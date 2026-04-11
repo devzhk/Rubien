@@ -818,7 +818,11 @@ struct ContentView: View {
         }
         .frame(minWidth: 900, minHeight: 600)
         .onAppear {
-            if !hasPromptedCLIInstallation && !CLIInstaller.isInstalled {
+            // Skip the install prompt when running via `swift run` from .build/ —
+            // /usr/local/bin isn't writable in that context and the prompt can't succeed.
+            if !hasPromptedCLIInstallation
+                && !CLIInstaller.isInstalled
+                && !CLIInstaller.isRunningFromDevBuild {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                     showCLIInstallPrompt = true
                 }

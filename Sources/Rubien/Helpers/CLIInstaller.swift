@@ -16,6 +16,16 @@ enum CLIInstaller {
         FileManager.default.fileExists(atPath: installURL.path)
     }
 
+    /// True when the app is running from a SwiftPM dev build (e.g. `swift run Rubien`
+    /// produces a binary under `.build/`) rather than a proper `.app` bundle. Used to
+    /// suppress the first-launch CLI install prompt during development, since
+    /// `/usr/local/bin` isn't writable without admin rights anyway.
+    static var isRunningFromDevBuild: Bool {
+        guard let execURL = Bundle.main.executableURL else { return false }
+        let path = execURL.path
+        return path.contains("/.build/") || path.contains("/DerivedData/")
+    }
+
     /// Locate the bundled CLI binary inside the app bundle.
     static var bundledBinaryURL: URL? {
         // 1. Contents/Helpers/rubien-cli (standard location, avoids case-insensitive collision with the app bundle)
@@ -49,7 +59,7 @@ enum CLIInstaller {
 
     static func install() throws {
         guard let source = bundledBinaryURL else {
-            throw makeError("找不到 rubien-cli 可执行文件。请确认 CLI 已包含在 App 中。")
+            throw makeError("rubien-cli binary not found. Make sure the CLI is embedded in the app bundle.")
         }
 
         let dest = installURL
