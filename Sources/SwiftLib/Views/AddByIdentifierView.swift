@@ -16,11 +16,14 @@ struct AddByIdentifierView: View {
 
     var body: some View {
         VStack(spacing: 16) {
-            Text("元数据导入")
+            Text("addByIdentifier.title", bundle: .module)
                 .font(.headline)
 
             HStack {
-                TextField("DOI、ISBN、PMID、arXiv、CNKI 链接或中文题名", text: $inputText)
+                TextField(
+                    String(localized: "addByIdentifier.field.placeholder", bundle: .module),
+                    text: $inputText
+                )
                     .textFieldStyle(.roundedBorder)
                     .onSubmit { fetchMetadata() }
 
@@ -35,7 +38,7 @@ struct AddByIdentifierView: View {
                 .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isFetching)
             }
 
-            Text("支持 DOI · ISBN · PMID · arXiv · CNKI 链接 · 中文题名")
+            Text("Supports DOI · arXiv · PMID · ISBN · paper title")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -61,10 +64,14 @@ struct AddByIdentifierView: View {
             }
 
             if let ref = fetchedReference {
-                resolutionCard(title: "已验证：", titleText: ref.title, bodyText: verifiedSummary(for: ref))
+                resolutionCard(
+                    title: String(localized: "Verified:", bundle: .module),
+                    titleText: ref.title,
+                    bodyText: verifiedSummary(for: ref)
+                )
             } else if let pendingResolution {
                 resolutionCard(
-                    title: "待确认：",
+                    title: String(localized: "Needs review:", bundle: .module),
                     titleText: pendingResolutionTitle(pendingResolution),
                     bodyText: pendingResolutionMessage(pendingResolution)
                 )
@@ -73,19 +80,19 @@ struct AddByIdentifierView: View {
             Spacer()
 
             HStack {
-                Button("取消") { dismiss() }
+                Button(String(localized: "common.cancel", bundle: .module)) { dismiss() }
                     .keyboardShortcut(.cancelAction)
                     .buttonStyle(SLSecondaryButtonStyle())
                 Spacer()
                 if let pendingResolution {
-                    Button("加入待确认队列") {
+                    Button(String(localized: "Queue for review", bundle: .module)) {
                         onQueueResult(pendingResolution, inputText.trimmingCharacters(in: .whitespacesAndNewlines))
                         dismiss()
                     }
                     .disabled(isFetching)
                     .buttonStyle(SLSecondaryButtonStyle())
                 }
-                Button("导入到资料库") {
+                Button(String(localized: "Import to library", bundle: .module)) {
                     if let ref = fetchedReference {
                         onSave(ref)
                         dismiss()
@@ -150,12 +157,12 @@ struct AddByIdentifierView: View {
     private func statusMessage(for text: String) -> String {
         if let url = URL(string: text), ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
             _ = url
-            return "正在校验输入…"
+            return String(localized: "addByIdentifier.status.validating", bundle: .module)
         }
         if MetadataFetcher.extractIdentifier(from: text) != nil {
-            return "正在解析标识符…"
+            return String(localized: "addByIdentifier.status.resolvingIdentifier", bundle: .module)
         }
-        return "正在查询元数据…"
+        return String(localized: "addByIdentifier.status.queryingMetadata", bundle: .module)
     }
 
     private func verifiedSummary(for reference: Reference) -> String {
@@ -176,27 +183,28 @@ struct AddByIdentifierView: View {
     }
 
     private func pendingResolutionTitle(_ result: MetadataResolutionResult) -> String {
+        let placeholder = String(localized: "Unresolved entry", bundle: .module)
         switch result {
         case .candidate(let envelope):
             return envelope.currentReference?.title
                 ?? envelope.fallbackReference?.title
                 ?? envelope.seed?.title
-                ?? "待确认候选"
+                ?? placeholder
         case .blocked(let envelope):
             return envelope.currentReference?.title
                 ?? envelope.fallbackReference?.title
                 ?? envelope.seed?.title
-                ?? "待确认条目"
+                ?? placeholder
         case .seedOnly(let envelope):
             return envelope.currentReference?.title
                 ?? envelope.fallbackReference?.title
                 ?? envelope.seed?.title
-                ?? "待确认条目"
+                ?? placeholder
         case .rejected(let envelope):
             return envelope.currentReference?.title
                 ?? envelope.fallbackReference?.title
                 ?? envelope.seed?.title
-                ?? "待确认条目"
+                ?? placeholder
         case .verified(let envelope):
             return envelope.reference.title
         }

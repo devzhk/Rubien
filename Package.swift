@@ -3,11 +3,12 @@ import PackageDescription
 
 let package = Package(
     name: "SwiftLib",
+    defaultLocalization: "en",
     platforms: [.macOS(.v14)],
     products: [
         .library(name: "SwiftLibCore", targets: ["SwiftLibCore"]),
-        .executable(name: "SwiftLib", targets: ["SwiftLib"]),
-        .executable(name: "swiftlib-cli", targets: ["SwiftLibCLI"]),
+        .executable(name: "Slate", targets: ["SwiftLib"]),
+        .executable(name: "slate-cli", targets: ["SwiftLibCLI"]),
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "6.24.0"),
@@ -33,7 +34,7 @@ let package = Package(
             ],
             resources: [
                 .process("Assets.xcassets"),
-                .copy("Resources")
+                .process("Resources")
             ]
         ),
         .executableTarget(

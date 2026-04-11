@@ -1,12 +1,12 @@
 import AppKit
 import Foundation
 
-/// Installs / uninstalls the `swiftlib-cli` CLI tool to /usr/local/bin.
+/// Installs / uninstalls the `slate-cli` CLI tool to /usr/local/bin.
 ///
 /// The CLI binary is expected to live alongside the main app executable
 /// inside the app bundle's `MacOS/` directory (or as a bundled resource).
 enum CLIInstaller {
-    static let binaryName = "swiftlib-cli"
+    static let binaryName = "slate-cli"
 
     static var installURL: URL {
         URL(fileURLWithPath: "/usr/local/bin/\(binaryName)")
@@ -49,7 +49,7 @@ enum CLIInstaller {
 
     static func install() throws {
         guard let source = bundledBinaryURL else {
-            throw makeError("找不到 swiftlib-cli 可执行文件。请确认 CLI 已包含在 App 中。")
+            throw makeError("找不到 slate-cli 可执行文件。请确认 CLI 已包含在 App 中。")
         }
 
         let dest = installURL
@@ -83,7 +83,7 @@ enum CLIInstaller {
 
     private static func makeError(_ message: String) -> NSError {
         NSError(
-            domain: "SwiftLib.CLIInstaller",
+            domain: "Slate.CLIInstaller",
             code: -1,
             userInfo: [NSLocalizedDescriptionKey: message]
         )

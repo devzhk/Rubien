@@ -37,14 +37,15 @@ struct BatchImportView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Button("取消") { dismiss() }
+                Button(String(localized: "common.cancel", bundle: .module)) { dismiss() }
                     .keyboardShortcut(.cancelAction)
                 Spacer()
-                Text("批量元数据导入")
+                Text("batchImport.title", bundle: .module)
                     .font(.headline)
                 Spacer()
                 if !results.isEmpty {
-                    Button("导入 \(results.filter(\.isSuccess).count) 条到资料库") {
+                    let importedCount = results.filter(\.isSuccess).count
+                    Button(String(format: String(localized: "Import %d to library", bundle: .module), importedCount)) {
                         let refs = results.compactMap { result -> Reference? in
                             if case .imported(let ref) = result.outcome { return ref }
                             return nil
@@ -55,7 +56,7 @@ struct BatchImportView: View {
                     .keyboardShortcut(.defaultAction)
                     .disabled(results.filter(\.isSuccess).isEmpty)
                 } else {
-                    Button("全部抓取") { startBatchFetch() }
+                    Button(String(localized: "batchImport.button.start", bundle: .module)) { startBatchFetch() }
                         .keyboardShortcut(.defaultAction)
                         .disabled(identifiers.isEmpty || isProcessing)
                 }
@@ -66,7 +67,7 @@ struct BatchImportView: View {
 
             if results.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("粘贴 DOI / ISBN / PMID / arXiv / 中文题名，或 CNKI 链接，每行一个：")
+                    Text("batchImport.field.placeholder", bundle: .module)
                         .font(.callout)
                         .foregroundStyle(.secondary)
 
@@ -76,11 +77,11 @@ struct BatchImportView: View {
                         .border(Color.secondary.opacity(0.3))
 
                     HStack {
-                        Text("已识别 \(identifiers.count) 条输入")
+                        Text(String(format: String(localized: "%d identifiers recognized", bundle: .module), identifiers.count))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         Spacer()
-                        Button("从剪贴板粘贴") {
+                        Button(String(localized: "Paste from clipboard", bundle: .module)) {
                             if let text = NSPasteboard.general.string(forType: .string) {
                                 inputText = text
                             }
@@ -90,14 +91,14 @@ struct BatchImportView: View {
 
                     GroupBox {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("示例（每行一个）：")
+                            Text("Example (one per line):")
                                 .font(.caption.bold())
                             Text("""
                             10.1038/nature12373
-                            9787302511854
-                            https://book.douban.com/subject/35723636/
-                            arXiv:2301.07041
-                            太湖流域水环境研究进展
+                            9780262035613
+                            arXiv:1706.03762
+                            PMID: 25719670
+                            Attention Is All You Need
                             """)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -135,14 +136,14 @@ struct BatchImportView: View {
                         return false
                     }.count
                     HStack {
-                        Label("\(succeeded) 条已验证", systemImage: "checkmark.circle.fill")
+                        Label(String(format: String(localized: "%d verified", bundle: .module), succeeded), systemImage: "checkmark.circle.fill")
                             .foregroundStyle(.green)
                         if queued > 0 {
-                            Label("\(queued) 条进入待确认", systemImage: "clock.badge.exclamationmark")
+                            Label(String(format: String(localized: "%d queued", bundle: .module), queued), systemImage: "clock.badge.exclamationmark")
                                 .foregroundStyle(.orange)
                         }
                         if failed > 0 {
-                            Label("\(failed) 条失败", systemImage: "xmark.circle.fill")
+                            Label(String(format: String(localized: "%d failed", bundle: .module), failed), systemImage: "xmark.circle.fill")
                                 .foregroundStyle(.red)
                         }
                     }
@@ -236,7 +237,10 @@ struct BatchImportView: View {
                         appendResult(identifier: identifier, outcome: .imported(envelope.reference))
                     case .candidate, .blocked, .seedOnly, .rejected:
                         onQueueResult(result, identifier)
-                        appendResult(identifier: identifier, outcome: .queued("已加入待确认队列"))
+                        appendResult(
+                            identifier: identifier,
+                            outcome: .queued(String(localized: "Queued for review", bundle: .module))
+                        )
                     }
 
                     if nextIndex < inputs.count {
@@ -266,12 +270,12 @@ struct BatchImportView: View {
     private func statusMessage(for input: String) -> String {
         if let url = URL(string: input), ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
             _ = url
-            return "正在校验输入…"
+            return String(localized: "addByIdentifier.status.validating", bundle: .module)
         }
         if MetadataFetcher.extractIdentifier(from: input) != nil {
-            return "正在解析标识符…"
+            return String(localized: "addByIdentifier.status.resolvingIdentifier", bundle: .module)
         }
-        return "正在查询元数据…"
+        return String(localized: "addByIdentifier.status.queryingMetadata", bundle: .module)
     }
 
     private func iconName(for outcome: ImportResult.Outcome) -> String {

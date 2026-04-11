@@ -18,7 +18,7 @@ struct SidebarView: View {
                 sidebarSection {
                     SidebarRow(
                         icon: "books.vertical",
-                        label: "全部文献",
+                        label: String(localized: "sidebar.item.all", bundle: .module),
                         isSelected: selection == .allReferences,
                         trailing: { countBadge(referenceCount) }
                     ) {
@@ -28,7 +28,7 @@ struct SidebarView: View {
 
                 sidebarSection {
                     HStack {
-                        Text("收藏集")
+                        Text("sidebar.section.collections", bundle: .module)
                         Spacer()
                         Button(action: onAddCollection) {
                             Image(systemName: "plus")
@@ -38,11 +38,11 @@ struct SidebarView: View {
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .help("新建收藏集")
+                        .help(String(localized: "sidebar.button.addCollection", bundle: .module))
                     }
                 } content: {
                     if collections.isEmpty {
-                        Text("暂无收藏集")
+                        Text("No collections yet", bundle: .module)
                             .font(.caption)
                             .foregroundStyle(.quaternary)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -58,7 +58,7 @@ struct SidebarView: View {
                                 selection = .collection(collection.id!)
                             }
                             .contextMenu {
-                                Button("删除", role: .destructive) {
+                                Button(String(localized: "common.delete", bundle: .module), role: .destructive) {
                                     onDeleteCollection(collection.id!)
                                 }
                             }
@@ -67,10 +67,10 @@ struct SidebarView: View {
                 }
 
                 sidebarSection {
-                    Text("标签")
+                    Text("sidebar.section.tags", bundle: .module)
                 } content: {
                     if tags.isEmpty {
-                        Text("暂无标签")
+                        Text("No tags yet", bundle: .module)
                             .font(.caption)
                             .foregroundStyle(.quaternary)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -90,7 +90,7 @@ struct SidebarView: View {
                                 selection = .tag(tag.id!)
                             }
                             .contextMenu {
-                                Button("删除", role: .destructive) {
+                                Button(String(localized: "common.delete", bundle: .module), role: .destructive) {
                                     onDeleteTag(tag.id!)
                                 }
                             }
@@ -108,7 +108,7 @@ struct SidebarView: View {
             Divider()
                 .padding(.horizontal, 10)
             sidebarSection {
-                Text("智能合集")
+                Text("Smart collections", bundle: .module)
             } content: {
                 FlowLayout(spacing: 6) {
                     ForEach(titleKeywords, id: \.word) { item in
@@ -147,7 +147,7 @@ struct SidebarView: View {
         }
         }
         .background(Color(nsColor: .controlBackgroundColor))
-        .navigationTitle("SwiftLib")
+        .navigationTitle("Slate")
     }
 
     // MARK: - Building Blocks

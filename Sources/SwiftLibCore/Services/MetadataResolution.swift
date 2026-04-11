@@ -3,8 +3,8 @@ import GRDB
 import OSLog
 
 // MARK: - Debug Logger
-// 调试日志开关：在 Xcode 控制台可见，可通过 Console.app 过滤 subsystem="com.swiftlib.metadata" 查看
-private let metadataLog = Logger(subsystem: "com.swiftlib.metadata", category: "resolution")
+// In Console.app filter subsystem="com.slate.metadata" to see resolver traces.
+private let metadataLog = Logger(subsystem: "com.slate.metadata", category: "resolution")
 
 public enum MetadataSource: String, Codable, CaseIterable, DatabaseValueConvertible, Sendable {
     case translationServer

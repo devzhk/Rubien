@@ -1,7 +1,7 @@
 import Foundation
 import OSLog
 
-private let ytDlpTranscriptLog = Logger(subsystem: "SwiftLib", category: "YtDlpTranscript")
+private let ytDlpTranscriptLog = Logger(subsystem: "Slate", category: "YtDlpTranscript")
 
 protocol YtDlpCommandRunning {
     func run(

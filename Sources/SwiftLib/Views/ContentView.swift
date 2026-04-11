@@ -364,7 +364,7 @@ final class LibraryViewModel: ObservableObject {
 
     func importBibTeX(from url: URL) {
         isImporting = true
-        importProgress = "正在读取文件…"
+        importProgress = String(localized: "Reading file…", bundle: .module)
 
         Task.detached { [weak self] in
             guard let self else { return }
@@ -373,14 +373,20 @@ final class LibraryViewModel: ObservableObject {
 
             do {
                 let content = try String(contentsOf: url, encoding: .utf8)
-                await MainActor.run { self.importProgress = "正在解析 BibTeX…" }
+                await MainActor.run {
+                    self.importProgress = String(localized: "Parsing BibTeX…", bundle: .module)
+                }
 
                 let refs = BibTeXImporter.parse(content)
-                await MainActor.run { self.importProgress = "正在导入 \(refs.count) 条条目…" }
+                await MainActor.run {
+                    let fmt = String(localized: "Importing %d entries…", bundle: .module)
+                    self.importProgress = String(format: fmt, refs.count)
+                }
 
                 let count = try self.db.batchImportReferences(refs)
                 await MainActor.run {
-                    self.importProgress = "已导入 \(count) 条条目"
+                    let fmt = String(localized: "Imported %d entries", bundle: .module)
+                    self.importProgress = String(format: fmt, count)
                     self.isImporting = false
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                         self.importProgress = nil
@@ -388,7 +394,8 @@ final class LibraryViewModel: ObservableObject {
                 }
             } catch {
                 await MainActor.run {
-                    self.importProgress = "导入失败：\(error.localizedDescription)"
+                    let fmt = String(localized: "content.import.error.generic", bundle: .module)
+                    self.importProgress = String(format: fmt, error.localizedDescription)
                     self.isImporting = false
                 }
             }
@@ -397,7 +404,7 @@ final class LibraryViewModel: ObservableObject {
 
     func importRIS(from url: URL) {
         isImporting = true
-        importProgress = "正在读取文件…"
+        importProgress = String(localized: "Reading file…", bundle: .module)
 
         Task.detached { [weak self] in
             guard let self else { return }
@@ -406,14 +413,20 @@ final class LibraryViewModel: ObservableObject {
 
             do {
                 let content = try String(contentsOf: url, encoding: .utf8)
-                await MainActor.run { self.importProgress = "正在解析 RIS…" }
+                await MainActor.run {
+                    self.importProgress = String(localized: "Parsing RIS…", bundle: .module)
+                }
 
                 let refs = RISImporter.parse(content)
-                await MainActor.run { self.importProgress = "正在导入 \(refs.count) 条条目…" }
+                await MainActor.run {
+                    let fmt = String(localized: "Importing %d entries…", bundle: .module)
+                    self.importProgress = String(format: fmt, refs.count)
+                }
 
                 let count = try self.db.batchImportReferences(refs)
                 await MainActor.run {
-                    self.importProgress = "已导入 \(count) 条条目"
+                    let fmt = String(localized: "Imported %d entries", bundle: .module)
+                    self.importProgress = String(format: fmt, count)
                     self.isImporting = false
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                         self.importProgress = nil
@@ -421,7 +434,8 @@ final class LibraryViewModel: ObservableObject {
                 }
             } catch {
                 await MainActor.run {
-                    self.importProgress = "导入失败：\(error.localizedDescription)"
+                    let fmt = String(localized: "content.import.error.generic", bundle: .module)
+                    self.importProgress = String(format: fmt, error.localizedDescription)
                     self.isImporting = false
                 }
             }
@@ -519,10 +533,10 @@ struct ContentView: View {
                     Image(systemName: "books.vertical")
                         .font(.system(size: 48))
                         .foregroundStyle(.tertiary)
-                    Text("选择一篇文献")
+                    Text("Select a reference", bundle: .module)
                         .font(.title3)
                         .foregroundStyle(.secondary)
-                    Text("共 \(viewModel.references.count) 篇文献")
+                    Text(String(format: String(localized: "%d references", bundle: .module), viewModel.references.count))
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                 }
@@ -533,9 +547,9 @@ struct ContentView: View {
                 Button {
                     showSearch = true
                 } label: {
-                    Label("搜索", systemImage: "magnifyingglass")
+                    Label(String(localized: "common.search", bundle: .module), systemImage: "magnifyingglass")
                 }
-                .help("搜索文献")
+                .help(String(localized: "Search references", bundle: .module))
                 .keyboardShortcut("f", modifiers: .command)
 
                 ControlGroup {
@@ -543,22 +557,22 @@ struct ContentView: View {
                         addReferenceInitialType = .journalArticle
                         showAddReference = true
                     }) {
-                        Label("手动新建", systemImage: "square.and.pencil")
+                        Label(String(localized: "New entry", bundle: .module), systemImage: "square.and.pencil")
                     }
-                    .help("新建一个空白条目并手动填写信息")
+                    .help(String(localized: "Create a blank reference and fill in its fields", bundle: .module))
 
                     Button(action: {
                         showWebImport = true
                     }) {
-                        Label("网页剪藏", systemImage: "globe")
+                        Label(String(localized: "Web clip", bundle: .module), systemImage: "globe")
                     }
-                    .help("输入网页链接，使用内置 Obsidian Clipper 抓取标题、摘要和正文")
+                    .help(String(localized: "Paste a URL and let Slate clip the title, abstract, and article body", bundle: .module))
                 }
 
                 ControlGroup {
                     Button(action: { showPendingMetadataQueue = true }) {
                         HStack(spacing: 6) {
-                            Label("待确认队列", systemImage: "clock.badge.exclamationmark")
+                            Label(String(localized: "content.toolbar.pendingQueue", bundle: .module), systemImage: "clock.badge.exclamationmark")
                             if !viewModel.pendingMetadataIntakes.isEmpty {
                                 Text("\(viewModel.pendingMetadataIntakes.count)")
                                     .font(.caption2.weight(.semibold))
@@ -569,28 +583,28 @@ struct ContentView: View {
                             }
                         }
                     }
-                    .help("打开待确认元数据队列，继续选候选、处理验证码或人工确认")
+                    .help(String(localized: "Open the pending metadata queue to review candidates or confirm manually", bundle: .module))
                     .disabled(viewModel.pendingMetadataIntakes.isEmpty)
 
                     Button(action: { showAddByIdentifier = true }) {
-                        Label("按标识导入", systemImage: "text.magnifyingglass")
+                        Label(String(localized: "content.toolbar.addByIdentifier", bundle: .module), systemImage: "text.magnifyingglass")
                     }
-                    .help("输入 DOI、PMID 或 arXiv ID，自动导入条目元数据")
+                    .help(String(localized: "Paste a DOI, arXiv ID, PMID, or ISBN and fetch metadata automatically", bundle: .module))
 
                     Button(action: { importPDFWithMetadata() }) {
-                        Label("导入 PDF", systemImage: "doc.badge.plus")
+                        Label(String(localized: "content.toolbar.importPDF", bundle: .module), systemImage: "doc.badge.plus")
                     }
-                    .help("导入 PDF，并尽量自动补全文献信息")
+                    .help(String(localized: "Import a PDF and auto-fill its metadata when possible", bundle: .module))
 
                     Menu {
-                        Button("批量按标识导入…") { showBatchImport = true }
+                        Button(String(localized: "content.toolbar.batchImport", bundle: .module) + "…") { showBatchImport = true }
                         Divider()
-                        Button("导入 BibTeX (.bib)…") { importBibTeX() }
-                        Button("导入 RIS (.ris)…") { importRIS() }
+                        Button(String(localized: "content.toolbar.importBibTeX", bundle: .module)) { importBibTeX() }
+                        Button(String(localized: "content.toolbar.importRIS", bundle: .module)) { importRIS() }
                         Divider()
-                        Button("导入引文样式 (.csl)…") { importCitationStyles() }
+                        Button(String(localized: "Import citation styles (.csl)…", bundle: .module)) { importCitationStyles() }
                     } label: {
-                        Label("更多导入", systemImage: "tray.and.arrow.down")
+                        Label(String(localized: "More import options", bundle: .module), systemImage: "tray.and.arrow.down")
                     }
                     .help("打开更多导入方式")
                     .disabled(viewModel.isImporting)
@@ -794,11 +808,11 @@ struct ContentView: View {
             selectedId = id
             columnVisibility = .all
         }
-        .alert("操作失败", isPresented: Binding(
+        .alert(String(localized: "Operation failed", bundle: .module), isPresented: Binding(
             get: { viewModel.errorMessage != nil },
             set: { if !$0 { viewModel.errorMessage = nil } }
         )) {
-            Button("确定") { viewModel.errorMessage = nil }
+            Button(String(localized: "common.ok", bundle: .module)) { viewModel.errorMessage = nil }
         } message: {
             Text(viewModel.errorMessage ?? "")
         }
@@ -810,8 +824,11 @@ struct ContentView: View {
                 }
             }
         }
-        .alert("安装命令行工具", isPresented: $showCLIInstallPrompt) {
-            Button("安装") {
+        .alert(
+            String(localized: "content.cli.installPrompt.title", bundle: .module),
+            isPresented: $showCLIInstallPrompt
+        ) {
+            Button(String(localized: "content.cli.installPrompt.install", bundle: .module)) {
                 hasPromptedCLIInstallation = true
                 do {
                     try CLIInstaller.install()
@@ -820,20 +837,22 @@ struct ContentView: View {
                     cliInstallResult = .failure(error.localizedDescription)
                 }
             }
-            Button("暂不安装", role: .cancel) {
+            Button(String(localized: "content.cli.installPrompt.later", bundle: .module), role: .cancel) {
                 hasPromptedCLIInstallation = true
             }
         } message: {
-            Text("SwiftLib 提供配套的命令行工具 swiftlib-cli，可在终端中快速搜索、添加和导出文献。\n\n是否将其安装到 /usr/local/bin？\n（你也可以稍后在菜单栏「CLI 工具」中安装）")
+            Text("content.cli.installPrompt.message", bundle: .module)
         }
         .alert(
-            cliInstallResult?.isSuccess == true ? "安装成功" : "安装失败",
+            cliInstallResult?.isSuccess == true
+                ? String(localized: "Install succeeded", bundle: .module)
+                : String(localized: "Install failed", bundle: .module),
             isPresented: Binding(
                 get: { cliInstallResult != nil },
                 set: { if !$0 { cliInstallResult = nil } }
             )
         ) {
-            Button("好") { cliInstallResult = nil }
+            Button(String(localized: "common.ok", bundle: .module)) { cliInstallResult = nil }
         } message: {
             Text(cliInstallResult?.message ?? "")
         }
@@ -852,7 +871,7 @@ struct ContentView: View {
     private func importPDFWithMetadata() {
         guard let url = OpenPanelPicker.pickPDFFile() else { return }
         viewModel.isImporting = true
-        viewModel.importProgress = "正在导入 PDF…"
+        viewModel.importProgress = String(localized: "content.import.progress.importingPDF", bundle: .module)
 
         Task { @MainActor in
             do {
@@ -861,7 +880,8 @@ struct ContentView: View {
                 _ = MetadataResolutionSeed.fromImportedPDF(url: url, extracted: prepared.extracted)
 
                 if let doi = prepared.extracted.doi, !doi.isEmpty {
-                    viewModel.importProgress = "正在获取元数据：\(doi)…"
+                    let fmt = String(localized: "content.import.progress.fetchingMetadata", bundle: .module)
+                    viewModel.importProgress = String(format: fmt, doi)
                 }
 
                 let resolution = await metadataResolver.resolveImportedPDF(url: url, extracted: prepared.extracted)
@@ -870,7 +890,8 @@ struct ContentView: View {
                 case .verified(let envelope):
                     var reference = envelope.reference
                     reference.pdfPath = fallbackReference.pdfPath
-                    finishPDFImport(with: reference, message: "已导入: \(reference.title)")
+                    let fmt = String(localized: "Imported: %@", bundle: .module)
+                    finishPDFImport(with: reference, message: String(format: fmt, reference.title))
 
                 case .candidate, .blocked, .seedOnly, .rejected:
                     let queued = queueResolutionResult(
@@ -879,7 +900,7 @@ struct ContentView: View {
                             sourceKind: .importedPDF,
                             preferredPDFPath: fallbackReference.pdfPath
                         ),
-                        successMessage: "还不能自动确认，已加入待确认队列"
+                        successMessage: String(localized: "Couldn't auto-verify — added to the pending queue", bundle: .module)
                     )
                     if queued == nil, let pdfPath = fallbackReference.pdfPath {
                         PDFService.deletePDF(at: pdfPath)
@@ -888,7 +909,8 @@ struct ContentView: View {
             } catch {
                 viewModel.isImporting = false
                 viewModel.importProgress = nil
-                viewModel.errorMessage = "PDF 导入失败: \(error.localizedDescription)"
+                let fmt = String(localized: "PDF import failed: %@", bundle: .module)
+                viewModel.errorMessage = String(format: fmt, error.localizedDescription)
             }
         }
     }
@@ -1191,9 +1213,11 @@ private enum CLIInstallResult {
     var message: String {
         switch self {
         case .success:
-            return "命令行工具已安装到 \(CLIInstaller.installURL.path)\n\n你现在可以在终端中使用 swiftlib-cli 命令了。"
+            let fmt = String(localized: "content.cli.install.success", bundle: .module)
+            return String(format: fmt, CLIInstaller.installURL.path)
         case .failure(let reason):
-            return "安装失败：\(reason)\n\n你可以稍后在菜单栏「CLI 工具」中重试，或手动复制。"
+            let fmt = String(localized: "content.cli.install.failure", bundle: .module)
+            return String(format: fmt, reason)
         }
     }
 }

@@ -2,7 +2,7 @@ import Foundation
 import GRDB
 import os.log
 
-private let appDatabaseLog = Logger(subsystem: "SwiftLib", category: "AppDatabase")
+private let appDatabaseLog = Logger(subsystem: "Slate", category: "AppDatabase")
 
 public final class AppDatabase: Sendable {
     public let dbWriter: any DatabaseWriter

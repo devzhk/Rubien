@@ -2,9 +2,9 @@ import SwiftUI
 import SwiftLibCore
 
 struct MetadataCandidatePickerView: View {
-    var title: String = "找到多个元数据候选"
-    var message: String = "请选择要导入的元数据。"
-    var skipLabel: String = "跳过"
+    var title: String = String(localized: "candidatePicker.title", bundle: .module)
+    var message: String = String(localized: "candidatePicker.subtitle", bundle: .module)
+    var skipLabel: String = String(localized: "candidatePicker.button.skip", bundle: .module)
     let candidates: [MetadataCandidate]
     var assessmentByCandidateID: [MetadataCandidate.ID: ManualCandidateImportAssessment] = [:]
     let onImportSelected: (MetadataCandidate) -> Void
@@ -34,7 +34,7 @@ struct MetadataCandidatePickerView: View {
                             .font(.headline)
                         Spacer(minLength: 0)
                         if candidate.id == candidates.first?.id {
-                            Text("最佳匹配")
+                            Text("Best match", bundle: .module)
                                 .font(.caption2)
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
@@ -91,16 +91,19 @@ struct MetadataCandidatePickerView: View {
 
                     if let assessment {
                         VStack(alignment: .leading, spacing: 3) {
+                            let readyText = String(localized: "Complete — ready to import", bundle: .module)
+                            let missingFmt = String(localized: "Missing: %@", bundle: .module)
                             Text(
                                 assessment.canImportDirectly
-                                    ? "信息已齐，可直接导入"
-                                    : "还缺：\(assessment.missingFields.joined(separator: " / "))"
+                                    ? readyText
+                                    : String(format: missingFmt, assessment.missingFields.joined(separator: " / "))
                             )
                             .font(.caption2.weight(.semibold))
                             .foregroundStyle(assessment.canImportDirectly ? .green : .orange)
 
                             if !assessment.presentFields.isEmpty {
-                                Text("已有：\(assessment.presentFields.joined(separator: " / "))")
+                                let haveFmt = String(localized: "Have: %@", bundle: .module)
+                                Text(String(format: haveFmt, assessment.presentFields.joined(separator: " / ")))
                                     .font(.caption2)
                                     .foregroundStyle(.tertiary)
                             }
@@ -110,12 +113,13 @@ struct MetadataCandidatePickerView: View {
 
                     HStack {
                         if !candidate.matchedBy.isEmpty {
-                            Text("匹配: \(candidate.matchedBy.joined(separator: " / "))")
+                            let matchFmt = String(localized: "Matched: %@", bundle: .module)
+                            Text(String(format: matchFmt, candidate.matchedBy.joined(separator: " / ")))
                                 .font(.caption2)
                                 .foregroundStyle(.tertiary)
                         }
                         Spacer()
-                        Button("使用此条") {
+                        Button(String(localized: "Use this one", bundle: .module)) {
                             onImportSelected(candidate)
                         }
                         .buttonStyle(SLPrimaryButtonStyle())
@@ -128,14 +132,14 @@ struct MetadataCandidatePickerView: View {
             .frame(minWidth: 640, minHeight: 320)
 
             HStack {
-                Button("取消", role: .cancel, action: onCancel)
+                Button(String(localized: "common.cancel", bundle: .module), role: .cancel, action: onCancel)
                     .keyboardShortcut(.cancelAction)
 
                 Spacer()
 
                 Button(skipLabel, action: onSkip)
 
-                Button("导入所选结果") {
+                Button(String(localized: "Import selected", bundle: .module)) {
                     guard let selectedCandidate else { return }
                     onImportSelected(selectedCandidate)
                 }

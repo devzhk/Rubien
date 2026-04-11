@@ -1,9 +1,9 @@
 import XCTest
 import Foundation
 
-/// Integration tests for the `swiftlib-cli` CLI binary.
+/// Integration tests for the `slate-cli` CLI binary.
 /// These tests invoke the compiled CLI executable and verify its output.
-/// Requires the CLI to be built first: `swift build --product swiftlib-cli`
+/// Requires the CLI to be built first: `swift build --product slate-cli`
 final class SwiftLibCLITests: XCTestCase {
 
     /// Path to the built CLI binary
@@ -12,14 +12,14 @@ final class SwiftLibCLITests: XCTestCase {
             .deletingLastPathComponent()  // SwiftLibCLITests/
             .deletingLastPathComponent()  // Tests/
             .deletingLastPathComponent()  // project root
-            .appendingPathComponent(".build/debug/swiftlib-cli")
+            .appendingPathComponent(".build/debug/slate-cli")
             .path
 
         if FileManager.default.isExecutableFile(atPath: debugPath) {
             return debugPath
         }
-        if FileManager.default.isExecutableFile(atPath: "/usr/local/bin/swiftlib-cli") {
-            return "/usr/local/bin/swiftlib-cli"
+        if FileManager.default.isExecutableFile(atPath: "/usr/local/bin/slate-cli") {
+            return "/usr/local/bin/slate-cli"
         }
         return debugPath
     }

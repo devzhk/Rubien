@@ -22,7 +22,9 @@ struct SwiftLibApp: App {
                 .onReceive(NotificationCenter.default.publisher(for: .swiftLibClipImported)) { note in
                     let title = (note.userInfo?[SwiftLibClipImportedKeys.title] as? String)?
                         .trimmingCharacters(in: .whitespacesAndNewlines)
-                    let message = title.flatMap { !$0.isEmpty ? "已保存网页剪藏：\($0)" : nil } ?? "已保存网页剪藏"
+                    let fallback = String(localized: "Saved web clip", bundle: .module)
+                    let fmt = String(localized: "Saved web clip: %@", bundle: .module)
+                    let message = title.flatMap { !$0.isEmpty ? String(format: fmt, $0) : nil } ?? fallback
                     showToast(message, tone: .success)
                 }
         }
@@ -31,33 +33,49 @@ struct SwiftLibApp: App {
         .defaultSize(width: Self.defaultWindowSize.width, height: Self.defaultWindowSize.height)
         .commands {
             CommandGroup(after: .appSettings) {
-                Toggle("剪藏 YouTube 时在笔记中追加字幕", isOn: $appendYouTubeTranscriptOnClip)
+                Toggle(
+                    String(localized: "Append YouTube transcript to note on clip", bundle: .module),
+                    isOn: $appendYouTubeTranscriptOnClip
+                )
 
                 Divider()
 
-                Button(CLIInstaller.isInstalled ? "重新安装 CLI 工具" : "安装 CLI 工具") {
+                Button(
+                    CLIInstaller.isInstalled
+                        ? String(localized: "Reinstall command-line tool", bundle: .module)
+                        : String(localized: "Install command-line tool", bundle: .module)
+                ) {
                     do {
                         try CLIInstaller.install()
-                        showToast("CLI 已安装到 \(CLIInstaller.installURL.path)", tone: .success)
+                        let fmt = String(localized: "Installed command-line tool at %@", bundle: .module)
+                        showToast(String(format: fmt, CLIInstaller.installURL.path), tone: .success)
                     } catch {
-                        showToast("安装失败：\(error.localizedDescription)", tone: .error, hideAfter: 5)
+                        let fmt = String(localized: "content.cli.install.failure", bundle: .module)
+                        showToast(String(format: fmt, error.localizedDescription), tone: .error, hideAfter: 5)
                     }
                 }
 
-                Button("卸载 CLI 工具") {
+                Button(String(localized: "Uninstall command-line tool", bundle: .module)) {
                     CLIInstaller.uninstall()
-                    showToast("CLI 工具已卸载", tone: .info, hideAfter: 2.5)
+                    showToast(
+                        String(localized: "Command-line tool uninstalled", bundle: .module),
+                        tone: .info,
+                        hideAfter: 2.5
+                    )
                 }
                 .disabled(!CLIInstaller.isInstalled)
 
-                Button("在 Finder 中显示") {
+                Button(String(localized: "Reveal in Finder", bundle: .module)) {
                     CLIInstaller.revealInFinder()
                 }
 
                 Divider()
 
                 let installed = CLIInstaller.isInstalled
-                Text("状态：\(installed ? "✅ 已安装" : "❌ 未安装")  路径：\(CLIInstaller.installURL.path)")
+                let statusText = installed
+                    ? String(localized: "Status: ✅ Installed  ·  %@", bundle: .module)
+                    : String(localized: "Status: ❌ Not installed  ·  %@", bundle: .module)
+                Text(String(format: statusText, CLIInstaller.installURL.path))
             }
         }
         Settings {

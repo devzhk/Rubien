@@ -2,7 +2,7 @@ import Foundation
 import OSLog
 import SwiftLibCore
 
-private let resolverLog = Logger(subsystem: "SwiftLib", category: "MetadataResolver")
+private let resolverLog = Logger(subsystem: "Slate", category: "MetadataResolver")
 
 private func resolverTrace(_ message: String) {
     guard SwiftLibDebugLogging.metadataVerbose else { return }

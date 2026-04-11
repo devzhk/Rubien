@@ -1,0 +1,122 @@
+/* Slate — English localization (Phase 5a MVP)
+   Keys use dot-separated namespacing: <screen>.<section>.<element>.
+   Add new keys at the bottom and keep them alphabetized within their section. */
+
+// MARK: - Common
+
+"common.cancel" = "Cancel";
+"common.ok" = "OK";
+"common.confirm" = "Confirm";
+"common.delete" = "Delete";
+"common.save" = "Save";
+"common.close" = "Close";
+"common.done" = "Done";
+"common.retry" = "Retry";
+"common.open" = "Open";
+"common.loading" = "Loading…";
+"common.error" = "Error";
+"common.search" = "Search";
+"common.unknown" = "Unknown";
+
+// MARK: - Add by Identifier sheet
+
+"addByIdentifier.title" = "Add by Identifier";
+"addByIdentifier.field.placeholder" = "Paste a DOI, arXiv ID, PMID, ISBN, or paper title";
+"addByIdentifier.button.fetch" = "Fetch metadata";
+"addByIdentifier.status.validating" = "Validating input…";
+"addByIdentifier.status.resolvingIdentifier" = "Resolving identifier…";
+"addByIdentifier.status.queryingMetadata" = "Querying metadata…";
+"addByIdentifier.error.empty" = "Enter a DOI, arXiv ID, PMID, ISBN, or paper title.";
+"addByIdentifier.error.notFound" = "No matching record found. Try a DOI, arXiv ID, PMID, or ISBN instead.";
+
+// MARK: - Batch Import
+
+"batchImport.title" = "Batch Import";
+"batchImport.field.placeholder" = "Paste one identifier per line (DOI / arXiv / PMID / ISBN / title)";
+"batchImport.button.start" = "Start import";
+"batchImport.button.cancel" = "Cancel";
+"batchImport.status.inProgress" = "Importing %1$d of %2$d…";
+"batchImport.status.done" = "Import complete";
+"batchImport.result.imported" = "Imported";
+"batchImport.result.queued" = "Queued for review";
+"batchImport.result.failed" = "Failed";
+
+// MARK: - Metadata candidate picker
+
+"candidatePicker.title" = "Choose a match";
+"candidatePicker.subtitle" = "Multiple candidates matched. Pick the correct one.";
+"candidatePicker.button.confirm" = "Confirm";
+"candidatePicker.button.skip" = "Skip for now";
+"candidatePicker.label.score" = "Match score: %@";
+
+// MARK: - Pending metadata queue
+
+"pendingQueue.title" = "Pending metadata";
+"pendingQueue.empty" = "No pending items.";
+"pendingQueue.button.retry" = "Retry";
+"pendingQueue.button.confirm" = "Confirm manually";
+"pendingQueue.button.delete" = "Remove";
+"pendingQueue.notice.title" = "Needs review";
+
+// MARK: - Content view / main shell
+
+"content.toolbar.add" = "Add";
+"content.toolbar.addByIdentifier" = "Add by Identifier";
+"content.toolbar.batchImport" = "Batch Import";
+"content.toolbar.importPDF" = "Import PDF";
+"content.toolbar.importBibTeX" = "Import BibTeX…";
+"content.toolbar.importRIS" = "Import RIS…";
+"content.toolbar.webImport" = "Import from Web…";
+"content.toolbar.pendingQueue" = "Pending metadata";
+"content.toolbar.search" = "Search";
+"content.import.progress.importingPDF" = "Importing PDF…";
+"content.import.progress.fetchingMetadata" = "Fetching metadata: %@…";
+"content.import.error.generic" = "Import failed: %@";
+"content.cli.installPrompt.title" = "Install command-line tool?";
+"content.cli.installPrompt.message" = "Slate ships a companion command-line tool, slate-cli, that lets you search, add, and export references from the Terminal.\n\nInstall it to /usr/local/bin? You can also install it later from the menu bar.";
+"content.cli.installPrompt.install" = "Install";
+"content.cli.installPrompt.later" = "Not now";
+"content.cli.install.success" = "Command-line tool installed at %@.\n\nYou can now use the slate-cli command in Terminal.";
+"content.cli.install.failure" = "Install failed: %@";
+
+// MARK: - Sidebar
+
+"sidebar.section.library" = "Library";
+"sidebar.section.collections" = "Collections";
+"sidebar.section.tags" = "Tags";
+"sidebar.item.all" = "All References";
+"sidebar.item.recent" = "Recently Added";
+"sidebar.item.unfiled" = "Unfiled";
+"sidebar.button.addCollection" = "New Collection";
+
+// MARK: - Add Reference sheet
+
+"addReference.title" = "Add Reference";
+"addReference.section.basics" = "Basics";
+"addReference.section.publication" = "Publication";
+"addReference.section.identifiers" = "Identifiers";
+"addReference.field.title" = "Title";
+"addReference.field.authors" = "Authors";
+"addReference.field.year" = "Year";
+"addReference.field.journal" = "Journal";
+"addReference.field.doi" = "DOI";
+"addReference.field.isbn" = "ISBN";
+"addReference.field.abstract" = "Abstract";
+"addReference.button.save" = "Save";
+
+// MARK: - Resolver / verifier error messages
+
+"resolver.error.verificationRequired" = "Verification required.";
+"resolver.error.timedOut" = "Request timed out. Check your network and try again.";
+"resolver.error.insufficientEvidence" = "Not enough evidence to verify this match automatically.";
+"resolver.error.verifierRuleNotSatisfied" = "Auto-verification rule not satisfied.";
+"resolver.error.unsupportedRoute" = "Unsupported input.";
+"resolver.error.noMatch" = "No matching record found.";
+
+// MARK: - Metadata verifier (MetadataVerifier.swift inline messages)
+
+"verifier.message.multipleCandidates" = "Multiple candidates matched; manual review required.";
+"verifier.message.journalRuleNotMet" = "Did not meet journal auto-verification rules.";
+"verifier.message.bookRuleNotMet" = "Did not meet book auto-verification rules.";
+"verifier.message.thesisRuleNotMet" = "Did not meet thesis auto-verification rules.";
+"verifier.message.missingTitle" = "Missing a verifiable title.";

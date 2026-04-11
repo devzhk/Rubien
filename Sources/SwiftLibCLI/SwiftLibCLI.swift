@@ -5,8 +5,8 @@ import SwiftLibCore
 @main
 struct SwiftLibCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "swiftlib-cli",
-        abstract: "swiftlib-cli — 在命令行管理文献库",
+        commandName: "slate-cli",
+        abstract: "slate-cli — manage your Slate reference library from the command line",
         version: "1.0.0",
         subcommands: [
             Search.self,

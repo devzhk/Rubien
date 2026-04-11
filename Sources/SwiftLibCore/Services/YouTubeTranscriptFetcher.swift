@@ -1,7 +1,7 @@
 import Foundation
 import OSLog
 
-private let ytTranscriptLog = Logger(subsystem: "SwiftLib", category: "YouTubeTranscript")
+private let ytTranscriptLog = Logger(subsystem: "Slate", category: "YouTubeTranscript")
 
 public protocol YouTubeTranscriptTransport {
     func data(for request: URLRequest) async throws -> (Data, URLResponse)

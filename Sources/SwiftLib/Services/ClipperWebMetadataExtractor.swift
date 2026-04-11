@@ -4,7 +4,7 @@ import OSLog
 import SwiftLibCore
 import WebKit
 
-private let clipperImportLog = Logger(subsystem: "SwiftLib", category: "WebpageImport")
+private let clipperImportLog = Logger(subsystem: "Slate", category: "WebpageImport")
 
 /// 从网页添加条目时：用与在线阅读相同的 WKWebView + ClipperDefuddle / Readability 流水线抓取标题、摘要、作者。
 @MainActor

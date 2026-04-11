@@ -50,11 +50,11 @@ struct PendingMetadataQueueView: View {
                         if workingIntakeID == intake.id {
                             ProgressView()
                                 .controlSize(.small)
-                            Text("处理中…")
+                            Text("Processing…", bundle: .module)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         } else if !intake.decodedCandidates.isEmpty {
-                            Button("确认导入") {
+                            Button(String(localized: "Confirm & import", bundle: .module)) {
                                 if let id = intake.id {
                                     candidateContext = CandidateContext(id: id)
                                 }
@@ -62,7 +62,7 @@ struct PendingMetadataQueueView: View {
                             .buttonStyle(SLPrimaryButtonStyle())
                             .controlSize(.small)
                         } else if intake.bestAvailableReference != nil {
-                            Button("确认导入") {
+                            Button(String(localized: "Confirm & import", bundle: .module)) {
                                 onConfirmManual(intake)
                             }
                             .buttonStyle(SLPrimaryButtonStyle())
@@ -72,11 +72,11 @@ struct PendingMetadataQueueView: View {
                         Spacer()
 
                         Menu {
-                            Button("重试") {
+                            Button(String(localized: "pendingQueue.button.retry", bundle: .module)) {
                                 retry(intake)
                             }
                             Divider()
-                            Button("移除", role: .destructive) {
+                            Button(String(localized: "pendingQueue.button.delete", bundle: .module), role: .destructive) {
                                 onDelete(intake)
                             }
                         } label: {
@@ -89,10 +89,10 @@ struct PendingMetadataQueueView: View {
                 }
                 .padding(.vertical, 4)
             }
-            .navigationTitle("待确认元数据")
+            .navigationTitle(String(localized: "pendingQueue.title", bundle: .module))
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("关闭") { dismiss() }
+                    Button(String(localized: "common.close", bundle: .module)) { dismiss() }
                 }
             }
         }
@@ -109,9 +109,9 @@ struct PendingMetadataQueueView: View {
                     )
                 }
                 MetadataCandidatePickerView(
-                    title: "确认候选记录",
-                    message: "你手动选中候选后，如果卡片信息已经够完整，会直接按人工确认导入；只有信息还不够时，才会继续抓取详情页 / export。",
-                    skipLabel: "取消",
+                    title: String(localized: "Confirm candidate", bundle: .module),
+                    message: String(localized: "If the selected candidate already has enough information, it will be imported as manually-verified. Otherwise Slate will fetch the detail page to fill in the gaps.", bundle: .module),
+                    skipLabel: String(localized: "common.cancel", bundle: .module),
                     candidates: intake.decodedCandidates,
                     assessmentByCandidateID: assessmentByCandidateID,
                     onImportSelected: { candidate in

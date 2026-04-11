@@ -6,12 +6,12 @@ final class CLIInstallerTests: XCTestCase {
 
     // MARK: - Properties
 
-    func testBinaryNameIsSwiftlibCLI() {
-        XCTAssertEqual(CLIInstaller.binaryName, "swiftlib-cli")
+    func testBinaryNameIsSlateCLI() {
+        XCTAssertEqual(CLIInstaller.binaryName, "slate-cli")
     }
 
     func testInstallURLPointsToUsrLocalBin() {
-        let expected = URL(fileURLWithPath: "/usr/local/bin/swiftlib-cli")
+        let expected = URL(fileURLWithPath: "/usr/local/bin/slate-cli")
         XCTAssertEqual(CLIInstaller.installURL, expected)
     }
 
@@ -63,8 +63,8 @@ final class CLIInstallerTests: XCTestCase {
         guard CLIInstaller.bundledBinaryURL == nil else { return }
         XCTAssertThrowsError(try CLIInstaller.install()) { error in
             let nsError = error as NSError
-            XCTAssertEqual(nsError.domain, "SwiftLib.CLIInstaller")
-            XCTAssertTrue(nsError.localizedDescription.contains("swiftlib-cli"),
+            XCTAssertEqual(nsError.domain, "Slate.CLIInstaller")
+            XCTAssertTrue(nsError.localizedDescription.contains("slate-cli"),
                           "Error should mention the binary name")
         }
     }

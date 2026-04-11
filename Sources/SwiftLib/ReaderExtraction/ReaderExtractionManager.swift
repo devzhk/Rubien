@@ -3,7 +3,7 @@ import OSLog
 import WebKit
 import SwiftLibCore
 
-private let readerExtractionLog = Logger(subsystem: "SwiftLib", category: "OnlineReadable")
+private let readerExtractionLog = Logger(subsystem: "Slate", category: "OnlineReadable")
 
 /// 在线阅读：原文页注入 Defuddle / Readability / YouTube 降级；`readerResult` 由本类接收，`deinit` 移除 handler。
 final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {

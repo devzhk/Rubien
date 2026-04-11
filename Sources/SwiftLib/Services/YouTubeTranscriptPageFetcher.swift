@@ -3,7 +3,7 @@ import OSLog
 import SwiftLibCore
 import WebKit
 
-private let transcriptDOMLog = Logger(subsystem: "SwiftLib", category: "YouTubeTranscriptDOM")
+private let transcriptDOMLog = Logger(subsystem: "Slate", category: "YouTubeTranscriptDOM")
 
 @MainActor
 final class YouTubeTranscriptPageFetcher: NSObject, ObservableObject {
