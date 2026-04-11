@@ -706,6 +706,10 @@ private struct SelectionActionBar: View {
                     viewModel.applySelectionAction(.highlight)
                 }
 
+                toolbarButton(icon: "underline", label: String(localized: "Underline", bundle: .module)) {
+                    viewModel.applySelectionAction(.underline)
+                }
+
                 toolbarButton(icon: "doc.on.doc", label: String(localized: "Copy", bundle: .module)) {
                     if !viewModel.stagedSelectionText.isEmpty {
                         NSPasteboard.general.clearContents()

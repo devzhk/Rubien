@@ -139,7 +139,7 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
     func runReadabilityForOnlineRead(in webView: WKWebView, isYouTube: Bool) {
         readerExtractionLog.notice("runReadabilityForOnlineRead isYouTube=\(isYouTube)")
         guard let scriptSource = Self.loadReadabilityScript() else {
-            onTerminalFailure?("缺少 Readability.js 资源文件。")
+            onTerminalFailure?(String(localized: "Missing Readability.js resource.", bundle: .module))
             return
         }
         let js = scriptSource + "\n" + Self.readabilityBootstrapJS

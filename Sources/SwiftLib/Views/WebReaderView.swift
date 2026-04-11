@@ -2196,6 +2196,10 @@ private struct WebSelectionActionBar: View {
                     viewModel.applySelectionAction(.highlight)
                 }
 
+                toolbarButton(icon: "underline", label: String(localized: "Underline", bundle: .module)) {
+                    viewModel.applySelectionAction(.underline)
+                }
+
                 toolbarButton(icon: "doc.on.doc", label: String(localized: "Copy", bundle: .module)) {
                     if let text = viewModel.pendingSelection?.text, !text.isEmpty {
                         NSPasteboard.general.clearContents()
