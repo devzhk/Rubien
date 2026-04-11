@@ -7,38 +7,14 @@ import OSLog
 private let metadataLog = Logger(subsystem: "com.swiftlib.metadata", category: "resolution")
 
 public enum MetadataSource: String, Codable, CaseIterable, DatabaseValueConvertible, Sendable {
-    case cnki
-    case wanfang
-    case vip
-    case douban
-    case duxiu
-    case wenjin
     case translationServer
 
     public var displayName: String {
         switch self {
-        case .cnki:
-            return "中国知网"
-        case .wanfang:
-            return "万方"
-        case .vip:
-            return "维普"
-        case .douban:
-            return "豆瓣读书"
-        case .duxiu:
-            return "读秀"
-        case .wenjin:
-            return "文津"
         case .translationServer:
-            return "Translation Server"
+            return "Generic"
         }
     }
-}
-
-public enum MetadataLanguageHint: String, Codable, Sendable {
-    case chinese
-    case nonChinese
-    case unknown
 }
 
 public enum MetadataWorkKind: String, Codable, CaseIterable, Sendable {
@@ -69,39 +45,18 @@ public enum MetadataWorkKind: String, Codable, CaseIterable, Sendable {
     public var displayName: String {
         switch self {
         case .journalArticle:
-            return "期刊论文"
+            return "Journal Article"
         case .book:
-            return "图书"
+            return "Book"
         case .thesis:
-            return "学位论文"
+            return "Thesis"
         case .conferencePaper:
-            return "会议论文"
+            return "Conference Paper"
         case .report:
-            return "报告"
+            return "Report"
         case .unknown:
-            return "未知"
+            return "Unknown"
         }
-    }
-}
-
-public struct CNKIExportLocator: Hashable, Codable, Sendable {
-    public var exportID: String?
-    public var dbname: String?
-    public var filename: String?
-
-    public init(
-        exportID: String? = nil,
-        dbname: String? = nil,
-        filename: String? = nil
-    ) {
-        self.exportID = exportID?.swiftlib_nilIfBlank
-        self.dbname = dbname?.swiftlib_nilIfBlank
-        self.filename = filename?.swiftlib_nilIfBlank
-    }
-
-    public var hasUsableExport: Bool {
-        exportID?.swiftlib_nilIfBlank != nil
-            || (dbname?.swiftlib_nilIfBlank != nil && filename?.swiftlib_nilIfBlank != nil)
     }
 }
 
@@ -123,7 +78,6 @@ public struct MetadataCandidate: Identifiable, Hashable, Codable, Sendable {
     public var matchedBy: [String]
     public var selectionSessionID: String?
     public var selectionItemID: String?
-    public var cnkiExport: CNKIExportLocator?
 
     public var id: String {
         if let sourceRecordID = sourceRecordID?.swiftlib_nilIfBlank {
@@ -152,8 +106,7 @@ public struct MetadataCandidate: Identifiable, Hashable, Codable, Sendable {
         sourceRecordID: String? = nil,
         matchedBy: [String] = [],
         selectionSessionID: String? = nil,
-        selectionItemID: String? = nil,
-        cnkiExport: CNKIExportLocator? = nil
+        selectionItemID: String? = nil
     ) {
         self.source = source
         self.title = title
@@ -172,7 +125,6 @@ public struct MetadataCandidate: Identifiable, Hashable, Codable, Sendable {
         self.matchedBy = matchedBy
         self.selectionSessionID = selectionSessionID?.swiftlib_nilIfBlank
         self.selectionItemID = selectionItemID?.swiftlib_nilIfBlank
-        self.cnkiExport = cnkiExport
     }
 }
 
@@ -187,7 +139,6 @@ public struct MetadataResolutionSeed: Hashable, Codable, Sendable {
     public var issn: String?
     public var publisher: String?
     public var edition: String?
-    public var languageHint: MetadataLanguageHint
     public var workKindHint: MetadataWorkKind
     public var textSnippet: String?
     public var sourceURL: String?
@@ -203,7 +154,6 @@ public struct MetadataResolutionSeed: Hashable, Codable, Sendable {
         issn: String? = nil,
         publisher: String? = nil,
         edition: String? = nil,
-        languageHint: MetadataLanguageHint = .unknown,
         workKindHint: MetadataWorkKind = .unknown,
         textSnippet: String? = nil,
         sourceURL: String? = nil
@@ -218,7 +168,6 @@ public struct MetadataResolutionSeed: Hashable, Codable, Sendable {
         self.issn = issn?.swiftlib_nilIfBlank
         self.publisher = publisher?.swiftlib_nilIfBlank
         self.edition = edition?.swiftlib_nilIfBlank
-        self.languageHint = languageHint
         self.workKindHint = workKindHint
         self.textSnippet = textSnippet?.swiftlib_nilIfBlank
         self.sourceURL = sourceURL?.swiftlib_nilIfBlank
@@ -226,14 +175,6 @@ public struct MetadataResolutionSeed: Hashable, Codable, Sendable {
 
     public var normalizedTitle: String? {
         title.map(MetadataResolution.normalizedComparableText(_:)).swiftlib_nilIfBlank
-    }
-
-    public var containsChineseText: Bool {
-        MetadataResolution.containsHanCharacters(title) || MetadataResolution.containsHanCharacters(fileName)
-    }
-
-    public var shouldSearchCNKI: Bool {
-        languageHint == .chinese || containsChineseText
     }
 
     public static func fromImportedPDF(url: URL, extracted: PDFService.ExtractedMetadata) -> MetadataResolutionSeed {
@@ -253,15 +194,6 @@ public struct MetadataResolutionSeed: Hashable, Codable, Sendable {
             ?? parsed.firstAuthor
             ?? MetadataResolution.extractLikelyAuthorName(from: cleanedFileName)
 
-        let languageHint: MetadataLanguageHint
-        if MetadataResolution.containsHanCharacters(title) || MetadataResolution.containsHanCharacters(cleanedFileName) {
-            languageHint = .chinese
-        } else if let title, !title.isEmpty {
-            languageHint = .nonChinese
-        } else {
-            languageHint = .unknown
-        }
-
         let seed = MetadataResolutionSeed(
             fileName: cleanedFileName,
             title: title,
@@ -273,18 +205,16 @@ public struct MetadataResolutionSeed: Hashable, Codable, Sendable {
             issn: extracted.issn,
             publisher: extracted.publisher,
             edition: extracted.edition,
-            languageHint: languageHint,
             workKindHint: extracted.workKindHint,
             textSnippet: extracted.textSnippet,
             sourceURL: url.absoluteString
         )
         metadataLog.debug("""
-            🌱 [seed] PDF 种子构建完成
-              文件名: \(cleanedFileName, privacy: .public)
-              标题: \(title ?? "nil", privacy: .public)
-              作者: \(firstAuthor ?? "nil", privacy: .public)
-              年份: \(extracted.year.map(String.init) ?? "nil", privacy: .public)
-              语言: \(languageHint.rawValue, privacy: .public) shouldSearchCNKI=\(seed.shouldSearchCNKI)
+            🌱 [seed] PDF seed built
+              fileName: \(cleanedFileName, privacy: .public)
+              title: \(title ?? "nil", privacy: .public)
+              author: \(firstAuthor ?? "nil", privacy: .public)
+              year: \(extracted.year.map(String.init) ?? "nil", privacy: .public)
               DOI: \(extracted.doi ?? "nil", privacy: .public)
             """)
         return seed
@@ -312,15 +242,6 @@ public struct MetadataResolutionSeed: Hashable, Codable, Sendable {
             ?? parsed.firstAuthor
             ?? MetadataResolution.extractLikelyAuthorName(from: cleanedFileName)
 
-        let languageHint: MetadataLanguageHint
-        if MetadataResolution.containsHanCharacters(title) || MetadataResolution.containsHanCharacters(cleanedFileName) {
-            languageHint = .chinese
-        } else if let title, !title.isEmpty {
-            languageHint = .nonChinese
-        } else {
-            languageHint = .unknown
-        }
-
         return MetadataResolutionSeed(
             fileName: cleanedFileName,
             title: title,
@@ -332,7 +253,6 @@ public struct MetadataResolutionSeed: Hashable, Codable, Sendable {
             issn: reference.issn,
             publisher: reference.publisher,
             edition: reference.edition,
-            languageHint: languageHint,
             workKindHint: MetadataResolution.workKind(for: reference.referenceType),
             textSnippet: reference.abstract,
             sourceURL: reference.url
@@ -352,9 +272,6 @@ public enum MetadataResolution {
     public static let candidateThreshold = 0.52
     public static let automaticCandidateThreshold = 0.85
     public static let automaticCandidateMargin = 0.10
-    // CNKI 专用阈值：中文标题相似度因副标题、标点差异等原因系统性偏低，适当放宽
-    public static let cnkiCandidateThreshold = 0.45  // 原等于 candidateThreshold (0.52)
-    public static let automaticCNKIRefreshThreshold = 0.78  // 原等于 automaticCandidateThreshold (0.85)
 
     public static func mergeReference(primary: Reference, fallback: Reference) -> Reference {
         var merged = primary
@@ -484,125 +401,11 @@ public enum MetadataResolution {
         }
     }
 
-    public static func metadataSource(for urlString: String?, fallback: MetadataSource = .translationServer) -> MetadataSource {
-        guard let urlString = urlString?.swiftlib_nilIfBlank,
-              let host = URL(string: urlString)?.host?.lowercased() else {
-            return fallback
-        }
-        switch host {
-        case let host where host.contains("cnki"):
-            return .cnki
-        case let host where host.contains("wanfang"):
-            return .wanfang
-        case let host where host.contains("cqvip") || host.contains("vip"):
-            return .vip
-        case let host where host.contains("douban"):
-            return .douban
-        case let host where host.contains("duxiu"):
-            return .duxiu
-        case let host where host.contains("nlc.cn") || host.contains("wenjin"):
-            return .wenjin
-        default:
-            return fallback
-        }
-    }
-
-    public static func shouldPreferCNKIForImportedPDF(seed: MetadataResolutionSeed) -> Bool {
-        seed.shouldSearchCNKI
-    }
-
     public static func shouldAcceptDOIReference(_ reference: Reference, seed: MetadataResolutionSeed) -> Bool {
+        _ = seed
         guard !reference.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
-
         let completeness = completenessScore(for: reference)
-        guard completeness >= 0.28 else { return false }
-
-        if !seed.shouldSearchCNKI {
-            return completeness >= 0.45
-        }
-
-        let titleScore = titleSimilarity(seed.title ?? "", reference.title)
-        let institutionalAuthorRatio = institutionalAuthorRatio(for: reference.authors)
-
-        if titleScore >= 0.82 { return true }
-        if titleScore >= 0.58 && institutionalAuthorRatio < 0.5 { return true }
-        if containsHanCharacters(reference.title) && completeness >= 0.7 && institutionalAuthorRatio < 0.8 { return true }
-        return false
-    }
-
-    public static func buildCNKICandidate(
-        title rawTitle: String,
-        metaText rawMetaText: String,
-        snippet rawSnippet: String?,
-        detailURL: String,
-        seed: MetadataResolutionSeed,
-        cnkiExport: CNKIExportLocator? = nil
-    ) -> MetadataCandidate? {
-        let title = cleanCandidateTitle(rawTitle)
-        guard !title.isEmpty else { return nil }
-
-        var metaText = rawMetaText.replacingOccurrences(of: rawTitle, with: " ")
-        metaText = metaText.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        let authors = extractAuthors(fromMetadataText: metaText)
-        let journal = extractJournal(fromMetadataText: metaText)
-        let year = extractYear(fromMetadataText: metaText)
-        let snippet = rawSnippet?.swiftlib_nilIfBlank
-
-        let titleScore = titleSimilarity(seed.title ?? seed.fileName, title)
-
-        // 权重调整：降低标题权重，提升作者和年份权重，以应对中文截断文件名导致标题相似度系统性偏低的问题
-        var score = titleScore * 0.60  // 原 0.72
-        let authorMatched = authorMatches(seed.firstAuthor, authors: authors)
-        if authorMatched { score += 0.25 }  // 原 0.18
-        var yearMatched = false
-        var yearDelta = -1
-        if let seedYear = seed.year, let year {
-            yearDelta = abs(seedYear - year)
-            if seedYear == year {
-                score += 0.10  // 原 0.07
-                yearMatched = true
-            } else if yearDelta == 1 {
-                score += 0.04  // 原 0.03
-            }
-        }
-        let journalMatched = journalMatches(seed.journal, candidateJournal: journal)
-        if journalMatched {
-            score += 0.05  // 原 0.03
-        }
-        if containsHanCharacters(title) == seed.shouldSearchCNKI {
-            score += 0.02
-        }
-
-        // 🔍 评分日志：记录每个候选的详细分数
-        metadataLog.debug("""
-            📊 [buildCandidate] 候选: \(title, privacy: .public)
-              seed.title=\(seed.title ?? "nil", privacy: .public) seed.author=\(seed.firstAuthor ?? "nil", privacy: .public) seed.year=\(seed.year.map(String.init) ?? "nil", privacy: .public)
-              titleScore=\(String(format: "%.3f", titleScore)) authorMatch=\(authorMatched) yearMatch=\(yearMatched) yearDelta=\(yearDelta) journalMatch=\(journalMatched)
-              候选作者=\(authors.map(\.displayName).joined(separator: ","), privacy: .public) 候选年份=\(year.map(String.init) ?? "nil", privacy: .public)
-              最终得分=\(String(format: "%.3f", min(score, 1))) 阈值=\(cnkiCandidateThreshold)
-            """)
-        if min(score, 1) >= cnkiCandidateThreshold {
-            metadataLog.debug("✅ [buildCandidate] 得分 \(String(format: "%.3f", min(score, 1))) 达阈值，加入候选列表")
-        } else {
-            metadataLog.debug("❌ [buildCandidate] 得分 \(String(format: "%.3f", min(score, 1))) 未达阈值 \(cnkiCandidateThreshold)，将被过滤")
-        }
-
-        return MetadataCandidate(
-            source: .cnki,
-            title: title,
-            authors: authors,
-            journal: journal,
-            year: year,
-            detailURL: detailURL,
-            score: min(score, 1),
-            snippet: snippet,
-            workKind: seed.workKindHint == .unknown ? .journalArticle : seed.workKindHint,
-            referenceType: (seed.workKindHint == .unknown ? MetadataWorkKind.journalArticle : seed.workKindHint).referenceType,
-            matchedBy: ["title", "author", "year", "journal"],
-            cnkiExport: cnkiExport
-        )
+        return completeness >= 0.45
     }
 
     public static func preferredAutomaticCandidate(from candidates: [MetadataCandidate]) -> MetadataCandidate? {
@@ -613,37 +416,6 @@ public enum MetadataResolution {
         }
         guard first.score >= automaticCandidateThreshold else { return nil }
         return (first.score - second.score) >= automaticCandidateMargin ? first : nil
-    }
-
-    public static func preferredAutomaticCNKICandidate(from candidates: [MetadataCandidate]) -> MetadataCandidate? {
-        // 使用 CNKI 专用阈值，而非通用阈值
-        let sorted = candidates.sorted { $0.score > $1.score }
-
-        metadataLog.debug("🎯 [autoSelect] 共 \(candidates.count) 个候选，阈值=\(cnkiCandidateThreshold) 自动阈值=\(automaticCNKIRefreshThreshold)")
-        sorted.enumerated().forEach { i, c in
-            metadataLog.debug("🎯 [autoSelect] [\(i)] score=\(String(format: "%.3f", c.score)) title=\(c.title, privacy: .public)")
-        }
-
-        guard let first = sorted.first, first.score >= cnkiCandidateThreshold else {
-            metadataLog.debug("🎯 [autoSelect] 最高分未达基础阈值，返回 nil")
-            return nil
-        }
-        guard let second = sorted.dropFirst().first else {
-            metadataLog.debug("🎯 [autoSelect] 唯一候选，直接返回: \(first.title, privacy: .public) score=\(String(format: "%.3f", first.score))")
-            return first
-        }
-        guard first.score >= automaticCNKIRefreshThreshold else {
-            metadataLog.debug("🎯 [autoSelect] 最高分 \(String(format: "%.3f", first.score)) 未达自动阈值 \(automaticCNKIRefreshThreshold)，需要手动确认")
-            return nil
-        }
-        let margin = first.score - second.score
-        if margin >= automaticCandidateMargin {
-            metadataLog.debug("🎯 [autoSelect] 自动选择: \(first.title, privacy: .public) score=\(String(format: "%.3f", first.score)) margin=\(String(format: "%.3f", margin))")
-            return first
-        } else {
-            metadataLog.debug("🎯 [autoSelect] 差距 \(String(format: "%.3f", margin)) < \(automaticCandidateMargin)，候选不够确定，需手动确认")
-            return nil
-        }
     }
 
     public static func parseVolumeIssuePages(from text: String) -> (volume: String?, issue: String?, pages: String?) {
@@ -815,7 +587,7 @@ public enum MetadataResolution {
         }
 
         let segments = normalized
-            .replacingOccurrences(of: #"[，,；;、|\s]+"#, with: "\n", options: .regularExpression)
+            .replacingOccurrences(of: #"[，,；;、|]+"#, with: "\n", options: .regularExpression)
             .split(separator: "\n")
             .map { String($0) }
             .map {

@@ -43,11 +43,6 @@ final class CitationFormatterTests: XCTestCase {
         XCTAssertEqual(kind, .numeric)
     }
 
-    func testCitationKindForBuiltInGBTStyleUsesCSLMetadata() {
-        let kind = CitationFormatter.citationKind(for: "http://www.zotero.org/styles/china-national-standard-gb-t-7714-2015-numeric")
-        XCTAssertEqual(kind, .numeric)
-    }
-
     // MARK: - Format Inline Citation
 
     func testFormatInlineCitationAPA() {

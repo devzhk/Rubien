@@ -838,8 +838,7 @@ public enum MetadataFetcher {
         // Heuristic: Chinese family names romanized are very short (2-3 chars: Wu, Li, Liu, Gan).
         // If "given" is a single short word (≤3 chars) and "family" is strictly longer,
         // the fields are likely swapped. Conservative threshold to avoid false positives
-        // on Western names like "Test"/"Author". Ambiguous cases (e.g. "Liu"/"Min"
-        // where both are 3 chars) will be corrected by ChineseMetadataMergePolicy.
+        // on Western names like "Test"/"Author".
         let gWords = g.components(separatedBy: " ").filter { !$0.isEmpty }
         return gWords.count == 1 && g.count <= 3 && f.count > g.count
     }

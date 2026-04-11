@@ -119,7 +119,7 @@ public enum PDFService {
         metadata.issn = extractISSN(from: fullText)
         metadata.publisher = extractPublisher(from: fullText)
         metadata.edition = extractEdition(from: fullText)
-        metadata.language = MetadataResolution.containsHanCharacters(fullText) ? "zh-CN" : "en"
+        metadata.language = "en"
 
         // 4. Extract year if not found
         if metadata.year == nil {
@@ -284,7 +284,6 @@ public enum PDFService {
             guard !blockedTokens.contains(where: lowered.contains) else { return nil }
 
             var score = 0
-            if MetadataResolution.containsHanCharacters(cleaned) { score += 24 }
             if index < 4 { score += 20 - (index * 4) }
             if cleaned.count >= 10 && cleaned.count <= 40 { score += 18 }
             if !lowered.contains("university") && !cleaned.contains("@") { score += 8 }

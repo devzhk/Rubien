@@ -479,7 +479,6 @@ public final class CiteprocJSCoreEngine {
 // CiteprocJSCorePool
 //
 // Thread-safe pool of CiteprocJSCoreEngine instances, keyed by style ID.
-// Used by WordAddinServer to handle concurrent render requests.
 // ---------------------------------------------------------------------------
 
 public final class CiteprocJSCorePool {

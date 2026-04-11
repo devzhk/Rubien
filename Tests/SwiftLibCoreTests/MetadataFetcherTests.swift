@@ -91,7 +91,6 @@ final class MetadataFetcherTests: XCTestCase {
         XCTAssertEqual(reference.authors[0].family, "Wu")
         XCTAssertEqual(reference.authors[0].given, "Haoyun")
         // "Liu"/"Min" are equal-length (3 chars each) — ambiguous, not swapped.
-        // ChineseMetadataMergePolicy will correct these from CNKI data later.
         XCTAssertEqual(reference.authors[1].given, "Liu")
         XCTAssertEqual(reference.authors[1].family, "Min")
         XCTAssertEqual(reference.title, "Research on multi-objective driven dispatching water level of Lake Taihu")

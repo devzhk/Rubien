@@ -149,15 +149,13 @@ struct AddByIdentifierView: View {
 
     private func statusMessage(for text: String) -> String {
         if let url = URL(string: text), ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
-            if MetadataResolution.metadataSource(for: text, fallback: .translationServer) == .cnki {
-                return "正在匹配中文元数据…"
-            }
+            _ = url
             return "正在校验输入…"
         }
         if MetadataFetcher.extractIdentifier(from: text) != nil {
-            return "正在启动本地元数据服务…"
+            return "正在解析标识符…"
         }
-        return "正在匹配中文元数据…"
+        return "正在查询元数据…"
     }
 
     private func verifiedSummary(for reference: Reference) -> String {

@@ -37,7 +37,6 @@ final class MetadataVerifierTests: XCTestCase {
             year: 2024,
             doi: "10.1000/example",
             journal: "Journal of Verification",
-            languageHint: .nonChinese,
             workKindHint: .journalArticle
         )
         let reference = Reference(
@@ -65,7 +64,6 @@ final class MetadataVerifierTests: XCTestCase {
         let seed = MetadataResolutionSeed(
             fileName: "suspicious.pdf",
             doi: "10.1000/example",
-            languageHint: .nonChinese,
             workKindHint: .journalArticle
         )
         let reference = Reference(

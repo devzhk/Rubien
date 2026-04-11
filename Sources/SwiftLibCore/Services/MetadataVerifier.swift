@@ -61,11 +61,6 @@ public enum MetadataVerifier {
         let journalExact = journalMatch(seed?.journal, reference.journal)
         let doiExact = identifierMatch(seed?.doi, reference.doi)
         let recordKeyPresent = evidence.recordKey?.swiftlib_nilIfBlank != nil || evidence.verificationHints.hasStableRecordKey
-        let noCompetingCandidate = evidence.verificationHints.competingCandidateCount <= 1
-
-        let firstAuthorCompatible = normalized(seed?.firstAuthor).isEmpty || firstAuthorExact
-        let yearCompatible = seed?.year == nil || yearExact
-        let journalCompatible = normalized(seed?.journal).isEmpty || journalExact
 
         if doiExact && titleScore >= 0.92 && (yearExact || firstAuthorExact) {
             return .verified(verifiedEnvelope(reference, evidence: evidence, rule: .j1DOIExact))
@@ -78,18 +73,6 @@ public enum MetadataVerifier {
             && yearExact
             && journalExact {
             return .verified(verifiedEnvelope(reference, evidence: evidence, rule: .j2SourceRecordKey))
-        }
-
-        if [.cnki, .wanfang, .vip].contains(evidence.source)
-            && recordKeyPresent
-            && evidence.verificationHints.hasStructuredTitle
-            && evidence.verificationHints.hasStructuredAuthors
-            && noCompetingCandidate
-            && titleScore >= 0.92
-            && firstAuthorCompatible
-            && yearCompatible
-            && journalCompatible {
-            return .verified(verifiedEnvelope(reference, evidence: evidence, rule: .j3CNKINoDOI))
         }
 
         if evidence.verificationHints.competingCandidateCount > 1 {

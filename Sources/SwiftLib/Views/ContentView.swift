@@ -431,7 +431,6 @@ final class LibraryViewModel: ObservableObject {
 
 struct ContentView: View {
     @StateObject private var viewModel = LibraryViewModel()
-    @StateObject private var cnkiMetadataProvider = CNKIMetadataProvider()
     @AppStorage("hasPromptedCLIInstallation") private var hasPromptedCLIInstallation = false
     @State private var showCLIInstallPrompt = false
     @State private var cliInstallResult: CLIInstallResult?
@@ -455,7 +454,7 @@ struct ContentView: View {
     }
 
     private var metadataResolver: MetadataResolver {
-        MetadataResolver(cnkiProvider: cnkiMetadataProvider)
+        MetadataResolver()
     }
 
     private var selectedReference: Reference? {
@@ -720,19 +719,6 @@ struct ContentView: View {
                 }
             )
         }
-        .sheet(item: Binding(
-            get: { cnkiMetadataProvider.verificationSession },
-            set: { session in
-                if session == nil, cnkiMetadataProvider.verificationSession != nil {
-                    cnkiMetadataProvider.cancelVerification()
-                }
-            }
-        )) { session in
-            CNKIVerificationSheet(
-                provider: cnkiMetadataProvider,
-                session: session
-            )
-        }
         .overlay(alignment: .bottom) {
             if let msg = cslImportMessage {
                 Text(msg)
@@ -851,22 +837,6 @@ struct ContentView: View {
         } message: {
             Text(cliInstallResult?.message ?? "")
         }
-        .background(cnkiHiddenWebViewIfNeeded)
-    }
-
-    @ViewBuilder
-    private var cnkiHiddenWebViewIfNeeded: some View {
-        if cnkiMetadataProvider.needsWebView {
-            HiddenWKWebViewHost(
-                configure: cnkiMetadataProvider.configureWebView(_:),
-                onCreate: { webView in
-                    cnkiMetadataProvider.registerWebView(webView)
-                }
-            )
-            .frame(width: 1, height: 1)
-            .opacity(0.001)
-            .allowsHitTesting(false)
-        }
     }
 
     private func importBibTeX() {
@@ -888,11 +858,9 @@ struct ContentView: View {
             do {
                 let prepared = try PDFService.prepareImportedPDF(from: url)
                 let fallbackReference = prepared.reference
-                let seed = MetadataResolutionSeed.fromImportedPDF(url: url, extracted: prepared.extracted)
+                _ = MetadataResolutionSeed.fromImportedPDF(url: url, extracted: prepared.extracted)
 
-                if MetadataResolution.shouldPreferCNKIForImportedPDF(seed: seed) {
-                    viewModel.importProgress = "正在匹配知网元数据…"
-                } else if let doi = prepared.extracted.doi, !doi.isEmpty {
+                if let doi = prepared.extracted.doi, !doi.isEmpty {
                     viewModel.importProgress = "正在获取元数据：\(doi)…"
                 }
 

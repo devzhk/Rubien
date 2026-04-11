@@ -23,8 +23,6 @@ struct SwiftLibCLI: AsyncParsableCommand {
             Annotations.self,
             Styles.self,
             Export.self,
-            TagDOCX.self,
-            CNKIDebug.self,
         ]
     )
 }
@@ -167,20 +165,6 @@ struct CitationTextOutput: Encodable {
     let style: String
     let inline: String
     let bibliography: [String]
-}
-
-struct CNKIDebugOutput: Encodable {
-    let seedTitle: String
-    let candidateTitle: String
-    let titleSimilarity: Double
-    let score: Double?
-    let threshold: Double
-    let accepted: Bool
-    let authors: [String]
-    let journal: String?
-    let year: Int?
-    let firstAuthorMatched: Bool
-    let journalMatched: Bool
 }
 
 // MARK: - Subcommands
@@ -666,98 +650,6 @@ struct Import: ParsableCommand {
 
         let count = try AppDatabase.shared.batchImportReferences(refs)
         printJSON(["imported": "\(count)", "file": file])
-    }
-}
-
-struct CNKIDebug: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "cnki-debug",
-        abstract: "调试 CNKI 标题匹配与候选条目解析（不启动主程序）"
-    )
-
-    @Option(name: .long, help: "本地条目/PDF 的原始标题")
-    var seedTitle: String
-
-    @Option(name: .long, help: "本地条目的第一作者")
-    var seedAuthor: String?
-
-    @Option(name: .long, help: "本地条目的出版年份")
-    var seedYear: Int?
-
-    @Option(name: .long, help: "本地条目的期刊名")
-    var seedJournal: String?
-
-    @Option(name: .long, help: "CNKI 返回的候选标题")
-    var candidateTitle: String
-
-    @Option(name: .long, help: "候选条目的元数据（作者/来源/日期等，通常为一行文本）")
-    var metaText: String = ""
-
-    @Option(name: .long, help: "候选条目的摘要片段")
-    var snippet: String?
-
-    @Option(name: .long, help: "调试用虚拟详情页 URL")
-    var detailURL: String = "https://kns.cnki.net/debug"
-
-    @Option(name: .long, help: "标题不完整时使用的文件名")
-    var fileName: String?
-
-    func run() throws {
-        let resolvedSeedTitle = seedTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        let seed = MetadataResolutionSeed(
-            fileName: fileName ?? resolvedSeedTitle,
-            title: resolvedSeedTitle,
-            firstAuthor: seedAuthor,
-            year: seedYear,
-            journal: seedJournal,
-            languageHint: .chinese
-        )
-
-        let candidate = MetadataResolution.buildCNKICandidate(
-            title: candidateTitle,
-            metaText: metaText,
-            snippet: snippet,
-            detailURL: detailURL,
-            seed: seed
-        )
-
-        let similarity = MetadataResolution.titleSimilarity(resolvedSeedTitle, candidateTitle)
-        let authors = candidate?.authors.map(\.displayName) ?? []
-        let firstAuthorMatched: Bool = {
-            guard let seedAuthor = seedAuthor?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !seedAuthor.isEmpty else { return false }
-            let normalizedSeed = MetadataResolution.normalizedComparableText(seedAuthor)
-            return authors.contains { author in
-                let normalizedAuthor = MetadataResolution.normalizedComparableText(author)
-                return !normalizedAuthor.isEmpty
-                    && (normalizedAuthor.contains(normalizedSeed) || normalizedSeed.contains(normalizedAuthor))
-            }
-        }()
-        let journalMatched: Bool = {
-            guard let seedJournal = seedJournal?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  let candidateJournal = candidate?.journal?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !seedJournal.isEmpty,
-                  !candidateJournal.isEmpty else { return false }
-            let lhs = MetadataResolution.normalizedComparableText(seedJournal)
-            let rhs = MetadataResolution.normalizedComparableText(candidateJournal)
-            return lhs == rhs || lhs.contains(rhs) || rhs.contains(lhs)
-        }()
-
-        printJSON(
-            CNKIDebugOutput(
-                seedTitle: resolvedSeedTitle,
-                candidateTitle: candidateTitle,
-                titleSimilarity: similarity,
-                score: candidate?.score,
-                threshold: MetadataResolution.cnkiCandidateThreshold,
-                accepted: (candidate?.score ?? 0) >= MetadataResolution.cnkiCandidateThreshold,
-                authors: authors,
-                journal: candidate?.journal,
-                year: candidate?.year,
-                firstAuthorMatched: firstAuthorMatched,
-                journalMatched: journalMatched
-            )
-        )
     }
 }
 

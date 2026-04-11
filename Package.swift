@@ -19,9 +19,6 @@ let package = Package(
             dependencies: [
                 .product(name: "GRDB", package: "GRDB.swift"),
             ],
-            exclude: [
-                "Services/MetadataResolution.swift.bak",
-            ],
             resources: [
                 .copy("Resources")
             ]

@@ -171,9 +171,9 @@ final class AppDatabaseTests: XCTestCase {
 
     func testPersistCandidateResolutionCreatesPendingIntake() throws {
         let db = try makeDatabase()
-        let evidence = makeEvidence(source: .cnki, recordKey: "CJFD-2024-001", sourceURL: "https://kns.cnki.net/detail")
+        let evidence = makeEvidence(source: .translationServer, recordKey: "CJFD-2024-001", sourceURL: "https://kns.cnki.net/detail")
         let candidate = MetadataCandidate(
-            source: .cnki,
+            source: .translationServer,
             title: "候选论文",
             authors: [AuthorName(given: "小明", family: "张")],
             journal: "测试期刊",
@@ -185,7 +185,7 @@ final class AppDatabaseTests: XCTestCase {
         let result = try db.persistMetadataResolution(
             .candidate(
                 CandidateEnvelope(
-                    seed: MetadataResolutionSeed(fileName: "candidate.pdf", title: "候选论文", languageHint: .chinese, workKindHint: .journalArticle),
+                    seed: MetadataResolutionSeed(fileName: "candidate.pdf", title: "候选论文", workKindHint: .journalArticle),
                     fallbackReference: Reference(title: "候选论文"),
                     currentReference: Reference(title: "候选论文"),
                     candidates: [candidate],
@@ -243,7 +243,7 @@ final class AppDatabaseTests: XCTestCase {
         try db.saveReference(&original)
 
         let evidence = makeEvidence(
-            source: .cnki,
+            source: .translationServer,
             recordKey: "CJFD-2024-009",
             sourceURL: "https://kns.cnki.net/detail/example",
             fetchMode: .detail
@@ -255,7 +255,7 @@ final class AppDatabaseTests: XCTestCase {
             journal: "知网测试期刊"
         )
         verified.verificationStatus = .verifiedManual
-        verified.metadataSource = .cnki
+        verified.metadataSource = .translationServer
         verified.recordKey = evidence.recordKey
         verified.verificationSourceURL = evidence.sourceURL
         verified.evidenceBundleHash = evidence.bundleHash
@@ -283,13 +283,13 @@ final class AppDatabaseTests: XCTestCase {
         XCTAssertEqual(refreshed.title, "刷新后的权威条目")
         XCTAssertEqual(refreshed.journal, "知网测试期刊")
         XCTAssertEqual(refreshed.verificationStatus, .verifiedManual)
-        XCTAssertEqual(refreshed.metadataSource, .cnki)
+        XCTAssertEqual(refreshed.metadataSource, .translationServer)
         XCTAssertEqual(refreshed.recordKey, "CJFD-2024-009")
     }
 
     func testConfirmMetadataIntakePromotesToVerifiedManualReference() throws {
         let db = try makeDatabase()
-        let evidence = makeEvidence(source: .cnki, recordKey: "CJFD-2024-002", sourceURL: "https://kns.cnki.net/detail")
+        let evidence = makeEvidence(source: .translationServer, recordKey: "CJFD-2024-002", sourceURL: "https://kns.cnki.net/detail")
         let unresolved = Reference(
             title: "待人工确认的条目",
             authors: [AuthorName(given: "华", family: "李")],
@@ -300,7 +300,7 @@ final class AppDatabaseTests: XCTestCase {
         let persisted = try db.persistMetadataResolution(
             .rejected(
                 RejectedEnvelope(
-                    seed: MetadataResolutionSeed(fileName: "queued.pdf", title: unresolved.title, firstAuthor: "李华", year: 2024, journal: unresolved.journal, languageHint: .chinese, workKindHint: .journalArticle),
+                    seed: MetadataResolutionSeed(fileName: "queued.pdf", title: unresolved.title, firstAuthor: "李华", year: 2024, journal: unresolved.journal, workKindHint: .journalArticle),
                     fallbackReference: unresolved,
                     currentReference: unresolved,
                     reason: .verifierRuleNotSatisfied,

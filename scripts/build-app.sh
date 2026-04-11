@@ -23,29 +23,10 @@ APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
 DMG_NAME="$APP_NAME-${CONFIGURATION}.dmg"
 DMG_PATH="$OUTPUT_DIR/$DMG_NAME"
 
-BACKEND_DIR="$PROJECT_DIR/swiftlib-translation-backend"
-BACKEND_RESOURCE_DIR="$APP_BUNDLE/Contents/Resources/TranslationBackend"
-BACKEND_SEED_DIR="$APP_BUNDLE/Contents/Resources/TranslationBackendSeed"
-BACKEND_MANIFEST_PATH="$APP_BUNDLE/Contents/Resources/TranslationBackendManifest.json"
 HELPERS_DIR="$APP_BUNDLE/Contents/Helpers"
-
-NODE_VERSION="${NODE_VERSION:-$(node --version 2>/dev/null | sed 's/^v//' || true)}"
-NODE_VERSION="${NODE_VERSION:-25.8.1}"
-NODE_ARCH="${NODE_ARCH:-darwin-arm64}"
-NODE_DIST_BASENAME="node-v${NODE_VERSION}-${NODE_ARCH}"
-NODE_CACHE_DIR="$PROJECT_DIR/.cache/node/${NODE_DIST_BASENAME}"
-NODE_TARBALL="$NODE_CACHE_DIR/${NODE_DIST_BASENAME}.tar.gz"
-NODE_DIST_URL="${NODE_DIST_URL:-https://nodejs.org/dist/v${NODE_VERSION}/${NODE_DIST_BASENAME}.tar.gz}"
-NODE_DIST_DIR="$NODE_CACHE_DIR/${NODE_DIST_BASENAME}"
 
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 CODESIGN_ENABLED="${CODESIGN_ENABLED:-1}"
-
-json_field() {
-    local json="$1"
-    local expr="$2"
-    node -e "const data = JSON.parse(process.argv[1]); const value = ${expr}; if (value == null) process.stdout.write(''); else process.stdout.write(String(value));" "$json"
-}
 
 build_app() {
     echo "▸ Building $APP_NAME app ($CONFIGURATION)..."
@@ -121,100 +102,11 @@ assemble_app_bundle() {
 PLIST
 }
 
-prepare_backend_overlay() {
-    echo "▸ Building translators overlay..."
-    (cd "$BACKEND_DIR" && node scripts/build-overlay.mjs >/dev/null)
-}
-
-download_node_runtime() {
-    echo "▸ Preparing bundled Node.js runtime ($NODE_VERSION)..."
-    mkdir -p "$NODE_CACHE_DIR"
-    if [ ! -x "$NODE_DIST_DIR/bin/node" ]; then
-        if [ ! -f "$NODE_TARBALL" ]; then
-            curl -fsSL "$NODE_DIST_URL" -o "$NODE_TARBALL"
-        fi
-        rm -rf "$NODE_DIST_DIR"
-        tar -xzf "$NODE_TARBALL" -C "$NODE_CACHE_DIR"
-    fi
-}
-
 embed_helpers() {
-    echo "▸ Embedding CLI and Node runtimes..."
+    echo "▸ Embedding CLI..."
     mkdir -p "$HELPERS_DIR"
     cp "$PRODUCTS_DIR/$CLI_NAME" "$HELPERS_DIR/$CLI_NAME"
     chmod 755 "$HELPERS_DIR/$CLI_NAME"
-    cp "$NODE_DIST_DIR/bin/node" "$HELPERS_DIR/node"
-    chmod 755 "$HELPERS_DIR/node"
-}
-
-embed_backend_runtime() {
-    echo "▸ Embedding translation backend runtime..."
-    rm -rf "$BACKEND_RESOURCE_DIR" "$BACKEND_SEED_DIR"
-    mkdir -p "$BACKEND_RESOURCE_DIR" "$BACKEND_SEED_DIR/runtime" "$BACKEND_RESOURCE_DIR/licenses"
-
-    local revisions_json
-    revisions_json="$(cd "$BACKEND_DIR" && node scripts/update-translators.mjs)"
-    local translation_server_revision
-    local translators_cn_revision
-    translation_server_revision="$(json_field "$revisions_json" 'data.translationServerRevision')"
-    translators_cn_revision="$(json_field "$revisions_json" 'data.translatorsCNRevision')"
-    local overlay_revision="${translation_server_revision}+${translators_cn_revision}"
-    local backend_version
-    backend_version="$(node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); process.stdout.write(p.version);" "$BACKEND_DIR/package.json")"
-    local licenses_version="${LICENSES_VERSION:-${backend_version}-${NODE_VERSION}}"
-
-    cp "$BACKEND_DIR/server.js" "$BACKEND_RESOURCE_DIR/server.js"
-    cp "$BACKEND_DIR/package.json" "$BACKEND_RESOURCE_DIR/package.json"
-    mkdir -p "$BACKEND_RESOURCE_DIR/config"
-    cp "$BACKEND_DIR/config/upstream-revisions.json" "$BACKEND_RESOURCE_DIR/config/upstream-revisions.json"
-
-    mkdir -p "$BACKEND_RESOURCE_DIR/vendor/translation-server"
-    rsync -a --delete \
-        --exclude '.git' \
-        "$BACKEND_DIR/vendor/translation-server/config" \
-        "$BACKEND_DIR/vendor/translation-server/src" \
-        "$BACKEND_DIR/vendor/translation-server/modules" \
-        "$BACKEND_DIR/vendor/translation-server/node_modules" \
-        "$BACKEND_DIR/vendor/translation-server/package.json" \
-        "$BACKEND_DIR/vendor/translation-server/package-lock.json" \
-        "$BACKEND_RESOURCE_DIR/vendor/translation-server/"
-
-    rsync -a --delete "$BACKEND_DIR/runtime/" "$BACKEND_SEED_DIR/runtime/"
-
-    cp "$BACKEND_DIR/vendor/translation-server/COPYING" "$BACKEND_RESOURCE_DIR/licenses/translation-server-LICENSE.txt"
-    cp "$BACKEND_DIR/vendor/translators_CN/LICENSE" "$BACKEND_RESOURCE_DIR/licenses/translators_CN-LICENSE.txt"
-    cp "$NODE_DIST_DIR/LICENSE" "$BACKEND_RESOURCE_DIR/licenses/node-LICENSE.txt"
-
-    cat > "$BACKEND_RESOURCE_DIR/OPEN_SOURCE_NOTICES.txt" <<EOF
-SwiftLib 中文元数据后端包含以下第三方组件：
-
-1. translation-server
-   Revision: ${translation_server_revision}
-   License file: licenses/translation-server-LICENSE.txt
-
-2. translators_CN
-   Revision: ${translators_cn_revision}
-   License file: licenses/translators_CN-LICENSE.txt
-
-3. Node.js runtime
-   Version: ${NODE_VERSION}
-   License file: licenses/node-LICENSE.txt
-EOF
-
-    cat > "$BACKEND_MANIFEST_PATH" <<EOF
-{
-  "backendVersion": "${backend_version}",
-  "nodeVersion": "${NODE_VERSION}",
-  "nodePath": "Contents/Helpers/node",
-  "backendRootPath": "Contents/Resources/TranslationBackend",
-  "backendEntryPath": "Contents/Resources/TranslationBackend/server.js",
-  "seedRootPath": "Contents/Resources/TranslationBackendSeed",
-  "translationServerRevision": "${translation_server_revision}",
-  "translatorsCNRevision": "${translators_cn_revision}",
-  "overlayRevision": "${overlay_revision}",
-  "licensesVersion": "${licenses_version}"
-}
-EOF
 }
 
 codesign_target() {
@@ -230,12 +122,7 @@ sign_bundle() {
     fi
 
     echo "▸ Codesigning embedded helpers and app bundle..."
-    codesign_target "$HELPERS_DIR/node"
     codesign_target "$HELPERS_DIR/$CLI_NAME"
-
-    while IFS= read -r dylib; do
-        codesign_target "$dylib"
-    done < <(find "$BACKEND_RESOURCE_DIR/vendor/translation-server/node_modules" -type f \( -name '*.node' -o -name '*.dylib' \) 2>/dev/null | sort)
 
     codesign --force --deep --sign "$CODESIGN_IDENTITY" --timestamp=none "$APP_BUNDLE"
 }
@@ -282,10 +169,7 @@ build_app
 build_cli
 assemble_app_bundle
 embed_app_icon
-prepare_backend_overlay
-download_node_runtime
 embed_helpers
-embed_backend_runtime
 sign_bundle
 create_dmg
 

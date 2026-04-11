@@ -58,32 +58,6 @@ struct SwiftLibApp: App {
 
                 let installed = CLIInstaller.isInstalled
                 Text("状态：\(installed ? "✅ 已安装" : "❌ 未安装")  路径：\(CLIInstaller.installURL.path)")
-
-                Divider()
-
-                Button(WordAddinInstaller.isInstalled ? "重新安装 Word 插件" : "安装 Word 插件") {
-                    do {
-                        try WordAddinInstaller.install()
-                        showToast("Word 插件已安装", tone: .success)
-                    } catch {
-                        showToast("Word 插件安装失败：\(error.localizedDescription)", tone: .error, hideAfter: 5)
-                    }
-                }
-
-                Button("卸载 Word 插件") {
-                    WordAddinInstaller.uninstall()
-                    showToast("Word 插件已卸载", tone: .info, hideAfter: 2.5)
-                }
-                .disabled(!WordAddinInstaller.isInstalled)
-
-                Button("在 Finder 中显示插件清单") {
-                    WordAddinInstaller.revealManifest()
-                }
-
-                Divider()
-
-                let addinInstalled = WordAddinInstaller.isInstalled
-                Text("Word 插件：\(addinInstalled ? "✅ 已安装" : "❌ 未安装")  服务：\(WordAddinServer.shared.isRunning ? "🟢 运行中" : "⚪ 已停止")")
             }
         }
         Settings {
@@ -124,18 +98,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         MetadataFetcher.contactEmail = SwiftLibPreferences.apiContactEmail
 
         // Pre-warm the JSCore engine for the style used in the last session,
-        // so the first Word Add-in render request doesn't pay the cold-start cost.
+        // so the first citation render doesn't pay the cold-start cost.
         CiteprocJSCorePool.shared.warmUpLastUsed()
-
-        // Auto-install Word Add-in manifest (idempotent) and start HTTP server
-        try? WordAddinInstaller.install()
-        WordAddinServer.shared.start()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        WordAddinServer.shared.stop()
         ReaderWindowManager.shared.closeAll()
-        TranslationBackendProcessManager.shared.shutdownSync()
     }
 }
 

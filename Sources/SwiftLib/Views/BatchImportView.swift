@@ -265,15 +265,13 @@ struct BatchImportView: View {
 
     private func statusMessage(for input: String) -> String {
         if let url = URL(string: input), ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
-            if MetadataResolution.metadataSource(for: input, fallback: .translationServer) == .cnki {
-                return "正在匹配中文元数据…"
-            }
+            _ = url
             return "正在校验输入…"
         }
         if MetadataFetcher.extractIdentifier(from: input) != nil {
-            return "正在启动本地元数据服务…"
+            return "正在解析标识符…"
         }
-        return "正在匹配中文元数据…"
+        return "正在查询元数据…"
     }
 
     private func iconName(for outcome: ImportResult.Outcome) -> String {
