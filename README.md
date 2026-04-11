@@ -35,6 +35,18 @@ swift test
 
 Build outputs land in `build/`: `Slate.app` and `Slate-{Debug,Release}.dmg`.
 
+### Troubleshooting: stale SPM checkouts
+
+If `swift build` / `swift run Slate` suddenly fails with errors like `'grdb.swift': Source files for target CSQLite should be located under 'Sources/CSQLite'` or `'swift-argument-parser': invalid custom path 'Tools/generate-docc-reference'`, the Swift Package Manager checkout cache is corrupt — usually after switching the active developer toolchain (`sudo xcode-select -s ...`) between CommandLineTools and Xcode. Fix:
+
+```bash
+rm -rf .build .swiftpm
+swift package resolve
+swift run Slate
+```
+
+This nukes the local package checkouts and SwiftPM state, then re-fetches cleanly.
+
 ## Project layout
 
 ```

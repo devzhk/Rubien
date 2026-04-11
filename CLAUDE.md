@@ -30,6 +30,24 @@ Full app bundle / DMG:
 
 Outputs land in `build/`: `Slate.app`, `slate-cli` (embedded under `Slate.app/Contents/Helpers/`), `Slate-{Debug,Release}.dmg`. The script drives `xcodebuild build -scheme SwiftLib` (note: the *scheme* name is still the SPM target name `SwiftLib`, while the resulting binary gets renamed to `Slate` post-build). `xcodebuild` derived data is written to `.xcodebuild/` (not `~/Library/Developer/Xcode/DerivedData/`). The bundle ID defaults to `com.slate.app` — override with `BUNDLE_ID=... ./scripts/build-app.sh`.
 
+### Stale `.build/checkouts` after toolchain swaps
+
+If `swift build` / `swift run Slate` suddenly errors with nonsense like:
+
+- `'grdb.swift': the package manifest at '.build/checkouts/GRDB.swift/Package.swift' cannot be accessed`
+- `'grdb.swift': Source files for target CSQLite should be located under 'Sources/CSQLite'`
+- `'swift-argument-parser': invalid custom path 'Tools/generate-docc-reference' for target 'generate-docc-reference'`
+
+…the SPM checkout cache is corrupt, usually after switching the active developer dir (`sudo xcode-select -s ...`) between CommandLineTools and Xcode. Fix:
+
+```bash
+rm -rf .build .swiftpm
+swift package resolve
+swift run Slate
+```
+
+This nukes the per-package local checkouts and the SwiftPM state, then refetches cleanly. It's hit this repo at least twice — it's not an edit you made, it's an SPM bug around stale state.
+
 ## Architecture
 
 Three Swift targets sit on top of one shared core (`Package.swift`):
