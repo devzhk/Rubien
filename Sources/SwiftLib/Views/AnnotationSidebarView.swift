@@ -63,7 +63,7 @@ struct AnnotationSidebarView: View {
     private var sidebarHeader: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .center) {
-                Text("标注")
+                Text("Annotations", bundle: .module)
                     .font(.headline)
 
                 Text("\(filteredAnnotations.count)")
@@ -78,10 +78,10 @@ struct AnnotationSidebarView: View {
             }
 
             DraggableSegmentedControl(selection: $filterType, items: [
-                ("全部", nil),
-                ("高亮", .highlight),
-                ("下划线", .underline),
-                ("笔记", .note),
+                (String(localized: "All", bundle: .module), nil),
+                (String(localized: "Highlight", bundle: .module), .highlight),
+                (String(localized: "Underline", bundle: .module), .underline),
+                (String(localized: "Note", bundle: .module), .note),
             ])
         }
         .padding(.horizontal, 14)
@@ -109,10 +109,10 @@ struct AnnotationSidebarView: View {
                 )
 
             VStack(spacing: 6) {
-                Text("暂无标注")
+                Text("No annotations yet", bundle: .module)
                     .font(.headline)
                     .foregroundStyle(.primary)
-                Text("选择正文内容后，可在悬浮工具条中添加高亮、下划线或笔记。")
+                Text("Select text in the document, then add a highlight, underline, or note from the floating toolbar.", bundle: .module)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -165,16 +165,16 @@ struct AnnotationSidebarView: View {
     private func editNoteSheet(annotation: PDFAnnotationRecord) -> some View {
         VStack(spacing: 16) {
             HStack {
-                Text("编辑笔记")
+                Text("Edit note", bundle: .module)
                     .font(.headline)
                 Spacer()
-                Button("取消") { editingAnnotation = nil }
+                Button(String(localized: "common.cancel", bundle: .module)) { editingAnnotation = nil }
                     .keyboardShortcut(.cancelAction)
             }
 
             if let text = annotation.selectedText, !text.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("选中文本")
+                    Text("Selected text", bundle: .module)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text(text)
@@ -191,7 +191,7 @@ struct AnnotationSidebarView: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("笔记内容")
+                Text("Note", bundle: .module)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 RichNoteEditorView(markdown: $editNoteText)
@@ -205,7 +205,7 @@ struct AnnotationSidebarView: View {
 
             HStack {
                 Spacer()
-                Button("保存") {
+                Button(String(localized: "common.save", bundle: .module)) {
                     viewModel.updateAnnotationNote(annotation, noteText: editNoteText)
                     editingAnnotation = nil
                 }
@@ -325,9 +325,9 @@ struct AnnotationCard: View {
                     Spacer()
                     HStack(spacing: 8) {
                         cardActionButton(icon: "pencil", tint: .secondary, action: onEdit)
-                            .help("编辑笔记")
+                            .help(String(localized: "Edit note", bundle: .module))
                         cardActionButton(icon: "trash", tint: .red, action: onDelete)
-                            .help("删除标注")
+                            .help(String(localized: "Delete annotation", bundle: .module))
                     }
                     .transition(.opacity)
                 }

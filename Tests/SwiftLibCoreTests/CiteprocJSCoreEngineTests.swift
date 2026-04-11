@@ -123,7 +123,7 @@ final class CiteprocJSCoreEngineTests: XCTestCase {
         ])) { error in
             XCTAssertEqual(
                 error.localizedDescription,
-                "citeproc-js render failed: 文档中的引文引用了当前渲染上下文中不存在的文献 ID：2"
+                "citeproc-js render failed: Document references reference IDs that aren't in the current render context: 2"
             )
         }
     }

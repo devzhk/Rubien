@@ -34,7 +34,7 @@ struct NotePopoverView: View {
             // WYSIWYG Markdown editor (pre-warmed via NoteEditorPool)
             RichNoteEditorView(
                 markdown: $editingMarkdown,
-                placeholder: "添加笔记…",
+                placeholder: "Add a note…",
                 autoFocus: true
             )
             .frame(minHeight: 80, maxHeight: 200)
@@ -49,7 +49,7 @@ struct NotePopoverView: View {
             // Action bar
             HStack(spacing: 8) {
                 Spacer()
-                Button("取消") {
+                Button("Cancel") {
                     onCancel()
                 }
                 .buttonStyle(.plain)
@@ -57,7 +57,7 @@ struct NotePopoverView: View {
                 .font(.caption)
                 .keyboardShortcut(.cancelAction)
 
-                Button("保存") {
+                Button("Save") {
                     onSave(editingMarkdown.trimmingCharacters(in: .whitespacesAndNewlines))
                 }
                 .buttonStyle(.borderedProminent)

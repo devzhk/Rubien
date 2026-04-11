@@ -34,9 +34,9 @@ public enum AnnotationType: String, Codable, CaseIterable, DatabaseValueConverti
 
     public var label: String {
         switch self {
-        case .highlight: return "高亮"
-        case .underline: return "下划线"
-        case .note: return "笔记"
+        case .highlight: return "Highlight"
+        case .underline: return "Underline"
+        case .note: return "Note"
         }
     }
 }

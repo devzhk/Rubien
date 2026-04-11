@@ -8,27 +8,27 @@ struct PDFInfoSidebarView: View {
     var body: some View {
         OverlayScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                infoSection("基本信息") {
-                    infoRow("标题", value: reference.title)
-                    infoRow("作者", value: reference.authors.map { $0.displayName }.joined(separator: ", "))
-                    infoRow("年份", value: reference.year.map { String($0) })
-                    infoRow("类型", value: reference.referenceType.rawValue)
+                infoSection(String(localized: "Basics", bundle: .module)) {
+                    infoRow(String(localized: "Title", bundle: .module), value: reference.title)
+                    infoRow(String(localized: "Authors", bundle: .module), value: reference.authors.map { $0.displayName }.joined(separator: ", "))
+                    infoRow(String(localized: "Year", bundle: .module), value: reference.year.map { String($0) })
+                    infoRow(String(localized: "Type", bundle: .module), value: reference.referenceType.rawValue)
                 }
 
-                infoSection("出版信息") {
-                    infoRow("期刊", value: reference.journal)
-                    infoRow("卷", value: reference.volume)
-                    infoRow("期", value: reference.issue)
-                    infoRow("页码", value: reference.pages)
-                    infoRow("出版社", value: reference.publisher)
-                    infoRow("出版地", value: reference.publisherPlace)
-                    infoRow("版次", value: reference.edition)
-                    infoRow("机构", value: reference.institution)
-                    infoRow("语言", value: reference.language)
-                    infoRow("页数", value: reference.numberOfPages)
+                infoSection(String(localized: "Publication", bundle: .module)) {
+                    infoRow(String(localized: "Journal", bundle: .module), value: reference.journal)
+                    infoRow(String(localized: "Volume", bundle: .module), value: reference.volume)
+                    infoRow(String(localized: "Issue", bundle: .module), value: reference.issue)
+                    infoRow(String(localized: "Pages", bundle: .module), value: reference.pages)
+                    infoRow(String(localized: "Publisher", bundle: .module), value: reference.publisher)
+                    infoRow(String(localized: "Place", bundle: .module), value: reference.publisherPlace)
+                    infoRow(String(localized: "Edition", bundle: .module), value: reference.edition)
+                    infoRow(String(localized: "Institution", bundle: .module), value: reference.institution)
+                    infoRow(String(localized: "Language", bundle: .module), value: reference.language)
+                    infoRow(String(localized: "Page count", bundle: .module), value: reference.numberOfPages)
                 }
 
-                infoSection("标识符") {
+                infoSection(String(localized: "Identifiers", bundle: .module)) {
                     infoRow("DOI", value: reference.doi)
                     infoRow("ISBN", value: reference.isbn)
                     infoRow("ISSN", value: reference.issn)
@@ -38,7 +38,7 @@ struct PDFInfoSidebarView: View {
                 }
 
                 if let abstract = reference.abstract, !abstract.isEmpty {
-                    infoSection("摘要") {
+                    infoSection(String(localized: "Abstract", bundle: .module)) {
                         Text(abstract)
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)

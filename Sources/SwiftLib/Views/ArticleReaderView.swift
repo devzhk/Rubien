@@ -17,7 +17,7 @@ struct ArticleReaderView: View {
                 ContentUnavailableView(
                     "No article content",
                     systemImage: "doc.text.magnifyingglass",
-                    description: Text("这个网页条目还没有抓取到正文内容。")
+                    description: Text("This web entry doesn't have any clipped content yet.", bundle: .module)
                 )
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 40)
@@ -51,7 +51,7 @@ struct ArticleReaderView: View {
 
                 if let urlString = reference.url, let url = URL(string: urlString) {
                     Link(destination: url) {
-                        Label("打开原文", systemImage: "safari")
+                        Label(String(localized: "Open source", bundle: .module), systemImage: "safari")
                     }
                     .buttonStyle(SLPrimaryButtonStyle())
                 }

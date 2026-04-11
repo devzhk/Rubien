@@ -33,7 +33,7 @@ struct ReferenceListView: View {
                 }
             }
         }
-        .navigationTitle("文献")
+        .navigationTitle(String(localized: "References", bundle: .module))
         .navigationSubtitle(subtitleText)
         // ⌘A: select all
         .onKeyPress(.init("a"), phases: .down) { event in
@@ -52,14 +52,14 @@ struct ReferenceListView: View {
             return .ignored
         }
         .confirmationDialog(
-            "删除 \(multiSelection.count) 条文献？",
+            String(format: String(localized: "Delete %d references?", bundle: .module), multiSelection.count),
             isPresented: $showDeleteConfirm,
             titleVisibility: .visible
         ) {
-            Button("删除", role: .destructive) { batchDelete() }
-            Button("取消", role: .cancel) {}
+            Button(String(localized: "common.delete", bundle: .module), role: .destructive) { batchDelete() }
+            Button(String(localized: "common.cancel", bundle: .module), role: .cancel) {}
         } message: {
-            Text("此操作不可撤销。")
+            Text("This action cannot be undone.", bundle: .module)
         }
     }
 
@@ -70,10 +70,10 @@ struct ReferenceListView: View {
             Image(systemName: "doc.text.magnifyingglass")
                 .font(.system(size: 36))
                 .foregroundStyle(.secondary)
-            Text("暂无文献")
+            Text("No references yet", bundle: .module)
                 .font(.headline)
                 .foregroundStyle(.secondary)
-            Text("点击工具栏 + 按钮添加\n或导入 .bib / .ris 文件")
+            Text("Use the + toolbar button to add references,\nor import a .bib / .ris file.", bundle: .module)
                 .font(.caption)
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
@@ -109,31 +109,31 @@ struct ReferenceListView: View {
                     )
                     .contextMenu {
                         if isMultiSelected && multiSelection.count > 1 {
-                            Button("刷新所选 \(multiSelection.count) 条元数据") {
+                            Button(String(format: String(localized: "Refresh metadata for %d selected", bundle: .module), multiSelection.count)) {
                                 batchRefreshMetadata()
                             }
                             .disabled(isRefreshingMetadata)
                             Divider()
                             moveToCollectionMenu(forBatch: true)
                             Divider()
-                            Button("删除所选 \(multiSelection.count) 条", role: .destructive) {
+                            Button(String(format: String(localized: "Delete %d selected", bundle: .module), multiSelection.count), role: .destructive) {
                                 showDeleteConfirm = true
                             }
                             Divider()
-                            Button("取消多选") { clearMultiSelection() }
+                            Button(String(localized: "Clear selection", bundle: .module)) { clearMultiSelection() }
                         } else {
-                            Button("刷新元数据") {
+                            Button(String(localized: "Refresh metadata", bundle: .module)) {
                                 onRefreshMetadata([ref])
                             }
                             .disabled(isRefreshingMetadata)
                             Divider()
                             moveToCollectionMenu(forRef: ref)
                             Divider()
-                            Button("删除", role: .destructive) {
+                            Button(String(localized: "common.delete", bundle: .module), role: .destructive) {
                                 onDelete([ref])
                             }
                             Divider()
-                            Button("⌘+点击可多选") {}
+                            Button(String(localized: "⌘-click to multi-select", bundle: .module)) {}
                                 .disabled(true)
                         }
                     }
@@ -145,7 +145,7 @@ struct ReferenceListView: View {
 
     private var batchToolbar: some View {
         HStack(spacing: 10) {
-            Text("\(multiSelection.count) 条已选")
+            Text(String(format: String(localized: "%d selected", bundle: .module), multiSelection.count))
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.secondary)
             Spacer()
@@ -157,7 +157,9 @@ struct ReferenceListView: View {
                     selectAll()
                 }
             } label: {
-                Text(allSelected ? "全不选" : "全选")
+                Text(allSelected
+                     ? String(localized: "Deselect all", bundle: .module)
+                     : String(localized: "Select all", bundle: .module))
                     .font(.system(size: 12))
             }
             .buttonStyle(.plain)
@@ -166,7 +168,7 @@ struct ReferenceListView: View {
             Button(role: .destructive) {
                 showDeleteConfirm = true
             } label: {
-                Label("删除", systemImage: "trash")
+                Label(String(localized: "common.delete", bundle: .module), systemImage: "trash")
                     .font(.system(size: 12))
             }
             .buttonStyle(.plain)
@@ -175,7 +177,7 @@ struct ReferenceListView: View {
             Button {
                 batchRefreshMetadata()
             } label: {
-                Label("刷新元数据", systemImage: "arrow.clockwise")
+                Label(String(localized: "Refresh metadata", bundle: .module), systemImage: "arrow.clockwise")
                     .font(.system(size: 12))
             }
             .buttonStyle(.plain)
@@ -184,7 +186,7 @@ struct ReferenceListView: View {
             Divider().frame(height: 16)
             Menu {
                 Menu {
-                    Button("移出分组（无分组）") {
+                    Button(String(localized: "Remove from collection", bundle: .module)) {
                         batchMove(toCollectionId: nil)
                     }
                     if !collections.isEmpty { Divider() }
@@ -194,7 +196,7 @@ struct ReferenceListView: View {
                         }
                     }
                 } label: {
-                    Label("移动到…", systemImage: "folder")
+                    Label(String(localized: "Move to…", bundle: .module), systemImage: "folder")
                 }
             } label: {
                 Image(systemName: "ellipsis")
@@ -230,8 +232,8 @@ struct ReferenceListView: View {
     /// Batch move: applies to all selected items
     @ViewBuilder
     private func moveToCollectionMenu(forBatch: Bool) -> some View {
-        Menu("移动到…") {
-            Button("移出分组（无分组）") {
+        Menu(String(localized: "Move to…", bundle: .module)) {
+            Button(String(localized: "Remove from collection", bundle: .module)) {
                 batchMove(toCollectionId: nil)
             }
             if !collections.isEmpty { Divider() }
@@ -246,8 +248,8 @@ struct ReferenceListView: View {
     /// Single-item move
     @ViewBuilder
     private func moveToCollectionMenu(forRef ref: Reference) -> some View {
-        Menu("移动到…") {
-            Button("移出分组（无分组）") {
+        Menu(String(localized: "Move to…", bundle: .module)) {
+            Button(String(localized: "Remove from collection", bundle: .module)) {
                 onMove([ref], nil)
             }
             if !collections.isEmpty { Divider() }
@@ -263,9 +265,11 @@ struct ReferenceListView: View {
 
     private var subtitleText: String {
         if isMultiSelectMode && !multiSelection.isEmpty {
-            return "已选 \(multiSelection.count) / \(references.count) 条"
+            let fmt = String(localized: "%d / %d selected", bundle: .module)
+            return String(format: fmt, multiSelection.count, references.count)
         }
-        return "\(references.count) 条"
+        let fmt = String(localized: "%d references", bundle: .module)
+        return String(format: fmt, references.count)
     }
 
     // MARK: - Interaction

@@ -63,6 +63,11 @@ public enum MetadataFetcher {
 
         // DOI: 10.XXXX/... (most specific)
         if let doi = cleanDOI(trimmed) {
+            // arXiv DataCite DOIs (10.48550/arXiv.YYMM.NNNNN) aren't indexed by
+            // CrossRef — extract the bare arXiv ID and route to the arXiv resolver.
+            if let arxivID = arxivIDFromDataCiteDOI(doi) {
+                return .arxiv(arxivID)
+            }
             return .doi(doi)
         }
 
@@ -97,6 +102,22 @@ public enum MetadataFetcher {
         }
 
         return nil
+    }
+
+    /// If `doi` is an arXiv DataCite DOI (e.g. `10.48550/arXiv.1706.03762` or
+    /// `10.48550/arXiv.cs/0501001`), return the bare arXiv ID. Otherwise nil.
+    private static func arxivIDFromDataCiteDOI(_ doi: String) -> String? {
+        let lowered = doi.lowercased()
+        let prefix = "10.48550/arxiv."
+        guard lowered.hasPrefix(prefix) else { return nil }
+        let id = String(doi.dropFirst(prefix.count))
+        // Strip any trailing version suffix (`v2`, `v10`, etc.)
+        let stripped = id.replacingOccurrences(
+            of: #"v\d+$"#,
+            with: "",
+            options: .regularExpression
+        )
+        return stripped.isEmpty ? nil : stripped
     }
 
     /// Clean and extract DOI from various formats (URL, bare DOI, etc.)

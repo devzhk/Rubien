@@ -96,9 +96,9 @@ final class PDFAnnotationRecordModelTests: XCTestCase {
     }
 
     func testAnnotationTypeLabels() {
-        XCTAssertEqual(AnnotationType.highlight.label, "高亮")
-        XCTAssertEqual(AnnotationType.underline.label, "下划线")
-        XCTAssertEqual(AnnotationType.note.label, "笔记")
+        XCTAssertEqual(AnnotationType.highlight.label, "Highlight")
+        XCTAssertEqual(AnnotationType.underline.label, "Underline")
+        XCTAssertEqual(AnnotationType.note.label, "Note")
     }
 
     func testAnnotationTypeRawValues() {

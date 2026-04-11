@@ -5,7 +5,7 @@ import WebKit
 /// Uses NoteEditorPool for pre-warmed instances – zero loading delay.
 struct RichNoteEditorView: NSViewRepresentable {
     @Binding var markdown: String
-    var placeholder: String = "添加笔记…"
+    var placeholder: String = "Add a note…"
     var autoFocus: Bool = true
     var onFocus: (() -> Void)?
     var onBlur: (() -> Void)?

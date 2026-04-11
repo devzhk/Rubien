@@ -74,7 +74,7 @@ struct SearchOverlay: View {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 16))
                         .foregroundStyle(.secondary)
-                    TextField("搜索文献…", text: $query)
+                    TextField(String(localized: "Search references…", bundle: .module), text: $query)
                         .textFieldStyle(.plain)
                         .font(.system(size: 16))
                         .focused($isFocused)
@@ -98,7 +98,7 @@ struct SearchOverlay: View {
                     // Multi-select mode indicator
                     if isMultiSelectMode {
                         HStack(spacing: 4) {
-                            Text("\(multiSelection.count) 条已选")
+                            Text(String(format: String(localized: "%d selected", bundle: .module), multiSelection.count))
                                 .font(.system(size: 12, weight: .medium))
                                 .foregroundStyle(.white)
                                 .padding(.horizontal, 8)
@@ -140,7 +140,7 @@ struct SearchOverlay: View {
                         Image(systemName: "doc.text.magnifyingglass")
                             .font(.system(size: 24))
                             .foregroundStyle(.tertiary)
-                        Text("无匹配结果")
+                        Text("No results", bundle: .module)
                             .font(.callout)
                             .foregroundStyle(.secondary)
                         if let errorMessage, !errorMessage.isEmpty {
@@ -156,7 +156,7 @@ struct SearchOverlay: View {
                         ScrollView {
                             VStack(spacing: 0) {
                                 if query.isEmpty && !hasActiveFilters {
-                                    Text("最近文献")
+                                    Text("Recent references", bundle: .module)
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -183,23 +183,23 @@ struct SearchOverlay: View {
                                     }
                                     .contextMenu {
                                         if isMultiSelected && multiSelection.count > 1 {
-                                            Button("打开所选 \(multiSelection.count) 条") { openMultiSelected() }
+                                            Button(String(format: String(localized: "Open %d selected", bundle: .module), multiSelection.count)) { openMultiSelected() }
                                             if onDeleteMultiple != nil {
-                                                Button("删除所选 \(multiSelection.count) 条", role: .destructive) {
+                                                Button(String(format: String(localized: "Delete %d selected", bundle: .module), multiSelection.count), role: .destructive) {
                                                     showDeleteConfirm = true
                                                 }
                                             }
                                             Divider()
-                                            Button("取消多选") { clearMultiSelection() }
+                                            Button(String(localized: "Clear selection", bundle: .module)) { clearMultiSelection() }
                                         } else {
-                                            Button("打开") { select(ref) }
+                                            Button(String(localized: "common.open", bundle: .module)) { select(ref) }
                                             if onDeleteMultiple != nil {
-                                                Button("删除", role: .destructive) {
+                                                Button(String(localized: "common.delete", bundle: .module), role: .destructive) {
                                                     onDeleteMultiple?([ref])
                                                 }
                                             }
                                             Divider()
-                                            Button("⌘+点击可多选") {}.disabled(true)
+                                            Button(String(localized: "⌘-click to multi-select", bundle: .module)) {}.disabled(true)
                                         }
                                     }
                                 }
@@ -273,14 +273,14 @@ struct SearchOverlay: View {
         }
         .animation(.easeInOut(duration: 0.18), value: isMultiSelectMode)
         .confirmationDialog(
-            "删除 \(multiSelection.count) 条文献？",
+            String(format: String(localized: "Delete %d references?", bundle: .module), multiSelection.count),
             isPresented: $showDeleteConfirm,
             titleVisibility: .visible
         ) {
-            Button("删除", role: .destructive) { batchDelete() }
-            Button("取消", role: .cancel) {}
+            Button(String(localized: "common.delete", bundle: .module), role: .destructive) { batchDelete() }
+            Button(String(localized: "common.cancel", bundle: .module), role: .cancel) {}
         } message: {
-            Text("此操作不可撤销。")
+            Text("This action cannot be undone.", bundle: .module)
         }
     }
 
@@ -288,7 +288,7 @@ struct SearchOverlay: View {
 
     private var batchActionBar: some View {
         HStack(spacing: 12) {
-            Text("已选 \(multiSelection.count) 条")
+            Text(String(format: String(localized: "%d selected", bundle: .module), multiSelection.count))
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.secondary)
 
@@ -297,7 +297,7 @@ struct SearchOverlay: View {
             Button {
                 selectAllResults()
             } label: {
-                Text("全选 \(results.count) 条结果")
+                Text(String(format: String(localized: "Select all %d results", bundle: .module), results.count))
                     .font(.system(size: 12))
             }
             .buttonStyle(.plain)
@@ -308,7 +308,7 @@ struct SearchOverlay: View {
             Button {
                 openMultiSelected()
             } label: {
-                Label("打开所选", systemImage: "arrow.right.circle")
+                Label(String(localized: "Open selected", bundle: .module), systemImage: "arrow.right.circle")
                     .font(.system(size: 12))
             }
             .buttonStyle(.plain)
@@ -319,7 +319,7 @@ struct SearchOverlay: View {
                 Button(role: .destructive) {
                     showDeleteConfirm = true
                 } label: {
-                    Label("删除", systemImage: "trash")
+                    Label(String(localized: "common.delete", bundle: .module), systemImage: "trash")
                         .font(.system(size: 12))
                 }
                 .buttonStyle(.plain)
@@ -339,37 +339,37 @@ struct SearchOverlay: View {
             if !isMultiSelectMode {
                 HStack(spacing: 4) {
                     KeyboardHint(symbols: ["↑", "↓"])
-                    Text("选择")
+                    Text("Select", bundle: .module)
                 }
                 HStack(spacing: 4) {
                     KeyboardHint(symbols: ["↩"])
-                    Text("打开")
+                    Text("Open", bundle: .module)
                 }
                 HStack(spacing: 4) {
-                    KeyboardHint(symbols: ["⌘", "点击"])
-                    Text("多选")
+                    KeyboardHint(symbols: ["⌘", "click"])
+                    Text("Multi-select", bundle: .module)
                 }
                 HStack(spacing: 4) {
                     KeyboardHint(symbols: ["esc"])
-                    Text("关闭")
+                    Text("common.close", bundle: .module)
                 }
             } else {
                 HStack(spacing: 4) {
                     KeyboardHint(symbols: ["⌘", "A"])
-                    Text("全选结果")
+                    Text("Select all", bundle: .module)
                 }
                 HStack(spacing: 4) {
                     KeyboardHint(symbols: ["↩"])
-                    Text("打开所选")
+                    Text("Open selected", bundle: .module)
                 }
                 HStack(spacing: 4) {
                     KeyboardHint(symbols: ["esc"])
-                    Text("取消多选")
+                    Text("Clear selection", bundle: .module)
                 }
             }
             Spacer()
             if !results.isEmpty {
-                Text("\(results.count) 条结果")
+                Text(String(format: String(localized: "%d results", bundle: .module), results.count))
             }
         }
         .font(.caption2)
@@ -384,14 +384,14 @@ struct SearchOverlay: View {
         HStack(spacing: 6) {
             FilterPill(
                 icon: "character.cursor.ibeam",
-                label: "仅标题",
+                label: String(localized: "Title only", bundle: .module),
                 isActive: titleOnly
             ) {
                 titleOnly.toggle()
             }
 
             FilterPillMenu(icon: "doc.on.doc", label: typeLabel) {
-                Button("全部类型") { selectedType = nil }
+                Button(String(localized: "All types", bundle: .module)) { selectedType = nil }
                 Divider()
                 ForEach(ReferenceType.allCases, id: \.self) { type in
                     Button {
@@ -404,7 +404,7 @@ struct SearchOverlay: View {
 
             if !collections.isEmpty {
                 FilterPillMenu(icon: "folder", label: collectionLabel) {
-                    Button("全部分组") { selectedCollectionId = nil }
+                    Button(String(localized: "All collections", bundle: .module)) { selectedCollectionId = nil }
                     Divider()
                     ForEach(collections) { col in
                         Button {
@@ -424,7 +424,7 @@ struct SearchOverlay: View {
                 HStack(spacing: 3) {
                     Image(systemName: "plus")
                         .font(.system(size: 10))
-                    Text("筛选")
+                    Text("Filters", bundle: .module)
                     if activeFilterCount > 0 {
                         Text("(\(activeFilterCount))")
                     }
@@ -444,7 +444,7 @@ struct SearchOverlay: View {
                 Button {
                     clearFilters()
                 } label: {
-                    Text("清除")
+                    Text("Clear", bundle: .module)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -464,9 +464,9 @@ struct SearchOverlay: View {
                     .frame(width: 16)
                     .font(.caption)
                 Picker("PDF", selection: $hasPDF) {
-                    Text("不限").tag(nil as Bool?)
-                    Text("有 PDF").tag(true as Bool?)
-                    Text("无 PDF").tag(false as Bool?)
+                    Text("Any", bundle: .module).tag(nil as Bool?)
+                    Text("With PDF", bundle: .module).tag(true as Bool?)
+                    Text("Without PDF", bundle: .module).tag(false as Bool?)
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
@@ -480,12 +480,12 @@ struct SearchOverlay: View {
                     .foregroundStyle(.secondary)
                     .frame(width: 16)
                     .font(.caption)
-                TextField("起始年份", text: $yearFrom)
+                TextField(String(localized: "From year", bundle: .module), text: $yearFrom)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 80)
                 Text("—")
                     .foregroundStyle(.tertiary)
-                TextField("结束年份", text: $yearTo)
+                TextField(String(localized: "To year", bundle: .module), text: $yearTo)
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 80)
                 Spacer()
@@ -496,7 +496,7 @@ struct SearchOverlay: View {
     // MARK: - Helpers
 
     private var typeLabel: String {
-        selectedType?.rawValue ?? "类型"
+        selectedType?.rawValue ?? String(localized: "Type", bundle: .module)
     }
 
     private var collectionLabel: String {
@@ -504,7 +504,7 @@ struct SearchOverlay: View {
            let col = collections.first(where: { $0.id == id }) {
             return col.name
         }
-        return "分组"
+        return String(localized: "Collection", bundle: .module)
     }
 
     private func clearFilters() {

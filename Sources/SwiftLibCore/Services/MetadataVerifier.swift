@@ -49,7 +49,7 @@ public enum MetadataVerifier {
                     fallbackReference: nil,
                     currentReference: reference,
                     reason: .insufficientEvidence,
-                    message: "缺少可验证的题名。",
+                    message: "Missing a verifiable title.",
                     evidence: evidence
                 )
             )
@@ -82,7 +82,7 @@ public enum MetadataVerifier {
                     fallbackReference: nil,
                     currentReference: reference,
                     candidates: [],
-                    message: "存在多个未区分开的候选结果，需人工确认。",
+                    message: "Multiple candidates matched; manual review required.",
                     evidence: evidence
                 )
             )
@@ -94,7 +94,7 @@ public enum MetadataVerifier {
                 fallbackReference: nil,
                 currentReference: reference,
                 reason: .verifierRuleNotSatisfied,
-                message: "未满足期刊类自动验证规则。",
+                message: "Did not meet journal auto-verification rules.",
                 evidence: evidence
             )
         )
@@ -124,7 +124,7 @@ public enum MetadataVerifier {
                 fallbackReference: nil,
                 currentReference: reference,
                 reason: .verifierRuleNotSatisfied,
-                message: "未满足学位论文自动验证规则。",
+                message: "Did not meet thesis auto-verification rules.",
                 evidence: evidence
             )
         )
@@ -152,7 +152,7 @@ public enum MetadataVerifier {
                 fallbackReference: nil,
                 currentReference: reference,
                 reason: .verifierRuleNotSatisfied,
-                message: "未满足图书类自动验证规则。",
+                message: "Did not meet book auto-verification rules.",
                 evidence: evidence
             )
         )

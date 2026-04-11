@@ -59,13 +59,13 @@ struct AddReferenceView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Button("取消") { dismiss() }
+                Button(String(localized: "common.cancel", bundle: .module)) { dismiss() }
                     .keyboardShortcut(.cancelAction)
                 Spacer()
-                Text("手动新建")
+                Text("New reference", bundle: .module)
                     .font(.headline)
                 Spacer()
-                Button("保存") {
+                Button(String(localized: "common.save", bundle: .module)) {
                     save()
                 }
                 .keyboardShortcut(.defaultAction)

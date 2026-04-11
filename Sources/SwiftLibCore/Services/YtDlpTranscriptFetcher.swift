@@ -31,15 +31,15 @@ enum YtDlpTranscriptError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidVideoId:
-            return "无效的视频 ID"
+            return "Invalid video ID"
         case .executableUnavailable(let detail):
-            return "yt-dlp 不可用：\(detail)"
+            return "yt-dlp unavailable: \(detail)"
         case .commandFailed(let detail):
-            return "yt-dlp 抓取失败：\(detail)"
+            return "yt-dlp fetch failed: \(detail)"
         case .transcriptFileMissing:
-            return "yt-dlp 未产出字幕文件"
+            return "yt-dlp produced no subtitle file"
         case .transcriptParseFailed(let detail):
-            return "yt-dlp 字幕解析失败：\(detail)"
+            return "yt-dlp subtitle parse failed: \(detail)"
         }
     }
 }
@@ -90,7 +90,7 @@ actor YtDlpBinaryLocator {
         #else
         // 出于安全防范（避免下载并执行未知签名的可执行代码导致沙盒被破坏或审核被拒），正式版禁止运行时热更新第三方二进制。
         // 请确保打包时在 Resources 目录中带上了 yt-dlp_macos。
-        throw YtDlpTranscriptError.executableUnavailable("未找到 yt-dlp。如需使用字幕提取功能，请通过 Homebrew 安装：brew install yt-dlp")
+        throw YtDlpTranscriptError.executableUnavailable("yt-dlp not found. To use transcript extraction, install it via Homebrew: brew install yt-dlp")
         #endif
     }
 

@@ -53,7 +53,9 @@ struct ReferenceDetailView: View {
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button(isEditing ? "完成" : "编辑") {
+                Button(isEditing
+                       ? String(localized: "common.done", bundle: .module)
+                       : String(localized: "Edit", bundle: .module)) {
                     Task {
                         if isEditing {
                             await saveEdits()
@@ -196,7 +198,7 @@ struct ReferenceDetailView: View {
                     if hasTags {
                         if !metaRows.isEmpty { Divider() }
                         HStack(alignment: .top, spacing: 10) {
-                            Text("标签")
+                            Text("Tags", bundle: .module)
                                 .font(.caption)
                                 .foregroundStyle(.tertiary)
                                 .frame(width: 36, alignment: .trailing)
@@ -229,10 +231,12 @@ struct ReferenceDetailView: View {
                         .foregroundStyle(.secondary)
                         .frame(width: 20)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(hasClip ? "网页正文已就绪（剪藏）" : "可在线阅读原文")
+                        Text(hasClip
+                             ? String(localized: "Clipped article ready", bundle: .module)
+                             : String(localized: "Read source article online", bundle: .module))
                             .font(.callout)
                         if webAnnotationCount > 0 {
-                            Text("\(webAnnotationCount) 条标注")
+                            Text(String(format: String(localized: "%d annotations", bundle: .module), webAnnotationCount))
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
@@ -244,7 +248,7 @@ struct ReferenceDetailView: View {
                             onOpenWebReader?(prepared)
                         }
                     } label: {
-                        Label("阅读网页", systemImage: "text.book.closed")
+                        Label(String(localized: "Read web", bundle: .module), systemImage: "text.book.closed")
                     }
                     .buttonStyle(SLPrimaryButtonStyle())
                     .controlSize(.small)
@@ -262,10 +266,10 @@ struct ReferenceDetailView: View {
                         .foregroundStyle(.secondary)
                         .frame(width: 20)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("已附加 PDF")
+                        Text("PDF attached", bundle: .module)
                             .font(.callout)
                         if pdfAnnotationCount > 0 {
-                            Text("\(pdfAnnotationCount) 条标注")
+                            Text(String(format: String(localized: "%d annotations", bundle: .module), pdfAnnotationCount))
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
@@ -274,7 +278,7 @@ struct ReferenceDetailView: View {
                     Button {
                         onOpenPDFReader?(reference)
                     } label: {
-                        Label("阅读 & 标注", systemImage: "book.pages")
+                        Label(String(localized: "Read & annotate", bundle: .module), systemImage: "book.pages")
                     }
                     .buttonStyle(SLPrimaryButtonStyle())
                     .controlSize(.small)
@@ -287,7 +291,7 @@ struct ReferenceDetailView: View {
             // ── Abstract ──
             if let abstract = reference.abstract, !abstract.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("摘要")
+                    Text("Abstract", bundle: .module)
                         .font(.footnote.weight(.semibold))
                         .foregroundStyle(.secondary)
                         .textCase(.uppercase)
@@ -304,7 +308,9 @@ struct ReferenceDetailView: View {
             // ── Notes ──
             if let notes = reference.notes, !notes.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(reference.referenceType == .webpage ? "高亮与笔记" : "笔记")
+                    Text(reference.referenceType == .webpage
+                         ? String(localized: "Highlights & notes", bundle: .module)
+                         : String(localized: "Notes", bundle: .module))
                         .font(.footnote.weight(.semibold))
                         .foregroundStyle(.secondary)
                         .textCase(.uppercase)
@@ -319,10 +325,11 @@ struct ReferenceDetailView: View {
 
             // ── Footer ──
             HStack {
-                Text("添加于 \(reference.dateAdded.formatted(date: .abbreviated, time: .shortened))")
+                Text(String(format: String(localized: "Added %@", bundle: .module),
+                            reference.dateAdded.formatted(date: .abbreviated, time: .shortened)))
                     .foregroundStyle(.tertiary)
                 Spacer()
-                Button("删除文献", role: .destructive) {
+                Button(String(localized: "Delete reference", bundle: .module), role: .destructive) {
                     onDelete()
                 }
                 .buttonStyle(SLDestructiveButtonStyle())
@@ -349,7 +356,7 @@ struct ReferenceDetailView: View {
                     .font(.caption)
             }
             .buttonStyle(.plain)
-            .help("在浏览器中打开")
+            .help(String(localized: "Open in browser", bundle: .module))
         }
     }
 
@@ -537,7 +544,7 @@ struct ReferenceDetailView: View {
     @ViewBuilder
     private var editView: some View {
         Form {
-            Section("基本信息") {
+            Section(String(localized: "Basics", bundle: .module)) {
                 Picker("Type", selection: $editedRef.referenceType) {
                     ForEach(ReferenceType.allCases, id: \.self) { type in
                         Label(type.rawValue, systemImage: type.icon).tag(type)
@@ -551,7 +558,7 @@ struct ReferenceDetailView: View {
                 TextField("Year", value: $editedRef.year, format: .number)
             }
 
-            Section("出版信息") {
+            Section(String(localized: "Publication", bundle: .module)) {
                 TextField("Journal / Book Title", text: Binding(
                     get: { editedRef.journal ?? "" },
                     set: { editedRef.journal = $0.isEmpty ? nil : $0 }
@@ -612,7 +619,7 @@ struct ReferenceDetailView: View {
                 }
             }
 
-            Section("标识符") {
+            Section(String(localized: "Identifiers", bundle: .module)) {
                 TextField("DOI", text: Binding(
                     get: { editedRef.doi ?? "" },
                     set: { editedRef.doi = $0.isEmpty ? nil : $0 }
@@ -631,7 +638,7 @@ struct ReferenceDetailView: View {
                 ))
             }
 
-            Section("扩展信息") {
+            Section(String(localized: "Extended", bundle: .module)) {
                 TextField("Language", text: Binding(
                     get: { editedRef.language ?? "" },
                     set: { editedRef.language = $0.isEmpty ? nil : $0 }
@@ -642,7 +649,7 @@ struct ReferenceDetailView: View {
                 ))
             }
 
-            Section("文献集") {
+            Section(String(localized: "Collection", bundle: .module)) {
                 Picker("Collection", selection: $editedRef.collectionId) {
                     Text("None").tag(nil as Int64?)
                     ForEach(collections) { col in
@@ -651,7 +658,7 @@ struct ReferenceDetailView: View {
                 }
             }
 
-            Section("摘要") {
+            Section(String(localized: "Abstract", bundle: .module)) {
                 TextEditor(text: Binding(
                     get: { editedRef.abstract ?? "" },
                     set: { editedRef.abstract = $0.isEmpty ? nil : $0 }
@@ -659,7 +666,7 @@ struct ReferenceDetailView: View {
                 .frame(minHeight: 100)
             }
 
-            Section("笔记") {
+            Section(String(localized: "Notes", bundle: .module)) {
                 TextEditor(text: Binding(
                     get: { editedRef.notes ?? "" },
                     set: { editedRef.notes = $0.isEmpty ? nil : $0 }
@@ -668,12 +675,12 @@ struct ReferenceDetailView: View {
             }
 
             if editedRef.referenceType == .webpage {
-                Section("文章内容") {
+                Section(String(localized: "Article content", bundle: .module)) {
                     if isLoadingWebContent && editedRef.webContent == nil {
                         HStack(spacing: 8) {
                             ProgressView()
                                 .controlSize(.small)
-                            Text("正在加载正文…")
+                            Text("Loading article…", bundle: .module)
                                 .foregroundStyle(.secondary)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -690,10 +697,10 @@ struct ReferenceDetailView: View {
                 }
             }
 
-            Section("PDF 附件") {
+            Section(String(localized: "PDF attachment", bundle: .module)) {
                 if editedRef.pdfPath != nil {
                     HStack {
-                        Label("已附加 PDF", systemImage: "doc.fill")
+                        Label(String(localized: "PDF attached", bundle: .module), systemImage: "doc.fill")
                         Spacer()
                         Button("Remove PDF") {
                             editedRef.pdfPath = nil
@@ -810,26 +817,37 @@ struct ReferenceDetailView: View {
 
     private func metadataRows(for reference: Reference) -> [(label: String, value: String)] {
         var rows: [(String, String)] = []
+        let lSource = String(localized: "Source", bundle: .module)
+        let lPublisher = String(localized: "Publisher", bundle: .module)
+        let lPlace = String(localized: "Place", bundle: .module)
+        let lEdition = String(localized: "Edition", bundle: .module)
+        let lLanguage = String(localized: "Language", bundle: .module)
+        let lPages = String(localized: "Pages", bundle: .module)
+        let lInstitution = String(localized: "Institution", bundle: .module)
+        let lType = String(localized: "Type", bundle: .module)
+        let lYear = String(localized: "Year", bundle: .module)
+        let lEvent = String(localized: "Event", bundle: .module)
+        let lEventPlace = String(localized: "Venue", bundle: .module)
 
         if let source = reference.metadataSource?.displayName {
-            rows.append(("来源", source))
+            rows.append((lSource, source))
         }
 
         switch reference.referenceType {
         case .book, .bookSection:
-            if let publisher = reference.publisher { rows.append(("出版社", publisher)) }
-            if let place = reference.publisherPlace { rows.append(("出版地", place)) }
-            if let edition = reference.edition { rows.append(("版次", edition)) }
+            if let publisher = reference.publisher { rows.append((lPublisher, publisher)) }
+            if let place = reference.publisherPlace { rows.append((lPlace, place)) }
+            if let edition = reference.edition { rows.append((lEdition, edition)) }
             if let isbn = reference.isbn { rows.append(("ISBN", isbn)) }
-            if let language = reference.language { rows.append(("语言", language)) }
-            if let pages = reference.numberOfPages { rows.append(("页数", pages)) }
+            if let language = reference.language { rows.append((lLanguage, language)) }
+            if let pages = reference.numberOfPages { rows.append((lPages, pages)) }
         case .thesis:
-            if let institution = reference.institution { rows.append(("机构", institution)) }
-            if let genre = reference.genre { rows.append(("类型", genre)) }
-            if let year = reference.year { rows.append(("年份", String(year))) }
+            if let institution = reference.institution { rows.append((lInstitution, institution)) }
+            if let genre = reference.genre { rows.append((lType, genre)) }
+            if let year = reference.year { rows.append((lYear, String(year))) }
         case .conferencePaper:
-            if let eventTitle = reference.eventTitle { rows.append(("会议", eventTitle)) }
-            if let eventPlace = reference.eventPlace { rows.append(("地点", eventPlace)) }
+            if let eventTitle = reference.eventTitle { rows.append((lEvent, eventTitle)) }
+            if let eventPlace = reference.eventPlace { rows.append((lEventPlace, eventPlace)) }
             if let issn = reference.issn { rows.append(("ISSN", issn)) }
         case .journalArticle,
              .magazineArticle,
@@ -850,7 +868,7 @@ struct ReferenceDetailView: View {
              .patent,
              .other:
             if let issn = reference.issn { rows.append(("ISSN", issn)) }
-            if let publisher = reference.publisher { rows.append(("出版社", publisher)) }
+            if let publisher = reference.publisher { rows.append((lPublisher, publisher)) }
         }
 
         return rows.filter { !$0.1.isEmpty }

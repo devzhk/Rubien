@@ -16,7 +16,7 @@ struct PDFOutlineSidebarView: View {
                     Image(systemName: "list.bullet.indent")
                         .font(.system(size: 26))
                         .foregroundStyle(.tertiary)
-                    Text("暂无目录")
+                    Text("No outline available", bundle: .module)
                         .font(.callout)
                         .foregroundStyle(.secondary)
                     Spacer()

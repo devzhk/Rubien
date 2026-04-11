@@ -182,7 +182,7 @@ public final class CiteprocJSCoreEngine {
         let availableIDs = Set(itemStore.keys)
         let missingIDs = referencedIDs.subtracting(availableIDs).sorted()
         if !missingIDs.isEmpty {
-            throw EngineError.renderFailed("文档中的引文引用了当前渲染上下文中不存在的文献 ID：\(missingIDs.joined(separator: ", "))")
+            throw EngineError.renderFailed("Document references reference IDs that aren't in the current render context: \(missingIDs.joined(separator: ", "))")
         }
 
         // Use plain-text output for citations — the Word add-in inserts
@@ -343,7 +343,7 @@ public final class CiteprocJSCoreEngine {
     private func syncRegisteredItems() throws {
         guard let idsData = try? JSONSerialization.data(withJSONObject: currentItemIDs),
               let idsStr = String(data: idsData, encoding: .utf8) else {
-            throw EngineError.renderFailed("无法序列化当前文献条目。")
+            throw EngineError.renderFailed("Failed to serialize the current reference.")
         }
         let result = jsContext.evaluateScript("""
             try {

@@ -606,7 +606,7 @@ struct ContentView: View {
                     } label: {
                         Label(String(localized: "More import options", bundle: .module), systemImage: "tray.and.arrow.down")
                     }
-                    .help("打开更多导入方式")
+                    .help(String(localized: "More import options", bundle: .module))
                     .disabled(viewModel.isImporting)
                 }
             }
@@ -649,7 +649,7 @@ struct ContentView: View {
                             sourceKind: .batchIdentifier,
                             originalInput: input
                         ),
-                        successMessage: "已加入待确认队列"
+                        successMessage: String(localized: "Queued for review", bundle: .module)
                     )
                 }
             )
@@ -695,7 +695,7 @@ struct ContentView: View {
                             sourceKind: .manualEntry,
                             originalInput: input
                         ),
-                        successMessage: "已加入待确认队列"
+                        successMessage: String(localized: "Queued for review", bundle: .module)
                     )
                 }
             )
@@ -772,13 +772,13 @@ struct ContentView: View {
                     }
 
                     HStack {
-                        Button("打开待确认队列") {
+                        Button(String(localized: "Open pending queue", bundle: .module)) {
                             pendingQueueNotice = nil
                             showPendingMetadataQueue = true
                         }
                         .buttonStyle(SLPrimaryButtonStyle())
 
-                        Button("稍后处理") {
+                        Button(String(localized: "Later", bundle: .module)) {
                             pendingQueueNotice = nil
                         }
                         .buttonStyle(SLSecondaryButtonStyle())
@@ -945,13 +945,14 @@ struct ContentView: View {
 
     private func refreshSingleReferenceMetadata(_ reference: Reference) {
         viewModel.isImporting = true
-        viewModel.importProgress = "正在刷新元数据…"
+        viewModel.importProgress = String(localized: "Refreshing metadata…", bundle: .module)
 
         Task { @MainActor in
             let result = await metadataResolver.refreshReference(reference, allowCandidateSelection: true)
             switch result {
             case .refreshed(let refreshed):
-                saveRefreshedReference(refreshed, message: "已刷新：\(refreshed.title)")
+                let fmt = String(localized: "Refreshed: %@", bundle: .module)
+                saveRefreshedReference(refreshed, message: String(format: fmt, refreshed.title))
 
             case .pending(let pendingResult):
                 _ = queueResolutionResult(
@@ -961,7 +962,7 @@ struct ContentView: View {
                         originalInput: reference.doi ?? reference.pmid ?? reference.isbn ?? reference.title,
                         linkedReferenceId: reference.id
                     ),
-                    successMessage: "已加入待确认队列，等待你继续处理"
+                    successMessage: String(localized: "Queued for review", bundle: .module)
                 )
 
             case .skipped(let reason):
@@ -983,7 +984,8 @@ struct ContentView: View {
 
     private func refreshBatchMetadata(for references: [Reference]) {
         viewModel.isImporting = true
-        viewModel.importProgress = "准备刷新 \(references.count) 条条目…"
+        let fmt = String(localized: "Preparing to refresh %d references…", bundle: .module)
+        viewModel.importProgress = String(format: fmt, references.count)
 
         Task { @MainActor in
             var refreshedCount = 0
@@ -998,7 +1000,8 @@ struct ContentView: View {
                 let batchEnd = min(batchStart + maxConcurrency, total)
                 let batch = Array(references[batchStart..<batchEnd])
 
-                viewModel.importProgress = "正在刷新 \(batchStart + 1)–\(batchEnd)/\(total)…"
+                let progressFmt = String(localized: "Refreshing %d–%d of %d…", bundle: .module)
+                viewModel.importProgress = String(format: progressFmt, batchStart + 1, batchEnd, total)
 
                 let batchResults: [(Reference, ReferenceMetadataRefreshResult)] = await withTaskGroup(
                     of: (Reference, ReferenceMetadataRefreshResult).self,
@@ -1036,13 +1039,14 @@ struct ContentView: View {
                     case .skipped:
                         skippedCount += 1
                     case .failed(let message):
-                        failedMessages.append("\(reference.title)：\(message)")
+                        failedMessages.append("\(reference.title): \(message)")
                     }
                 }
             }
 
             viewModel.isImporting = false
-            viewModel.importProgress = "批量刷新完成：\(refreshedCount) 条已更新，\(skippedCount) 条跳过，\(failedMessages.count) 条失败"
+            let summaryFmt = String(localized: "Batch refresh complete: %d updated, %d skipped, %d failed", bundle: .module)
+            viewModel.importProgress = String(format: summaryFmt, refreshedCount, skippedCount, failedMessages.count)
 
             if !failedMessages.isEmpty {
                 viewModel.errorMessage = failedMessages.prefix(5).joined(separator: "\n")
@@ -1086,7 +1090,8 @@ struct ContentView: View {
         case .verified(let reference):
             selectedId = reference.id
             viewModel.isImporting = false
-            viewModel.importProgress = successMessage ?? "已验证：\(reference.title)"
+            let verifiedFmt = String(localized: "Verified: %@", bundle: .module)
+            viewModel.importProgress = successMessage ?? String(format: verifiedFmt, reference.title)
             pendingQueueNotice = nil
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
                 if !viewModel.isImporting {
@@ -1106,15 +1111,21 @@ struct ContentView: View {
     }
 
     private func showPendingQueueNotice(for intake: MetadataIntake, message: String?) {
-        let title = "这条元数据还需要你确认"
-        let lead = intake.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "该条目" : "“\(intake.title)”"
+        let title = String(localized: "This metadata needs your review", bundle: .module)
+        let lead: String
+        if intake.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            lead = String(localized: "The entry", bundle: .module)
+        } else {
+            lead = "“\(intake.title)”"
+        }
         let detail = message?.swiftlib_nilIfBlank
             ?? intake.statusMessage?.swiftlib_nilIfBlank
-            ?? "已放入待确认队列。"
+            ?? String(localized: "is waiting in the pending queue.", bundle: .module)
 
+        let bodyFmt = String(localized: "%@ %@ Open the queue to continue.", bundle: .module)
         let notice = PendingQueueNotice(
             title: title,
-            message: "\(lead)\(detail.hasPrefix("已") ? "" : " ")\(detail) 你可以直接打开队列继续处理。"
+            message: String(format: bodyFmt, lead, detail)
         )
         pendingQueueNotice = notice
 
@@ -1138,7 +1149,8 @@ struct ContentView: View {
 
         guard !imported.isEmpty else { return }
 
-        cslImportMessage = "已导入：\(imported.joined(separator: "、"))"
+        let fmt = String(localized: "Imported: %@", bundle: .module)
+        cslImportMessage = String(format: fmt, imported.joined(separator: ", "))
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
             cslImportMessage = nil
         }

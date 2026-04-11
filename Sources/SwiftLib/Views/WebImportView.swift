@@ -41,11 +41,11 @@ struct WebImportView: View {
 
             VStack(spacing: 0) {
                 HStack {
-                    Button("取消") { dismiss() }
+                    Button(String(localized: "common.cancel", bundle: .module)) { dismiss() }
                         .keyboardShortcut(.cancelAction)
                         .disabled(isSaving)
                     Spacer()
-                    Text("网页剪藏")
+                    Text("Web clip", bundle: .module)
                         .font(.headline)
                     Spacer()
                     HStack(spacing: 8) {
@@ -53,7 +53,7 @@ struct WebImportView: View {
                             ProgressView()
                                 .controlSize(.small)
                         }
-                        Button("保存") {
+                        Button(String(localized: "common.save", bundle: .module)) {
                             saveWebpageWithClipper()
                         }
                         .keyboardShortcut(.defaultAction)
@@ -65,11 +65,11 @@ struct WebImportView: View {
                 Divider()
 
                 Form {
-                    Section("网页") {
-                        TextField("页面链接", text: $url, prompt: Text("https://…"))
+                    Section(String(localized: "Web page", bundle: .module)) {
+                        TextField(String(localized: "Page URL", bundle: .module), text: $url, prompt: Text(verbatim: "https://…"))
                             .textContentType(.URL)
                             .disabled(isSaving)
-                        Text("保存时将使用内置 Obsidian Clipper 流水线抓取标题、摘要与正文。YouTube 会额外尝试 transcript fallback。")
+                        Text("Slate will use the built-in Obsidian Clipper pipeline to extract the title, abstract, and article body. YouTube pages also try the transcript fallback.", bundle: .module)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -79,16 +79,16 @@ struct WebImportView: View {
                             Text(clipperError)
                                 .font(.caption)
                                 .foregroundStyle(.red)
-                            Button("仍保存链接（不抓取）") {
+                            Button(String(localized: "Save URL only (skip extraction)", bundle: .module)) {
                                 saveWebpageURLOnlyFallback()
                             }
                             .disabled(isSaving)
                         }
                     }
 
-                    Section("合集") {
-                        Picker("合集", selection: $collectionId) {
-                            Text("不加入合集").tag(nil as Int64?)
+                    Section(String(localized: "Collection", bundle: .module)) {
+                        Picker(String(localized: "Collection", bundle: .module), selection: $collectionId) {
+                            Text("Unfiled", bundle: .module).tag(nil as Int64?)
                             ForEach(collections) { col in
                                 Label(col.name, systemImage: col.icon).tag(col.id as Int64?)
                             }
@@ -136,7 +136,7 @@ struct WebImportView: View {
         let urlTrimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
         let host = URL(string: urlTrimmed)?.host
         let reference = Reference(
-            title: host ?? "网页",
+            title: host ?? String(localized: "Web page", bundle: .module),
             url: urlTrimmed,
             siteName: host,
             referenceType: .webpage,

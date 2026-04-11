@@ -39,7 +39,7 @@ struct WebAnnotationSidebarView: View {
             HStack {
                 Image(systemName: "bookmark.fill")
                     .foregroundStyle(Color.accentColor)
-                Text("标注")
+                Text("Annotations", bundle: .module)
                     .font(.headline)
                 Spacer()
                 Text("\(filteredAnnotations.count)")
@@ -52,10 +52,10 @@ struct WebAnnotationSidebarView: View {
             }
 
             DraggableSegmentedControl(selection: $filterType, items: [
-                ("全部", nil),
-                ("高亮", .highlight),
-                ("下划线", .underline),
-                ("笔记", .note),
+                (String(localized: "All", bundle: .module), nil),
+                (String(localized: "Highlight", bundle: .module), .highlight),
+                (String(localized: "Underline", bundle: .module), .underline),
+                (String(localized: "Note", bundle: .module), .note),
             ])
         }
         .padding(.horizontal, 12)
@@ -68,10 +68,10 @@ struct WebAnnotationSidebarView: View {
             Image(systemName: "highlighter")
                 .font(.system(size: 26))
                 .foregroundStyle(.tertiary)
-            Text("暂无标注")
+            Text("No annotations yet", bundle: .module)
                 .font(.callout)
                 .foregroundStyle(.secondary)
-            Text("选择文本后使用悬浮菜单进行标注")
+            Text("Select text in the article, then add an annotation from the floating toolbar.", bundle: .module)
                 .font(.caption)
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
@@ -135,10 +135,10 @@ struct WebAnnotationSidebarView: View {
 
     private var compactEmptyAnnotations: some View {
         VStack(spacing: 6) {
-            Text("暂无标注")
+            Text("No annotations yet", bundle: .module)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text("选中文本后可添加高亮、下划线或笔记")
+            Text("Select text to add a highlight, underline, or note.", bundle: .module)
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
@@ -150,10 +150,10 @@ struct WebAnnotationSidebarView: View {
     private func editNoteSheet(annotation: WebAnnotationRecord) -> some View {
         VStack(spacing: 16) {
             HStack {
-                Text("编辑笔记")
+                Text("Edit note", bundle: .module)
                     .font(.headline)
                 Spacer()
-                Button("取消") { editingAnnotation = nil }
+                Button(String(localized: "common.cancel", bundle: .module)) { editingAnnotation = nil }
                     .keyboardShortcut(.cancelAction)
             }
 
@@ -175,7 +175,7 @@ struct WebAnnotationSidebarView: View {
 
             HStack {
                 Spacer()
-                Button("保存") {
+                Button(String(localized: "common.save", bundle: .module)) {
                     viewModel.updateAnnotationNote(annotation, noteText: editNoteText)
                     editingAnnotation = nil
                 }
@@ -202,7 +202,7 @@ private struct WebSummarySidebarCard: View {
                 Image(systemName: "text.alignleft")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                Text("摘要")
+                Text("Abstract", bundle: .module)
                     .font(.caption2)
                     .fontWeight(.semibold)
                     .foregroundStyle(.secondary)
@@ -238,7 +238,7 @@ private struct WebSummarySidebarCard: View {
         .onHover { isHovered = $0 }
         .animation(.easeInOut(duration: 0.15), value: isHovered)
         .animation(.easeInOut(duration: 0.15), value: isHighlighted)
-        .help("跳转到正文中的摘要位置")
+        .help(String(localized: "Jump to the abstract in the article", bundle: .module))
     }
 }
 
@@ -316,7 +316,7 @@ private struct WebAnnotationCard: View {
                                 .font(.caption2)
                         }
                         .buttonStyle(.plain)
-                        .help("编辑笔记")
+                        .help(String(localized: "Edit note", bundle: .module))
 
                         Button { onDelete() } label: {
                             Image(systemName: "trash")
@@ -324,7 +324,7 @@ private struct WebAnnotationCard: View {
                                 .foregroundStyle(.red)
                         }
                         .buttonStyle(.plain)
-                        .help("删除标注")
+                        .help(String(localized: "Delete annotation", bundle: .module))
                     }
                     .transition(.opacity)
                 }

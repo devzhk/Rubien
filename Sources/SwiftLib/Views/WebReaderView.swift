@@ -8,13 +8,13 @@ import SwiftLibCore
 /// Online-reading pipeline log. In Console.app filter subsystem `Slate`, category `OnlineReadable`.
 private let onlineReadableLog = Logger(subsystem: "Slate", category: "OnlineReadable")
 
-// MARK: - 阅读模式（剪藏 Markdown / 在线 Defuddle + Readability 回退）
+// MARK: - Reading mode (clipped markdown / live Defuddle+Readability fallback)
 
 enum WebReaderDisplayMode: String, CaseIterable {
-    /// 使用条目中的剪藏 Markdown（当前默认行为）
-    case clippedMarkdown = "剪藏正文"
-    /// 打开解析后的原文 URL（`resolvedWebReaderURLString()`）：优先 Defuddle 抽取并套用 Clipper reader 样式；失败则回退 Readability
-    case liveReadable = "在线阅读"
+    /// Show the reference's clipped markdown (default).
+    case clippedMarkdown = "Clipped"
+    /// Load the source URL and run Defuddle → Readability extraction.
+    case liveReadable = "Live"
 }
 
 struct WebSelectionSnapshot: Equatable {
@@ -267,7 +267,7 @@ final class WebReaderViewModel: ObservableObject {
         case .liveReadable:
             let u = reference.resolvedWebReaderURLString() ?? ""
             guard !u.isEmpty, URL(string: u) != nil else {
-                liveReadableUserMessage = "没有可用于在线阅读的有效链接。"
+                liveReadableUserMessage = String(localized: "No valid URL available for live reading.", bundle: .module)
                 displayMode = .clippedMarkdown
                 return
             }
@@ -286,7 +286,8 @@ final class WebReaderViewModel: ObservableObject {
             try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
             guard !Task.isCancelled else { return }
             guard displayMode == .liveReadable, isLiveReadableBusy else { return }
-            readableExtractionFailed(message: "加载或提取正文超时（约 \(seconds) 秒）。请检查网络、页面是否需登录，或改用「剪藏正文」。")
+            let fmt = String(localized: "Loading or extracting the article timed out (~%d seconds). Check your network or switch back to Clipped.", bundle: .module)
+            readableExtractionFailed(message: String(format: fmt, seconds))
         }
     }
 
@@ -316,12 +317,12 @@ final class WebReaderViewModel: ObservableObject {
         excerpt: String?,
         byline: String?,
         includeClipperTypography: Bool,
-        eyebrowText: String = "在线阅读"
+        eyebrowText: String = "Live reading"
     ) {
         cancelTranscriptLoad()
         var trimmed = contentHTML.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            readableExtractionFailed(message: "在线阅读失败：提取结果为空。")
+            readableExtractionFailed(message: String(localized: "Live reading failed: extraction returned no content.", bundle: .module))
             return
         }
 
@@ -457,7 +458,7 @@ final class WebReaderViewModel: ObservableObject {
                 onlineReadableLog.notice("YouTube 网络字幕为空 vid=\(videoId, privacy: .public)")
                 recordTranscriptFailure(
                     source: .network,
-                    message: "该视频字幕内容为空。",
+                    message: String(localized: "This video has no caption content.", bundle: .module),
                     sequence: sequence
                 )
                 return
@@ -482,7 +483,7 @@ final class WebReaderViewModel: ObservableObject {
             onlineReadableLog.notice("YouTube transcript DOM fallback 未返回内容 vid=\(videoId, privacy: .public)")
             recordTranscriptFailure(
                 source: .dom,
-                message: "页面 transcript 面板未返回内容。",
+                message: String(localized: "The page's transcript panel returned no content.", bundle: .module),
                 sequence: sequence
             )
             return
@@ -493,7 +494,7 @@ final class WebReaderViewModel: ObservableObject {
             onlineReadableLog.notice("YouTube transcript DOM fallback 返回空字幕 vid=\(videoId, privacy: .public)")
             recordTranscriptFailure(
                 source: .dom,
-                message: "页面 transcript 面板未返回内容。",
+                message: String(localized: "The page's transcript panel returned no content.", bundle: .module),
                 sequence: sequence
             )
             return
@@ -543,7 +544,7 @@ final class WebReaderViewModel: ObservableObject {
             htmlLines.append("<span class=\"swiftlib-yt-line\">\(escaped)</span>")
         }
         let transcriptHTML = htmlLines.joined(separator: "\n")
-        let block = "<details class=\"swiftlib-yt-transcript\" open><summary>字幕 / Transcript</summary><div class=\"swiftlib-yt-transcript-body\">\(transcriptHTML)</div></details>"
+        let block = "<details class=\"swiftlib-yt-transcript\" open><summary>Transcript</summary><div class=\"swiftlib-yt-transcript-body\">\(transcriptHTML)</div></details>"
         replaceTranscriptPlaceholder(with: block, isHTML: true)
         if let bodyHTML = currentArticleBodyHTML,
            !Self.htmlContainsRenderedTranscriptBlock(bodyHTML) {
@@ -631,7 +632,7 @@ final class WebReaderViewModel: ObservableObject {
     }
 
     private static func htmlInsertingYouTubeTranscriptPlaceholder(_ html: String) -> String? {
-        let block = "<div id=\"\(transcriptPlaceholderId)\" class=\"swiftlib-yt-transcript\"><summary style=\"list-style:none;padding:10px 14px;font-size:14px;color:#6b7280;\">正在加载字幕…</summary></div>"
+        let block = "<div id=\"\(transcriptPlaceholderId)\" class=\"swiftlib-yt-transcript\"><summary style=\"list-style:none;padding:10px 14px;font-size:14px;color:#6b7280;\">Loading transcript…</summary></div>"
         guard let range = html.range(of: "</article>", options: .backwards) else { return nil }
         return String(html[..<range.lowerBound]) + block + String(html[range.lowerBound...])
     }
@@ -650,13 +651,13 @@ final class WebReaderViewModel: ObservableObject {
         if let dom = failures[.dom]?.trimmingCharacters(in: .whitespacesAndNewlines), !dom.isEmpty {
             return dom
         }
-        return "字幕不可用。"
+        return "Transcript unavailable."
     }
 
     nonisolated private static func transcriptTimeoutMessage(failures: [TranscriptLoadSource: String]) -> String {
-        let base = "字幕加载超时，请稍后重试。"
+        let base = "Transcript loading timed out. Please try again later."
         if let network = failures[.network]?.trimmingCharacters(in: .whitespacesAndNewlines), !network.isEmpty {
-            return "\(base) 当前结果：\(network)"
+            return "\(base) Current result: \(network)"
         }
         return base
     }
@@ -683,7 +684,7 @@ final class WebReaderViewModel: ObservableObject {
             let escaped = content
                 .replacingOccurrences(of: "&", with: "&amp;")
                 .replacingOccurrences(of: "<", with: "&lt;")
-            let errorBlock = "<div class=\"swiftlib-yt-transcript\"><summary style=\"list-style:none;padding:10px 14px;font-size:14px;color:#6b7280;\">字幕不可用：\(escaped)</summary></div>"
+            let errorBlock = "<div class=\"swiftlib-yt-transcript\"><summary style=\"list-style:none;padding:10px 14px;font-size:14px;color:#6b7280;\">Transcript unavailable: \(escaped)</summary></div>"
             renderedHTML.replaceSubrange(fullRange, with: errorBlock)
         }
     }
@@ -842,7 +843,7 @@ final class WebReaderViewModel: ObservableObject {
                 articleBodyHTML: finalBodyHTML,
                 fontSize: fontSize,
                 contentWidth: contentWidth,
-                eyebrowText: isYouTube ? "YouTube 剪藏" : "剪藏正文",
+                eyebrowText: isYouTube ? "YouTube clip" : "Clipped",
                 includeClipperTypography: includeClipperTypography,
                 omitReferenceAbstract: isYouTube,
                 omitArticleHeader: isYouTube
@@ -919,7 +920,7 @@ final class WebReaderViewModel: ObservableObject {
                   \(site.isEmpty ? "" : "<span>\(site)</span>")
                   \(showURLInMeta ? "<span>\(url)</span>" : "")
                 </div>
-                \(summary.isEmpty ? "" : "<div id=\"swiftlib-article-summary\" class=\"summary\" title=\"在侧栏查看摘要\">\(summary)</div>")
+                \(summary.isEmpty ? "" : "<div id=\"swiftlib-article-summary\" class=\"summary\" title=\"View abstract in the sidebar\">\(summary)</div>")
               </header>
 """
 
@@ -1608,7 +1609,7 @@ final class WebReaderViewModel: ObservableObject {
         <body>
           <div class="empty">
             <h2>\(htmlEscape(title))</h2>
-            <p>这个网页条目还没有抓取到正文内容。</p>
+            <p>This web entry doesn't have any clipped content yet.</p>
           </div>
         </body>
         </html>
@@ -1823,7 +1824,7 @@ struct WebReaderView: View {
                 }
 
                 if viewModel.isRendering || viewModel.isLiveReadableBusy {
-                    ProgressView(viewModel.isLiveReadableBusy ? "正在加载并提取正文…" : "正在渲染 Markdown…")
+                    ProgressView(viewModel.isLiveReadableBusy ? String(localized: "Loading and extracting…", bundle: .module) : String(localized: "Rendering markdown…", bundle: .module))
                         .padding(.horizontal, 14)
                         .padding(.vertical, 10)
                         .background(.regularMaterial, in: Capsule())
@@ -1869,7 +1870,7 @@ struct WebReaderView: View {
         .toolbar {
             ToolbarItemGroup(placement: .automatic) {
                 if viewModel.allowsDisplayModeSwitching {
-                    Picker("阅读模式", selection: Binding(
+                    Picker(String(localized: "Reading mode", bundle: .module), selection: Binding(
                         get: { viewModel.displayMode },
                         set: { viewModel.setDisplayMode($0) }
                     )) {
@@ -1891,7 +1892,7 @@ struct WebReaderView: View {
                 Button {
                     withAnimation { showAnnotationSidebar.toggle() }
                 } label: {
-                    Label("侧边栏", systemImage: "sidebar.right")
+                    Label(String(localized: "Sidebar", bundle: .module), systemImage: "sidebar.right")
                 }
             }
         }
@@ -1909,11 +1910,11 @@ struct WebReaderView: View {
             }
         }
         .navigationTitle(viewModel.reference.title)
-        .alert("在线阅读", isPresented: Binding(
+        .alert(String(localized: "Live reading", bundle: .module), isPresented: Binding(
             get: { viewModel.liveReadableUserMessage != nil },
             set: { if !$0 { viewModel.liveReadableUserMessage = nil } }
         )) {
-            Button("好", role: .cancel) {}
+            Button(String(localized: "common.ok", bundle: .module), role: .cancel) {}
         } message: {
             Text(viewModel.liveReadableUserMessage ?? "")
         }
@@ -1935,7 +1936,7 @@ struct WebReaderView: View {
                 if let urlString = viewModel.reference.resolvedWebReaderURLString(),
                    let url = URL(string: urlString) {
                     Link(destination: url) {
-                        Label("原视频", systemImage: "arrow.up.right")
+                        Label(String(localized: "Source video", bundle: .module), systemImage: "arrow.up.right")
                             .font(.caption)
                     }
                     .foregroundStyle(.secondary)
@@ -1976,7 +1977,7 @@ struct WebReaderView: View {
                         Button {
                             viewModel.collapseYouTubeInlinePlayer()
                         } label: {
-                            Label("收起视频", systemImage: "xmark")
+                            Label(String(localized: "Collapse video", bundle: .module), systemImage: "xmark")
                                 .labelStyle(.iconOnly)
                                 .padding(9)
                                 .background(.ultraThinMaterial, in: Circle())
@@ -2146,10 +2147,10 @@ private struct YouTubeWatchPlayPlaceholder: View {
             }
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("点击播放在线视频")
+                Text("Tap to play this video", bundle: .module)
                     .font(.headline.weight(.semibold))
                     .foregroundStyle(.white)
-                Text("默认保留封面，避免阅读区和网页播放器同时展开。")
+                Text("The cover is shown by default to avoid loading the player alongside the reading view.", bundle: .module)
                     .font(.subheadline)
                     .foregroundStyle(.white.opacity(0.82))
             }
@@ -2160,7 +2161,7 @@ private struct YouTubeWatchPlayPlaceholder: View {
                     HStack(spacing: 10) {
                         Image(systemName: "play.fill")
                             .font(.system(size: 15, weight: .bold))
-                        Text("播放在线视频")
+                        Text("Play video", bundle: .module)
                             .font(.headline.weight(.semibold))
                     }
                     .foregroundStyle(.white)
@@ -2169,7 +2170,7 @@ private struct YouTubeWatchPlayPlaceholder: View {
                     .background(.black.opacity(0.58), in: Capsule())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("播放 YouTube 视频")
+                .accessibilityLabel(String(localized: "Play YouTube video", bundle: .module))
             }
         }
 
@@ -2191,11 +2192,11 @@ private struct WebSelectionActionBar: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 2) {
-                toolbarButton(icon: "highlighter", label: "高亮") {
+                toolbarButton(icon: "highlighter", label: String(localized: "Highlight", bundle: .module)) {
                     viewModel.applySelectionAction(.highlight)
                 }
 
-                toolbarButton(icon: "doc.on.doc", label: "复制") {
+                toolbarButton(icon: "doc.on.doc", label: String(localized: "Copy", bundle: .module)) {
                     if let text = viewModel.pendingSelection?.text, !text.isEmpty {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(text, forType: .string)
@@ -2231,7 +2232,7 @@ private struct WebSelectionActionBar: View {
 
                 separator
 
-                toolbarButton(icon: "trash", label: "取消选择") {
+                toolbarButton(icon: "trash", label: String(localized: "Clear selection", bundle: .module)) {
                     viewModel.clearSelection()
                 }
             }
@@ -2247,7 +2248,7 @@ private struct WebSelectionActionBar: View {
             VStack(spacing: 0) {
                 RichNoteEditorView(
                     markdown: $noteMarkdown,
-                    placeholder: "添加笔记…",
+                    placeholder: String(localized: "Add a note…", bundle: .module),
                     autoFocus: false,
                     onContentHeightChanged: { height in
                         editorContentHeight = height
@@ -2260,7 +2261,7 @@ private struct WebSelectionActionBar: View {
 
                 HStack(spacing: 8) {
                     Spacer()
-                    Button("取消") {
+                    Button(String(localized: "common.cancel", bundle: .module)) {
                         noteMarkdown = ""
                         viewModel.clearSelection()
                     }
@@ -2268,7 +2269,7 @@ private struct WebSelectionActionBar: View {
                     .foregroundStyle(.white.opacity(0.6))
                     .font(.system(size: 11))
 
-                    Button("保存") {
+                    Button(String(localized: "common.save", bundle: .module)) {
                         let md = noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !md.isEmpty, let selection = viewModel.pendingSelection else { return }
                         viewModel.addAnnotation(type: .note, selection: selection, noteText: md)
@@ -2414,7 +2415,7 @@ private struct WebAnnotationActionBar: View {
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(WebNotionToolbarButtonStyle())
-                    .help("删除标注")
+                    .help(String(localized: "Delete annotation", bundle: .module))
                 }
                 .padding(.horizontal, 5)
                 .padding(.vertical, 3)
@@ -2429,7 +2430,7 @@ private struct WebAnnotationActionBar: View {
                     // WYSIWYG inline editor — auto-saves
                     RichNoteEditorView(
                         markdown: $editingMarkdown,
-                        placeholder: "添加笔记…",
+                        placeholder: String(localized: "Add a note…", bundle: .module),
                         autoFocus: true,
                         onContentHeightChanged: { height in
                             editorContentHeight = height
@@ -2447,7 +2448,7 @@ private struct WebAnnotationActionBar: View {
                         HStack(spacing: 4) {
                             Image(systemName: "note.text")
                                 .font(.system(size: 10))
-                            Text("添加笔记…")
+                            Text("Add a note…", bundle: .module)
                                 .font(.system(size: 11))
                         }
                         .foregroundStyle(.white.opacity(0.5))
@@ -2615,7 +2616,7 @@ private struct WebReaderContentView: NSViewRepresentable {
                         excerpt: excerpt,
                         byline: byline,
                         includeClipperTypography: true,
-                        eyebrowText: "在线阅读 · Defuddle"
+                        eyebrowText: "Live · Defuddle"
                     )
                 }
             }
@@ -2629,7 +2630,7 @@ private struct WebReaderContentView: NSViewRepresentable {
                         excerpt: excerpt,
                         byline: byline,
                         includeClipperTypography: false,
-                        eyebrowText: "在线阅读"
+                        eyebrowText: "Live"
                     )
                 }
             }
@@ -2643,7 +2644,7 @@ private struct WebReaderContentView: NSViewRepresentable {
                         excerpt: excerpt,
                         byline: byline,
                         includeClipperTypography: false,
-                        eyebrowText: "在线阅读 · YouTube"
+                        eyebrowText: "Live · YouTube"
                     )
                 }
             }
@@ -2719,7 +2720,7 @@ private struct WebReaderContentView: NSViewRepresentable {
                 let vm = parent.viewModel
                 guard vm.displayMode == .liveReadable, vm.isLiveReadableBusy else { return }
                 awaitingReadableExtraction = false
-                vm.readableExtractionFailed(message: "网页进程已终止，请重试或改用「剪藏正文」。")
+                vm.readableExtractionFailed(message: String(localized: "The web process terminated. Try again or switch back to Clipped.", bundle: .module))
             }
         }
 
@@ -2728,7 +2729,7 @@ private struct WebReaderContentView: NSViewRepresentable {
             Task { @MainActor in
                 let vm = self.parent.viewModel
                 guard vm.displayMode == .liveReadable, vm.isLiveReadableBusy else { return }
-                vm.readableExtractionFailed(message: "页面加载失败：\(message)")
+                vm.readableExtractionFailed(message: String(format: String(localized: "Page load failed: %@", bundle: .module), message))
             }
         }
 

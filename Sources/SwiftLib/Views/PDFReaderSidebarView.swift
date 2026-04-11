@@ -11,8 +11,8 @@ struct PDFReaderSidebarView: View {
             DraggableSegmentedControl(
                 selection: $selectedTab,
                 items: [
-                    ("目录", .outline),
-                    ("信息", .info),
+                    (String(localized: "Outline", bundle: .module), .outline),
+                    (String(localized: "Info", bundle: .module), .info),
                 ]
             )
             .padding(.horizontal, 12)

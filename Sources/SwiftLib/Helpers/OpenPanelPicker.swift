@@ -5,8 +5,8 @@ enum OpenPanelPicker {
     @MainActor
     static func pickBibTeXFile() -> URL? {
         pickSingleFile(
-            title: "导入 BibTeX",
-            prompt: "导入",
+            title: "Import BibTeX",
+            prompt: "Import",
             allowedContentTypes: [type(forExtension: "bib", fallback: .plainText)]
         )
     }
@@ -14,8 +14,8 @@ enum OpenPanelPicker {
     @MainActor
     static func pickRISFile() -> URL? {
         pickSingleFile(
-            title: "导入 RIS",
-            prompt: "导入",
+            title: "Import RIS",
+            prompt: "Import",
             allowedContentTypes: [type(forExtension: "ris", fallback: .plainText)]
         )
     }
@@ -23,8 +23,8 @@ enum OpenPanelPicker {
     @MainActor
     static func pickCitationStyleFiles() -> [URL] {
         pickFiles(
-            title: "导入引文样式",
-            prompt: "导入",
+            title: "Import citation styles",
+            prompt: "Import",
             allowedContentTypes: [.xml, type(forExtension: "csl", fallback: .xml)]
         )
     }
@@ -32,8 +32,8 @@ enum OpenPanelPicker {
     @MainActor
     static func pickPDFFile() -> URL? {
         pickSingleFile(
-            title: "选择 PDF",
-            prompt: "选择",
+            title: "Choose PDF",
+            prompt: "Choose",
             allowedContentTypes: [.pdf]
         )
     }

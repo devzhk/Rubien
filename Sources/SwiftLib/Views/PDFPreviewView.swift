@@ -13,7 +13,7 @@ struct PDFPreviewView: View {
                     .font(.headline)
                     .lineLimit(1)
                 Spacer()
-                Button("完成") {
+                Button(String(localized: "common.done", bundle: .module)) {
                     if let onClose {
                         onClose()
                     } else {

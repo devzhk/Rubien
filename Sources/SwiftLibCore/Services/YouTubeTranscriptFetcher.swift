@@ -42,16 +42,16 @@ public enum YouTubeTranscriptFetcher {
 
         public var errorDescription: String? {
             switch self {
-            case .invalidVideoId: return "无效的视频 ID"
-            case .noInitialPlayerResponse: return "页面中未找到 ytInitialPlayerResponse"
-            case .jsonParseFailed: return "无法解析播放器 JSON"
-            case .noCaptionTracks: return "该视频无可用字幕轨道"
-            case .captionDownloadFailed(let s): return "字幕下载失败: \(s)"
+            case .invalidVideoId: return "Invalid video ID"
+            case .noInitialPlayerResponse: return "ytInitialPlayerResponse not found in page"
+            case .jsonParseFailed: return "Failed to parse player JSON"
+            case .noCaptionTracks: return "No caption tracks available for this video"
+            case .captionDownloadFailed(let s): return "Caption download failed: \(s)"
             case .captionBlockedOrEmptyAfterFallback:
-                return "字幕请求返回空内容或被 YouTube 拦截（已尝试 TV fallback）"
+                return "Caption request returned empty content or was blocked by YouTube (TV fallback was tried)"
             case .captionUnavailableAfterYtDlp(let detail):
-                return "字幕仍不可用（已尝试 TV fallback 与 yt-dlp）：\(detail)"
-            case .transcriptEmpty: return "字幕内容为空"
+                return "Captions still unavailable (tried TV fallback and yt-dlp): \(detail)"
+            case .transcriptEmpty: return "Transcript is empty"
             }
         }
     }

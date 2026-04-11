@@ -6,9 +6,9 @@ import SwiftLibCore
 // MARK: - Annotation Tool
 
 enum PDFSidebarTab: String, CaseIterable {
-    case outline = "目录"
-    case annotations = "标注"
-    case info = "信息"
+    case outline
+    case annotations
+    case info
 }
 
 enum AnnotationTool: String, CaseIterable {
@@ -28,10 +28,10 @@ enum AnnotationTool: String, CaseIterable {
 
     var label: String {
         switch self {
-        case .cursor: return "选择"
-        case .highlight: return "高亮"
-        case .underline: return "下划线"
-        case .note: return "笔记"
+        case .cursor: return String(localized: "Select", bundle: .module)
+        case .highlight: return String(localized: "Highlight", bundle: .module)
+        case .underline: return String(localized: "Underline", bundle: .module)
+        case .note: return String(localized: "Note", bundle: .module)
         }
     }
 }
@@ -42,12 +42,12 @@ struct AnnotationColor: Identifiable {
     let nsColor: NSColor
 
     static let palette: [AnnotationColor] = [
-        .init(id: "#FFDE59", name: "黄色", nsColor: NSColor(red: 1.0, green: 0.87, blue: 0.35, alpha: 0.4)),
-        .init(id: "#7ED957", name: "绿色", nsColor: NSColor(red: 0.49, green: 0.85, blue: 0.34, alpha: 0.4)),
-        .init(id: "#5CE1E6", name: "蓝色", nsColor: NSColor(red: 0.36, green: 0.88, blue: 0.9, alpha: 0.4)),
-        .init(id: "#FF66C4", name: "粉色", nsColor: NSColor(red: 1.0, green: 0.4, blue: 0.77, alpha: 0.4)),
-        .init(id: "#FF914D", name: "橙色", nsColor: NSColor(red: 1.0, green: 0.57, blue: 0.3, alpha: 0.4)),
-        .init(id: "#CB6CE6", name: "紫色", nsColor: NSColor(red: 0.80, green: 0.42, blue: 0.9, alpha: 0.4)),
+        .init(id: "#FFDE59", name: String(localized: "Yellow", bundle: .module), nsColor: NSColor(red: 1.0, green: 0.87, blue: 0.35, alpha: 0.4)),
+        .init(id: "#7ED957", name: String(localized: "Green", bundle: .module), nsColor: NSColor(red: 0.49, green: 0.85, blue: 0.34, alpha: 0.4)),
+        .init(id: "#5CE1E6", name: String(localized: "Blue", bundle: .module), nsColor: NSColor(red: 0.36, green: 0.88, blue: 0.9, alpha: 0.4)),
+        .init(id: "#FF66C4", name: String(localized: "Pink", bundle: .module), nsColor: NSColor(red: 1.0, green: 0.4, blue: 0.77, alpha: 0.4)),
+        .init(id: "#FF914D", name: String(localized: "Orange", bundle: .module), nsColor: NSColor(red: 1.0, green: 0.57, blue: 0.3, alpha: 0.4)),
+        .init(id: "#CB6CE6", name: String(localized: "Purple", bundle: .module), nsColor: NSColor(red: 0.80, green: 0.42, blue: 0.9, alpha: 0.4)),
     ]
 
     static func nsColor(for hex: String) -> NSColor {
@@ -443,12 +443,12 @@ struct PDFReaderView: View {
                     .contentShape(Capsule(style: .continuous))
             }
             .buttonStyle(FloatingGlassCapsuleButtonStyle(isActive: showOutlineSidebar))
-            .help("显示/隐藏目录侧边栏")
+            .help(String(localized: "Toggle outline sidebar", bundle: .module))
 
             HStack(spacing: 1) {
-                floatingIconButton(systemName: "minus.magnifyingglass", help: "缩小", action: zoomOut)
-                floatingIconButton(systemName: "plus.magnifyingglass", help: "放大", action: zoomIn)
-                floatingIconButton(systemName: "arrow.left.and.right", help: "适合宽度", action: fitToWidth)
+                floatingIconButton(systemName: "minus.magnifyingglass", help: String(localized: "Zoom out", bundle: .module), action: zoomOut)
+                floatingIconButton(systemName: "plus.magnifyingglass", help: String(localized: "Zoom in", bundle: .module), action: zoomIn)
+                floatingIconButton(systemName: "arrow.left.and.right", help: String(localized: "Fit width", bundle: .module), action: fitToWidth)
             }
             .padding(.horizontal, 3)
             .padding(.vertical, 2)
@@ -477,7 +477,7 @@ struct PDFReaderView: View {
                 .contentShape(Capsule(style: .continuous))
             }
             .buttonStyle(FloatingGlassCapsuleButtonStyle(isActive: showAnnotationSidebar))
-            .help("显示/隐藏标注侧边栏")
+            .help(String(localized: "Toggle annotations sidebar", bundle: .module))
         }
         .padding(.horizontal, 5)
         .padding(.vertical, 5)
@@ -702,11 +702,11 @@ private struct SelectionActionBar: View {
         VStack(spacing: 0) {
             // Top row: actions + color dots
             HStack(spacing: 2) {
-                toolbarButton(icon: "highlighter", label: "高亮") {
+                toolbarButton(icon: "highlighter", label: String(localized: "Highlight", bundle: .module)) {
                     viewModel.applySelectionAction(.highlight)
                 }
 
-                toolbarButton(icon: "doc.on.doc", label: "复制") {
+                toolbarButton(icon: "doc.on.doc", label: String(localized: "Copy", bundle: .module)) {
                     if !viewModel.stagedSelectionText.isEmpty {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(viewModel.stagedSelectionText, forType: .string)
@@ -742,7 +742,7 @@ private struct SelectionActionBar: View {
 
                 separator
 
-                toolbarButton(icon: "trash", label: "取消选择") {
+                toolbarButton(icon: "trash", label: String(localized: "Clear selection", bundle: .module)) {
                     viewModel.clearStagedSelection()
                 }
             }
@@ -759,7 +759,7 @@ private struct SelectionActionBar: View {
             VStack(spacing: 0) {
                 RichNoteEditorView(
                     markdown: $noteMarkdown,
-                    placeholder: "添加笔记…",
+                    placeholder: String(localized: "Add a note…", bundle: .module),
                     autoFocus: false,
                     onContentHeightChanged: { height in
                         editorContentHeight = height
@@ -772,7 +772,7 @@ private struct SelectionActionBar: View {
 
                 HStack(spacing: 8) {
                     Spacer()
-                    Button("取消") {
+                    Button(String(localized: "common.cancel", bundle: .module)) {
                         noteMarkdown = ""
                         viewModel.clearStagedSelection()
                     }
@@ -780,7 +780,7 @@ private struct SelectionActionBar: View {
                     .foregroundStyle(.white.opacity(0.6))
                     .font(.system(size: 11))
 
-                    Button("保存") {
+                    Button(String(localized: "common.save", bundle: .module)) {
                         let md = noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !md.isEmpty else { return }
                         viewModel.addAnnotations(
@@ -921,7 +921,7 @@ private struct AnnotationActionBar: View {
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(NotionToolbarButtonStyle())
-                    .help("删除标注")
+                    .help(String(localized: "Delete annotation", bundle: .module))
                 }
                 .padding(.horizontal, 5)
                 .padding(.vertical, 3)
@@ -937,7 +937,7 @@ private struct AnnotationActionBar: View {
                     // WYSIWYG inline editor — auto-saves
                     RichNoteEditorView(
                         markdown: $editingMarkdown,
-                        placeholder: "添加笔记…",
+                        placeholder: String(localized: "Add a note…", bundle: .module),
                         autoFocus: true,
                         onContentHeightChanged: { height in
                             editorContentHeight = height
@@ -955,7 +955,7 @@ private struct AnnotationActionBar: View {
                         HStack(spacing: 4) {
                             Image(systemName: "note.text")
                                 .font(.system(size: 10))
-                            Text("添加笔记…")
+                            Text("Add a note…", bundle: .module)
                                 .font(.system(size: 11))
                         }
                         .foregroundStyle(.white.opacity(0.5))
