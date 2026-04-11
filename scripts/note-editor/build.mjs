@@ -4,7 +4,7 @@ import { dirname, resolve } from 'path'
 import { fileURLToPath } from 'url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const outDir = resolve(__dirname, '../../Sources/SwiftLib/Resources')
+const outDir = resolve(__dirname, '../../Sources/Rubien/Resources')
 
 // Ensure output dir exists
 mkdirSync(outDir, { recursive: true })

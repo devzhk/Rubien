@@ -2,13 +2,13 @@
 import PackageDescription
 
 let package = Package(
-    name: "SwiftLib",
+    name: "Rubien",
     defaultLocalization: "en",
     platforms: [.macOS(.v14)],
     products: [
-        .library(name: "SwiftLibCore", targets: ["SwiftLibCore"]),
-        .executable(name: "Slate", targets: ["SwiftLib"]),
-        .executable(name: "slate-cli", targets: ["SwiftLibCLI"]),
+        .library(name: "RubienCore", targets: ["RubienCore"]),
+        .executable(name: "Rubien", targets: ["Rubien"]),
+        .executable(name: "rubien-cli", targets: ["RubienCLI"]),
     ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "6.24.0"),
@@ -16,7 +16,7 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "SwiftLibCore",
+            name: "RubienCore",
             dependencies: [
                 .product(name: "GRDB", package: "GRDB.swift"),
             ],
@@ -25,12 +25,12 @@ let package = Package(
             ]
         ),
         .executableTarget(
-            name: "SwiftLib",
+            name: "Rubien",
             dependencies: [
-                "SwiftLibCore",
+                "RubienCore",
             ],
             exclude: [
-                "SwiftLib.entitlements"
+                "Rubien.entitlements"
             ],
             resources: [
                 .process("Assets.xcassets"),
@@ -38,26 +38,26 @@ let package = Package(
             ]
         ),
         .executableTarget(
-            name: "SwiftLibCLI",
+            name: "RubienCLI",
             dependencies: [
-                "SwiftLibCore",
+                "RubienCore",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]
         ),
         .testTarget(
-            name: "SwiftLibCoreTests",
-            dependencies: ["SwiftLibCore"],
-            path: "Tests/SwiftLibCoreTests"
+            name: "RubienCoreTests",
+            dependencies: ["RubienCore"],
+            path: "Tests/RubienCoreTests"
         ),
         .testTarget(
-            name: "SwiftLibTests",
-            dependencies: ["SwiftLib", "SwiftLibCore"],
-            path: "Tests/SwiftLibTests"
+            name: "RubienTests",
+            dependencies: ["Rubien", "RubienCore"],
+            path: "Tests/RubienTests"
         ),
         .testTarget(
-            name: "SwiftLibCLITests",
+            name: "RubienCLITests",
             dependencies: [],
-            path: "Tests/SwiftLibCLITests"
+            path: "Tests/RubienCLITests"
         ),
     ]
 )

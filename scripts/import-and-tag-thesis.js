@@ -8,7 +8,7 @@ const { spawnSync } = require('child_process');
 function parseArgs(argv) {
   const options = {
     root: '/Users/water/Downloads/硕士论文与小论文的分析与润色优化',
-    cli: path.resolve(__dirname, '..', '.build', 'debug', 'swiftlib-cli'),
+    cli: path.resolve(__dirname, '..', '.build', 'debug', 'rubien-cli'),
     style: 'nature',
     outputDirName: 'docx-output',
     collectionName: `thesis-${new Date().toISOString().replace(/[:.]/g, '-')}`,
@@ -393,7 +393,7 @@ function main() {
   const referencePath = path.join(root, '参考文献.md');
   const chapterPaths = listChapterFiles(root);
   const outputDir = path.join(root, options.outputDirName);
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'swiftlib-thesis-'));
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rubien-thesis-'));
 
   ensureFile(options.cli);
   ensureFile(referencePath);

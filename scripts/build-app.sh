@@ -17,12 +17,9 @@ PRODUCTS_DIR="$DERIVED_DATA/Build/Products/$CONFIGURATION"
 OUTPUT_DIR="$PROJECT_DIR/build"
 STAGING_DIR="$OUTPUT_DIR/dmg-staging"
 
-APP_NAME="Slate"
-CLI_NAME="slate-cli"
-BUNDLE_ID="${BUNDLE_ID:-com.slate.app}"
-# Internal SPM target/scheme names — not renamed to avoid touching every import.
-SCHEME_APP="SwiftLib"
-SCHEME_CLI="swiftlib-cli"
+APP_NAME="Rubien"
+CLI_NAME="rubien-cli"
+BUNDLE_ID="${BUNDLE_ID:-com.rubien.app}"
 APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
 DMG_NAME="$APP_NAME-${CONFIGURATION}.dmg"
 DMG_PATH="$OUTPUT_DIR/$DMG_NAME"
@@ -35,7 +32,7 @@ CODESIGN_ENABLED="${CODESIGN_ENABLED:-1}"
 build_app() {
     echo "▸ Building $APP_NAME app ($CONFIGURATION)..."
     xcodebuild build \
-        -scheme "$SCHEME_APP" \
+        -scheme "$APP_NAME" \
         -configuration "$CONFIGURATION" \
         -destination 'platform=macOS' \
         -derivedDataPath "$DERIVED_DATA" \
@@ -45,7 +42,7 @@ build_app() {
 build_cli() {
     echo "▸ Building $CLI_NAME ($CONFIGURATION)..."
     xcodebuild build \
-        -scheme "$SCHEME_CLI" \
+        -scheme "$CLI_NAME" \
         -configuration "$CONFIGURATION" \
         -destination 'platform=macOS' \
         -derivedDataPath "$DERIVED_DATA" \
@@ -57,31 +54,21 @@ assemble_app_bundle() {
     rm -rf "$APP_BUNDLE"
     mkdir -p "$OUTPUT_DIR"
 
-    if [ -d "$PRODUCTS_DIR/$SCHEME_APP.app" ]; then
-        cp -R "$PRODUCTS_DIR/$SCHEME_APP.app" "$APP_BUNDLE"
-        rebrand_app_bundle
+    if [ -d "$PRODUCTS_DIR/$APP_NAME.app" ]; then
+        cp -R "$PRODUCTS_DIR/$APP_NAME.app" "$APP_BUNDLE"
+        update_info_plist_bundle_id
         return
     fi
 
     mkdir -p "$APP_BUNDLE/Contents/MacOS"
     mkdir -p "$APP_BUNDLE/Contents/Resources"
-    cp "$PRODUCTS_DIR/$SCHEME_APP" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+    cp "$PRODUCTS_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
     for bundle in "$PRODUCTS_DIR"/*.bundle; do
         [ -d "$bundle" ] && cp -R "$bundle" "$APP_BUNDLE/Contents/Resources/"
     done
 
     write_info_plist
-}
-
-rebrand_app_bundle() {
-    # Rename binary inside the bundle: Contents/MacOS/SwiftLib → Contents/MacOS/Slate
-    if [ -f "$APP_BUNDLE/Contents/MacOS/$SCHEME_APP" ] \
-       && [ "$SCHEME_APP" != "$APP_NAME" ]; then
-        mv "$APP_BUNDLE/Contents/MacOS/$SCHEME_APP" \
-           "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
-    fi
-    update_info_plist_in_place
 }
 
 write_info_plist() {
@@ -121,15 +108,10 @@ write_info_plist() {
 PLIST
 }
 
-update_info_plist_in_place() {
+update_info_plist_bundle_id() {
+    # xcodebuild may ship a default bundle identifier; override with BUNDLE_ID.
     local plist="$APP_BUNDLE/Contents/Info.plist"
     [ -f "$plist" ] || return 0
-    /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable $APP_NAME" "$plist" 2>/dev/null \
-        || /usr/libexec/PlistBuddy -c "Add :CFBundleExecutable string $APP_NAME" "$plist"
-    /usr/libexec/PlistBuddy -c "Set :CFBundleName $APP_NAME" "$plist" 2>/dev/null \
-        || /usr/libexec/PlistBuddy -c "Add :CFBundleName string $APP_NAME" "$plist"
-    /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $APP_NAME" "$plist" 2>/dev/null \
-        || /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string $APP_NAME" "$plist"
     /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$plist" 2>/dev/null \
         || /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $BUNDLE_ID" "$plist"
 }
@@ -137,7 +119,7 @@ update_info_plist_in_place() {
 embed_helpers() {
     echo "▸ Embedding CLI..."
     mkdir -p "$HELPERS_DIR"
-    cp "$PRODUCTS_DIR/$SCHEME_CLI" "$HELPERS_DIR/$CLI_NAME"
+    cp "$PRODUCTS_DIR/$CLI_NAME" "$HELPERS_DIR/$CLI_NAME"
     chmod 755 "$HELPERS_DIR/$CLI_NAME"
 }
 
@@ -162,7 +144,7 @@ sign_bundle() {
 embed_app_icon() {
     local icon_src="$PROJECT_DIR/图标.png"
     if [ ! -f "$icon_src" ]; then
-        echo "▸ 跳过图标嵌入（未找到 图标.png）"
+        echo "▸ Skipping icon embed (no 图标.png found)"
         return
     fi
     echo "▸ Embedding app icon..."
@@ -181,7 +163,6 @@ embed_app_icon() {
     sips -z 1024 1024 "$icon_src" --out "$iconset/icon_512x512@2x.png"    >/dev/null
     iconutil -c icns "$iconset" -o "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
     rm -rf "$iconset"
-    # 确保 Info.plist 中有 CFBundleIconFile
     if ! /usr/libexec/PlistBuddy -c "Print :CFBundleIconFile" "$APP_BUNDLE/Contents/Info.plist" >/dev/null 2>&1; then
         /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$APP_BUNDLE/Contents/Info.plist"
     else
@@ -213,5 +194,5 @@ echo "✅ Done!  App=${APP_SIZE}  DMG=${DMG_SIZE}"
 echo "   App: $APP_BUNDLE"
 echo "   DMG: $DMG_PATH"
 echo ""
-echo "   运行 App: open \"$APP_BUNDLE\""
-echo "   发行包:   \"$DMG_PATH\""
+echo "   Run:      open \"$APP_BUNDLE\""
+echo "   DMG:      \"$DMG_PATH\""
