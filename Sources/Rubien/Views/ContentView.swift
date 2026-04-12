@@ -633,6 +633,7 @@ struct ContentView: View {
             )
             .navigationSplitViewColumnWidth(min: 400, ideal: 600, max: .infinity)
         } detail: {
+            Group {
             if let ref = selectedReference {
                 ReferenceDetailView(
                     reference: ref,
@@ -670,9 +671,12 @@ struct ContentView: View {
                         .foregroundStyle(.tertiary)
                 }
             }
+            }
+            .navigationSplitViewColumnWidth(min: 250, ideal: 320, max: 420)
         }
         .toolbar(content: {
             ToolbarItemGroup(placement: .primaryAction) {
+                Group {
                 Button {
                     showSearch = true
                 } label: {
@@ -738,6 +742,8 @@ struct ContentView: View {
                     .help(String(localized: "More import options", bundle: .module))
                     .disabled(viewModel.isImporting)
                 }
+                }
+                .labelStyle(.titleAndIcon)
             }
 
         })

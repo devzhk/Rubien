@@ -97,47 +97,6 @@ struct SidebarView: View {
             .padding(.bottom, 16)
         }
 
-        if !titleKeywords.isEmpty {
-            Divider()
-                .padding(.horizontal, 10)
-            sidebarSection {
-                Text("Smart collections", bundle: .module)
-            } content: {
-                FlowLayout(spacing: 6) {
-                    ForEach(titleKeywords, id: \.word) { item in
-                        let isSelected = selection == .titleKeyword(item.word)
-                        Button {
-                            if isSelected {
-                                if let dv = defaultView { selection = .view(dv.id!) }
-                            } else {
-                                selection = .titleKeyword(item.word)
-                            }
-                        } label: {
-                            HStack(spacing: 4) {
-                                Text(item.word)
-                                    .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
-                                Text("\(item.count)")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(
-                                Capsule(style: .continuous)
-                                    .fill(isSelected
-                                        ? Color.accentColor.opacity(0.15)
-                                        : Color.primary.opacity(0.05))
-                            )
-                            .foregroundStyle(isSelected ? Color.accentColor : .primary.opacity(0.75))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 6)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 10)
-        }
         }
         .background(Color(nsColor: .controlBackgroundColor))
         .navigationTitle("Rubien")
