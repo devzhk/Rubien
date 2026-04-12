@@ -519,6 +519,9 @@ struct TagsCellView: View {
                             .font(.system(size: 10))
                             .foregroundStyle(.tertiary)
                     }
+                    Image(systemName: "plus")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.quaternary)
                 }
             }
         }
@@ -527,15 +530,7 @@ struct TagsCellView: View {
             TagPickerPopover(
                 assignedTags: tags,
                 allTags: allTags,
-                onToggle: { tagId, selected in
-                    var currentIds = tags.compactMap(\.id)
-                    if selected {
-                        if !currentIds.contains(tagId) { currentIds.append(tagId) }
-                    } else {
-                        currentIds.removeAll { $0 == tagId }
-                    }
-                    onUpdateTags(currentIds)
-                },
+                onCommit: { tagIds in onUpdateTags(tagIds) },
                 onCreateTag: onCreateTag,
                 newTagName: $newTagName
             )
@@ -546,10 +541,11 @@ struct TagsCellView: View {
 private struct TagPickerPopover: View {
     let assignedTags: [Tag]
     let allTags: [Tag]
-    let onToggle: (Int64, Bool) -> Void
+    let onCommit: ([Int64]) -> Void
     let onCreateTag: (String) -> Void
     @Binding var newTagName: String
     @State private var search = ""
+    @State private var localIds: Set<Int64> = []
 
     private var filteredTags: [Tag] {
         if search.isEmpty { return allTags }
@@ -557,7 +553,14 @@ private struct TagPickerPopover: View {
     }
 
     private func isAssigned(_ tag: Tag) -> Bool {
-        assignedTags.contains { $0.id == tag.id }
+        guard let id = tag.id else { return false }
+        return localIds.contains(id)
+    }
+
+    private func handleCreate(_ name: String) {
+        onCommit(Array(localIds))
+        onCreateTag(name)
+        search = ""
     }
 
     var body: some View {
@@ -572,8 +575,7 @@ private struct TagPickerPopover: View {
                     .onSubmit {
                         let trimmed = search.trimmingCharacters(in: .whitespaces)
                         if !trimmed.isEmpty && !allTags.contains(where: { $0.name.lowercased() == trimmed.lowercased() }) {
-                            onCreateTag(trimmed)
-                            search = ""
+                            handleCreate(trimmed)
                         }
                     }
             }
@@ -587,7 +589,9 @@ private struct TagPickerPopover: View {
                     ForEach(filteredTags) { tag in
                         let assigned = isAssigned(tag)
                         Button {
-                            onToggle(tag.id!, !assigned)
+                            if let id = tag.id {
+                                if localIds.contains(id) { localIds.remove(id) } else { localIds.insert(id) }
+                            }
                         } label: {
                             HStack(spacing: 8) {
                                 Image(systemName: assigned ? "checkmark.circle.fill" : "circle")
@@ -611,8 +615,7 @@ private struct TagPickerPopover: View {
                         Button {
                             let trimmed = search.trimmingCharacters(in: .whitespaces)
                             if !trimmed.isEmpty {
-                                onCreateTag(trimmed)
-                                search = ""
+                                handleCreate(trimmed)
                             }
                         } label: {
                             HStack(spacing: 6) {
@@ -636,6 +639,12 @@ private struct TagPickerPopover: View {
             .frame(maxHeight: 200)
         }
         .frame(width: 220)
+        .onAppear {
+            localIds = Set(assignedTags.compactMap(\.id))
+        }
+        .onDisappear {
+            onCommit(Array(localIds))
+        }
     }
 }
 

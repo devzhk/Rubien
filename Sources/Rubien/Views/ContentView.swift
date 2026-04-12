@@ -638,6 +638,7 @@ struct ContentView: View {
                     reference: ref,
                     collections: viewModel.collections,
                     allTags: viewModel.tags,
+                    liveTags: viewModel.referenceTagMap[ref.id ?? -1] ?? [],
                     db: viewModel.db,
                     onSave: { updated in
                         var r = updated

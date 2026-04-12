@@ -29,10 +29,13 @@ struct ReferenceDetailView: View {
         var isDownloading: Bool { if case .downloading = self { return true } else { return false } }
     }
 
-    init(reference: Reference, collections: [Collection], allTags: [Tag], db: AppDatabase, onSave: @escaping (Reference) -> Void, onDelete: @escaping () -> Void, onOpenPDFReader: ((Reference) -> Void)? = nil, onOpenWebReader: ((Reference) -> Void)? = nil) {
+    let liveTags: [Tag]
+
+    init(reference: Reference, collections: [Collection], allTags: [Tag], liveTags: [Tag] = [], db: AppDatabase, onSave: @escaping (Reference) -> Void, onDelete: @escaping () -> Void, onOpenPDFReader: ((Reference) -> Void)? = nil, onOpenWebReader: ((Reference) -> Void)? = nil) {
         self.reference = reference
         self.collections = collections
         self.allTags = allTags
+        self.liveTags = liveTags
         self.db = db
         self.onSave = onSave
         self.onDelete = onDelete
@@ -87,6 +90,9 @@ struct ReferenceDetailView: View {
         }
         .task(id: reference.id) {
             await loadSupplementaryData(for: reference.id)
+        }
+        .onChange(of: liveTags) { _, newTags in
+            referenceTags = newTags
         }
         .onDisappear { closeQuickPreviewWindow() }
     }
