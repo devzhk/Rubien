@@ -786,8 +786,8 @@ struct Tags: ParsableCommand {
     @Option(name: .long, help: "Tag name (with --create or --rename)")
     var name: String?
 
-    @Option(name: .long, help: "Tag color as hex (with --create, default #007AFF)")
-    var color: String = "#007AFF"
+    @Option(name: .long, help: "Tag color as hex (with --create, auto-assigned if omitted)")
+    var color: String?
 
     @Option(name: .long, help: "Delete a tag by ID")
     var delete: Int64?
@@ -815,7 +815,16 @@ struct Tags: ParsableCommand {
             try AppDatabase.shared.deleteTag(id: deleteId)
             printJSON(["deleted": "\(deleteId)"])
         } else if create, let n = name {
-            var t = Tag(name: n, color: color)
+            let resolvedColor: String
+            if let c = color {
+                resolvedColor = c
+            } else {
+                let existing = try AppDatabase.shared.fetchAllTags()
+                let usedColors = Set(existing.map(\.color))
+                resolvedColor = Tag.colorPalette.first { !usedColors.contains($0) }
+                    ?? Tag.colorPalette.randomElement() ?? Tag.colorPalette[0]
+            }
+            var t = Tag(name: n, color: resolvedColor)
             try AppDatabase.shared.saveTag(&t)
             printJSON(["id": t.id.map(String.init) ?? "", "name": t.name, "color": t.color])
         } else if assign, let refId = reference {
@@ -847,7 +856,7 @@ struct Tags: ParsableCommand {
                 throw ExitCode.failure
             }
             tag.name = n
-            if color != "#007AFF" { tag.color = color }
+            if let c = color { tag.color = c }
             try AppDatabase.shared.saveTag(&tag)
             printJSON(["id": tag.id.map(String.init) ?? "", "name": tag.name, "color": tag.color])
         } else if let refId = reference {

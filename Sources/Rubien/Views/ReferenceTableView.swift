@@ -14,6 +14,7 @@ struct ReferenceTableView: View {
     let onUpdateReference: (Reference) -> Void
     let onUpdateTags: (Int64, [Int64]) -> Void
     let onCreateTag: (Int64, String) -> Void
+    let onDeleteTag: (Int64) -> Void
     var isRefreshingMetadata = false
     var onDoubleClick: ((Int64) -> Void)? = nil
 
@@ -96,7 +97,8 @@ struct ReferenceTableView: View {
             tableSortOrder: $tableSortOrder,
             onUpdateReference: onUpdateReference,
             onUpdateTags: onUpdateTags,
-            onCreateTag: onCreateTag
+            onCreateTag: onCreateTag,
+            onDeleteTag: onDeleteTag
         )
         .contextMenu(forSelectionType: Reference.ID.self) { ids in
             if let id = ids.first, let ref = references.first(where: { $0.id == id }) {
@@ -312,18 +314,25 @@ private struct ReferenceTableContent: View {
     let onUpdateReference: (Reference) -> Void
     let onUpdateTags: (Int64, [Int64]) -> Void
     let onCreateTag: (Int64, String) -> Void
+    let onDeleteTag: (Int64) -> Void
+
+    @SceneStorage("referenceTableColumnCustomization")
+    private var columnCustomization: TableColumnCustomization<Reference>
 
     var body: some View {
-        Table(references, selection: $selection, sortOrder: $tableSortOrder) {
+        Table(references, selection: $selection, sortOrder: $tableSortOrder, columnCustomization: $columnCustomization) {
             TableColumn(ColumnIdentifier.title.header, value: \.title) { ref in
                 TitleCellView(reference: ref)
             }
             .width(min: 150, ideal: 250)
+            .customizationID(ColumnIdentifier.title.rawValue)
+            .disabledCustomizationBehavior(.visibility)
 
             TableColumn(ColumnIdentifier.authors.header, value: \.authorsNormalized) { ref in
                 AuthorsCellView(reference: ref)
             }
             .width(min: 80, ideal: 140)
+            .customizationID(ColumnIdentifier.authors.rawValue)
 
             TableColumn(ColumnIdentifier.tags.header, value: \.title) { ref in
                 TagsCellView(
@@ -331,20 +340,24 @@ private struct ReferenceTableContent: View {
                     allTags: allTags,
                     referenceId: ref.id ?? -1,
                     onUpdateTags: { tagIds in onUpdateTags(ref.id ?? -1, tagIds) },
-                    onCreateTag: { name in onCreateTag(ref.id ?? -1, name) }
+                    onCreateTag: { name in onCreateTag(ref.id ?? -1, name) },
+                    onDeleteTag: onDeleteTag
                 )
             }
             .width(min: 60, ideal: 120)
+            .customizationID(ColumnIdentifier.tags.rawValue)
 
             TableColumn(ColumnIdentifier.readingStatus.header, value: \.readingStatus.rawValue) { ref in
                 ReadingStatusCell(reference: ref, onUpdate: onUpdateReference)
             }
             .width(min: 70, ideal: 90)
+            .customizationID(ColumnIdentifier.readingStatus.rawValue)
 
             TableColumn(ColumnIdentifier.priority.header, value: \.priority.rawValue) { ref in
                 PriorityCell(reference: ref, onUpdate: onUpdateReference)
             }
             .width(min: 60, ideal: 80)
+            .customizationID(ColumnIdentifier.priority.rawValue)
 
             TableColumn(ColumnIdentifier.dateAdded.header, value: \.dateAdded) { ref in
                 Text(ref.dateAdded, style: .date)
@@ -352,6 +365,7 @@ private struct ReferenceTableContent: View {
                     .foregroundStyle(.secondary)
             }
             .width(min: 70, ideal: 90)
+            .customizationID(ColumnIdentifier.dateAdded.rawValue)
         }
     }
 }
@@ -491,6 +505,7 @@ struct TagsCellView: View {
     let referenceId: Int64
     let onUpdateTags: ([Int64]) -> Void
     let onCreateTag: (String) -> Void
+    let onDeleteTag: (Int64) -> Void
 
     @State private var showPopover = false
     @State private var newTagName = ""
@@ -532,6 +547,7 @@ struct TagsCellView: View {
                 allTags: allTags,
                 onCommit: { tagIds in onUpdateTags(tagIds) },
                 onCreateTag: onCreateTag,
+                onDeleteTag: onDeleteTag,
                 newTagName: $newTagName
             )
         }
@@ -543,6 +559,7 @@ private struct TagPickerPopover: View {
     let allTags: [Tag]
     let onCommit: ([Int64]) -> Void
     let onCreateTag: (String) -> Void
+    let onDeleteTag: (Int64) -> Void
     @Binding var newTagName: String
     @State private var search = ""
     @State private var localIds: Set<Int64> = []
@@ -588,27 +605,42 @@ private struct TagPickerPopover: View {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(filteredTags) { tag in
                         let assigned = isAssigned(tag)
-                        Button {
-                            if let id = tag.id {
-                                if localIds.contains(id) { localIds.remove(id) } else { localIds.insert(id) }
+                        HStack(spacing: 0) {
+                            Button {
+                                if let id = tag.id {
+                                    if localIds.contains(id) { localIds.remove(id) } else { localIds.insert(id) }
+                                }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: assigned ? "checkmark.circle.fill" : "circle")
+                                        .font(.system(size: 13))
+                                        .foregroundStyle(assigned ? Color.accentColor : .secondary)
+                                    Circle()
+                                        .fill(Color(hex: tag.color))
+                                        .frame(width: 8, height: 8)
+                                    Text(tag.name)
+                                        .font(.system(size: 12))
+                                    Spacer()
+                                }
+                                .contentShape(Rectangle())
                             }
-                        } label: {
-                            HStack(spacing: 8) {
-                                Image(systemName: assigned ? "checkmark.circle.fill" : "circle")
-                                    .font(.system(size: 13))
-                                    .foregroundStyle(assigned ? Color.accentColor : .secondary)
-                                Circle()
-                                    .fill(Color(hex: tag.color))
-                                    .frame(width: 8, height: 8)
-                                Text(tag.name)
-                                    .font(.system(size: 12))
-                                Spacer()
+                            .buttonStyle(.plain)
+
+                            Button {
+                                if let id = tag.id {
+                                    localIds.remove(id)
+                                    onDeleteTag(id)
+                                }
+                            } label: {
+                                Image(systemName: "trash")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
                             }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 5)
-                            .contentShape(Rectangle())
+                            .buttonStyle(.plain)
+                            .help("Delete tag")
                         }
-                        .buttonStyle(.plain)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 5)
                     }
 
                     if !search.isEmpty && !allTags.contains(where: { $0.name.lowercased() == search.trimmingCharacters(in: .whitespaces).lowercased() }) {

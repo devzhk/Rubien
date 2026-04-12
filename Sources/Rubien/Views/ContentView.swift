@@ -334,8 +334,10 @@ final class LibraryViewModel: ObservableObject {
 
     func createTagAndAssign(name: String, toReference refId: Int64) {
         do {
-            let colorIndex = tags.count % Tag.colorPalette.count
-            var tag = Tag(name: name, color: Tag.colorPalette[colorIndex])
+            let usedColors = Set(tags.map(\.color))
+            let available = Tag.colorPalette.filter { !usedColors.contains($0) }
+            let color = available.first ?? Tag.colorPalette.randomElement() ?? Tag.colorPalette[0]
+            var tag = Tag(name: name, color: color)
             try db.saveTag(&tag)
             if let tagId = tag.id {
                 let existingTagIds = (referenceTagMap[refId] ?? []).compactMap(\.id)
@@ -623,6 +625,7 @@ struct ContentView: View {
                 },
                 onUpdateTags: { refId, tagIds in viewModel.setTags(forReference: refId, tagIds: tagIds) },
                 onCreateTag: { refId, name in viewModel.createTagAndAssign(name: name, toReference: refId) },
+                onDeleteTag: { tagId in viewModel.deleteTag(id: tagId) },
                 isRefreshingMetadata: viewModel.isImporting,
                 onDoubleClick: { refId in
                     openReader(for: refId)
@@ -672,7 +675,7 @@ struct ContentView: View {
                 }
             }
             }
-            .navigationSplitViewColumnWidth(min: 250, ideal: 320, max: 420)
+            .navigationSplitViewColumnWidth(min: 250, ideal: 360, max: 600)
         }
         .toolbar(content: {
             ToolbarItemGroup(placement: .primaryAction) {

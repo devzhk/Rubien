@@ -4,6 +4,7 @@ import RubienCore
 struct ColumnConfigPopover: View {
     @Binding var columns: [ColumnConfig]
     @State private var searchText = ""
+    @State private var draggedColumnId: ColumnIdentifier?
 
     private var visibleColumns: [ColumnConfig] {
         columns
@@ -65,6 +66,15 @@ struct ColumnConfigPopover: View {
                     sectionHeader("Visible")
                     ForEach(visibleColumns, id: \.columnId) { config in
                         columnRow(config)
+                            .onDrag {
+                                draggedColumnId = config.columnId
+                                return NSItemProvider(object: config.columnId.rawValue as NSString)
+                            }
+                            .onDrop(of: [.text], delegate: ColumnDropDelegate(
+                                targetId: config.columnId,
+                                draggedId: $draggedColumnId,
+                                columns: $columns
+                            ))
                     }
                 }
 
@@ -91,6 +101,7 @@ struct ColumnConfigPopover: View {
     @ViewBuilder
     private func columnRow(_ config: ColumnConfig) -> some View {
         let isTitle = config.columnId == .title
+        let isDragging = draggedColumnId == config.columnId
         HStack(spacing: 8) {
             Image(systemName: "line.3.horizontal")
                 .font(.system(size: 10))
@@ -121,6 +132,7 @@ struct ColumnConfigPopover: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 4)
         .contentShape(Rectangle())
+        .opacity(isDragging ? 0.4 : 1.0)
     }
 
     private func toggleColumn(_ columnId: ColumnIdentifier, visible: Bool) {
@@ -130,5 +142,51 @@ struct ColumnConfigPopover: View {
             let maxOrder = columns.filter(\.isVisible).map(\.displayOrder).max() ?? 0
             columns[idx].displayOrder = maxOrder + 1
         }
+    }
+}
+
+// MARK: - Drop Delegate
+
+private struct ColumnDropDelegate: DropDelegate {
+    let targetId: ColumnIdentifier
+    @Binding var draggedId: ColumnIdentifier?
+    @Binding var columns: [ColumnConfig]
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggedId = nil
+        return true
+    }
+
+    func dropEntered(info: DropInfo) {
+        guard let source = draggedId, source != targetId else { return }
+        // Don't allow reordering the title column
+        guard source != .title && targetId != .title else { return }
+
+        let visible = columns
+            .filter(\.isVisible)
+            .sorted { $0.displayOrder < $1.displayOrder }
+
+        guard let fromIndex = visible.firstIndex(where: { $0.columnId == source }),
+              let toIndex = visible.firstIndex(where: { $0.columnId == targetId }) else { return }
+
+        var reordered = visible.map(\.columnId)
+        let moved = reordered.remove(at: fromIndex)
+        reordered.insert(moved, at: toIndex)
+
+        withAnimation(.easeInOut(duration: 0.2)) {
+            for (order, colId) in reordered.enumerated() {
+                if let idx = columns.firstIndex(where: { $0.columnId == colId }) {
+                    columns[idx].displayOrder = order
+                }
+            }
+        }
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+
+    func validateDrop(info: DropInfo) -> Bool {
+        draggedId != nil
     }
 }
