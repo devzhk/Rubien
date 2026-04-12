@@ -23,6 +23,7 @@ struct RubienCLI: AsyncParsableCommand {
             Annotations.self,
             Styles.self,
             Export.self,
+            Views.self,
         ]
     )
 }
@@ -121,6 +122,8 @@ struct ReferenceDTO: Encodable {
     let publisher: String?
     let language: String?
     let edition: String?
+    let readingStatus: String
+    let priority: Int
 
     init(from ref: Reference) {
         self.id = ref.id
@@ -145,6 +148,8 @@ struct ReferenceDTO: Encodable {
         self.publisher = ref.publisher
         self.language = ref.language
         self.edition = ref.edition
+        self.readingStatus = ref.readingStatus.rawValue
+        self.priority = ref.priority.rawValue
     }
 }
 
@@ -220,9 +225,22 @@ struct List: ParsableCommand {
     @Option(name: .long, help: "Keyword search across title, abstract, and notes")
     var keyword: String?
 
+    @Option(name: .customLong("reading-status"), help: "Filter by reading status (unread, reading, skimmed, read)")
+    var readingStatus: String?
+
+    @Option(name: .long, help: "Filter by priority (0=none, 1=low, 2=medium, 3=high)")
+    var priority: Int?
+
+    @Option(name: .customLong("sort-by"), help: "Sort by field (year, dateAdded, priority, title)")
+    var sortBy: String?
+
+    @Flag(name: .long, help: "Sort ascending (default is descending)")
+    var asc = false
+
     func run() throws {
         let hasAdvancedFilter = author != nil || yearFrom != nil || yearTo != nil
             || journal != nil || referenceType != nil || hasPdf || keyword != nil
+            || readingStatus != nil || priority != nil
         var refs: [Reference]
         if hasAdvancedFilter {
             let scope: ReferenceScope = collection.map { .collection($0) }
@@ -234,6 +252,21 @@ struct List: ParsableCommand {
             if let j = journal { filter.journal = j }
             if let k = keyword { filter.keyword = k }
             if hasPdf { filter.hasPDF = true }
+            if let rs = readingStatus {
+                guard let status = ReadingStatus(rawValue: rs) else {
+                    let valid = ReadingStatus.allCases.map(\.rawValue).joined(separator: ", ")
+                    printJSONError("Unknown reading status '\(rs)'. Valid: \(valid)")
+                    throw ExitCode.failure
+                }
+                filter.readingStatus = status
+            }
+            if let p = priority {
+                guard let prio = Priority(rawValue: p) else {
+                    printJSONError("Unknown priority '\(p)'. Valid: 0 (none), 1 (low), 2 (medium), 3 (high)")
+                    throw ExitCode.failure
+                }
+                filter.priority = prio
+            }
             if let rt = referenceType {
                 guard let type = ReferenceType(rawValue: rt) else {
                     let valid = ReferenceType.allCases.map(\.rawValue).joined(separator: ", ")
@@ -383,6 +416,12 @@ struct Update: ParsableCommand {
     @Option(name: .customLong("clear-field"), help: "Clear a single field (repeatable, e.g. --clear-field doi)")
     var clearFields: [String] = []
 
+    @Option(name: .customLong("reading-status"), help: "Set reading status (unread, reading, skimmed, read)")
+    var readingStatus: String?
+
+    @Option(name: .long, help: "Set priority (0=none, 1=low, 2=medium, 3=high)")
+    var priority: Int?
+
     func run() throws {
         let refs = try AppDatabase.shared.fetchReferences(ids: [id])
         guard var ref = refs.first else {
@@ -392,6 +431,21 @@ struct Update: ParsableCommand {
         if let t = title { ref.title = t }
         if let y = year { ref.year = y }
         if let a = authors { ref.authors = AuthorName.parseList(a) }
+        if let rs = readingStatus {
+            guard let status = ReadingStatus(rawValue: rs) else {
+                let valid = ReadingStatus.allCases.map(\.rawValue).joined(separator: ", ")
+                printJSONError("Unknown reading status '\(rs)'. Valid: \(valid)")
+                throw ExitCode.failure
+            }
+            ref.readingStatus = status
+        }
+        if let p = priority {
+            guard let prio = Priority(rawValue: p) else {
+                printJSONError("Unknown priority '\(p)'. Valid: 0 (none), 1 (low), 2 (medium), 3 (high)")
+                throw ExitCode.failure
+            }
+            ref.priority = prio
+        }
         if let rt = referenceType {
             guard let type = ReferenceType(rawValue: rt) else {
                 let valid = ReferenceType.allCases.map(\.rawValue).joined(separator: ", ")
@@ -969,5 +1023,134 @@ struct Export: ParsableCommand {
         default:
             printJSON(refs.map(ReferenceDTO.init))
         }
+    }
+}
+
+// MARK: - Views
+
+struct Views: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "views",
+        abstract: "Manage database views"
+    )
+
+    @Flag(name: .long, help: "Create a new view")
+    var create = false
+
+    @Option(name: .long, help: "View name (for --create or --rename)")
+    var name: String?
+
+    @Option(name: .long, help: "Delete a view by ID")
+    var delete: Int64?
+
+    @Option(name: .long, help: "Execute a view's query and return matching references")
+    var query: Int64?
+
+    @Option(name: .shortAndLong, help: "Max results for --query (0 = all)")
+    var limit: Int = 0
+
+    @Option(name: .long, help: "Rename a view by ID")
+    var rename: Int64?
+
+    @Option(name: .long, help: "JSON filters (for --create)")
+    var filters: String?
+
+    @Option(name: .long, help: "JSON sorts (for --create)")
+    var sorts: String?
+
+    func run() throws {
+        let db = AppDatabase.shared
+
+        if create {
+            guard let viewName = name else {
+                printJSONError("--name is required with --create")
+                throw ExitCode.failure
+            }
+            let parsedFilters: [ViewFilter] = {
+                guard let json = filters, let data = json.data(using: .utf8),
+                      let decoded = try? JSONDecoder().decode([ViewFilter].self, from: data) else { return [] }
+                return decoded
+            }()
+            let parsedSorts: [ViewSort] = {
+                guard let json = sorts, let data = json.data(using: .utf8),
+                      let decoded = try? JSONDecoder().decode([ViewSort].self, from: data) else { return [.defaultSort] }
+                return decoded
+            }()
+            let existing = try db.fetchAllDatabaseViews()
+            let maxOrder = existing.map(\.displayOrder).max() ?? 0
+            var view = DatabaseView(
+                name: viewName,
+                filters: parsedFilters,
+                sorts: parsedSorts,
+                displayOrder: maxOrder + 1
+            )
+            try db.saveDatabaseView(&view)
+            printJSON(DatabaseViewDTO(from: view))
+        } else if let deleteId = delete {
+            guard let view = try db.fetchDatabaseView(id: deleteId) else {
+                printJSONError("View \(deleteId) not found")
+                throw ExitCode.failure
+            }
+            if view.isDefault {
+                printJSONError("Cannot delete the default view")
+                throw ExitCode.failure
+            }
+            try db.deleteDatabaseView(id: deleteId)
+            printJSON(["deleted": deleteId])
+        } else if let queryId = query {
+            guard let view = try db.fetchDatabaseView(id: queryId) else {
+                printJSONError("View \(queryId) not found")
+                throw ExitCode.failure
+            }
+            let scope: ReferenceScope
+            switch view.parsedScope {
+            case .all: scope = .all
+            case .collection(let id): scope = .collection(id)
+            case .tag(let id): scope = .tag(id)
+            }
+            let refs = try db.fetchReferences(scope: scope, filter: ReferenceFilter(), limit: limit)
+            printJSON(refs.map(ReferenceDTO.init))
+        } else if let renameId = rename {
+            guard var view = try db.fetchDatabaseView(id: renameId) else {
+                printJSONError("View \(renameId) not found")
+                throw ExitCode.failure
+            }
+            guard let newName = name else {
+                printJSONError("--name is required with --rename")
+                throw ExitCode.failure
+            }
+            view.name = newName
+            try db.saveDatabaseView(&view)
+            printJSON(DatabaseViewDTO(from: view))
+        } else {
+            let views = try db.fetchAllDatabaseViews()
+            printJSON(views.map(DatabaseViewDTO.init))
+        }
+    }
+}
+
+struct DatabaseViewDTO: Encodable {
+    let id: Int64?
+    let name: String
+    let icon: String
+    let isDefault: Bool
+    let displayOrder: Int
+    let scope: String
+    let filters: String
+    let sorts: String
+    let dateCreated: Date
+    let dateModified: Date
+
+    init(from view: DatabaseView) {
+        self.id = view.id
+        self.name = view.name
+        self.icon = view.icon
+        self.isDefault = view.isDefault
+        self.displayOrder = view.displayOrder
+        self.scope = view.scopeJSON
+        self.filters = view.filtersJSON
+        self.sorts = view.sortsJSON
+        self.dateCreated = view.dateCreated
+        self.dateModified = view.dateModified
     }
 }

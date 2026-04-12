@@ -160,6 +160,56 @@ extension Array where Element == AuthorName {
     }
 }
 
+public enum ReadingStatus: String, Codable, CaseIterable, DatabaseValueConvertible, Sendable {
+    case unread
+    case reading
+    case skimmed
+    case read
+
+    public var label: String {
+        switch self {
+        case .unread: return "Unread"
+        case .reading: return "Reading"
+        case .skimmed: return "Skimmed"
+        case .read: return "Read"
+        }
+    }
+
+    public var icon: String {
+        switch self {
+        case .unread: return "circle"
+        case .reading: return "book.fill"
+        case .skimmed: return "eye"
+        case .read: return "checkmark.circle.fill"
+        }
+    }
+}
+
+public enum Priority: Int, Codable, CaseIterable, DatabaseValueConvertible, Sendable {
+    case none = 0
+    case low = 1
+    case medium = 2
+    case high = 3
+
+    public var label: String {
+        switch self {
+        case .none: return "None"
+        case .low: return "Low"
+        case .medium: return "Medium"
+        case .high: return "High"
+        }
+    }
+
+    public var icon: String {
+        switch self {
+        case .none: return "flag"
+        case .low: return "flag"
+        case .medium: return "flag.fill"
+        case .high: return "flag.fill"
+        }
+    }
+}
+
 public struct Reference: Identifiable, Codable, Hashable, Sendable {
     public var id: Int64?
     public var title: String
@@ -189,6 +239,10 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
     public var verifiedAt: Date?
     public var reviewedBy: String?
     public var collectionId: Int64?
+
+    // MARK: - User workflow fields
+    public var readingStatus: ReadingStatus
+    public var priority: Priority
 
     // MARK: - Extended metadata (P0)
     public var publisher: String?
@@ -251,6 +305,8 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
         verifiedAt: Date? = nil,
         reviewedBy: String? = nil,
         collectionId: Int64? = nil,
+        readingStatus: ReadingStatus = .unread,
+        priority: Priority = .none,
         // Extended metadata (P0)
         publisher: String? = nil,
         publisherPlace: String? = nil,
@@ -303,6 +359,8 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
         self.verifiedAt = verifiedAt
         self.reviewedBy = reviewedBy
         self.collectionId = collectionId
+        self.readingStatus = readingStatus
+        self.priority = priority
         // Extended metadata (P0)
         self.publisher = publisher
         self.publisherPlace = publisherPlace
@@ -391,7 +449,9 @@ extension Reference {
                   lhs.evidenceBundleHash == rhs.evidenceBundleHash,
                   lhs.verifiedAt == rhs.verifiedAt,
                   lhs.reviewedBy == rhs.reviewedBy,
-                  lhs.collectionId == rhs.collectionId else {
+                  lhs.collectionId == rhs.collectionId,
+                  lhs.readingStatus == rhs.readingStatus,
+                  lhs.priority == rhs.priority else {
                 return false
             }
 
@@ -457,6 +517,8 @@ extension Reference {
         hasher.combine(verifiedAt)
         hasher.combine(reviewedBy)
         hasher.combine(collectionId)
+        hasher.combine(readingStatus)
+        hasher.combine(priority)
         hasher.combine(publisher)
         hasher.combine(publisherPlace)
         hasher.combine(edition)
@@ -509,6 +571,8 @@ extension Reference {
         Columns.verifiedAt,
         Columns.reviewedBy,
         Columns.collectionId,
+        Columns.readingStatus,
+        Columns.priority,
         Columns.publisher,
         Columns.publisherPlace,
         Columns.edition,
@@ -749,6 +813,8 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
         verifiedAt = row["verifiedAt"]
         reviewedBy = row["reviewedBy"]
         collectionId = row["collectionId"]
+        readingStatus = row["readingStatus"] ?? .unread
+        priority = row["priority"] ?? .none
 
         // Extended metadata (P0)
         publisher = row["publisher"]
@@ -813,6 +879,8 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
         container["verifiedAt"] = verifiedAt
         container["reviewedBy"] = reviewedBy
         container["collectionId"] = collectionId
+        container["readingStatus"] = readingStatus
+        container["priority"] = priority
 
         // Extended metadata (P0)
         container["publisher"] = publisher
@@ -847,6 +915,7 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
         case pdfPath, notes, webContent, siteName, favicon, referenceType, metadataSource
         case verificationStatus, acceptedByRuleID, recordKey, verificationSourceURL, evidenceBundleHash, verifiedAt, reviewedBy
         case collectionId
+        case readingStatus, priority
         // Extended metadata
         case publisher, publisherPlace, edition, editors, isbn, issn
         case accessedDate, issuedMonth, issuedDay

@@ -522,6 +522,67 @@ public final class AppDatabase: Sendable {
             )
         }
 
+        migrator.registerMigration("v11-reading-status-priority") { db in
+            let existingColumns = try db.columns(in: "reference").map(\.name)
+
+            try db.alter(table: "reference") { t in
+                if !existingColumns.contains("readingStatus") {
+                    t.add(column: "readingStatus", .text).notNull().defaults(to: ReadingStatus.unread.rawValue)
+                }
+                if !existingColumns.contains("priority") {
+                    t.add(column: "priority", .integer).notNull().defaults(to: Priority.none.rawValue)
+                }
+            }
+
+            try db.create(index: "reference_readingStatus", on: "reference", columns: ["readingStatus"], ifNotExists: true)
+            try db.create(index: "reference_priority", on: "reference", columns: ["priority"], ifNotExists: true)
+        }
+
+        migrator.registerMigration("v12-database-views") { db in
+            try db.create(table: "databaseView", ifNotExists: true) { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("name", .text).notNull()
+                t.column("icon", .text).notNull().defaults(to: "tablecells")
+                t.column("scopeJSON", .text).notNull().defaults(to: #"{"all":{}}"#)
+                t.column("columnsJSON", .text).notNull().defaults(to: "[]")
+                t.column("filtersJSON", .text).notNull().defaults(to: "[]")
+                t.column("sortsJSON", .text).notNull().defaults(to: "[]")
+                t.column("isDefault", .boolean).notNull().defaults(to: false)
+                t.column("displayOrder", .integer).notNull().defaults(to: 0)
+                t.column("dateCreated", .datetime).notNull()
+                t.column("dateModified", .datetime).notNull()
+            }
+
+            let defaultColumnsJSON = (try? String(
+                data: JSONEncoder().encode(ColumnConfig.defaultColumns),
+                encoding: .utf8
+            )) ?? "[]"
+            let defaultSortsJSON = (try? String(
+                data: JSONEncoder().encode([ViewSort.defaultSort]),
+                encoding: .utf8
+            )) ?? "[]"
+
+            try db.execute(sql: """
+                INSERT INTO databaseView (name, icon, scopeJSON, columnsJSON, filtersJSON, sortsJSON, isDefault, displayOrder, dateCreated, dateModified)
+                VALUES ('All References', 'books.vertical', '{"all":{}}', ?, ?, '[]', 1, 0, datetime('now'), datetime('now'))
+                """, arguments: [defaultColumnsJSON, defaultSortsJSON])
+
+            let collections = try Row.fetchAll(db, sql: "SELECT id, name, icon FROM collection ORDER BY name")
+            for (index, row) in collections.enumerated() {
+                let colId: Int64 = row["id"]
+                let name: String = row["name"]
+                let icon: String = row["icon"]
+                let scopeJSON = (try? String(
+                    data: JSONEncoder().encode(ViewScope.collection(colId)),
+                    encoding: .utf8
+                )) ?? #"{"all":{}}"#
+                try db.execute(sql: """
+                    INSERT INTO databaseView (name, icon, scopeJSON, columnsJSON, filtersJSON, sortsJSON, isDefault, displayOrder, dateCreated, dateModified)
+                    VALUES (?, ?, ?, ?, ?, '[]', 0, ?, datetime('now'), datetime('now'))
+                    """, arguments: [name, icon, scopeJSON, defaultColumnsJSON, defaultSortsJSON, index + 1])
+            }
+        }
+
         return migrator
     }
 }
@@ -1314,6 +1375,49 @@ extension AppDatabase {
     }
 }
 
+// MARK: - DatabaseView CRUD
+extension AppDatabase {
+    public func saveDatabaseView(_ view: inout DatabaseView) throws {
+        try dbWriter.write { db in
+            view.dateModified = Date()
+            try view.save(db)
+        }
+    }
+
+    public func deleteDatabaseView(id: Int64) throws {
+        try dbWriter.write { db in
+            _ = try DatabaseView.deleteOne(db, id: id)
+        }
+    }
+
+    public func fetchAllDatabaseViews() throws -> [DatabaseView] {
+        try dbWriter.read { db in
+            try DatabaseView.order(DatabaseView.Columns.displayOrder).fetchAll(db)
+        }
+    }
+
+    public func fetchDatabaseView(id: Int64) throws -> DatabaseView? {
+        try dbWriter.read { db in
+            try DatabaseView.fetchOne(db, id: id)
+        }
+    }
+
+    public func fetchDefaultDatabaseView() throws -> DatabaseView? {
+        try dbWriter.read { db in
+            try DatabaseView.filter(DatabaseView.Columns.isDefault == true).fetchOne(db)
+        }
+    }
+
+    public func observeDatabaseViews() -> AnyPublisher<[DatabaseView], Error> {
+        ValueObservation
+            .tracking { db in
+                try DatabaseView.order(DatabaseView.Columns.displayOrder).fetchAll(db)
+            }
+            .publisher(in: dbWriter, scheduling: .immediate)
+            .eraseToAnyPublisher()
+    }
+}
+
 // MARK: - PDF Annotation CRUD
 extension AppDatabase {
     public func saveAnnotation(_ annotation: inout PDFAnnotationRecord) throws {
@@ -1435,11 +1539,14 @@ public struct ReferenceFilter: Sendable {
     public var titleOnly: Bool = false
     public var hasPDF: Bool? = nil
     public var collectionId: Int64? = nil
+    public var readingStatus: ReadingStatus? = nil
+    public var priority: Priority? = nil
 
     public var isEmpty: Bool {
         keyword.isEmpty && author.isEmpty && yearFrom == nil
             && yearTo == nil && journal.isEmpty && referenceType == nil
             && !titleOnly && hasPDF == nil && collectionId == nil
+            && readingStatus == nil && priority == nil
     }
 
     public init() {}
@@ -1554,6 +1661,12 @@ extension AppDatabase {
                 ? request.filter(Reference.Columns.pdfPath != nil)
                 : request.filter(Reference.Columns.pdfPath == nil)
         }
+        if let rs = filter.readingStatus {
+            request = request.filter(Reference.Columns.readingStatus == rs.rawValue)
+        }
+        if let p = filter.priority {
+            request = request.filter(Reference.Columns.priority == p.rawValue)
+        }
 
         // ── 3. Order + limit ──────────────────────────────────────────────
         request = request.order(Reference.Columns.dateAdded.desc)
@@ -1599,6 +1712,27 @@ extension AppDatabase {
         ValueObservation
             .tracking { db in
                 try Tag.order(Tag.Columns.name).fetchAll(db)
+            }
+            .publisher(in: dbWriter, scheduling: .immediate)
+            .eraseToAnyPublisher()
+    }
+
+    public func observeReferenceTagMappings() -> AnyPublisher<[Int64: [Tag]], Error> {
+        ValueObservation
+            .tracking { db in
+                let rows = try Row.fetchAll(db, sql: """
+                    SELECT rt.referenceId, t.id, t.name, t.color
+                    FROM referenceTag rt
+                    JOIN tag t ON t.id = rt.tagId
+                    ORDER BY t.name
+                    """)
+                var map: [Int64: [Tag]] = [:]
+                for row in rows {
+                    let refId: Int64 = row["referenceId"]
+                    let tag = Tag(id: row["id"], name: row["name"], color: row["color"])
+                    map[refId, default: []].append(tag)
+                }
+                return map
             }
             .publisher(in: dbWriter, scheduling: .immediate)
             .eraseToAnyPublisher()

@@ -2,35 +2,53 @@ import SwiftUI
 import RubienCore
 
 struct SidebarView: View {
-    let collections: [Collection]
-    let tags: [Tag]
+    let databaseViews: [DatabaseView]
     let titleKeywords: [(word: String, count: Int)]
     @Binding var selection: SidebarItem
     let referenceCount: Int
-    let onDeleteCollection: (Int64) -> Void
-    let onDeleteTag: (Int64) -> Void
-    let onAddCollection: () -> Void
+    let onCreateView: (String) -> Void
+    let onDeleteView: (Int64) -> Void
+    let onRenameView: (Int64, String) -> Void
+
+    @State private var showNewViewSheet = false
+    @State private var newViewName = ""
+    @State private var renamingViewId: Int64?
+    @State private var renamingViewName = ""
+
+    private var defaultView: DatabaseView? {
+        databaseViews.first(where: \.isDefault)
+    }
+
+    private var userViews: [DatabaseView] {
+        databaseViews.filter { !$0.isDefault }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
         OverlayScrollView {
             VStack(spacing: 20) {
-                sidebarSection {
-                    SidebarRow(
-                        icon: "books.vertical",
-                        label: String(localized: "sidebar.item.all", bundle: .module),
-                        isSelected: selection == .allReferences,
-                        trailing: { countBadge(referenceCount) }
-                    ) {
-                        selection = .allReferences
+                // Default "All References" view
+                if let defaultView {
+                    sidebarSection {
+                        SidebarRow(
+                            icon: defaultView.icon,
+                            label: defaultView.name,
+                            isSelected: selection == .view(defaultView.id!),
+                            trailing: { countBadge(referenceCount) }
+                        ) {
+                            selection = .view(defaultView.id!)
+                        }
                     }
                 }
 
+                // User-created views
                 sidebarSection {
                     HStack {
-                        Text("sidebar.section.collections", bundle: .module)
+                        Text("Views")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
                         Spacer()
-                        Button(action: onAddCollection) {
+                        Button { showNewViewSheet = true } label: {
                             Image(systemName: "plus")
                                 .font(.system(size: 11, weight: .medium))
                                 .foregroundStyle(.tertiary)
@@ -38,66 +56,41 @@ struct SidebarView: View {
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .help(String(localized: "sidebar.button.addCollection", bundle: .module))
+                        .help("Create a new view")
                     }
                 } content: {
-                    if collections.isEmpty {
-                        Text("No collections yet", bundle: .module)
+                    if userViews.isEmpty {
+                        Text("No views yet")
                             .font(.caption)
                             .foregroundStyle(.quaternary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.leading, 10)
                             .padding(.vertical, 4)
                     } else {
-                        ForEach(collections) { collection in
+                        ForEach(userViews) { view in
                             SidebarRow(
-                                icon: collection.icon,
-                                label: collection.name,
-                                isSelected: selection == .collection(collection.id!)
+                                icon: view.icon,
+                                label: view.name,
+                                isSelected: selection == .view(view.id!)
                             ) {
-                                selection = .collection(collection.id!)
+                                selection = .view(view.id!)
                             }
                             .contextMenu {
-                                Button(String(localized: "common.delete", bundle: .module), role: .destructive) {
-                                    onDeleteCollection(collection.id!)
+                                Button("Rename…") {
+                                    renamingViewId = view.id
+                                    renamingViewName = view.name
+                                }
+                                Button("Duplicate") {
+                                    onCreateView(view.name + " Copy")
+                                }
+                                Divider()
+                                Button("Delete", role: .destructive) {
+                                    if let id = view.id { onDeleteView(id) }
                                 }
                             }
                         }
                     }
                 }
-
-                sidebarSection {
-                    Text("sidebar.section.tags", bundle: .module)
-                } content: {
-                    if tags.isEmpty {
-                        Text("No tags yet", bundle: .module)
-                            .font(.caption)
-                            .foregroundStyle(.quaternary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.leading, 10)
-                            .padding(.vertical, 4)
-                    } else {
-                        ForEach(tags) { tag in
-                            SidebarRow(
-                                iconView: AnyView(
-                                    Circle()
-                                        .fill(Color(hex: tag.color))
-                                        .frame(width: 9, height: 9)
-                                ),
-                                label: tag.name,
-                                isSelected: selection == .tag(tag.id!)
-                            ) {
-                                selection = .tag(tag.id!)
-                            }
-                            .contextMenu {
-                                Button(String(localized: "common.delete", bundle: .module), role: .destructive) {
-                                    onDeleteTag(tag.id!)
-                                }
-                            }
-                        }
-                    }
-                }
-
             }
             .padding(.horizontal, 10)
             .padding(.top, 6)
@@ -115,7 +108,7 @@ struct SidebarView: View {
                         let isSelected = selection == .titleKeyword(item.word)
                         Button {
                             if isSelected {
-                                selection = .allReferences
+                                if let dv = defaultView { selection = .view(dv.id!) }
                             } else {
                                 selection = .titleKeyword(item.word)
                             }
@@ -148,6 +141,28 @@ struct SidebarView: View {
         }
         .background(Color(nsColor: .controlBackgroundColor))
         .navigationTitle("Rubien")
+        .sheet(isPresented: $showNewViewSheet) {
+            NewViewSheet(name: $newViewName) {
+                let name = newViewName.trimmingCharacters(in: .whitespaces)
+                guard !name.isEmpty else { return }
+                onCreateView(name)
+                newViewName = ""
+                showNewViewSheet = false
+            }
+        }
+        .alert("Rename View", isPresented: Binding(
+            get: { renamingViewId != nil },
+            set: { if !$0 { renamingViewId = nil } }
+        )) {
+            TextField("Name", text: $renamingViewName)
+            Button("Rename") {
+                if let id = renamingViewId {
+                    onRenameView(id, renamingViewName)
+                }
+                renamingViewId = nil
+            }
+            Button("Cancel", role: .cancel) { renamingViewId = nil }
+        }
     }
 
     // MARK: - Building Blocks
@@ -319,5 +334,30 @@ private struct FlowLayout: Layout {
             x += size.width + spacing
             rowHeight = max(rowHeight, size.height)
         }
+    }
+}
+
+// MARK: - New View Sheet
+
+private struct NewViewSheet: View {
+    @Binding var name: String
+    let onCreate: () -> Void
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("New View")
+                .font(.headline)
+            TextField("View name", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 250)
+                .onSubmit { onCreate() }
+            HStack {
+                Button("Cancel", role: .cancel) { name = "" }
+                Button("Create") { onCreate() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(20)
     }
 }

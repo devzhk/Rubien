@@ -1,0 +1,447 @@
+# rubien-cli — Command-Line Reference
+
+`rubien-cli` is the companion CLI for the Rubien reference manager. It operates on the same GRDB database as the app (`~/Library/Application Support/Rubien/`), so changes made via CLI are immediately visible in the GUI and vice versa.
+
+All commands output JSON to stdout (pretty-printed, sorted keys, ISO 8601 dates). Errors go to stderr as `{"error": "..."}`.
+
+```
+rubien-cli <subcommand> [options]
+```
+
+---
+
+## Subcommands
+
+| Command | Description |
+|---------|-------------|
+| `search` | Full-text search across the library |
+| `list` | List references with filtering and sorting |
+| `get` | Fetch a single reference by ID |
+| `add` | Add a reference via identifier, BibTeX, or manual entry |
+| `update` | Update fields on an existing reference |
+| `delete` | Delete references by ID or bulk-delete a collection |
+| `move` | Move references into a collection |
+| `cite` | Generate formatted citations |
+| `import` | Import from BibTeX or RIS file |
+| `export` | Export references as JSON, BibTeX, or RIS |
+| `collections` | List or manage collections |
+| `tags` | List or manage tags |
+| `annotations` | List PDF annotations for a reference |
+| `styles` | List available citation styles |
+| `views` | Manage database views |
+
+---
+
+## search
+
+Full-text search across title, authors, journal, abstract, notes, DOI, and other indexed fields.
+
+```bash
+rubien-cli search "neural network" --limit 10
+```
+
+| Argument / Option | Type | Default | Description |
+|---|---|---|---|
+| `query` | String (required) | — | Search query |
+| `-l, --limit` | Int | 20 | Maximum results |
+
+**Output:** JSON array of reference objects.
+
+---
+
+## list
+
+List references with comprehensive filtering and sorting.
+
+```bash
+rubien-cli list --author Smith --year-from 2020 --has-pdf
+rubien-cli list --reading-status unread --priority 2 --sort-by year --asc
+rubien-cli list --collection 5 --limit 50
+rubien-cli list --tag 3
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `-l, --limit` | Int | 0 (all) | Maximum results |
+| `--offset` | Int | 0 | Skip first N results (pagination) |
+| `--collection` | Int64 | — | Filter by collection ID |
+| `--tag` | Int64 | — | Filter by tag ID |
+| `--author` | String | — | Filter by author name (fuzzy) |
+| `--year-from` | Int | — | Year lower bound |
+| `--year-to` | Int | — | Year upper bound |
+| `--journal` | String | — | Filter by journal (fuzzy) |
+| `--type` | String | — | Filter by reference type (e.g. `"Journal Article"`) |
+| `--has-pdf` | Flag | false | Only references with a PDF |
+| `--keyword` | String | — | Keyword search across title, abstract, notes |
+| `--reading-status` | String | — | Filter: `unread`, `reading`, `skimmed`, `read` |
+| `--priority` | Int | — | Filter: `0` (none), `1` (low), `2` (medium), `3` (high) |
+| `--sort-by` | String | — | Sort field: `year`, `dateAdded`, `priority`, `title` |
+| `--asc` | Flag | false | Sort ascending (default descending) |
+
+**Output:** JSON array of reference objects.
+
+---
+
+## get
+
+Fetch a single reference by ID.
+
+```bash
+rubien-cli get 42
+```
+
+| Argument | Type | Description |
+|---|---|---|
+| `id` | Int64 (required) | Reference ID |
+
+**Output:** JSON reference object.
+
+---
+
+## add
+
+Add a reference via DOI/PMID/arXiv ID, BibTeX string, or manual title.
+
+```bash
+rubien-cli add --identifier "10.1038/s41586-021-03819-2"
+rubien-cli add --bibtex '@article{..., title={...}, ...}'
+rubien-cli add --title "My Paper" --collection 3
+```
+
+| Option | Type | Description |
+|---|---|---|
+| `--identifier` | String | DOI, PMID, or arXiv ID — metadata is fetched automatically |
+| `--bibtex` | String | BibTeX source string (can contain multiple entries) |
+| `--title` | String | Title for manual entry (creates a minimal reference) |
+| `--collection` | Int64 | Add to collection ID |
+
+Exactly one of `--identifier`, `--bibtex`, or `--title` is required.
+
+**Output:** JSON reference object (or array if BibTeX contains multiple entries).
+
+---
+
+## update
+
+Update fields on an existing reference.
+
+```bash
+rubien-cli update 42 --title "New Title" --year 2024
+rubien-cli update 42 --reading-status read --priority 3
+rubien-cli update 42 --clear-field doi --clear-field abstract
+```
+
+| Argument / Option | Type | Description |
+|---|---|---|
+| `id` | Int64 (required) | Reference ID |
+| `--title` | String | Title |
+| `--year` | Int | Publication year |
+| `--authors` | String | Authors (`"Last, First; Last, First"`) |
+| `--type` | String | Reference type (e.g. `"Book"`) |
+| `--journal` | String | Journal name |
+| `--volume` | String | Volume |
+| `--issue` | String | Issue |
+| `--pages` | String | Pages (e.g. `"100-110"`) |
+| `--doi` | String | DOI |
+| `--url` | String | URL |
+| `--abstract` | String | Abstract |
+| `--notes` | String | Notes |
+| `--publisher` | String | Publisher |
+| `--isbn` | String | ISBN |
+| `--issn` | String | ISSN |
+| `--language` | String | Language |
+| `--edition` | String | Edition |
+| `--collection` | Int64 | Move to collection ID |
+| `--reading-status` | String | `unread`, `reading`, `skimmed`, `read` |
+| `--priority` | Int | `0` (none), `1` (low), `2` (medium), `3` (high) |
+| `--clear-field` | String (repeatable) | Clear a field (e.g. `--clear-field doi --clear-field abstract`) |
+
+Valid `--clear-field` values: `year`, `journal`, `volume`, `issue`, `pages`, `doi`, `url`, `abstract`, `notes`, `publisher`, `isbn`, `issn`, `language`, `edition`, `collection`.
+
+**Output:** JSON updated reference object.
+
+---
+
+## delete
+
+Delete references by ID, or bulk-delete all references in a collection.
+
+```bash
+rubien-cli delete 42 43 44
+rubien-cli delete --collection 5 --delete-collection --force
+```
+
+| Argument / Option | Type | Default | Description |
+|---|---|---|---|
+| `ids` | Int64 array | — | Reference IDs to delete |
+| `--collection` | Int64 | — | Delete all references in this collection |
+| `--delete-collection` | Flag | false | Also delete the collection itself |
+| `-f, --force` | Flag | false | Skip confirmation prompt |
+
+**Output:** JSON `{"deleted": "id1,id2,..."}` or `{"deletedReferences": N, "deletedCollection": id}`.
+
+---
+
+## move
+
+Move references into a collection or remove from all collections.
+
+```bash
+rubien-cli move 42 43 --collection 5
+rubien-cli move 42 --remove
+```
+
+| Argument / Option | Type | Description |
+|---|---|---|
+| `ids` | Int64 array (required) | Reference IDs |
+| `--collection` | Int64 | Target collection ID |
+| `--remove` | Flag | Remove from all collections |
+
+**Output:** JSON `{"moved": "id1,id2,...", "toCollection": id_or_none}`.
+
+---
+
+## cite
+
+Generate formatted citations.
+
+```bash
+rubien-cli cite 42 --style apa
+rubien-cli cite 42 43 --style ieee --format bibliography
+```
+
+| Argument / Option | Type | Default | Description |
+|---|---|---|---|
+| `ids` | Int64 array (required) | Reference IDs |
+| `-s, --style` | String | `apa` | Style: `apa`, `mla`, `chicago`, `ieee`, `harvard`, `vancouver`, `nature` |
+| `--format` | String | `text` | Output format: `text`, `bibliography`, `docx-cc` |
+
+**Output formats:**
+
+- **`text`:** `{"style": "...", "inline": "...", "bibliography": ["..."]}`
+- **`bibliography`:** `{"style": "...", "entries": ["..."]}`
+- **`docx-cc`:** `{"tag": "...", "text": "...", "style": "...", "isShortTag": bool, "fallbackPayload": "..."}`
+
+---
+
+## import
+
+Import references from a BibTeX (`.bib`) or RIS (`.ris`) file. Use `"-"` to read from stdin.
+
+```bash
+rubien-cli import references.bib --collection 3
+cat paper.ris | rubien-cli import - --format ris
+```
+
+| Argument / Option | Type | Description |
+|---|---|---|
+| `file` | String (required) | File path, or `"-"` for stdin |
+| `--collection` | Int64 | Import into collection ID |
+| `--format` | String | Format hint for stdin: `bib`, `ris` |
+
+File size limit: 50 MB. When reading from stdin, `--format` is required.
+
+**Output:** JSON `{"imported": N, "file": "path"}`.
+
+---
+
+## export
+
+Export references as JSON, BibTeX, or RIS.
+
+```bash
+rubien-cli export --format bibtex
+rubien-cli export --format ris --collection 5
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `-f, --format` | String | `json` | `json`, `bibtex`, `ris` |
+| `--collection` | Int64 | — | Filter by collection ID |
+
+**Output:** JSON array (default), or plain-text BibTeX/RIS to stdout.
+
+---
+
+## collections
+
+List or manage collections.
+
+```bash
+rubien-cli collections                           # List all
+rubien-cli collections --create --name "Physics"
+rubien-cli collections --rename --id 3 --name "Quantum Physics"
+rubien-cli collections --delete 3
+rubien-cli collections --delete 3 --with-references --force
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `--create` | Flag | false | Create a new collection |
+| `--name` | String | — | Name (with `--create` or `--rename`) |
+| `--delete` | Int64 | — | Delete collection by ID (keeps references) |
+| `--with-references` | Flag | false | Also delete references inside (with `--delete`) |
+| `-f, --force` | Flag | false | Skip confirmation for destructive actions |
+| `--rename` | Flag | false | Rename a collection |
+| `--id` | Int64 | — | Collection ID (with `--rename`) |
+
+**Output:** JSON array of `{id, name, icon}` when listing; single object on create/rename.
+
+---
+
+## tags
+
+List or manage tags, assign/remove tags from references.
+
+```bash
+rubien-cli tags                                  # List all
+rubien-cli tags --create --name "Important" --color "#FF0000"
+rubien-cli tags --assign --reference 42 --tags "1,3,5"
+rubien-cli tags --remove-tags --reference 42 --tags "3"
+rubien-cli tags --reference 42                   # List tags for reference
+rubien-cli tags --rename --id 1 --name "Critical"
+rubien-cli tags --delete 3
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `--create` | Flag | false | Create a new tag |
+| `--name` | String | — | Tag name (with `--create` or `--rename`) |
+| `--color` | String | `#007AFF` | Hex color (with `--create`) |
+| `--delete` | Int64 | — | Delete tag by ID |
+| `--assign` | Flag | false | Append tags to a reference |
+| `--remove-tags` | Flag | false | Remove tags from a reference |
+| `--reference` | Int64 | — | Reference ID (with `--assign`, `--remove-tags`, or to list) |
+| `--tags` | String | — | Comma-separated tag IDs (with `--assign` or `--remove-tags`) |
+| `--rename` | Flag | false | Rename a tag |
+| `--id` | Int64 | — | Tag ID (with `--rename`) |
+
+**Output:** JSON array of `{id, name, color}`.
+
+---
+
+## annotations
+
+List PDF annotations for a reference.
+
+```bash
+rubien-cli annotations 42
+```
+
+| Argument | Type | Description |
+|---|---|---|
+| `referenceId` | Int64 (required) | Reference ID |
+
+**Output:** JSON array of `{id, type, color, pageIndex, selectedText, noteText}`.
+
+---
+
+## styles
+
+List available citation styles.
+
+```bash
+rubien-cli styles
+```
+
+No options.
+
+**Output:** JSON array of `{id, title, isBuiltin, citationKind}`.
+
+---
+
+## views
+
+Manage database views (saved query + display configurations).
+
+```bash
+rubien-cli views                                              # List all
+rubien-cli views --create --name "Unread Papers"
+rubien-cli views --create --name "High Priority" \
+  --filters '[{"field":"priority","op":"greaterOrEqual","value":"2"}]' \
+  --sorts '[{"field":"priority","ascending":false}]'
+rubien-cli views --query 3 --limit 50                         # Run a view's query
+rubien-cli views --rename 3 --name "Urgent Papers"
+rubien-cli views --delete 3
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `--create` | Flag | false | Create a new view |
+| `--name` | String | — | View name (with `--create` or `--rename`) |
+| `--delete` | Int64 | — | Delete view by ID (cannot delete default) |
+| `--query` | Int64 | — | Execute a view's saved query |
+| `-l, --limit` | Int | 0 (all) | Max results (with `--query`) |
+| `--rename` | Int64 | — | Rename view by ID |
+| `--filters` | String | — | JSON `[ViewFilter]` (with `--create`) |
+| `--sorts` | String | — | JSON `[ViewSort]` (with `--create`) |
+
+### ViewFilter JSON format
+
+```json
+[
+  {"field": "readingStatus", "op": "equals", "value": "unread"},
+  {"field": "priority", "op": "greaterOrEqual", "value": "2"},
+  {"field": "year", "op": "greaterThan", "value": "2020"}
+]
+```
+
+**Fields:** `title`, `authors`, `year`, `journal`, `referenceType`, `tags`, `readingStatus`, `priority`, `dateAdded`, `dateModified`, `doi`, `publisher`, `volume`, `issue`, `pages`, `pdfAttached`
+
+**Operators:** `equals`, `notEquals`, `contains`, `notContains`, `greaterThan`, `lessThan`, `greaterOrEqual`, `lessOrEqual`, `isEmpty`, `isNotEmpty`, `isAnyOf`
+
+### ViewSort JSON format
+
+```json
+[{"field": "dateAdded", "ascending": false}]
+```
+
+**Output:** JSON array of `{id, name, icon, isDefault, displayOrder, scope, filters, sorts, dateCreated, dateModified}` when listing; single object on create/rename; reference array on `--query`.
+
+---
+
+## Reference JSON Shape
+
+All commands that return references use this structure:
+
+```json
+{
+  "id": 42,
+  "title": "Attention Is All You Need",
+  "authors": "Ashish Vaswani, Noam Shazeer, ...",
+  "year": 2017,
+  "journal": "Advances in Neural Information Processing Systems",
+  "volume": "30",
+  "issue": null,
+  "pages": null,
+  "doi": "10.48550/arXiv.1706.03762",
+  "url": "https://arxiv.org/abs/1706.03762",
+  "abstract": "The dominant sequence transduction models...",
+  "referenceType": "Conference Paper",
+  "collectionId": null,
+  "dateAdded": "2024-01-15T10:30:00Z",
+  "dateModified": "2024-01-15T10:30:00Z",
+  "pdfPath": "/path/to/file.pdf",
+  "notes": null,
+  "isbn": null,
+  "issn": null,
+  "publisher": null,
+  "language": "en",
+  "edition": null,
+  "readingStatus": "unread",
+  "priority": 0
+}
+```
+
+---
+
+## Reference Types
+
+Valid values for `--type`:
+
+```
+Journal Article, Magazine Article, Newspaper Article, Preprint,
+Book, Book Section, Conference Paper, Thesis, Dataset, Software,
+Standard, Manuscript, Interview, Presentation, Blog Post,
+Forum Post, Legal Case, Legislation, Web Page, Report, Patent, Other
+```

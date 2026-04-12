@@ -7,6 +7,7 @@ enum SidebarItem: Hashable {
     case collection(Int64)
     case tag(Int64)
     case titleKeyword(String)
+    case view(Int64)
 }
 
 struct SearchQuery {
@@ -61,7 +62,10 @@ final class LibraryViewModel: ObservableObject {
     @Published var collections: [Collection] = []
     @Published var tags: [Tag] = []
     @Published var selectedSidebar: SidebarItem = .allReferences {
-        didSet { rebuildReferenceObserver() }
+        didSet {
+            rebuildReferenceObserver()
+            syncColumnConfigFromView()
+        }
     }
     /// Raw search text typed by the user; debounced before hitting the DB.
     @Published var searchText = "" {
@@ -72,6 +76,13 @@ final class LibraryViewModel: ObservableObject {
     @Published var errorMessage: String?
     /// All reference titles for smart keyword extraction (unaffected by filters).
     @Published private(set) var allReferenceTitles: [String] = []
+    /// Tag map for table view: referenceId → [Tag]
+    @Published var referenceTagMap: [Int64: [Tag]] = [:]
+    /// Column configuration for the table view (persisted via @AppStorage in ContentView)
+    @Published var tableSorts: [ViewSort] = [.defaultSort]
+    @Published var viewFilters: [ViewFilter] = []
+    /// All saved database views
+    @Published var databaseViews: [DatabaseView] = []
 
     // MARK: - Private state
     let db: AppDatabase
@@ -133,6 +144,27 @@ final class LibraryViewModel: ObservableObject {
             )
             .store(in: &cancellables)
 
+        db.observeDatabaseViews()
+            .receive(on: DispatchQueue.main)
+            .sink(
+                receiveCompletion: { _ in },
+                receiveValue: { [weak self] views in
+                    self?.databaseViews = views
+                    self?.selectDefaultViewIfNeeded()
+                }
+            )
+            .store(in: &cancellables)
+
+        db.observeReferenceTagMappings()
+            .receive(on: DispatchQueue.main)
+            .sink(
+                receiveCompletion: { _ in },
+                receiveValue: { [weak self] map in
+                    self?.referenceTagMap = map
+                }
+            )
+            .store(in: &cancellables)
+
         // Observe all reference titles for smart keyword extraction.
         db.observeReferences()
             .receive(on: DispatchQueue.main)
@@ -182,6 +214,16 @@ final class LibraryViewModel: ObservableObject {
             scope = .all
         case .collection(let id):   scope = .collection(id)
         case .tag(let id):          scope = .tag(id)
+        case .view(let viewId):
+            if let dbView = databaseViews.first(where: { $0.id == viewId }) {
+                switch dbView.parsedScope {
+                case .all: scope = .all
+                case .collection(let id): scope = .collection(id)
+                case .tag(let id): scope = .tag(id)
+                }
+            } else {
+                scope = .all
+            }
         }
         return scope
     }
@@ -282,6 +324,28 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
+    func setTags(forReference refId: Int64, tagIds: [Int64]) {
+        do {
+            try db.setTags(forReference: refId, tagIds: tagIds)
+        } catch {
+            errorMessage = "Set tags failed: \(error.localizedDescription)"
+        }
+    }
+
+    func createTagAndAssign(name: String, toReference refId: Int64) {
+        do {
+            let colorIndex = tags.count % Tag.colorPalette.count
+            var tag = Tag(name: name, color: Tag.colorPalette[colorIndex])
+            try db.saveTag(&tag)
+            if let tagId = tag.id {
+                let existingTagIds = (referenceTagMap[refId] ?? []).compactMap(\.id)
+                try db.setTags(forReference: refId, tagIds: existingTagIds + [tagId])
+            }
+        } catch {
+            errorMessage = "Create tag failed: \(error.localizedDescription)"
+        }
+    }
+
     func saveManualReference(_ ref: inout Reference, reviewedBy: String = "manual-entry") {
         if ref.id == nil && !ref.verificationStatus.isLibraryReady {
             ref = MetadataVerifier.manuallyVerified(ref, reviewedBy: reviewedBy)
@@ -359,6 +423,59 @@ final class LibraryViewModel: ObservableObject {
             try db.deleteTag(id: id)
         } catch {
             errorMessage = "Delete failed: \(error.localizedDescription)"
+        }
+    }
+
+    func saveDatabaseView(_ view: inout DatabaseView) {
+        do {
+            try db.saveDatabaseView(&view)
+        } catch {
+            errorMessage = "Save view failed: \(error.localizedDescription)"
+        }
+    }
+
+    func deleteDatabaseView(id: Int64) {
+        do {
+            try db.deleteDatabaseView(id: id)
+            if case .view(let selectedId) = selectedSidebar, selectedId == id {
+                selectedSidebar = .allReferences
+            }
+        } catch {
+            errorMessage = "Delete view failed: \(error.localizedDescription)"
+        }
+    }
+
+    func createDatabaseView(name: String, scope: ViewScope = .all) {
+        let maxOrder = databaseViews.map(\.displayOrder).max() ?? 0
+        var view = DatabaseView(
+            name: name,
+            scope: scope,
+            isDefault: false,
+            displayOrder: maxOrder + 1
+        )
+        saveDatabaseView(&view)
+        if let id = view.id {
+            selectedSidebar = .view(id)
+        }
+    }
+
+    func renameDatabaseView(id: Int64, name: String) {
+        guard var view = databaseViews.first(where: { $0.id == id }) else { return }
+        view.name = name
+        saveDatabaseView(&view)
+    }
+
+    private func syncColumnConfigFromView() {
+        guard case .view(let id) = selectedSidebar,
+              let dbView = databaseViews.first(where: { $0.id == id }) else { return }
+        tableSorts = dbView.parsedSorts
+    }
+
+    func selectDefaultViewIfNeeded() {
+        if case .allReferences = selectedSidebar,
+           let defaultView = databaseViews.first(where: \.isDefault),
+           let id = defaultView.id {
+            selectedSidebar = .view(id)
         }
     }
 
@@ -460,6 +577,7 @@ struct ContentView: View {
     @State private var cslImportMessage: String?
     @State private var columnVisibility = NavigationSplitViewVisibility.all
     @State private var selectedId: Int64?
+    @State private var columnConfigs: [ColumnConfig] = ColumnConfig.defaultColumns
 
     private struct PendingQueueNotice: Identifiable, Equatable {
         let id = UUID()
@@ -479,31 +597,41 @@ struct ContentView: View {
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             SidebarView(
-                collections: viewModel.collections,
-                tags: viewModel.tags,
+                databaseViews: viewModel.databaseViews,
                 titleKeywords: viewModel.titleKeywords,
                 selection: $viewModel.selectedSidebar,
                 referenceCount: viewModel.references.count,
-                onDeleteCollection: { viewModel.deleteCollection(id: $0) },
-                onDeleteTag: { viewModel.deleteTag(id: $0) },
-                onAddCollection: { showAddCollection = true }
+                onCreateView: { name in viewModel.createDatabaseView(name: name) },
+                onDeleteView: { viewModel.deleteDatabaseView(id: $0) },
+                onRenameView: { id, name in viewModel.renameDatabaseView(id: id, name: name) }
             )
             .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 300)
         } content: {
-            ReferenceListView(
+            ReferenceTableView(
                 references: viewModel.filteredReferences,
                 collections: viewModel.collections,
+                tagMap: viewModel.referenceTagMap,
+                allTags: viewModel.tags,
                 selectedId: selectedId,
                 onSelect: { selectedId = $0 },
                 onDelete: { deleteReferences($0) },
                 onMove: { refs, colId in viewModel.moveReferences(refs, toCollectionId: colId) },
                 onRefreshMetadata: { refs in refreshMetadata(for: refs) },
+                onUpdateReference: { updated in
+                    var ref = updated
+                    viewModel.saveReference(&ref)
+                },
+                onUpdateTags: { refId, tagIds in viewModel.setTags(forReference: refId, tagIds: tagIds) },
+                onCreateTag: { refId, name in viewModel.createTagAndAssign(name: name, toReference: refId) },
                 isRefreshingMetadata: viewModel.isImporting,
                 onDoubleClick: { refId in
                     openReader(for: refId)
-                }
+                },
+                columnConfigs: $columnConfigs,
+                sorts: $viewModel.tableSorts,
+                filters: $viewModel.viewFilters
             )
-            .navigationSplitViewColumnWidth(min: 280, ideal: 350, max: 500)
+            .navigationSplitViewColumnWidth(min: 400, ideal: 600, max: .infinity)
         } detail: {
             if let ref = selectedReference {
                 ReferenceDetailView(

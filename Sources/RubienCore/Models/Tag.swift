@@ -6,6 +6,12 @@ public struct Tag: Identifiable, Codable, Hashable, Sendable {
     public var name: String
     public var color: String
 
+    public static let colorPalette: [String] = [
+        "#007AFF", "#34C759", "#FF9500", "#FF3B30", "#AF52DE",
+        "#5AC8FA", "#FF2D55", "#FFCC00", "#00C7BE", "#8E8E93",
+        "#30B0C7", "#A2845E", "#FF6482", "#64D2FF", "#BF5AF2",
+    ]
+
     public init(id: Int64? = nil, name: String, color: String = "#007AFF") {
         self.id = id
         self.name = name
