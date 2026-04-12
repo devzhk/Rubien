@@ -21,6 +21,13 @@ struct ReferenceDetailView: View {
     @State private var webAnnotationCount: Int = 0
     @State private var hasStoredWebContent = false
     @State private var isLoadingWebContent = false
+    @State private var pdfDownloadState: PDFDownloadState = .idle
+    @State private var showOverwriteConfirmation = false
+
+    private enum PDFDownloadState {
+        case idle, downloading, failed(String)
+        var isDownloading: Bool { if case .downloading = self { return true } else { return false } }
+    }
 
     init(reference: Reference, collections: [Collection], allTags: [Tag], db: AppDatabase, onSave: @escaping (Reference) -> Void, onDelete: @escaping () -> Void, onOpenPDFReader: ((Reference) -> Void)? = nil, onOpenWebReader: ((Reference) -> Void)? = nil) {
         self.reference = reference
@@ -324,20 +331,81 @@ struct ReferenceDetailView: View {
             }
 
             // ── Footer ──
-            HStack {
-                Text(String(format: String(localized: "Added %@", bundle: .module),
-                            reference.dateAdded.formatted(date: .abbreviated, time: .shortened)))
-                    .foregroundStyle(.tertiary)
-                Spacer()
-                Button(String(localized: "Delete reference", bundle: .module), role: .destructive) {
-                    onDelete()
+            VStack(alignment: .trailing, spacing: 4) {
+                HStack {
+                    Text(String(format: String(localized: "Added %@", bundle: .module),
+                                reference.dateAdded.formatted(date: .abbreviated, time: .shortened)))
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                    Button {
+                        if reference.pdfPath != nil {
+                            showOverwriteConfirmation = true
+                        } else {
+                            performPDFDownload()
+                        }
+                    } label: {
+                        if pdfDownloadState.isDownloading {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Label(String(localized: "Download PDF", bundle: .module),
+                                  systemImage: "arrow.down.doc")
+                        }
+                    }
+                    .buttonStyle(SLPrimaryButtonStyle())
+                    .controlSize(.small)
+                    .disabled(!canDownloadPDF || pdfDownloadState.isDownloading)
+                    .help(canDownloadPDF ? "" : String(localized: "Needs a DOI or arXiv link", bundle: .module))
+                    .alert(String(localized: "Replace existing PDF?", bundle: .module),
+                           isPresented: $showOverwriteConfirmation) {
+                        Button(String(localized: "Replace", bundle: .module), role: .destructive) {
+                            performPDFDownload()
+                        }
+                        Button(String(localized: "Cancel", bundle: .module), role: .cancel) {}
+                    } message: {
+                        Text("This will overwrite the current attachment.", bundle: .module)
+                    }
+
+                    Button(String(localized: "Delete reference", bundle: .module), role: .destructive) {
+                        onDelete()
+                    }
+                    .buttonStyle(SLDestructiveButtonStyle())
                 }
-                .buttonStyle(SLDestructiveButtonStyle())
+                if case .failed(let message) = pdfDownloadState {
+                    Text(message)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                }
             }
             .font(.caption)
             .padding(.top, 6)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var canDownloadPDF: Bool {
+        if let doi = reference.doi, !doi.isEmpty { return true }
+        if let url = reference.url, url.lowercased().contains("arxiv.org/abs/") { return true }
+        return false
+    }
+
+    private func performPDFDownload() {
+        pdfDownloadState = .downloading
+        Task {
+            do {
+                if let oldPath = reference.pdfPath {
+                    PDFService.deletePDF(at: oldPath)
+                }
+                let newPath = try await PDFDownloadService.downloadPDF(for: reference)
+                var updated = reference
+                updated.pdfPath = newPath
+                updated.dateModified = Date()
+                onSave(updated)
+                pdfDownloadState = .idle
+            } catch {
+                pdfDownloadState = .failed(error.localizedDescription)
+            }
+        }
     }
 
     @ViewBuilder

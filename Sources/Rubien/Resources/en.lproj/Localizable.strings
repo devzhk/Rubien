@@ -120,3 +120,10 @@
 "verifier.message.bookRuleNotMet" = "Did not meet book auto-verification rules.";
 "verifier.message.thesisRuleNotMet" = "Did not meet thesis auto-verification rules.";
 "verifier.message.missingTitle" = "Missing a verifiable title.";
+
+// PDF Download
+"Download PDF" = "Download PDF";
+"Needs a DOI or arXiv link" = "Needs a DOI or arXiv link";
+"Replace existing PDF?" = "Replace existing PDF?";
+"This will overwrite the current attachment." = "This will overwrite the current attachment.";
+"Replace" = "Replace";
