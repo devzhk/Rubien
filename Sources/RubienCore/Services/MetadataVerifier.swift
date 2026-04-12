@@ -6,6 +6,16 @@ public enum MetadataVerifier {
         seed: MetadataResolutionSeed?,
         evidence: EvidenceBundle
     ) -> MetadataVerificationDecision {
+        let directTitle = normalized(reference.title)
+        if seed == nil
+            && !directTitle.isEmpty
+            && evidence.verificationHints.exactIdentifierMatch
+            && evidence.verificationHints.usedIdentifierFetch
+            && evidence.verificationHints.competingCandidateCount <= 1
+        {
+            return .verified(verifiedEnvelope(reference, evidence: evidence, rule: .idDirectIdentifier))
+        }
+
         switch reference.referenceType {
         case .thesis:
             return verifyThesis(reference: reference, seed: seed, evidence: evidence)

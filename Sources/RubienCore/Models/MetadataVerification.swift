@@ -50,6 +50,7 @@ public enum VerificationStatus: String, Codable, CaseIterable, DatabaseValueConv
 }
 
 public enum AcceptedRuleID: String, Codable, CaseIterable, DatabaseValueConvertible, Sendable {
+    case idDirectIdentifier = "ID_DIRECT_IDENTIFIER"
     case j1DOIExact = "J1_DOI_EXACT"
     case j2SourceRecordKey = "J2_SOURCE_RECORD_KEY"
     case t1ThesisSourceKey = "T1_THESIS_SOURCE_KEY"

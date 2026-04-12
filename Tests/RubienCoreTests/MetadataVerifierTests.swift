@@ -85,4 +85,46 @@ final class MetadataVerifierTests: XCTestCase {
         }
         XCTAssertEqual(envelope.reason, .verifierRuleNotSatisfied)
     }
+
+    func testDirectIdentifierMatchVerifiesWithNilSeed() {
+        let reference = Reference(
+            title: "Attention Is All You Need",
+            authors: [AuthorName(given: "Ashish", family: "Vaswani")],
+            year: 2017,
+            referenceType: .journalArticle
+        )
+        let evidence = EvidenceBundle(
+            source: .translationServer,
+            recordKey: "2604.04917",
+            fetchMode: .identifier,
+            verificationHints: VerificationHints(
+                hasStructuredTitle: true,
+                hasStructuredAuthors: true,
+                usedIdentifierFetch: true,
+                exactIdentifierMatch: true
+            )
+        )
+        let decision = MetadataVerifier.verify(reference: reference, seed: nil, evidence: evidence)
+        guard case .verified(let envelope) = decision else {
+            return XCTFail("Direct identifier match with nil seed should auto-verify")
+        }
+        XCTAssertEqual(envelope.reference.acceptedByRuleID, AcceptedRuleID.idDirectIdentifier.rawValue)
+    }
+
+    func testDirectIdentifierMatchRejectsEmptyTitle() {
+        let reference = Reference(title: "", authors: [], year: nil, referenceType: .journalArticle)
+        let evidence = EvidenceBundle(
+            source: .translationServer,
+            recordKey: "2604.04917",
+            fetchMode: .identifier,
+            verificationHints: VerificationHints(
+                usedIdentifierFetch: true,
+                exactIdentifierMatch: true
+            )
+        )
+        let decision = MetadataVerifier.verify(reference: reference, seed: nil, evidence: evidence)
+        guard case .rejected = decision else {
+            return XCTFail("Empty title should still be rejected even with identifier match")
+        }
+    }
 }
