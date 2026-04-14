@@ -78,6 +78,8 @@ final class LibraryViewModel: ObservableObject {
     @Published private(set) var allReferenceTitles: [String] = []
     /// Tag map for table view: referenceId → [Tag]
     @Published var referenceTagMap: [Int64: [Tag]] = [:]
+    @Published var propertyDefs: [PropertyDefinition] = []
+    @Published var customPropertyValueMap: [Int64: [Int64: String]] = [:]
     /// Column configuration for the table view (persisted via @AppStorage in ContentView)
     @Published var tableSorts: [ViewSort] = [.defaultSort]
     @Published var viewFilters: [ViewFilter] = []
@@ -161,6 +163,26 @@ final class LibraryViewModel: ObservableObject {
                 receiveCompletion: { _ in },
                 receiveValue: { [weak self] map in
                     self?.referenceTagMap = map
+                }
+            )
+            .store(in: &cancellables)
+
+        db.observePropertyDefinitions()
+            .receive(on: DispatchQueue.main)
+            .sink(
+                receiveCompletion: { _ in },
+                receiveValue: { [weak self] defs in
+                    self?.propertyDefs = defs
+                }
+            )
+            .store(in: &cancellables)
+
+        db.observeAllPropertyValues()
+            .receive(on: DispatchQueue.main)
+            .sink(
+                receiveCompletion: { _ in },
+                receiveValue: { [weak self] map in
+                    self?.customPropertyValueMap = map
                 }
             )
             .store(in: &cancellables)
@@ -632,7 +654,13 @@ struct ContentView: View {
                 },
                 columnConfigs: $columnConfigs,
                 sorts: $viewModel.tableSorts,
-                filters: $viewModel.viewFilters
+                filters: $viewModel.viewFilters,
+                propertyDefs: Binding(
+                    get: { viewModel.propertyDefs },
+                    set: { viewModel.propertyDefs = $0 }
+                ),
+                db: viewModel.db,
+                customPropertyValueMap: viewModel.customPropertyValueMap
             )
             .navigationSplitViewColumnWidth(min: 400, ideal: 600, max: .infinity)
         } detail: {
@@ -656,7 +684,14 @@ struct ContentView: View {
                     },
                     onOpenWebReader: { r in
                         ReaderWindowManager.shared.openWebReader(for: r)
-                    }
+                    },
+                    onUpdateTags: { refId, tagIds in viewModel.setTags(forReference: refId, tagIds: tagIds) },
+                    onCreateTag: { refId, name in viewModel.createTagAndAssign(name: name, toReference: refId) },
+                    onDeleteTag: { tagId in viewModel.deleteTag(id: tagId) },
+                    propertyDefs: Binding(
+                        get: { viewModel.propertyDefs },
+                        set: { viewModel.propertyDefs = $0 }
+                    )
                 )
             } else if selectedId != nil {
                 ProgressView()

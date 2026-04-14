@@ -21,10 +21,13 @@ struct ReferenceTableView: View {
     @Binding var columnConfigs: [ColumnConfig]
     @Binding var sorts: [ViewSort]
     @Binding var filters: [ViewFilter]
+    @Binding var propertyDefs: [PropertyDefinition]
+    let db: AppDatabase
+    let customPropertyValueMap: [Int64: [Int64: String]]
 
     @State private var selection = Set<Reference.ID>()
     @State private var showDeleteConfirm = false
-    @State private var showColumnConfig = false
+    @State private var showPropertyManager = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -41,16 +44,41 @@ struct ReferenceTableView: View {
         .navigationTitle(String(localized: "References", bundle: .module))
         .navigationSubtitle(subtitleText)
         .toolbar {
-            ToolbarItem(placement: .automatic) {
+            ToolbarItem(placement: .navigation) {
                 Button {
-                    showColumnConfig.toggle()
+                    showPropertyManager.toggle()
                 } label: {
-                    Image(systemName: "slider.horizontal.3")
+                    Label("Properties", systemImage: "slider.horizontal.3")
+                        .labelStyle(.titleAndIcon)
                         .font(.system(size: 12))
                 }
-                .help("Configure columns")
-                .popover(isPresented: $showColumnConfig) {
-                    ColumnConfigPopover(columns: $columnConfigs)
+                .help("Manage properties")
+                .popover(isPresented: $showPropertyManager) {
+                    PropertyManagerPopover(
+                        propertyDefs: $propertyDefs,
+                        onToggleVisibility: { propId, visible in
+                            try? db.togglePropertyVisibility(id: propId, visible: visible)
+                        },
+                        onDelete: { propId in
+                            try? db.deletePropertyDefinition(id: propId)
+                        },
+                        onReorder: { orderedIds in
+                            try? db.reorderProperties(orderedIds)
+                        },
+                        onCreateProperty: { name, type in
+                            let maxOrder = propertyDefs.map(\.sortOrder).max() ?? 0
+                            var newProp = PropertyDefinition(
+                                name: name, type: type, sortOrder: maxOrder + 1, isDefault: false, isVisible: true
+                            )
+                            try? db.savePropertyDefinition(&newProp)
+                        },
+                        onRenameProperty: { propId, newName in
+                            if var prop = propertyDefs.first(where: { $0.id == propId }) {
+                                prop.name = newName
+                                try? db.savePropertyDefinition(&prop)
+                            }
+                        }
+                    )
                 }
             }
         }
@@ -98,7 +126,16 @@ struct ReferenceTableView: View {
             onUpdateReference: onUpdateReference,
             onUpdateTags: onUpdateTags,
             onCreateTag: onCreateTag,
-            onDeleteTag: onDeleteTag
+            onDeleteTag: onDeleteTag,
+            customProperties: propertyDefs.filter { prop in
+                guard prop.isVisible else { return false }
+                if !prop.isDefault { return true }
+                // Include visible defaults that don't have hardcoded columns
+                let hardcodedKeys: Set<String> = ["tags", "readingStatus"]
+                guard let key = prop.defaultFieldKey else { return false }
+                return !hardcodedKeys.contains(key)
+            },
+            customPropertyValueMap: customPropertyValueMap
         )
         .contextMenu(forSelectionType: Reference.ID.self) { ids in
             if let id = ids.first, let ref = references.first(where: { $0.id == id }) {
@@ -315,6 +352,8 @@ private struct ReferenceTableContent: View {
     let onUpdateTags: (Int64, [Int64]) -> Void
     let onCreateTag: (Int64, String) -> Void
     let onDeleteTag: (Int64) -> Void
+    let customProperties: [PropertyDefinition]
+    let customPropertyValueMap: [Int64: [Int64: String]]
 
     @SceneStorage("referenceTableColumnCustomization")
     private var columnCustomization: TableColumnCustomization<Reference>
@@ -353,12 +392,6 @@ private struct ReferenceTableContent: View {
             .width(min: 70, ideal: 90)
             .customizationID(ColumnIdentifier.readingStatus.rawValue)
 
-            TableColumn(ColumnIdentifier.priority.header, value: \.priority.rawValue) { ref in
-                PriorityCell(reference: ref, onUpdate: onUpdateReference)
-            }
-            .width(min: 60, ideal: 80)
-            .customizationID(ColumnIdentifier.priority.rawValue)
-
             TableColumn(ColumnIdentifier.dateAdded.header, value: \.dateAdded) { ref in
                 Text(ref.dateAdded, style: .date)
                     .font(.callout)
@@ -366,6 +399,155 @@ private struct ReferenceTableContent: View {
             }
             .width(min: 70, ideal: 90)
             .customizationID(ColumnIdentifier.dateAdded.rawValue)
+
+            TableColumnForEach(customProperties) { prop in
+                TableColumn(prop.name) { ref in
+                    if prop.isDefault, let key = prop.defaultFieldKey {
+                        DefaultPropertyCellView(
+                            reference: ref,
+                            fieldKey: key,
+                            property: prop
+                        )
+                    } else {
+                        CustomPropertyCellView(
+                            value: customPropertyValueMap[ref.id ?? -1]?[prop.id ?? 0],
+                            property: prop
+                        )
+                    }
+                }
+                .width(min: 60, ideal: 100)
+            }
+        }
+    }
+}
+
+// MARK: - Default Property Cell View
+
+private struct DefaultPropertyCellView: View {
+    let reference: Reference
+    let fieldKey: String
+    let property: PropertyDefinition
+
+    private var value: String {
+        switch fieldKey {
+        case "referenceType": return reference.referenceType.rawValue
+        case "year": return reference.year.map(String.init) ?? ""
+        case "doi": return reference.doi ?? ""
+        case "url": return reference.url ?? ""
+        case "journal": return reference.journal ?? ""
+        case "volume": return reference.volume ?? ""
+        case "issue": return reference.issue ?? ""
+        case "pages": return reference.pages ?? ""
+        case "publisher": return reference.publisher ?? ""
+        case "publisherPlace": return reference.publisherPlace ?? ""
+        case "edition": return reference.edition ?? ""
+        case "isbn": return reference.isbn ?? ""
+        case "issn": return reference.issn ?? ""
+        case "editors": return reference.parsedEditors.displayString
+        case "translators": return reference.parsedTranslators.displayString
+        case "accessedDate": return reference.accessedDate ?? ""
+        case "eventTitle": return reference.eventTitle ?? ""
+        case "eventPlace": return reference.eventPlace ?? ""
+        case "genre": return reference.genre ?? ""
+        case "institution": return reference.institution ?? ""
+        case "number": return reference.number ?? ""
+        case "collectionTitle": return reference.collectionTitle ?? ""
+        case "numberOfPages": return reference.numberOfPages ?? ""
+        case "language": return reference.language ?? ""
+        case "pmid": return reference.pmid ?? ""
+        case "pmcid": return reference.pmcid ?? ""
+        default: return ""
+        }
+    }
+
+    var body: some View {
+        if property.type == .singleSelect, let option = property.options.first(where: { $0.value == value }) {
+            Text(option.value)
+                .font(.callout)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1)
+                .background(Color(hex: option.color).opacity(0.2))
+                .clipShape(Capsule())
+        } else if value.isEmpty {
+            Text("—")
+                .font(.callout)
+                .foregroundStyle(.quaternary)
+        } else {
+            Text(value)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+    }
+}
+
+// MARK: - Custom Property Cell View
+
+private struct CustomPropertyCellView: View {
+    let value: String?
+    let property: PropertyDefinition
+
+    var body: some View {
+        if let value, !value.isEmpty {
+            switch property.type {
+            case .singleSelect:
+                if let option = property.options.first(where: { $0.value == value }) {
+                    Text(option.value)
+                        .font(.callout)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(Color(hex: option.color).opacity(0.2))
+                        .clipShape(Capsule())
+                } else {
+                    Text(value)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            case .multiSelect:
+                if let data = value.data(using: .utf8),
+                   let values = try? JSONDecoder().decode([String].self, from: data) {
+                    HStack(spacing: 2) {
+                        ForEach(values.prefix(2), id: \.self) { val in
+                            if let option = property.options.first(where: { $0.value == val }) {
+                                Text(option.value)
+                                    .font(.caption2)
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 1)
+                                    .background(Color(hex: option.color).opacity(0.2))
+                                    .clipShape(Capsule())
+                            }
+                        }
+                        if values.count > 2 {
+                            Text("+\(values.count - 2)")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+                } else {
+                    Text(value).font(.callout).foregroundStyle(.secondary)
+                }
+            case .checkbox:
+                Image(systemName: value == "true" ? "checkmark.square.fill" : "square")
+                    .font(.callout)
+                    .foregroundStyle(value == "true" ? Color.accentColor : Color.gray.opacity(0.3))
+            case .date:
+                if let date = ISO8601DateFormatter().date(from: value) {
+                    Text(date, style: .date)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(value).font(.callout).foregroundStyle(.secondary)
+                }
+            case .string, .url, .number:
+                Text(value)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        } else {
+            Text("—")
+                .font(.callout)
+                .foregroundStyle(.quaternary)
         }
     }
 }
@@ -554,129 +736,5 @@ struct TagsCellView: View {
     }
 }
 
-private struct TagPickerPopover: View {
-    let assignedTags: [Tag]
-    let allTags: [Tag]
-    let onCommit: ([Int64]) -> Void
-    let onCreateTag: (String) -> Void
-    let onDeleteTag: (Int64) -> Void
-    @Binding var newTagName: String
-    @State private var search = ""
-    @State private var localIds: Set<Int64> = []
-
-    private var filteredTags: [Tag] {
-        if search.isEmpty { return allTags }
-        return allTags.filter { $0.name.localizedCaseInsensitiveContains(search) }
-    }
-
-    private func isAssigned(_ tag: Tag) -> Bool {
-        guard let id = tag.id else { return false }
-        return localIds.contains(id)
-    }
-
-    private func handleCreate(_ name: String) {
-        onCommit(Array(localIds))
-        onCreateTag(name)
-        search = ""
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
-                TextField("Search or create tag…", text: $search)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12))
-                    .onSubmit {
-                        let trimmed = search.trimmingCharacters(in: .whitespaces)
-                        if !trimmed.isEmpty && !allTags.contains(where: { $0.name.lowercased() == trimmed.lowercased() }) {
-                            handleCreate(trimmed)
-                        }
-                    }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-
-            Divider()
-
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(filteredTags) { tag in
-                        let assigned = isAssigned(tag)
-                        HStack(spacing: 0) {
-                            Button {
-                                if let id = tag.id {
-                                    if localIds.contains(id) { localIds.remove(id) } else { localIds.insert(id) }
-                                }
-                            } label: {
-                                HStack(spacing: 8) {
-                                    Image(systemName: assigned ? "checkmark.circle.fill" : "circle")
-                                        .font(.system(size: 13))
-                                        .foregroundStyle(assigned ? Color.accentColor : .secondary)
-                                    Circle()
-                                        .fill(Color(hex: tag.color))
-                                        .frame(width: 8, height: 8)
-                                    Text(tag.name)
-                                        .font(.system(size: 12))
-                                    Spacer()
-                                }
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-
-                            Button {
-                                if let id = tag.id {
-                                    localIds.remove(id)
-                                    onDeleteTag(id)
-                                }
-                            } label: {
-                                Image(systemName: "trash")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(.secondary)
-                            }
-                            .buttonStyle(.plain)
-                            .help("Delete tag")
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 5)
-                    }
-
-                    if !search.isEmpty && !allTags.contains(where: { $0.name.lowercased() == search.trimmingCharacters(in: .whitespaces).lowercased() }) {
-                        Button {
-                            let trimmed = search.trimmingCharacters(in: .whitespaces)
-                            if !trimmed.isEmpty {
-                                handleCreate(trimmed)
-                            }
-                        } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: "plus.circle.fill")
-                                    .font(.system(size: 13))
-                                    .foregroundStyle(Color.accentColor)
-                                Text("Create \"\(search.trimmingCharacters(in: .whitespaces))\"")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(Color.accentColor)
-                                Spacer()
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 5)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.vertical, 4)
-            }
-            .frame(maxHeight: 200)
-        }
-        .frame(width: 220)
-        .onAppear {
-            localIds = Set(assignedTags.compactMap(\.id))
-        }
-        .onDisappear {
-            onCommit(Array(localIds))
-        }
-    }
-}
+// TagPickerPopover is in TagPickerPopover.swift
 

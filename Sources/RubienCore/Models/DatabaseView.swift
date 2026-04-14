@@ -72,7 +72,7 @@ public struct ColumnConfig: Codable, Hashable, Sendable {
         .init(columnId: .referenceType, isVisible: true,  displayOrder: 4),
         .init(columnId: .tags,          isVisible: true,  displayOrder: 5),
         .init(columnId: .readingStatus, isVisible: true,  displayOrder: 6),
-        .init(columnId: .priority,      isVisible: true,  displayOrder: 7),
+        .init(columnId: .priority,      isVisible: false, displayOrder: 7),
         .init(columnId: .dateAdded,     isVisible: true,  displayOrder: 8),
         .init(columnId: .dateModified,  isVisible: false, displayOrder: 9),
         .init(columnId: .doi,           isVisible: false, displayOrder: 10),

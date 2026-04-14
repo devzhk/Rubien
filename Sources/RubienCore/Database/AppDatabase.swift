@@ -583,6 +583,116 @@ public final class AppDatabase: Sendable {
             }
         }
 
+        migrator.registerMigration("v13-custom-properties") { db in
+            try db.create(table: "propertyDefinition", ifNotExists: true) { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("name", .text).notNull()
+                t.column("type", .text).notNull().defaults(to: "string")
+                t.column("optionsJSON", .text).notNull().defaults(to: "[]")
+                t.column("sortOrder", .integer).notNull().defaults(to: 0)
+                t.column("isDefault", .boolean).notNull().defaults(to: false)
+                t.column("defaultFieldKey", .text)
+                t.column("isVisible", .boolean).notNull().defaults(to: true)
+            }
+
+            try db.create(table: "propertyValue", ifNotExists: true) { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("referenceId", .integer).notNull()
+                    .references("reference", onDelete: .cascade)
+                t.column("propertyId", .integer).notNull()
+                    .references("propertyDefinition", onDelete: .cascade)
+                t.column("value", .text)
+                t.uniqueKey(["referenceId", "propertyId"])
+            }
+            try db.create(indexOn: "propertyValue", columns: ["referenceId"])
+
+            // Seed default properties
+
+            let typeOptions: [SelectOption] = [
+                .init(value: "Journal Article", color: "#007AFF"),
+                .init(value: "Book", color: "#34C759"),
+                .init(value: "Book Section", color: "#00C7BE"),
+                .init(value: "Conference Paper", color: "#AF52DE"),
+                .init(value: "Preprint", color: "#5AC8FA"),
+                .init(value: "Thesis", color: "#FF9500"),
+                .init(value: "Report", color: "#A2845E"),
+                .init(value: "Web Page", color: "#30B0C7"),
+                .init(value: "Dataset", color: "#FFCC00"),
+                .init(value: "Software", color: "#BF5AF2"),
+                .init(value: "Patent", color: "#FF6482"),
+                .init(value: "Magazine Article", color: "#64D2FF"),
+                .init(value: "Newspaper Article", color: "#8E8E93"),
+                .init(value: "Standard", color: "#FF2D55"),
+                .init(value: "Manuscript", color: "#A2845E"),
+                .init(value: "Interview", color: "#FF3B30"),
+                .init(value: "Presentation", color: "#007AFF"),
+                .init(value: "Blog Post", color: "#34C759"),
+                .init(value: "Forum Post", color: "#5AC8FA"),
+                .init(value: "Legal Case", color: "#8E8E93"),
+                .init(value: "Legislation", color: "#FF9500"),
+                .init(value: "Other", color: "#8E8E93"),
+            ]
+            let typeOptionsJSON = (try? String(data: JSONEncoder().encode(typeOptions), encoding: .utf8)) ?? "[]"
+
+            let statusOptions: [SelectOption] = [
+                .init(value: "Unread", color: "#8E8E93"),
+                .init(value: "Reading", color: "#007AFF"),
+                .init(value: "Skimmed", color: "#FF9500"),
+                .init(value: "Read", color: "#34C759"),
+            ]
+            let statusOptionsJSON = (try? String(data: JSONEncoder().encode(statusOptions), encoding: .utf8)) ?? "[]"
+
+            // 6 visible defaults
+            let visibleDefaults: [(name: String, type: String, optionsJSON: String, fieldKey: String)] = [
+                ("Type", "singleSelect", typeOptionsJSON, "referenceType"),
+                ("Status", "singleSelect", statusOptionsJSON, "readingStatus"),
+                ("Tags", "multiSelect", "[]", "tags"),
+                ("Year", "number", "[]", "year"),
+                ("DOI", "url", "[]", "doi"),
+                ("URL", "url", "[]", "url"),
+            ]
+
+            for (index, def) in visibleDefaults.enumerated() {
+                try db.execute(sql: """
+                    INSERT INTO propertyDefinition (name, type, optionsJSON, sortOrder, isDefault, defaultFieldKey, isVisible)
+                    VALUES (?, ?, ?, ?, 1, ?, 1)
+                    """, arguments: [def.name, def.type, def.optionsJSON, index, def.fieldKey])
+            }
+
+            // Hidden defaults (auto-populated by resolvers / importers)
+            let hiddenDefaults: [(name: String, type: String, fieldKey: String)] = [
+                ("Journal", "string", "journal"),
+                ("Volume", "string", "volume"),
+                ("Issue", "string", "issue"),
+                ("Pages", "string", "pages"),
+                ("Publisher", "string", "publisher"),
+                ("Place", "string", "publisherPlace"),
+                ("Edition", "string", "edition"),
+                ("ISBN", "string", "isbn"),
+                ("ISSN", "string", "issn"),
+                ("Editors", "string", "editors"),
+                ("Translators", "string", "translators"),
+                ("Accessed Date", "string", "accessedDate"),
+                ("Event", "string", "eventTitle"),
+                ("Event Place", "string", "eventPlace"),
+                ("Genre", "string", "genre"),
+                ("Institution", "string", "institution"),
+                ("Number", "string", "number"),
+                ("Series", "string", "collectionTitle"),
+                ("Pages Count", "string", "numberOfPages"),
+                ("Language", "string", "language"),
+                ("PMID", "string", "pmid"),
+                ("PMCID", "string", "pmcid"),
+            ]
+
+            for (index, def) in hiddenDefaults.enumerated() {
+                try db.execute(sql: """
+                    INSERT INTO propertyDefinition (name, type, optionsJSON, sortOrder, isDefault, defaultFieldKey, isVisible)
+                    VALUES (?, ?, '[]', ?, 1, ?, 0)
+                    """, arguments: [def.name, def.type, visibleDefaults.count + index, def.fieldKey])
+            }
+        }
+
         return migrator
     }
 }
@@ -1731,6 +1841,124 @@ extension AppDatabase {
                     let refId: Int64 = row["referenceId"]
                     let tag = Tag(id: row["id"], name: row["name"], color: row["color"])
                     map[refId, default: []].append(tag)
+                }
+                return map
+            }
+            .publisher(in: dbWriter, scheduling: .immediate)
+            .eraseToAnyPublisher()
+    }
+}
+
+// MARK: - Property Definition CRUD
+extension AppDatabase {
+    public func fetchAllPropertyDefinitions() throws -> [PropertyDefinition] {
+        try dbWriter.read { db in
+            try PropertyDefinition
+                .order(PropertyDefinition.Columns.sortOrder)
+                .fetchAll(db)
+        }
+    }
+
+    public func fetchVisiblePropertyDefinitions() throws -> [PropertyDefinition] {
+        try dbWriter.read { db in
+            try PropertyDefinition
+                .filter(PropertyDefinition.Columns.isVisible == true)
+                .order(PropertyDefinition.Columns.sortOrder)
+                .fetchAll(db)
+        }
+    }
+
+    public func savePropertyDefinition(_ prop: inout PropertyDefinition) throws {
+        try dbWriter.write { db in
+            try prop.save(db)
+        }
+    }
+
+    public func deletePropertyDefinition(id: Int64) throws {
+        try dbWriter.write { db in
+            // Guard: never delete default properties
+            if let prop = try PropertyDefinition.fetchOne(db, id: id), prop.isDefault {
+                return
+            }
+            // Delete associated values first
+            try PropertyValue
+                .filter(PropertyValue.Columns.propertyId == id)
+                .deleteAll(db)
+            _ = try PropertyDefinition.deleteOne(db, id: id)
+        }
+    }
+
+    public func reorderProperties(_ orderedIds: [Int64]) throws {
+        try dbWriter.write { db in
+            for (index, propId) in orderedIds.enumerated() {
+                try db.execute(
+                    sql: "UPDATE propertyDefinition SET sortOrder = ? WHERE id = ?",
+                    arguments: [index, propId]
+                )
+            }
+        }
+    }
+
+    public func togglePropertyVisibility(id: Int64, visible: Bool) throws {
+        try dbWriter.write { db in
+            try db.execute(
+                sql: "UPDATE propertyDefinition SET isVisible = ? WHERE id = ?",
+                arguments: [visible, id]
+            )
+        }
+    }
+
+    public func observePropertyDefinitions() -> AnyPublisher<[PropertyDefinition], Error> {
+        ValueObservation
+            .tracking { db in
+                try PropertyDefinition
+                    .order(PropertyDefinition.Columns.sortOrder)
+                    .fetchAll(db)
+            }
+            .publisher(in: dbWriter, scheduling: .immediate)
+            .eraseToAnyPublisher()
+    }
+}
+
+// MARK: - Property Value CRUD
+extension AppDatabase {
+    public func fetchPropertyValues(forReference refId: Int64) throws -> [PropertyValue] {
+        try dbWriter.read { db in
+            try PropertyValue
+                .filter(PropertyValue.Columns.referenceId == refId)
+                .fetchAll(db)
+        }
+    }
+
+    public func setPropertyValue(referenceId: Int64, propertyId: Int64, value: String?) throws {
+        try dbWriter.write { db in
+            if let existing = try PropertyValue
+                .filter(PropertyValue.Columns.referenceId == referenceId)
+                .filter(PropertyValue.Columns.propertyId == propertyId)
+                .fetchOne(db) {
+                if let value {
+                    var updated = existing
+                    updated.value = value
+                    try updated.update(db)
+                } else {
+                    _ = try existing.delete(db)
+                }
+            } else if let value {
+                var pv = PropertyValue(referenceId: referenceId, propertyId: propertyId, value: value)
+                try pv.insert(db)
+            }
+        }
+    }
+
+    public func observeAllPropertyValues() -> AnyPublisher<[Int64: [Int64: String]], Error> {
+        ValueObservation
+            .tracking { db in
+                let rows = try PropertyValue.fetchAll(db)
+                var map: [Int64: [Int64: String]] = [:]
+                for row in rows {
+                    if let val = row.value {
+                        map[row.referenceId, default: [:]][row.propertyId] = val
+                    }
                 }
                 return map
             }

@@ -11,18 +11,23 @@ struct ReferenceDetailView: View {
     let onDelete: () -> Void
     var onOpenPDFReader: ((Reference) -> Void)?
     var onOpenWebReader: ((Reference) -> Void)?
+    var onUpdateTags: ((Int64, [Int64]) -> Void)?
+    var onCreateTag: ((Int64, String) -> Void)?
+    var onDeleteTag: ((Int64) -> Void)?
 
-    @State private var isEditing = false
     @State private var editedRef: Reference
+    @State private var editingField: String?
     @State private var previewWindow: NSWindow?
     @State private var previewWindowCloseObserver: NSObjectProtocol?
     @State private var referenceTags: [Tag] = []
     @State private var pdfAnnotationCount: Int = 0
     @State private var webAnnotationCount: Int = 0
     @State private var hasStoredWebContent = false
-    @State private var isLoadingWebContent = false
     @State private var pdfDownloadState: PDFDownloadState = .idle
     @State private var showOverwriteConfirmation = false
+    @Binding var propertyDefs: [PropertyDefinition]
+    @State private var customValues: [Int64: String] = [:]
+    @State private var showPropertyManager = false
 
     private enum PDFDownloadState {
         case idle, downloading, failed(String)
@@ -31,7 +36,13 @@ struct ReferenceDetailView: View {
 
     let liveTags: [Tag]
 
-    init(reference: Reference, collections: [Collection], allTags: [Tag], liveTags: [Tag] = [], db: AppDatabase, onSave: @escaping (Reference) -> Void, onDelete: @escaping () -> Void, onOpenPDFReader: ((Reference) -> Void)? = nil, onOpenWebReader: ((Reference) -> Void)? = nil) {
+    init(reference: Reference, collections: [Collection], allTags: [Tag], liveTags: [Tag] = [], db: AppDatabase,
+         onSave: @escaping (Reference) -> Void, onDelete: @escaping () -> Void,
+         onOpenPDFReader: ((Reference) -> Void)? = nil, onOpenWebReader: ((Reference) -> Void)? = nil,
+         onUpdateTags: ((Int64, [Int64]) -> Void)? = nil,
+         onCreateTag: ((Int64, String) -> Void)? = nil,
+         onDeleteTag: ((Int64) -> Void)? = nil,
+         propertyDefs: Binding<[PropertyDefinition]>) {
         self.reference = reference
         self.collections = collections
         self.allTags = allTags
@@ -41,55 +52,47 @@ struct ReferenceDetailView: View {
         self.onDelete = onDelete
         self.onOpenPDFReader = onOpenPDFReader
         self.onOpenWebReader = onOpenWebReader
+        self.onUpdateTags = onUpdateTags
+        self.onCreateTag = onCreateTag
+        self.onDeleteTag = onDeleteTag
         self._editedRef = State(initialValue: reference)
+        self._propertyDefs = propertyDefs
     }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                if isEditing {
-                    editView
-                } else {
-                    displayView
-                }
+                headerSection
+                propertiesCard
+                if canOpenWebReader { webReaderCard }
+                if reference.pdfPath != nil { pdfCard }
+                abstractSection
+                notesSection
+                footerSection
             }
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background {
-            if !isEditing, reference.pdfPath != nil {
+            if editingField == nil, reference.pdfPath != nil {
                 quickPreviewShortcut
             }
         }
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button(isEditing
-                       ? String(localized: "common.done", bundle: .module)
-                       : String(localized: "Edit", bundle: .module)) {
-                    Task {
-                        if isEditing {
-                            await saveEdits()
-                        } else {
-                            isEditing = true
-                            await loadWebContentIfNeeded()
-                        }
-                    }
-                }
-            }
-        }
         .onChange(of: reference) { oldRef, newRef in
+            commitPendingEdit()
             closeQuickPreviewWindow()
             editedRef = newRef
-            isEditing = false
+            editingField = nil
             guard oldRef.id != newRef.id else { return }
             referenceTags = []
             pdfAnnotationCount = 0
             webAnnotationCount = 0
             hasStoredWebContent = false
-            isLoadingWebContent = false
+            customValues = [:]
         }
         .task(id: reference.id) {
             await loadSupplementaryData(for: reference.id)
+            await loadCustomPropertyValues(for: reference.id)
         }
         .onChange(of: liveTags) { _, newTags in
             referenceTags = newTags
@@ -97,297 +100,948 @@ struct ReferenceDetailView: View {
         .onDisappear { closeQuickPreviewWindow() }
     }
 
-    // MARK: - Display View
+    // MARK: - Header (Title + Authors)
+
     @ViewBuilder
-    private var displayView: some View {
-        VStack(alignment: .leading, spacing: 0) {
-
-            // ── Header: badge / title / authors / publication line ──
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 6) {
-                    Label(reference.referenceType.rawValue, systemImage: reference.referenceType.icon)
-                        .font(.caption)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(.quaternary)
-                        .clipShape(Capsule())
-                    if let source = reference.metadataSource {
-                        Text(source.displayName)
-                            .font(.caption)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(.quaternary)
-                            .clipShape(Capsule())
-                    }
-                }
-
+    private var headerSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            // Title — click to edit
+            if editingField == "title" {
+                InlineTitleEditor(
+                    text: Binding(
+                        get: { editedRef.title },
+                        set: { editedRef.title = $0 }
+                    ),
+                    onCommit: { commitFieldAndSave("title") },
+                    onCancel: { cancelEdit() }
+                )
+            } else {
                 Text(reference.title)
                     .font(.title2.bold())
                     .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture { beginEdit("title") }
+            }
 
-                if !reference.authors.isEmpty {
-                    Text(reference.authors.displayString)
-                        .font(.body)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                // Publication line — only rendered when at least one field is present
-                let pubParts: [String] = [
-                    reference.journal.flatMap { $0.isEmpty ? nil : $0 },
-                    reference.volume.map { "Vol. \($0)" },
-                    reference.issue.map { "(\($0))" },
-                    reference.pages.map { "pp. \($0)" },
-                    reference.year.map { "(\(String($0)))" }
-                ].compactMap { $0 }
-                if !pubParts.isEmpty {
-                    HStack(spacing: 8) {
-                        if let journal = reference.journal, !journal.isEmpty {
-                            Text(journal).italic()
-                        }
-                        if let vol = reference.volume { Text("Vol. \(vol)") }
-                        if let issue = reference.issue { Text("(\(issue))") }
-                        if let pages = reference.pages { Text("pp. \(pages)") }
-                        if let year = reference.year { Text("(\(String(year)))") }
-                    }
-                    .font(.callout)
+            // Authors — click to edit
+            if editingField == "authors" {
+                InlineAuthorsEditor(
+                    text: Binding(
+                        get: { editedRef.authors.displayString },
+                        set: { editedRef.authors = AuthorName.parseList($0) }
+                    ),
+                    onCommit: { commitFieldAndSave("authors") },
+                    onCancel: { cancelEdit() }
+                )
+            } else if !reference.authors.isEmpty {
+                Text(reference.authors.displayString)
+                    .font(.body)
                     .foregroundStyle(.secondary)
-                }
-            }
-            .padding(.bottom, 16)
-
-            // ── Identifiers card (DOI / URL) ──
-            let hasDOI = reference.doi.map { !$0.isEmpty } ?? false
-            let hasURL = (reference.url.map { !$0.isEmpty } ?? false)
-            if hasDOI || hasURL {
-                VStack(alignment: .leading, spacing: 8) {
-                    if let doi = reference.doi, !doi.isEmpty {
-                        HStack(alignment: .top, spacing: 10) {
-                            Text("DOI")
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
-                                .frame(width: 36, alignment: .trailing)
-                            Link(doi, destination: URL(string: "https://doi.org/\(doi)") ?? URL(string: "https://doi.org")!)
-                                .font(.callout)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-                    }
-                    if let url = reference.url, !url.isEmpty, let u = URL(string: url) {
-                        HStack(alignment: .top, spacing: 10) {
-                            Text("URL")
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
-                                .frame(width: 36, alignment: .trailing)
-                            urlSection(url: u)
-                        }
-                    }
-                }
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .padding(.bottom, 10)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .contentShape(Rectangle())
+                    .onTapGesture { beginEdit("authors") }
+            } else {
+                Text("Add authors")
+                    .font(.body)
+                    .foregroundStyle(.quaternary)
+                    .contentShape(Rectangle())
+                    .onTapGesture { beginEdit("authors") }
             }
 
-            // ── Metadata + Tags card ──
-            let metaRows = metadataRows(for: reference)
-            let hasTags = !referenceTags.isEmpty
-            if !metaRows.isEmpty || hasTags {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(metaRows, id: \.label) { row in
-                        HStack(alignment: .top, spacing: 10) {
-                            Text(row.label)
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
-                                .frame(width: 36, alignment: .trailing)
-                            Text(row.value)
-                                .font(.callout)
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
+            // Publication line (read-only summary when fields have values)
+            let pubParts: [String] = [
+                reference.journal.flatMap { $0.isEmpty ? nil : $0 },
+                reference.volume.map { "Vol. \($0)" },
+                reference.issue.map { "(\($0))" },
+                reference.pages.map { "pp. \($0)" },
+                reference.year.map { "(\(String($0)))" }
+            ].compactMap { $0 }
+            if !pubParts.isEmpty {
+                HStack(spacing: 8) {
+                    if let journal = reference.journal, !journal.isEmpty {
+                        Text(journal).italic()
                     }
-                    if hasTags {
-                        if !metaRows.isEmpty { Divider() }
-                        HStack(alignment: .top, spacing: 10) {
-                            Text("Tags", bundle: .module)
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
-                                .frame(width: 36, alignment: .trailing)
-                            HStack(spacing: 4) {
-                                ForEach(referenceTags) { tag in
-                                    Text(tag.name)
-                                        .font(.caption)
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 2)
-                                        .background(Color(hex: tag.color).opacity(0.2))
-                                        .clipShape(Capsule())
-                                }
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                    }
+                    if let vol = reference.volume { Text("Vol. \(vol)") }
+                    if let issue = reference.issue { Text("(\(issue))") }
+                    if let pages = reference.pages { Text("pp. \(pages)") }
+                    if let year = reference.year { Text("(\(String(year)))") }
                 }
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .padding(.bottom, 10)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    // MARK: - Properties Card
+
+    @ViewBuilder
+    private var propertiesCard: some View {
+        let visibleDefs = propertyDefs.filter(\.isVisible).sorted { $0.sortOrder < $1.sortOrder }
+
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(visibleDefs) { prop in
+                propertyRow(for: prop)
+                if prop.id != visibleDefs.last?.id {
+                    Divider().padding(.leading, 100)
+                }
             }
 
-            // ── Web reader card ──
-            if canOpenWebReader {
-                let hasClip = hasStoredWebContent
-                HStack(spacing: 10) {
-                    Image(systemName: hasClip ? "doc.text.image" : "safari")
-                        .font(.body)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 20)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(hasClip
-                             ? String(localized: "Clipped article ready", bundle: .module)
-                             : String(localized: "Read source article online", bundle: .module))
-                            .font(.callout)
-                        if webAnnotationCount > 0 {
-                            Text(String(format: String(localized: "%d annotations", bundle: .module), webAnnotationCount))
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
+            // PDF attach/remove actions
+            Divider().padding(.leading, 100)
+            PropertyRowLayout(label: "PDF") {
+                if editedRef.pdfPath != nil {
+                    HStack(spacing: 8) {
+                        Label("Attached", systemImage: "doc.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                        Button("Remove") {
+                            editedRef.pdfPath = nil
+                            commitDefaultSave()
                         }
+                        .font(.system(size: 11))
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.red)
                     }
-                    Spacer()
+                } else {
                     Button {
-                        Task {
-                            guard let prepared = await prepareReferenceForWebReader() else { return }
-                            onOpenWebReader?(prepared)
+                        if let url = OpenPanelPicker.pickPDFFile(),
+                           let path = try? PDFService.importPDF(from: url) {
+                            editedRef.pdfPath = path
+                            commitDefaultSave()
                         }
                     } label: {
-                        Label(String(localized: "Read web", bundle: .module), systemImage: "text.book.closed")
+                        Label("Attach PDF...", systemImage: "plus")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
                     }
-                    .buttonStyle(SLPrimaryButtonStyle())
-                    .controlSize(.small)
+                    .buttonStyle(.plain)
                 }
-                .padding(12)
-                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .padding(.bottom, 10)
             }
 
-            // ── PDF card ──
-            if reference.pdfPath != nil {
-                HStack(spacing: 10) {
-                    Image(systemName: "doc.fill")
-                        .font(.body)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 20)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("PDF attached", bundle: .module)
-                            .font(.callout)
-                        if pdfAnnotationCount > 0 {
-                            Text(String(format: String(localized: "%d annotations", bundle: .module), pdfAnnotationCount))
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
+            // + Add property button
+            Divider().padding(.leading, 100)
+            Button {
+                showPropertyManager = true
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 11))
+                    Text("Add a property")
+                        .font(.system(size: 12))
+                }
+                .foregroundStyle(.tertiary)
+                .padding(.vertical, 6)
+                .padding(.horizontal, 12)
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $showPropertyManager) {
+                PropertyManagerPopover(
+                    propertyDefs: $propertyDefs,
+                    onToggleVisibility: { propId, visible in
+                        try? db.togglePropertyVisibility(id: propId, visible: visible)
+                    },
+                    onDelete: { propId in
+                        try? db.deletePropertyDefinition(id: propId)
+                    },
+                    onReorder: { orderedIds in
+                        try? db.reorderProperties(orderedIds)
+                    },
+                    onCreateProperty: { name, type in
+                        let maxOrder = propertyDefs.map(\.sortOrder).max() ?? 0
+                        var newProp = PropertyDefinition(
+                            name: name, type: type, sortOrder: maxOrder + 1, isDefault: false, isVisible: true
+                        )
+                        try? db.savePropertyDefinition(&newProp)
+                    },
+                    onRenameProperty: { propId, newName in
+                        if var prop = propertyDefs.first(where: { $0.id == propId }) {
+                            prop.name = newName
+                            try? db.savePropertyDefinition(&prop)
                         }
                     }
-                    Spacer()
-                    Button {
-                        onOpenPDFReader?(reference)
-                    } label: {
-                        Label(String(localized: "Read & annotate", bundle: .module), systemImage: "book.pages")
-                    }
-                    .buttonStyle(SLPrimaryButtonStyle())
-                    .controlSize(.small)
-                }
-                .padding(12)
-                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .padding(.bottom, 10)
+                )
             }
+        }
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
 
-            // ── Abstract ──
-            if let abstract = reference.abstract, !abstract.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Abstract", bundle: .module)
-                        .font(.footnote.weight(.semibold))
+    // MARK: - Property Row Dispatcher
+
+    @ViewBuilder
+    private func propertyRow(for prop: PropertyDefinition) -> some View {
+        if prop.isDefault {
+            defaultPropertyRow(for: prop)
+        } else {
+            customPropertyRow(for: prop)
+        }
+    }
+
+    @ViewBuilder
+    private func defaultPropertyRow(for prop: PropertyDefinition) -> some View {
+        switch prop.defaultFieldKey {
+        case "referenceType":
+            InlineSingleSelectRow(
+                label: prop.name,
+                value: editedRef.referenceType.rawValue,
+                options: prop.options,
+                onSelect: { value in
+                    if let type = ReferenceType(rawValue: value) {
+                        editedRef.referenceType = type
+                        commitDefaultSave()
+                    }
+                }
+            )
+        case "readingStatus":
+            InlineSingleSelectRow(
+                label: prop.name,
+                value: editedRef.readingStatus.label,
+                options: prop.options,
+                onSelect: { value in
+                    if let status = ReadingStatus.allCases.first(where: { $0.label == value }) {
+                        editedRef.readingStatus = status
+                        commitDefaultSave()
+                    }
+                }
+            )
+        case "tags":
+            InlineTagsRow(
+                label: prop.name,
+                tags: referenceTags,
+                allTags: allTags,
+                onUpdateTags: { tagIds in
+                    guard let refId = reference.id else { return }
+                    onUpdateTags?(refId, tagIds)
+                },
+                onCreateTag: { name in
+                    guard let refId = reference.id else { return }
+                    onCreateTag?(refId, name)
+                },
+                onDeleteTag: { tagId in
+                    onDeleteTag?(tagId)
+                }
+            )
+        case "year":
+            InlineNumberRow(
+                label: prop.name,
+                value: editedRef.year,
+                placeholder: "Empty",
+                isEditing: editingField == "year",
+                onBeginEditing: { beginEdit("year") },
+                onCommit: { val in
+                    editedRef.year = val
+                    commitFieldAndSave("year")
+                },
+                onCancel: { cancelEdit() }
+            )
+        case "doi":
+            InlineURLRow(
+                label: prop.name,
+                value: editedRef.doi ?? "",
+                isEditing: editingField == "doi",
+                onBeginEditing: { beginEdit("doi") },
+                onCommit: { val in
+                    editedRef.doi = val.isEmpty ? nil : val
+                    commitFieldAndSave("doi")
+                },
+                onCancel: { cancelEdit() }
+            )
+        case "url":
+            InlineURLRow(
+                label: prop.name,
+                value: editedRef.url ?? "",
+                isEditing: editingField == "url",
+                onBeginEditing: { beginEdit("url") },
+                onCommit: { val in
+                    editedRef.url = val.isEmpty ? nil : val
+                    commitFieldAndSave("url")
+                },
+                onCancel: { cancelEdit() }
+            )
+        case "journal":
+            InlineStringRow(
+                label: prop.name,
+                value: editedRef.journal ?? "",
+                isEditing: editingField == "journal",
+                onBeginEditing: { beginEdit("journal") },
+                onCommit: { val in
+                    editedRef.journal = val.isEmpty ? nil : val
+                    commitFieldAndSave("journal")
+                },
+                onCancel: { cancelEdit() }
+            )
+        case "volume":
+            InlineStringRow(
+                label: prop.name,
+                value: editedRef.volume ?? "",
+                isEditing: editingField == "volume",
+                onBeginEditing: { beginEdit("volume") },
+                onCommit: { val in
+                    editedRef.volume = val.isEmpty ? nil : val
+                    commitFieldAndSave("volume")
+                },
+                onCancel: { cancelEdit() }
+            )
+        case "issue":
+            InlineStringRow(
+                label: prop.name,
+                value: editedRef.issue ?? "",
+                isEditing: editingField == "issue",
+                onBeginEditing: { beginEdit("issue") },
+                onCommit: { val in
+                    editedRef.issue = val.isEmpty ? nil : val
+                    commitFieldAndSave("issue")
+                },
+                onCancel: { cancelEdit() }
+            )
+        case "pages":
+            InlineStringRow(
+                label: prop.name,
+                value: editedRef.pages ?? "",
+                isEditing: editingField == "pages",
+                onBeginEditing: { beginEdit("pages") },
+                onCommit: { val in
+                    editedRef.pages = val.isEmpty ? nil : val
+                    commitFieldAndSave("pages")
+                },
+                onCancel: { cancelEdit() }
+            )
+        case "publisher":
+            InlineStringRow(
+                label: prop.name,
+                value: editedRef.publisher ?? "",
+                isEditing: editingField == "publisher",
+                onBeginEditing: { beginEdit("publisher") },
+                onCommit: { val in
+                    editedRef.publisher = val.isEmpty ? nil : val
+                    commitFieldAndSave("publisher")
+                },
+                onCancel: { cancelEdit() }
+            )
+        case "publisherPlace":
+            InlineStringRow(
+                label: prop.name,
+                value: editedRef.publisherPlace ?? "",
+                isEditing: editingField == "publisherPlace",
+                onBeginEditing: { beginEdit("publisherPlace") },
+                onCommit: { val in
+                    editedRef.publisherPlace = val.isEmpty ? nil : val
+                    commitFieldAndSave("publisherPlace")
+                },
+                onCancel: { cancelEdit() }
+            )
+        case "edition":
+            InlineStringRow(
+                label: prop.name,
+                value: editedRef.edition ?? "",
+                isEditing: editingField == "edition",
+                onBeginEditing: { beginEdit("edition") },
+                onCommit: { val in
+                    editedRef.edition = val.isEmpty ? nil : val
+                    commitFieldAndSave("edition")
+                },
+                onCancel: { cancelEdit() }
+            )
+        case "isbn":
+            InlineStringRow(
+                label: prop.name,
+                value: editedRef.isbn ?? "",
+                isEditing: editingField == "isbn",
+                onBeginEditing: { beginEdit("isbn") },
+                onCommit: { val in
+                    editedRef.isbn = val.isEmpty ? nil : val
+                    commitFieldAndSave("isbn")
+                },
+                onCancel: { cancelEdit() }
+            )
+        case "issn":
+            InlineStringRow(
+                label: prop.name,
+                value: editedRef.issn ?? "",
+                isEditing: editingField == "issn",
+                onBeginEditing: { beginEdit("issn") },
+                onCommit: { val in
+                    editedRef.issn = val.isEmpty ? nil : val
+                    commitFieldAndSave("issn")
+                },
+                onCancel: { cancelEdit() }
+            )
+        case "editors":
+            InlineStringRow(
+                label: prop.name,
+                value: editedRef.parsedEditors.displayString,
+                isEditing: editingField == "editors",
+                onBeginEditing: { beginEdit("editors") },
+                onCommit: { val in
+                    editedRef.editors = val.isEmpty ? nil : Reference.encodeNames(AuthorName.parseList(val))
+                    commitFieldAndSave("editors")
+                },
+                onCancel: { cancelEdit() }
+            )
+        case "translators":
+            InlineStringRow(
+                label: prop.name,
+                value: editedRef.parsedTranslators.displayString,
+                isEditing: editingField == "translators",
+                onBeginEditing: { beginEdit("translators") },
+                onCommit: { val in
+                    editedRef.translators = val.isEmpty ? nil : Reference.encodeNames(AuthorName.parseList(val))
+                    commitFieldAndSave("translators")
+                },
+                onCancel: { cancelEdit() }
+            )
+        case "accessedDate":
+            InlineStringRow(
+                label: prop.name,
+                value: editedRef.accessedDate ?? "",
+                isEditing: editingField == "accessedDate",
+                onBeginEditing: { beginEdit("accessedDate") },
+                onCommit: { val in
+                    editedRef.accessedDate = val.isEmpty ? nil : val
+                    commitFieldAndSave("accessedDate")
+                },
+                onCancel: { cancelEdit() }
+            )
+        case "eventTitle":
+            InlineStringRow(
+                label: prop.name,
+                value: editedRef.eventTitle ?? "",
+                isEditing: editingField == "eventTitle",
+                onBeginEditing: { beginEdit("eventTitle") },
+                onCommit: { val in
+                    editedRef.eventTitle = val.isEmpty ? nil : val
+                    commitFieldAndSave("eventTitle")
+                },
+                onCancel: { cancelEdit() }
+            )
+        case "eventPlace":
+            InlineStringRow(
+                label: prop.name,
+                value: editedRef.eventPlace ?? "",
+                isEditing: editingField == "eventPlace",
+                onBeginEditing: { beginEdit("eventPlace") },
+                onCommit: { val in
+                    editedRef.eventPlace = val.isEmpty ? nil : val
+                    commitFieldAndSave("eventPlace")
+                },
+                onCancel: { cancelEdit() }
+            )
+        case "genre":
+            InlineStringRow(
+                label: prop.name,
+                value: editedRef.genre ?? "",
+                isEditing: editingField == "genre",
+                onBeginEditing: { beginEdit("genre") },
+                onCommit: { val in
+                    editedRef.genre = val.isEmpty ? nil : val
+                    commitFieldAndSave("genre")
+                },
+                onCancel: { cancelEdit() }
+            )
+        case "institution":
+            InlineStringRow(
+                label: prop.name,
+                value: editedRef.institution ?? "",
+                isEditing: editingField == "institution",
+                onBeginEditing: { beginEdit("institution") },
+                onCommit: { val in
+                    editedRef.institution = val.isEmpty ? nil : val
+                    commitFieldAndSave("institution")
+                },
+                onCancel: { cancelEdit() }
+            )
+        case "number":
+            InlineStringRow(
+                label: prop.name,
+                value: editedRef.number ?? "",
+                isEditing: editingField == "number",
+                onBeginEditing: { beginEdit("number") },
+                onCommit: { val in
+                    editedRef.number = val.isEmpty ? nil : val
+                    commitFieldAndSave("number")
+                },
+                onCancel: { cancelEdit() }
+            )
+        case "collectionTitle":
+            InlineStringRow(
+                label: prop.name,
+                value: editedRef.collectionTitle ?? "",
+                isEditing: editingField == "collectionTitle",
+                onBeginEditing: { beginEdit("collectionTitle") },
+                onCommit: { val in
+                    editedRef.collectionTitle = val.isEmpty ? nil : val
+                    commitFieldAndSave("collectionTitle")
+                },
+                onCancel: { cancelEdit() }
+            )
+        case "numberOfPages":
+            InlineStringRow(
+                label: prop.name,
+                value: editedRef.numberOfPages ?? "",
+                isEditing: editingField == "numberOfPages",
+                onBeginEditing: { beginEdit("numberOfPages") },
+                onCommit: { val in
+                    editedRef.numberOfPages = val.isEmpty ? nil : val
+                    commitFieldAndSave("numberOfPages")
+                },
+                onCancel: { cancelEdit() }
+            )
+        case "language":
+            InlineStringRow(
+                label: prop.name,
+                value: editedRef.language ?? "",
+                isEditing: editingField == "language",
+                onBeginEditing: { beginEdit("language") },
+                onCommit: { val in
+                    editedRef.language = val.isEmpty ? nil : val
+                    commitFieldAndSave("language")
+                },
+                onCancel: { cancelEdit() }
+            )
+        case "pmid":
+            InlineStringRow(
+                label: prop.name,
+                value: editedRef.pmid ?? "",
+                isEditing: editingField == "pmid",
+                onBeginEditing: { beginEdit("pmid") },
+                onCommit: { val in
+                    editedRef.pmid = val.isEmpty ? nil : val
+                    commitFieldAndSave("pmid")
+                },
+                onCancel: { cancelEdit() }
+            )
+        case "pmcid":
+            InlineStringRow(
+                label: prop.name,
+                value: editedRef.pmcid ?? "",
+                isEditing: editingField == "pmcid",
+                onBeginEditing: { beginEdit("pmcid") },
+                onCommit: { val in
+                    editedRef.pmcid = val.isEmpty ? nil : val
+                    commitFieldAndSave("pmcid")
+                },
+                onCancel: { cancelEdit() }
+            )
+        default:
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder
+    private func customPropertyRow(for prop: PropertyDefinition) -> some View {
+        let propId = prop.id ?? 0
+        let currentValue = customValues[propId] ?? ""
+        let fieldKey = "custom_\(propId)"
+
+        switch prop.type {
+        case .string:
+            InlineStringRow(
+                label: prop.name,
+                value: currentValue,
+                isEditing: editingField == fieldKey,
+                onBeginEditing: { beginEdit(fieldKey) },
+                onCommit: { val in
+                    saveCustomValue(propId: propId, value: val.isEmpty ? nil : val)
+                    editingField = nil
+                },
+                onCancel: { cancelEdit() }
+            )
+        case .url:
+            InlineURLRow(
+                label: prop.name,
+                value: currentValue,
+                isEditing: editingField == fieldKey,
+                onBeginEditing: { beginEdit(fieldKey) },
+                onCommit: { val in
+                    saveCustomValue(propId: propId, value: val.isEmpty ? nil : val)
+                    editingField = nil
+                },
+                onCancel: { cancelEdit() }
+            )
+        case .number:
+            InlineNumberRow(
+                label: prop.name,
+                value: Int(currentValue),
+                placeholder: "Empty",
+                isEditing: editingField == fieldKey,
+                onBeginEditing: { beginEdit(fieldKey) },
+                onCommit: { val in
+                    saveCustomValue(propId: propId, value: val.map(String.init))
+                    editingField = nil
+                },
+                onCancel: { cancelEdit() }
+            )
+        case .singleSelect:
+            InlineSingleSelectRow(
+                label: prop.name,
+                value: currentValue,
+                options: prop.options,
+                onSelect: { val in
+                    saveCustomValue(propId: propId, value: val)
+                },
+                onCreateOption: { newOption in
+                    addOptionToProperty(propId: propId, optionValue: newOption)
+                }
+            )
+        case .multiSelect:
+            let selected = parseMultiSelectValues(currentValue)
+            InlineMultiSelectOptionRow(
+                label: prop.name,
+                selectedValues: selected,
+                options: prop.options,
+                onUpdate: { values in
+                    let json = encodeMultiSelectValues(values)
+                    saveCustomValue(propId: propId, value: json.isEmpty ? nil : json)
+                },
+                onCreateOption: { newOption in
+                    addOptionToProperty(propId: propId, optionValue: newOption)
+                }
+            )
+        case .checkbox:
+            InlineCheckboxRow(
+                label: prop.name,
+                isChecked: currentValue == "true",
+                onToggle: { checked in
+                    saveCustomValue(propId: propId, value: checked ? "true" : "false")
+                }
+            )
+        case .date:
+            let dateValue = ISO8601DateFormatter().date(from: currentValue)
+            InlineDateRow(
+                label: prop.name,
+                value: dateValue,
+                onCommit: { date in
+                    let str = date.map { ISO8601DateFormatter().string(from: $0) }
+                    saveCustomValue(propId: propId, value: str)
+                }
+            )
+        }
+    }
+
+    // MARK: - Web Reader Card
+
+    @ViewBuilder
+    private var webReaderCard: some View {
+        let hasClip = hasStoredWebContent
+        HStack(spacing: 10) {
+            Image(systemName: hasClip ? "doc.text.image" : "safari")
+                .font(.body)
+                .foregroundStyle(.secondary)
+                .frame(width: 20)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(hasClip
+                     ? String(localized: "Clipped article ready", bundle: .module)
+                     : String(localized: "Read source article online", bundle: .module))
+                    .font(.callout)
+                if webAnnotationCount > 0 {
+                    Text(String(format: String(localized: "%d annotations", bundle: .module), webAnnotationCount))
+                        .font(.caption2)
                         .foregroundStyle(.secondary)
-                        .textCase(.uppercase)
-                    Text(abstract)
+                }
+            }
+            Spacer()
+            Button {
+                Task {
+                    guard let prepared = await prepareReferenceForWebReader() else { return }
+                    onOpenWebReader?(prepared)
+                }
+            } label: {
+                Label(String(localized: "Read web", bundle: .module), systemImage: "text.book.closed")
+            }
+            .buttonStyle(SLPrimaryButtonStyle())
+            .controlSize(.small)
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    // MARK: - PDF Card
+
+    @ViewBuilder
+    private var pdfCard: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "doc.fill")
+                .font(.body)
+                .foregroundStyle(.secondary)
+                .frame(width: 20)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("PDF attached", bundle: .module)
+                    .font(.callout)
+                if pdfAnnotationCount > 0 {
+                    Text(String(format: String(localized: "%d annotations", bundle: .module), pdfAnnotationCount))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+            Button {
+                onOpenPDFReader?(reference)
+            } label: {
+                Label(String(localized: "Read & annotate", bundle: .module), systemImage: "book.pages")
+            }
+            .buttonStyle(SLPrimaryButtonStyle())
+            .controlSize(.small)
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    // MARK: - Abstract Section
+
+    @ViewBuilder
+    private var abstractSection: some View {
+        let hasAbstract = !(reference.abstract ?? "").isEmpty
+
+        if editingField == "abstract" || hasAbstract {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Abstract", bundle: .module)
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+
+                if editingField == "abstract" {
+                    TextEditor(text: Binding(
+                        get: { editedRef.abstract ?? "" },
+                        set: { editedRef.abstract = $0.isEmpty ? nil : $0 }
+                    ))
+                    .font(.callout)
+                    .frame(minHeight: 100)
+                    .scrollContentBackground(.hidden)
+                    .padding(4)
+                    .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 6))
+                    .onExitCommand { commitFieldAndSave("abstract") }
+
+                    HStack {
+                        Spacer()
+                        Button("Done") { commitFieldAndSave("abstract") }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                    }
+                } else {
+                    Text(reference.abstract ?? "")
                         .font(.callout)
                         .textSelection(.enabled)
                         .lineSpacing(4)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .fixedSize(horizontal: false, vertical: true)
+                        .contentShape(Rectangle())
+                        .onTapGesture { beginEdit("abstract") }
                 }
-                .padding(.bottom, 14)
             }
+        }
+    }
 
-            // ── Notes ──
-            if let notes = reference.notes, !notes.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(reference.referenceType == .webpage
-                         ? String(localized: "Highlights & notes", bundle: .module)
-                         : String(localized: "Notes", bundle: .module))
-                        .font(.footnote.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .textCase(.uppercase)
-                    Text(notes)
+    // MARK: - Notes Section
+
+    @ViewBuilder
+    private var notesSection: some View {
+        let hasNotes = !(reference.notes ?? "").isEmpty
+        let sectionTitle = reference.referenceType == .webpage
+            ? String(localized: "Highlights & notes", bundle: .module)
+            : String(localized: "Notes", bundle: .module)
+
+        if editingField == "notes" || hasNotes {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(sectionTitle)
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+
+                if editingField == "notes" {
+                    TextEditor(text: Binding(
+                        get: { editedRef.notes ?? "" },
+                        set: { editedRef.notes = $0.isEmpty ? nil : $0 }
+                    ))
+                    .font(.callout)
+                    .frame(minHeight: 80)
+                    .scrollContentBackground(.hidden)
+                    .padding(4)
+                    .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 6))
+                    .onExitCommand { commitFieldAndSave("notes") }
+
+                    HStack {
+                        Spacer()
+                        Button("Done") { commitFieldAndSave("notes") }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                    }
+                } else {
+                    Text(reference.notes ?? "")
                         .font(.callout)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(.bottom, 14)
-            }
-
-            // ── Footer ──
-            VStack(alignment: .trailing, spacing: 4) {
-                HStack {
-                    Text(String(format: String(localized: "Added %@", bundle: .module),
-                                reference.dateAdded.formatted(date: .abbreviated, time: .shortened)))
-                        .foregroundStyle(.tertiary)
-                    Spacer()
-                    Button {
-                        if reference.pdfPath != nil {
-                            showOverwriteConfirmation = true
-                        } else {
-                            performPDFDownload()
-                        }
-                    } label: {
-                        if pdfDownloadState.isDownloading {
-                            ProgressView()
-                                .controlSize(.small)
-                        } else {
-                            Label(String(localized: "Download PDF", bundle: .module),
-                                  systemImage: "arrow.down.doc")
-                        }
-                    }
-                    .buttonStyle(SLPrimaryButtonStyle())
-                    .controlSize(.small)
-                    .disabled(!canDownloadPDF || pdfDownloadState.isDownloading)
-                    .help(canDownloadPDF ? "" : String(localized: "Needs a DOI or arXiv link", bundle: .module))
-                    .alert(String(localized: "Replace existing PDF?", bundle: .module),
-                           isPresented: $showOverwriteConfirmation) {
-                        Button(String(localized: "Replace", bundle: .module), role: .destructive) {
-                            performPDFDownload()
-                        }
-                        Button(String(localized: "Cancel", bundle: .module), role: .cancel) {}
-                    } message: {
-                        Text("This will overwrite the current attachment.", bundle: .module)
-                    }
-
-                    Button(String(localized: "Delete reference", bundle: .module), role: .destructive) {
-                        onDelete()
-                    }
-                    .buttonStyle(SLDestructiveButtonStyle())
-                }
-                if case .failed(let message) = pdfDownloadState {
-                    Text(message)
-                        .font(.caption2)
-                        .foregroundStyle(.red)
+                        .contentShape(Rectangle())
+                        .onTapGesture { beginEdit("notes") }
                 }
             }
-            .font(.caption)
-            .padding(.top, 6)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
+
+    // MARK: - Footer
+
+    @ViewBuilder
+    private var footerSection: some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            HStack {
+                Text(String(format: String(localized: "Added %@", bundle: .module),
+                            reference.dateAdded.formatted(date: .abbreviated, time: .shortened)))
+                    .foregroundStyle(.tertiary)
+                Spacer()
+                Button {
+                    if reference.pdfPath != nil {
+                        showOverwriteConfirmation = true
+                    } else {
+                        performPDFDownload()
+                    }
+                } label: {
+                    if pdfDownloadState.isDownloading {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Label(String(localized: "Download PDF", bundle: .module),
+                              systemImage: "arrow.down.doc")
+                    }
+                }
+                .buttonStyle(SLPrimaryButtonStyle())
+                .controlSize(.small)
+                .disabled(!canDownloadPDF || pdfDownloadState.isDownloading)
+                .help(canDownloadPDF ? "" : String(localized: "Needs a DOI or arXiv link", bundle: .module))
+                .alert(String(localized: "Replace existing PDF?", bundle: .module),
+                       isPresented: $showOverwriteConfirmation) {
+                    Button(String(localized: "Replace", bundle: .module), role: .destructive) {
+                        performPDFDownload()
+                    }
+                    Button(String(localized: "Cancel", bundle: .module), role: .cancel) {}
+                } message: {
+                    Text("This will overwrite the current attachment.", bundle: .module)
+                }
+
+                Button(String(localized: "Delete reference", bundle: .module), role: .destructive) {
+                    onDelete()
+                }
+                .buttonStyle(SLDestructiveButtonStyle())
+            }
+            if case .failed(let message) = pdfDownloadState {
+                Text(message)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+            }
+        }
+        .font(.caption)
+        .padding(.top, 6)
+    }
+
+    // MARK: - Edit Helpers
+
+    private func beginEdit(_ field: String) {
+        commitPendingEdit()
+        editingField = field
+    }
+
+    private func cancelEdit() {
+        editedRef = reference
+        editingField = nil
+    }
+
+    private func commitPendingEdit() {
+        guard editingField != nil else { return }
+        if editedRef.title != reference.title ||
+           editedRef.authors != reference.authors ||
+           editedRef.year != reference.year ||
+           editedRef.doi != reference.doi ||
+           editedRef.url != reference.url ||
+           editedRef.journal != reference.journal ||
+           editedRef.volume != reference.volume ||
+           editedRef.issue != reference.issue ||
+           editedRef.pages != reference.pages ||
+           editedRef.abstract != reference.abstract ||
+           editedRef.notes != reference.notes ||
+           editedRef.referenceType != reference.referenceType ||
+           editedRef.readingStatus != reference.readingStatus ||
+           editedRef.priority != reference.priority ||
+           editedRef.publisher != reference.publisher ||
+           editedRef.publisherPlace != reference.publisherPlace ||
+           editedRef.edition != reference.edition ||
+           editedRef.isbn != reference.isbn ||
+           editedRef.issn != reference.issn ||
+           editedRef.editors != reference.editors ||
+           editedRef.translators != reference.translators ||
+           editedRef.accessedDate != reference.accessedDate ||
+           editedRef.eventTitle != reference.eventTitle ||
+           editedRef.eventPlace != reference.eventPlace ||
+           editedRef.genre != reference.genre ||
+           editedRef.institution != reference.institution ||
+           editedRef.number != reference.number ||
+           editedRef.collectionTitle != reference.collectionTitle ||
+           editedRef.numberOfPages != reference.numberOfPages ||
+           editedRef.language != reference.language ||
+           editedRef.pmid != reference.pmid ||
+           editedRef.pmcid != reference.pmcid {
+            var updated = editedRef
+            updated.dateModified = Date()
+            onSave(updated)
+        }
+        editingField = nil
+    }
+
+    private func commitFieldAndSave(_ field: String) {
+        var updated = editedRef
+        updated.dateModified = Date()
+        onSave(updated)
+        editingField = nil
+    }
+
+    private func commitDefaultSave() {
+        var updated = editedRef
+        updated.dateModified = Date()
+        onSave(updated)
+    }
+
+    // MARK: - Custom Property Helpers
+
+    private func saveCustomValue(propId: Int64, value: String?) {
+        guard let refId = reference.id else { return }
+        if let value {
+            customValues[propId] = value
+        } else {
+            customValues.removeValue(forKey: propId)
+        }
+        try? db.setPropertyValue(referenceId: refId, propertyId: propId, value: value)
+    }
+
+    private func addOptionToProperty(propId: Int64, optionValue: String) {
+        guard var prop = propertyDefs.first(where: { $0.id == propId }) else { return }
+        let usedColors = Set(prop.options.map(\.color))
+        let available = SelectOption.colorPalette.filter { !usedColors.contains($0) }
+        let color = available.first ?? SelectOption.colorPalette.randomElement() ?? "#007AFF"
+        var options = prop.options
+        options.append(SelectOption(value: optionValue, color: color))
+        prop.options = options
+        try? db.savePropertyDefinition(&prop)
+    }
+
+    private func parseMultiSelectValues(_ raw: String) -> [String] {
+        guard !raw.isEmpty,
+              let data = raw.data(using: .utf8),
+              let arr = try? JSONDecoder().decode([String].self, from: data) else {
+            return []
+        }
+        return arr
+    }
+
+    private func encodeMultiSelectValues(_ values: [String]) -> String {
+        guard !values.isEmpty,
+              let data = try? JSONEncoder().encode(values),
+              let json = String(data: data, encoding: .utf8) else {
+            return ""
+        }
+        return json
+    }
+
+    // MARK: - PDF Download
 
     private var canDownloadPDF: Bool {
         if let doi = reference.doi, !doi.isEmpty { return true }
@@ -414,25 +1068,32 @@ struct ReferenceDetailView: View {
         }
     }
 
-    @ViewBuilder
-    private func urlSection(url: URL) -> some View {
-        HStack(spacing: 6) {
-            Link(destination: url) {
-                Text(shortURLLabel(for: url))
-                    .font(.callout)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-            .buttonStyle(.plain)
+    // MARK: - Web Reader
 
-            Link(destination: url) {
-                Image(systemName: "arrow.up.right.square")
-                    .font(.caption)
-            }
-            .buttonStyle(.plain)
-            .help(String(localized: "Open in browser", bundle: .module))
-        }
+    private var canOpenWebReader: Bool {
+        reference.referenceType == .webpage && (hasStoredWebContent || resolvedWebReaderURLString != nil)
     }
+
+    private var resolvedWebReaderURLString: String? {
+        let value = reference.resolvedWebReaderURLString()?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return value.isEmpty ? nil : value
+    }
+
+    private func prepareReferenceForWebReader() async -> Reference? {
+        guard let referenceID = reference.id else { return nil }
+        if !hasStoredWebContent { return reference }
+
+        let webContent = await Task.detached(priority: .userInitiated) { [db] in
+            try? db.fetchWebContent(id: referenceID)
+        }.value
+
+        guard !Task.isCancelled, reference.id == referenceID else { return nil }
+        var prepared = reference
+        prepared.webContent = webContent
+        return prepared
+    }
+
+    // MARK: - Quick Preview (Space key)
 
     private var quickPreviewShortcut: some View {
         Button {
@@ -459,7 +1120,6 @@ struct ReferenceDetailView: View {
                 closeQuickPreviewWindow()
                 return
             }
-
             previewWindow.deminiaturize(nil)
             enforceQuickPreviewWindowSizeIfNeeded(previewWindow, minimumSize: minimumSize, preferredSize: preferredSize)
             NSApp.activate(ignoringOtherApps: true)
@@ -473,7 +1133,8 @@ struct ReferenceDetailView: View {
             backing: .buffered,
             defer: false
         )
-        window.title = quickPreviewWindowTitle(fallbackURL: url)
+        window.title = reference.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? url.lastPathComponent : reference.title
         window.isReleasedWhenClosed = false
         window.minSize = minimumSize
         window.setFrameAutosaveName(autosaveName)
@@ -481,20 +1142,14 @@ struct ReferenceDetailView: View {
         enforceQuickPreviewWindowSizeIfNeeded(window, minimumSize: minimumSize, preferredSize: preferredSize)
 
         window.contentViewController = NSHostingController(
-            rootView: PDFPreviewView(url: url) {
-                window.close()
-            }
+            rootView: PDFPreviewView(url: url) { window.close() }
         )
-        if !restoredFrame {
-            window.center()
-        }
+        if !restoredFrame { window.center() }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
         previewWindowCloseObserver = NotificationCenter.default.addObserver(
-            forName: NSWindow.willCloseNotification,
-            object: window,
-            queue: .main
+            forName: NSWindow.willCloseNotification, object: window, queue: .main
         ) { _ in
             previewWindow = nil
             if let observer = previewWindowCloseObserver {
@@ -502,13 +1157,7 @@ struct ReferenceDetailView: View {
                 previewWindowCloseObserver = nil
             }
         }
-
         previewWindow = window
-    }
-
-    private func quickPreviewWindowTitle(fallbackURL url: URL) -> String {
-        let title = reference.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        return title.isEmpty ? url.lastPathComponent : title
     }
 
     private func preferredQuickPreviewWindowSize(minimumSize: NSSize) -> NSSize {
@@ -521,18 +1170,10 @@ struct ReferenceDetailView: View {
     private func enforceQuickPreviewWindowSizeIfNeeded(_ window: NSWindow, minimumSize: NSSize, preferredSize: NSSize) {
         let visibleFrame = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 960)
         let currentFrame = window.frame
-
-        guard currentFrame.width < minimumSize.width || currentFrame.height < minimumSize.height else {
-            return
-        }
-
+        guard currentFrame.width < minimumSize.width || currentFrame.height < minimumSize.height else { return }
         let safeWidth = min(max(preferredSize.width, minimumSize.width), visibleFrame.width - 40)
         let safeHeight = min(max(preferredSize.height, minimumSize.height), visibleFrame.height - 40)
-        let origin = NSPoint(
-            x: visibleFrame.midX - safeWidth / 2,
-            y: visibleFrame.midY - safeHeight / 2
-        )
-
+        let origin = NSPoint(x: visibleFrame.midX - safeWidth / 2, y: visibleFrame.midY - safeHeight / 2)
         window.setFrame(NSRect(origin: origin, size: NSSize(width: safeWidth, height: safeHeight)), display: false)
     }
 
@@ -545,264 +1186,7 @@ struct ReferenceDetailView: View {
         }
     }
 
-    private func prettyURLTitle(for url: URL) -> String {
-        let host = displayHost(for: url)
-        let path = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        if path.isEmpty || path == "/" {
-            return host
-        }
-        let lastPath = path.split(separator: "/").last.map(String.init) ?? path
-        if lastPath.isEmpty {
-            return host
-        }
-        return "\(host)/\(lastPath)"
-    }
-
-    private func shortURLLabel(for url: URL) -> String {
-        let host = displayHost(for: url)
-        let components = url.pathComponents
-            .filter { $0 != "/" && !$0.isEmpty }
-
-        guard !components.isEmpty else { return host }
-
-        let summary: String
-        if components.count == 1 {
-            summary = components[0]
-        } else {
-            summary = components.suffix(2).joined(separator: "/")
-        }
-
-        return "\(host)/\(summary)"
-    }
-
-    private func compactURLSubtitle(for url: URL) -> String {
-        var parts: [String] = [displayHost(for: url)]
-
-        let path = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        if !path.isEmpty {
-            parts.append("/" + path)
-        }
-
-        if let query = url.query, !query.isEmpty {
-            parts.append("?" + abbreviatedQuery(query))
-        }
-
-        return parts.joined()
-    }
-
-    private func displayHost(for url: URL) -> String {
-        let host = url.host ?? url.absoluteString
-        return host.replacingOccurrences(of: #"^www\."#, with: "", options: .regularExpression)
-    }
-
-    private func abbreviatedQuery(_ query: String) -> String {
-        let items = query.split(separator: "&").map(String.init)
-        guard !items.isEmpty else { return query }
-        if items.count == 1 {
-            return abbreviateQueryItem(items[0])
-        }
-        return ([abbreviateQueryItem(items[0]), "\(items.count - 1) more"]).joined(separator: " · ")
-    }
-
-    private func abbreviateQueryItem(_ item: String) -> String {
-        guard let equalsIndex = item.firstIndex(of: "=") else {
-            return item
-        }
-        let key = String(item[..<equalsIndex])
-        let value = String(item[item.index(after: equalsIndex)...])
-        guard value.count > 18 else { return item }
-        return "\(key)=\(value.prefix(8))...\(value.suffix(6))"
-    }
-
-    // MARK: - Edit View
-    @ViewBuilder
-    private var editView: some View {
-        Form {
-            Section(String(localized: "Basics", bundle: .module)) {
-                Picker("Type", selection: $editedRef.referenceType) {
-                    ForEach(ReferenceType.allCases, id: \.self) { type in
-                        Label(type.rawValue, systemImage: type.icon).tag(type)
-                    }
-                }
-                TextField("Title", text: $editedRef.title)
-                TextField("Authors", text: Binding(
-                    get: { editedRef.authors.displayString },
-                    set: { editedRef.authors = AuthorName.parseList($0) }
-                ))
-                TextField("Year", value: $editedRef.year, format: .number)
-            }
-
-            Section(String(localized: "Publication", bundle: .module)) {
-                TextField("Journal / Book Title", text: Binding(
-                    get: { editedRef.journal ?? "" },
-                    set: { editedRef.journal = $0.isEmpty ? nil : $0 }
-                ))
-                if editedRef.referenceType == .webpage {
-                    TextField("Site Name", text: Binding(
-                        get: { editedRef.siteName ?? "" },
-                        set: { editedRef.siteName = $0.isEmpty ? nil : $0 }
-                    ))
-                }
-                HStack {
-                    TextField("Volume", text: Binding(
-                        get: { editedRef.volume ?? "" },
-                        set: { editedRef.volume = $0.isEmpty ? nil : $0 }
-                    ))
-                    TextField("Issue", text: Binding(
-                        get: { editedRef.issue ?? "" },
-                        set: { editedRef.issue = $0.isEmpty ? nil : $0 }
-                    ))
-                    TextField("Pages", text: Binding(
-                        get: { editedRef.pages ?? "" },
-                        set: { editedRef.pages = $0.isEmpty ? nil : $0 }
-                    ))
-                }
-                TextField("Publisher", text: Binding(
-                    get: { editedRef.publisher ?? "" },
-                    set: { editedRef.publisher = $0.isEmpty ? nil : $0 }
-                ))
-                HStack {
-                    TextField("Publisher Place", text: Binding(
-                        get: { editedRef.publisherPlace ?? "" },
-                        set: { editedRef.publisherPlace = $0.isEmpty ? nil : $0 }
-                    ))
-                    TextField("Edition", text: Binding(
-                        get: { editedRef.edition ?? "" },
-                        set: { editedRef.edition = $0.isEmpty ? nil : $0 }
-                    ))
-                }
-                if editedRef.referenceType == .conferencePaper {
-                    TextField("Event Title", text: Binding(
-                        get: { editedRef.eventTitle ?? "" },
-                        set: { editedRef.eventTitle = $0.isEmpty ? nil : $0 }
-                    ))
-                    TextField("Event Place", text: Binding(
-                        get: { editedRef.eventPlace ?? "" },
-                        set: { editedRef.eventPlace = $0.isEmpty ? nil : $0 }
-                    ))
-                }
-                if editedRef.referenceType == .thesis {
-                    TextField("Institution", text: Binding(
-                        get: { editedRef.institution ?? "" },
-                        set: { editedRef.institution = $0.isEmpty ? nil : $0 }
-                    ))
-                    TextField("Genre / Thesis Type", text: Binding(
-                        get: { editedRef.genre ?? "" },
-                        set: { editedRef.genre = $0.isEmpty ? nil : $0 }
-                    ))
-                }
-            }
-
-            Section(String(localized: "Identifiers", bundle: .module)) {
-                TextField("DOI", text: Binding(
-                    get: { editedRef.doi ?? "" },
-                    set: { editedRef.doi = $0.isEmpty ? nil : $0 }
-                ))
-                TextField("ISBN", text: Binding(
-                    get: { editedRef.isbn ?? "" },
-                    set: { editedRef.isbn = $0.isEmpty ? nil : $0 }
-                ))
-                TextField("ISSN", text: Binding(
-                    get: { editedRef.issn ?? "" },
-                    set: { editedRef.issn = $0.isEmpty ? nil : $0 }
-                ))
-                TextField("URL", text: Binding(
-                    get: { editedRef.url ?? "" },
-                    set: { editedRef.url = $0.isEmpty ? nil : $0 }
-                ))
-            }
-
-            Section(String(localized: "Extended", bundle: .module)) {
-                TextField("Language", text: Binding(
-                    get: { editedRef.language ?? "" },
-                    set: { editedRef.language = $0.isEmpty ? nil : $0 }
-                ))
-                TextField("Number of Pages", text: Binding(
-                    get: { editedRef.numberOfPages ?? "" },
-                    set: { editedRef.numberOfPages = $0.isEmpty ? nil : $0 }
-                ))
-            }
-
-            Section(String(localized: "Collection", bundle: .module)) {
-                Picker("Collection", selection: $editedRef.collectionId) {
-                    Text("None").tag(nil as Int64?)
-                    ForEach(collections) { col in
-                        Label(col.name, systemImage: col.icon).tag(col.id as Int64?)
-                    }
-                }
-            }
-
-            Section(String(localized: "Abstract", bundle: .module)) {
-                TextEditor(text: Binding(
-                    get: { editedRef.abstract ?? "" },
-                    set: { editedRef.abstract = $0.isEmpty ? nil : $0 }
-                ))
-                .frame(minHeight: 100)
-            }
-
-            Section(String(localized: "Notes", bundle: .module)) {
-                TextEditor(text: Binding(
-                    get: { editedRef.notes ?? "" },
-                    set: { editedRef.notes = $0.isEmpty ? nil : $0 }
-                ))
-                .frame(minHeight: 80)
-            }
-
-            if editedRef.referenceType == .webpage {
-                Section(String(localized: "Article content", bundle: .module)) {
-                    if isLoadingWebContent && editedRef.webContent == nil {
-                        HStack(spacing: 8) {
-                            ProgressView()
-                                .controlSize(.small)
-                            Text("Loading article…", bundle: .module)
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-
-                    TextEditor(text: Binding(
-                        get: { editedRef.decodedWebContent?.body ?? "" },
-                        set: { newValue in
-                            let format = editedRef.decodedWebContent?.format ?? .markdown
-                            editedRef.webContent = Reference.encodeWebContent(newValue, format: format)
-                        }
-                    ))
-                    .frame(minHeight: 220)
-                }
-            }
-
-            Section(String(localized: "PDF attachment", bundle: .module)) {
-                if editedRef.pdfPath != nil {
-                    HStack {
-                        Label(String(localized: "PDF attached", bundle: .module), systemImage: "doc.fill")
-                        Spacer()
-                        Button("Remove PDF") {
-                            editedRef.pdfPath = nil
-                        }
-                    }
-                } else {
-                    Button("Attach PDF...") { attachPDF() }
-                }
-            }
-        }
-        .formStyle(.grouped)
-    }
-
-    private func attachPDF() {
-        guard let url = OpenPanelPicker.pickPDFFile() else { return }
-        if let path = try? PDFService.importPDF(from: url) {
-            editedRef.pdfPath = path
-        }
-    }
-
-    private var canOpenWebReader: Bool {
-        reference.referenceType == .webpage && (hasStoredWebContent || resolvedWebReaderURLString != nil)
-    }
-
-    private var resolvedWebReaderURLString: String? {
-        let value = reference.resolvedWebReaderURLString()?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return value.isEmpty ? nil : value
-    }
+    // MARK: - Data Loading
 
     private func loadSupplementaryData(for referenceID: Int64?) async {
         guard let referenceID else {
@@ -836,115 +1220,63 @@ struct ReferenceDetailView: View {
         hasStoredWebContent = payload.hasStoredWebContent
     }
 
-    private func loadWebContentIfNeeded() async {
-        guard hasStoredWebContent, editedRef.webContent == nil, let referenceID = reference.id else {
+    private func loadCustomPropertyValues(for referenceID: Int64?) async {
+        guard let referenceID else {
+            customValues = [:]
             return
         }
-
-        isLoadingWebContent = true
-        let webContent = await Task.detached(priority: .userInitiated) { [db] in
-            try? db.fetchWebContent(id: referenceID)
+        let values = await Task.detached(priority: .userInitiated) { [db] in
+            (try? db.fetchPropertyValues(forReference: referenceID)) ?? []
         }.value
-
         guard !Task.isCancelled, reference.id == referenceID else { return }
-        isLoadingWebContent = false
-        if editedRef.id == referenceID, editedRef.webContent == nil {
-            editedRef.webContent = webContent ?? editedRef.webContent
+        var map: [Int64: String] = [:]
+        for pv in values {
+            if let val = pv.value { map[pv.propertyId] = val }
         }
+        customValues = map
     }
+}
 
-    private func prepareReferenceForWebReader() async -> Reference? {
-        guard let referenceID = reference.id else { return nil }
-        if !hasStoredWebContent {
-            return reference
-        }
+// MARK: - Inline Title Editor
 
-        if editedRef.id == referenceID, let content = editedRef.webContent,
-           !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            var prepared = reference
-            prepared.webContent = content
-            return prepared
-        }
+private struct InlineTitleEditor: View {
+    @Binding var text: String
+    let onCommit: () -> Void
+    let onCancel: () -> Void
+    @FocusState private var isFocused: Bool
 
-        let webContent = await Task.detached(priority: .userInitiated) { [db] in
-            try? db.fetchWebContent(id: referenceID)
-        }.value
-
-        guard !Task.isCancelled, reference.id == referenceID else { return nil }
-        var prepared = reference
-        prepared.webContent = webContent
-        if editedRef.id == referenceID, editedRef.webContent == nil {
-            editedRef.webContent = webContent
-        }
-        return prepared
+    var body: some View {
+        TextField("Title", text: $text)
+            .font(.title2.bold())
+            .textFieldStyle(.plain)
+            .focused($isFocused)
+            .onSubmit { onCommit() }
+            .onExitCommand { onCancel() }
+            .onAppear { isFocused = true }
+            .onChange(of: isFocused) { _, focused in
+                if !focused { onCommit() }
+            }
     }
+}
 
-    private func saveEdits() async {
-        if hasStoredWebContent && editedRef.webContent == nil {
-            await loadWebContentIfNeeded()
-        }
-        guard !Task.isCancelled else { return }
-        hasStoredWebContent = !(editedRef.webContent?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
-        onSave(editedRef)
-        isEditing = false
-    }
+// MARK: - Inline Authors Editor
 
-    private func metadataRows(for reference: Reference) -> [(label: String, value: String)] {
-        var rows: [(String, String)] = []
-        let lSource = String(localized: "Source", bundle: .module)
-        let lPublisher = String(localized: "Publisher", bundle: .module)
-        let lPlace = String(localized: "Place", bundle: .module)
-        let lEdition = String(localized: "Edition", bundle: .module)
-        let lLanguage = String(localized: "Language", bundle: .module)
-        let lPages = String(localized: "Pages", bundle: .module)
-        let lInstitution = String(localized: "Institution", bundle: .module)
-        let lType = String(localized: "Type", bundle: .module)
-        let lYear = String(localized: "Year", bundle: .module)
-        let lEvent = String(localized: "Event", bundle: .module)
-        let lEventPlace = String(localized: "Venue", bundle: .module)
+private struct InlineAuthorsEditor: View {
+    @Binding var text: String
+    let onCommit: () -> Void
+    let onCancel: () -> Void
+    @FocusState private var isFocused: Bool
 
-        if let source = reference.metadataSource?.displayName {
-            rows.append((lSource, source))
-        }
-
-        switch reference.referenceType {
-        case .book, .bookSection:
-            if let publisher = reference.publisher { rows.append((lPublisher, publisher)) }
-            if let place = reference.publisherPlace { rows.append((lPlace, place)) }
-            if let edition = reference.edition { rows.append((lEdition, edition)) }
-            if let isbn = reference.isbn { rows.append(("ISBN", isbn)) }
-            if let language = reference.language { rows.append((lLanguage, language)) }
-            if let pages = reference.numberOfPages { rows.append((lPages, pages)) }
-        case .thesis:
-            if let institution = reference.institution { rows.append((lInstitution, institution)) }
-            if let genre = reference.genre { rows.append((lType, genre)) }
-            if let year = reference.year { rows.append((lYear, String(year))) }
-        case .conferencePaper:
-            if let eventTitle = reference.eventTitle { rows.append((lEvent, eventTitle)) }
-            if let eventPlace = reference.eventPlace { rows.append((lEventPlace, eventPlace)) }
-            if let issn = reference.issn { rows.append(("ISSN", issn)) }
-        case .journalArticle,
-             .magazineArticle,
-             .newspaperArticle,
-             .preprint,
-             .dataset,
-             .software,
-             .standard,
-             .manuscript,
-             .interview,
-             .presentation,
-             .blogPost,
-             .forumPost,
-             .legalCase,
-             .legislation,
-             .report,
-             .webpage,
-             .patent,
-             .other:
-            if let issn = reference.issn { rows.append(("ISSN", issn)) }
-            if let publisher = reference.publisher { rows.append((lPublisher, publisher)) }
-        }
-
-        return rows.filter { !$0.1.isEmpty }
+    var body: some View {
+        TextField("Authors (e.g. John Smith; Jane Doe)", text: $text)
+            .font(.body)
+            .textFieldStyle(.plain)
+            .focused($isFocused)
+            .onSubmit { onCommit() }
+            .onExitCommand { onCancel() }
+            .onAppear { isFocused = true }
+            .onChange(of: isFocused) { _, focused in
+                if !focused { onCommit() }
+            }
     }
 }
