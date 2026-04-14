@@ -24,6 +24,8 @@ final class ReaderWindowManager {
     private var windows: [Int64: NSWindow] = [:]
     /// Close-notification observers, keyed by reference ID.
     private var closeObservers: [Int64: NSObjectProtocol] = [:]
+    /// Shared tabbing identifier so all reader windows group into the same tab bar.
+    private let readerTabbingIdentifier = "com.rubien.reader-window"
 
     private init() {}
 
@@ -33,16 +35,20 @@ final class ReaderWindowManager {
     func openPDFReader(for reference: Reference) {
         guard let refId = reference.id, reference.pdfPath != nil else { return }
 
-        // Already open → bring to front
-        if let existing = windows[refId], existing.isVisible || existing.isMiniaturized {
-            existing.deminiaturize(nil)
+        // Already open → bring to front (select its tab if tabbed).
+        // Check visibility, miniaturized, or part of a tab group to avoid
+        // reusing a stale window that is mid-close (async cleanup race).
+        if let existing = windows[refId],
+           existing.isVisible || existing.isMiniaturized || existing.tabGroup != nil {
+            if existing.isMiniaturized { existing.deminiaturize(nil) }
             existing.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
         }
 
+        let title = windowTitle(for: reference, suffix: "PDF")
         let window = makeWindow(
-            title: windowTitle(for: reference, suffix: "PDF"),
+            title: title,
             autosaveName: "RubienPDFReader-\(refId)",
             minSize: NSSize(width: 800, height: 600)
         )
@@ -53,22 +59,25 @@ final class ReaderWindowManager {
         .frame(minWidth: 800, minHeight: 600)
 
         window.contentViewController = NSHostingController(rootView: readerView)
-        registerWindow(window, forReferenceId: refId)
+        registerWindow(window, title: title, forReferenceId: refId)
     }
 
     /// Open (or re-activate) a Web reader window for the given reference.
     func openWebReader(for reference: Reference) {
         guard let refId = reference.id, reference.canOpenWebReader else { return }
 
-        if let existing = windows[refId], existing.isVisible || existing.isMiniaturized {
-            existing.deminiaturize(nil)
+        // Already open → bring to front (select its tab if tabbed).
+        if let existing = windows[refId],
+           existing.isVisible || existing.isMiniaturized || existing.tabGroup != nil {
+            if existing.isMiniaturized { existing.deminiaturize(nil) }
             existing.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
         }
 
+        let title = windowTitle(for: reference, suffix: "Web")
         let window = makeWindow(
-            title: windowTitle(for: reference, suffix: "Web"),
+            title: title,
             autosaveName: "RubienWebReader-\(refId)",
             minSize: NSSize(width: 800, height: 600)
         )
@@ -79,7 +88,7 @@ final class ReaderWindowManager {
         .frame(minWidth: 800, minHeight: 600)
 
         window.contentViewController = NSHostingController(rootView: readerView)
-        registerWindow(window, forReferenceId: refId)
+        registerWindow(window, title: title, forReferenceId: refId)
     }
 
     /// Returns true if a reader window is currently open for the given reference.
@@ -103,16 +112,24 @@ final class ReaderWindowManager {
 
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: preferredSize),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = title
         window.isReleasedWhenClosed = false
         window.minSize = minSize
-        window.titlebarAppearsTransparent = true
+        window.titlebarAppearsTransparent = false
         window.titleVisibility = .visible
+        window.tabbingIdentifier = readerTabbingIdentifier
+        window.tabbingMode = .preferred
+
+        // A toolbar is required for the unified style to render tab titles.
+        let toolbar = NSToolbar(identifier: "ReaderToolbar")
+        toolbar.showsBaselineSeparator = false
+        window.toolbar = toolbar
         window.toolbarStyle = .unified
+
         window.setFrameAutosaveName(autosaveName)
 
         // Restore saved frame; if none, use preferred size centered on screen
@@ -123,13 +140,25 @@ final class ReaderWindowManager {
         return window
     }
 
-    private func registerWindow(_ window: NSWindow, forReferenceId refId: Int64) {
-        // Show window
+    private func registerWindow(_ window: NSWindow, title: String, forReferenceId refId: Int64) {
+        // Store reference
+        windows[refId] = window
+
+        // If another reader window is already open, add as a tab
+        if let host = windows.values.first(where: { $0 !== window && ($0.isVisible || $0.isMiniaturized) }) {
+            if host.isMiniaturized { host.deminiaturize(nil) }
+            host.addTabbedWindow(window, ordered: .above)
+        }
+
+        // Show window / select tab
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
-        // Store reference
-        windows[refId] = window
+        // Re-apply title: NSHostingController clears window.title when set
+        // as contentViewController, so we must restore it after the window
+        // is shown and has joined its tab group.
+        window.title = title
+        window.tab.title = title
 
         // Observe close to clean up
         let observer = NotificationCenter.default.addObserver(

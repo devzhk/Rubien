@@ -1136,6 +1136,7 @@ struct ReferenceDetailView: View {
         window.title = reference.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? url.lastPathComponent : reference.title
         window.isReleasedWhenClosed = false
+        window.tabbingMode = .disallowed
         window.minSize = minimumSize
         window.setFrameAutosaveName(autosaveName)
         let restoredFrame = window.setFrameUsingName(autosaveName)
