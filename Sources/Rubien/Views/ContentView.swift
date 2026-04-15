@@ -648,6 +648,16 @@ struct ContentView: View {
                 onUpdateTags: { refId, tagIds in viewModel.setTags(forReference: refId, tagIds: tagIds) },
                 onCreateTag: { refId, name in viewModel.createTagAndAssign(name: name, toReference: refId) },
                 onDeleteTag: { tagId in viewModel.deleteTag(id: tagId) },
+                onCreateOption: { propId, optionValue in
+                    guard var prop = viewModel.propertyDefs.first(where: { $0.id == propId }) else { return }
+                    let usedColors = Set(prop.options.map(\.color))
+                    let available = SelectOption.colorPalette.filter { !usedColors.contains($0) }
+                    let color = available.first ?? SelectOption.colorPalette.randomElement() ?? "#007AFF"
+                    var options = prop.options
+                    options.append(SelectOption(value: optionValue, color: color))
+                    prop.options = options
+                    try? viewModel.db.savePropertyDefinition(&prop)
+                },
                 isRefreshingMetadata: viewModel.isImporting,
                 onDoubleClick: { refId in
                     openReader(for: refId)

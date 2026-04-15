@@ -15,6 +15,7 @@ struct ReferenceTableView: View {
     let onUpdateTags: (Int64, [Int64]) -> Void
     let onCreateTag: (Int64, String) -> Void
     let onDeleteTag: (Int64) -> Void
+    let onCreateOption: (Int64, String) -> Void
     var isRefreshingMetadata = false
     var onDoubleClick: ((Int64) -> Void)? = nil
 
@@ -127,6 +128,7 @@ struct ReferenceTableView: View {
             onUpdateTags: onUpdateTags,
             onCreateTag: onCreateTag,
             onDeleteTag: onDeleteTag,
+            onCreateOption: onCreateOption,
             customProperties: propertyDefs.filter { prop in
                 guard prop.isVisible else { return false }
                 if !prop.isDefault { return true }
@@ -135,7 +137,8 @@ struct ReferenceTableView: View {
                 guard let key = prop.defaultFieldKey else { return false }
                 return !hardcodedKeys.contains(key)
             },
-            customPropertyValueMap: customPropertyValueMap
+            customPropertyValueMap: customPropertyValueMap,
+            db: db
         )
         .contextMenu(forSelectionType: Reference.ID.self) { ids in
             if let id = ids.first, let ref = references.first(where: { $0.id == id }) {
@@ -352,23 +355,68 @@ private struct ReferenceTableContent: View {
     let onUpdateTags: (Int64, [Int64]) -> Void
     let onCreateTag: (Int64, String) -> Void
     let onDeleteTag: (Int64) -> Void
+    let onCreateOption: (Int64, String) -> Void
     let customProperties: [PropertyDefinition]
     let customPropertyValueMap: [Int64: [Int64: String]]
+    let db: AppDatabase
 
     @SceneStorage("referenceTableColumnCustomization")
     private var columnCustomization: TableColumnCustomization<Reference>
 
+    @State private var editingCell: EditingCellID? = nil
+
+    private func isEditing(_ refId: Int64?, _ key: String) -> Bool {
+        guard let refId else { return false }
+        return editingCell == EditingCellID(referenceId: refId, fieldKey: key)
+    }
+    private func beginEdit(_ refId: Int64?, _ key: String) {
+        guard let refId else { return }
+        editingCell = EditingCellID(referenceId: refId, fieldKey: key)
+    }
+    private func cancel() { editingCell = nil }
+    private func commitRef(_ updated: Reference) {
+        var u = updated
+        u.dateModified = Date()
+        onUpdateReference(u)
+        editingCell = nil
+    }
+    private func commitCustom(refId: Int64, propId: Int64, value: String?) {
+        try? db.setPropertyValue(referenceId: refId, propertyId: propId, value: value)
+        editingCell = nil
+    }
+
     var body: some View {
         Table(references, selection: $selection, sortOrder: $tableSortOrder, columnCustomization: $columnCustomization) {
             TableColumn(ColumnIdentifier.title.header, value: \.title) { ref in
-                TitleCellView(reference: ref)
+                EditableStringCell(
+                    value: ref.title,
+                    isEditing: isEditing(ref.id, "title"),
+                    onBeginEdit: { beginEdit(ref.id, "title") },
+                    onCommit: { val in
+                        var u = ref
+                        u.title = val
+                        commitRef(u)
+                    },
+                    onCancel: cancel,
+                    placeholder: "Untitled"
+                )
             }
             .width(min: 150, ideal: 250)
             .customizationID(ColumnIdentifier.title.rawValue)
             .disabledCustomizationBehavior(.visibility)
 
             TableColumn(ColumnIdentifier.authors.header, value: \.authorsNormalized) { ref in
-                AuthorsCellView(reference: ref)
+                EditableStringCell(
+                    value: ref.authors.displayString,
+                    isEditing: isEditing(ref.id, "authors"),
+                    onBeginEdit: { beginEdit(ref.id, "authors") },
+                    onCommit: { val in
+                        var u = ref
+                        u.authors = AuthorName.parseList(val)
+                        commitRef(u)
+                    },
+                    onCancel: cancel
+                )
             }
             .width(min: 80, ideal: 140)
             .customizationID(ColumnIdentifier.authors.rawValue)
@@ -403,197 +451,35 @@ private struct ReferenceTableContent: View {
             TableColumnForEach(customProperties) { prop in
                 TableColumn(prop.name) { ref in
                     if prop.isDefault, let key = prop.defaultFieldKey {
-                        DefaultPropertyCellView(
+                        EditableDefaultPropertyCell(
                             reference: ref,
                             fieldKey: key,
-                            property: prop
+                            property: prop,
+                            isEditing: { key in isEditing(ref.id, key) },
+                            onBeginEdit: { key in beginEdit(ref.id, key) },
+                            onCancel: cancel,
+                            commitRef: commitRef
+                        )
+                    } else if let refId = ref.id {
+                        EditableCustomPropertyCell(
+                            referenceId: refId,
+                            property: prop,
+                            rawValue: customPropertyValueMap[refId]?[prop.id ?? 0],
+                            isEditing: { key in isEditing(refId, key) },
+                            onBeginEdit: { key in beginEdit(refId, key) },
+                            onCancel: cancel,
+                            commitCustom: commitCustom,
+                            onCreateOption: onCreateOption
                         )
                     } else {
-                        CustomPropertyCellView(
-                            value: customPropertyValueMap[ref.id ?? -1]?[prop.id ?? 0],
-                            property: prop
-                        )
+                        Text("—")
+                            .font(.callout)
+                            .foregroundStyle(.quaternary)
                     }
                 }
                 .width(min: 60, ideal: 100)
             }
         }
-    }
-}
-
-// MARK: - Default Property Cell View
-
-private struct DefaultPropertyCellView: View {
-    let reference: Reference
-    let fieldKey: String
-    let property: PropertyDefinition
-
-    private var value: String {
-        switch fieldKey {
-        case "referenceType": return reference.referenceType.rawValue
-        case "year": return reference.year.map(String.init) ?? ""
-        case "doi": return reference.doi ?? ""
-        case "url": return reference.url ?? ""
-        case "journal": return reference.journal ?? ""
-        case "volume": return reference.volume ?? ""
-        case "issue": return reference.issue ?? ""
-        case "pages": return reference.pages ?? ""
-        case "publisher": return reference.publisher ?? ""
-        case "publisherPlace": return reference.publisherPlace ?? ""
-        case "edition": return reference.edition ?? ""
-        case "isbn": return reference.isbn ?? ""
-        case "issn": return reference.issn ?? ""
-        case "editors": return reference.parsedEditors.displayString
-        case "translators": return reference.parsedTranslators.displayString
-        case "accessedDate": return reference.accessedDate ?? ""
-        case "eventTitle": return reference.eventTitle ?? ""
-        case "eventPlace": return reference.eventPlace ?? ""
-        case "genre": return reference.genre ?? ""
-        case "institution": return reference.institution ?? ""
-        case "number": return reference.number ?? ""
-        case "collectionTitle": return reference.collectionTitle ?? ""
-        case "numberOfPages": return reference.numberOfPages ?? ""
-        case "language": return reference.language ?? ""
-        case "pmid": return reference.pmid ?? ""
-        case "pmcid": return reference.pmcid ?? ""
-        default: return ""
-        }
-    }
-
-    var body: some View {
-        if property.type == .singleSelect, let option = property.options.first(where: { $0.value == value }) {
-            Text(option.value)
-                .font(.callout)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 1)
-                .background(Color(hex: option.color).opacity(0.2))
-                .clipShape(Capsule())
-        } else if value.isEmpty {
-            Text("—")
-                .font(.callout)
-                .foregroundStyle(.quaternary)
-        } else {
-            Text(value)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        }
-    }
-}
-
-// MARK: - Custom Property Cell View
-
-private struct CustomPropertyCellView: View {
-    let value: String?
-    let property: PropertyDefinition
-
-    var body: some View {
-        if let value, !value.isEmpty {
-            switch property.type {
-            case .singleSelect:
-                if let option = property.options.first(where: { $0.value == value }) {
-                    Text(option.value)
-                        .font(.callout)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 1)
-                        .background(Color(hex: option.color).opacity(0.2))
-                        .clipShape(Capsule())
-                } else {
-                    Text(value)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-            case .multiSelect:
-                if let data = value.data(using: .utf8),
-                   let values = try? JSONDecoder().decode([String].self, from: data) {
-                    HStack(spacing: 2) {
-                        ForEach(values.prefix(2), id: \.self) { val in
-                            if let option = property.options.first(where: { $0.value == val }) {
-                                Text(option.value)
-                                    .font(.caption2)
-                                    .padding(.horizontal, 4)
-                                    .padding(.vertical, 1)
-                                    .background(Color(hex: option.color).opacity(0.2))
-                                    .clipShape(Capsule())
-                            }
-                        }
-                        if values.count > 2 {
-                            Text("+\(values.count - 2)")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
-                } else {
-                    Text(value).font(.callout).foregroundStyle(.secondary)
-                }
-            case .checkbox:
-                Image(systemName: value == "true" ? "checkmark.square.fill" : "square")
-                    .font(.callout)
-                    .foregroundStyle(value == "true" ? Color.accentColor : Color.gray.opacity(0.3))
-            case .date:
-                if let date = ISO8601DateFormatter().date(from: value) {
-                    Text(date, style: .date)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text(value).font(.callout).foregroundStyle(.secondary)
-                }
-            case .string, .url, .number:
-                Text(value)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-        } else {
-            Text("—")
-                .font(.callout)
-                .foregroundStyle(.quaternary)
-        }
-    }
-}
-
-// MARK: - Simple Cell Views
-
-private struct TitleCellView: View {
-    let reference: Reference
-    var body: some View {
-        Text(reference.title)
-            .font(.system(.callout, weight: .medium))
-            .lineLimit(2)
-    }
-}
-
-private struct AuthorsCellView: View {
-    let reference: Reference
-    var body: some View {
-        let display: String = {
-            guard let first = reference.authors.first else { return "" }
-            return reference.authors.count > 1 ? "\(first.family) et al." : first.family
-        }()
-        Text(display)
-            .font(.callout)
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-    }
-}
-
-private struct YearCellView: View {
-    let year: Int?
-    var body: some View {
-        Text(year.map(String.init) ?? "—")
-            .font(.callout)
-            .monospacedDigit()
-            .foregroundStyle(year != nil ? .primary : .quaternary)
-    }
-}
-
-private struct JournalCellView: View {
-    let journal: String?
-    var body: some View {
-        Text(journal ?? "")
-            .font(.callout)
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
     }
 }
 
