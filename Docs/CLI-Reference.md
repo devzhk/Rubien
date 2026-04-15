@@ -26,6 +26,7 @@ rubien-cli <subcommand> [options]
 | `export` | Export references as JSON, BibTeX, or RIS |
 | `collections` | List or manage collections |
 | `tags` | List or manage tags |
+| `properties` | List or manage custom property definitions and per-reference values |
 | `annotations` | List PDF annotations for a reference |
 | `styles` | List available citation styles |
 | `views` | Manage database views |
@@ -307,7 +308,7 @@ rubien-cli tags --delete 3
 |---|---|---|---|
 | `--create` | Flag | false | Create a new tag |
 | `--name` | String | — | Tag name (with `--create` or `--rename`) |
-| `--color` | String | `#007AFF` | Hex color (with `--create`) |
+| `--color` | String | auto | Hex color (with `--create`); an unused palette color is auto-assigned if omitted |
 | `--delete` | Int64 | — | Delete tag by ID |
 | `--assign` | Flag | false | Append tags to a reference |
 | `--remove-tags` | Flag | false | Remove tags from a reference |
@@ -317,6 +318,84 @@ rubien-cli tags --delete 3
 | `--id` | Int64 | — | Tag ID (with `--rename`) |
 
 **Output:** JSON array of `{id, name, color}`.
+
+---
+
+## properties
+
+List or manage **custom property definitions** (built-in "default" properties such as DOI/Year/Type are read-only via this command — use `update` for those) and per-reference **property values**.
+
+```bash
+rubien-cli properties                                              # List all definitions
+rubien-cli properties --visible                                    # Only visible definitions
+rubien-cli properties --create --name "Status" \
+  --type singleSelect --options "todo,doing,done"
+rubien-cli properties --create --name "Tags2" \
+  --type multiSelect --options "ml,nlp,vision"
+rubien-cli properties --rename --id 42 --name "Stage"
+rubien-cli properties --show --id 42                               # Mark visible
+rubien-cli properties --hide --id 42
+rubien-cli properties --add-option --id 42 --value "blocked"
+rubien-cli properties --delete 42                                  # Deletes a custom definition; built-ins are refused
+rubien-cli properties --set --reference 7 --id 42 --value "doing"
+rubien-cli properties --set --reference 7 --id 43 --value "ml,nlp" # multiSelect: CSV → stored as JSON [String]
+rubien-cli properties --clear --reference 7 --id 42
+rubien-cli properties --reference 7                                # List values set on reference 7
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `--visible` | Flag | false | Restrict the default list to visible definitions |
+| `--create` | Flag | false | Create a new definition (requires `--name` and `--type`) |
+| `--name` | String | — | Property name (with `--create` or `--rename`) |
+| `--type` | String | — | Property type (with `--create`): `string`, `url`, `number`, `singleSelect`, `multiSelect`, `date`, `checkbox` |
+| `--options` | String | — | Comma-separated option values for `singleSelect`/`multiSelect` (with `--create`); colors auto-assigned |
+| `--delete` | Int64 | — | Delete a definition by ID; built-in (`isDefault: true`) definitions are refused |
+| `--rename` | Flag | false | Rename a definition (requires `--id` and `--name`) |
+| `--show` | Flag | false | Mark a definition visible (requires `--id`) |
+| `--hide` | Flag | false | Mark a definition hidden (requires `--id`) |
+| `--add-option` | Flag | false | Append a select option (requires `--id` and `--value`; color auto-assigned if `--color` omitted) |
+| `--id` | Int64 | — | Property definition ID |
+| `--value` | String | — | Option value (with `--add-option` or `--set`); for `multiSelect` pass comma-separated values |
+| `--color` | String | auto | Hex color (with `--add-option`); unused palette color auto-assigned if omitted |
+| `--set` | Flag | false | Upsert a value on a reference (requires `--reference`, `--id`, `--value`); refused for built-in properties |
+| `--clear` | Flag | false | Delete a value on a reference (requires `--reference` and `--id`); refused for built-in properties |
+| `--reference` | Int64 | — | Reference ID (with `--set`, `--clear`, or alone to list that reference's values) |
+
+**Output shapes:**
+
+Listing (default): JSON array of `PropertyDefinition` objects:
+
+```json
+{
+  "id": "1",
+  "name": "Status",
+  "type": "singleSelect",
+  "options": [
+    {"value": "todo",  "color": "#007AFF"},
+    {"value": "doing", "color": "#34C759"},
+    {"value": "done",  "color": "#FF9500"}
+  ],
+  "sortOrder": 5,
+  "isDefault": false,
+  "defaultFieldKey": null,
+  "isVisible": true
+}
+```
+
+Listing with `--reference <id>`: JSON array of values on that reference:
+
+```json
+[{ "propertyId": "1", "name": "Status", "type": "singleSelect", "value": "doing" }]
+```
+
+For `--set` on a `multiSelect` property, `value` in the output echoes the JSON-encoded string array the CLI stored (e.g. `"[\"ml\",\"nlp\"]"`), matching what the app decodes.
+
+Create/rename/show/hide/add-option: single `PropertyDefinition` object (same shape as listing entries). `--delete`/`--set`/`--clear` return a short confirmation dict.
+
+**Guards:**
+- `--delete` on a built-in definition (e.g. Type, Year) returns an error and leaves the row untouched. Use `update --clear-field <name>` on the reference instead for built-in values.
+- `--set` / `--clear` on a built-in property return an error — built-in properties live on the `Reference` fields, not the `propertyValue` table. Use `update` for those.
 
 ---
 
@@ -429,9 +508,15 @@ All commands that return references use this structure:
   "language": "en",
   "edition": null,
   "readingStatus": "unread",
-  "priority": 0
+  "priority": 0,
+  "customProperties": [
+    {"propertyId": "17", "name": "Status", "type": "singleSelect", "value": "doing"},
+    {"propertyId": "18", "name": "Tags2",  "type": "multiSelect",  "value": "[\"ml\",\"nlp\"]"}
+  ]
 }
 ```
+
+`customProperties` is always present (may be an empty array). Each entry corresponds to a **non-default** property definition that has a value set on this reference; built-in fields like `year` and `doi` live at the top level. For `multiSelect`, `value` is a JSON-encoded `[String]` literal — decode it client-side.
 
 ---
 

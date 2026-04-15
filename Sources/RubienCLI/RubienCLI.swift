@@ -20,6 +20,7 @@ struct RubienCLI: AsyncParsableCommand {
             Import.self,
             Collections.self,
             Tags.self,
+            Properties.self,
             Annotations.self,
             Styles.self,
             Export.self,
@@ -99,6 +100,13 @@ private func uniqueBibTeXKeys(for refs: [Reference]) -> [String] {
 
 // MARK: - Reference JSON DTO
 
+struct CustomPropertyValueDTO: Encodable {
+    let propertyId: String
+    let name: String
+    let type: String
+    let value: String
+}
+
 struct ReferenceDTO: Encodable {
     let id: Int64?
     let title: String
@@ -124,8 +132,11 @@ struct ReferenceDTO: Encodable {
     let edition: String?
     let readingStatus: String
     let priority: Int
+    let customProperties: [CustomPropertyValueDTO]
 
-    init(from ref: Reference) {
+    init(from ref: Reference,
+         defs: [PropertyDefinition] = [],
+         valuesByRef: [Int64: [Int64: String]] = [:]) {
         self.id = ref.id
         self.title = ref.title
         self.authors = ref.authors.displayString
@@ -150,6 +161,40 @@ struct ReferenceDTO: Encodable {
         self.edition = ref.edition
         self.readingStatus = ref.readingStatus.rawValue
         self.priority = ref.priority.rawValue
+
+        let refValues = ref.id.flatMap { valuesByRef[$0] } ?? [:]
+        let customDefs = defs.filter { !$0.isDefault }
+        self.customProperties = customDefs.compactMap { def -> CustomPropertyValueDTO? in
+            guard let propId = def.id, let value = refValues[propId] else { return nil }
+            return CustomPropertyValueDTO(
+                propertyId: String(propId),
+                name: def.name,
+                type: def.type.rawValue,
+                value: value
+            )
+        }
+    }
+}
+
+struct PropertyDefinitionDTO: Encodable {
+    let id: String
+    let name: String
+    let type: String
+    let options: [SelectOption]
+    let sortOrder: Int
+    let isDefault: Bool
+    let defaultFieldKey: String?
+    let isVisible: Bool
+
+    init(from def: PropertyDefinition) {
+        self.id = def.id.map(String.init) ?? ""
+        self.name = def.name
+        self.type = def.type.rawValue
+        self.options = def.options
+        self.sortOrder = def.sortOrder
+        self.isDefault = def.isDefault
+        self.defaultFieldKey = def.defaultFieldKey
+        self.isVisible = def.isVisible
     }
 }
 
@@ -172,6 +217,35 @@ struct CitationTextOutput: Encodable {
     let bibliography: [String]
 }
 
+// MARK: - Reference DTO helpers
+
+/// Map a batch of references to DTOs, fetching property defs + values scoped
+/// to the returned references so a paged read doesn't scan the whole table.
+func mapReferenceDTOs(_ refs: [Reference]) throws -> [ReferenceDTO] {
+    guard !refs.isEmpty else { return [] }
+    let defs = try AppDatabase.shared.fetchAllPropertyDefinitions()
+    let refIds = refs.compactMap(\.id)
+    let valuesByRef = try AppDatabase.shared.fetchPropertyValues(forReferences: refIds)
+    return refs.map { ReferenceDTO(from: $0, defs: defs, valuesByRef: valuesByRef) }
+}
+
+/// Build a DTO for a single reference, fetching just that reference's values.
+func referenceDTO(for ref: Reference) throws -> ReferenceDTO {
+    let defs = try AppDatabase.shared.fetchAllPropertyDefinitions()
+    let valuesByRef: [Int64: [Int64: String]]
+    if let rid = ref.id {
+        let values = try AppDatabase.shared.fetchPropertyValues(forReference: rid)
+        var map: [Int64: String] = [:]
+        for v in values {
+            if let val = v.value { map[v.propertyId] = val }
+        }
+        valuesByRef = [rid: map]
+    } else {
+        valuesByRef = [:]
+    }
+    return ReferenceDTO(from: ref, defs: defs, valuesByRef: valuesByRef)
+}
+
 // MARK: - Subcommands
 
 struct Search: ParsableCommand {
@@ -185,7 +259,7 @@ struct Search: ParsableCommand {
 
     func run() throws {
         let refs = try AppDatabase.shared.searchReferences(query: query, limit: limit)
-        printJSON(refs.map(ReferenceDTO.init))
+        printJSON(try mapReferenceDTOs(refs))
     }
 }
 
@@ -286,7 +360,7 @@ struct List: ParsableCommand {
         if offset > 0 {
             refs = Array(refs.dropFirst(offset))
         }
-        printJSON(refs.map(ReferenceDTO.init))
+        printJSON(try mapReferenceDTOs(refs))
     }
 }
 
@@ -302,7 +376,7 @@ struct Get: ParsableCommand {
             printJSONError("Reference \(id) not found")
             throw ExitCode.failure
         }
-        printJSON(ReferenceDTO(from: ref))
+        printJSON(try referenceDTO(for: ref))
     }
 }
 
@@ -327,25 +401,27 @@ struct Add: AsyncParsableCommand {
             ref.collectionId = collection
             ref = MetadataVerifier.manuallyVerified(ref, reviewedBy: "cli-identifier")
             try AppDatabase.shared.saveReference(&ref)
-            printJSON(ReferenceDTO(from: ref))
+            // saveReference may dedupe onto an existing row; surface that row's
+            // existing custom properties so the contract matches get/list/export.
+            printJSON(try referenceDTO(for: ref))
         } else if let bib = bibtex {
             let refs = BibTeXImporter.parse(bib)
             guard !refs.isEmpty else {
                 printJSONError("No valid BibTeX entries found")
                 throw ExitCode.failure
             }
-            var imported: [ReferenceDTO] = []
+            var saved: [Reference] = []
             for var ref in refs {
                 ref.collectionId = collection
                 try AppDatabase.shared.saveReference(&ref)
-                imported.append(ReferenceDTO(from: ref))
+                saved.append(ref)
             }
-            printJSON(imported)
+            printJSON(try mapReferenceDTOs(saved))
         } else if let t = title {
             var ref = Reference(title: t)
             ref.collectionId = collection
             try AppDatabase.shared.saveReference(&ref)
-            printJSON(ReferenceDTO(from: ref))
+            printJSON(try referenceDTO(for: ref))
         } else {
             printJSONError("Provide --identifier, --bibtex, or --title")
             throw ExitCode.failure
@@ -491,7 +567,7 @@ struct Update: ParsableCommand {
             }
         }
         try AppDatabase.shared.saveReference(&ref)
-        printJSON(ReferenceDTO(from: ref))
+        printJSON(try referenceDTO(for: ref))
     }
 }
 
@@ -878,6 +954,274 @@ struct Tags: ParsableCommand {
     }
 }
 
+struct Properties: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "properties",
+        abstract: "List or manage custom property definitions and per-reference values"
+    )
+
+    @Flag(name: .long, help: "Only visible property definitions (with list)")
+    var visible = false
+
+    @Flag(name: .long, help: "Create a new property definition")
+    var create = false
+
+    @Option(name: .long, help: "Property name (with --create or --rename)")
+    var name: String?
+
+    @Option(name: .long, help: "Property type (with --create): string, url, number, singleSelect, multiSelect, date, checkbox")
+    var type: String?
+
+    @Option(name: .long, help: "Comma-separated option values for singleSelect/multiSelect (with --create), auto-colored")
+    var options: String?
+
+    @Option(name: .long, help: "Delete a property definition by ID (ignored for built-in defaults)")
+    var delete: Int64?
+
+    @Flag(name: .long, help: "Rename a property definition")
+    var rename = false
+
+    @Flag(name: .long, help: "Mark a property as visible")
+    var show = false
+
+    @Flag(name: .long, help: "Mark a property as hidden")
+    var hide = false
+
+    @Flag(name: .customLong("add-option"), help: "Append a select option to an existing property")
+    var addOption = false
+
+    @Option(name: .long, help: "Property definition ID (with --rename, --show, --hide, --add-option, --set, --clear)")
+    var id: Int64?
+
+    @Option(name: .long, help: "Option value (with --add-option or --set on select types)")
+    var value: String?
+
+    @Option(name: .long, help: "Option color as hex (with --add-option, auto-assigned if omitted)")
+    var color: String?
+
+    @Flag(name: .long, help: "Upsert a property value on a reference (requires --reference, --id, --value)")
+    var set = false
+
+    @Flag(name: .long, help: "Clear a property value on a reference (requires --reference and --id)")
+    var clear = false
+
+    @Option(name: .long, help: "Reference ID (with --set, --clear, or to list that reference's property values)")
+    var reference: Int64?
+
+    func run() throws {
+        if let deleteId = delete {
+            let defs = try AppDatabase.shared.fetchAllPropertyDefinitions()
+            guard let target = defs.first(where: { $0.id == deleteId }) else {
+                printJSONError("Property \(deleteId) not found")
+                throw ExitCode.failure
+            }
+            if target.isDefault {
+                printJSONError("Cannot delete built-in property '\(target.name)'")
+                throw ExitCode.failure
+            }
+            try AppDatabase.shared.deletePropertyDefinition(id: deleteId)
+            printJSON(["deleted": "\(deleteId)"])
+            return
+        }
+
+        if create {
+            guard let n = name else {
+                printJSONError("--create requires --name")
+                throw ExitCode.failure
+            }
+            guard let typeStr = type, let ptype = PropertyType(rawValue: typeStr) else {
+                printJSONError("--create requires --type (one of: string, url, number, singleSelect, multiSelect, date, checkbox)")
+                throw ExitCode.failure
+            }
+            let parsedOptions = parseOptions(options)
+            if !parsedOptions.isEmpty, ptype != .singleSelect && ptype != .multiSelect {
+                printJSONError("--options only applies to singleSelect or multiSelect types")
+                throw ExitCode.failure
+            }
+            let existing = try AppDatabase.shared.fetchAllPropertyDefinitions()
+            let maxOrder = existing.map(\.sortOrder).max() ?? 0
+            var prop = PropertyDefinition(
+                name: n,
+                type: ptype,
+                options: parsedOptions,
+                sortOrder: maxOrder + 1,
+                isDefault: false,
+                isVisible: true
+            )
+            try AppDatabase.shared.savePropertyDefinition(&prop)
+            printJSON(PropertyDefinitionDTO(from: prop))
+            return
+        }
+
+        if rename {
+            guard let propId = id, let n = name else {
+                printJSONError("--rename requires --id and --name")
+                throw ExitCode.failure
+            }
+            let defs = try AppDatabase.shared.fetchAllPropertyDefinitions()
+            guard var prop = defs.first(where: { $0.id == propId }) else {
+                printJSONError("Property \(propId) not found")
+                throw ExitCode.failure
+            }
+            if prop.isDefault {
+                printJSONError("Cannot rename built-in property '\(prop.name)'")
+                throw ExitCode.failure
+            }
+            prop.name = n
+            try AppDatabase.shared.savePropertyDefinition(&prop)
+            printJSON(PropertyDefinitionDTO(from: prop))
+            return
+        }
+
+        if show || hide {
+            guard let propId = id else {
+                printJSONError("--show / --hide requires --id")
+                throw ExitCode.failure
+            }
+            try AppDatabase.shared.togglePropertyVisibility(id: propId, visible: show)
+            let defs = try AppDatabase.shared.fetchAllPropertyDefinitions()
+            guard let prop = defs.first(where: { $0.id == propId }) else {
+                printJSONError("Property \(propId) not found")
+                throw ExitCode.failure
+            }
+            printJSON(PropertyDefinitionDTO(from: prop))
+            return
+        }
+
+        if addOption {
+            guard let propId = id, let v = value else {
+                printJSONError("--add-option requires --id and --value")
+                throw ExitCode.failure
+            }
+            let defs = try AppDatabase.shared.fetchAllPropertyDefinitions()
+            guard var prop = defs.first(where: { $0.id == propId }) else {
+                printJSONError("Property \(propId) not found")
+                throw ExitCode.failure
+            }
+            if prop.isDefault {
+                printJSONError("Cannot add options to built-in property '\(prop.name)'. Built-in select values are backed by enums and cannot be extended.")
+                throw ExitCode.failure
+            }
+            guard prop.type == .singleSelect || prop.type == .multiSelect else {
+                printJSONError("--add-option only applies to singleSelect or multiSelect types")
+                throw ExitCode.failure
+            }
+            var opts = prop.options
+            let resolvedColor: String
+            if let c = color {
+                resolvedColor = c
+            } else {
+                let used = Set(opts.map(\.color))
+                resolvedColor = SelectOption.colorPalette.first { !used.contains($0) }
+                    ?? SelectOption.colorPalette.randomElement() ?? SelectOption.colorPalette[0]
+            }
+            opts.append(SelectOption(value: v, color: resolvedColor))
+            prop.options = opts
+            try AppDatabase.shared.savePropertyDefinition(&prop)
+            printJSON(PropertyDefinitionDTO(from: prop))
+            return
+        }
+
+        if set {
+            guard let refId = reference, let propId = id, let v = value else {
+                printJSONError("--set requires --reference, --id, and --value")
+                throw ExitCode.failure
+            }
+            let defs = try AppDatabase.shared.fetchAllPropertyDefinitions()
+            guard let def = defs.first(where: { $0.id == propId }) else {
+                printJSONError("Property \(propId) not found")
+                throw ExitCode.failure
+            }
+            // Built-in properties back onto Reference fields, not the propertyValue table.
+            // Writing a propertyValue row for them would appear to succeed but never render
+            // in `get`/`list`/the UI. Redirect to `update` instead.
+            if def.isDefault {
+                printJSONError("Cannot --set built-in property '\(def.name)'. Use `rubien-cli update` for built-in fields.")
+                throw ExitCode.failure
+            }
+            // multiSelect values are persisted as a JSON-encoded [String]; the UI
+            // decoder silently returns [] for a raw scalar, so accept comma-separated
+            // input here and encode before writing.
+            let stored: String
+            if def.type == .multiSelect {
+                let values = v.split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty }
+                guard let data = try? JSONEncoder().encode(values),
+                      let json = String(data: data, encoding: .utf8) else {
+                    printJSONError("Failed to encode multiSelect value")
+                    throw ExitCode.failure
+                }
+                stored = json
+            } else {
+                stored = v
+            }
+            try AppDatabase.shared.setPropertyValue(referenceId: refId, propertyId: propId, value: stored)
+            printJSON(["referenceId": "\(refId)", "propertyId": "\(propId)", "value": stored])
+            return
+        }
+
+        if clear {
+            guard let refId = reference, let propId = id else {
+                printJSONError("--clear requires --reference and --id")
+                throw ExitCode.failure
+            }
+            let defs = try AppDatabase.shared.fetchAllPropertyDefinitions()
+            guard let def = defs.first(where: { $0.id == propId }) else {
+                printJSONError("Property \(propId) not found")
+                throw ExitCode.failure
+            }
+            if def.isDefault {
+                printJSONError("Cannot --clear built-in property '\(def.name)'. Use `rubien-cli update --clear-field <name>` for built-in fields.")
+                throw ExitCode.failure
+            }
+            try AppDatabase.shared.setPropertyValue(referenceId: refId, propertyId: propId, value: nil)
+            printJSON(["cleared": "\(refId):\(propId)"])
+            return
+        }
+
+        if let refId = reference {
+            // List values set on this reference
+            let defs = try AppDatabase.shared.fetchAllPropertyDefinitions()
+            let defsById: [Int64: PropertyDefinition] = Dictionary(
+                uniqueKeysWithValues: defs.compactMap { def in def.id.map { ($0, def) } }
+            )
+            let values = try AppDatabase.shared.fetchPropertyValues(forReference: refId)
+            let dtos: [CustomPropertyValueDTO] = values.compactMap { v in
+                guard let val = v.value, let def = defsById[v.propertyId] else { return nil }
+                return CustomPropertyValueDTO(
+                    propertyId: String(v.propertyId),
+                    name: def.name,
+                    type: def.type.rawValue,
+                    value: val
+                )
+            }
+            printJSON(dtos)
+            return
+        }
+
+        // Default: list definitions
+        let defs = visible
+            ? try AppDatabase.shared.fetchVisiblePropertyDefinitions()
+            : try AppDatabase.shared.fetchAllPropertyDefinitions()
+        printJSON(defs.map(PropertyDefinitionDTO.init))
+    }
+
+    private func parseOptions(_ raw: String?) -> [SelectOption] {
+        guard let raw, !raw.isEmpty else { return [] }
+        let values = raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        var options: [SelectOption] = []
+        var used: Set<String> = []
+        for v in values {
+            let color = SelectOption.colorPalette.first { !used.contains($0) }
+                ?? SelectOption.colorPalette.randomElement() ?? SelectOption.colorPalette[0]
+            used.insert(color)
+            options.append(SelectOption(value: v, color: color))
+        }
+        return options
+    }
+}
+
 struct Annotations: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "List PDF annotations for a reference")
 
@@ -1030,7 +1374,7 @@ struct Export: ParsableCommand {
             }
             print(output, terminator: "")
         default:
-            printJSON(refs.map(ReferenceDTO.init))
+            printJSON(try mapReferenceDTOs(refs))
         }
     }
 }
@@ -1118,7 +1462,7 @@ struct Views: ParsableCommand {
             case .tag(let id): scope = .tag(id)
             }
             let refs = try db.fetchReferences(scope: scope, filter: ReferenceFilter(), limit: limit)
-            printJSON(refs.map(ReferenceDTO.init))
+            printJSON(try mapReferenceDTOs(refs))
         } else if let renameId = rename {
             guard var view = try db.fetchDatabaseView(id: renameId) else {
                 printJSONError("View \(renameId) not found")

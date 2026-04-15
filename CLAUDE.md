@@ -89,7 +89,11 @@ When adding a new built-in style, update both the Swift formatter (for speed) an
 
 ### CLI
 
-`Sources/RubienCLI/RubienCLI.swift` is the single-file argument-parser entry with 14 subcommands (`search`, `list`, `get`, `add`, `update`, `delete`, `move`, `cite`, `import`, `export`, `collections`, `tags`, `annotations`, `styles`). JSON is the default output format — scripts depend on it, so don't change CLI output shape without updating tests in `Tests/RubienCLITests/`.
+`Sources/RubienCLI/RubienCLI.swift` is the single-file argument-parser entry with 16 subcommands (`search`, `list`, `get`, `add`, `update`, `delete`, `move`, `cite`, `import`, `export`, `collections`, `tags`, `properties`, `views`, `annotations`, `styles`). JSON is the default output format — scripts depend on it, so don't change CLI output shape without updating tests in `Tests/RubienCLITests/`.
+
+**Keep the CLI in sync with data-layer changes.** Any time `RubienCore` gains a new model, table, field, or mutation (e.g. custom property definitions, property values, new reference metadata fields), extend the CLI to cover it — new subcommand for new entities, fold new fields into existing `get`/`list`/`export` JSON. UI-only changes (column reorder, popover layout, detail-panel widths) do **not** need CLI parity; the line is "is this a new way to read or write data?" If yes, the CLI must expose it and `RubienCLITests` must cover the JSON contract.
+
+**Keep `Docs/CLI-Reference.md` current.** Any commit that changes CLI subcommands, flags, or JSON output shape must update the doc in the same commit: the subcommand table, the per-subcommand section (flags + example JSON), and the "Reference JSON Shape" block if `ReferenceDTO` changed. The doc is the scripting contract for users who don't read Swift source.
 
 ## Tests
 

@@ -1950,6 +1950,42 @@ extension AppDatabase {
         }
     }
 
+    public func fetchAllPropertyValues() throws -> [Int64: [Int64: String]] {
+        try dbWriter.read { db in
+            let rows = try PropertyValue.fetchAll(db)
+            var map: [Int64: [Int64: String]] = [:]
+            for row in rows {
+                if let val = row.value {
+                    map[row.referenceId, default: [:]][row.propertyId] = val
+                }
+            }
+            return map
+        }
+    }
+
+    public func fetchPropertyValues(forReferences refIds: [Int64]) throws -> [Int64: [Int64: String]] {
+        guard !refIds.isEmpty else { return [:] }
+        // SQLite caps host parameters at 999 on older builds (32 766 on newer). Chunk
+        // the IN-list so unfiltered `list` / `export` over a large library can't
+        // exceed the limit and throw mid-read.
+        let chunkSize = 500
+        return try dbWriter.read { db in
+            var map: [Int64: [Int64: String]] = [:]
+            for start in stride(from: 0, to: refIds.count, by: chunkSize) {
+                let slice = Array(refIds[start..<min(start + chunkSize, refIds.count)])
+                let rows = try PropertyValue
+                    .filter(slice.contains(PropertyValue.Columns.referenceId))
+                    .fetchAll(db)
+                for row in rows {
+                    if let val = row.value {
+                        map[row.referenceId, default: [:]][row.propertyId] = val
+                    }
+                }
+            }
+            return map
+        }
+    }
+
     public func observeAllPropertyValues() -> AnyPublisher<[Int64: [Int64: String]], Error> {
         ValueObservation
             .tracking { db in
