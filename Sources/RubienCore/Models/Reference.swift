@@ -419,69 +419,63 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
 
 extension Reference {
     public static func == (lhs: Reference, rhs: Reference) -> Bool {
-        switch (lhs.id, rhs.id) {
-        case let (.some(leftID), .some(rightID)):
-            return leftID == rightID
-        case (.none, .none):
-            guard lhs.title == rhs.title,
-                  lhs.authors == rhs.authors,
-                  lhs.year == rhs.year,
-                  lhs.journal == rhs.journal,
-                  lhs.volume == rhs.volume,
-                  lhs.issue == rhs.issue,
-                  lhs.pages == rhs.pages,
-                  lhs.doi == rhs.doi,
-                  lhs.url == rhs.url,
-                  lhs.abstract == rhs.abstract,
-                  lhs.dateAdded == rhs.dateAdded,
-                  lhs.dateModified == rhs.dateModified,
-                  lhs.pdfPath == rhs.pdfPath,
-                  lhs.notes == rhs.notes,
-                  lhs.webContent == rhs.webContent,
-                  lhs.siteName == rhs.siteName,
-                  lhs.favicon == rhs.favicon,
-                  lhs.referenceType == rhs.referenceType,
-                  lhs.metadataSource == rhs.metadataSource,
-                  lhs.verificationStatus == rhs.verificationStatus,
-                  lhs.acceptedByRuleID == rhs.acceptedByRuleID,
-                  lhs.recordKey == rhs.recordKey,
-                  lhs.verificationSourceURL == rhs.verificationSourceURL,
-                  lhs.evidenceBundleHash == rhs.evidenceBundleHash,
-                  lhs.verifiedAt == rhs.verifiedAt,
-                  lhs.reviewedBy == rhs.reviewedBy,
-                  lhs.collectionId == rhs.collectionId,
-                  lhs.readingStatus == rhs.readingStatus,
-                  lhs.priority == rhs.priority else {
-                return false
-            }
-
-            guard lhs.publisher == rhs.publisher,
-                  lhs.publisherPlace == rhs.publisherPlace,
-                  lhs.edition == rhs.edition,
-                  lhs.editors == rhs.editors,
-                  lhs.isbn == rhs.isbn,
-                  lhs.issn == rhs.issn,
-                  lhs.accessedDate == rhs.accessedDate,
-                  lhs.issuedMonth == rhs.issuedMonth,
-                  lhs.issuedDay == rhs.issuedDay,
-                  lhs.translators == rhs.translators,
-                  lhs.eventTitle == rhs.eventTitle,
-                  lhs.eventPlace == rhs.eventPlace,
-                  lhs.genre == rhs.genre,
-                  lhs.institution == rhs.institution,
-                  lhs.number == rhs.number,
-                  lhs.collectionTitle == rhs.collectionTitle,
-                  lhs.numberOfPages == rhs.numberOfPages,
-                  lhs.language == rhs.language,
-                  lhs.pmid == rhs.pmid,
-                  lhs.pmcid == rhs.pmcid else {
-                return false
-            }
-
-            return true
-        default:
+        guard lhs.id == rhs.id else { return false }
+        guard lhs.title == rhs.title,
+              lhs.authors == rhs.authors,
+              lhs.year == rhs.year,
+              lhs.journal == rhs.journal,
+              lhs.volume == rhs.volume,
+              lhs.issue == rhs.issue,
+              lhs.pages == rhs.pages,
+              lhs.doi == rhs.doi,
+              lhs.url == rhs.url,
+              lhs.abstract == rhs.abstract,
+              lhs.dateAdded == rhs.dateAdded,
+              lhs.dateModified == rhs.dateModified,
+              lhs.pdfPath == rhs.pdfPath,
+              lhs.notes == rhs.notes,
+              lhs.webContent == rhs.webContent,
+              lhs.siteName == rhs.siteName,
+              lhs.favicon == rhs.favicon,
+              lhs.referenceType == rhs.referenceType,
+              lhs.metadataSource == rhs.metadataSource,
+              lhs.verificationStatus == rhs.verificationStatus,
+              lhs.acceptedByRuleID == rhs.acceptedByRuleID,
+              lhs.recordKey == rhs.recordKey,
+              lhs.verificationSourceURL == rhs.verificationSourceURL,
+              lhs.evidenceBundleHash == rhs.evidenceBundleHash,
+              lhs.verifiedAt == rhs.verifiedAt,
+              lhs.reviewedBy == rhs.reviewedBy,
+              lhs.collectionId == rhs.collectionId,
+              lhs.readingStatus == rhs.readingStatus,
+              lhs.priority == rhs.priority else {
             return false
         }
+
+        guard lhs.publisher == rhs.publisher,
+              lhs.publisherPlace == rhs.publisherPlace,
+              lhs.edition == rhs.edition,
+              lhs.editors == rhs.editors,
+              lhs.isbn == rhs.isbn,
+              lhs.issn == rhs.issn,
+              lhs.accessedDate == rhs.accessedDate,
+              lhs.issuedMonth == rhs.issuedMonth,
+              lhs.issuedDay == rhs.issuedDay,
+              lhs.translators == rhs.translators,
+              lhs.eventTitle == rhs.eventTitle,
+              lhs.eventPlace == rhs.eventPlace,
+              lhs.genre == rhs.genre,
+              lhs.institution == rhs.institution,
+              lhs.number == rhs.number,
+              lhs.collectionTitle == rhs.collectionTitle,
+              lhs.numberOfPages == rhs.numberOfPages,
+              lhs.language == rhs.language,
+              lhs.pmid == rhs.pmid,
+              lhs.pmcid == rhs.pmcid else {
+            return false
+        }
+
+        return true
     }
 
     public func hash(into hasher: inout Hasher) {

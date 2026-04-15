@@ -109,6 +109,13 @@ public struct PropertyDefinition: Identifiable, Codable, Hashable, Sendable {
         }
         return json
     }
+
+    public var customizationID: String {
+        if isDefault {
+            return defaultFieldKey.map { "default_\($0)" } ?? "prop_\(id ?? 0)"
+        }
+        return "custom_\(id ?? 0)"
+    }
 }
 
 // MARK: - GRDB Record

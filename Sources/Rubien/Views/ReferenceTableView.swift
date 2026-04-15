@@ -398,13 +398,14 @@ private struct ReferenceTableContent: View {
                 .map(\.rawValue)
         )
         for prop in customProperties {
+            guard columnCustomization[visibility: prop.customizationID] != .hidden else { continue }
             if prop.isDefault {
                 guard let key = prop.defaultFieldKey, !alreadyHandled.contains(key) else { continue }
                 keys.append(key)
-            } else if let propId = prop.id {
+            } else if prop.id != nil {
                 switch prop.type {
                 case .string, .url, .number:
-                    keys.append("custom_\(propId)")
+                    keys.append(prop.customizationID)
                 case .singleSelect, .multiSelect, .checkbox, .date:
                     continue
                 }
@@ -533,6 +534,7 @@ private struct ReferenceTableContent: View {
                     }
                 }
                 .width(min: 60, ideal: 100)
+                .customizationID(prop.customizationID)
             }
         }
         .onKeyPress(.return) {

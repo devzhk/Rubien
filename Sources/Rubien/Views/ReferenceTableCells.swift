@@ -544,7 +544,7 @@ struct EditableCustomPropertyCell: View {
     var onTab: ((_ backwards: Bool) -> Void)? = nil
 
     private var propId: Int64 { property.id ?? 0 }
-    private var fieldKey: String { "custom_\(propId)" }
+    private var fieldKey: String { property.customizationID }
     private var currentValue: String { rawValue ?? "" }
 
     var body: some View {

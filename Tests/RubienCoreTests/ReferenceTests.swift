@@ -240,10 +240,16 @@ final class ReferenceTests: XCTestCase {
 
     // MARK: - Hashable / Equatable
 
-    func testReferencesWithSameIdAreEqual() {
+    func testReferencesWithSameIdAndContentAreEqual() {
+        let ref1 = Reference(id: 1, title: "A")
+        let ref2 = ref1
+        XCTAssertEqual(ref1, ref2)
+    }
+
+    func testReferencesWithSameIdButDifferentContentAreNotEqual() {
         let ref1 = Reference(id: 1, title: "A")
         let ref2 = Reference(id: 1, title: "B")
-        XCTAssertEqual(ref1, ref2)
+        XCTAssertNotEqual(ref1, ref2)
     }
 
     func testReferencesWithDifferentIdsAreNotEqual() {

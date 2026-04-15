@@ -533,6 +533,7 @@ struct SelectOptionPicker: View {
             localSelected = Set(selectedValues)
         }
         .onDisappear {
+            guard !isSingleSelect else { return }
             onCommit(Array(localSelected))
         }
     }
