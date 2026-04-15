@@ -555,34 +555,54 @@ struct ReadingStatusCell: View {
     let reference: Reference
     let onUpdate: (Reference) -> Void
 
+    @State private var showPicker = false
+
     var body: some View {
-        Menu {
-            ForEach(ReadingStatus.allCases, id: \.self) { status in
-                Button {
-                    var updated = reference
-                    updated.readingStatus = status
-                    onUpdate(updated)
-                } label: {
-                    Label(status.label, systemImage: status.icon)
+        Button {
+            showPicker = true
+        } label: {
+            Text(reference.readingStatus.label)
+                .font(.callout)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1)
+                .chipBackground(statusColor(for: reference.readingStatus))
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $showPicker) {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(ReadingStatus.allCases, id: \.self) { status in
+                    let isSelected = status == reference.readingStatus
+                    Button {
+                        var updated = reference
+                        updated.readingStatus = status
+                        onUpdate(updated)
+                        showPicker = false
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                .font(.system(size: 13))
+                                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                            Text(status.label)
+                                .font(.callout)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 1)
+                                .chipBackground(statusColor(for: status))
+                            Spacer()
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
                 }
             }
-        } label: {
-            HStack(spacing: 4) {
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 7, height: 7)
-                Text(reference.readingStatus.label)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
+            .padding(.vertical, 4)
+            .frame(width: 180)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
     }
 
-    private var statusColor: Color {
-        switch reference.readingStatus {
+    private func statusColor(for status: ReadingStatus) -> Color {
+        switch status {
         case .unread: return .gray
         case .reading: return .blue
         case .skimmed: return .orange
@@ -595,36 +615,66 @@ struct PriorityCell: View {
     let reference: Reference
     let onUpdate: (Reference) -> Void
 
+    @State private var showPicker = false
+
     var body: some View {
-        Menu {
-            ForEach(Priority.allCases, id: \.self) { p in
-                Button {
-                    var updated = reference
-                    updated.priority = p
-                    onUpdate(updated)
-                } label: {
-                    Label(p.label, systemImage: p.icon)
-                }
-            }
+        Button {
+            showPicker = true
         } label: {
-            HStack(spacing: 3) {
-                if reference.priority != .none {
-                    Image(systemName: reference.priority.icon)
-                        .font(.system(size: 10))
-                        .foregroundStyle(priorityColor)
-                }
+            if reference.priority == .none {
                 Text(reference.priority.label)
                     .font(.callout)
-                    .foregroundStyle(reference.priority == .none ? .quaternary : .secondary)
+                    .foregroundStyle(.quaternary)
+            } else {
+                Text(reference.priority.label)
+                    .font(.callout)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1)
+                    .chipBackground(priorityColor(for: reference.priority))
             }
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
+        .buttonStyle(.plain)
+        .popover(isPresented: $showPicker) {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Priority.allCases, id: \.self) { p in
+                    let isSelected = p == reference.priority
+                    Button {
+                        var updated = reference
+                        updated.priority = p
+                        onUpdate(updated)
+                        showPicker = false
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                                .font(.system(size: 13))
+                                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                            if p == .none {
+                                Text(p.label)
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Text(p.label)
+                                    .font(.callout)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 1)
+                                    .chipBackground(priorityColor(for: p))
+                            }
+                            Spacer()
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                }
+            }
+            .padding(.vertical, 4)
+            .frame(width: 180)
+        }
     }
 
-    private var priorityColor: Color {
-        switch reference.priority {
+    private func priorityColor(for priority: Priority) -> Color {
+        switch priority {
         case .none: return .gray
         case .low: return .blue
         case .medium: return .orange
@@ -651,25 +701,23 @@ struct TagsCellView: View {
             HStack(spacing: 3) {
                 if tags.isEmpty {
                     Text("+ tag")
-                        .font(.system(size: 10))
+                        .font(.callout)
                         .foregroundStyle(.quaternary)
                 } else {
                     ForEach(tags.prefix(3)) { tag in
                         Text(tag.name)
-                            .font(.system(size: 10, weight: .medium))
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
-                            .background(Color(hex: tag.color).opacity(0.15))
-                            .foregroundStyle(Color(hex: tag.color))
-                            .clipShape(Capsule())
+                            .font(.callout)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .chipBackground(Color(hex: tag.color))
                     }
                     if tags.count > 3 {
                         Text("+\(tags.count - 3)")
-                            .font(.system(size: 10))
+                            .font(.callout)
                             .foregroundStyle(.tertiary)
                     }
                     Image(systemName: "plus")
-                        .font(.system(size: 9, weight: .medium))
+                        .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(.quaternary)
                 }
             }

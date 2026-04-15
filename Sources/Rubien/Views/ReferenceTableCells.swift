@@ -212,8 +212,7 @@ struct EditableSingleSelectCell: View {
                     .font(.callout)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 1)
-                    .background(Color(hex: current.color).opacity(0.2))
-                    .clipShape(Capsule())
+                    .chipBackground(Color(hex: current.color))
             } else if value.isEmpty {
                 Text("—")
                     .font(.callout)
@@ -263,20 +262,19 @@ struct EditableMultiSelectCell: View {
                     ForEach(selectedValues.prefix(2), id: \.self) { val in
                         if let option = options.first(where: { $0.value == val }) {
                             Text(option.value)
-                                .font(.caption2)
-                                .padding(.horizontal, 4)
+                                .font(.callout)
+                                .padding(.horizontal, 6)
                                 .padding(.vertical, 1)
-                                .background(Color(hex: option.color).opacity(0.2))
-                                .clipShape(Capsule())
+                                .chipBackground(Color(hex: option.color))
                         } else {
                             Text(val)
-                                .font(.caption2)
+                                .font(.callout)
                                 .foregroundStyle(.secondary)
                         }
                     }
                     if selectedValues.count > 2 {
                         Text("+\(selectedValues.count - 2)")
-                            .font(.caption2)
+                            .font(.callout)
                             .foregroundStyle(.tertiary)
                     }
                 }

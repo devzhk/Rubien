@@ -134,17 +134,11 @@ struct InlineSingleSelectRow: View {
     var body: some View {
         PropertyRowLayout(label: label) {
             if let current = options.first(where: { $0.value == value }) {
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(Color(hex: current.color))
-                        .frame(width: 7, height: 7)
-                    Text(current.value)
-                        .font(.system(size: 12))
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(Color(hex: current.color).opacity(0.12))
-                .clipShape(Capsule())
+                Text(current.value)
+                    .font(.system(size: 12))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .chipBackground(Color(hex: current.color))
             } else {
                 Text(value.isEmpty ? "Select..." : value)
                     .font(.system(size: 12))
@@ -194,8 +188,7 @@ struct InlineTagsRow: View {
                             .font(.system(size: 11))
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
-                            .background(Color(hex: tag.color).opacity(0.2))
-                            .clipShape(Capsule())
+                            .chipBackground(Color(hex: tag.color))
                     }
                 }
             }
@@ -241,8 +234,7 @@ struct InlineMultiSelectOptionRow: View {
                                 .font(.system(size: 11))
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
-                                .background(Color(hex: option.color).opacity(0.2))
-                                .clipShape(Capsule())
+                                .chipBackground(Color(hex: option.color))
                         }
                     }
                 }
@@ -478,11 +470,12 @@ struct SelectOptionPicker: View {
                                 Image(systemName: selected ? "checkmark.circle.fill" : "circle")
                                     .font(.system(size: 13))
                                     .foregroundStyle(selected ? Color.accentColor : .secondary)
-                                Circle()
-                                    .fill(Color(hex: option.color))
-                                    .frame(width: 8, height: 8)
                                 Text(option.value)
                                     .font(.system(size: 12))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color(hex: option.color).opacity(0.2))
+                                    .clipShape(Capsule())
                                 Spacer()
                             }
                             .contentShape(Rectangle())
