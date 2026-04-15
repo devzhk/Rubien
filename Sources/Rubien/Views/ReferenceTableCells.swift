@@ -8,14 +8,29 @@ struct EditingCellID: Equatable {
     let fieldKey: String
 }
 
-// Edit interaction: single click selects the row (SwiftUI `Table` does this);
-// double click enters edit mode. This keeps row selection, batch actions, and
-// the context menu working — cell taps that consume single clicks would break
-// all three.
+// Inline-edit cells (string/number/url) carry no tap gesture — Return on the
+// selected row enters edit mode (in ReferenceTableView). Picker cells keep
+// double-click because their popover doesn't race with Table row selection
+// the way an inline TextField's focus does.
 //
-// Esc inside the TextField is swallowed by `.onExitCommand`; the outer
-// `onKeyPress(.escape)` in ReferenceTableView (clears selection) only fires
-// when no cell is mid-edit. Don't change without testing both paths.
+// Esc inside an editing TextField is swallowed by `.onExitCommand`; the outer
+// `.onKeyPress(.escape)` in ReferenceTableView only fires when no cell is
+// mid-edit. Don't change without testing both Esc paths.
+
+private extension View {
+    // Tab / Shift+Tab inside an editing TextField: commit the current value
+    // and advance (or retreat) to the next inline-editable column.
+    func onTabCommit(
+        _ onTab: ((_ backwards: Bool) -> Void)?,
+        commit: @escaping () -> Void
+    ) -> some View {
+        onKeyPress(.tab, phases: .down) { press in
+            commit()
+            onTab?(press.modifiers.contains(.shift))
+            return .handled
+        }
+    }
+}
 
 // MARK: - Editable String Cell
 
@@ -26,6 +41,7 @@ struct EditableStringCell: View {
     let onCommit: (String) -> Void
     let onCancel: () -> Void
     var placeholder: String = "—"
+    var onTab: ((_ backwards: Bool) -> Void)? = nil
 
     @State private var editText = ""
     @State private var didCancel = false
@@ -42,6 +58,7 @@ struct EditableStringCell: View {
                     didCancel = true
                     onCancel()
                 }
+                .onTabCommit(onTab) { onCommit(editText) }
                 .onAppear {
                     editText = value
                     didCancel = false
@@ -65,8 +82,6 @@ struct EditableStringCell: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-                .onTapGesture(count: 2) { onBeginEdit() }
         }
     }
 }
@@ -80,6 +95,7 @@ struct EditableNumberCell: View {
     let onCommit: (Int?) -> Void
     let onCancel: () -> Void
     var placeholder: String = "—"
+    var onTab: ((_ backwards: Bool) -> Void)? = nil
 
     @State private var editText = ""
     @State private var didCancel = false
@@ -97,6 +113,7 @@ struct EditableNumberCell: View {
                     didCancel = true
                     onCancel()
                 }
+                .onTabCommit(onTab) { onCommit(Int(editText)) }
                 .onAppear {
                     editText = value.map(String.init) ?? ""
                     didCancel = false
@@ -121,8 +138,6 @@ struct EditableNumberCell: View {
                 .foregroundStyle(display.isEmpty ? .quaternary : .primary)
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-                .onTapGesture(count: 2) { onBeginEdit() }
         }
     }
 }
@@ -135,6 +150,7 @@ struct EditableURLCell: View {
     let onBeginEdit: () -> Void
     let onCommit: (String) -> Void
     let onCancel: () -> Void
+    var onTab: ((_ backwards: Bool) -> Void)? = nil
 
     @State private var editText = ""
     @State private var didCancel = false
@@ -151,6 +167,7 @@ struct EditableURLCell: View {
                     didCancel = true
                     onCancel()
                 }
+                .onTabCommit(onTab) { onCommit(editText) }
                 .onAppear {
                     editText = value
                     didCancel = false
@@ -174,8 +191,6 @@ struct EditableURLCell: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-                .onTapGesture(count: 2) { onBeginEdit() }
         }
     }
 }
@@ -212,7 +227,7 @@ struct EditableSingleSelectCell: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
-        .onTapGesture(count: 2) { showPicker = true }
+        .simultaneousGesture(TapGesture(count: 2).onEnded { showPicker = true })
         .popover(isPresented: $showPicker) {
             SelectOptionPicker(
                 selectedValues: value.isEmpty ? [] : [value],
@@ -269,7 +284,7 @@ struct EditableMultiSelectCell: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
-        .onTapGesture(count: 2) { showPicker = true }
+        .simultaneousGesture(TapGesture(count: 2).onEnded { showPicker = true })
         .popover(isPresented: $showPicker) {
             SelectOptionPicker(
                 selectedValues: selectedValues,
@@ -321,7 +336,7 @@ struct EditableDateCell: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
-        .onTapGesture(count: 2) { showPicker = true }
+        .simultaneousGesture(TapGesture(count: 2).onEnded { showPicker = true })
         .popover(isPresented: $showPicker) {
             VStack(spacing: 8) {
                 DatePicker("", selection: $editDate, displayedComponents: .date)
@@ -363,6 +378,7 @@ struct EditableDefaultPropertyCell: View {
     let onBeginEdit: (String) -> Void
     let onCancel: () -> Void
     let commitRef: (Reference) -> Void
+    var onTab: ((_ backwards: Bool) -> Void)? = nil
 
     var body: some View {
         switch fieldKey {
@@ -388,7 +404,8 @@ struct EditableDefaultPropertyCell: View {
                     u.year = val
                     commitRef(u)
                 },
-                onCancel: onCancel
+                onCancel: onCancel,
+                onTab: onTab
             )
         case "doi":
             EditableURLCell(
@@ -400,7 +417,8 @@ struct EditableDefaultPropertyCell: View {
                     u.doi = val.isEmpty ? nil : val
                     commitRef(u)
                 },
-                onCancel: onCancel
+                onCancel: onCancel,
+                onTab: onTab
             )
         case "url":
             EditableURLCell(
@@ -412,7 +430,8 @@ struct EditableDefaultPropertyCell: View {
                     u.url = val.isEmpty ? nil : val
                     commitRef(u)
                 },
-                onCancel: onCancel
+                onCancel: onCancel,
+                onTab: onTab
             )
         case "editors":
             EditableStringCell(
@@ -424,7 +443,8 @@ struct EditableDefaultPropertyCell: View {
                     u.editors = val.isEmpty ? nil : Reference.encodeNames(AuthorName.parseList(val))
                     commitRef(u)
                 },
-                onCancel: onCancel
+                onCancel: onCancel,
+                onTab: onTab
             )
         case "translators":
             EditableStringCell(
@@ -436,7 +456,8 @@ struct EditableDefaultPropertyCell: View {
                     u.translators = val.isEmpty ? nil : Reference.encodeNames(AuthorName.parseList(val))
                     commitRef(u)
                 },
-                onCancel: onCancel
+                onCancel: onCancel,
+                onTab: onTab
             )
         default:
             defaultStringCell
@@ -503,7 +524,8 @@ struct EditableDefaultPropertyCell: View {
                 }
                 commitRef(u)
             },
-            onCancel: onCancel
+            onCancel: onCancel,
+            onTab: onTab
         )
     }
 }
@@ -519,6 +541,7 @@ struct EditableCustomPropertyCell: View {
     let onCancel: () -> Void
     let commitCustom: (Int64, Int64, String?) -> Void
     let onCreateOption: (Int64, String) -> Void
+    var onTab: ((_ backwards: Bool) -> Void)? = nil
 
     private var propId: Int64 { property.id ?? 0 }
     private var fieldKey: String { "custom_\(propId)" }
@@ -534,7 +557,8 @@ struct EditableCustomPropertyCell: View {
                 onCommit: { val in
                     commitCustom(referenceId, propId, val.isEmpty ? nil : val)
                 },
-                onCancel: onCancel
+                onCancel: onCancel,
+                onTab: onTab
             )
         case .url:
             EditableURLCell(
@@ -544,7 +568,8 @@ struct EditableCustomPropertyCell: View {
                 onCommit: { val in
                     commitCustom(referenceId, propId, val.isEmpty ? nil : val)
                 },
-                onCancel: onCancel
+                onCancel: onCancel,
+                onTab: onTab
             )
         case .number:
             EditableNumberCell(
@@ -554,7 +579,8 @@ struct EditableCustomPropertyCell: View {
                 onCommit: { val in
                     commitCustom(referenceId, propId, val.map(String.init))
                 },
-                onCancel: onCancel
+                onCancel: onCancel,
+                onTab: onTab
             )
         case .singleSelect:
             EditableSingleSelectCell(

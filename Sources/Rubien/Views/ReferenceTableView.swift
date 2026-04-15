@@ -385,6 +385,42 @@ private struct ReferenceTableContent: View {
         editingCell = nil
     }
 
+    // Tab skips columns hidden via `TableColumnCustomization` — landing on an
+    // invisible editor would strand `editingCell` and block Return-to-edit.
+    private func editableColumnKeys() -> [String] {
+        var keys: [String] = [ColumnIdentifier.title.rawValue]
+        // Title has `.disabledCustomizationBehavior(.visibility)` — always visible.
+        if columnCustomization[visibility: ColumnIdentifier.authors.rawValue] != .hidden {
+            keys.append(ColumnIdentifier.authors.rawValue)
+        }
+        let alreadyHandled: Set<String> = Set(
+            [ColumnIdentifier.title, .authors, .tags, .readingStatus, .dateAdded, .referenceType]
+                .map(\.rawValue)
+        )
+        for prop in customProperties {
+            if prop.isDefault {
+                guard let key = prop.defaultFieldKey, !alreadyHandled.contains(key) else { continue }
+                keys.append(key)
+            } else if let propId = prop.id {
+                switch prop.type {
+                case .string, .url, .number:
+                    keys.append("custom_\(propId)")
+                case .singleSelect, .multiSelect, .checkbox, .date:
+                    continue
+                }
+            }
+        }
+        return keys
+    }
+
+    private func advanceEdit(from refId: Int64, fieldKey: String, backwards: Bool) {
+        let keys = editableColumnKeys()
+        guard let idx = keys.firstIndex(of: fieldKey) else { cancel(); return }
+        let nextIdx = backwards ? idx - 1 : idx + 1
+        guard keys.indices.contains(nextIdx) else { cancel(); return }
+        beginEdit(refId, keys[nextIdx])
+    }
+
     var body: some View {
         Table(references, selection: $selection, sortOrder: $tableSortOrder, columnCustomization: $columnCustomization) {
             TableColumn(ColumnIdentifier.title.header, value: \.title) { ref in
@@ -398,7 +434,12 @@ private struct ReferenceTableContent: View {
                         commitRef(u)
                     },
                     onCancel: cancel,
-                    placeholder: "Untitled"
+                    placeholder: "Untitled",
+                    onTab: { back in
+                        if let id = ref.id {
+                            advanceEdit(from: id, fieldKey: ColumnIdentifier.title.rawValue, backwards: back)
+                        }
+                    }
                 )
             }
             .width(min: 150, ideal: 250)
@@ -415,7 +456,12 @@ private struct ReferenceTableContent: View {
                         u.authors = AuthorName.parseList(val)
                         commitRef(u)
                     },
-                    onCancel: cancel
+                    onCancel: cancel,
+                    onTab: { back in
+                        if let id = ref.id {
+                            advanceEdit(from: id, fieldKey: ColumnIdentifier.authors.rawValue, backwards: back)
+                        }
+                    }
                 )
             }
             .width(min: 80, ideal: 140)
@@ -458,9 +504,15 @@ private struct ReferenceTableContent: View {
                             isEditing: { key in isEditing(ref.id, key) },
                             onBeginEdit: { key in beginEdit(ref.id, key) },
                             onCancel: cancel,
-                            commitRef: commitRef
+                            commitRef: commitRef,
+                            onTab: { back in
+                                if let id = ref.id {
+                                    advanceEdit(from: id, fieldKey: key, backwards: back)
+                                }
+                            }
                         )
                     } else if let refId = ref.id {
+                        let customKey = "custom_\(prop.id ?? 0)"
                         EditableCustomPropertyCell(
                             referenceId: refId,
                             property: prop,
@@ -469,7 +521,10 @@ private struct ReferenceTableContent: View {
                             onBeginEdit: { key in beginEdit(refId, key) },
                             onCancel: cancel,
                             commitCustom: commitCustom,
-                            onCreateOption: onCreateOption
+                            onCreateOption: onCreateOption,
+                            onTab: { back in
+                                advanceEdit(from: refId, fieldKey: customKey, backwards: back)
+                            }
                         )
                     } else {
                         Text("—")
@@ -479,6 +534,15 @@ private struct ReferenceTableContent: View {
                 }
                 .width(min: 60, ideal: 100)
             }
+        }
+        .onKeyPress(.return) {
+            guard editingCell == nil,
+                  selection.count == 1,
+                  let id = selection.first ?? nil else {
+                return .ignored
+            }
+            beginEdit(id, ColumnIdentifier.title.rawValue)
+            return .handled
         }
     }
 }
