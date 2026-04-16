@@ -360,8 +360,13 @@ private struct ReferenceTableContent: View {
     let customPropertyValueMap: [Int64: [Int64: String]]
     let db: AppDatabase
 
-    @SceneStorage("referenceTableColumnCustomization")
-    private var columnCustomization: TableColumnCustomization<Reference>
+    @State private var columnCustomization: TableColumnCustomization<Reference> = {
+        guard let data = UserDefaults.standard.data(forKey: RubienPreferences.tableColumnCustomizationKey),
+              let decoded = try? JSONDecoder().decode(TableColumnCustomization<Reference>.self, from: data) else {
+            return TableColumnCustomization<Reference>()
+        }
+        return decoded
+    }()
 
     @State private var editingCell: EditingCellID? = nil
 
@@ -545,6 +550,16 @@ private struct ReferenceTableContent: View {
             }
             beginEdit(id, ColumnIdentifier.title.rawValue)
             return .handled
+        }
+        .onChange(of: columnCustomization) { _, newValue in
+            persistColumnCustomization(newValue)
+        }
+    }
+
+    private func persistColumnCustomization(_ value: TableColumnCustomization<Reference>) {
+        let encoder = JSONEncoder()
+        if let data = try? encoder.encode(value) {
+            UserDefaults.standard.set(data, forKey: RubienPreferences.tableColumnCustomizationKey)
         }
     }
 }

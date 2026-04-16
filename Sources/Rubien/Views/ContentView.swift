@@ -601,7 +601,13 @@ struct ContentView: View {
     @State private var cslImportMessage: String?
     @State private var columnVisibility = NavigationSplitViewVisibility.all
     @State private var selectedId: Int64?
-    @State private var columnConfigs: [ColumnConfig] = ColumnConfig.defaultColumns
+    @State private var columnConfigs: [ColumnConfig] = {
+        guard let data = UserDefaults.standard.data(forKey: RubienPreferences.columnConfigsKey),
+              let decoded = try? JSONDecoder().decode([ColumnConfig].self, from: data) else {
+            return ColumnConfig.defaultColumns
+        }
+        return decoded
+    }()
 
     private struct PendingQueueNotice: Identifiable, Equatable {
         let id = UUID()
@@ -1000,6 +1006,11 @@ struct ContentView: View {
             Text(viewModel.errorMessage ?? "")
         }
         .frame(minWidth: 900, minHeight: 600)
+        .onChange(of: columnConfigs) { _, newValue in
+            if let data = try? JSONEncoder().encode(newValue) {
+                UserDefaults.standard.set(data, forKey: RubienPreferences.columnConfigsKey)
+            }
+        }
         .onAppear {
             // Skip the install prompt when running via `swift run` from .build/ —
             // /usr/local/bin isn't writable in that context and the prompt can't succeed.

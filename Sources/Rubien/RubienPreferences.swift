@@ -17,4 +17,7 @@ enum RubienPreferences {
         get { UserDefaults.standard.string(forKey: apiContactEmailKey) ?? "" }
         set { UserDefaults.standard.set(newValue, forKey: apiContactEmailKey) }
     }
+
+    static let columnConfigsKey = "Rubien.columnConfigs"
+    static let tableColumnCustomizationKey = "Rubien.tableColumnCustomization"
 }
