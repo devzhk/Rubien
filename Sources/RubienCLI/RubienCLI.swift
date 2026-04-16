@@ -15,10 +15,8 @@ struct RubienCLI: AsyncParsableCommand {
             Add.self,
             Update.self,
             Delete.self,
-            Move.self,
             Cite.self,
             Import.self,
-            Collections.self,
             Tags.self,
             Properties.self,
             Annotations.self,
@@ -120,7 +118,6 @@ struct ReferenceDTO: Encodable {
     let url: String?
     let abstract: String?
     let referenceType: String
-    let collectionId: Int64?
     let dateAdded: Date
     let dateModified: Date
     let pdfPath: String?
@@ -149,7 +146,6 @@ struct ReferenceDTO: Encodable {
         self.url = ref.url
         self.abstract = ref.abstract
         self.referenceType = ref.referenceType.rawValue
-        self.collectionId = ref.collectionId
         self.dateAdded = ref.dateAdded
         self.dateModified = ref.dateModified
         self.pdfPath = ref.pdfPath
@@ -272,9 +268,6 @@ struct List: ParsableCommand {
     @Option(name: .long, help: "Skip the first N results (pagination)")
     var offset: Int = 0
 
-    @Option(name: .long, help: "Filter by collection ID")
-    var collection: Int64?
-
     @Option(name: .long, help: "Filter by tag ID")
     var tag: Int64?
 
@@ -317,8 +310,7 @@ struct List: ParsableCommand {
             || readingStatus != nil || priority != nil
         var refs: [Reference]
         if hasAdvancedFilter {
-            let scope: ReferenceScope = collection.map { .collection($0) }
-                ?? tag.map { .tag($0) } ?? .all
+            let scope: ReferenceScope = tag.map { .tag($0) } ?? .all
             var filter = ReferenceFilter()
             if let a = author { filter.author = a }
             if let yf = yearFrom { filter.yearFrom = yf }
@@ -350,8 +342,6 @@ struct List: ParsableCommand {
                 filter.referenceType = type
             }
             refs = try AppDatabase.shared.fetchReferences(scope: scope, filter: filter, limit: limit)
-        } else if let cid = collection {
-            refs = try AppDatabase.shared.fetchReferences(collectionId: cid)
         } else if let tid = tag {
             refs = try AppDatabase.shared.fetchReferences(tagId: tid)
         } else {
@@ -392,13 +382,9 @@ struct Add: AsyncParsableCommand {
     @Option(name: .long, help: "Title (for manual entry)")
     var title: String?
 
-    @Option(name: .long, help: "Add to the given collection ID")
-    var collection: Int64?
-
     func run() async throws {
         if let id = identifier {
             var ref = try await MetadataFetcher.fetch(from: id)
-            ref.collectionId = collection
             ref = MetadataVerifier.manuallyVerified(ref, reviewedBy: "cli-identifier")
             try AppDatabase.shared.saveReference(&ref)
             // saveReference may dedupe onto an existing row; surface that row's
@@ -412,14 +398,12 @@ struct Add: AsyncParsableCommand {
             }
             var saved: [Reference] = []
             for var ref in refs {
-                ref.collectionId = collection
                 try AppDatabase.shared.saveReference(&ref)
                 saved.append(ref)
             }
             printJSON(try mapReferenceDTOs(saved))
         } else if let t = title {
             var ref = Reference(title: t)
-            ref.collectionId = collection
             try AppDatabase.shared.saveReference(&ref)
             printJSON(try referenceDTO(for: ref))
         } else {
@@ -486,9 +470,6 @@ struct Update: ParsableCommand {
     @Option(name: .long, help: "Edition")
     var edition: String?
 
-    @Option(name: .long, help: "Move to the given collection ID")
-    var collection: Int64?
-
     @Option(name: .customLong("clear-field"), help: "Clear a single field (repeatable, e.g. --clear-field doi)")
     var clearFields: [String] = []
 
@@ -543,7 +524,6 @@ struct Update: ParsableCommand {
         if let i = issn { ref.issn = i }
         if let l = language { ref.language = l }
         if let e = edition { ref.edition = e }
-        if let cid = collection { ref.collectionId = cid }
         for field in clearFields {
             switch field.lowercased() {
             case "year": ref.year = nil
@@ -560,9 +540,8 @@ struct Update: ParsableCommand {
             case "issn": ref.issn = nil
             case "language": ref.language = nil
             case "edition": ref.edition = nil
-            case "collection": ref.collectionId = nil
             default:
-                printJSONError("Unknown field '\(field)'. Valid: year, journal, volume, issue, pages, doi, url, abstract, notes, publisher, isbn, issn, language, edition, collection")
+                printJSONError("Unknown field '\(field)'. Valid: year, journal, volume, issue, pages, doi, url, abstract, notes, publisher, isbn, issn, language, edition")
                 throw ExitCode.failure
             }
         }
@@ -572,45 +551,16 @@ struct Update: ParsableCommand {
 }
 
 struct Delete: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Delete references by ID, or bulk-delete a collection")
+    static let configuration = CommandConfiguration(abstract: "Delete references by ID")
 
-    @Argument(help: "Reference IDs to delete (omit when using --collection for bulk deletion)")
+    @Argument(help: "Reference IDs to delete")
     var ids: [Int64] = []
 
     @Flag(name: .shortAndLong, help: "Skip the confirmation prompt")
     var force = false
 
-    @Option(name: .long, help: "Delete every reference in the given collection ID")
-    var collection: Int64?
-
-    @Flag(name: .customLong("delete-collection"), help: "Also delete the collection itself (with --collection)")
-    var deleteCollection = false
-
     func run() throws {
-        if let cid = collection, ids.isEmpty {
-            // Bulk delete all references in the given collection
-            let refs = try AppDatabase.shared.fetchReferences(collectionId: cid)
-            let refIds = refs.compactMap(\.id)
-            if !force && isatty(STDIN_FILENO) != 0 {
-                let msg = "Delete \(refs.count) reference(s) in collection \(cid)" +
-                    (deleteCollection ? " and delete the collection itself" : "") + "? [y/N] "
-                FileHandle.standardError.write(Data(msg.utf8))
-                guard let line = readLine(), line.lowercased().hasPrefix("y") else {
-                    printJSONError("Aborted")
-                    throw ExitCode.failure
-                }
-            }
-            if !refIds.isEmpty {
-                let pdfPaths = try AppDatabase.shared.deleteReferencesReturningPDFPaths(ids: refIds)
-                for path in pdfPaths { PDFService.deletePDF(at: path) }
-            }
-            if deleteCollection {
-                try AppDatabase.shared.deleteCollection(id: cid)
-            }
-            var result: [String: String] = ["deletedReferences": "\(refIds.count)"]
-            if deleteCollection { result["deletedCollection"] = "\(cid)" }
-            printJSON(result)
-        } else if !ids.isEmpty {
+        if !ids.isEmpty {
             if !force && isatty(STDIN_FILENO) != 0 {
                 FileHandle.standardError.write(Data("Delete \(ids.count) reference(s) and associated PDFs? [y/N] ".utf8))
                 guard let line = readLine(), line.lowercased().hasPrefix("y") else {
@@ -622,39 +572,9 @@ struct Delete: ParsableCommand {
             for path in pdfPaths { PDFService.deletePDF(at: path) }
             printJSON(["deleted": ids.map(String.init).joined(separator: ",")])
         } else {
-            printJSONError("Provide reference IDs as arguments, or --collection <id> for bulk deletion")
+            printJSONError("Provide reference IDs as arguments")
             throw ExitCode.failure
         }
-    }
-}
-
-struct Move: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Move references into a collection")
-
-    @Argument(help: "Reference IDs to move")
-    var ids: [Int64]
-
-    @Option(name: .long, help: "Target collection ID")
-    var collection: Int64?
-
-    @Flag(name: .long, help: "Remove from all collections (move to unfiled)")
-    var remove = false
-
-    func run() throws {
-        let targetId: Int64?
-        if remove {
-            targetId = nil
-        } else if let cid = collection {
-            targetId = cid
-        } else {
-            printJSONError("Provide --collection <id> to move into a collection, or --remove to uncategorise")
-            throw ExitCode.failure
-        }
-        try AppDatabase.shared.moveReferences(ids: ids, toCollectionId: targetId)
-        printJSON([
-            "moved": ids.map(String.init).joined(separator: ","),
-            "toCollection": targetId.map(String.init) ?? "none",
-        ])
     }
 }
 
@@ -728,9 +648,6 @@ struct Import: ParsableCommand {
     @Argument(help: "Path to a .bib or .ris file, or '-' to read from stdin")
     var file: String
 
-    @Option(name: .long, help: "Import into the given collection ID")
-    var collection: Int64?
-
     @Option(name: .long, help: "Format hint when reading from stdin: bib, ris")
     var format: String?
 
@@ -774,82 +691,8 @@ struct Import: ParsableCommand {
             throw ExitCode.failure
         }
 
-        if let cid = collection {
-            for i in refs.indices { refs[i].collectionId = cid }
-        }
-
         let count = try AppDatabase.shared.batchImportReferences(refs)
         printJSON(["imported": "\(count)", "file": file])
-    }
-}
-
-struct Collections: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "List or manage collections")
-
-    @Flag(name: .long, help: "Create a new collection")
-    var create = false
-
-    @Option(name: .long, help: "Collection name (with --create or --rename)")
-    var name: String?
-
-    @Option(name: .long, help: "Delete a collection by ID (its references are kept)")
-    var delete: Int64?
-
-    @Flag(name: .customLong("with-references"), help: "Also delete all references and PDFs inside the collection")
-    var withReferences = false
-
-    @Flag(name: .shortAndLong, help: "Skip the confirmation prompt for destructive actions")
-    var force = false
-
-    @Flag(name: .long, help: "Rename a collection")
-    var rename = false
-
-    @Option(name: .long, help: "Collection ID (with --rename)")
-    var id: Int64?
-
-    func run() throws {
-        if let deleteId = delete {
-            if withReferences {
-                let refs = try AppDatabase.shared.fetchReferences(collectionId: deleteId)
-                let refIds = refs.compactMap(\.id)
-                if !force && isatty(STDIN_FILENO) != 0 {
-                    let msg = "Delete collection \(deleteId), \(refIds.count) reference(s), and associated PDFs? [y/N] "
-                    FileHandle.standardError.write(Data(msg.utf8))
-                    guard let line = readLine(), line.lowercased().hasPrefix("y") else {
-                        printJSONError("Aborted")
-                        throw ExitCode.failure
-                    }
-                }
-                if !refIds.isEmpty {
-                    let pdfPaths = try AppDatabase.shared.deleteReferencesReturningPDFPaths(ids: refIds)
-                    for path in pdfPaths { PDFService.deletePDF(at: path) }
-                }
-                try AppDatabase.shared.deleteCollection(id: deleteId)
-                printJSON(["deletedCollection": "\(deleteId)", "deletedReferences": "\(refIds.count)"])
-            } else {
-                try AppDatabase.shared.deleteCollection(id: deleteId)
-                printJSON(["deleted": "\(deleteId)"])
-            }
-        } else if create, let n = name {
-            var c = Collection(name: n)
-            try AppDatabase.shared.saveCollection(&c)
-            printJSON(["id": c.id.map(String.init) ?? "", "name": c.name])
-        } else if rename, let cid = id, let n = name {
-            let all = try AppDatabase.shared.fetchAllCollections()
-            guard var col = all.first(where: { $0.id == cid }) else {
-                printJSONError("Collection \(cid) not found")
-                throw ExitCode.failure
-            }
-            col.name = n
-            try AppDatabase.shared.saveCollection(&col)
-            printJSON(["id": col.id.map(String.init) ?? "", "name": col.name])
-        } else {
-            let collections = try AppDatabase.shared.fetchAllCollections()
-            let dtos = collections.map { c in
-                ["id": c.id.map(String.init) ?? "", "name": c.name, "icon": c.icon]
-            }
-            printJSON(dtos)
-        }
     }
 }
 
@@ -1275,16 +1118,8 @@ struct Export: ParsableCommand {
     @Option(name: .shortAndLong, help: "Output format: json, bibtex, ris")
     var format: String = "json"
 
-    @Option(name: .long, help: "Filter by collection ID")
-    var collection: Int64?
-
     func run() throws {
-        let refs: [Reference]
-        if let cid = collection {
-            refs = try AppDatabase.shared.fetchReferences(collectionId: cid)
-        } else {
-            refs = try AppDatabase.shared.fetchAllReferences()
-        }
+        let refs = try AppDatabase.shared.fetchAllReferences()
 
         switch format {
         case "bibtex":
@@ -1458,7 +1293,6 @@ struct Views: ParsableCommand {
             let scope: ReferenceScope
             switch view.parsedScope {
             case .all: scope = .all
-            case .collection(let id): scope = .collection(id)
             case .tag(let id): scope = .tag(id)
             }
             let refs = try db.fetchReferences(scope: scope, filter: ReferenceFilter(), limit: limit)

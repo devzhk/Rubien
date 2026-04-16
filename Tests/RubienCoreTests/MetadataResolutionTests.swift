@@ -122,8 +122,7 @@ final class MetadataResolutionTests: XCTestCase {
             webContent: "<article>cached</article>",
             siteName: "Custom Site",
             favicon: "icon.png",
-            referenceType: .journalArticle,
-            collectionId: 7
+            referenceType: .journalArticle
         )
         let refreshed = Reference(
             title: "Attention Is All You Need",
@@ -139,7 +138,6 @@ final class MetadataResolutionTests: XCTestCase {
         let merged = MetadataResolution.mergeRefreshedReference(primary: refreshed, existing: existing)
 
         XCTAssertEqual(merged.id, 42)
-        XCTAssertEqual(merged.collectionId, 7)
         XCTAssertEqual(merged.pdfPath, "/tmp/sample.pdf")
         XCTAssertEqual(merged.notes, "My notes")
         XCTAssertEqual(merged.webContent, "<article>cached</article>")

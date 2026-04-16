@@ -108,7 +108,7 @@ Both are indexed and filterable from the CLI and UI.
 - **v11-reading-status-priority**: Adds `readingStatus` TEXT and `priority` INTEGER columns to `reference`, with indexes.
 - **v12-database-views**: Creates `databaseView` table, inserts the default "All References" view, and converts each existing `Collection` row into a `DatabaseView` with `scope = .collection(id)`.
 
-The `collection` table and `reference.collectionId` are **not dropped** — they remain for backwards compatibility with `rubien-cli collections`.
+The `collection` table and `reference.collectionId` have been removed — collections are fully replaced by database views.
 
 ---
 
@@ -179,7 +179,7 @@ The CLI gained `--reading-status`, `--priority`, `--sort-by` flags on `list`/`up
 
 1. **JSON TEXT over normalized tables** for view config: a view's columns/filters/sorts are always loaded as a unit, never queried across views. JSON avoids join explosion and matches the existing `editors`/`translators` pattern.
 
-2. **`collection` table preserved**: Dropping it would break `rubien-cli collections` and existing `reference.collectionId` foreign keys. Instead, collections are surfaced as views with `scope = .collection(id)`.
+2. **`collection` table removed**: Collections have been fully replaced by database views. The `collection` table and `reference.collectionId` are no longer present.
 
 3. **SwiftUI `Table` over NSTableView**: The app targets macOS 14+ exclusively. SwiftUI `Table` integrates cleanly with `NavigationSplitView` and gained `TableColumnCustomization` in macOS 14. The reference list (hundreds to low-thousands of rows) is well within its performance envelope.
 

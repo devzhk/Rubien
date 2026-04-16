@@ -11,7 +11,6 @@ function parseArgs(argv) {
     cli: path.resolve(__dirname, '..', '.build', 'debug', 'rubien-cli'),
     style: 'nature',
     outputDirName: 'docx-output',
-    collectionName: `thesis-${new Date().toISOString().replace(/[:.]/g, '-')}`,
     keepTemp: false,
   };
 
@@ -29,9 +28,6 @@ function parseArgs(argv) {
         break;
       case '--output-dir-name':
         options.outputDirName = argv[++index];
-        break;
-      case '--collection-name':
-        options.collectionName = argv[++index];
         break;
       case '--keep-temp':
         options.keepTemp = true;
@@ -354,18 +350,8 @@ function writeMergedMarkdown(chapterMarkdown, referenceMarkdown) {
   return `${body}\n\n# 参考文献\n\n${referenceMarkdown.trim()}\n`;
 }
 
-function createCollection(cliPath, name) {
-  const raw = run(cliPath, ['collections', '--create', '--name', name]);
-  const parsed = JSON.parse(raw);
-  const id = Number(parsed.id);
-  if (!Number.isFinite(id)) {
-    throw new Error(`Failed to parse collection id from CLI output: ${raw}`);
-  }
-  return { id, name: parsed.name || name };
-}
-
-function importReferences(cliPath, risPath, collectionId) {
-  const raw = run(cliPath, ['import', risPath, '--collection', String(collectionId)]);
+function importReferences(cliPath, risPath) {
+  const raw = run(cliPath, ['import', risPath]);
   return JSON.parse(raw);
 }
 
@@ -373,7 +359,7 @@ function convertToDocx(markdownPath, docxPath) {
   run('pandoc', [markdownPath, '-o', docxPath]);
 }
 
-function tagDocx(cliPath, inputPath, outputPath, style, collectionId) {
+function tagDocx(cliPath, inputPath, outputPath, style) {
   const raw = run(cliPath, [
     'tag-docx',
     inputPath,
@@ -381,8 +367,6 @@ function tagDocx(cliPath, inputPath, outputPath, style, collectionId) {
     outputPath,
     '--style',
     style,
-    '--collection',
-    String(collectionId),
   ]);
   return JSON.parse(raw);
 }
@@ -411,8 +395,7 @@ function main() {
   const risPath = path.join(tempDir, 'references.ris');
   fs.writeFileSync(risPath, buildRis(referenceEntries), 'utf8');
 
-  const collection = createCollection(options.cli, options.collectionName);
-  const importReport = importReferences(options.cli, risPath, collection.id);
+  const importReport = importReferences(options.cli, risPath);
 
   const chapterReports = [];
   for (const chapterPath of chapterPaths) {
@@ -426,7 +409,7 @@ function main() {
     fs.writeFileSync(mergedMarkdownPath, mergedMarkdown, 'utf8');
 
     convertToDocx(mergedMarkdownPath, rawDocxPath);
-    const tagReport = tagDocx(options.cli, rawDocxPath, taggedDocxPath, options.style, collection.id);
+    const tagReport = tagDocx(options.cli, rawDocxPath, taggedDocxPath, options.style);
 
     chapterReports.push({
       chapter: chapterName,
@@ -440,7 +423,6 @@ function main() {
   const summary = {
     root,
     style: options.style,
-    collection,
     referenceCount: referenceEntries.length,
     importReport,
     chapterReports,
@@ -458,7 +440,6 @@ function main() {
   process.stdout.write(`${JSON.stringify({
     summaryPath,
     outputDir,
-    collection,
     importedReferenceCount: referenceEntries.length,
     chapterCount: chapterReports.length,
   }, null, 2)}\n`);

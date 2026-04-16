@@ -1,50 +1,6 @@
 import XCTest
 @testable import RubienCore
 
-final class CollectionModelTests: XCTestCase {
-
-    // MARK: - Initialization
-
-    func testInitWithName() {
-        let col = Collection(name: "My Collection")
-        XCTAssertEqual(col.name, "My Collection")
-        XCTAssertNil(col.id)
-        XCTAssertNil(col.parentId)
-    }
-
-    func testDefaultIcon() {
-        let col = Collection(name: "Default Icon")
-        XCTAssertEqual(col.icon, "folder")
-    }
-
-    func testCustomIcon() {
-        let col = Collection(name: "Custom", icon: "folder.fill")
-        XCTAssertEqual(col.icon, "folder.fill")
-    }
-
-    func testNameCanBeUpdated() {
-        var col = Collection(name: "Original")
-        col.name = "Updated"
-        XCTAssertEqual(col.name, "Updated")
-    }
-
-    func testDateCreatedIsSet() {
-        let before = Date()
-        let col = Collection(name: "Date Test")
-        XCTAssertGreaterThanOrEqual(col.dateCreated, before)
-    }
-
-    func testParentId() {
-        let col = Collection(name: "Child", parentId: 42)
-        XCTAssertEqual(col.parentId, 42)
-    }
-
-    func testParentIdDefaultsToNil() {
-        let col = Collection(name: "Root")
-        XCTAssertNil(col.parentId)
-    }
-}
-
 final class TagModelTests: XCTestCase {
 
     // MARK: - Initialization

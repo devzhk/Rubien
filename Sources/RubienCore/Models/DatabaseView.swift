@@ -125,7 +125,6 @@ public struct ViewFilter: Codable, Hashable, Sendable {
 
 public enum ViewScope: Codable, Hashable, Sendable {
     case all
-    case collection(Int64)
     case tag(Int64)
 }
 

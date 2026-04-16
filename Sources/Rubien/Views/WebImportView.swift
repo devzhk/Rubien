@@ -3,14 +3,12 @@ import WebKit
 import RubienCore
 
 struct WebImportView: View {
-    let collections: [Collection]
     let onSave: (Reference) -> Void
 
     @Environment(\.dismiss) private var dismiss
 
     @StateObject private var clipperExtractor = ClipperWebMetadataExtractor()
     @State private var url = ""
-    @State private var collectionId: Int64?
     @State private var clipperError: String?
     @State private var isSaving = false
 
@@ -86,15 +84,6 @@ struct WebImportView: View {
                         }
                     }
 
-                    Section(String(localized: "Collection", bundle: .module)) {
-                        Picker(String(localized: "Collection", bundle: .module), selection: $collectionId) {
-                            Text("Unfiled", bundle: .module).tag(nil as Int64?)
-                            ForEach(collections) { col in
-                                Label(col.name, systemImage: col.icon).tag(col.id as Int64?)
-                            }
-                        }
-                        .disabled(isSaving)
-                    }
                 }
                 .formStyle(.grouped)
             }
@@ -107,7 +96,6 @@ struct WebImportView: View {
         clipperError = nil
         isSaving = true
         let urlTrimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
-        let collection = collectionId
 
         Task { @MainActor in
             defer { isSaving = false }
@@ -121,8 +109,7 @@ struct WebImportView: View {
                     abstract: result.abstract,
                     webContent: result.webContent,
                     siteName: result.siteHost,
-                    referenceType: .webpage,
-                    collectionId: collection
+                    referenceType: .webpage
                 )
                 onSave(reference)
                 dismiss()
@@ -139,8 +126,7 @@ struct WebImportView: View {
             title: host ?? String(localized: "Web page", bundle: .module),
             url: urlTrimmed,
             siteName: host,
-            referenceType: .webpage,
-            collectionId: collectionId
+            referenceType: .webpage
         )
         onSave(reference)
         dismiss()

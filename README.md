@@ -12,7 +12,7 @@ The name is a variant of **Rubick**, the Grand Magus from Dota 2 — a sorcerer 
 - **Citation engine** — citeproc-js embedded via JavaScriptCore. 100+ CSL styles. APA 7 default, plus IEEE / MLA / Chicago / Harvard / Vancouver / Nature.
 - **FTS5 search** — SQLite full-text search across title, authors, journal, abstract, notes, DOI.
 - **BibTeX / RIS import & export** — standard parsers, round-trip friendly.
-- **CLI** — `rubien-cli` with 14 subcommands: `search`, `list`, `get`, `add`, `update`, `delete`, `move`, `cite`, `import`, `export`, `collections`, `tags`, `annotations`, `styles`. JSON output for scripting.
+- **CLI** — `rubien-cli` with 14 subcommands: `search`, `list`, `get`, `add`, `update`, `delete`, `cite`, `import`, `export`, `tags`, `properties`, `views`, `annotations`, `styles`. JSON output for scripting.
 
 ## Requirements
 
@@ -57,7 +57,7 @@ Rubien stores all user data under:
 ~/Library/Application Support/Rubien/
 ```
 
-This includes the SQLite database (`Rubien.sqlite` — references, collections, tags, annotations, custom properties, views) and imported PDF attachments. Back up this directory to preserve your library. Uninstalling the app bundle does **not** delete it; remove the folder manually if you want to start fresh.
+This includes the SQLite database (`Rubien.sqlite` — references, tags, annotations, custom properties, views) and imported PDF attachments. Back up this directory to preserve your library. Uninstalling the app bundle does **not** delete it; remove the folder manually if you want to start fresh.
 
 Window layout and other app preferences are stored separately in `~/Library/Preferences/com.rubien.app.plist` (standard macOS user defaults).
 

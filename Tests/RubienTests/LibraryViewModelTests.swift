@@ -61,44 +61,6 @@ final class LibraryViewModelTests: XCTestCase {
         XCTAssertTrue(fetched.isEmpty, "Deleted reference should not be fetchable")
     }
 
-    // MARK: - Collection Management
-
-    func testSaveCollection() throws {
-        let db = try makeTestDB()
-        let vm = LibraryViewModel(db: db)
-        var col = Collection(name: "ViewModel Col Test")
-        vm.saveCollection(&col)
-        XCTAssertNotNil(col.id)
-        XCTAssertNil(vm.errorMessage)
-    }
-
-    func testDeleteCollectionResetsSidebar() throws {
-        let db = try makeTestDB()
-        let vm = LibraryViewModel(db: db)
-        var col = Collection(name: "Delete Col Test")
-        vm.saveCollection(&col)
-        let colId = col.id!
-
-        vm.selectedSidebar = .collection(colId)
-        vm.deleteCollection(id: colId)
-        XCTAssertEqual(vm.selectedSidebar, .allReferences,
-                       "Sidebar should reset to allReferences after deleting the selected collection")
-    }
-
-    func testDeleteCollectionDoesNotResetSidebarIfDifferent() throws {
-        let db = try makeTestDB()
-        let vm = LibraryViewModel(db: db)
-        var col1 = Collection(name: "Col 1")
-        var col2 = Collection(name: "Col 2")
-        vm.saveCollection(&col1)
-        vm.saveCollection(&col2)
-
-        vm.selectedSidebar = .collection(col1.id!)
-        vm.deleteCollection(id: col2.id!)
-        XCTAssertEqual(vm.selectedSidebar, .collection(col1.id!),
-                       "Sidebar should not change when deleting a different collection")
-    }
-
     // MARK: - Tag Management
 
     func testSaveTag() throws {

@@ -238,8 +238,6 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
     public var evidenceBundleHash: String?
     public var verifiedAt: Date?
     public var reviewedBy: String?
-    public var collectionId: Int64?
-
     // MARK: - User workflow fields
     public var readingStatus: ReadingStatus
     public var priority: Priority
@@ -304,7 +302,6 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
         evidenceBundleHash: String? = nil,
         verifiedAt: Date? = nil,
         reviewedBy: String? = nil,
-        collectionId: Int64? = nil,
         readingStatus: ReadingStatus = .unread,
         priority: Priority = .none,
         // Extended metadata (P0)
@@ -358,7 +355,6 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
         self.evidenceBundleHash = evidenceBundleHash
         self.verifiedAt = verifiedAt
         self.reviewedBy = reviewedBy
-        self.collectionId = collectionId
         self.readingStatus = readingStatus
         self.priority = priority
         // Extended metadata (P0)
@@ -446,7 +442,6 @@ extension Reference {
               lhs.evidenceBundleHash == rhs.evidenceBundleHash,
               lhs.verifiedAt == rhs.verifiedAt,
               lhs.reviewedBy == rhs.reviewedBy,
-              lhs.collectionId == rhs.collectionId,
               lhs.readingStatus == rhs.readingStatus,
               lhs.priority == rhs.priority else {
             return false
@@ -510,7 +505,6 @@ extension Reference {
         hasher.combine(evidenceBundleHash)
         hasher.combine(verifiedAt)
         hasher.combine(reviewedBy)
-        hasher.combine(collectionId)
         hasher.combine(readingStatus)
         hasher.combine(priority)
         hasher.combine(publisher)
@@ -564,7 +558,6 @@ extension Reference {
         Columns.evidenceBundleHash,
         Columns.verifiedAt,
         Columns.reviewedBy,
-        Columns.collectionId,
         Columns.readingStatus,
         Columns.priority,
         Columns.publisher,
@@ -751,11 +744,6 @@ extension Reference {
 extension Reference: FetchableRecord, MutablePersistableRecord {
     public static let databaseTableName = "reference"
 
-    public static let collection = belongsTo(Collection.self)
-    public var collection: QueryInterfaceRequest<Collection> {
-        request(for: Reference.collection)
-    }
-
     public static let referenceTagPivot = hasMany(ReferenceTag.self)
     public static let tags = hasMany(Tag.self, through: referenceTagPivot, using: ReferenceTag.tag)
     public var tags: QueryInterfaceRequest<Tag> {
@@ -806,7 +794,6 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
         evidenceBundleHash = row["evidenceBundleHash"]
         verifiedAt = row["verifiedAt"]
         reviewedBy = row["reviewedBy"]
-        collectionId = row["collectionId"]
         readingStatus = row["readingStatus"] ?? .unread
         priority = row["priority"] ?? .none
 
@@ -872,7 +859,6 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
         container["evidenceBundleHash"] = evidenceBundleHash
         container["verifiedAt"] = verifiedAt
         container["reviewedBy"] = reviewedBy
-        container["collectionId"] = collectionId
         container["readingStatus"] = readingStatus
         container["priority"] = priority
 
@@ -908,7 +894,6 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
         case doi, url, abstract, dateAdded, dateModified
         case pdfPath, notes, webContent, siteName, favicon, referenceType, metadataSource
         case verificationStatus, acceptedByRuleID, recordKey, verificationSourceURL, evidenceBundleHash, verifiedAt, reviewedBy
-        case collectionId
         case readingStatus, priority
         // Extended metadata
         case publisher, publisherPlace, edition, editors, isbn, issn

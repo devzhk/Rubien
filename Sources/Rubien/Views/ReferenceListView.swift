@@ -5,11 +5,9 @@ import RubienCore
 
 struct ReferenceListView: View {
     let references: [Reference]
-    let collections: [Collection]
     let selectedId: Int64?
     let onSelect: (Int64) -> Void
     let onDelete: ([Reference]) -> Void
-    let onMove: ([Reference], Int64?) -> Void
     let onRefreshMetadata: ([Reference]) -> Void
     var isRefreshingMetadata = false
     var onDoubleClick: ((Int64) -> Void)? = nil
@@ -114,8 +112,6 @@ struct ReferenceListView: View {
                             }
                             .disabled(isRefreshingMetadata)
                             Divider()
-                            moveToCollectionMenu(forBatch: true)
-                            Divider()
                             Button(String(format: String(localized: "Delete %d selected", bundle: .module), multiSelection.count), role: .destructive) {
                                 showDeleteConfirm = true
                             }
@@ -126,8 +122,6 @@ struct ReferenceListView: View {
                                 onRefreshMetadata([ref])
                             }
                             .disabled(isRefreshingMetadata)
-                            Divider()
-                            moveToCollectionMenu(forRef: ref)
                             Divider()
                             Button(String(localized: "common.delete", bundle: .module), role: .destructive) {
                                 onDelete([ref])
@@ -184,30 +178,6 @@ struct ReferenceListView: View {
             .foregroundStyle(.secondary)
             .disabled(isRefreshingMetadata)
             Divider().frame(height: 16)
-            Menu {
-                Menu {
-                    Button(String(localized: "Remove from collection", bundle: .module)) {
-                        batchMove(toCollectionId: nil)
-                    }
-                    if !collections.isEmpty { Divider() }
-                    ForEach(collections) { col in
-                        Button(col.name) {
-                            batchMove(toCollectionId: col.id)
-                        }
-                    }
-                } label: {
-                    Label(String(localized: "Move to…", bundle: .module), systemImage: "folder")
-                }
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 13, weight: .medium))
-                    .frame(width: 24, height: 24)
-                    .contentShape(Rectangle())
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            Divider().frame(height: 16)
             Button {
                 clearMultiSelection()
             } label: {
@@ -225,40 +195,6 @@ struct ReferenceListView: View {
         }
         .transition(.move(edge: .bottom).combined(with: .opacity))
         .animation(.easeInOut(duration: 0.18), value: multiSelection.count)
-    }
-
-    // MARK: - Move-to-collection context menus
-
-    /// Batch move: applies to all selected items
-    @ViewBuilder
-    private func moveToCollectionMenu(forBatch: Bool) -> some View {
-        Menu(String(localized: "Move to…", bundle: .module)) {
-            Button(String(localized: "Remove from collection", bundle: .module)) {
-                batchMove(toCollectionId: nil)
-            }
-            if !collections.isEmpty { Divider() }
-            ForEach(collections) { col in
-                Button(col.name) {
-                    batchMove(toCollectionId: col.id)
-                }
-            }
-        }
-    }
-
-    /// Single-item move
-    @ViewBuilder
-    private func moveToCollectionMenu(forRef ref: Reference) -> some View {
-        Menu(String(localized: "Move to…", bundle: .module)) {
-            Button(String(localized: "Remove from collection", bundle: .module)) {
-                onMove([ref], nil)
-            }
-            if !collections.isEmpty { Divider() }
-            ForEach(collections) { col in
-                Button(col.name) {
-                    onMove([ref], col.id)
-                }
-            }
-        }
     }
 
     // MARK: - Helpers
@@ -325,12 +261,6 @@ struct ReferenceListView: View {
         let toDelete = references.filter { multiSelection.contains($0.id ?? -1) }
         clearMultiSelection()
         onDelete(toDelete)
-    }
-
-    private func batchMove(toCollectionId: Int64?) {
-        let toMove = references.filter { multiSelection.contains($0.id ?? -1) }
-        clearMultiSelection()
-        onMove(toMove, toCollectionId)
     }
 
     private func batchRefreshMetadata() {

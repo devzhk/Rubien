@@ -225,19 +225,6 @@ final class ReferenceTests: XCTestCase {
         XCTAssertEqual(ref.language, "en")
     }
 
-    // MARK: - Collection Assignment
-
-    func testCollectionIdDefaultsToNil() {
-        let ref = Reference(title: "No Collection")
-        XCTAssertNil(ref.collectionId)
-    }
-
-    func testCollectionIdCanBeSet() {
-        var ref = Reference(title: "With Collection")
-        ref.collectionId = 42
-        XCTAssertEqual(ref.collectionId, 42)
-    }
-
     // MARK: - Hashable / Equatable
 
     func testReferencesWithSameIdAndContentAreEqual() {

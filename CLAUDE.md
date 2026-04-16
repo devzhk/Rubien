@@ -58,7 +58,7 @@ Three Swift targets sit on top of one shared core (`Package.swift`):
 
 ### Data layer — GRDB + single migrator
 
-`Sources/RubienCore/Database/AppDatabase.swift` owns the only `DatabaseMigrator`. All schema changes go through new `registerMigration(...)` blocks — **never** edit an already-shipped migration, because users have live databases. `eraseDatabaseOnSchemaChange` is opt-in via `SWIFTLIB_RESET_DB_ON_SCHEMA_CHANGE=1` in DEBUG builds only (env-var name kept from upstream for compatibility); production never wipes the library. Models in `Sources/RubienCore/Models/` are GRDB `Codable` records (`Reference`, `Collection`, `Tag`, `PDFAnnotationRecord`, `WebAnnotationRecord`, `MetadataIntake`, `MetadataVerification`). Full-text search uses SQLite FTS5 over reference fields.
+`Sources/RubienCore/Database/AppDatabase.swift` owns the only `DatabaseMigrator`. The app has not shipped, so all schema is defined in a single consolidated `"v1"` migration. Once the app ships, new schema changes go through new `registerMigration(...)` blocks — never edit an already-shipped migration. `eraseDatabaseOnSchemaChange` is opt-in via `SWIFTLIB_RESET_DB_ON_SCHEMA_CHANGE=1` in DEBUG builds only (env-var name kept from upstream for compatibility); production never wipes the library. Models in `Sources/RubienCore/Models/` are GRDB `Codable` records (`Reference`, `Tag`, `PDFAnnotationRecord`, `WebAnnotationRecord`, `MetadataIntake`, `MetadataVerification`). Full-text search uses SQLite FTS5 over reference fields.
 
 On-disk storage: the app writes its database and PDF attachments under `~/Library/Application Support/Rubien/` (see `AppDatabase.preferredStorageRoot(named:)`).
 
@@ -89,7 +89,7 @@ When adding a new built-in style, update both the Swift formatter (for speed) an
 
 ### CLI
 
-`Sources/RubienCLI/RubienCLI.swift` is the single-file argument-parser entry with 16 subcommands (`search`, `list`, `get`, `add`, `update`, `delete`, `move`, `cite`, `import`, `export`, `collections`, `tags`, `properties`, `views`, `annotations`, `styles`). JSON is the default output format — scripts depend on it, so don't change CLI output shape without updating tests in `Tests/RubienCLITests/`.
+`Sources/RubienCLI/RubienCLI.swift` is the single-file argument-parser entry with 14 subcommands (`search`, `list`, `get`, `add`, `update`, `delete`, `cite`, `import`, `export`, `tags`, `properties`, `views`, `annotations`, `styles`). JSON is the default output format — scripts depend on it, so don't change CLI output shape without updating tests in `Tests/RubienCLITests/`.
 
 **Keep the CLI in sync with data-layer changes.** Any time `RubienCore` gains a new model, table, field, or mutation (e.g. custom property definitions, property values, new reference metadata fields), extend the CLI to cover it — new subcommand for new entities, fold new fields into existing `get`/`list`/`export` JSON. UI-only changes (column reorder, popover layout, detail-panel widths) do **not** need CLI parity; the line is "is this a new way to read or write data?" If yes, the CLI must expose it and `RubienCLITests` must cover the JSON contract.
 

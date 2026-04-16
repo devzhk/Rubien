@@ -113,17 +113,6 @@ final class RubienCLITests: XCTestCase {
         XCTAssertTrue(json is [Any], "Search output should be a JSON array")
     }
 
-    // MARK: - Collections
-
-    func testCollectionsListCommand() throws {
-        try skipIfBinaryMissing()
-        let result = try runCLI(["collections"])
-        XCTAssertEqual(result.exitCode, 0)
-        let data = Data(result.stdout.utf8)
-        let json = try JSONSerialization.jsonObject(with: data)
-        XCTAssertTrue(json is [Any], "Collections output should be a JSON array")
-    }
-
     // MARK: - Tags
 
     func testTagsListCommand() throws {

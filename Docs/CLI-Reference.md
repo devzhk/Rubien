@@ -19,12 +19,10 @@ rubien-cli <subcommand> [options]
 | `get` | Fetch a single reference by ID |
 | `add` | Add a reference via identifier, BibTeX, or manual entry |
 | `update` | Update fields on an existing reference |
-| `delete` | Delete references by ID or bulk-delete a collection |
-| `move` | Move references into a collection |
+| `delete` | Delete references by ID |
 | `cite` | Generate formatted citations |
 | `import` | Import from BibTeX or RIS file |
 | `export` | Export references as JSON, BibTeX, or RIS |
-| `collections` | List or manage collections |
 | `tags` | List or manage tags |
 | `properties` | List or manage custom property definitions and per-reference values |
 | `annotations` | List PDF annotations for a reference |
@@ -57,7 +55,6 @@ List references with comprehensive filtering and sorting.
 ```bash
 rubien-cli list --author Smith --year-from 2020 --has-pdf
 rubien-cli list --reading-status unread --priority 2 --sort-by year --asc
-rubien-cli list --collection 5 --limit 50
 rubien-cli list --tag 3
 ```
 
@@ -65,7 +62,6 @@ rubien-cli list --tag 3
 |---|---|---|---|
 | `-l, --limit` | Int | 0 (all) | Maximum results |
 | `--offset` | Int | 0 | Skip first N results (pagination) |
-| `--collection` | Int64 | — | Filter by collection ID |
 | `--tag` | Int64 | — | Filter by tag ID |
 | `--author` | String | — | Filter by author name (fuzzy) |
 | `--year-from` | Int | — | Year lower bound |
@@ -106,7 +102,7 @@ Add a reference via DOI/PMID/arXiv ID, BibTeX string, or manual title.
 ```bash
 rubien-cli add --identifier "10.1038/s41586-021-03819-2"
 rubien-cli add --bibtex '@article{..., title={...}, ...}'
-rubien-cli add --title "My Paper" --collection 3
+rubien-cli add --title "My Paper"
 ```
 
 | Option | Type | Description |
@@ -114,7 +110,6 @@ rubien-cli add --title "My Paper" --collection 3
 | `--identifier` | String | DOI, PMID, or arXiv ID — metadata is fetched automatically |
 | `--bibtex` | String | BibTeX source string (can contain multiple entries) |
 | `--title` | String | Title for manual entry (creates a minimal reference) |
-| `--collection` | Int64 | Add to collection ID |
 
 Exactly one of `--identifier`, `--bibtex`, or `--title` is required.
 
@@ -152,12 +147,11 @@ rubien-cli update 42 --clear-field doi --clear-field abstract
 | `--issn` | String | ISSN |
 | `--language` | String | Language |
 | `--edition` | String | Edition |
-| `--collection` | Int64 | Move to collection ID |
 | `--reading-status` | String | `unread`, `reading`, `skimmed`, `read` |
 | `--priority` | Int | `0` (none), `1` (low), `2` (medium), `3` (high) |
 | `--clear-field` | String (repeatable) | Clear a field (e.g. `--clear-field doi --clear-field abstract`) |
 
-Valid `--clear-field` values: `year`, `journal`, `volume`, `issue`, `pages`, `doi`, `url`, `abstract`, `notes`, `publisher`, `isbn`, `issn`, `language`, `edition`, `collection`.
+Valid `--clear-field` values: `year`, `journal`, `volume`, `issue`, `pages`, `doi`, `url`, `abstract`, `notes`, `publisher`, `isbn`, `issn`, `language`, `edition`.
 
 **Output:** JSON updated reference object.
 
@@ -165,40 +159,19 @@ Valid `--clear-field` values: `year`, `journal`, `volume`, `issue`, `pages`, `do
 
 ## delete
 
-Delete references by ID, or bulk-delete all references in a collection.
+Delete references by ID.
 
 ```bash
 rubien-cli delete 42 43 44
-rubien-cli delete --collection 5 --delete-collection --force
+rubien-cli delete 42 --force
 ```
 
 | Argument / Option | Type | Default | Description |
 |---|---|---|---|
 | `ids` | Int64 array | — | Reference IDs to delete |
-| `--collection` | Int64 | — | Delete all references in this collection |
-| `--delete-collection` | Flag | false | Also delete the collection itself |
 | `-f, --force` | Flag | false | Skip confirmation prompt |
 
-**Output:** JSON `{"deleted": "id1,id2,..."}` or `{"deletedReferences": N, "deletedCollection": id}`.
-
----
-
-## move
-
-Move references into a collection or remove from all collections.
-
-```bash
-rubien-cli move 42 43 --collection 5
-rubien-cli move 42 --remove
-```
-
-| Argument / Option | Type | Description |
-|---|---|---|
-| `ids` | Int64 array (required) | Reference IDs |
-| `--collection` | Int64 | Target collection ID |
-| `--remove` | Flag | Remove from all collections |
-
-**Output:** JSON `{"moved": "id1,id2,...", "toCollection": id_or_none}`.
+**Output:** JSON `{"deleted": "id1,id2,..."}`.
 
 ---
 
@@ -230,14 +203,13 @@ rubien-cli cite 42 43 --style ieee --format bibliography
 Import references from a BibTeX (`.bib`) or RIS (`.ris`) file. Use `"-"` to read from stdin.
 
 ```bash
-rubien-cli import references.bib --collection 3
+rubien-cli import references.bib
 cat paper.ris | rubien-cli import - --format ris
 ```
 
 | Argument / Option | Type | Description |
 |---|---|---|
 | `file` | String (required) | File path, or `"-"` for stdin |
-| `--collection` | Int64 | Import into collection ID |
 | `--format` | String | Format hint for stdin: `bib`, `ris` |
 
 File size limit: 50 MB. When reading from stdin, `--format` is required.
@@ -252,41 +224,14 @@ Export references as JSON, BibTeX, or RIS.
 
 ```bash
 rubien-cli export --format bibtex
-rubien-cli export --format ris --collection 5
+rubien-cli export --format ris
 ```
 
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `-f, --format` | String | `json` | `json`, `bibtex`, `ris` |
-| `--collection` | Int64 | — | Filter by collection ID |
 
 **Output:** JSON array (default), or plain-text BibTeX/RIS to stdout.
-
----
-
-## collections
-
-List or manage collections.
-
-```bash
-rubien-cli collections                           # List all
-rubien-cli collections --create --name "Physics"
-rubien-cli collections --rename --id 3 --name "Quantum Physics"
-rubien-cli collections --delete 3
-rubien-cli collections --delete 3 --with-references --force
-```
-
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `--create` | Flag | false | Create a new collection |
-| `--name` | String | — | Name (with `--create` or `--rename`) |
-| `--delete` | Int64 | — | Delete collection by ID (keeps references) |
-| `--with-references` | Flag | false | Also delete references inside (with `--delete`) |
-| `-f, --force` | Flag | false | Skip confirmation for destructive actions |
-| `--rename` | Flag | false | Rename a collection |
-| `--id` | Int64 | — | Collection ID (with `--rename`) |
-
-**Output:** JSON array of `{id, name, icon}` when listing; single object on create/rename.
 
 ---
 
@@ -497,7 +442,6 @@ All commands that return references use this structure:
   "url": "https://arxiv.org/abs/1706.03762",
   "abstract": "The dominant sequence transduction models...",
   "referenceType": "Conference Paper",
-  "collectionId": null,
   "dateAdded": "2024-01-15T10:30:00Z",
   "dateModified": "2024-01-15T10:30:00Z",
   "pdfPath": "/path/to/file.pdf",

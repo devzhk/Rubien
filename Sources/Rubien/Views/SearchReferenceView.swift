@@ -4,7 +4,6 @@ import RubienCore
 struct SearchOverlay: View {
     let db: AppDatabase
     let scope: ReferenceScope
-    let collections: [Collection]
     @Binding var isPresented: Bool
     let onSelect: (Reference) -> Void
     var onDeleteMultiple: (([Reference]) -> Void)? = nil
@@ -16,7 +15,6 @@ struct SearchOverlay: View {
     // Filters
     @State private var titleOnly = false
     @State private var selectedType: ReferenceType?
-    @State private var selectedCollectionId: Int64?
     @State private var hasPDF: Bool?
     @State private var yearFrom = ""
     @State private var yearTo = ""
@@ -34,7 +32,7 @@ struct SearchOverlay: View {
     @State private var keyboardNavigated = false
 
     private var hasActiveFilters: Bool {
-        titleOnly || selectedType != nil || selectedCollectionId != nil ||
+        titleOnly || selectedType != nil ||
         hasPDF != nil || !yearFrom.isEmpty || !yearTo.isEmpty
     }
 
@@ -42,7 +40,6 @@ struct SearchOverlay: View {
         var c = 0
         if titleOnly { c += 1 }
         if selectedType != nil { c += 1 }
-        if selectedCollectionId != nil { c += 1 }
         if hasPDF != nil { c += 1 }
         if !yearFrom.isEmpty || !yearTo.isEmpty { c += 1 }
         return c
@@ -51,7 +48,6 @@ struct SearchOverlay: View {
     private struct FilterState: Equatable {
         var query: String
         var selectedType: ReferenceType?
-        var selectedCollectionId: Int64?
         var hasPDF: Bool?
         var titleOnly: Bool
         var yearFrom: String
@@ -59,7 +55,7 @@ struct SearchOverlay: View {
     }
 
     private var filterState: FilterState {
-        FilterState(query: query, selectedType: selectedType, selectedCollectionId: selectedCollectionId, hasPDF: hasPDF, titleOnly: titleOnly, yearFrom: yearFrom, yearTo: yearTo)
+        FilterState(query: query, selectedType: selectedType, hasPDF: hasPDF, titleOnly: titleOnly, yearFrom: yearFrom, yearTo: yearTo)
     }
 
     var body: some View {
@@ -262,9 +258,8 @@ struct SearchOverlay: View {
         }
         .onChange(of: filterState) { oldState, newState in
             selectedIndex = 0
-            if oldState.query != newState.query || 
+            if oldState.query != newState.query ||
                oldState.selectedType != newState.selectedType ||
-               oldState.selectedCollectionId != newState.selectedCollectionId ||
                oldState.hasPDF != newState.hasPDF ||
                oldState.titleOnly != newState.titleOnly {
                 clearMultiSelection()
@@ -402,20 +397,6 @@ struct SearchOverlay: View {
                 }
             }
 
-            if !collections.isEmpty {
-                FilterPillMenu(icon: "folder", label: collectionLabel) {
-                    Button(String(localized: "All collections", bundle: .module)) { selectedCollectionId = nil }
-                    Divider()
-                    ForEach(collections) { col in
-                        Button {
-                            selectedCollectionId = col.id
-                        } label: {
-                            Label(col.name, systemImage: col.icon)
-                        }
-                    }
-                }
-            }
-
             Button {
                 withAnimation(.easeInOut(duration: 0.2)) {
                     showFilters.toggle()
@@ -499,18 +480,9 @@ struct SearchOverlay: View {
         selectedType?.rawValue ?? String(localized: "Type", bundle: .module)
     }
 
-    private var collectionLabel: String {
-        if let id = selectedCollectionId,
-           let col = collections.first(where: { $0.id == id }) {
-            return col.name
-        }
-        return String(localized: "Collection", bundle: .module)
-    }
-
     private func clearFilters() {
         titleOnly = false
         selectedType = nil
-        selectedCollectionId = nil
         hasPDF = nil
         yearFrom = ""
         yearTo = ""
@@ -560,7 +532,6 @@ struct SearchOverlay: View {
         filter.keyword = query
         filter.referenceType = selectedType
         filter.hasPDF = hasPDF
-        filter.collectionId = selectedCollectionId
         filter.titleOnly = titleOnly
         filter.yearFrom = Int(yearFrom)
         filter.yearTo = Int(yearTo)

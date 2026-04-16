@@ -24,16 +24,6 @@ public final class AppDatabase: Sendable {
         #endif
 
         migrator.registerMigration("v1") { db in
-            // Collections
-            try db.create(table: "collection") { t in
-                t.autoIncrementedPrimaryKey("id")
-                t.column("name", .text).notNull()
-                t.column("icon", .text).notNull().defaults(to: "folder")
-                t.column("dateCreated", .datetime).notNull()
-                t.column("parentId", .integer).references("collection", onDelete: .setNull)
-            }
-            try db.create(index: "collection_parentId", on: "collection", columns: ["parentId"])
-
             // Tags
             try db.create(table: "tag") { t in
                 t.autoIncrementedPrimaryKey("id")
@@ -71,357 +61,51 @@ public final class AppDatabase: Sendable {
                 t.column("evidenceBundleHash", .text)
                 t.column("verifiedAt", .datetime)
                 t.column("reviewedBy", .text)
-                t.column("collectionId", .integer).references("collection", onDelete: .setNull)
+                t.column("readingStatus", .text).notNull().defaults(to: ReadingStatus.unread.rawValue)
+                t.column("priority", .integer).notNull().defaults(to: Priority.none.rawValue)
+                // Extended metadata (P0)
+                t.column("publisher", .text)
+                t.column("publisherPlace", .text)
+                t.column("edition", .text)
+                t.column("editors", .text)
+                t.column("isbn", .text)
+                t.column("issn", .text)
+                t.column("accessedDate", .text)
+                t.column("issuedMonth", .integer)
+                t.column("issuedDay", .integer)
+                // Extended metadata (P1)
+                t.column("translators", .text)
+                t.column("eventTitle", .text)
+                t.column("eventPlace", .text)
+                t.column("genre", .text)
+                t.column("institution", .text)
+                t.column("number", .text)
+                t.column("collectionTitle", .text)
+                t.column("numberOfPages", .text)
+                // Extended metadata (P2)
+                t.column("language", .text)
+                t.column("pmid", .text)
+                t.column("pmcid", .text)
             }
 
-            // Indexes for fast queries
+            // Reference indexes
             try db.create(index: "reference_year", on: "reference", columns: ["year"])
             try db.create(index: "reference_dateAdded", on: "reference", columns: ["dateAdded"])
-            try db.create(index: "reference_collectionId", on: "reference", columns: ["collectionId"])
             try db.create(index: "reference_doi", on: "reference", columns: ["doi"])
             try db.create(index: "reference_referenceType", on: "reference", columns: ["referenceType"])
             try db.create(index: "reference_authorsNormalized", on: "reference", columns: ["authorsNormalized"])
             try db.create(index: "reference_verificationStatus", on: "reference", columns: ["verificationStatus"])
+            try db.create(index: "reference_readingStatus", on: "reference", columns: ["readingStatus"])
+            try db.create(index: "reference_priority", on: "reference", columns: ["priority"])
+            try db.create(index: "reference_recordKey", on: "reference", columns: ["recordKey"])
+            try db.create(index: "reference_evidenceBundleHash", on: "reference", columns: ["evidenceBundleHash"])
+            try db.create(index: "reference_metadataSource", on: "reference", columns: ["metadataSource"])
+            try db.create(index: "reference_isbn", on: "reference", columns: ["isbn"])
+            try db.create(index: "reference_issn", on: "reference", columns: ["issn"])
+            try db.create(index: "reference_pmid", on: "reference", columns: ["pmid"])
+            try db.create(index: "reference_pmcid", on: "reference", columns: ["pmcid"])
 
-            // FTS5 Full-Text Search virtual table
-            try db.create(virtualTable: "referenceFts", using: FTS5()) { t in
-                t.synchronize(withTable: "reference")
-                t.tokenizer = .unicode61()
-                t.column("title")
-                t.column("authorsNormalized")
-                t.column("journal")
-                t.column("abstract")
-                t.column("notes")
-                t.column("webContent")
-                t.column("siteName")
-                t.column("doi")
-            }
-
-            // Reference-Tag pivot table
-            try db.create(table: "referenceTag") { t in
-                t.column("referenceId", .integer).notNull().references("reference", onDelete: .cascade)
-                t.column("tagId", .integer).notNull().references("tag", onDelete: .cascade)
-                t.primaryKey(["referenceId", "tagId"])
-            }
-            try db.create(index: "referenceTag_tagId", on: "referenceTag", columns: ["tagId"])
-        }
-
-        migrator.registerMigration("v2-structured-authors") { db in
-            // Convert plain-text authors to JSON arrays
-            let rows = try Row.fetchAll(db, sql: "SELECT id, authors FROM reference")
-            for row in rows {
-                let id: Int64 = row["id"]
-                let plain: String = row["authors"] ?? ""
-                guard !plain.isEmpty else { continue }
-                // Skip if already JSON
-                if plain.hasPrefix("[") { continue }
-                let parsed = AuthorName.parseList(plain)
-                if let data = try? JSONEncoder().encode(parsed),
-                   let json = String(data: data, encoding: .utf8) {
-                    try db.execute(sql: "UPDATE reference SET authors = ? WHERE id = ?", arguments: [json, id])
-                }
-            }
-        }
-
-        migrator.registerMigration("v3-pdf-annotations") { db in
-            try db.create(table: "pdfAnnotation") { t in
-                t.autoIncrementedPrimaryKey("id")
-                t.column("referenceId", .integer).notNull().references("reference", onDelete: .cascade)
-                t.column("type", .text).notNull().defaults(to: "highlight")
-                t.column("selectedText", .text)
-                t.column("noteText", .text)
-                t.column("color", .text).notNull().defaults(to: "#FFDE59")
-                t.column("pageIndex", .integer).notNull()
-                t.column("boundsX", .double).notNull()
-                t.column("boundsY", .double).notNull()
-                t.column("boundsWidth", .double).notNull()
-                t.column("boundsHeight", .double).notNull()
-                t.column("rectsData", .text).notNull().defaults(to: "[]")
-                t.column("dateCreated", .datetime).notNull()
-            }
-            try db.create(index: "pdfAnnotation_referenceId", on: "pdfAnnotation", columns: ["referenceId"])
-            try db.create(index: "pdfAnnotation_pageIndex", on: "pdfAnnotation", columns: ["pageIndex"])
-        }
-
-        migrator.registerMigration("v4-pdf-annotation-rects") { db in
-            let hasRectsDataColumn = try db.columns(in: "pdfAnnotation")
-                .contains { $0.name == "rectsData" }
-
-            if !hasRectsDataColumn {
-                try db.alter(table: "pdfAnnotation") { t in
-                    t.add(column: "rectsData", .text).notNull().defaults(to: "[]")
-                }
-            }
-
-            struct LegacyRect: Encodable {
-                var x: Double
-                var y: Double
-                var width: Double
-                var height: Double
-            }
-
-            let rows = try Row.fetchAll(
-                db,
-                sql: """
-                    SELECT id, boundsX, boundsY, boundsWidth, boundsHeight
-                    FROM pdfAnnotation
-                    WHERE rectsData = '[]' OR rectsData = ''
-                    """
-            )
-
-            for row in rows {
-                let id: Int64 = row["id"]
-                let rect = LegacyRect(
-                    x: row["boundsX"],
-                    y: row["boundsY"],
-                    width: row["boundsWidth"],
-                    height: row["boundsHeight"]
-                )
-
-                if let data = try? JSONEncoder().encode([rect]),
-                   let json = String(data: data, encoding: .utf8) {
-                    try db.execute(
-                        sql: "UPDATE pdfAnnotation SET rectsData = ? WHERE id = ?",
-                        arguments: [json, id]
-                    )
-                }
-            }
-        }
-
-        migrator.registerMigration("v5-web-content") { db in
-            let existingColumns = try db.columns(in: "reference").map(\.name)
-
-            try db.alter(table: "reference") { t in
-                if !existingColumns.contains("webContent") {
-                    t.add(column: "webContent", .text)
-                }
-                if !existingColumns.contains("siteName") {
-                    t.add(column: "siteName", .text)
-                }
-                if !existingColumns.contains("favicon") {
-                    t.add(column: "favicon", .text)
-                }
-            }
-
-            try db.execute(sql: "DROP TRIGGER IF EXISTS __referenceFts_ai")
-            try db.execute(sql: "DROP TRIGGER IF EXISTS __referenceFts_ad")
-            try db.execute(sql: "DROP TRIGGER IF EXISTS __referenceFts_au")
-
-            if try db.tableExists("referenceFts") {
-                try db.drop(table: "referenceFts")
-            }
-
-            try db.create(virtualTable: "referenceFts", using: FTS5()) { t in
-                t.synchronize(withTable: "reference")
-                t.tokenizer = .unicode61()
-                t.column("title")
-                t.column("authors")
-                t.column("journal")
-                t.column("abstract")
-                t.column("notes")
-                t.column("webContent")
-                t.column("siteName")
-                t.column("doi")
-            }
-
-            try db.execute(sql: "INSERT INTO referenceFts(referenceFts) VALUES('rebuild')")
-        }
-
-        migrator.registerMigration("v6-web-annotations") { db in
-            try db.create(table: "webAnnotation", ifNotExists: true) { t in
-                t.autoIncrementedPrimaryKey("id")
-                t.column("referenceId", .integer).notNull().references("reference", onDelete: .cascade)
-                t.column("type", .text).notNull().defaults(to: AnnotationType.highlight.rawValue)
-                t.column("selectedText", .text).notNull()
-                t.column("noteText", .text)
-                t.column("color", .text).notNull().defaults(to: "#FFDE59")
-                t.column("anchorText", .text).notNull()
-                t.column("prefixText", .text)
-                t.column("suffixText", .text)
-                t.column("dateCreated", .datetime).notNull()
-            }
-            try db.create(index: "webAnnotation_referenceId", on: "webAnnotation", columns: ["referenceId"], ifNotExists: true)
-            try db.create(index: "webAnnotation_dateCreated", on: "webAnnotation", columns: ["dateCreated"], ifNotExists: true)
-        }
-
-        migrator.registerMigration("v7-extended-metadata") { db in
-            let existingColumns = try db.columns(in: "reference").map(\.name)
-
-            try db.alter(table: "reference") { t in
-                // P0 fields
-                if !existingColumns.contains("publisher") {
-                    t.add(column: "publisher", .text)
-                }
-                if !existingColumns.contains("publisherPlace") {
-                    t.add(column: "publisherPlace", .text)
-                }
-                if !existingColumns.contains("edition") {
-                    t.add(column: "edition", .text)
-                }
-                if !existingColumns.contains("editors") {
-                    t.add(column: "editors", .text)
-                }
-                if !existingColumns.contains("isbn") {
-                    t.add(column: "isbn", .text)
-                }
-                if !existingColumns.contains("issn") {
-                    t.add(column: "issn", .text)
-                }
-                if !existingColumns.contains("accessedDate") {
-                    t.add(column: "accessedDate", .text)
-                }
-                if !existingColumns.contains("issuedMonth") {
-                    t.add(column: "issuedMonth", .integer)
-                }
-                if !existingColumns.contains("issuedDay") {
-                    t.add(column: "issuedDay", .integer)
-                }
-                // P1 fields
-                if !existingColumns.contains("translators") {
-                    t.add(column: "translators", .text)
-                }
-                if !existingColumns.contains("eventTitle") {
-                    t.add(column: "eventTitle", .text)
-                }
-                if !existingColumns.contains("eventPlace") {
-                    t.add(column: "eventPlace", .text)
-                }
-                if !existingColumns.contains("genre") {
-                    t.add(column: "genre", .text)
-                }
-                if !existingColumns.contains("number") {
-                    t.add(column: "number", .text)
-                }
-                if !existingColumns.contains("collectionTitle") {
-                    t.add(column: "collectionTitle", .text)
-                }
-                if !existingColumns.contains("numberOfPages") {
-                    t.add(column: "numberOfPages", .text)
-                }
-                // P2 fields
-                if !existingColumns.contains("language") {
-                    t.add(column: "language", .text)
-                }
-                if !existingColumns.contains("pmid") {
-                    t.add(column: "pmid", .text)
-                }
-                if !existingColumns.contains("pmcid") {
-                    t.add(column: "pmcid", .text)
-                }
-            }
-
-            // Rebuild FTS5 to include new searchable fields
-            try db.execute(sql: "DROP TRIGGER IF EXISTS __referenceFts_ai")
-            try db.execute(sql: "DROP TRIGGER IF EXISTS __referenceFts_ad")
-            try db.execute(sql: "DROP TRIGGER IF EXISTS __referenceFts_au")
-
-            if try db.tableExists("referenceFts") {
-                try db.drop(table: "referenceFts")
-            }
-
-            try db.create(virtualTable: "referenceFts", using: FTS5()) { t in
-                t.synchronize(withTable: "reference")
-                t.tokenizer = .unicode61()
-                t.column("title")
-                t.column("authors")
-                t.column("journal")
-                t.column("abstract")
-                t.column("notes")
-                t.column("webContent")
-                t.column("siteName")
-                t.column("doi")
-                t.column("publisher")
-                t.column("isbn")
-                t.column("issn")
-            }
-
-            try db.execute(sql: "INSERT INTO referenceFts(referenceFts) VALUES('rebuild')")
-        }
-
-        migrator.registerMigration("v8-reference-search-hardening") { db in
-            let existingColumns = try db.columns(in: "reference").map(\.name)
-
-            try db.alter(table: "reference") { t in
-                if !existingColumns.contains("authorsNormalized") {
-                    t.add(column: "authorsNormalized", .text).notNull().defaults(to: "")
-                }
-            }
-
-            try db.create(index: "reference_authorsNormalized", on: "reference", columns: ["authorsNormalized"], ifNotExists: true)
-            try db.create(index: "reference_pmid", on: "reference", columns: ["pmid"], ifNotExists: true)
-            try db.create(index: "reference_pmcid", on: "reference", columns: ["pmcid"], ifNotExists: true)
-
-            let rows = try Row.fetchAll(db, sql: "SELECT id, authors FROM reference")
-            for row in rows {
-                let id: Int64 = row["id"]
-                let rawAuthors: String = row["authors"] ?? ""
-
-                let normalized: String = {
-                    guard !rawAuthors.isEmpty else { return "" }
-                    if let data = rawAuthors.data(using: .utf8),
-                       let decoded = try? JSONDecoder().decode([AuthorName].self, from: data) {
-                        return decoded.normalizedSearchString
-                    }
-                    return AuthorName.parseList(rawAuthors).normalizedSearchString
-                }()
-
-                try db.execute(
-                    sql: "UPDATE reference SET authorsNormalized = ? WHERE id = ?",
-                    arguments: [normalized, id]
-                )
-            }
-
-            try db.execute(sql: "DROP TRIGGER IF EXISTS __referenceFts_ai")
-            try db.execute(sql: "DROP TRIGGER IF EXISTS __referenceFts_ad")
-            try db.execute(sql: "DROP TRIGGER IF EXISTS __referenceFts_au")
-
-            if try db.tableExists("referenceFts") {
-                try db.drop(table: "referenceFts")
-            }
-
-            try db.create(virtualTable: "referenceFts", using: FTS5()) { t in
-                t.synchronize(withTable: "reference")
-                t.tokenizer = .unicode61()
-                t.column("title")
-                t.column("authorsNormalized")
-                t.column("journal")
-                t.column("abstract")
-                t.column("notes")
-                t.column("webContent")
-                t.column("siteName")
-                t.column("doi")
-                t.column("publisher")
-                t.column("isbn")
-                t.column("issn")
-            }
-
-            try db.execute(sql: "INSERT INTO referenceFts(referenceFts) VALUES('rebuild')")
-        }
-
-        migrator.registerMigration("v9-metadata-source-and-institution") { db in
-            let existingColumns = try db.columns(in: "reference").map(\.name)
-
-            try db.alter(table: "reference") { t in
-                if !existingColumns.contains("metadataSource") {
-                    t.add(column: "metadataSource", .text)
-                }
-                if !existingColumns.contains("institution") {
-                    t.add(column: "institution", .text)
-                }
-            }
-
-            try db.create(index: "reference_metadataSource", on: "reference", columns: ["metadataSource"], ifNotExists: true)
-            try db.create(index: "reference_isbn", on: "reference", columns: ["isbn"], ifNotExists: true)
-            try db.create(index: "reference_issn", on: "reference", columns: ["issn"], ifNotExists: true)
-
-            try db.execute(sql: "DROP TRIGGER IF EXISTS __referenceFts_ai")
-            try db.execute(sql: "DROP TRIGGER IF EXISTS __referenceFts_ad")
-            try db.execute(sql: "DROP TRIGGER IF EXISTS __referenceFts_au")
-
-            if try db.tableExists("referenceFts") {
-                try db.drop(table: "referenceFts")
-            }
-
+            // FTS5 Full-Text Search virtual table (synced with reference)
             try db.create(virtualTable: "referenceFts", using: FTS5()) { t in
                 t.synchronize(withTable: "reference")
                 t.tokenizer = .unicode61()
@@ -439,41 +123,51 @@ public final class AppDatabase: Sendable {
                 t.column("institution")
             }
 
-            try db.execute(sql: "INSERT INTO referenceFts(referenceFts) VALUES('rebuild')")
-        }
-
-        migrator.registerMigration("v10-verification-pipeline") { db in
-            let existingColumns = try db.columns(in: "reference").map(\.name)
-
-            try db.alter(table: "reference") { t in
-                if !existingColumns.contains("verificationStatus") {
-                    t.add(column: "verificationStatus", .text).notNull().defaults(to: VerificationStatus.legacy.rawValue)
-                }
-                if !existingColumns.contains("acceptedByRuleID") {
-                    t.add(column: "acceptedByRuleID", .text)
-                }
-                if !existingColumns.contains("recordKey") {
-                    t.add(column: "recordKey", .text)
-                }
-                if !existingColumns.contains("verificationSourceURL") {
-                    t.add(column: "verificationSourceURL", .text)
-                }
-                if !existingColumns.contains("evidenceBundleHash") {
-                    t.add(column: "evidenceBundleHash", .text)
-                }
-                if !existingColumns.contains("verifiedAt") {
-                    t.add(column: "verifiedAt", .datetime)
-                }
-                if !existingColumns.contains("reviewedBy") {
-                    t.add(column: "reviewedBy", .text)
-                }
+            // Reference-Tag pivot table
+            try db.create(table: "referenceTag") { t in
+                t.column("referenceId", .integer).notNull().references("reference", onDelete: .cascade)
+                t.column("tagId", .integer).notNull().references("tag", onDelete: .cascade)
+                t.primaryKey(["referenceId", "tagId"])
             }
+            try db.create(index: "referenceTag_tagId", on: "referenceTag", columns: ["tagId"])
 
-            try db.create(index: "reference_verificationStatus", on: "reference", columns: ["verificationStatus"], ifNotExists: true)
-            try db.create(index: "reference_recordKey", on: "reference", columns: ["recordKey"], ifNotExists: true)
-            try db.create(index: "reference_evidenceBundleHash", on: "reference", columns: ["evidenceBundleHash"], ifNotExists: true)
+            // PDF annotations
+            try db.create(table: "pdfAnnotation") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("referenceId", .integer).notNull().references("reference", onDelete: .cascade)
+                t.column("type", .text).notNull().defaults(to: "highlight")
+                t.column("selectedText", .text)
+                t.column("noteText", .text)
+                t.column("color", .text).notNull().defaults(to: "#FFDE59")
+                t.column("pageIndex", .integer).notNull()
+                t.column("boundsX", .double).notNull()
+                t.column("boundsY", .double).notNull()
+                t.column("boundsWidth", .double).notNull()
+                t.column("boundsHeight", .double).notNull()
+                t.column("rectsData", .text).notNull().defaults(to: "[]")
+                t.column("dateCreated", .datetime).notNull()
+            }
+            try db.create(index: "pdfAnnotation_referenceId", on: "pdfAnnotation", columns: ["referenceId"])
+            try db.create(index: "pdfAnnotation_pageIndex", on: "pdfAnnotation", columns: ["pageIndex"])
 
-            try db.create(table: "metadataIntake", ifNotExists: true) { t in
+            // Web annotations
+            try db.create(table: "webAnnotation") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("referenceId", .integer).notNull().references("reference", onDelete: .cascade)
+                t.column("type", .text).notNull().defaults(to: AnnotationType.highlight.rawValue)
+                t.column("selectedText", .text).notNull()
+                t.column("noteText", .text)
+                t.column("color", .text).notNull().defaults(to: "#FFDE59")
+                t.column("anchorText", .text).notNull()
+                t.column("prefixText", .text)
+                t.column("suffixText", .text)
+                t.column("dateCreated", .datetime).notNull()
+            }
+            try db.create(index: "webAnnotation_referenceId", on: "webAnnotation", columns: ["referenceId"])
+            try db.create(index: "webAnnotation_dateCreated", on: "webAnnotation", columns: ["dateCreated"])
+
+            // Metadata intake pipeline
+            try db.create(table: "metadataIntake") { t in
                 t.autoIncrementedPrimaryKey("id")
                 t.column("sourceKind", .text).notNull()
                 t.column("verificationStatus", .text).notNull()
@@ -491,12 +185,11 @@ public final class AppDatabase: Sendable {
                 t.column("createdAt", .datetime).notNull()
                 t.column("updatedAt", .datetime).notNull()
             }
+            try db.create(index: "metadataIntake_verificationStatus", on: "metadataIntake", columns: ["verificationStatus"])
+            try db.create(index: "metadataIntake_linkedReferenceId", on: "metadataIntake", columns: ["linkedReferenceId"])
+            try db.create(index: "metadataIntake_updatedAt", on: "metadataIntake", columns: ["updatedAt"])
 
-            try db.create(index: "metadataIntake_verificationStatus", on: "metadataIntake", columns: ["verificationStatus"], ifNotExists: true)
-            try db.create(index: "metadataIntake_linkedReferenceId", on: "metadataIntake", columns: ["linkedReferenceId"], ifNotExists: true)
-            try db.create(index: "metadataIntake_updatedAt", on: "metadataIntake", columns: ["updatedAt"], ifNotExists: true)
-
-            try db.create(table: "metadataEvidence", ifNotExists: true) { t in
+            try db.create(table: "metadataEvidence") { t in
                 t.autoIncrementedPrimaryKey("id")
                 t.column("intakeId", .integer).references("metadataIntake", onDelete: .cascade)
                 t.column("referenceId", .integer).references("reference", onDelete: .cascade)
@@ -508,38 +201,12 @@ public final class AppDatabase: Sendable {
                 t.column("payloadJSON", .text).notNull()
                 t.column("createdAt", .datetime).notNull()
             }
+            try db.create(index: "metadataEvidence_bundleHash", on: "metadataEvidence", columns: ["bundleHash"])
+            try db.create(index: "metadataEvidence_intakeId", on: "metadataEvidence", columns: ["intakeId"])
+            try db.create(index: "metadataEvidence_referenceId", on: "metadataEvidence", columns: ["referenceId"])
 
-            try db.create(index: "metadataEvidence_bundleHash", on: "metadataEvidence", columns: ["bundleHash"], ifNotExists: true)
-            try db.create(index: "metadataEvidence_intakeId", on: "metadataEvidence", columns: ["intakeId"], ifNotExists: true)
-            try db.create(index: "metadataEvidence_referenceId", on: "metadataEvidence", columns: ["referenceId"], ifNotExists: true)
-
-            try db.execute(
-                sql: """
-                UPDATE reference
-                SET verificationStatus = COALESCE(NULLIF(verificationStatus, ''), ?)
-                """,
-                arguments: [VerificationStatus.legacy.rawValue]
-            )
-        }
-
-        migrator.registerMigration("v11-reading-status-priority") { db in
-            let existingColumns = try db.columns(in: "reference").map(\.name)
-
-            try db.alter(table: "reference") { t in
-                if !existingColumns.contains("readingStatus") {
-                    t.add(column: "readingStatus", .text).notNull().defaults(to: ReadingStatus.unread.rawValue)
-                }
-                if !existingColumns.contains("priority") {
-                    t.add(column: "priority", .integer).notNull().defaults(to: Priority.none.rawValue)
-                }
-            }
-
-            try db.create(index: "reference_readingStatus", on: "reference", columns: ["readingStatus"], ifNotExists: true)
-            try db.create(index: "reference_priority", on: "reference", columns: ["priority"], ifNotExists: true)
-        }
-
-        migrator.registerMigration("v12-database-views") { db in
-            try db.create(table: "databaseView", ifNotExists: true) { t in
+            // Database views
+            try db.create(table: "databaseView") { t in
                 t.autoIncrementedPrimaryKey("id")
                 t.column("name", .text).notNull()
                 t.column("icon", .text).notNull().defaults(to: "tablecells")
@@ -564,27 +231,11 @@ public final class AppDatabase: Sendable {
 
             try db.execute(sql: """
                 INSERT INTO databaseView (name, icon, scopeJSON, columnsJSON, filtersJSON, sortsJSON, isDefault, displayOrder, dateCreated, dateModified)
-                VALUES ('All References', 'books.vertical', '{"all":{}}', ?, ?, '[]', 1, 0, datetime('now'), datetime('now'))
+                VALUES ('All References', 'books.vertical', '{"all":{}}', ?, '[]', ?, 1, 0, datetime('now'), datetime('now'))
                 """, arguments: [defaultColumnsJSON, defaultSortsJSON])
 
-            let collections = try Row.fetchAll(db, sql: "SELECT id, name, icon FROM collection ORDER BY name")
-            for (index, row) in collections.enumerated() {
-                let colId: Int64 = row["id"]
-                let name: String = row["name"]
-                let icon: String = row["icon"]
-                let scopeJSON = (try? String(
-                    data: JSONEncoder().encode(ViewScope.collection(colId)),
-                    encoding: .utf8
-                )) ?? #"{"all":{}}"#
-                try db.execute(sql: """
-                    INSERT INTO databaseView (name, icon, scopeJSON, columnsJSON, filtersJSON, sortsJSON, isDefault, displayOrder, dateCreated, dateModified)
-                    VALUES (?, ?, ?, ?, ?, '[]', 0, ?, datetime('now'), datetime('now'))
-                    """, arguments: [name, icon, scopeJSON, defaultColumnsJSON, defaultSortsJSON, index + 1])
-            }
-        }
-
-        migrator.registerMigration("v13-custom-properties") { db in
-            try db.create(table: "propertyDefinition", ifNotExists: true) { t in
+            // Custom properties
+            try db.create(table: "propertyDefinition") { t in
                 t.autoIncrementedPrimaryKey("id")
                 t.column("name", .text).notNull()
                 t.column("type", .text).notNull().defaults(to: "string")
@@ -595,7 +246,7 @@ public final class AppDatabase: Sendable {
                 t.column("isVisible", .boolean).notNull().defaults(to: true)
             }
 
-            try db.create(table: "propertyValue", ifNotExists: true) { t in
+            try db.create(table: "propertyValue") { t in
                 t.autoIncrementedPrimaryKey("id")
                 t.column("referenceId", .integer).notNull()
                     .references("reference", onDelete: .cascade)
@@ -607,7 +258,6 @@ public final class AppDatabase: Sendable {
             try db.create(indexOn: "propertyValue", columns: ["referenceId"])
 
             // Seed default properties
-
             let typeOptions: [SelectOption] = [
                 .init(value: "Journal Article", color: "#007AFF"),
                 .init(value: "Book", color: "#34C759"),
@@ -812,32 +462,12 @@ extension AppDatabase {
         }
     }
 
-    /// Batch-move references to a collection (or nil to remove from collection).
-    /// Uses a single SQL UPDATE for optimal performance.
-    public func moveReferences(ids: [Int64], toCollectionId: Int64?) throws {
-        guard !ids.isEmpty else { return }
-        _ = try dbWriter.write { db in
-            try Reference
-                .filter(ids.contains(Reference.Columns.id))
-                .updateAll(db, Reference.Columns.collectionId.set(to: toCollectionId))
-        }
-    }
-
     public func fetchAllReferences(limit: Int = 0) throws -> [Reference] {
         try dbWriter.read { db in
             if limit > 0 {
                 return try Reference.order(Reference.Columns.dateAdded.desc).limit(limit).fetchAll(db)
             }
             return try Reference.order(Reference.Columns.dateAdded.desc).fetchAll(db)
-        }
-    }
-
-    public func fetchReferences(collectionId: Int64) throws -> [Reference] {
-        try dbWriter.read { db in
-            try Reference
-                .filter(Reference.Columns.collectionId == collectionId)
-                .order(Reference.Columns.dateAdded.desc)
-                .fetchAll(db)
         }
     }
 
@@ -1104,12 +734,6 @@ extension AppDatabase {
     public func referenceCount() throws -> Int {
         try dbWriter.read { db in
             try Reference.fetchCount(db)
-        }
-    }
-
-    public func referenceCount(collectionId: Int64) throws -> Int {
-        try dbWriter.read { db in
-            try Reference.filter(Reference.Columns.collectionId == collectionId).fetchCount(db)
         }
     }
 
@@ -1397,7 +1021,6 @@ extension AppDatabase {
         merged.evidenceBundleHash = preferred(incoming.evidenceBundleHash, over: existing.evidenceBundleHash)
         merged.verifiedAt = incoming.verifiedAt ?? existing.verifiedAt
         merged.reviewedBy = preferred(incoming.reviewedBy, over: existing.reviewedBy)
-        merged.collectionId = incoming.collectionId ?? existing.collectionId
         merged.publisher = preferred(incoming.publisher, over: existing.publisher)
         merged.publisherPlace = preferred(incoming.publisherPlace, over: existing.publisherPlace)
         merged.edition = preferred(incoming.edition, over: existing.edition)
@@ -1421,27 +1044,6 @@ extension AppDatabase {
         merged.dateAdded = existing.dateAdded
         merged.dateModified = Date()
         return merged
-    }
-}
-
-// MARK: - Collection CRUD
-extension AppDatabase {
-    public func saveCollection(_ collection: inout Collection) throws {
-        try dbWriter.write { db in
-            try collection.save(db)
-        }
-    }
-
-    public func deleteCollection(id: Int64) throws {
-        try dbWriter.write { db in
-            _ = try Collection.deleteOne(db, id: id)
-        }
-    }
-
-    public func fetchAllCollections() throws -> [Collection] {
-        try dbWriter.read { db in
-            try Collection.order(Collection.Columns.name).fetchAll(db)
-        }
     }
 }
 
@@ -1634,7 +1236,6 @@ import Combine
 /// the correct query without loading every row into memory first.
 public enum ReferenceScope: Sendable {
     case all
-    case collection(Int64)
     case tag(Int64)
 }
 
@@ -1648,14 +1249,13 @@ public struct ReferenceFilter: Sendable {
     public var referenceType: ReferenceType? = nil
     public var titleOnly: Bool = false
     public var hasPDF: Bool? = nil
-    public var collectionId: Int64? = nil
     public var readingStatus: ReadingStatus? = nil
     public var priority: Priority? = nil
 
     public var isEmpty: Bool {
         keyword.isEmpty && author.isEmpty && yearFrom == nil
             && yearTo == nil && journal.isEmpty && referenceType == nil
-            && !titleOnly && hasPDF == nil && collectionId == nil
+            && !titleOnly && hasPDF == nil
             && readingStatus == nil && priority == nil
     }
 
@@ -1722,8 +1322,6 @@ extension AppDatabase {
         switch scope {
         case .all:
             request = Reference.all()
-        case .collection(let cid):
-            request = Reference.filter(Reference.Columns.collectionId == cid)
         case .tag(let tid):
             request = Reference
                 .joining(required: Reference.referenceTagPivot
@@ -1763,9 +1361,6 @@ extension AppDatabase {
         if let type = filter.referenceType {
             request = request.filter(Reference.Columns.referenceType == type.rawValue)
         }
-        if let collectionId = filter.collectionId {
-            request = request.filter(Reference.Columns.collectionId == collectionId)
-        }
         if let hasPDF = filter.hasPDF {
             request = hasPDF
                 ? request.filter(Reference.Columns.pdfPath != nil)
@@ -1789,15 +1384,6 @@ extension AppDatabase {
         }
 
         return try request.fetchAll(db)
-    }
-
-    public func observeCollections() -> AnyPublisher<[Collection], Error> {
-        ValueObservation
-            .tracking { db in
-                try Collection.order(Collection.Columns.name).fetchAll(db)
-            }
-            .publisher(in: dbWriter, scheduling: .immediate)
-            .eraseToAnyPublisher()
     }
 
     public func observePendingMetadataIntakes() -> AnyPublisher<[MetadataIntake], Error> {

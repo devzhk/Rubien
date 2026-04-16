@@ -397,44 +397,6 @@ final class AppDatabaseTests: XCTestCase {
         XCTAssertTrue(results.isEmpty)
     }
 
-    // MARK: - Collection CRUD
-
-    func testSaveAndFetchCollection() throws {
-        let db = try makeDatabase()
-        var col = Collection(name: "Test Collection")
-        try db.saveCollection(&col)
-        XCTAssertNotNil(col.id)
-
-        let all = try db.fetchAllCollections()
-        XCTAssertTrue(all.contains(where: { $0.id == col.id }))
-    }
-
-    func testDeleteCollection() throws {
-        let db = try makeDatabase()
-        var col = Collection(name: "To Delete")
-        try db.saveCollection(&col)
-        let id = col.id!
-
-        try db.deleteCollection(id: id)
-        let all = try db.fetchAllCollections()
-        XCTAssertFalse(all.contains(where: { $0.id == id }))
-    }
-
-    // MARK: - Filter by Collection
-
-    func testFetchReferencesByCollection() throws {
-        let db = try makeDatabase()
-        var col = Collection(name: "Filter Col")
-        try db.saveCollection(&col)
-
-        var ref = Reference(title: "In Collection")
-        ref.collectionId = col.id
-        try db.saveReference(&ref)
-
-        let results = try db.fetchReferences(collectionId: col.id!)
-        XCTAssertTrue(results.contains(where: { $0.id == ref.id }))
-    }
-
     // MARK: - Tag CRUD
 
     func testSaveAndFetchTag() throws {
@@ -520,21 +482,6 @@ final class AppDatabaseTests: XCTestCase {
 
         let count = try db.referenceCount()
         XCTAssertEqual(count, 2)
-    }
-
-    func testReferenceCountByCollection() throws {
-        let db = try makeDatabase()
-        var col = Collection(name: "Count Col")
-        try db.saveCollection(&col)
-
-        var ref1 = Reference(title: "In Col")
-        ref1.collectionId = col.id
-        var ref2 = Reference(title: "No Col")
-        try db.saveReference(&ref1)
-        try db.saveReference(&ref2)
-
-        let count = try db.referenceCount(collectionId: col.id!)
-        XCTAssertEqual(count, 1)
     }
 
     // MARK: - PDF Annotation CRUD

@@ -3,13 +3,11 @@ import RubienCore
 
 struct ReferenceTableView: View {
     let references: [Reference]
-    let collections: [Collection]
     let tagMap: [Int64: [Tag]]
     let allTags: [Tag]
     let selectedId: Int64?
     let onSelect: (Int64) -> Void
     let onDelete: ([Reference]) -> Void
-    let onMove: ([Reference], Int64?) -> Void
     let onRefreshMetadata: ([Reference]) -> Void
     let onUpdateReference: (Reference) -> Void
     let onUpdateTags: (Int64, [Int64]) -> Void
@@ -212,8 +210,6 @@ struct ReferenceTableView: View {
             }
             .disabled(isRefreshingMetadata)
             Divider()
-            moveToCollectionMenu(forBatch: true)
-            Divider()
             Button(String(format: String(localized: "Delete %d selected", bundle: .module), selection.count), role: .destructive) {
                 showDeleteConfirm = true
             }
@@ -225,38 +221,8 @@ struct ReferenceTableView: View {
             }
             .disabled(isRefreshingMetadata)
             Divider()
-            moveToCollectionMenu(forRef: ref)
-            Divider()
             Button(String(localized: "common.delete", bundle: .module), role: .destructive) {
                 onDelete([ref])
-            }
-        }
-    }
-
-    // MARK: - Move-to-collection
-
-    @ViewBuilder
-    private func moveToCollectionMenu(forBatch: Bool) -> some View {
-        Menu(String(localized: "Move to…", bundle: .module)) {
-            Button(String(localized: "Remove from collection", bundle: .module)) {
-                batchMove(toCollectionId: nil)
-            }
-            if !collections.isEmpty { Divider() }
-            ForEach(collections) { col in
-                Button(col.name) { batchMove(toCollectionId: col.id) }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func moveToCollectionMenu(forRef ref: Reference) -> some View {
-        Menu(String(localized: "Move to…", bundle: .module)) {
-            Button(String(localized: "Remove from collection", bundle: .module)) {
-                onMove([ref], nil)
-            }
-            if !collections.isEmpty { Divider() }
-            ForEach(collections) { col in
-                Button(col.name) { onMove([ref], col.id) }
             }
         }
     }
@@ -328,12 +294,6 @@ struct ReferenceTableView: View {
         let toDelete = references.filter { selection.contains($0.id) }
         selection.removeAll()
         onDelete(toDelete)
-    }
-
-    private func batchMove(toCollectionId: Int64?) {
-        let toMove = references.filter { selection.contains($0.id) }
-        selection.removeAll()
-        onMove(toMove, toCollectionId)
     }
 
     private func batchRefreshMetadata() {

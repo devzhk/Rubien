@@ -4,7 +4,6 @@ import RubienCore
 
 enum SidebarItem: Hashable {
     case allReferences
-    case collection(Int64)
     case tag(Int64)
     case titleKeyword(String)
     case view(Int64)
@@ -59,7 +58,6 @@ final class LibraryViewModel: ObservableObject {
     /// The current page of references returned by the database-level query.
     @Published var references: [Reference] = []
     @Published var pendingMetadataIntakes: [MetadataIntake] = []
-    @Published var collections: [Collection] = []
     @Published var tags: [Tag] = []
     @Published var selectedSidebar: SidebarItem = .allReferences {
         didSet {
@@ -104,20 +102,6 @@ final class LibraryViewModel: ObservableObject {
     // MARK: - Observation setup
 
     private func setupObservation() {
-        db.observeCollections()
-            .receive(on: DispatchQueue.main)
-            .sink(
-                receiveCompletion: { [weak self] completion in
-                    if case .failure(let error) = completion {
-                        self?.errorMessage = "Collections refresh failed: \(error.localizedDescription)"
-                    }
-                },
-                receiveValue: { [weak self] collections in
-                    self?.collections = collections
-                }
-            )
-            .store(in: &cancellables)
-
         db.observeTags()
             .receive(on: DispatchQueue.main)
             .sink(
@@ -234,13 +218,11 @@ final class LibraryViewModel: ObservableObject {
         switch selectedSidebar {
         case .allReferences, .titleKeyword:
             scope = .all
-        case .collection(let id):   scope = .collection(id)
         case .tag(let id):          scope = .tag(id)
         case .view(let viewId):
             if let dbView = databaseViews.first(where: { $0.id == viewId }) {
                 switch dbView.parsedScope {
                 case .all: scope = .all
-                case .collection(let id): scope = .collection(id)
                 case .tag(let id): scope = .tag(id)
                 }
             } else {
@@ -314,15 +296,6 @@ final class LibraryViewModel: ObservableObject {
             .sorted { $0.value > $1.value }
             .prefix(15)
             .map { (word: $0.key, count: $0.value) }
-    }
-
-    func moveReferences(_ refs: [Reference], toCollectionId: Int64?) {
-        let ids = refs.compactMap(\.id)
-        do {
-            try db.moveReferences(ids: ids, toCollectionId: toCollectionId)
-        } catch {
-            errorMessage = "Move failed: \(error.localizedDescription)"
-        }
     }
 
     func deleteReferences(_ refs: [Reference]) {
@@ -412,25 +385,6 @@ final class LibraryViewModel: ObservableObject {
             try db.deleteMetadataIntake(id: id)
         } catch {
             errorMessage = "Delete failed: \(error.localizedDescription)"
-        }
-    }
-
-    func saveCollection(_ col: inout Collection) {
-        do {
-            try db.saveCollection(&col)
-        } catch {
-            errorMessage = "Save failed: \(error.localizedDescription)"
-        }
-    }
-
-    func deleteCollection(id: Int64) {
-        do {
-            try db.deleteCollection(id: id)
-        } catch {
-            errorMessage = "Delete failed: \(error.localizedDescription)"
-        }
-        if case .collection(let cid) = selectedSidebar, cid == id {
-            selectedSidebar = .allReferences
         }
     }
 
@@ -593,7 +547,6 @@ struct ContentView: View {
     @State private var showAddReference = false
     @State private var addReferenceInitialType: ReferenceType = .journalArticle
     @State private var showWebImport = false
-    @State private var showAddCollection = false
     @State private var showAddByIdentifier = false
     @State private var showBatchImport = false
     @State private var showPendingMetadataQueue = false
@@ -639,13 +592,11 @@ struct ContentView: View {
         } content: {
             ReferenceTableView(
                 references: viewModel.filteredReferences,
-                collections: viewModel.collections,
                 tagMap: viewModel.referenceTagMap,
                 allTags: viewModel.tags,
                 selectedId: selectedId,
                 onSelect: { selectedId = $0 },
                 onDelete: { deleteReferences($0) },
-                onMove: { refs, colId in viewModel.moveReferences(refs, toCollectionId: colId) },
                 onRefreshMetadata: { refs in refreshMetadata(for: refs) },
                 onUpdateReference: { updated in
                     var ref = updated
@@ -684,7 +635,6 @@ struct ContentView: View {
             if let ref = selectedReference {
                 ReferenceDetailView(
                     reference: ref,
-                    collections: viewModel.collections,
                     allTags: viewModel.tags,
                     liveTags: viewModel.referenceTagMap[ref.id ?? -1] ?? [],
                     db: viewModel.db,
@@ -803,7 +753,6 @@ struct ContentView: View {
         })
         .sheet(isPresented: $showAddReference) {
             AddReferenceView(
-                collections: viewModel.collections,
                 allTags: viewModel.tags,
                 onSave: { ref in
                     var r = ref
@@ -818,7 +767,6 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showWebImport) {
             WebImportView(
-                collections: viewModel.collections,
                 onSave: { ref in
                     var r = ref
                     viewModel.saveManualReference(&r, reviewedBy: "web-import")
@@ -848,7 +796,6 @@ struct ContentView: View {
                 SearchOverlay(
                     db: viewModel.db,
                     scope: viewModel.currentReferenceScope,
-                    collections: viewModel.collections,
                     isPresented: $showSearch,
                     onSelect: { ref in
                         selectedId = ref.id
@@ -888,12 +835,6 @@ struct ContentView: View {
                     )
                 }
             )
-        }
-        .sheet(isPresented: $showAddCollection) {
-            AddCollectionSheet { col in
-                var c = col
-                viewModel.saveCollection(&c)
-            }
         }
         .sheet(isPresented: $showPendingMetadataQueue) {
             PendingMetadataQueueView(

@@ -82,13 +82,10 @@
 // MARK: - Sidebar
 
 "sidebar.section.library" = "Library";
-"sidebar.section.collections" = "Collections";
 "sidebar.section.tags" = "Tags";
 "sidebar.item.all" = "All References";
 "sidebar.item.recent" = "Recently Added";
 "sidebar.item.unfiled" = "Unfiled";
-"sidebar.button.addCollection" = "New Collection";
-
 // MARK: - Add Reference sheet
 
 "addReference.title" = "Add Reference";

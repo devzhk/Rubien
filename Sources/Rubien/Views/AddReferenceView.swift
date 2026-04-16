@@ -3,7 +3,6 @@ import SwiftUI
 import RubienCore
 
 struct AddReferenceView: View {
-    let collections: [Collection]
     let allTags: [Tag]
     let onSave: (Reference) -> Void
     let onCreateTag: (Tag) -> Void
@@ -34,17 +33,14 @@ struct AddReferenceView: View {
     @State private var abstract = ""
     @State private var notes = ""
     @State private var referenceType: ReferenceType
-    @State private var collectionId: Int64?
     @State private var pdfPath: String?
 
     init(
-        collections: [Collection],
         allTags: [Tag],
         onSave: @escaping (Reference) -> Void,
         onCreateTag: @escaping (Tag) -> Void,
         initialReferenceType: ReferenceType = .journalArticle
     ) {
-        self.collections = collections
         self.allTags = allTags
         self.onSave = onSave
         self.onCreateTag = onCreateTag
@@ -124,15 +120,6 @@ struct AddReferenceView: View {
                     TextField("Number of Pages", text: $numberOfPages)
                 }
 
-                Section("Collection") {
-                    Picker("Collection", selection: $collectionId) {
-                        Text("None").tag(nil as Int64?)
-                        ForEach(collections) { col in
-                            Label(col.name, systemImage: col.icon).tag(col.id as Int64?)
-                        }
-                    }
-                }
-
                 Section("Abstract") {
                     TextEditor(text: $abstract)
                         .frame(minHeight: 80)
@@ -179,7 +166,6 @@ struct AddReferenceView: View {
             notes: notes.isEmpty ? nil : notes,
             siteName: nil,
             referenceType: referenceType,
-            collectionId: collectionId,
             publisher: publisher.isEmpty ? nil : publisher,
             publisherPlace: publisherPlace.isEmpty ? nil : publisherPlace,
             edition: edition.isEmpty ? nil : edition,

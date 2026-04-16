@@ -324,11 +324,10 @@ public enum MetadataResolution {
 
     public static func mergeRefreshedReference(primary: Reference, existing: Reference) -> Reference {
         // Refresh strategy: authoritative fetched metadata should replace the old
-        // bibliographic fields, while local state (library id, collection, notes,
+        // bibliographic fields, while local state (library id, notes,
         // attachments, cached reader content) must survive the refresh.
         var merged = mergeReference(primary: primary, fallback: existing)
         merged.id = existing.id
-        merged.collectionId = existing.collectionId
         merged.notes = existing.notes.rubien_nilIfBlank ?? primary.notes
         merged.pdfPath = existing.pdfPath.rubien_nilIfBlank ?? primary.pdfPath
         merged.metadataSource = primary.metadataSource ?? existing.metadataSource

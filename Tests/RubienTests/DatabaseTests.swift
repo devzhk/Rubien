@@ -34,23 +34,6 @@ final class DatabaseTests: XCTestCase {
         XCTAssertEqual(matches.first?.authors, [AuthorName(given: "John", family: "Smith")])
     }
 
-    func testCollectionsBatchImportAndCollectionCountsWorkTogether() throws {
-        let db = try makeDatabase()
-        var collection = Collection(name: "Reading List")
-        try db.saveCollection(&collection)
-
-        let imported = try db.batchImportReferences([
-            Reference(title: "One", collectionId: collection.id),
-            Reference(title: "Two", collectionId: collection.id),
-            Reference(title: "Three"),
-        ])
-
-        XCTAssertEqual(imported, 3)
-        XCTAssertEqual(try db.referenceCount(), 3)
-        XCTAssertEqual(try db.referenceCount(collectionId: try XCTUnwrap(collection.id)), 2)
-        XCTAssertEqual(try db.fetchAllCollections().map(\.name), ["Reading List"])
-    }
-
     func testUpdateReferenceWebContentReplacesStoredBody() throws {
         let db = try makeDatabase()
         var reference = Reference(

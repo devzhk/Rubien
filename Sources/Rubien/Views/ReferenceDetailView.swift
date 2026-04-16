@@ -4,7 +4,6 @@ import RubienCore
 
 struct ReferenceDetailView: View {
     let reference: Reference
-    let collections: [Collection]
     let allTags: [Tag]
     let db: AppDatabase
     let onSave: (Reference) -> Void
@@ -36,7 +35,7 @@ struct ReferenceDetailView: View {
 
     let liveTags: [Tag]
 
-    init(reference: Reference, collections: [Collection], allTags: [Tag], liveTags: [Tag] = [], db: AppDatabase,
+    init(reference: Reference, allTags: [Tag], liveTags: [Tag] = [], db: AppDatabase,
          onSave: @escaping (Reference) -> Void, onDelete: @escaping () -> Void,
          onOpenPDFReader: ((Reference) -> Void)? = nil, onOpenWebReader: ((Reference) -> Void)? = nil,
          onUpdateTags: ((Int64, [Int64]) -> Void)? = nil,
@@ -44,7 +43,6 @@ struct ReferenceDetailView: View {
          onDeleteTag: ((Int64) -> Void)? = nil,
          propertyDefs: Binding<[PropertyDefinition]>) {
         self.reference = reference
-        self.collections = collections
         self.allTags = allTags
         self.liveTags = liveTags
         self.db = db
