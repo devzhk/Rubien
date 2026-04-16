@@ -49,6 +49,18 @@ swift run Rubien
 
 This nukes the local package checkouts and SwiftPM state, then re-fetches cleanly.
 
+## Data storage
+
+Rubien stores all user data under:
+
+```
+~/Library/Application Support/Rubien/
+```
+
+This includes the SQLite database (`Rubien.sqlite` — references, collections, tags, annotations, custom properties, views) and imported PDF attachments. Back up this directory to preserve your library. Uninstalling the app bundle does **not** delete it; remove the folder manually if you want to start fresh.
+
+Window layout and other app preferences are stored separately in `~/Library/Preferences/com.rubien.app.plist` (standard macOS user defaults).
+
 ## Project layout
 
 ```

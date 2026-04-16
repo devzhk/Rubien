@@ -720,7 +720,7 @@ struct ContentView: View {
                 }
             }
             }
-            .navigationSplitViewColumnWidth(min: 250, ideal: 360, max: 600)
+            .navigationSplitViewColumnWidth(min: 180, ideal: 350, max: 350)
         }
         .toolbar(content: {
             ToolbarItemGroup(placement: .primaryAction) {

@@ -99,8 +99,8 @@ struct RubienApp: App {
         let fallback = CGSize(width: 1440, height: 920)
         guard let visibleFrame = NSScreen.main?.visibleFrame else { return fallback }
 
-        let width = min(visibleFrame.width - 80, max(1280, visibleFrame.width * 0.84))
-        let height = min(visibleFrame.height - 80, max(820, visibleFrame.height * 0.84))
+        let width = min(visibleFrame.width - 80, max(1280, visibleFrame.width * 0.9))
+        let height = min(visibleFrame.height - 80, max(820, visibleFrame.height * 0.9))
         return CGSize(width: width, height: height)
     }
 }
