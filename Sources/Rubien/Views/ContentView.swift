@@ -60,6 +60,9 @@ final class LibraryViewModel: ObservableObject {
     @Published var pendingMetadataIntakes: [MetadataIntake] = []
     @Published var tags: [Tag] = []
     @Published var selectedSidebar: SidebarItem = .allReferences {
+        willSet {
+            stashDraftIfDirty(for: selectedSidebar)
+        }
         didSet {
             rebuildReferenceObserver()
             syncColumnConfigFromView()
@@ -79,8 +82,13 @@ final class LibraryViewModel: ObservableObject {
     @Published var propertyDefs: [PropertyDefinition] = []
     @Published var customPropertyValueMap: [Int64: [Int64: String]] = [:]
     /// Column configuration for the table view (persisted via @AppStorage in ContentView)
-    @Published var tableSorts: [ViewSort] = [.defaultSort]
-    @Published var viewFilters: [ViewFilter] = []
+    @Published var tableSorts: [ViewSort] = [.defaultSort] {
+        didSet { recomputeIsDirty() }
+    }
+    @Published var viewFilters: [ViewFilter] = [] {
+        didSet { recomputeIsDirty() }
+    }
+    @Published private(set) var isCurrentViewDirty: Bool = false
     /// All saved database views
     @Published var databaseViews: [DatabaseView] = []
 
@@ -443,15 +451,72 @@ final class LibraryViewModel: ObservableObject {
         saveDatabaseView(&view)
     }
 
+    /// Stash of per-view edits that haven't been saved yet. Keyed by view id.
+    /// On view switch we record the leaving view's edits here; on return we
+    /// restore them instead of reloading from persisted state.
+    private var viewDrafts: [Int64: (filters: [ViewFilter], sorts: [ViewSort])] = [:]
+
+    private var currentDBView: DatabaseView? {
+        guard case .view(let id) = selectedSidebar else { return nil }
+        return databaseViews.first(where: { $0.id == id })
+    }
+
     private func syncColumnConfigFromView() {
-        guard case .view(let id) = selectedSidebar,
-              let dbView = databaseViews.first(where: { $0.id == id }) else {
+        guard let dbView = currentDBView, let id = dbView.id else {
             tableSorts = [.defaultSort]
             viewFilters = []
             return
         }
-        tableSorts = dbView.parsedSorts
+        if let draft = viewDrafts[id] {
+            tableSorts = draft.sorts
+            viewFilters = draft.filters
+        } else {
+            tableSorts = dbView.parsedSorts
+            viewFilters = dbView.parsedFilters
+        }
+    }
+
+    private func stashDraftIfDirty(for item: SidebarItem) {
+        guard case .view(let id) = item,
+              let dbView = databaseViews.first(where: { $0.id == id }) else { return }
+        let dirty = viewFilters != dbView.parsedFilters || tableSorts != dbView.parsedSorts
+        if dirty {
+            viewDrafts[id] = (filters: viewFilters, sorts: tableSorts)
+        } else {
+            viewDrafts.removeValue(forKey: id)
+        }
+    }
+
+    private func recomputeIsDirty() {
+        guard let dbView = currentDBView else {
+            isCurrentViewDirty = false
+            return
+        }
+        isCurrentViewDirty = viewFilters != dbView.parsedFilters || tableSorts != dbView.parsedSorts
+    }
+
+    var currentViewName: String? { currentDBView?.name }
+
+    func saveDraftForCurrentView() {
+        guard var dbView = currentDBView, let id = dbView.id else { return }
+        dbView.parsedFilters = viewFilters
+        dbView.parsedSorts = tableSorts
+        saveDatabaseView(&dbView)
+        // `observeDatabaseViews` updates `databaseViews` asynchronously; patch
+        // our local copy synchronously so the dirty-check baseline is correct
+        // on the next recompute.
+        if let idx = databaseViews.firstIndex(where: { $0.id == id }) {
+            databaseViews[idx] = dbView
+        }
+        viewDrafts.removeValue(forKey: id)
+        recomputeIsDirty()
+    }
+
+    func discardDraftForCurrentView() {
+        guard let dbView = currentDBView, let id = dbView.id else { return }
         viewFilters = dbView.parsedFilters
+        tableSorts = dbView.parsedSorts
+        viewDrafts.removeValue(forKey: id)
     }
 
     func selectDefaultViewIfNeeded() {
@@ -632,7 +697,11 @@ struct ContentView: View {
                     set: { viewModel.propertyDefs = $0 }
                 ),
                 db: viewModel.db,
-                customPropertyValueMap: viewModel.customPropertyValueMap
+                customPropertyValueMap: viewModel.customPropertyValueMap,
+                viewName: viewModel.currentViewName,
+                isDirty: viewModel.isCurrentViewDirty,
+                onSaveView: { viewModel.saveDraftForCurrentView() },
+                onDiscardView: { viewModel.discardDraftForCurrentView() }
             )
             .navigationSplitViewColumnWidth(min: 400, ideal: 600, max: .infinity)
         } detail: {

@@ -23,6 +23,10 @@ struct ReferenceTableView: View {
     @Binding var propertyDefs: [PropertyDefinition]
     let db: AppDatabase
     let customPropertyValueMap: [Int64: [Int64: String]]
+    var viewName: String? = nil
+    var isDirty: Bool = false
+    var onSaveView: () -> Void = {}
+    var onDiscardView: () -> Void = {}
 
     @State private var selection = Set<Reference.ID>()
     @State private var showDeleteConfirm = false
@@ -30,10 +34,18 @@ struct ReferenceTableView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            ViewChromeBar(
+                viewName: viewName,
+                filters: $filters,
+                tags: allTags,
+                propertyDefs: propertyDefs,
+                isDirty: isDirty,
+                onSave: onSaveView,
+                onDiscard: onDiscardView
+            )
             if references.isEmpty {
                 emptyState
             } else {
-                ViewFilterBar(filters: $filters)
                 tableContent
                 if !selection.isEmpty {
                     batchToolbar
