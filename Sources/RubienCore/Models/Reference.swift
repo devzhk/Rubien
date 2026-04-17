@@ -185,31 +185,6 @@ public enum ReadingStatus: String, Codable, CaseIterable, DatabaseValueConvertib
     }
 }
 
-public enum Priority: Int, Codable, CaseIterable, DatabaseValueConvertible, Sendable {
-    case none = 0
-    case low = 1
-    case medium = 2
-    case high = 3
-
-    public var label: String {
-        switch self {
-        case .none: return "None"
-        case .low: return "Low"
-        case .medium: return "Medium"
-        case .high: return "High"
-        }
-    }
-
-    public var icon: String {
-        switch self {
-        case .none: return "flag"
-        case .low: return "flag"
-        case .medium: return "flag.fill"
-        case .high: return "flag.fill"
-        }
-    }
-}
-
 public struct Reference: Identifiable, Codable, Hashable, Sendable {
     public var id: Int64?
     public var title: String
@@ -240,7 +215,6 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
     public var reviewedBy: String?
     // MARK: - User workflow fields
     public var readingStatus: ReadingStatus
-    public var priority: Priority
 
     // MARK: - Extended metadata (P0)
     public var publisher: String?
@@ -303,7 +277,6 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
         verifiedAt: Date? = nil,
         reviewedBy: String? = nil,
         readingStatus: ReadingStatus = .unread,
-        priority: Priority = .none,
         // Extended metadata (P0)
         publisher: String? = nil,
         publisherPlace: String? = nil,
@@ -356,7 +329,6 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
         self.verifiedAt = verifiedAt
         self.reviewedBy = reviewedBy
         self.readingStatus = readingStatus
-        self.priority = priority
         // Extended metadata (P0)
         self.publisher = publisher
         self.publisherPlace = publisherPlace
@@ -442,8 +414,7 @@ extension Reference {
               lhs.evidenceBundleHash == rhs.evidenceBundleHash,
               lhs.verifiedAt == rhs.verifiedAt,
               lhs.reviewedBy == rhs.reviewedBy,
-              lhs.readingStatus == rhs.readingStatus,
-              lhs.priority == rhs.priority else {
+              lhs.readingStatus == rhs.readingStatus else {
             return false
         }
 
@@ -506,7 +477,6 @@ extension Reference {
         hasher.combine(verifiedAt)
         hasher.combine(reviewedBy)
         hasher.combine(readingStatus)
-        hasher.combine(priority)
         hasher.combine(publisher)
         hasher.combine(publisherPlace)
         hasher.combine(edition)
@@ -559,7 +529,6 @@ extension Reference {
         Columns.verifiedAt,
         Columns.reviewedBy,
         Columns.readingStatus,
-        Columns.priority,
         Columns.publisher,
         Columns.publisherPlace,
         Columns.edition,
@@ -795,7 +764,6 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
         verifiedAt = row["verifiedAt"]
         reviewedBy = row["reviewedBy"]
         readingStatus = row["readingStatus"] ?? .unread
-        priority = row["priority"] ?? .none
 
         // Extended metadata (P0)
         publisher = row["publisher"]
@@ -860,7 +828,6 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
         container["verifiedAt"] = verifiedAt
         container["reviewedBy"] = reviewedBy
         container["readingStatus"] = readingStatus
-        container["priority"] = priority
 
         // Extended metadata (P0)
         container["publisher"] = publisher
@@ -894,7 +861,7 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
         case doi, url, abstract, dateAdded, dateModified
         case pdfPath, notes, webContent, siteName, favicon, referenceType, metadataSource
         case verificationStatus, acceptedByRuleID, recordKey, verificationSourceURL, evidenceBundleHash, verifiedAt, reviewedBy
-        case readingStatus, priority
+        case readingStatus
         // Extended metadata
         case publisher, publisherPlace, edition, editors, isbn, issn
         case accessedDate, issuedMonth, issuedDay

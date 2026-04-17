@@ -62,7 +62,6 @@ public final class AppDatabase: Sendable {
                 t.column("verifiedAt", .datetime)
                 t.column("reviewedBy", .text)
                 t.column("readingStatus", .text).notNull().defaults(to: ReadingStatus.unread.rawValue)
-                t.column("priority", .integer).notNull().defaults(to: Priority.none.rawValue)
                 // Extended metadata (P0)
                 t.column("publisher", .text)
                 t.column("publisherPlace", .text)
@@ -96,7 +95,6 @@ public final class AppDatabase: Sendable {
             try db.create(index: "reference_authorsNormalized", on: "reference", columns: ["authorsNormalized"])
             try db.create(index: "reference_verificationStatus", on: "reference", columns: ["verificationStatus"])
             try db.create(index: "reference_readingStatus", on: "reference", columns: ["readingStatus"])
-            try db.create(index: "reference_priority", on: "reference", columns: ["priority"])
             try db.create(index: "reference_recordKey", on: "reference", columns: ["recordKey"])
             try db.create(index: "reference_evidenceBundleHash", on: "reference", columns: ["evidenceBundleHash"])
             try db.create(index: "reference_metadataSource", on: "reference", columns: ["metadataSource"])
@@ -1251,13 +1249,12 @@ public struct ReferenceFilter: Sendable {
     public var titleOnly: Bool = false
     public var hasPDF: Bool? = nil
     public var readingStatus: ReadingStatus? = nil
-    public var priority: Priority? = nil
 
     public var isEmpty: Bool {
         keyword.isEmpty && author.isEmpty && yearFrom == nil
             && yearTo == nil && journal.isEmpty && referenceType == nil
             && !titleOnly && hasPDF == nil
-            && readingStatus == nil && priority == nil
+            && readingStatus == nil
     }
 
     public init() {}
@@ -1369,9 +1366,6 @@ extension AppDatabase {
         }
         if let rs = filter.readingStatus {
             request = request.filter(Reference.Columns.readingStatus == rs.rawValue)
-        }
-        if let p = filter.priority {
-            request = request.filter(Reference.Columns.priority == p.rawValue)
         }
 
         // ── 3. Order + limit ──────────────────────────────────────────────

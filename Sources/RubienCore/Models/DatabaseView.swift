@@ -5,7 +5,7 @@ import GRDB
 
 public enum ColumnIdentifier: String, Codable, CaseIterable, Sendable {
     case title, authors, year, journal, referenceType, tags
-    case readingStatus, priority, dateAdded, dateModified
+    case readingStatus, dateAdded, dateModified
     case doi, publisher, volume, issue, pages, pdfAttached
 
     public var header: String {
@@ -17,7 +17,6 @@ public enum ColumnIdentifier: String, Codable, CaseIterable, Sendable {
         case .referenceType: return "Type"
         case .tags: return "Tags"
         case .readingStatus: return "Status"
-        case .priority: return "Priority"
         case .dateAdded: return "Added"
         case .dateModified: return "Modified"
         case .doi: return "DOI"
@@ -37,7 +36,6 @@ public enum ColumnIdentifier: String, Codable, CaseIterable, Sendable {
         case .journal: return "journal"
         case .referenceType: return "referenceType"
         case .readingStatus: return "readingStatus"
-        case .priority: return "priority"
         case .dateAdded: return "dateAdded"
         case .dateModified: return "dateModified"
         case .doi: return "doi"
@@ -72,15 +70,14 @@ public struct ColumnConfig: Codable, Hashable, Sendable {
         .init(columnId: .referenceType, isVisible: true,  displayOrder: 4),
         .init(columnId: .tags,          isVisible: true,  displayOrder: 5),
         .init(columnId: .readingStatus, isVisible: true,  displayOrder: 6),
-        .init(columnId: .priority,      isVisible: false, displayOrder: 7),
-        .init(columnId: .dateAdded,     isVisible: true,  displayOrder: 8),
-        .init(columnId: .dateModified,  isVisible: false, displayOrder: 9),
-        .init(columnId: .doi,           isVisible: false, displayOrder: 10),
-        .init(columnId: .publisher,     isVisible: false, displayOrder: 11),
-        .init(columnId: .volume,        isVisible: false, displayOrder: 12),
-        .init(columnId: .issue,         isVisible: false, displayOrder: 13),
-        .init(columnId: .pages,         isVisible: false, displayOrder: 14),
-        .init(columnId: .pdfAttached,   isVisible: false, displayOrder: 15),
+        .init(columnId: .dateAdded,     isVisible: true,  displayOrder: 7),
+        .init(columnId: .dateModified,  isVisible: false, displayOrder: 8),
+        .init(columnId: .doi,           isVisible: false, displayOrder: 9),
+        .init(columnId: .publisher,     isVisible: false, displayOrder: 10),
+        .init(columnId: .volume,        isVisible: false, displayOrder: 11),
+        .init(columnId: .issue,         isVisible: false, displayOrder: 12),
+        .init(columnId: .pages,         isVisible: false, displayOrder: 13),
+        .init(columnId: .pdfAttached,   isVisible: false, displayOrder: 14),
     ]
 }
 

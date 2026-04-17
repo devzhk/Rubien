@@ -54,7 +54,7 @@ List references with comprehensive filtering and sorting.
 
 ```bash
 rubien-cli list --author Smith --year-from 2020 --has-pdf
-rubien-cli list --reading-status unread --priority 2 --sort-by year --asc
+rubien-cli list --reading-status unread --sort-by year --asc
 rubien-cli list --tag 3
 ```
 
@@ -71,8 +71,7 @@ rubien-cli list --tag 3
 | `--has-pdf` | Flag | false | Only references with a PDF |
 | `--keyword` | String | — | Keyword search across title, abstract, notes |
 | `--reading-status` | String | — | Filter: `unread`, `reading`, `skimmed`, `read` |
-| `--priority` | Int | — | Filter: `0` (none), `1` (low), `2` (medium), `3` (high) |
-| `--sort-by` | String | — | Sort field: `year`, `dateAdded`, `priority`, `title` |
+| `--sort-by` | String | — | Sort field: `year`, `dateAdded`, `title` |
 | `--asc` | Flag | false | Sort ascending (default descending) |
 
 **Output:** JSON array of reference objects.
@@ -123,7 +122,7 @@ Update fields on an existing reference.
 
 ```bash
 rubien-cli update 42 --title "New Title" --year 2024
-rubien-cli update 42 --reading-status read --priority 3
+rubien-cli update 42 --reading-status read
 rubien-cli update 42 --clear-field doi --clear-field abstract
 ```
 
@@ -148,7 +147,6 @@ rubien-cli update 42 --clear-field doi --clear-field abstract
 | `--language` | String | Language |
 | `--edition` | String | Edition |
 | `--reading-status` | String | `unread`, `reading`, `skimmed`, `read` |
-| `--priority` | Int | `0` (none), `1` (low), `2` (medium), `3` (high) |
 | `--clear-field` | String (repeatable) | Clear a field (e.g. `--clear-field doi --clear-field abstract`) |
 
 Valid `--clear-field` values: `year`, `journal`, `volume`, `issue`, `pages`, `doi`, `url`, `abstract`, `notes`, `publisher`, `isbn`, `issn`, `language`, `edition`.
@@ -381,9 +379,9 @@ Manage database views (saved query + display configurations).
 ```bash
 rubien-cli views                                              # List all
 rubien-cli views --create --name "Unread Papers"
-rubien-cli views --create --name "High Priority" \
-  --filters '[{"field":"priority","op":"greaterOrEqual","value":"2"}]' \
-  --sorts '[{"field":"priority","ascending":false}]'
+rubien-cli views --create --name "Recent Reading" \
+  --filters '[{"field":"readingStatus","op":"equals","value":"reading"}]' \
+  --sorts '[{"field":"dateAdded","ascending":false}]'
 rubien-cli views --query 3 --limit 50                         # Run a view's query
 rubien-cli views --rename 3 --name "Urgent Papers"
 rubien-cli views --delete 3
@@ -405,12 +403,11 @@ rubien-cli views --delete 3
 ```json
 [
   {"field": "readingStatus", "op": "equals", "value": "unread"},
-  {"field": "priority", "op": "greaterOrEqual", "value": "2"},
   {"field": "year", "op": "greaterThan", "value": "2020"}
 ]
 ```
 
-**Fields:** `title`, `authors`, `year`, `journal`, `referenceType`, `tags`, `readingStatus`, `priority`, `dateAdded`, `dateModified`, `doi`, `publisher`, `volume`, `issue`, `pages`, `pdfAttached`
+**Fields:** `title`, `authors`, `year`, `journal`, `referenceType`, `tags`, `readingStatus`, `dateAdded`, `dateModified`, `doi`, `publisher`, `volume`, `issue`, `pages`, `pdfAttached`
 
 **Operators:** `equals`, `notEquals`, `contains`, `notContains`, `greaterThan`, `lessThan`, `greaterOrEqual`, `lessOrEqual`, `isEmpty`, `isNotEmpty`, `isAnyOf`
 
@@ -452,7 +449,6 @@ All commands that return references use this structure:
   "language": "en",
   "edition": null,
   "readingStatus": "unread",
-  "priority": 0,
   "customProperties": [
     {"propertyId": "17", "name": "Status", "type": "singleSelect", "value": "doing"},
     {"propertyId": "18", "name": "Tags2",  "type": "multiSelect",  "value": "[\"ml\",\"nlp\"]"}

@@ -21,7 +21,7 @@ extension FieldTarget {
     ) -> [FieldTargetOption] {
         let builtins: [ColumnIdentifier] = [
             .title, .authors, .journal, .year, .referenceType,
-            .tags, .readingStatus, .priority,
+            .tags, .readingStatus,
             .dateAdded, .dateModified,
             .doi, .publisher, .volume, .issue, .pages, .pdfAttached,
         ]

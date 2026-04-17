@@ -959,7 +959,6 @@ struct ReferenceDetailView: View {
            editedRef.notes != reference.notes ||
            editedRef.referenceType != reference.referenceType ||
            editedRef.readingStatus != reference.readingStatus ||
-           editedRef.priority != reference.priority ||
            editedRef.publisher != reference.publisher ||
            editedRef.publisherPlace != reference.publisherPlace ||
            editedRef.edition != reference.edition ||

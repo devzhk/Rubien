@@ -18,7 +18,7 @@ extension ColumnIdentifier {
             return .number
         case .dateAdded, .dateModified:
             return .date
-        case .referenceType, .readingStatus, .priority:
+        case .referenceType, .readingStatus:
             return .singleSelect
         case .tags:
             return .multiSelect

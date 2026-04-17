@@ -128,7 +128,6 @@ struct ReferenceDTO: Encodable {
     let language: String?
     let edition: String?
     let readingStatus: String
-    let priority: Int
     let customProperties: [CustomPropertyValueDTO]
 
     init(from ref: Reference,
@@ -156,7 +155,6 @@ struct ReferenceDTO: Encodable {
         self.language = ref.language
         self.edition = ref.edition
         self.readingStatus = ref.readingStatus.rawValue
-        self.priority = ref.priority.rawValue
 
         let refValues = ref.id.flatMap { valuesByRef[$0] } ?? [:]
         let customDefs = defs.filter { !$0.isDefault }
@@ -295,10 +293,7 @@ struct List: ParsableCommand {
     @Option(name: .customLong("reading-status"), help: "Filter by reading status (unread, reading, skimmed, read)")
     var readingStatus: String?
 
-    @Option(name: .long, help: "Filter by priority (0=none, 1=low, 2=medium, 3=high)")
-    var priority: Int?
-
-    @Option(name: .customLong("sort-by"), help: "Sort by field (year, dateAdded, priority, title)")
+    @Option(name: .customLong("sort-by"), help: "Sort by field (year, dateAdded, title)")
     var sortBy: String?
 
     @Flag(name: .long, help: "Sort ascending (default is descending)")
@@ -307,7 +302,7 @@ struct List: ParsableCommand {
     func run() throws {
         let hasAdvancedFilter = author != nil || yearFrom != nil || yearTo != nil
             || journal != nil || referenceType != nil || hasPdf || keyword != nil
-            || readingStatus != nil || priority != nil
+            || readingStatus != nil
         var refs: [Reference]
         if hasAdvancedFilter {
             let scope: ReferenceScope = tag.map { .tag($0) } ?? .all
@@ -325,13 +320,6 @@ struct List: ParsableCommand {
                     throw ExitCode.failure
                 }
                 filter.readingStatus = status
-            }
-            if let p = priority {
-                guard let prio = Priority(rawValue: p) else {
-                    printJSONError("Unknown priority '\(p)'. Valid: 0 (none), 1 (low), 2 (medium), 3 (high)")
-                    throw ExitCode.failure
-                }
-                filter.priority = prio
             }
             if let rt = referenceType {
                 guard let type = ReferenceType(rawValue: rt) else {
@@ -476,9 +464,6 @@ struct Update: ParsableCommand {
     @Option(name: .customLong("reading-status"), help: "Set reading status (unread, reading, skimmed, read)")
     var readingStatus: String?
 
-    @Option(name: .long, help: "Set priority (0=none, 1=low, 2=medium, 3=high)")
-    var priority: Int?
-
     func run() throws {
         let refs = try AppDatabase.shared.fetchReferences(ids: [id])
         guard var ref = refs.first else {
@@ -495,13 +480,6 @@ struct Update: ParsableCommand {
                 throw ExitCode.failure
             }
             ref.readingStatus = status
-        }
-        if let p = priority {
-            guard let prio = Priority(rawValue: p) else {
-                printJSONError("Unknown priority '\(p)'. Valid: 0 (none), 1 (low), 2 (medium), 3 (high)")
-                throw ExitCode.failure
-            }
-            ref.priority = prio
         }
         if let rt = referenceType {
             guard let type = ReferenceType(rawValue: rt) else {

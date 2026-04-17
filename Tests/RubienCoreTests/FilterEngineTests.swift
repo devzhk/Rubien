@@ -10,14 +10,13 @@ final class FilterEngineTests: XCTestCase {
         year: Int? = nil,
         journal: String? = nil,
         readingStatus: ReadingStatus = .unread,
-        priority: Priority = .none,
         referenceType: ReferenceType = .journalArticle,
         pdfPath: String? = nil,
         dateAdded: Date = Date()
     ) -> Reference {
         ReferenceFixtures.makeRef(
             id: id, title: title, authors: authors, year: year, journal: journal,
-            readingStatus: readingStatus, priority: priority, referenceType: referenceType,
+            readingStatus: readingStatus, referenceType: referenceType,
             pdfPath: pdfPath, dateAdded: dateAdded
         )
     }

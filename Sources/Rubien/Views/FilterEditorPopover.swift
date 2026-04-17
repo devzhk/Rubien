@@ -251,8 +251,6 @@ struct FilterEditorPopover: View {
         switch target {
         case .builtin(.readingStatus):
             return ReadingStatus.allCases.map { (key: $0.rawValue, label: $0.label) }
-        case .builtin(.priority):
-            return Priority.allCases.map { (key: String($0.rawValue), label: $0.label) }
         case .builtin(.referenceType):
             return ReferenceType.allCases.map { (key: $0.rawValue, label: $0.rawValue) }
         case .builtin(.tags):

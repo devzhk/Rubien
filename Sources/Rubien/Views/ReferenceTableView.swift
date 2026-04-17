@@ -233,7 +233,6 @@ struct ReferenceTableView: View {
         case \Reference.year:             return .year
         case \Reference.journal:          return .journal
         case \Reference.readingStatus.rawValue: return .readingStatus
-        case \Reference.priority.rawValue:      return .priority
         default: return .dateAdded
         }
     }
@@ -620,78 +619,6 @@ struct ReadingStatusCell: View {
         case .reading: return .blue
         case .skimmed: return .orange
         case .read: return .green
-        }
-    }
-}
-
-struct PriorityCell: View {
-    let reference: Reference
-    let onUpdate: (Reference) -> Void
-
-    @State private var showPicker = false
-
-    var body: some View {
-        Button {
-            showPicker = true
-        } label: {
-            if reference.priority == .none {
-                Text(reference.priority.label)
-                    .font(.callout)
-                    .foregroundStyle(.quaternary)
-            } else {
-                Text(reference.priority.label)
-                    .font(.callout)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 1)
-                    .chipBackground(priorityColor(for: reference.priority))
-            }
-        }
-        .buttonStyle(.plain)
-        .popover(isPresented: $showPicker) {
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(Priority.allCases, id: \.self) { p in
-                    let isSelected = p == reference.priority
-                    Button {
-                        var updated = reference
-                        updated.priority = p
-                        onUpdate(updated)
-                        showPicker = false
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                                .font(.system(size: 13))
-                                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
-                            if p == .none {
-                                Text(p.label)
-                                    .font(.callout)
-                                    .foregroundStyle(.secondary)
-                            } else {
-                                Text(p.label)
-                                    .font(.callout)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 1)
-                                    .chipBackground(priorityColor(for: p))
-                            }
-                            Spacer()
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 5)
-                }
-            }
-            .padding(.vertical, 4)
-            .frame(width: 180)
-        }
-    }
-
-    private func priorityColor(for priority: Priority) -> Color {
-        switch priority {
-        case .none: return .gray
-        case .low: return .blue
-        case .medium: return .orange
-        case .high: return .red
         }
     }
 }
