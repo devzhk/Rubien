@@ -632,7 +632,6 @@ struct TagsCellView: View {
     let onDeleteTag: (Int64) -> Void
 
     @State private var showPopover = false
-    @State private var newTagName = ""
 
     var body: some View {
         Button {
@@ -669,8 +668,7 @@ struct TagsCellView: View {
                 allTags: allTags,
                 onCommit: { tagIds in onUpdateTags(tagIds) },
                 onCreateTag: onCreateTag,
-                onDeleteTag: onDeleteTag,
-                newTagName: $newTagName
+                onDeleteTag: onDeleteTag
             )
         }
     }

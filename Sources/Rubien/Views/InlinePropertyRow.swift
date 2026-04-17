@@ -173,7 +173,6 @@ struct InlineTagsRow: View {
     let onDeleteTag: (Int64) -> Void
 
     @State private var showPicker = false
-    @State private var newTagName = ""
 
     var body: some View {
         PropertyRowLayout(label: label) {
@@ -201,8 +200,7 @@ struct InlineTagsRow: View {
                     allTags: allTags,
                     onCommit: onUpdateTags,
                     onCreateTag: onCreateTag,
-                    onDeleteTag: onDeleteTag,
-                    newTagName: $newTagName
+                    onDeleteTag: onDeleteTag
                 )
             }
         }

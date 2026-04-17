@@ -7,9 +7,9 @@ struct TagPickerPopover: View {
     let onCommit: ([Int64]) -> Void
     let onCreateTag: (String) -> Void
     let onDeleteTag: (Int64) -> Void
-    @Binding var newTagName: String
     @State private var search = ""
     @State private var localIds: Set<Int64> = []
+    @FocusState private var isSearchFocused: Bool
 
     private var filteredTags: [Tag] {
         if search.isEmpty { return allTags }
@@ -36,6 +36,7 @@ struct TagPickerPopover: View {
                 TextField("Search or create tag…", text: $search)
                     .textFieldStyle(.plain)
                     .font(.system(size: 12))
+                    .focused($isSearchFocused)
                     .onSubmit {
                         let trimmed = search.trimmingCharacters(in: .whitespaces)
                         if !trimmed.isEmpty && !allTags.contains(where: { $0.name.lowercased() == trimmed.lowercased() }) {
@@ -120,6 +121,7 @@ struct TagPickerPopover: View {
         .frame(width: 220)
         .onAppear {
             localIds = Set(assignedTags.compactMap(\.id))
+            DispatchQueue.main.async { isSearchFocused = true }
         }
         .onDisappear {
             onCommit(Array(localIds))
