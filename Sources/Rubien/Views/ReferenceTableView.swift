@@ -23,6 +23,7 @@ struct ReferenceTableView: View {
     @Binding var propertyDefs: [PropertyDefinition]
     let db: AppDatabase
     let customPropertyValueMap: [Int64: [Int64: String]]
+    @Binding var groupBy: GroupConfig?
     var viewName: String? = nil
     var isDirty: Bool = false
     var onSaveView: () -> Void = {}
@@ -38,6 +39,7 @@ struct ReferenceTableView: View {
                 viewName: viewName,
                 filters: $filters,
                 sorts: $sorts,
+                groupBy: $groupBy,
                 tags: allTags,
                 propertyDefs: propertyDefs,
                 isDirty: isDirty,
@@ -131,6 +133,11 @@ struct ReferenceTableView: View {
     private var tableContent: some View {
         ReferenceTableContent(
             references: processedReferences,
+            buckets: groupedBuckets,
+            collapsedGroups: Binding(
+                get: { groupBy?.collapsed ?? [] },
+                set: { newValue in groupBy?.collapsed = newValue }
+            ),
             tagMap: tagMap,
             allTags: allTags,
             selection: $selection,
@@ -213,15 +220,24 @@ struct ReferenceTableView: View {
 
     // MARK: - Pipeline
 
-    private var processedReferences: [Reference] {
-        let context = PipelineContext(
+    private var pipelineContext: PipelineContext {
+        PipelineContext(
             tagMap: tagMap,
             propertyValueMap: customPropertyValueMap,
             propertyDefs: propertyDefs,
             now: Date()
         )
+    }
+
+    private var processedReferences: [Reference] {
+        let context = pipelineContext
         let filtered = FilterEngine.apply(references, filters: filters, context: context)
         return SortEngine.apply(filtered, sorts: sorts, context: context)
+    }
+
+    private var groupedBuckets: [GroupBucket]? {
+        guard let groupBy else { return nil }
+        return GroupEngine.apply(processedReferences, config: groupBy, context: pipelineContext)
     }
 
     private func sortKeyToColumn(_ comparator: KeyPathComparator<Reference>) -> ColumnIdentifier {
@@ -344,6 +360,8 @@ struct ReferenceTableView: View {
 
 private struct ReferenceTableContent: View {
     let references: [Reference]
+    let buckets: [GroupBucket]?
+    @Binding var collapsedGroups: Set<String>
     let tagMap: [Int64: [Tag]]
     let allTags: [Tag]
     @Binding var selection: Set<Reference.ID>
@@ -425,7 +443,12 @@ private struct ReferenceTableContent: View {
     }
 
     var body: some View {
-        Table(references, selection: $selection, sortOrder: $tableSortOrder, columnCustomization: $columnCustomization) {
+        Table(
+            of: Reference.self,
+            selection: $selection,
+            sortOrder: $tableSortOrder,
+            columnCustomization: $columnCustomization
+        ) {
             TableColumn(ColumnIdentifier.title.header, value: \.title) { ref in
                 EditableStringCell(
                     value: ref.title,
@@ -538,6 +561,24 @@ private struct ReferenceTableContent: View {
                 .width(min: 60, ideal: 100)
                 .customizationID(prop.customizationID)
             }
+        } rows: {
+            if let buckets {
+                ForEach(buckets, id: \.key) { bucket in
+                    Section {
+                        if !collapsedGroups.contains(bucket.key) {
+                            ForEach(bucket.references) { ref in
+                                TableRow(ref)
+                            }
+                        }
+                    } header: {
+                        groupHeader(for: bucket)
+                    }
+                }
+            } else {
+                ForEach(references) { ref in
+                    TableRow(ref)
+                }
+            }
         }
         .onKeyPress(.return) {
             guard editingCell == nil,
@@ -550,6 +591,53 @@ private struct ReferenceTableContent: View {
         }
         .onChange(of: columnCustomization) { _, newValue in
             persistColumnCustomization(newValue)
+        }
+        .onChange(of: collapsedGroups) { _, _ in
+            pruneHiddenSelection()
+        }
+    }
+
+    /// When a group collapses, drop any selected rows that now live in a
+    /// collapsed section — otherwise batch actions could silently act on
+    /// rows the user can no longer see.
+    private func pruneHiddenSelection() {
+        guard let buckets, !selection.isEmpty else { return }
+        let visibleIds: Set<Int64> = Set(
+            buckets
+                .filter { !collapsedGroups.contains($0.key) }
+                .flatMap { $0.references.compactMap(\.id) }
+        )
+        let pruned = selection.filter { selectedId in
+            guard let id = selectedId else { return false }
+            return visibleIds.contains(id)
+        }
+        if pruned != selection {
+            selection = pruned
+        }
+    }
+
+    @ViewBuilder
+    private func groupHeader(for bucket: GroupBucket) -> some View {
+        let isCollapsed = collapsedGroups.contains(bucket.key)
+        HStack(spacing: 6) {
+            Button {
+                if isCollapsed {
+                    collapsedGroups.remove(bucket.key)
+                } else {
+                    collapsedGroups.insert(bucket.key)
+                }
+            } label: {
+                Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 12)
+            }
+            .buttonStyle(.plain)
+            Text(bucket.label)
+                .font(.system(size: 12, weight: .semibold))
+            Text("(\(bucket.references.count))")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
         }
     }
 

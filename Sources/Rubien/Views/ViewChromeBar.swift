@@ -5,6 +5,7 @@ struct ViewChromeBar: View {
     let viewName: String?
     @Binding var filters: [ViewFilter]
     @Binding var sorts: [ViewSort]
+    @Binding var groupBy: GroupConfig?
     let tags: [Tag]
     let propertyDefs: [PropertyDefinition]
     let isDirty: Bool
@@ -12,6 +13,7 @@ struct ViewChromeBar: View {
     let onDiscard: () -> Void
 
     @State private var showSortEditor = false
+    @State private var showGroupEditor = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -59,6 +61,7 @@ struct ViewChromeBar: View {
                 propertyDefs: propertyDefs
             )
             sortButton
+            groupButton
                 .padding(.trailing, 12)
         }
     }
@@ -96,5 +99,37 @@ struct ViewChromeBar: View {
         case 1: return "Sorted by \(sorts[0].target.displayLabel(propertyDefs: propertyDefs))"
         default: return "Sorted by \(sorts.count) fields"
         }
+    }
+
+    private var groupButton: some View {
+        Button {
+            showGroupEditor = true
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "rectangle.3.group")
+                    .font(.system(size: 9, weight: .medium))
+                Text(groupButtonLabel)
+                    .font(.system(size: 11))
+            }
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .stroke(Color.secondary.opacity(0.2))
+            )
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $showGroupEditor) {
+            GroupEditorPopover(
+                groupBy: $groupBy,
+                propertyDefs: propertyDefs
+            )
+        }
+    }
+
+    private var groupButtonLabel: String {
+        guard let groupBy else { return "Group" }
+        return "Grouped by \(groupBy.target.displayLabel(propertyDefs: propertyDefs))"
     }
 }

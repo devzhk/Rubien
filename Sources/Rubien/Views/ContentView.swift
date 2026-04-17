@@ -88,6 +88,9 @@ final class LibraryViewModel: ObservableObject {
     @Published var viewFilters: [ViewFilter] = [] {
         didSet { recomputeIsDirty() }
     }
+    @Published var viewGroupBy: GroupConfig? = nil {
+        didSet { recomputeIsDirty() }
+    }
     @Published private(set) var isCurrentViewDirty: Bool = false
     /// All saved database views
     @Published var databaseViews: [DatabaseView] = []
@@ -454,7 +457,12 @@ final class LibraryViewModel: ObservableObject {
     /// Stash of per-view edits that haven't been saved yet. Keyed by view id.
     /// On view switch we record the leaving view's edits here; on return we
     /// restore them instead of reloading from persisted state.
-    private var viewDrafts: [Int64: (filters: [ViewFilter], sorts: [ViewSort])] = [:]
+    private struct ViewDraft {
+        var filters: [ViewFilter]
+        var sorts: [ViewSort]
+        var groupBy: GroupConfig?
+    }
+    private var viewDrafts: [Int64: ViewDraft] = [:]
 
     private var currentDBView: DatabaseView? {
         guard case .view(let id) = selectedSidebar else { return nil }
@@ -465,23 +473,28 @@ final class LibraryViewModel: ObservableObject {
         guard let dbView = currentDBView, let id = dbView.id else {
             tableSorts = [.defaultSort]
             viewFilters = []
+            viewGroupBy = nil
             return
         }
         if let draft = viewDrafts[id] {
             tableSorts = draft.sorts
             viewFilters = draft.filters
+            viewGroupBy = draft.groupBy
         } else {
             tableSorts = dbView.parsedSorts
             viewFilters = dbView.parsedFilters
+            viewGroupBy = dbView.parsedGroupBy
         }
     }
 
     private func stashDraftIfDirty(for item: SidebarItem) {
         guard case .view(let id) = item,
               let dbView = databaseViews.first(where: { $0.id == id }) else { return }
-        let dirty = viewFilters != dbView.parsedFilters || tableSorts != dbView.parsedSorts
+        let dirty = viewFilters != dbView.parsedFilters
+            || tableSorts != dbView.parsedSorts
+            || viewGroupBy != dbView.parsedGroupBy
         if dirty {
-            viewDrafts[id] = (filters: viewFilters, sorts: tableSorts)
+            viewDrafts[id] = ViewDraft(filters: viewFilters, sorts: tableSorts, groupBy: viewGroupBy)
         } else {
             viewDrafts.removeValue(forKey: id)
         }
@@ -492,7 +505,9 @@ final class LibraryViewModel: ObservableObject {
             isCurrentViewDirty = false
             return
         }
-        isCurrentViewDirty = viewFilters != dbView.parsedFilters || tableSorts != dbView.parsedSorts
+        isCurrentViewDirty = viewFilters != dbView.parsedFilters
+            || tableSorts != dbView.parsedSorts
+            || viewGroupBy != dbView.parsedGroupBy
     }
 
     var currentViewName: String? { currentDBView?.name }
@@ -501,6 +516,7 @@ final class LibraryViewModel: ObservableObject {
         guard var dbView = currentDBView, let id = dbView.id else { return }
         dbView.parsedFilters = viewFilters
         dbView.parsedSorts = tableSorts
+        dbView.parsedGroupBy = viewGroupBy
         saveDatabaseView(&dbView)
         // `observeDatabaseViews` updates `databaseViews` asynchronously; patch
         // our local copy synchronously so the dirty-check baseline is correct
@@ -516,6 +532,7 @@ final class LibraryViewModel: ObservableObject {
         guard let dbView = currentDBView, let id = dbView.id else { return }
         viewFilters = dbView.parsedFilters
         tableSorts = dbView.parsedSorts
+        viewGroupBy = dbView.parsedGroupBy
         viewDrafts.removeValue(forKey: id)
     }
 
@@ -698,6 +715,7 @@ struct ContentView: View {
                 ),
                 db: viewModel.db,
                 customPropertyValueMap: viewModel.customPropertyValueMap,
+                groupBy: $viewModel.viewGroupBy,
                 viewName: viewModel.currentViewName,
                 isDirty: viewModel.isCurrentViewDirty,
                 onSaveView: { viewModel.saveDraftForCurrentView() },
