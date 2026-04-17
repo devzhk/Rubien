@@ -71,19 +71,7 @@ struct ViewChromeBar: View {
         Button {
             showSortEditor = true
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "arrow.up.arrow.down")
-                    .font(.system(size: 9, weight: .medium))
-                Text(sortButtonLabel)
-                    .font(.system(size: 11))
-            }
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
-            .background(
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .stroke(Color.secondary.opacity(0.2))
-            )
+            ChromeBarPill(iconName: "arrow.up.arrow.down", label: sortButtonLabel)
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showSortEditor) {
@@ -106,19 +94,7 @@ struct ViewChromeBar: View {
         Button {
             showGroupEditor = true
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "rectangle.3.group")
-                    .font(.system(size: 9, weight: .medium))
-                Text(groupButtonLabel)
-                    .font(.system(size: 11))
-            }
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
-            .background(
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .stroke(Color.secondary.opacity(0.2))
-            )
+            ChromeBarPill(iconName: "rectangle.3.group", label: groupButtonLabel)
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showGroupEditor) {
@@ -133,5 +109,27 @@ struct ViewChromeBar: View {
     private var groupButtonLabel: String {
         guard let groupBy else { return "Group" }
         return "Grouped by \(groupBy.target.displayLabel(propertyDefs: propertyDefs))"
+    }
+}
+
+/// Used inside a `Button { }` body so the pill itself is the hit target.
+struct ChromeBarPill: View {
+    let iconName: String
+    let label: String
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: iconName)
+                .font(.system(size: 9, weight: .medium))
+            Text(label)
+                .font(.system(size: 11))
+        }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .stroke(Color.secondary.opacity(0.2))
+        )
     }
 }

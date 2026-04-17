@@ -343,9 +343,7 @@ final class LibraryViewModel: ObservableObject {
     /// for a reference's tag set, avoiding a race with its `onCommit` flow.
     func createTag(name: String) -> Int64? {
         do {
-            let usedColors = Set(tags.map(\.color))
-            let available = Tag.colorPalette.filter { !usedColors.contains($0) }
-            let color = available.first ?? Tag.colorPalette.randomElement() ?? Tag.colorPalette[0]
+            let color = ColorPalette.nextUnused(excluding: Set(tags.map(\.color)))
             var tag = Tag(name: name, color: color)
             try db.saveTag(&tag)
             return tag.id
@@ -695,9 +693,7 @@ struct ContentView: View {
                 onDeleteTag: { tagId in viewModel.deleteTag(id: tagId) },
                 onCreateOption: { propId, optionValue in
                     guard var prop = viewModel.propertyDefs.first(where: { $0.id == propId }) else { return }
-                    let usedColors = Set(prop.options.map(\.color))
-                    let available = SelectOption.colorPalette.filter { !usedColors.contains($0) }
-                    let color = available.first ?? SelectOption.colorPalette.randomElement() ?? "#007AFF"
+                    let color = ColorPalette.nextUnused(excluding: Set(prop.options.map(\.color)))
                     var options = prop.options
                     options.append(SelectOption(value: optionValue, color: color))
                     prop.options = options
@@ -846,14 +842,9 @@ struct ContentView: View {
         })
         .sheet(isPresented: $showAddReference) {
             AddReferenceView(
-                allTags: viewModel.tags,
                 onSave: { ref in
                     var r = ref
                     viewModel.saveManualReference(&r)
-                },
-                onCreateTag: { tag in
-                    var t = tag
-                    viewModel.saveTag(&t)
                 },
                 initialReferenceType: addReferenceInitialType
             )

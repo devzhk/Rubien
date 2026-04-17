@@ -48,11 +48,7 @@ public struct SelectOption: Codable, Hashable, Sendable {
         self.color = color
     }
 
-    public static let colorPalette: [String] = [
-        "#007AFF", "#34C759", "#FF9500", "#FF3B30", "#AF52DE",
-        "#5AC8FA", "#FF2D55", "#FFCC00", "#00C7BE", "#8E8E93",
-        "#30B0C7", "#A2845E", "#FF6482", "#64D2FF", "#BF5AF2",
-    ]
+    public static var colorPalette: [String] { ColorPalette.default }
 }
 
 // MARK: - Property Definition

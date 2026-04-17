@@ -1008,9 +1008,7 @@ struct ReferenceDetailView: View {
 
     private func addOptionToProperty(propId: Int64, optionValue: String) {
         guard var prop = propertyDefs.first(where: { $0.id == propId }) else { return }
-        let usedColors = Set(prop.options.map(\.color))
-        let available = SelectOption.colorPalette.filter { !usedColors.contains($0) }
-        let color = available.first ?? SelectOption.colorPalette.randomElement() ?? "#007AFF"
+        let color = ColorPalette.nextUnused(excluding: Set(prop.options.map(\.color)))
         var options = prop.options
         options.append(SelectOption(value: optionValue, color: color))
         prop.options = options

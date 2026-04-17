@@ -717,9 +717,7 @@ struct Tags: ParsableCommand {
                 resolvedColor = c
             } else {
                 let existing = try AppDatabase.shared.fetchAllTags()
-                let usedColors = Set(existing.map(\.color))
-                resolvedColor = Tag.colorPalette.first { !usedColors.contains($0) }
-                    ?? Tag.colorPalette.randomElement() ?? Tag.colorPalette[0]
+                resolvedColor = ColorPalette.nextUnused(excluding: Set(existing.map(\.color)))
             }
             var t = Tag(name: n, color: resolvedColor)
             try AppDatabase.shared.saveTag(&t)
@@ -932,9 +930,7 @@ struct Properties: ParsableCommand {
             if let c = color {
                 resolvedColor = c
             } else {
-                let used = Set(opts.map(\.color))
-                resolvedColor = SelectOption.colorPalette.first { !used.contains($0) }
-                    ?? SelectOption.colorPalette.randomElement() ?? SelectOption.colorPalette[0]
+                resolvedColor = ColorPalette.nextUnused(excluding: Set(opts.map(\.color)))
             }
             opts.append(SelectOption(value: v, color: resolvedColor))
             prop.options = opts
@@ -1034,8 +1030,7 @@ struct Properties: ParsableCommand {
         var options: [SelectOption] = []
         var used: Set<String> = []
         for v in values {
-            let color = SelectOption.colorPalette.first { !used.contains($0) }
-                ?? SelectOption.colorPalette.randomElement() ?? SelectOption.colorPalette[0]
+            let color = ColorPalette.nextUnused(excluding: used)
             used.insert(color)
             options.append(SelectOption(value: v, color: color))
         }

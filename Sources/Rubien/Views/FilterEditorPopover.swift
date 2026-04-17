@@ -221,26 +221,28 @@ struct FilterEditorPopover: View {
             return []
         }()
         ScrollView {
-            VStack(alignment: .leading, spacing: 4) {
+            FlowLayout(spacing: 6) {
                 ForEach(options, id: \.key) { option in
-                    Toggle(isOn: Binding(
-                        get: { selected.contains(option.key) },
-                        set: { isOn in
-                            var updated = selected
-                            if allowMultiple {
-                                if isOn { updated.insert(option.key) } else { updated.remove(option.key) }
-                            } else {
-                                updated = isOn ? [option.key] : []
-                            }
-                            value = .selectKeys(Array(updated).sorted())
+                    let isSelected = selected.contains(option.key)
+                    Button {
+                        var updated = selected
+                        if allowMultiple {
+                            if isSelected { updated.remove(option.key) } else { updated.insert(option.key) }
+                        } else {
+                            updated = isSelected ? [] : [option.key]
                         }
-                    )) {
+                        value = .selectKeys(Array(updated).sorted())
+                    } label: {
                         Text(option.label)
-                            .font(.system(size: 12))
+                            .font(.system(size: 11))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .chipBackground(isSelected ? Color.accentColor : Color.secondary)
                     }
-                    .toggleStyle(.checkbox)
+                    .buttonStyle(.plain)
                 }
             }
+            .padding(.vertical, 2)
         }
         .frame(maxHeight: 160)
     }

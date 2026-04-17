@@ -3,9 +3,7 @@ import SwiftUI
 import RubienCore
 
 struct AddReferenceView: View {
-    let allTags: [Tag]
     let onSave: (Reference) -> Void
-    let onCreateTag: (Tag) -> Void
     let initialReferenceType: ReferenceType
 
     @Environment(\.dismiss) private var dismiss
@@ -36,14 +34,10 @@ struct AddReferenceView: View {
     @State private var pdfPath: String?
 
     init(
-        allTags: [Tag],
         onSave: @escaping (Reference) -> Void,
-        onCreateTag: @escaping (Tag) -> Void,
         initialReferenceType: ReferenceType = .journalArticle
     ) {
-        self.allTags = allTags
         self.onSave = onSave
-        self.onCreateTag = onCreateTag
         self.initialReferenceType = initialReferenceType
         _referenceType = State(initialValue: initialReferenceType)
     }
