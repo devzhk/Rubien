@@ -11,6 +11,24 @@ public struct FieldTargetOption: Hashable, Sendable {
 }
 
 extension FieldTarget {
+    /// Enumerable option keys for single-select targets, `nil` for targets
+    /// without a known finite set (text, multi-select, date, etc.). Used by
+    /// `GroupEngine` to emit empty buckets when `GroupConfig.showEmpty` is on.
+    public func knownSingleSelectKeys(propertyDefs: [PropertyDefinition]) -> [String]? {
+        switch self {
+        case .builtin(.readingStatus):
+            return ReadingStatus.allCases.map(\.rawValue)
+        case .builtin(.referenceType):
+            return ReferenceType.allCases.map(\.rawValue)
+        case .custom(let id):
+            guard let def = propertyDefs.first(where: { $0.id == id }),
+                  def.type == .singleSelect else { return nil }
+            return def.options.map(\.value)
+        default:
+            return nil
+        }
+    }
+
     /// The flat list of targets offered in filter/sort/group pickers. Built-in
     /// columns come first in a stable order; visible custom properties follow
     /// in their user-defined `sortOrder`. `excluding` lets callers drop value

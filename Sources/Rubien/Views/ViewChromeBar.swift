@@ -8,6 +8,7 @@ struct ViewChromeBar: View {
     @Binding var groupBy: GroupConfig?
     let tags: [Tag]
     let propertyDefs: [PropertyDefinition]
+    let currentBuckets: [GroupBucket]
     let isDirty: Bool
     let onSave: () -> Void
     let onDiscard: () -> Void
@@ -123,7 +124,8 @@ struct ViewChromeBar: View {
         .popover(isPresented: $showGroupEditor) {
             GroupEditorPopover(
                 groupBy: $groupBy,
-                propertyDefs: propertyDefs
+                propertyDefs: propertyDefs,
+                currentBuckets: currentBuckets
             )
         }
     }

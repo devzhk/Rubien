@@ -4,6 +4,10 @@ import RubienCore
 struct GroupEditorPopover: View {
     @Binding var groupBy: GroupConfig?
     let propertyDefs: [PropertyDefinition]
+    let currentBuckets: [GroupBucket]
+
+    private static let reorderRowHeight: CGFloat = 28
+    private static let reorderListMaxHeight: CGFloat = 200
 
     var body: some View {
         // Grouping targets exclude text and number per spec.
@@ -12,7 +16,11 @@ struct GroupEditorPopover: View {
             header
             Divider()
             content(options: options)
-            if groupBy != nil {
+            if let config = groupBy {
+                if !currentBuckets.isEmpty {
+                    Divider()
+                    reorderList(config: config)
+                }
                 Divider()
                 removeButton
             }
@@ -34,9 +42,13 @@ struct GroupEditorPopover: View {
     private func content(options: [FieldTargetOption]) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             fieldPicker(options: options)
-            if let config = groupBy,
-               config.target.valueKind(propertyDefs: propertyDefs) == .date {
-                dateBinPicker(current: config)
+            if let config = groupBy {
+                if config.target.valueKind(propertyDefs: propertyDefs) == .date {
+                    dateBinPicker(current: config)
+                }
+                if config.target.knownSingleSelectKeys(propertyDefs: propertyDefs) != nil {
+                    showEmptyToggle(current: config)
+                }
             }
         }
         .padding(14)
@@ -89,6 +101,73 @@ struct GroupEditorPopover: View {
             .pickerStyle(.segmented)
             .labelsHidden()
         }
+    }
+
+    /// Drag-reorderable list of the current group keys in the order they
+    /// render. Dragging writes `config.customOrder`; unknown keys that appear
+    /// later (new tags, new options) slot into natural order at the end until
+    /// the user drags them.
+    private func reorderList(config: GroupConfig) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Group order")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if config.customOrder != nil {
+                    Button("Reset") {
+                        var updated = config
+                        updated.customOrder = nil
+                        groupBy = updated
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 8)
+            .padding(.bottom, 4)
+            List {
+                ForEach(currentBuckets, id: \.key) { bucket in
+                    HStack(spacing: 8) {
+                        Image(systemName: "line.3.horizontal")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                        Text(bucket.label)
+                            .font(.system(size: 12))
+                        Spacer()
+                        Text("\(bucket.references.count)")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .onMove { source, destination in
+                    var keys = currentBuckets.map(\.key)
+                    keys.move(fromOffsets: source, toOffset: destination)
+                    var updated = config
+                    updated.customOrder = keys
+                    groupBy = updated
+                }
+            }
+            .listStyle(.plain)
+            .frame(height: min(CGFloat(currentBuckets.count) * Self.reorderRowHeight + 12, Self.reorderListMaxHeight))
+        }
+    }
+
+    private func showEmptyToggle(current: GroupConfig) -> some View {
+        Toggle(isOn: Binding(
+            get: { current.showEmpty },
+            set: { newValue in
+                var updated = current
+                updated.showEmpty = newValue
+                groupBy = updated
+            }
+        )) {
+            Text("Show empty groups")
+                .font(.system(size: 12))
+        }
+        .toggleStyle(.checkbox)
     }
 
     private var removeButton: some View {

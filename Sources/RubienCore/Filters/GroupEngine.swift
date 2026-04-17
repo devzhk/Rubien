@@ -40,6 +40,17 @@ public enum GroupEngine {
             }
         }
 
+        // Optionally seed empty buckets for every known single-select option
+        // so users see all categories, not just the ones that happen to have
+        // members. Only meaningful when the target has a finite option set.
+        if config.showEmpty, let knownKeys = config.target.knownSingleSelectKeys(propertyDefs: context.propertyDefs) {
+            for key in knownKeys where buckets[key] == nil {
+                orderedKeys.append(key)
+                labels[key] = readableLabel(forKey: key, target: config.target)
+                buckets[key] = []
+            }
+        }
+
         let sortedKeys = reorder(orderedKeys, customOrder: config.customOrder)
         return sortedKeys.map { key in
             GroupBucket(key: key, label: labels[key] ?? key, references: buckets[key] ?? [])
@@ -48,8 +59,11 @@ public enum GroupEngine {
 
     private static func keyLabelPairs(for value: ResolvedValue, config: GroupConfig) -> [(key: String, label: String)] {
         switch value {
-        case .text(let s), .singleSelect(let s):
+        case .text(let s):
             return s.map { [($0, $0)] } ?? [emptyPair]
+        case .singleSelect(let s):
+            guard let key = s else { return [emptyPair] }
+            return [(key, readableLabel(forKey: key, target: config.target))]
         case .number(let n):
             guard let n else { return [emptyPair] }
             let formatted = n.truncatingRemainder(dividingBy: 1) == 0 ? String(Int(n)) : String(n)
@@ -59,9 +73,27 @@ public enum GroupEngine {
             return [dateKeyLabel(d, bin: config.dateBin ?? .month)]
         case .multiSelect(let set):
             if set.isEmpty { return [emptyPair] }
-            return set.map { ($0, $0) }.sorted { $0.0 < $1.0 }
+            return set.map { key in (key, readableLabel(forKey: key, target: config.target)) }
+                .sorted { $0.0 < $1.0 }
         case .checkbox(let b):
             return [(b ? "true" : "false", b ? "Checked" : "Unchecked")]
+        }
+    }
+
+    /// Maps a raw resolver key to a human-readable label for group headers.
+    /// Built-in enums with a separate `.label` (currently `ReadingStatus`)
+    /// need this translation; other cases pass through unchanged.
+    private static func readableLabel(forKey key: String, target: FieldTarget) -> String {
+        switch target {
+        case .builtin(.readingStatus):
+            return ReadingStatus(rawValue: key)?.label ?? key
+        case .builtin(.tags):
+            // Tag keys are stringified ids; caller should resolve via tagMap
+            // for display. Fall back to the key itself (bucket will show an
+            // id number, which is legible enough if the tagMap lookup fails).
+            return key
+        default:
+            return key
         }
     }
 

@@ -34,7 +34,15 @@ struct ReferenceTableView: View {
     @State private var showPropertyManager = false
 
     var body: some View {
-        VStack(spacing: 0) {
+        // Hoist pipeline computations once per body render. `processedReferences`
+        // and `groupedBuckets` are computed vars, so reading them multiple times
+        // re-runs FilterEngine/SortEngine/GroupEngine across the whole set.
+        let processed = processedReferences
+        let buckets: [GroupBucket]? = {
+            guard let config = groupBy else { return nil }
+            return GroupEngine.apply(processed, config: config, context: pipelineContext)
+        }()
+        return VStack(spacing: 0) {
             ViewChromeBar(
                 viewName: viewName,
                 filters: $filters,
@@ -42,14 +50,17 @@ struct ReferenceTableView: View {
                 groupBy: $groupBy,
                 tags: allTags,
                 propertyDefs: propertyDefs,
+                currentBuckets: buckets ?? [],
                 isDirty: isDirty,
                 onSave: onSaveView,
                 onDiscard: onDiscardView
             )
             if references.isEmpty {
                 emptyState
+            } else if processed.isEmpty {
+                filteredEmptyState
             } else {
-                tableContent
+                tableContentView(processed: processed, buckets: buckets)
                 if !selection.isEmpty {
                     batchToolbar
                 }
@@ -130,10 +141,10 @@ struct ReferenceTableView: View {
             .sorted { $0.displayOrder < $1.displayOrder }
     }
 
-    private var tableContent: some View {
+    private func tableContentView(processed: [Reference], buckets: [GroupBucket]?) -> some View {
         ReferenceTableContent(
-            references: processedReferences,
-            buckets: groupedBuckets,
+            references: processed,
+            buckets: buckets,
             collapsedGroups: Binding(
                 get: { groupBy?.collapsed ?? [] },
                 set: { newValue in groupBy?.collapsed = newValue }
@@ -235,11 +246,6 @@ struct ReferenceTableView: View {
         return SortEngine.apply(filtered, sorts: sorts, context: context)
     }
 
-    private var groupedBuckets: [GroupBucket]? {
-        guard let groupBy else { return nil }
-        return GroupEngine.apply(processedReferences, config: groupBy, context: pipelineContext)
-    }
-
     private func sortKeyToColumn(_ comparator: KeyPathComparator<Reference>) -> ColumnIdentifier {
         switch comparator.keyPath {
         case \Reference.title:            return .title
@@ -327,6 +333,22 @@ struct ReferenceTableView: View {
                 .font(.headline)
                 .foregroundStyle(.secondary)
             Text("Use the + toolbar button to add references,\nor import a .bib / .ris file.", bundle: .module)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var filteredEmptyState: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "line.3.horizontal.decrease.circle")
+                .font(.system(size: 36))
+                .foregroundStyle(.secondary)
+            Text("No references match", bundle: .module)
+                .font(.headline)
+                .foregroundStyle(.secondary)
+            Text("Adjust or clear the filters above to see more.", bundle: .module)
                 .font(.caption)
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
@@ -633,6 +655,7 @@ private struct ReferenceTableContent: View {
                     .frame(width: 12)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel(isCollapsed ? "Expand \(bucket.label)" : "Collapse \(bucket.label)")
             Text(bucket.label)
                 .font(.system(size: 12, weight: .semibold))
             Text("(\(bucket.references.count))")
