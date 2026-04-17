@@ -152,7 +152,7 @@ struct ReferenceTableView: View {
             if let first = newOrder.first {
                 let field = sortKeyToColumn(first)
                 let ascending = first.order == .forward
-                sorts = [ViewSort(field: field, ascending: ascending)]
+                sorts = [ViewSort(target: .builtin(field), ascending: ascending)]
             }
         }
     }
@@ -166,36 +166,50 @@ struct ReferenceTableView: View {
     private var sortedReferences: [Reference] {
         if sorts.isEmpty { return references }
         let sort = sorts[0]
+        guard case .builtin(let field) = sort.target else { return references }
         return references.sorted { a, b in
-            let result: Bool
-            switch sort.field {
+            let comparison: ComparisonResult
+            switch field {
             case .title:
-                result = a.title.localizedStandardCompare(b.title) == .orderedAscending
+                comparison = a.title.localizedStandardCompare(b.title)
             case .year:
-                result = (a.year ?? 0) < (b.year ?? 0)
+                comparison = compare(a.year ?? 0, b.year ?? 0)
             case .dateAdded:
-                result = a.dateAdded < b.dateAdded
+                comparison = compare(a.dateAdded, b.dateAdded)
             case .dateModified:
-                result = a.dateModified < b.dateModified
+                comparison = compare(a.dateModified, b.dateModified)
             case .authors:
-                result = (a.authors.first?.family ?? "") < (b.authors.first?.family ?? "")
+                comparison = compare(a.authors.first?.family ?? "", b.authors.first?.family ?? "")
             case .journal:
-                result = (a.journal ?? "") < (b.journal ?? "")
+                comparison = compare(a.journal ?? "", b.journal ?? "")
             case .readingStatus:
-                result = a.readingStatus.rawValue < b.readingStatus.rawValue
+                comparison = compare(a.readingStatus.rawValue, b.readingStatus.rawValue)
             case .priority:
-                result = a.priority.rawValue < b.priority.rawValue
+                comparison = compare(a.priority.rawValue, b.priority.rawValue)
             default:
-                result = a.dateAdded < b.dateAdded
+                comparison = compare(a.dateAdded, b.dateAdded)
             }
-            return sort.ascending ? result : !result
+            if comparison == .orderedSame { return false }
+            return sort.ascending ? comparison == .orderedAscending : comparison == .orderedDescending
         }
+    }
+
+    private func compare<T: Comparable>(_ a: T, _ b: T) -> ComparisonResult {
+        if a < b { return .orderedAscending }
+        if a > b { return .orderedDescending }
+        return .orderedSame
     }
 
     private func sortKeyToColumn(_ comparator: KeyPathComparator<Reference>) -> ColumnIdentifier {
         switch comparator.keyPath {
-        case \Reference.title: return .title
-        case \Reference.dateAdded: return .dateAdded
+        case \Reference.title:            return .title
+        case \Reference.authorsNormalized: return .authors
+        case \Reference.dateAdded:        return .dateAdded
+        case \Reference.dateModified:     return .dateModified
+        case \Reference.year:             return .year
+        case \Reference.journal:          return .journal
+        case \Reference.readingStatus.rawValue: return .readingStatus
+        case \Reference.priority.rawValue:      return .priority
         default: return .dateAdded
         }
     }

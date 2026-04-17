@@ -70,12 +70,12 @@ private struct FilterPill: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Text(filter.field.header)
+            Text(headerLabel)
                 .font(.system(size: 10, weight: .medium))
             Text(operatorLabel)
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
-            Text(filter.value)
+            Text(valueLabel)
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(Color.accentColor)
             Button(action: onRemove) {
@@ -93,19 +93,47 @@ private struct FilterPill: View {
         )
     }
 
+    private var headerLabel: String {
+        switch filter.target {
+        case .builtin(let id): return id.header
+        case .custom:          return "Property"  // Phase 2 threads propertyDefs to resolve the real name
+        }
+    }
+
     private var operatorLabel: String {
         switch filter.op {
-        case .equals: return "is"
-        case .notEquals: return "is not"
-        case .contains: return "contains"
-        case .notContains: return "not contains"
-        case .greaterThan: return ">"
-        case .lessThan: return "<"
-        case .greaterOrEqual: return ">="
-        case .lessOrEqual: return "<="
-        case .isEmpty: return "is empty"
-        case .isNotEmpty: return "is not empty"
-        case .isAnyOf: return "is any of"
+        case .equals:           return "is"
+        case .notEquals:        return "is not"
+        case .contains:         return "contains"
+        case .notContains:      return "does not contain"
+        case .startsWith:       return "starts with"
+        case .endsWith:         return "ends with"
+        case .greaterThan:      return ">"
+        case .lessThan:         return "<"
+        case .greaterOrEqual:   return "≥"
+        case .lessOrEqual:      return "≤"
+        case .isWithin:         return "is within"
+        case .isAnyOf:          return "is any of"
+        case .isNoneOf:         return "is none of"
+        case .containsAnyOf:    return "contains any of"
+        case .containsNoneOf:   return "contains none of"
+        case .containsAllOf:    return "contains all of"
+        case .isChecked:        return "is checked"
+        case .isUnchecked:      return "is unchecked"
+        case .isEmpty:          return "is empty"
+        case .isNotEmpty:       return "is not empty"
+        }
+    }
+
+    private var valueLabel: String {
+        switch filter.value {
+        case .text(let s):        return s
+        case .number(let n):      return n.truncatingRemainder(dividingBy: 1) == 0 ? String(Int(n)) : String(n)
+        case .date(let d):        return d.formatted(date: .abbreviated, time: .omitted)
+        case .datePreset(let p):  return "\(p)"
+        case .selectKeys(let ks): return ks.joined(separator: ", ")
+        case .bool(let b):        return b ? "yes" : "no"
+        case .none:               return ""
         }
     }
 }
@@ -142,14 +170,14 @@ private struct AddFilterPopover: View {
             }
             .pickerStyle(.menu)
 
-            if selectedOp != .isEmpty && selectedOp != .isNotEmpty {
+            if needsValue {
                 valueField
             }
 
             HStack {
                 Spacer()
                 Button("Add") {
-                    onAdd(ViewFilter(field: selectedField, op: selectedOp, value: value))
+                    onAdd(ViewFilter(target: .builtin(selectedField), op: selectedOp, value: buildFilterValue()))
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(needsValue && value.trimmingCharacters(in: .whitespaces).isEmpty)
@@ -161,6 +189,18 @@ private struct AddFilterPopover: View {
 
     private var needsValue: Bool {
         selectedOp != .isEmpty && selectedOp != .isNotEmpty
+    }
+
+    private func buildFilterValue() -> FilterValue {
+        guard needsValue else { return .none }
+        switch selectedField {
+        case .year:
+            return .number(Double(value) ?? 0)
+        case .readingStatus, .priority, .referenceType:
+            return .selectKeys([value])
+        default:
+            return .text(value)
+        }
     }
 
     @ViewBuilder

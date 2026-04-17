@@ -214,6 +214,7 @@ public final class AppDatabase: Sendable {
                 t.column("columnsJSON", .text).notNull().defaults(to: "[]")
                 t.column("filtersJSON", .text).notNull().defaults(to: "[]")
                 t.column("sortsJSON", .text).notNull().defaults(to: "[]")
+                t.column("groupByJSON", .text)
                 t.column("isDefault", .boolean).notNull().defaults(to: false)
                 t.column("displayOrder", .integer).notNull().defaults(to: 0)
                 t.column("dateCreated", .datetime).notNull()

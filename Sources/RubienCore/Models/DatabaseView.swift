@@ -87,35 +87,39 @@ public struct ColumnConfig: Codable, Hashable, Sendable {
 // MARK: - Sort Configuration
 
 public struct ViewSort: Codable, Hashable, Sendable {
-    public var field: ColumnIdentifier
+    public var target: FieldTarget
     public var ascending: Bool
 
-    public init(field: ColumnIdentifier, ascending: Bool) {
-        self.field = field
+    public init(target: FieldTarget, ascending: Bool) {
+        self.target = target
         self.ascending = ascending
     }
 
-    public static let defaultSort = ViewSort(field: .dateAdded, ascending: false)
+    public static let defaultSort = ViewSort(target: .builtin(.dateAdded), ascending: false)
 }
 
 // MARK: - Filter Configuration
 
-public enum FilterOperator: String, Codable, Hashable, Sendable {
+public enum FilterOperator: String, Codable, Hashable, Sendable, CaseIterable {
     case equals, notEquals
     case contains, notContains
+    case startsWith, endsWith
     case greaterThan, lessThan
     case greaterOrEqual, lessOrEqual
+    case isWithin
+    case isAnyOf, isNoneOf
+    case containsAnyOf, containsNoneOf, containsAllOf
+    case isChecked, isUnchecked
     case isEmpty, isNotEmpty
-    case isAnyOf
 }
 
 public struct ViewFilter: Codable, Hashable, Sendable {
-    public var field: ColumnIdentifier
+    public var target: FieldTarget
     public var op: FilterOperator
-    public var value: String
+    public var value: FilterValue
 
-    public init(field: ColumnIdentifier, op: FilterOperator, value: String) {
-        self.field = field
+    public init(target: FieldTarget, op: FilterOperator, value: FilterValue) {
+        self.target = target
         self.op = op
         self.value = value
     }
@@ -138,6 +142,7 @@ public struct DatabaseView: Identifiable, Codable, Hashable, Sendable {
     public var columnsJSON: String
     public var filtersJSON: String
     public var sortsJSON: String
+    public var groupByJSON: String?
     public var isDefault: Bool
     public var displayOrder: Int
     public var dateCreated: Date
@@ -151,6 +156,7 @@ public struct DatabaseView: Identifiable, Codable, Hashable, Sendable {
         columns: [ColumnConfig] = ColumnConfig.defaultColumns,
         filters: [ViewFilter] = [],
         sorts: [ViewSort] = [.defaultSort],
+        groupBy: GroupConfig? = nil,
         isDefault: Bool = false,
         displayOrder: Int = 0,
         dateCreated: Date = Date(),
@@ -159,10 +165,11 @@ public struct DatabaseView: Identifiable, Codable, Hashable, Sendable {
         self.id = id
         self.name = name
         self.icon = icon
-        self.scopeJSON = (try? String(data: JSONEncoder().encode(scope), encoding: .utf8)) ?? "{}"
-        self.columnsJSON = (try? String(data: JSONEncoder().encode(columns), encoding: .utf8)) ?? "[]"
-        self.filtersJSON = (try? String(data: JSONEncoder().encode(filters), encoding: .utf8)) ?? "[]"
-        self.sortsJSON = (try? String(data: JSONEncoder().encode(sorts), encoding: .utf8)) ?? "[]"
+        self.scopeJSON = Self.encodeJSON(scope) ?? "{}"
+        self.columnsJSON = Self.encodeJSON(columns) ?? "[]"
+        self.filtersJSON = Self.encodeJSON(filters) ?? "[]"
+        self.sortsJSON = Self.encodeJSON(sorts) ?? "[]"
+        self.groupByJSON = groupBy.flatMap(Self.encodeJSON)
         self.isDefault = isDefault
         self.displayOrder = displayOrder
         self.dateCreated = dateCreated
@@ -172,55 +179,37 @@ public struct DatabaseView: Identifiable, Codable, Hashable, Sendable {
     // MARK: - JSON accessors
 
     public var parsedScope: ViewScope {
-        get {
-            guard let data = scopeJSON.data(using: .utf8),
-                  let scope = try? JSONDecoder().decode(ViewScope.self, from: data) else {
-                return .all
-            }
-            return scope
-        }
-        set {
-            scopeJSON = (try? String(data: JSONEncoder().encode(newValue), encoding: .utf8)) ?? "{}"
-        }
+        get { Self.decodeJSON(scopeJSON, as: ViewScope.self) ?? .all }
+        set { scopeJSON = Self.encodeJSON(newValue) ?? "{}" }
     }
 
     public var parsedColumns: [ColumnConfig] {
-        get {
-            guard let data = columnsJSON.data(using: .utf8),
-                  let cols = try? JSONDecoder().decode([ColumnConfig].self, from: data) else {
-                return ColumnConfig.defaultColumns
-            }
-            return cols
-        }
-        set {
-            columnsJSON = (try? String(data: JSONEncoder().encode(newValue), encoding: .utf8)) ?? "[]"
-        }
+        get { Self.decodeJSON(columnsJSON, as: [ColumnConfig].self) ?? ColumnConfig.defaultColumns }
+        set { columnsJSON = Self.encodeJSON(newValue) ?? "[]" }
     }
 
     public var parsedFilters: [ViewFilter] {
-        get {
-            guard let data = filtersJSON.data(using: .utf8),
-                  let filters = try? JSONDecoder().decode([ViewFilter].self, from: data) else {
-                return []
-            }
-            return filters
-        }
-        set {
-            filtersJSON = (try? String(data: JSONEncoder().encode(newValue), encoding: .utf8)) ?? "[]"
-        }
+        get { Self.decodeJSON(filtersJSON, as: [ViewFilter].self) ?? [] }
+        set { filtersJSON = Self.encodeJSON(newValue) ?? "[]" }
     }
 
     public var parsedSorts: [ViewSort] {
-        get {
-            guard let data = sortsJSON.data(using: .utf8),
-                  let sorts = try? JSONDecoder().decode([ViewSort].self, from: data) else {
-                return [.defaultSort]
-            }
-            return sorts
-        }
-        set {
-            sortsJSON = (try? String(data: JSONEncoder().encode(newValue), encoding: .utf8)) ?? "[]"
-        }
+        get { Self.decodeJSON(sortsJSON, as: [ViewSort].self) ?? [.defaultSort] }
+        set { sortsJSON = Self.encodeJSON(newValue) ?? "[]" }
+    }
+
+    public var parsedGroupBy: GroupConfig? {
+        get { groupByJSON.flatMap { Self.decodeJSON($0, as: GroupConfig.self) } }
+        set { groupByJSON = newValue.flatMap(Self.encodeJSON) }
+    }
+
+    private static func encodeJSON<T: Encodable>(_ value: T) -> String? {
+        (try? JSONEncoder().encode(value)).flatMap { String(data: $0, encoding: .utf8) }
+    }
+
+    private static func decodeJSON<T: Decodable>(_ json: String, as type: T.Type) -> T? {
+        guard let data = json.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
     }
 
     public var visibleColumns: [ColumnConfig] {
@@ -240,7 +229,7 @@ extension DatabaseView: FetchableRecord, MutablePersistableRecord {
     }
 
     public enum Columns: String, ColumnExpression {
-        case id, name, icon, scopeJSON, columnsJSON, filtersJSON, sortsJSON
+        case id, name, icon, scopeJSON, columnsJSON, filtersJSON, sortsJSON, groupByJSON
         case isDefault, displayOrder, dateCreated, dateModified
     }
 }
