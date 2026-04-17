@@ -69,7 +69,7 @@ struct FilterEditorPopover: View {
     // MARK: - Target picker
 
     private var targetPicker: some View {
-        let options = filterableTargets(propertyDefs: propertyDefs)
+        let options = FieldTarget.selectableOptions(propertyDefs: propertyDefs)
         return Picker("Field", selection: Binding(
             get: { target },
             set: { newTarget in
@@ -306,30 +306,3 @@ struct FilterEditorPopover: View {
     }
 }
 
-// MARK: - Filterable target list
-
-/// A flattened list of all targets the filter UI can choose from. Keeps the
-/// built-in columns in a stable order and appends visible custom properties.
-private struct FilterTargetEntry: Hashable {
-    let target: FieldTarget
-    let label: String
-}
-
-private func filterableTargets(propertyDefs: [PropertyDefinition]) -> [FilterTargetEntry] {
-    let builtins: [ColumnIdentifier] = [
-        .title, .authors, .journal, .year, .referenceType,
-        .tags, .readingStatus, .priority,
-        .dateAdded, .dateModified,
-        .doi, .publisher, .volume, .issue, .pages, .pdfAttached,
-    ]
-    var entries: [FilterTargetEntry] = builtins.map {
-        FilterTargetEntry(target: .builtin($0), label: $0.header)
-    }
-    let customs = propertyDefs
-        .filter { !$0.isDefault && $0.isVisible && $0.id != nil }
-        .sorted { $0.sortOrder < $1.sortOrder }
-    entries.append(contentsOf: customs.map {
-        FilterTargetEntry(target: .custom($0.id ?? 0), label: $0.name)
-    })
-    return entries
-}

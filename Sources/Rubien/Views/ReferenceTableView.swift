@@ -37,6 +37,7 @@ struct ReferenceTableView: View {
             ViewChromeBar(
                 viewName: viewName,
                 filters: $filters,
+                sorts: $sorts,
                 tags: allTags,
                 propertyDefs: propertyDefs,
                 isDirty: isDirty,
@@ -161,11 +162,48 @@ struct ReferenceTableView: View {
             }
         }
         .onChange(of: tableSortOrder) { _, newOrder in
-            if let first = newOrder.first {
-                let field = sortKeyToColumn(first)
-                let ascending = first.order == .forward
-                sorts = [ViewSort(target: .builtin(field), ascending: ascending)]
+            guard let first = newOrder.first else { return }
+            let target = FieldTarget.builtin(sortKeyToColumn(first))
+            let newPrimary = ViewSort(target: target, ascending: first.order == .forward)
+            // Preserve popover-configured tiebreakers; drop any existing sort on
+            // the new primary's target so it doesn't duplicate.
+            let tiebreakers = sorts.filter { $0.target != target }
+            let updated = [newPrimary] + tiebreakers
+            if updated != sorts {
+                sorts = updated
             }
+        }
+        .onChange(of: sorts) { _, newSorts in
+            let mirrored = headerOrder(from: newSorts.first)
+            if mirrored != tableSortOrder {
+                tableSortOrder = mirrored
+            }
+        }
+    }
+
+    /// Bridges the primary `ViewSort` back into SwiftUI `Table`'s native
+    /// `sortOrder` binding so the header arrow reflects popover edits. Returns
+    /// `[]` for targets that don't map to a natively-sortable TableColumn
+    /// (custom properties, or built-ins we don't expose as Table columns).
+    private func headerOrder(from sort: ViewSort?) -> [KeyPathComparator<Reference>] {
+        guard let sort, case .builtin(let column) = sort.target,
+              let comparator = nativeComparator(for: column, ascending: sort.ascending) else {
+            return []
+        }
+        return [comparator]
+    }
+
+    /// Only the columns actually rendered as sortable `TableColumn`s below.
+    /// Other `ColumnIdentifier`s are sortable via the popover but have no
+    /// header arrow to mirror.
+    private func nativeComparator(for column: ColumnIdentifier, ascending: Bool) -> KeyPathComparator<Reference>? {
+        let order: SortOrder = ascending ? .forward : .reverse
+        switch column {
+        case .title:           return KeyPathComparator(\.title, order: order)
+        case .authors:         return KeyPathComparator(\.authorsNormalized, order: order)
+        case .dateAdded:       return KeyPathComparator(\.dateAdded, order: order)
+        case .readingStatus:   return KeyPathComparator(\.readingStatus.rawValue, order: order)
+        default:               return nil
         }
     }
 
