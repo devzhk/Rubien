@@ -1417,22 +1417,32 @@ extension AppDatabase {
     public func observeReferenceTagMappings() -> AnyPublisher<[Int64: [Tag]], Error> {
         ValueObservation
             .tracking { db in
-                let rows = try Row.fetchAll(db, sql: """
-                    SELECT rt.referenceId, t.id, t.name, t.color
-                    FROM referenceTag rt
-                    JOIN tag t ON t.id = rt.tagId
-                    ORDER BY t.name
-                    """)
-                var map: [Int64: [Tag]] = [:]
-                for row in rows {
-                    let refId: Int64 = row["referenceId"]
-                    let tag = Tag(id: row["id"], name: row["name"], color: row["color"])
-                    map[refId, default: []].append(tag)
-                }
-                return map
+                try Self.loadReferenceTagMappings(db)
             }
             .publisher(in: dbWriter, scheduling: .immediate)
             .eraseToAnyPublisher()
+    }
+
+    public func fetchReferenceTagMappings() throws -> [Int64: [Tag]] {
+        try dbWriter.read { db in
+            try Self.loadReferenceTagMappings(db)
+        }
+    }
+
+    private static func loadReferenceTagMappings(_ db: Database) throws -> [Int64: [Tag]] {
+        let rows = try Row.fetchAll(db, sql: """
+            SELECT rt.referenceId, t.id, t.name, t.color
+            FROM referenceTag rt
+            JOIN tag t ON t.id = rt.tagId
+            ORDER BY t.name
+            """)
+        var map: [Int64: [Tag]] = [:]
+        for row in rows {
+            let refId: Int64 = row["referenceId"]
+            let tag = Tag(id: row["id"], name: row["name"], color: row["color"])
+            map[refId, default: []].append(tag)
+        }
+        return map
     }
 }
 

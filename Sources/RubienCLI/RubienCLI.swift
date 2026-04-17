@@ -1246,6 +1246,9 @@ struct Views: ParsableCommand {
     @Option(name: .long, help: "JSON sorts (for --create)")
     var sorts: String?
 
+    @Option(name: .long, help: "JSON groupBy (for --create)")
+    var groupBy: String?
+
     func run() throws {
         let db = AppDatabase.shared
 
@@ -1254,22 +1257,16 @@ struct Views: ParsableCommand {
                 printJSONError("--name is required with --create")
                 throw ExitCode.failure
             }
-            let parsedFilters: [ViewFilter] = {
-                guard let json = filters, let data = json.data(using: .utf8),
-                      let decoded = try? JSONDecoder().decode([ViewFilter].self, from: data) else { return [] }
-                return decoded
-            }()
-            let parsedSorts: [ViewSort] = {
-                guard let json = sorts, let data = json.data(using: .utf8),
-                      let decoded = try? JSONDecoder().decode([ViewSort].self, from: data) else { return [.defaultSort] }
-                return decoded
-            }()
+            let parsedFilters = try decodeOption([ViewFilter].self, from: filters, flag: "--filters", default: [])
+            let parsedSorts = try decodeOption([ViewSort].self, from: sorts, flag: "--sorts", default: [.defaultSort])
+            let parsedGroupBy = try decodeOption(GroupConfig?.self, from: groupBy, flag: "--group-by", default: nil)
             let existing = try db.fetchAllDatabaseViews()
             let maxOrder = existing.map(\.displayOrder).max() ?? 0
             var view = DatabaseView(
                 name: viewName,
                 filters: parsedFilters,
                 sorts: parsedSorts,
+                groupBy: parsedGroupBy,
                 displayOrder: maxOrder + 1
             )
             try db.saveDatabaseView(&view)
@@ -1295,8 +1292,22 @@ struct Views: ParsableCommand {
             case .all: scope = .all
             case .tag(let id): scope = .tag(id)
             }
-            let refs = try db.fetchReferences(scope: scope, filter: ReferenceFilter(), limit: limit)
-            printJSON(try mapReferenceDTOs(refs))
+            // Fast path: no filters/sorts/groupBy → push limit to SQL, skip engines.
+            if view.parsedFilters.isEmpty && view.parsedSorts.isEmpty && view.parsedGroupBy == nil {
+                let refs = try db.fetchReferences(scope: scope, filter: ReferenceFilter(), limit: limit)
+                printJSON(try mapReferenceDTOs(refs))
+                return
+            }
+            let refs = try db.fetchReferences(scope: scope, filter: ReferenceFilter(), limit: 0)
+            let context = PipelineContext(
+                tagMap: try db.fetchReferenceTagMappings(),
+                propertyValueMap: try db.fetchAllPropertyValues(),
+                propertyDefs: try db.fetchAllPropertyDefinitions()
+            )
+            let filtered = FilterEngine.apply(refs, filters: view.parsedFilters, context: context)
+            let sorted = SortEngine.apply(filtered, sorts: view.parsedSorts, context: context)
+            let truncated = limit > 0 ? Array(sorted.prefix(limit)) : sorted
+            printJSON(try mapReferenceDTOs(truncated))
         } else if let renameId = rename {
             guard var view = try db.fetchDatabaseView(id: renameId) else {
                 printJSONError("View \(renameId) not found")
@@ -1314,6 +1325,20 @@ struct Views: ParsableCommand {
             printJSON(views.map(DatabaseViewDTO.init))
         }
     }
+
+    private func decodeOption<T: Decodable>(_ type: T.Type, from json: String?, flag: String, default fallback: T) throws -> T {
+        guard let json else { return fallback }
+        guard let data = json.data(using: .utf8) else {
+            printJSONError("\(flag) is not valid UTF-8")
+            throw ExitCode.failure
+        }
+        do {
+            return try JSONDecoder().decode(T.self, from: data)
+        } catch {
+            printJSONError("\(flag) JSON is invalid: \(error.localizedDescription)")
+            throw ExitCode.failure
+        }
+    }
 }
 
 struct DatabaseViewDTO: Encodable {
@@ -1322,9 +1347,11 @@ struct DatabaseViewDTO: Encodable {
     let icon: String
     let isDefault: Bool
     let displayOrder: Int
-    let scope: String
-    let filters: String
-    let sorts: String
+    let scope: ViewScope
+    let columns: [ColumnConfig]
+    let filters: [ViewFilter]
+    let sorts: [ViewSort]
+    let groupBy: GroupConfig?
     let dateCreated: Date
     let dateModified: Date
 
@@ -1334,9 +1361,11 @@ struct DatabaseViewDTO: Encodable {
         self.icon = view.icon
         self.isDefault = view.isDefault
         self.displayOrder = view.displayOrder
-        self.scope = view.scopeJSON
-        self.filters = view.filtersJSON
-        self.sorts = view.sortsJSON
+        self.scope = view.parsedScope
+        self.columns = view.parsedColumns
+        self.filters = view.parsedFilters
+        self.sorts = view.parsedSorts
+        self.groupBy = view.parsedGroupBy
         self.dateCreated = view.dateCreated
         self.dateModified = view.dateModified
     }
