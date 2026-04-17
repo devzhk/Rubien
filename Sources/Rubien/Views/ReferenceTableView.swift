@@ -117,7 +117,7 @@ struct ReferenceTableView: View {
 
     private var tableContent: some View {
         ReferenceTableContent(
-            references: sortedReferences,
+            references: processedReferences,
             tagMap: tagMap,
             allTags: allTags,
             selection: $selection,
@@ -161,43 +161,17 @@ struct ReferenceTableView: View {
         .init(\.dateAdded, order: .reverse)
     ]
 
-    // MARK: - Sort
+    // MARK: - Pipeline
 
-    private var sortedReferences: [Reference] {
-        if sorts.isEmpty { return references }
-        let sort = sorts[0]
-        guard case .builtin(let field) = sort.target else { return references }
-        return references.sorted { a, b in
-            let comparison: ComparisonResult
-            switch field {
-            case .title:
-                comparison = a.title.localizedStandardCompare(b.title)
-            case .year:
-                comparison = compare(a.year ?? 0, b.year ?? 0)
-            case .dateAdded:
-                comparison = compare(a.dateAdded, b.dateAdded)
-            case .dateModified:
-                comparison = compare(a.dateModified, b.dateModified)
-            case .authors:
-                comparison = compare(a.authors.first?.family ?? "", b.authors.first?.family ?? "")
-            case .journal:
-                comparison = compare(a.journal ?? "", b.journal ?? "")
-            case .readingStatus:
-                comparison = compare(a.readingStatus.rawValue, b.readingStatus.rawValue)
-            case .priority:
-                comparison = compare(a.priority.rawValue, b.priority.rawValue)
-            default:
-                comparison = compare(a.dateAdded, b.dateAdded)
-            }
-            if comparison == .orderedSame { return false }
-            return sort.ascending ? comparison == .orderedAscending : comparison == .orderedDescending
-        }
-    }
-
-    private func compare<T: Comparable>(_ a: T, _ b: T) -> ComparisonResult {
-        if a < b { return .orderedAscending }
-        if a > b { return .orderedDescending }
-        return .orderedSame
+    private var processedReferences: [Reference] {
+        let context = PipelineContext(
+            tagMap: tagMap,
+            propertyValueMap: customPropertyValueMap,
+            propertyDefs: propertyDefs,
+            now: Date()
+        )
+        let filtered = FilterEngine.apply(references, filters: filters, context: context)
+        return SortEngine.apply(filtered, sorts: sorts, context: context)
     }
 
     private func sortKeyToColumn(_ comparator: KeyPathComparator<Reference>) -> ColumnIdentifier {

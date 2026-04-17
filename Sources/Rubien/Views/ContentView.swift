@@ -445,8 +445,13 @@ final class LibraryViewModel: ObservableObject {
 
     private func syncColumnConfigFromView() {
         guard case .view(let id) = selectedSidebar,
-              let dbView = databaseViews.first(where: { $0.id == id }) else { return }
+              let dbView = databaseViews.first(where: { $0.id == id }) else {
+            tableSorts = [.defaultSort]
+            viewFilters = []
+            return
+        }
         tableSorts = dbView.parsedSorts
+        viewFilters = dbView.parsedFilters
     }
 
     func selectDefaultViewIfNeeded() {
