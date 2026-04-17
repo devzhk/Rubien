@@ -5,7 +5,12 @@ struct TagPickerPopover: View {
     let assignedTags: [Tag]
     let allTags: [Tag]
     let onCommit: ([Int64]) -> Void
-    let onCreateTag: (String) -> Void
+    /// Creates a new tag and returns its id. The popover adds the id to its
+    /// local selection so the eventual `onCommit` in `.onDisappear` saves the
+    /// new tag as assigned — a plain `(String) -> Void` signature would race
+    /// with the popover's own commit flow and the new tag would flicker in
+    /// then disappear.
+    let onCreateTag: (String) -> Int64?
     let onDeleteTag: (Int64) -> Void
     @State private var search = ""
     @State private var localIds: Set<Int64> = []
@@ -22,8 +27,9 @@ struct TagPickerPopover: View {
     }
 
     private func handleCreate(_ name: String) {
-        onCommit(Array(localIds))
-        onCreateTag(name)
+        if let newId = onCreateTag(name) {
+            localIds.insert(newId)
+        }
         search = ""
     }
 

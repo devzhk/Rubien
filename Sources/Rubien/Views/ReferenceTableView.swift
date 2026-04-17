@@ -11,7 +11,7 @@ struct ReferenceTableView: View {
     let onRefreshMetadata: ([Reference]) -> Void
     let onUpdateReference: (Reference) -> Void
     let onUpdateTags: (Int64, [Int64]) -> Void
-    let onCreateTag: (Int64, String) -> Void
+    let onCreateTag: (String) -> Int64?
     let onDeleteTag: (Int64) -> Void
     let onCreateOption: (Int64, String) -> Void
     var isRefreshingMetadata = false
@@ -368,7 +368,7 @@ private struct ReferenceTableContent: View {
     @Binding var tableSortOrder: [KeyPathComparator<Reference>]
     let onUpdateReference: (Reference) -> Void
     let onUpdateTags: (Int64, [Int64]) -> Void
-    let onCreateTag: (Int64, String) -> Void
+    let onCreateTag: (String) -> Int64?
     let onDeleteTag: (Int64) -> Void
     let onCreateOption: (Int64, String) -> Void
     let customProperties: [PropertyDefinition]
@@ -499,7 +499,7 @@ private struct ReferenceTableContent: View {
                     allTags: allTags,
                     referenceId: ref.id ?? -1,
                     onUpdateTags: { tagIds in onUpdateTags(ref.id ?? -1, tagIds) },
-                    onCreateTag: { name in onCreateTag(ref.id ?? -1, name) },
+                    onCreateTag: onCreateTag,
                     onDeleteTag: onDeleteTag
                 )
             }
@@ -716,7 +716,7 @@ struct TagsCellView: View {
     let allTags: [Tag]
     let referenceId: Int64
     let onUpdateTags: ([Int64]) -> Void
-    let onCreateTag: (String) -> Void
+    let onCreateTag: (String) -> Int64?
     let onDeleteTag: (Int64) -> Void
 
     @State private var showPopover = false

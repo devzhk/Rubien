@@ -338,19 +338,20 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
-    func createTagAndAssign(name: String, toReference refId: Int64) {
+    /// Creates a new tag and returns its id. Assignment is the caller's job —
+    /// this separation lets `TagPickerPopover` stay the single source of truth
+    /// for a reference's tag set, avoiding a race with its `onCommit` flow.
+    func createTag(name: String) -> Int64? {
         do {
             let usedColors = Set(tags.map(\.color))
             let available = Tag.colorPalette.filter { !usedColors.contains($0) }
             let color = available.first ?? Tag.colorPalette.randomElement() ?? Tag.colorPalette[0]
             var tag = Tag(name: name, color: color)
             try db.saveTag(&tag)
-            if let tagId = tag.id {
-                let existingTagIds = (referenceTagMap[refId] ?? []).compactMap(\.id)
-                try db.setTags(forReference: refId, tagIds: existingTagIds + [tagId])
-            }
+            return tag.id
         } catch {
             errorMessage = "Create tag failed: \(error.localizedDescription)"
+            return nil
         }
     }
 
@@ -690,7 +691,7 @@ struct ContentView: View {
                     viewModel.saveReference(&ref)
                 },
                 onUpdateTags: { refId, tagIds in viewModel.setTags(forReference: refId, tagIds: tagIds) },
-                onCreateTag: { refId, name in viewModel.createTagAndAssign(name: name, toReference: refId) },
+                onCreateTag: { name in viewModel.createTag(name: name) },
                 onDeleteTag: { tagId in viewModel.deleteTag(id: tagId) },
                 onCreateOption: { propId, optionValue in
                     guard var prop = viewModel.propertyDefs.first(where: { $0.id == propId }) else { return }
@@ -744,7 +745,7 @@ struct ContentView: View {
                         ReaderWindowManager.shared.openWebReader(for: r)
                     },
                     onUpdateTags: { refId, tagIds in viewModel.setTags(forReference: refId, tagIds: tagIds) },
-                    onCreateTag: { refId, name in viewModel.createTagAndAssign(name: name, toReference: refId) },
+                    onCreateTag: { name in viewModel.createTag(name: name) },
                     onDeleteTag: { tagId in viewModel.deleteTag(id: tagId) },
                     propertyDefs: Binding(
                         get: { viewModel.propertyDefs },

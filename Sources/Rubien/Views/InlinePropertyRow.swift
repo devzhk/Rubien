@@ -169,7 +169,7 @@ struct InlineTagsRow: View {
     let tags: [Tag]
     let allTags: [Tag]
     let onUpdateTags: ([Int64]) -> Void
-    let onCreateTag: (String) -> Void
+    let onCreateTag: (String) -> Int64?
     let onDeleteTag: (Int64) -> Void
 
     @State private var showPicker = false

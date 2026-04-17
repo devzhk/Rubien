@@ -11,7 +11,7 @@ struct ReferenceDetailView: View {
     var onOpenPDFReader: ((Reference) -> Void)?
     var onOpenWebReader: ((Reference) -> Void)?
     var onUpdateTags: ((Int64, [Int64]) -> Void)?
-    var onCreateTag: ((Int64, String) -> Void)?
+    var onCreateTag: ((String) -> Int64?)?
     var onDeleteTag: ((Int64) -> Void)?
 
     @State private var editedRef: Reference
@@ -39,7 +39,7 @@ struct ReferenceDetailView: View {
          onSave: @escaping (Reference) -> Void, onDelete: @escaping () -> Void,
          onOpenPDFReader: ((Reference) -> Void)? = nil, onOpenWebReader: ((Reference) -> Void)? = nil,
          onUpdateTags: ((Int64, [Int64]) -> Void)? = nil,
-         onCreateTag: ((Int64, String) -> Void)? = nil,
+         onCreateTag: ((String) -> Int64?)? = nil,
          onDeleteTag: ((Int64) -> Void)? = nil,
          propertyDefs: Binding<[PropertyDefinition]>) {
         self.reference = reference
@@ -313,10 +313,7 @@ struct ReferenceDetailView: View {
                     guard let refId = reference.id else { return }
                     onUpdateTags?(refId, tagIds)
                 },
-                onCreateTag: { name in
-                    guard let refId = reference.id else { return }
-                    onCreateTag?(refId, name)
-                },
+                onCreateTag: { name in onCreateTag?(name) ?? nil },
                 onDeleteTag: { tagId in
                     onDeleteTag?(tagId)
                 }
