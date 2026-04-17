@@ -107,6 +107,19 @@ Prefer adding coverage to `RubienCoreTests` where possible, since those tests ru
 
 `swift test` requires the full Xcode toolchain (not just CommandLineTools) because it needs the XCTest framework. Verify with `xcode-select -p` — if it reports `/Library/Developer/CommandLineTools`, switch with `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`.
 
+## Development workflow for non-trivial changes
+
+For multi-file features or refactors, follow this cycle:
+
+1. **Scope tightly.** Each commit should be one coherent step that builds cleanly and passes tests. For big features, split into phases — each phase shippable in isolation. Write the plan file before coding when the feature touches more than a handful of files.
+2. **Implement → build → test.**
+3. **Independent review.** Ask `codex-rescue` to review the uncommitted diff and surface correctness, contract, and edge-case concerns.
+4. **`/simplify` sweep.** Run the three parallel reviews (reuse, quality, efficiency) to catch duplication, leaky abstractions, and hot-path concerns.
+5. **Decide what to fix.** Apply findings that are clearly worth it; note the rest. Not every flag warrants a change.
+6. **Build + test again**, then commit.
+
+Skip the full cycle for trivial diffs (typos, single-line edits, doc tweaks, mechanical refactors). Apply it when the diff crosses files or introduces new abstractions.
+
 ## Conventions worth knowing
 
 - `RubienCore/Resources` is attached with `.copy("Resources")` so the `Citeproc/{dist,CSL,locales}/` subdirectory structure is preserved verbatim inside the module bundle. `CiteprocJSCoreEngine` reads them via `Bundle.module.url(forResource:..., subdirectory: "Citeproc/...")`.
