@@ -628,4 +628,156 @@ final class RubienCLITests: XCTestCase {
             XCTAssertTrue(first["customProperties"] is [Any], "customProperties must be an array")
         }
     }
+
+    // MARK: - Views
+    //
+    // These tests lock the JSON contract for the `views` subcommand:
+    // the tagged-union shapes for FieldTarget / FilterValue / GroupConfig,
+    // the DTO fields emitted on create/list/rename, and the default-view
+    // protections. Scripts depend on this wire format.
+
+    private func parseInt64(_ value: Any?) -> Int64? {
+        if let i = value as? Int64 { return i }
+        if let i = value as? Int { return Int64(i) }
+        if let s = value as? String { return Int64(s) }
+        return nil
+    }
+
+    private func defaultViewId() throws -> Int64? {
+        let result = try runCLI(["views"])
+        guard result.exitCode == 0,
+              let arr = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [[String: Any]],
+              let def = arr.first(where: { ($0["isDefault"] as? Bool) == true }) else {
+            return nil
+        }
+        return parseInt64(def["id"])
+    }
+
+    func testViewsListIncludesDefault() throws {
+        try skipIfBinaryMissing()
+        let result = try runCLI(["views"])
+        XCTAssertEqual(result.exitCode, 0, "views list should succeed; stderr=\(result.stderr)")
+        let arr = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [[String: Any]] ?? []
+        let defaultView = arr.first { ($0["isDefault"] as? Bool) == true }
+        XCTAssertNotNil(defaultView, "a default view must be seeded by the migration")
+        XCTAssertEqual(defaultView?["name"] as? String, "All References")
+        XCTAssertTrue(defaultView?["filters"] is [Any], "filters must be an array")
+        XCTAssertTrue(defaultView?["sorts"] is [Any], "sorts must be an array")
+        // groupBy may be null or an object — the user can group on any view.
+        // Just verify it's one of those shapes (i.e., the key is always present).
+        XCTAssertTrue(defaultView?.keys.contains("groupBy") ?? false,
+                      "groupBy must be present in DTO (null or object)")
+    }
+
+    func testViewsCreateWithStructuredFilters() throws {
+        try skipIfBinaryMissing()
+        let viewName = "cli-view-\(UUID().uuidString.prefix(8))"
+        let filters = """
+            [{"target":{"kind":"builtin","value":"readingStatus"},\
+            "op":"isAnyOf",\
+            "value":{"kind":"selectKeys","value":["reading","read"]}}]
+            """
+        let sorts = """
+            [{"target":{"kind":"builtin","value":"dateAdded"},"ascending":false}]
+            """
+        let result = try runCLI(["views", "--create", "--name", viewName,
+                                 "--filters", filters, "--sorts", sorts])
+        XCTAssertEqual(result.exitCode, 0, "create should succeed; stderr=\(result.stderr)")
+        let obj = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any]
+        defer {
+            if let id = parseInt64(obj?["id"]) { _ = try? runCLI(["views", "--delete", String(id)]) }
+        }
+        XCTAssertEqual(obj?["name"] as? String, viewName)
+
+        let roundTripFilters = obj?["filters"] as? [[String: Any]] ?? []
+        XCTAssertEqual(roundTripFilters.count, 1)
+        let target = roundTripFilters.first?["target"] as? [String: Any]
+        XCTAssertEqual(target?["kind"] as? String, "builtin")
+        XCTAssertEqual(target?["value"] as? String, "readingStatus")
+        XCTAssertEqual(roundTripFilters.first?["op"] as? String, "isAnyOf")
+        let filterValue = roundTripFilters.first?["value"] as? [String: Any]
+        XCTAssertEqual(filterValue?["kind"] as? String, "selectKeys")
+        XCTAssertEqual(filterValue?["value"] as? [String], ["reading", "read"])
+
+        let roundTripSorts = obj?["sorts"] as? [[String: Any]] ?? []
+        XCTAssertEqual(roundTripSorts.count, 1)
+        let sortTarget = roundTripSorts.first?["target"] as? [String: Any]
+        XCTAssertEqual(sortTarget?["kind"] as? String, "builtin")
+        XCTAssertEqual(sortTarget?["value"] as? String, "dateAdded")
+        XCTAssertEqual(roundTripSorts.first?["ascending"] as? Bool, false)
+    }
+
+    func testViewsCreateWithGroupBy() throws {
+        try skipIfBinaryMissing()
+        let viewName = "cli-view-group-\(UUID().uuidString.prefix(8))"
+        let groupBy = """
+            {"target":{"kind":"builtin","value":"dateAdded"},\
+            "dateBin":"month","collapsed":[],"showEmpty":false}
+            """
+        let result = try runCLI(["views", "--create", "--name", viewName, "--group-by", groupBy])
+        XCTAssertEqual(result.exitCode, 0, "create should succeed; stderr=\(result.stderr)")
+        let obj = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any]
+        defer {
+            if let id = parseInt64(obj?["id"]) { _ = try? runCLI(["views", "--delete", String(id)]) }
+        }
+
+        let group = obj?["groupBy"] as? [String: Any]
+        XCTAssertNotNil(group, "groupBy must round-trip")
+        XCTAssertEqual(group?["dateBin"] as? String, "month")
+        XCTAssertEqual(group?["showEmpty"] as? Bool, false)
+        let target = group?["target"] as? [String: Any]
+        XCTAssertEqual(target?["kind"] as? String, "builtin")
+        XCTAssertEqual(target?["value"] as? String, "dateAdded")
+    }
+
+    func testViewsCreateWithInvalidFiltersJSONFails() throws {
+        try skipIfBinaryMissing()
+        let result = try runCLI(["views", "--create",
+                                 "--name", "cli-invalid-\(UUID().uuidString.prefix(8))",
+                                 "--filters", "not-valid-json"])
+        XCTAssertNotEqual(result.exitCode, 0, "malformed JSON should exit non-zero")
+        XCTAssertTrue(result.stderr.contains("--filters") || result.stdout.contains("\"error\""),
+                      "error output should mention the offending flag or be a JSON error object")
+    }
+
+    func testViewsRename() throws {
+        try skipIfBinaryMissing()
+        let original = "cli-rename-view-\(UUID().uuidString.prefix(8))"
+        let created = try runCLI(["views", "--create", "--name", original])
+        XCTAssertEqual(created.exitCode, 0)
+        let createdObj = try JSONSerialization.jsonObject(with: Data(created.stdout.utf8)) as? [String: Any]
+        guard let id = parseInt64(createdObj?["id"]) else {
+            XCTFail("create did not return an id")
+            return
+        }
+        defer { _ = try? runCLI(["views", "--delete", String(id)]) }
+
+        let renamed = original + "-renamed"
+        let result = try runCLI(["views", "--rename", String(id), "--name", renamed])
+        XCTAssertEqual(result.exitCode, 0, "rename should succeed; stderr=\(result.stderr)")
+        let obj = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any]
+        XCTAssertEqual(obj?["name"] as? String, renamed)
+    }
+
+    func testViewsDeleteDefaultIsRefused() throws {
+        try skipIfBinaryMissing()
+        guard let id = try defaultViewId() else {
+            XCTFail("default view not found")
+            return
+        }
+        let result = try runCLI(["views", "--delete", String(id)])
+        XCTAssertNotEqual(result.exitCode, 0, "deleting the default view must be refused")
+    }
+
+    func testViewsQueryReturnsReferenceArray() throws {
+        try skipIfBinaryMissing()
+        guard let id = try defaultViewId() else {
+            XCTFail("default view not found")
+            return
+        }
+        let result = try runCLI(["views", "--query", String(id), "--limit", "5"])
+        XCTAssertEqual(result.exitCode, 0, "query should succeed; stderr=\(result.stderr)")
+        let refs = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [[String: Any]]
+        XCTAssertNotNil(refs, "query output should be a JSON array of references")
+    }
 }

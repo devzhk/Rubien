@@ -374,15 +374,18 @@ No options.
 
 ## views
 
-Manage database views (saved query + display configurations).
+Manage database views (saved filter/sort/group configurations). `--query`
+runs the full filter → sort → group pipeline client-side against the view's
+scope.
 
 ```bash
 rubien-cli views                                              # List all
 rubien-cli views --create --name "Unread Papers"
 rubien-cli views --create --name "Recent Reading" \
-  --filters '[{"field":"readingStatus","op":"equals","value":"reading"}]' \
-  --sorts '[{"field":"dateAdded","ascending":false}]'
-rubien-cli views --query 3 --limit 50                         # Run a view's query
+  --filters '[{"target":{"kind":"builtin","value":"readingStatus"},"op":"isAnyOf","value":{"kind":"selectKeys","value":["reading","read"]}}]' \
+  --sorts '[{"target":{"kind":"builtin","value":"dateAdded"},"ascending":false}]' \
+  --group-by '{"target":{"kind":"builtin","value":"dateAdded"},"dateBin":"month","collapsed":[],"showEmpty":false}'
+rubien-cli views --query 3 --limit 50                         # Run the view's pipeline
 rubien-cli views --rename 3 --name "Urgent Papers"
 rubien-cli views --delete 3
 ```
@@ -391,33 +394,139 @@ rubien-cli views --delete 3
 |---|---|---|---|
 | `--create` | Flag | false | Create a new view |
 | `--name` | String | — | View name (with `--create` or `--rename`) |
-| `--delete` | Int64 | — | Delete view by ID (cannot delete default) |
-| `--query` | Int64 | — | Execute a view's saved query |
+| `--delete` | Int64 | — | Delete view by ID (default view cannot be deleted) |
+| `--query` | Int64 | — | Execute the view's pipeline, print matching references |
 | `-l, --limit` | Int | 0 (all) | Max results (with `--query`) |
 | `--rename` | Int64 | — | Rename view by ID |
-| `--filters` | String | — | JSON `[ViewFilter]` (with `--create`) |
-| `--sorts` | String | — | JSON `[ViewSort]` (with `--create`) |
+| `--filters` | String | `[]` | JSON `[ViewFilter]` (with `--create`) |
+| `--sorts` | String | default sort | JSON `[ViewSort]` (with `--create`) |
+| `--group-by` | String | — | JSON `GroupConfig` (with `--create`) |
+
+### FieldTarget
+
+Identifies the column a filter/sort/group targets. Tagged union:
+
+```json
+{"kind": "builtin", "value": "year"}
+{"kind": "custom",  "value": 42}
+```
+
+Built-in `value` is one of: `title`, `authors`, `year`, `journal`,
+`referenceType`, `tags`, `readingStatus`, `dateAdded`, `dateModified`, `doi`,
+`publisher`, `volume`, `issue`, `pages`, `pdfAttached`.
+
+Custom `value` is a `propertyDefinition.id` (from `rubien-cli properties`).
+
+### FilterValue
+
+Tagged union; the variant must match the operator's expected payload type:
+
+```json
+{"kind": "text",       "value": "transformer"}
+{"kind": "number",     "value": 2017}
+{"kind": "date",       "value": "2026-01-15T00:00:00Z"}
+{"kind": "datePreset", "value": {"preset": "lastNDays", "n": 7}}
+{"kind": "selectKeys", "value": ["reading", "read"]}
+{"kind": "bool",       "value": true}
+{"kind": "none"}
+```
+
+Date presets: `today`, `yesterday`, `tomorrow`, `thisWeek`, `thisMonth`,
+`thisYear`, `nextWeek`, `nextMonth`, `lastNDays` (requires `n`), `nextNDays`
+(requires `n`).
+
+`none` is used for the nullary operators (`isEmpty`, `isNotEmpty`,
+`isChecked`, `isUnchecked`).
+
+### Operators by field kind
+
+Each column has a kind (derived from the field type). The valid operators
+depend on the kind:
+
+| Kind | Operators |
+|---|---|
+| text | `equals`, `notEquals`, `contains`, `notContains`, `startsWith`, `endsWith`, `isEmpty`, `isNotEmpty` |
+| number | `equals`, `notEquals`, `greaterThan`, `lessThan`, `greaterOrEqual`, `lessOrEqual`, `isEmpty`, `isNotEmpty` |
+| date | `equals`, `notEquals`, `greaterThan`, `lessThan`, `greaterOrEqual`, `lessOrEqual`, `isWithin`, `isEmpty`, `isNotEmpty` |
+| singleSelect | `equals`, `notEquals`, `isAnyOf`, `isNoneOf`, `isEmpty`, `isNotEmpty` |
+| multiSelect | `contains`, `notContains`, `containsAnyOf`, `containsNoneOf`, `containsAllOf`, `isEmpty`, `isNotEmpty` |
+| checkbox | `isChecked`, `isUnchecked` |
+
+`isWithin` expects a `datePreset` value. `isAnyOf`/`isNoneOf`/`contains*`
+expect `selectKeys`. `contains`/`notContains` on multiSelect read only the
+first element of `selectKeys` (the UI funnels them through the same editor).
 
 ### ViewFilter JSON format
 
 ```json
 [
-  {"field": "readingStatus", "op": "equals", "value": "unread"},
-  {"field": "year", "op": "greaterThan", "value": "2020"}
+  {
+    "target": {"kind": "builtin", "value": "readingStatus"},
+    "op": "isAnyOf",
+    "value": {"kind": "selectKeys", "value": ["unread", "reading"]}
+  },
+  {
+    "target": {"kind": "builtin", "value": "year"},
+    "op": "greaterThan",
+    "value": {"kind": "number", "value": 2020}
+  }
 ]
 ```
 
-**Fields:** `title`, `authors`, `year`, `journal`, `referenceType`, `tags`, `readingStatus`, `dateAdded`, `dateModified`, `doi`, `publisher`, `volume`, `issue`, `pages`, `pdfAttached`
-
-**Operators:** `equals`, `notEquals`, `contains`, `notContains`, `greaterThan`, `lessThan`, `greaterOrEqual`, `lessOrEqual`, `isEmpty`, `isNotEmpty`, `isAnyOf`
+Filters AND together — a reference passes iff every filter matches.
 
 ### ViewSort JSON format
 
 ```json
-[{"field": "dateAdded", "ascending": false}]
+[
+  {"target": {"kind": "builtin", "value": "dateAdded"}, "ascending": false},
+  {"target": {"kind": "builtin", "value": "title"},     "ascending": true}
+]
 ```
 
-**Output:** JSON array of `{id, name, icon, isDefault, displayOrder, scope, filters, sorts, dateCreated, dateModified}` when listing; single object on create/rename; reference array on `--query`.
+Multi-column: first sort is primary, later sorts break ties. Nulls always
+sort last. Sorts targeting a multiSelect kind are silently dropped.
+
+### GroupConfig JSON format
+
+```json
+{
+  "target": {"kind": "builtin", "value": "tags"},
+  "dateBin": null,
+  "customOrder": null,
+  "collapsed": [],
+  "showEmpty": false
+}
+```
+
+Fields: `target` (required), `dateBin` (one of `week`, `month`, `year`; only
+meaningful for date targets), `customOrder` (optional array of keys
+overriding natural order), `collapsed` (UI state), `showEmpty` (seeds empty
+buckets for every known option of a finite single-select). Grouping on text
+or number kinds is disallowed.
+
+### Output
+
+Listing and create/rename emit a `DatabaseViewDTO`:
+
+```json
+{
+  "id": 3,
+  "name": "Recent Reading",
+  "icon": "tablecells",
+  "isDefault": false,
+  "displayOrder": 1,
+  "scope": {"all": {}},
+  "columns": [/* [ColumnConfig] */],
+  "filters": [/* [ViewFilter] — tagged-union shape above */],
+  "sorts":   [/* [ViewSort]   — tagged-union shape above */],
+  "groupBy": null,
+  "dateCreated": "2026-04-15T10:30:00Z",
+  "dateModified": "2026-04-15T10:30:00Z"
+}
+```
+
+`--query` emits a reference array (same shape as `list` / `search`).
 
 ---
 
