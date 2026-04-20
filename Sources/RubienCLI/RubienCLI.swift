@@ -620,21 +620,36 @@ struct Cite: ParsableCommand {
 struct Import: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "import",
-        abstract: "Import references from a BibTeX or RIS file (use '-' for stdin)"
+        abstract: "Import references from a BibTeX/RIS file or a Zotero export folder (use '-' for stdin)"
     )
 
-    @Argument(help: "Path to a .bib or .ris file, or '-' to read from stdin")
+    @Argument(help: "Path to a .bib or .ris file, a Zotero export folder (containing a .bib + files/ tree), or '-' to read from stdin")
     var file: String
 
     @Option(name: .long, help: "Format hint when reading from stdin: bib, ris")
     var format: String?
 
+    @Option(name: .long, help: "When importing a Zotero folder: stamp every reference with this property (default: Tags)")
+    var property: String?
+
+    @Option(name: .long, help: "When importing a Zotero folder: value to stamp on the property (default: folder basename)")
+    var value: String?
+
     func run() throws {
+        // Folder path → Zotero folder importer.
+        if file != "-" {
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: file, isDirectory: &isDir), isDir.boolValue {
+                try runZoteroFolderImport(folderPath: file)
+                return
+            }
+        }
+
+        // File or stdin → existing BibTeX/RIS path.
         let content: String
         let ext: String
 
         if file == "-" {
-            // Read from stdin
             guard let fmt = format?.lowercased() else {
                 printJSONError("--format (bib or ris) is required when reading from stdin")
                 throw ExitCode.failure
@@ -649,7 +664,6 @@ struct Import: ParsableCommand {
         } else {
             let url = URL(fileURLWithPath: file)
             ext = format?.lowercased() ?? url.pathExtension.lowercased()
-            // Guard against excessively large files (50 MB limit)
             let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
             if let size = attrs[.size] as? UInt64, size > 50 * 1024 * 1024 {
                 printJSONError("File exceeds 50 MB limit (\(size / 1024 / 1024) MB)")
@@ -671,6 +685,47 @@ struct Import: ParsableCommand {
 
         let count = try AppDatabase.shared.batchImportReferences(refs)
         printJSON(["imported": "\(count)", "file": file])
+    }
+
+    private func runZoteroFolderImport(folderPath: String) throws {
+        let folderURL = URL(fileURLWithPath: folderPath)
+        let db = AppDatabase.shared
+
+        let propertyName = property ?? PropertyDefinition.tagsPropertyName
+        let stampValue = value ?? folderURL.lastPathComponent
+
+        guard let propDef = try db.findPropertyDefinition(byName: propertyName) else {
+            printJSONError("Property not found: '\(propertyName)'")
+            throw ExitCode.failure
+        }
+        guard let propId = propDef.id else {
+            printJSONError("Property '\(propertyName)' has no id")
+            throw ExitCode.failure
+        }
+
+        let target = ZoteroImportPropertyTarget(propertyId: propId, value: stampValue)
+        do {
+            let result = try ZoteroFolderImporter.importFolder(
+                at: folderURL,
+                db: db,
+                propertyTarget: target
+            )
+            printJSON([
+                "imported": "\(result.imported)",
+                "attached": "\(result.attached)",
+                "duplicatesSkipped": "\(result.duplicatesSkipped)",
+                "missingPDFs": result.missingPDFs.joined(separator: ", "),
+                "property": propertyName,
+                "value": stampValue,
+                "file": folderPath,
+            ])
+        } catch let error as ZoteroImportError {
+            printJSONError(error.errorDescription ?? "\(error)")
+            throw ExitCode.failure
+        } catch let error as ZoteroFolderImporter.Error {
+            printJSONError(error.errorDescription ?? "\(error)")
+            throw ExitCode.failure
+        }
     }
 }
 

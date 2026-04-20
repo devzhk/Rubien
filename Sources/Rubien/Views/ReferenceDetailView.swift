@@ -681,13 +681,13 @@ struct ReferenceDetailView: View {
                 }
             )
         case .multiSelect:
-            let selected = parseMultiSelectValues(currentValue)
+            let selected = PropertyValue.decodeMultiSelect(currentValue)
             InlineMultiSelectOptionRow(
                 label: prop.name,
                 selectedValues: selected,
                 options: prop.options,
                 onUpdate: { values in
-                    let json = encodeMultiSelectValues(values)
+                    let json = PropertyValue.encodeMultiSelect(values)
                     saveCustomValue(propId: propId, value: json.isEmpty ? nil : json)
                 },
                 onCreateOption: { newOption in
@@ -1008,29 +1008,9 @@ struct ReferenceDetailView: View {
 
     private func addOptionToProperty(propId: Int64, optionValue: String) {
         guard var prop = propertyDefs.first(where: { $0.id == propId }) else { return }
-        let color = ColorPalette.nextUnused(excluding: Set(prop.options.map(\.color)))
-        var options = prop.options
-        options.append(SelectOption(value: optionValue, color: color))
-        prop.options = options
-        try? db.savePropertyDefinition(&prop)
-    }
-
-    private func parseMultiSelectValues(_ raw: String) -> [String] {
-        guard !raw.isEmpty,
-              let data = raw.data(using: .utf8),
-              let arr = try? JSONDecoder().decode([String].self, from: data) else {
-            return []
+        if prop.addOptionIfMissing(optionValue) {
+            try? db.savePropertyDefinition(&prop)
         }
-        return arr
-    }
-
-    private func encodeMultiSelectValues(_ values: [String]) -> String {
-        guard !values.isEmpty,
-              let data = try? JSONEncoder().encode(values),
-              let json = String(data: data, encoding: .utf8) else {
-            return ""
-        }
-        return json
     }
 
     // MARK: - PDF Download

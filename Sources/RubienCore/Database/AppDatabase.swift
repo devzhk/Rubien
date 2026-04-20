@@ -4,6 +4,17 @@ import os.log
 
 private let appDatabaseLog = Logger(subsystem: "Rubien", category: "AppDatabase")
 
+/// Per-entry outcome from `AppDatabase.classifyImportEntries`. The Zotero importer uses
+/// this to decide whether to copy each attachment:
+/// - `.fresh`, `.dbDuplicateWithoutPDF` → copy (merge will attach in the latter case);
+/// - `.dbDuplicateWithPDF`, `.intraBatchDuplicate` → skip copy to avoid orphaning.
+enum ImportClassification: Equatable {
+    case fresh
+    case dbDuplicateWithPDF
+    case dbDuplicateWithoutPDF
+    case intraBatchDuplicate
+}
+
 public final class AppDatabase: Sendable {
     public let dbWriter: any DatabaseWriter
 
@@ -236,7 +247,7 @@ public final class AppDatabase: Sendable {
             // Custom properties
             try db.create(table: "propertyDefinition") { t in
                 t.autoIncrementedPrimaryKey("id")
-                t.column("name", .text).notNull()
+                t.column("name", .text).notNull().unique()
                 t.column("type", .text).notNull().defaults(to: "string")
                 t.column("optionsJSON", .text).notNull().defaults(to: "[]")
                 t.column("sortOrder", .integer).notNull().defaults(to: 0)
@@ -421,8 +432,8 @@ extension AppDatabase {
             }
 
             if reference.id == nil,
-               let duplicateId = try findDuplicateReferenceID(for: reference, db: db),
-               var existing = try Reference.fetchOne(db, id: duplicateId) {
+               let match = try findDuplicateReferenceID(for: reference, db: db),
+               var existing = try Reference.fetchOne(db, id: match.id) {
                 existing = mergedReference(existing: existing, incoming: reference)
                 try existing.save(db)
                 reference = existing
@@ -530,22 +541,42 @@ extension AppDatabase {
     /// Batch import — uses single transaction for maximum speed
     /// 10,000 records in ~200ms on Apple Silicon
     public func batchImportReferences(_ references: [Reference]) throws -> Int {
-        guard !references.isEmpty else { return 0 }
+        try batchImportReferences(references, stamping: nil).count
+    }
+
+    /// Batch import with optional per-reference property stamping inside the same transaction.
+    /// Returns the count and the row IDs of every processed entry (existing row's ID on merge,
+    /// newly-inserted ID on fresh insert).
+    public func batchImportReferences(
+        _ references: [Reference],
+        stamping target: ZoteroImportPropertyTarget?
+    ) throws -> (count: Int, ids: [Int64]) {
+        guard !references.isEmpty else { return (0, []) }
         return try dbWriter.write { db in
-            var count = 0
+            var ids: [Int64] = []
+            ids.reserveCapacity(references.count)
             for var ref in references {
                 try normalizeForDirectLibrarySave(&ref)
                 try ensureLibraryReady(ref)
-                if let duplicateId = try findDuplicateReferenceID(for: ref, db: db),
-                   var existing = try Reference.fetchOne(db, id: duplicateId) {
+                if let match = try findDuplicateReferenceID(for: ref, db: db),
+                   var existing = try Reference.fetchOne(db, id: match.id) {
                     existing = mergedReference(existing: existing, incoming: ref)
                     try existing.save(db)
+                    if let existingId = existing.id { ids.append(existingId) }
                 } else {
                     try ref.insert(db)
+                    if let newId = ref.id { ids.append(newId) }
                 }
-                count += 1
             }
-            return count
+            if let target {
+                try applyPropertyValueInTransaction(
+                    referenceIds: ids,
+                    propertyId: target.propertyId,
+                    value: target.value,
+                    db: db
+                )
+            }
+            return (ids.count, ids)
         }
     }
 
@@ -858,8 +889,8 @@ extension AppDatabase {
         }
 
         if reference.id == nil,
-           let duplicateId = try findDuplicateReferenceID(for: reference, db: db),
-           var existing = try Reference.fetchOne(db, id: duplicateId) {
+           let match = try findDuplicateReferenceID(for: reference, db: db),
+           var existing = try Reference.fetchOne(db, id: match.id) {
             existing = mergedReference(existing: existing, incoming: reference)
             try existing.save(db)
             reference = existing
@@ -904,34 +935,41 @@ extension AppDatabase {
         try evidence.save(db)
     }
 
-    private func findDuplicateReferenceID(for reference: Reference, db: Database) throws -> Int64? {
+    /// Outcome of a single-entry duplicate lookup: the matched row's id and — because
+    /// callers (classifier, merge path) immediately want to know — its current `pdfPath`.
+    struct DuplicateMatch {
+        let id: Int64
+        let pdfPath: String?
+    }
+
+    func findDuplicateReferenceID(for reference: Reference, db: Database) throws -> DuplicateMatch? {
         if let doi = normalizedDOI(reference.doi),
-           let id = try Int64.fetchOne(db, sql: "SELECT id FROM reference WHERE lower(doi) = ? LIMIT 1", arguments: [doi]) {
-            return id
+           let row = try Row.fetchOne(db, sql: "SELECT id, pdfPath FROM reference WHERE lower(doi) = ? LIMIT 1", arguments: [doi]) {
+            return DuplicateMatch(id: row["id"], pdfPath: row["pdfPath"])
         }
 
         if let pmid = normalizedPMID(reference.pmid),
-           let id = try Int64.fetchOne(db, sql: "SELECT id FROM reference WHERE pmid = ? LIMIT 1", arguments: [pmid]) {
-            return id
+           let row = try Row.fetchOne(db, sql: "SELECT id, pdfPath FROM reference WHERE pmid = ? LIMIT 1", arguments: [pmid]) {
+            return DuplicateMatch(id: row["id"], pdfPath: row["pdfPath"])
         }
 
         if let pmcid = normalizedPMCID(reference.pmcid),
-           let id = try Int64.fetchOne(db, sql: "SELECT id FROM reference WHERE upper(pmcid) = ? LIMIT 1", arguments: [pmcid]) {
-            return id
+           let row = try Row.fetchOne(db, sql: "SELECT id, pdfPath FROM reference WHERE upper(pmcid) = ? LIMIT 1", arguments: [pmcid]) {
+            return DuplicateMatch(id: row["id"], pdfPath: row["pdfPath"])
         }
 
         if let isbn = normalizedISBN(reference.isbn),
-           let id = try Int64.fetchOne(
+           let row = try Row.fetchOne(
             db,
-            sql: "SELECT id FROM reference WHERE replace(replace(upper(isbn), '-', ''), ' ', '') = ? LIMIT 1",
+            sql: "SELECT id, pdfPath FROM reference WHERE replace(replace(upper(isbn), '-', ''), ' ', '') = ? LIMIT 1",
             arguments: [isbn]
            ) {
-            return id
+            return DuplicateMatch(id: row["id"], pdfPath: row["pdfPath"])
         }
 
         if let url = reference.url?.trimmingCharacters(in: .whitespacesAndNewlines), !url.isEmpty,
-           let id = try Int64.fetchOne(db, sql: "SELECT id FROM reference WHERE url = ? LIMIT 1", arguments: [url]) {
-            return id
+           let row = try Row.fetchOne(db, sql: "SELECT id, pdfPath FROM reference WHERE url = ? LIMIT 1", arguments: [url]) {
+            return DuplicateMatch(id: row["id"], pdfPath: row["pdfPath"])
         }
 
         if let issn = normalizedISSN(reference.issn),
@@ -940,7 +978,7 @@ extension AppDatabase {
             let rows = try Row.fetchAll(
                 db,
                 sql: """
-                    SELECT id, title
+                    SELECT id, title, pdfPath
                     FROM reference
                     WHERE replace(replace(upper(issn), '-', ''), ' ', '') = ?
                       AND year = ?
@@ -948,8 +986,8 @@ extension AppDatabase {
                     """,
                 arguments: [issn, year]
             )
-            if let match = rows.first(where: { normalizedTitleKey(($0["title"] as String?)) == normalizedTitle }) {
-                return match["id"]
+            if let row = rows.first(where: { normalizedTitleKey(($0["title"] as String?)) == normalizedTitle }) {
+                return DuplicateMatch(id: row["id"], pdfPath: row["pdfPath"])
             }
         }
 
@@ -959,7 +997,7 @@ extension AppDatabase {
             let rows = try Row.fetchAll(
                 db,
                 sql: """
-                    SELECT id, title
+                    SELECT id, title, pdfPath
                     FROM reference
                     WHERE year = ?
                       AND lower(trim(authorsNormalized)) = ?
@@ -967,12 +1005,176 @@ extension AppDatabase {
                     """,
                 arguments: [year, normalizedAuthors]
             )
-            if let match = rows.first(where: { normalizedTitleKey(($0["title"] as String?)) == normalizedTitle }) {
-                return match["id"]
+            if let row = rows.first(where: { normalizedTitleKey(($0["title"] as String?)) == normalizedTitle }) {
+                return DuplicateMatch(id: row["id"], pdfPath: row["pdfPath"])
             }
         }
 
         return nil
+    }
+
+    /// Batched classifier for import pipelines. For each incoming reference it decides
+    /// whether it duplicates an existing library row (and whether that row already has a
+    /// `pdfPath`) or duplicates an earlier entry within the same batch. Runs at most one
+    /// `IN (...)` query per identifier strategy (DOI, PMID, PMCID, ISBN, URL), falling
+    /// back to per-entry `findDuplicateReferenceID` only for title-key strategies 6–7.
+    ///
+    /// Read-only and advisory; `batchImportReferences` re-runs dedup in its write
+    /// transaction and remains the authoritative source of truth.
+    func classifyImportEntries(_ references: [Reference]) throws -> [ImportClassification] {
+        guard !references.isEmpty else { return [] }
+        return try dbWriter.read { db in
+            var doiKeys = Set<String>()
+            var pmidKeys = Set<String>()
+            var pmcidKeys = Set<String>()
+            var isbnKeys = Set<String>()
+            var urlKeys = Set<String>()
+
+            for ref in references {
+                if let v = normalizedDOI(ref.doi) { doiKeys.insert(v) }
+                if let v = normalizedPMID(ref.pmid) { pmidKeys.insert(v) }
+                if let v = normalizedPMCID(ref.pmcid) { pmcidKeys.insert(v) }
+                if let v = normalizedISBN(ref.isbn) { isbnKeys.insert(v) }
+                if let raw = ref.url?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+                    urlKeys.insert(raw)
+                }
+            }
+
+            var doiMap: [String: String?] = [:]
+            var pmidMap: [String: String?] = [:]
+            var pmcidMap: [String: String?] = [:]
+            var isbnMap: [String: String?] = [:]
+            var urlMap: [String: String?] = [:]
+
+            try fetchIdentifierMatches(
+                db: db,
+                sqlTemplate: "SELECT lower(doi) AS k, pdfPath AS p FROM reference WHERE lower(doi) IN (%@)",
+                keys: Array(doiKeys),
+                into: &doiMap
+            )
+            try fetchIdentifierMatches(
+                db: db,
+                sqlTemplate: "SELECT pmid AS k, pdfPath AS p FROM reference WHERE pmid IN (%@)",
+                keys: Array(pmidKeys),
+                into: &pmidMap
+            )
+            try fetchIdentifierMatches(
+                db: db,
+                sqlTemplate: "SELECT upper(pmcid) AS k, pdfPath AS p FROM reference WHERE upper(pmcid) IN (%@)",
+                keys: Array(pmcidKeys),
+                into: &pmcidMap
+            )
+            try fetchIdentifierMatches(
+                db: db,
+                sqlTemplate: "SELECT replace(replace(upper(isbn), '-', ''), ' ', '') AS k, pdfPath AS p FROM reference WHERE replace(replace(upper(isbn), '-', ''), ' ', '') IN (%@)",
+                keys: Array(isbnKeys),
+                into: &isbnMap
+            )
+            try fetchIdentifierMatches(
+                db: db,
+                sqlTemplate: "SELECT url AS k, pdfPath AS p FROM reference WHERE url IN (%@)",
+                keys: Array(urlKeys),
+                into: &urlMap
+            )
+
+            // Track identifiers already claimed by earlier entries in this batch so
+            // later occurrences become `.intraBatchDuplicate` (skip copy).
+            var claimedDoi = Set<String>()
+            var claimedPmid = Set<String>()
+            var claimedPmcid = Set<String>()
+            var claimedIsbn = Set<String>()
+            var claimedUrl = Set<String>()
+
+            var result: [ImportClassification] = []
+            result.reserveCapacity(references.count)
+
+            for ref in references {
+                let doi = normalizedDOI(ref.doi)
+                let pmid = normalizedPMID(ref.pmid)
+                let pmcid = normalizedPMCID(ref.pmcid)
+                let isbn = normalizedISBN(ref.isbn)
+                let url: String? = {
+                    let trimmed = ref.url?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return (trimmed?.isEmpty == false) ? trimmed : nil
+                }()
+
+                var intraBatch = false
+                if let doi, claimedDoi.contains(doi) { intraBatch = true }
+                else if let pmid, claimedPmid.contains(pmid) { intraBatch = true }
+                else if let pmcid, claimedPmcid.contains(pmcid) { intraBatch = true }
+                else if let isbn, claimedIsbn.contains(isbn) { intraBatch = true }
+                else if let url, claimedUrl.contains(url) { intraBatch = true }
+
+                if let doi { claimedDoi.insert(doi) }
+                if let pmid { claimedPmid.insert(pmid) }
+                if let pmcid { claimedPmcid.insert(pmcid) }
+                if let isbn { claimedIsbn.insert(isbn) }
+                if let url { claimedUrl.insert(url) }
+
+                if intraBatch {
+                    result.append(.intraBatchDuplicate)
+                    continue
+                }
+
+                var dbMatched = false
+                var dbExistingPDF: String? = nil
+                func apply(_ key: String?, in map: [String: String?]) {
+                    guard !dbMatched, let key, let pdf = map[key] else { return }
+                    dbMatched = true
+                    dbExistingPDF = pdf
+                }
+                apply(doi, in: doiMap)
+                apply(pmid, in: pmidMap)
+                apply(pmcid, in: pmcidMap)
+                apply(isbn, in: isbnMap)
+                apply(url, in: urlMap)
+
+                if dbMatched {
+                    result.append(dbExistingPDF != nil ? .dbDuplicateWithPDF : .dbDuplicateWithoutPDF)
+                    continue
+                }
+
+                // Strategies 1–5 didn't match. Fall back to per-entry title-key lookup
+                // (strategies 6–7) — rare in practice for Zotero exports, so this
+                // doesn't warrant a second batching pass.
+                if let fallback = try findDuplicateReferenceID(for: ref, db: db) {
+                    result.append(fallback.pdfPath != nil ? .dbDuplicateWithPDF : .dbDuplicateWithoutPDF)
+                    continue
+                }
+
+                result.append(.fresh)
+            }
+
+            return result
+        }
+    }
+
+    /// Chunked `IN (...)` lookup that populates `map[key] = pdfPath` for every row that
+    /// matches one of the incoming identifiers. `map[key] = nil` means "matched, no PDF"
+    /// (distinguishable from "not in map" via `map[key]` returning `Optional<String?>`).
+    /// Chunk size 500 matches the convention used by `fetchPropertyValues(forReferences:)`.
+    private func fetchIdentifierMatches(
+        db: Database,
+        sqlTemplate: String,
+        keys: [String],
+        into map: inout [String: String?]
+    ) throws {
+        guard !keys.isEmpty else { return }
+        let chunkSize = 500
+        for start in stride(from: 0, to: keys.count, by: chunkSize) {
+            let slice = Array(keys[start..<min(start + chunkSize, keys.count)])
+            let placeholders = Array(repeating: "?", count: slice.count).joined(separator: ",")
+            let sql = sqlTemplate.replacingOccurrences(of: "%@", with: placeholders)
+            let rows = try Row.fetchAll(db, sql: sql, arguments: StatementArguments(slice))
+            for row in rows {
+                let key: String = row["k"]
+                let pdf: String? = row["p"]
+                // Prefer a match that has a pdfPath over one that doesn't, in case
+                // multiple library rows somehow share the same normalized identifier.
+                if let existing = map[key], existing != nil { continue }
+                map[key] = pdf
+            }
+        }
     }
 
     private func mergedReference(existing: Reference, incoming: Reference) -> Reference {

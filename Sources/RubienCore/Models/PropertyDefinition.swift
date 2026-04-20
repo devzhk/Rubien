@@ -112,6 +112,25 @@ public struct PropertyDefinition: Identifiable, Codable, Hashable, Sendable {
         }
         return "custom_\(id ?? 0)"
     }
+
+    /// `defaultFieldKey` value for the built-in Tags property (routes writes through the Tag table).
+    public static let tagsFieldKey = "tags"
+    /// Display name of the built-in Tags property.
+    public static let tagsPropertyName = "Tags"
+
+    /// Append `value` as a new option with an auto-picked color if it isn't already listed.
+    /// Returns `true` when the definition was mutated (caller should persist), `false` otherwise.
+    @discardableResult
+    public mutating func addOptionIfMissing(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        var current = options
+        if current.contains(where: { $0.value == trimmed }) { return false }
+        let used = Set(current.map(\.color))
+        current.append(SelectOption(value: trimmed, color: ColorPalette.nextUnused(excluding: used)))
+        options = current
+        return true
+    }
 }
 
 // MARK: - GRDB Record

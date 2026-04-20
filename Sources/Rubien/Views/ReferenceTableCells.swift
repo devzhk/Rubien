@@ -592,12 +592,12 @@ struct EditableCustomPropertyCell: View {
                 }
             )
         case .multiSelect:
-            let selected = parseMultiSelectValues(currentValue)
+            let selected = PropertyValue.decodeMultiSelect(currentValue)
             EditableMultiSelectCell(
                 selectedValues: selected,
                 options: property.options,
                 onUpdate: { values in
-                    let json = encodeMultiSelectValues(values)
+                    let json = PropertyValue.encodeMultiSelect(values)
                     commitCustom(referenceId, propId, json.isEmpty ? nil : json)
                 },
                 onCreateOption: { newName in
@@ -623,21 +623,4 @@ struct EditableCustomPropertyCell: View {
         }
     }
 
-    private func parseMultiSelectValues(_ raw: String) -> [String] {
-        guard !raw.isEmpty,
-              let data = raw.data(using: .utf8),
-              let arr = try? JSONDecoder().decode([String].self, from: data) else {
-            return []
-        }
-        return arr
-    }
-
-    private func encodeMultiSelectValues(_ values: [String]) -> String {
-        guard !values.isEmpty,
-              let data = try? JSONEncoder().encode(values),
-              let json = String(data: data, encoding: .utf8) else {
-            return ""
-        }
-        return json
-    }
 }

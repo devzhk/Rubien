@@ -198,21 +198,45 @@ rubien-cli cite 42 43 --style ieee --format bibliography
 
 ## import
 
-Import references from a BibTeX (`.bib`) or RIS (`.ris`) file. Use `"-"` to read from stdin.
+Import references from a BibTeX (`.bib`) or RIS (`.ris`) file, or from a Zotero "Export Collection… with files" folder. Use `"-"` to read BibTeX/RIS from stdin.
 
 ```bash
 rubien-cli import references.bib
 cat paper.ris | rubien-cli import - --format ris
+
+# Zotero folder (a directory containing one .bib plus files/NNN/*.pdf)
+rubien-cli import ~/Downloads/RL
+rubien-cli import ~/Downloads/RL --property Project --value "RL Research"
 ```
 
 | Argument / Option | Type | Description |
 |---|---|---|
-| `file` | String (required) | File path, or `"-"` for stdin |
+| `file` | String (required) | File path, folder path, or `"-"` for stdin |
 | `--format` | String | Format hint for stdin: `bib`, `ris` |
+| `--property` | String | Folder import only: property name to stamp (default `Tags`) |
+| `--value` | String | Folder import only: value to stamp (default: folder basename) |
 
-File size limit: 50 MB. When reading from stdin, `--format` is required.
+File size limit (single-file mode): 50 MB. When reading from stdin, `--format` is required.
 
-**Output:** JSON `{"imported": N, "file": "path"}`.
+### Folder import behaviour
+
+When `file` points at a directory, Rubien expects a Zotero export layout:
+
+```
+RL/
+  RL.bib
+  files/835/Paper A.pdf
+  files/845/Paper B.pdf
+```
+
+- The parser reads the `file = {PDF:files/…/name.pdf:application/pdf}` field on each BibTeX entry, copies the referenced PDF into `~/Library/Application Support/Rubien/PDFs/`, and sets the new reference's `pdfPath` accordingly. Non-PDF attachments are ignored.
+- Each imported reference is stamped with one value on the chosen property. `Tags` (the default) routes through the Tag table; other `multiSelect`, `singleSelect`, `string`, and `url` properties are written to `propertyValue`. Passing `--property` with a `number`/`date`/`checkbox` type errors out.
+- Re-importing the same folder is safe: existing references are merged (by DOI/PMID/PMCID/ISBN/arXiv/record key), tags aren't duplicated, and previously-copied PDFs aren't re-copied.
+- Linked-file Zotero exports (absolute PDF paths) are reported in `missingPDFs`; re-export the collection with "Files copied into export" to attach them.
+
+**Output (single-file mode):** JSON `{"imported": N, "file": "path"}`.
+
+**Output (folder mode):** JSON `{"imported": N, "attached": M, "duplicatesSkipped": K, "missingPDFs": "a, b, c", "property": "Tags", "value": "RL", "file": "path"}`.
 
 ---
 

@@ -33,3 +33,30 @@ extension PropertyValue: FetchableRecord, MutablePersistableRecord {
         case id, referenceId, propertyId, value
     }
 }
+
+// MARK: - multiSelect codec
+//
+// multiSelect `value` is stored as a JSON-encoded `[String]`. Empty-array state
+// is represented by a nil row in `propertyValue`, not by `"[]"`, so `encode`
+// returns an empty string on an empty input — callers write nil to delete the
+// row when they receive an empty result.
+
+extension PropertyValue {
+    public static func decodeMultiSelect(_ raw: String) -> [String] {
+        guard !raw.isEmpty,
+              let data = raw.data(using: .utf8),
+              let arr = try? JSONDecoder().decode([String].self, from: data) else {
+            return []
+        }
+        return arr
+    }
+
+    public static func encodeMultiSelect(_ values: [String]) -> String {
+        guard !values.isEmpty,
+              let data = try? JSONEncoder().encode(values),
+              let json = String(data: data, encoding: .utf8) else {
+            return ""
+        }
+        return json
+    }
+}

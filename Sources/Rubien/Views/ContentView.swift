@@ -583,6 +583,43 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
+    func importZoteroFolder(from url: URL, target: ZoteroImportPropertyTarget?) {
+        isImporting = true
+        importProgress = String(localized: "Reading folder…", bundle: .module)
+
+        Task.detached { [weak self] in
+            guard let self else { return }
+            do {
+                let result = try ZoteroFolderImporter.importFolder(
+                    at: url,
+                    db: self.db,
+                    propertyTarget: target
+                )
+                await MainActor.run {
+                    let fmt = String(localized: "Imported %d entries", bundle: .module)
+                    var msg = String(format: fmt, result.imported)
+                    if result.attached > 0 {
+                        msg += " • \(result.attached) PDF\(result.attached == 1 ? "" : "s") attached"
+                    }
+                    if !result.missingPDFs.isEmpty {
+                        msg += " • \(result.missingPDFs.count) missing"
+                    }
+                    self.importProgress = msg
+                    self.isImporting = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                        self.importProgress = nil
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    let fmt = String(localized: "content.import.error.generic", bundle: .module)
+                    self.importProgress = String(format: fmt, error.localizedDescription)
+                    self.isImporting = false
+                }
+            }
+        }
+    }
+
     func importRIS(from url: URL) {
         isImporting = true
         importProgress = String(localized: "Reading file…", bundle: .module)
@@ -635,6 +672,7 @@ struct ContentView: View {
     @State private var showWebImport = false
     @State private var showAddByIdentifier = false
     @State private var showBatchImport = false
+    @State private var pendingZoteroImportFolder: PendingZoteroImport?
     @State private var showPendingMetadataQueue = false
     @State private var pendingQueueNotice: PendingQueueNotice?
     @State private var cslImportMessage: String?
@@ -652,6 +690,11 @@ struct ContentView: View {
         let id = UUID()
         let title: String
         let message: String
+    }
+
+    private struct PendingZoteroImport: Identifiable {
+        let id = UUID()
+        let url: URL
     }
 
     private var metadataResolver: MetadataResolver {
@@ -827,6 +870,7 @@ struct ContentView: View {
                         Divider()
                         Button(String(localized: "content.toolbar.importBibTeX", bundle: .module)) { importBibTeX() }
                         Button(String(localized: "content.toolbar.importRIS", bundle: .module)) { importRIS() }
+                        Button(String(localized: "content.toolbar.importZoteroFolder", bundle: .module)) { pickZoteroFolder() }
                         Divider()
                         Button(String(localized: "Import citation styles (.csl)…", bundle: .module)) { importCitationStyles() }
                     } label: {
@@ -873,6 +917,16 @@ struct ContentView: View {
                         successMessage: String(localized: "Queued for review", bundle: .module)
                     )
                 }
+            )
+        }
+        .sheet(item: $pendingZoteroImportFolder) { pending in
+            ZoteroImportSheet(
+                folderURL: pending.url,
+                db: viewModel.db,
+                onConfirm: { target in
+                    viewModel.importZoteroFolder(from: pending.url, target: target)
+                },
+                onCancel: {}
             )
         }
         .overlay {
@@ -1089,6 +1143,11 @@ struct ContentView: View {
     private func importRIS() {
         guard let url = OpenPanelPicker.pickRISFile() else { return }
         viewModel.importRIS(from: url)
+    }
+
+    private func pickZoteroFolder() {
+        guard let url = OpenPanelPicker.pickZoteroFolder() else { return }
+        pendingZoteroImportFolder = PendingZoteroImport(url: url)
     }
 
     private func importPDFWithMetadata() {

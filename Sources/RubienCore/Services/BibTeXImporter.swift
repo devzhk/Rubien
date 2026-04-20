@@ -1,11 +1,37 @@
 import Foundation
 
+/// A parsed BibTeX entry with any attachment paths extracted from the `file` field.
+public struct BibTeXEntry: Equatable {
+    public let reference: Reference
+    /// Relative PDF paths accepted from the `file` field. Absolute paths are routed to
+    /// `rejectedAttachmentPaths` so the caller can report them to the user.
+    public let attachmentPaths: [String]
+    /// Paths the parser saw but rejected (currently: absolute paths from linked-file Zotero libraries).
+    public let rejectedAttachmentPaths: [String]
+
+    public init(
+        reference: Reference,
+        attachmentPaths: [String],
+        rejectedAttachmentPaths: [String] = []
+    ) {
+        self.reference = reference
+        self.attachmentPaths = attachmentPaths
+        self.rejectedAttachmentPaths = rejectedAttachmentPaths
+    }
+}
+
 /// High-performance BibTeX parser for bulk import
 public enum BibTeXImporter {
-    /// Parse BibTeX string into Reference array — optimized for large files
+    /// Parse BibTeX string into Reference array — optimized for large files.
+    /// Attachment paths from the `file` field are discarded; use `parseWithAttachments` to keep them.
     public static func parse(_ bibtex: String) -> [Reference] {
-        var references: [Reference] = []
-        references.reserveCapacity(1000)
+        parseWithAttachments(bibtex).map(\.reference)
+    }
+
+    /// Parse BibTeX string into entries that carry the `file`-field attachment paths alongside each Reference.
+    public static func parseWithAttachments(_ bibtex: String) -> [BibTeXEntry] {
+        var entries: [BibTeXEntry] = []
+        entries.reserveCapacity(1000)
 
         let scanner = Scanner(string: bibtex)
         scanner.charactersToBeSkipped = nil
@@ -132,10 +158,118 @@ public enum BibTeXImporter {
                 // Extended metadata (P2)
                 language: fields["language"]
             )
-            references.append(ref)
+            let (accepted, rejected) = parseFileFieldDetailed(fields["file"])
+            entries.append(BibTeXEntry(
+                reference: ref,
+                attachmentPaths: accepted,
+                rejectedAttachmentPaths: rejected
+            ))
         }
 
-        return references
+        return entries
+    }
+
+    // MARK: - `file` field (Zotero attachment paths)
+
+    /// Parse the Zotero-style `file` field value into accepted relative PDF paths.
+    /// Absolute paths (linked-file libraries) and non-PDF attachments are rejected.
+    internal static func parseFileField(_ raw: String?) -> [String] {
+        parseFileFieldDetailed(raw).accepted
+    }
+
+    /// Detailed variant that returns both accepted relative PDF paths and absolute-path
+    /// rejections (so the caller can surface linked-file attachments as "missing").
+    ///
+    /// Format: `description:relativePath:mimeType`, with backslash-escaped `:` / `;` / `\`.
+    /// Multiple attachments are separated by *unescaped* `;`. Non-PDF attachments are
+    /// filtered out entirely (not reported).
+    internal static func parseFileFieldDetailed(
+        _ raw: String?
+    ) -> (accepted: [String], rejected: [String]) {
+        guard let raw, !raw.isEmpty else { return ([], []) }
+        var accepted: [String] = []
+        var rejected: [String] = []
+        for piece in splitUnescaped(raw, separator: ";") {
+            let trimmed = piece.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { continue }
+            let segments = splitUnescaped(trimmed, separator: ":")
+            guard segments.count >= 2 else { continue }
+            let path = unescape(segments[1]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let mime: String = segments.count >= 3
+                ? unescape(segments[2]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                : ""
+            guard !path.isEmpty else { continue }
+            let isPDF = mime == "application/pdf" || path.lowercased().hasSuffix(".pdf")
+            guard isPDF else { continue }
+            if isAbsolutePath(path) {
+                rejected.append(path)
+            } else {
+                accepted.append(path)
+            }
+        }
+        return (accepted, rejected)
+    }
+
+    private static func splitUnescaped(_ input: String, separator: Character) -> [String] {
+        var parts: [String] = []
+        var current = ""
+        var escape = false
+        for ch in input {
+            if escape {
+                current.append(ch)
+                escape = false
+                continue
+            }
+            if ch == "\\" {
+                current.append(ch)
+                escape = true
+                continue
+            }
+            if ch == separator {
+                parts.append(current)
+                current = ""
+                continue
+            }
+            current.append(ch)
+        }
+        parts.append(current)
+        return parts
+    }
+
+    private static func unescape(_ input: String) -> String {
+        // Zotero only escapes `:`, `;`, and `\`. Any other `\X` stays literal (keep the backslash).
+        var result = ""
+        result.reserveCapacity(input.count)
+        var escape = false
+        for ch in input {
+            if escape {
+                if ch == ":" || ch == ";" || ch == "\\" {
+                    result.append(ch)
+                } else {
+                    result.append("\\")
+                    result.append(ch)
+                }
+                escape = false
+                continue
+            }
+            if ch == "\\" {
+                escape = true
+                continue
+            }
+            result.append(ch)
+        }
+        if escape { result.append("\\") }
+        return result
+    }
+
+    private static func isAbsolutePath(_ path: String) -> Bool {
+        if path.hasPrefix("/") { return true }
+        // Windows-style drive letter: e.g. "C:\\Users\\..."
+        if path.count >= 2 {
+            let chars = Array(path)
+            if chars[0].isLetter && chars[1] == ":" { return true }
+        }
+        return false
     }
 
     /// Parse BibTeX month field to integer (1-12)

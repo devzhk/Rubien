@@ -39,6 +39,18 @@ enum OpenPanelPicker {
     }
 
     @MainActor
+    static func pickZoteroFolder() -> URL? {
+        let panel = NSOpenPanel()
+        panel.title = "Import Zotero Folder"
+        panel.prompt = "Choose"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.resolvesAliases = true
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    @MainActor
     private static func pickSingleFile(title: String, prompt: String, allowedContentTypes: [UTType]) -> URL? {
         let panel = configuredPanel(title: title, prompt: prompt, allowedContentTypes: allowedContentTypes)
         panel.allowsMultipleSelection = false
