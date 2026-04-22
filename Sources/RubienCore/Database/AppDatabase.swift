@@ -4,6 +4,12 @@ import os.log
 
 private let appDatabaseLog = Logger(subsystem: "Rubien", category: "AppDatabase")
 
+/// SQL expression that produces the current time as an ISO-8601 string with
+/// millisecond precision. Used both as a column default on `dateModified` /
+/// `deletedAt` and inside the sync trigger bodies so a single format is used
+/// across schema and triggers.
+private let sqlNowISO8601 = "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))"
+
 /// Per-entry outcome from `AppDatabase.classifyImportEntries`. The Zotero importer uses
 /// this to decide whether to copy each attachment:
 /// - `.fresh`, `.dbDuplicateWithoutPDF` → copy (merge will attach in the latter case);
@@ -40,6 +46,7 @@ public final class AppDatabase: Sendable {
                 t.autoIncrementedPrimaryKey("id")
                 t.column("name", .text).notNull().unique()
                 t.column("color", .text).notNull().defaults(to: "#007AFF")
+                t.column("dateModified", .datetime).notNull().defaults(sql: sqlNowISO8601)
             }
 
             // References
@@ -136,6 +143,7 @@ public final class AppDatabase: Sendable {
             try db.create(table: "referenceTag") { t in
                 t.column("referenceId", .integer).notNull().references("reference", onDelete: .cascade)
                 t.column("tagId", .integer).notNull().references("tag", onDelete: .cascade)
+                t.column("dateModified", .datetime).notNull().defaults(sql: sqlNowISO8601)
                 t.primaryKey(["referenceId", "tagId"])
             }
             try db.create(index: "referenceTag_tagId", on: "referenceTag", columns: ["tagId"])
@@ -155,6 +163,7 @@ public final class AppDatabase: Sendable {
                 t.column("boundsHeight", .double).notNull()
                 t.column("rectsData", .text).notNull().defaults(to: "[]")
                 t.column("dateCreated", .datetime).notNull()
+                t.column("dateModified", .datetime).notNull().defaults(sql: sqlNowISO8601)
             }
             try db.create(index: "pdfAnnotation_referenceId", on: "pdfAnnotation", columns: ["referenceId"])
             try db.create(index: "pdfAnnotation_pageIndex", on: "pdfAnnotation", columns: ["pageIndex"])
@@ -171,6 +180,7 @@ public final class AppDatabase: Sendable {
                 t.column("prefixText", .text)
                 t.column("suffixText", .text)
                 t.column("dateCreated", .datetime).notNull()
+                t.column("dateModified", .datetime).notNull().defaults(sql: sqlNowISO8601)
             }
             try db.create(index: "webAnnotation_referenceId", on: "webAnnotation", columns: ["referenceId"])
             try db.create(index: "webAnnotation_dateCreated", on: "webAnnotation", columns: ["dateCreated"])
@@ -254,6 +264,7 @@ public final class AppDatabase: Sendable {
                 t.column("isDefault", .boolean).notNull().defaults(to: false)
                 t.column("defaultFieldKey", .text)
                 t.column("isVisible", .boolean).notNull().defaults(to: true)
+                t.column("dateModified", .datetime).notNull().defaults(sql: sqlNowISO8601)
             }
 
             try db.create(table: "propertyValue") { t in
@@ -263,6 +274,7 @@ public final class AppDatabase: Sendable {
                 t.column("propertyId", .integer).notNull()
                     .references("propertyDefinition", onDelete: .cascade)
                 t.column("value", .text)
+                t.column("dateModified", .datetime).notNull().defaults(sql: sqlNowISO8601)
                 t.uniqueKey(["referenceId", "propertyId"])
             }
             try db.create(indexOn: "propertyValue", columns: ["referenceId"])
@@ -351,9 +363,112 @@ public final class AppDatabase: Sendable {
                     VALUES (?, ?, '[]', ?, 1, ?, 0)
                     """, arguments: [def.name, def.type, visibleDefaults.count + index, def.fieldKey])
             }
+
+            // MARK: - Sync bookkeeping
+            // Tombstones track deletions so we can propagate them to CloudKit later.
+            // entityType is the table name; entityId is the row's PK as TEXT (Int64
+            // stringified until A-pks migrates to UUIDs).
+            try db.create(table: "tombstone") { t in
+                t.column("entityType", .text).notNull()
+                t.column("entityId", .text).notNull()
+                t.column("deletedAt", .datetime).notNull().defaults(sql: sqlNowISO8601)
+                t.primaryKey(["entityType", "entityId"])
+            }
+            try db.create(index: "tombstone_deletedAt", on: "tombstone", columns: ["deletedAt"])
+
+            // syncState tracks which rows are dirty (need pushing) and caches the
+            // last-known CKRecord system fields blob per row for optimistic concurrency.
+            try db.create(table: "syncState") { t in
+                t.column("entityType", .text).notNull()
+                t.column("entityId", .text).notNull()
+                t.column("systemFields", .blob)
+                t.column("lastPushedAt", .datetime)
+                t.column("isDirty", .integer).notNull().defaults(to: 1)
+                t.primaryKey(["entityType", "entityId"])
+            }
+            try db.create(index: "syncState_isDirty", on: "syncState", columns: ["isDirty"])
+
+            // syncSession is a scratch table for session-scoped flags the triggers
+            // consult. The pull handler inserts ('applyingRemote','1') at the start of
+            // its transaction so triggers don't re-dirty rows they're applying from the
+            // cloud. Rows live only for the duration of that transaction.
+            try db.create(table: "syncSession") { t in
+                t.column("key", .text).notNull().primaryKey()
+                t.column("value", .text).notNull()
+            }
+
+            // MARK: - Dirty-tracking triggers
+            // One set per synced table. Triggers skip firing during remote apply
+            // (when syncSession has an 'applyingRemote' row). Deletes produce a
+            // tombstone and remove the corresponding syncState row. SQLite doesn't
+            // support AFTER INSERT OR UPDATE in a single trigger, so INSERT and
+            // UPDATE are emitted as two identical triggers from one template.
+            let applyingRemoteGuard =
+                "WHEN (SELECT value FROM syncSession WHERE key='applyingRemote') IS NULL"
+            for table in self.syncedTables {
+                let newKey = self.pkExpression(table: table, prefix: "NEW")
+                let oldKey = self.pkExpression(table: table, prefix: "OLD")
+                let markDirtyBody = """
+                    INSERT INTO syncState(entityType, entityId, isDirty)
+                        VALUES('\(table)', \(newKey), 1)
+                        ON CONFLICT(entityType, entityId) DO UPDATE SET isDirty = 1;
+                    """
+
+                for (suffix, event) in [("ai", "INSERT"), ("au", "UPDATE")] {
+                    try db.execute(sql: """
+                        CREATE TRIGGER \(table)_\(suffix) AFTER \(event) ON \(table)
+                            \(applyingRemoteGuard)
+                        BEGIN
+                            \(markDirtyBody)
+                        END;
+                        """)
+                }
+
+                try db.execute(sql: """
+                    CREATE TRIGGER \(table)_ad AFTER DELETE ON \(table)
+                        \(applyingRemoteGuard)
+                    BEGIN
+                        INSERT INTO tombstone(entityType, entityId, deletedAt)
+                            VALUES('\(table)', \(oldKey), \(sqlNowISO8601))
+                            ON CONFLICT(entityType, entityId)
+                                DO UPDATE SET deletedAt = excluded.deletedAt;
+                        DELETE FROM syncState
+                            WHERE entityType='\(table)' AND entityId=\(oldKey);
+                    END;
+                    """)
+            }
         }
 
         return migrator
+    }
+
+    /// Tables whose rows sync to CloudKit. Order is not significant here; pull-side
+    /// FK ordering is handled by the sync engine.
+    private var syncedTables: [String] {
+        [
+            "reference",
+            "tag",
+            "referenceTag",
+            "pdfAnnotation",
+            "webAnnotation",
+            "metadataIntake",
+            "metadataEvidence",
+            "propertyDefinition",
+            "propertyValue",
+            "databaseView",
+        ]
+    }
+
+    /// The primary-key expression used inside triggers. `referenceTag` is a pivot with a
+    /// composite key; its synthesized entityId is `referenceId/tagId`. `prefix` is
+    /// either "NEW" (INSERT/UPDATE) or "OLD" (DELETE).
+    private func pkExpression(table: String, prefix: String) -> String {
+        switch table {
+        case "referenceTag":
+            return "\(prefix).referenceId || '/' || \(prefix).tagId"
+        default:
+            return "\(prefix).id"
+        }
     }
 }
 
