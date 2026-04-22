@@ -368,22 +368,38 @@ public final class AppDatabase: Sendable {
             // Tombstones track deletions so we can propagate them to CloudKit later.
             // entityType is the table name; entityId is the row's PK as TEXT (Int64
             // stringified until A-pks migrates to UUIDs).
+            // `confirmedByServer` distinguishes tombstones the server has
+            // acknowledged (safe to GC on the 30-day window) from pending
+            // local deletes that still need to round-trip. Dropping an
+            // unacknowledged tombstone too early can cause a later server
+            // modification of the same recordID to resurrect the deleted
+            // row locally — "delete beats edit" only works if the tombstone
+            // marker is alive when the edit pull arrives.
             try db.create(table: "tombstone") { t in
                 t.column("entityType", .text).notNull()
                 t.column("entityId", .text).notNull()
                 t.column("deletedAt", .datetime).notNull().defaults(sql: sqlNowISO8601)
+                t.column("confirmedByServer", .integer).notNull().defaults(to: 0)
                 t.primaryKey(["entityType", "entityId"])
             }
             try db.create(index: "tombstone_deletedAt", on: "tombstone", columns: ["deletedAt"])
 
             // syncState tracks which rows are dirty (need pushing) and caches the
             // last-known CKRecord system fields blob per row for optimistic concurrency.
+            //
+            // `pushInFlight` closes a TOCTOU window on `isDirty`: when the engine
+            // builds a push batch, we stamp pushInFlight=1. If a local edit
+            // fires the trigger mid-flight, the ON CONFLICT upsert clears
+            // pushInFlight back to 0. On successful push ack, we only set
+            // isDirty=0 if pushInFlight is still 1 — else a fresh edit has
+            // landed and must be re-pushed.
             try db.create(table: "syncState") { t in
                 t.column("entityType", .text).notNull()
                 t.column("entityId", .text).notNull()
                 t.column("systemFields", .blob)
                 t.column("lastPushedAt", .datetime)
                 t.column("isDirty", .integer).notNull().defaults(to: 1)
+                t.column("pushInFlight", .integer).notNull().defaults(to: 0)
                 t.primaryKey(["entityType", "entityId"])
             }
             try db.create(index: "syncState_isDirty", on: "syncState", columns: ["isDirty"])
@@ -408,10 +424,14 @@ public final class AppDatabase: Sendable {
             for table in self.syncedTables {
                 let newKey = self.pkExpression(table: table, prefix: "NEW")
                 let oldKey = self.pkExpression(table: table, prefix: "OLD")
+                // A local edit that fires mid-push must also clear
+                // pushInFlight so the matching save-ack won't clobber the
+                // new isDirty=1 (see `pushInFlight` doc above).
                 let markDirtyBody = """
-                    INSERT INTO syncState(entityType, entityId, isDirty)
-                        VALUES('\(table)', \(newKey), 1)
-                        ON CONFLICT(entityType, entityId) DO UPDATE SET isDirty = 1;
+                    INSERT INTO syncState(entityType, entityId, isDirty, pushInFlight)
+                        VALUES('\(table)', \(newKey), 1, 0)
+                        ON CONFLICT(entityType, entityId)
+                            DO UPDATE SET isDirty = 1, pushInFlight = 0;
                     """
 
                 for (suffix, event) in [("ai", "INSERT"), ("au", "UPDATE")] {

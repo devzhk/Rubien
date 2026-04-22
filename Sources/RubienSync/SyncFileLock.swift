@@ -28,9 +28,15 @@ public final class SyncFileLock: @unchecked Sendable {
 
     /// Open (or create) the lock file. Creation uses mode 0o644 so the
     /// user's other tools can inspect it; it carries no content.
+    ///
+    /// Sets `FD_CLOEXEC` so child processes (e.g. anything the app
+    /// `exec`s — helper binaries, crash reporters) don't inherit the
+    /// open-file-description and with it the advisory lock. Without
+    /// this, a helper that outlives the parent could hold the sync
+    /// lock indefinitely and block the CLI.
     public init(fileURL: URL) throws {
         self.fileURL = fileURL
-        let fd = open(fileURL.path, O_CREAT | O_RDWR, 0o644)
+        let fd = open(fileURL.path, O_CREAT | O_RDWR | O_CLOEXEC, 0o644)
         if fd == -1 {
             throw SyncFileLockError.openFailed(errno: errno)
         }

@@ -93,7 +93,7 @@ final class SyncedLibraryStartupTests: XCTestCase {
 
     // MARK: - Tombstone compaction
 
-    func testCompactStaleTombstonesDropsOldRows() async throws {
+    func testCompactStaleTombstonesDropsOldConfirmedRows() async throws {
         let library = SyncedLibrary(
             appDatabase: db,
             stateFileURL: stateFile
@@ -104,14 +104,23 @@ final class SyncedLibraryStartupTests: XCTestCase {
             try store.upsertTombstone(
                 db,
                 entityType: .reference,
-                entityId: "ancient",
-                deletedAt: Date(timeIntervalSince1970: 1_000_000)
+                entityId: "ancient-confirmed",
+                deletedAt: Date(timeIntervalSince1970: 1_000_000),
+                confirmedByServer: true
             )
             try store.upsertTombstone(
                 db,
                 entityType: .reference,
-                entityId: "fresh",
-                deletedAt: Date()
+                entityId: "ancient-unconfirmed",
+                deletedAt: Date(timeIntervalSince1970: 1_000_000),
+                confirmedByServer: false
+            )
+            try store.upsertTombstone(
+                db,
+                entityType: .reference,
+                entityId: "fresh-confirmed",
+                deletedAt: Date(),
+                confirmedByServer: true
             )
         }
 
@@ -122,8 +131,8 @@ final class SyncedLibraryStartupTests: XCTestCase {
         }
         XCTAssertEqual(
             surviving,
-            ["fresh"],
-            "30-day compaction must keep fresh tombstones, evict stale"
+            ["ancient-unconfirmed", "fresh-confirmed"],
+            "compaction evicts only server-confirmed deletes past the 30-day window"
         )
     }
 }

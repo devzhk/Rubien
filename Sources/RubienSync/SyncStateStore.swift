@@ -45,9 +45,28 @@ public struct SyncStateStore: Sendable {
 
     // MARK: - syncState rows
 
+    /// Mark rows as in-flight for a push attempt. Called from the batch
+    /// builder before handing CKRecords to the engine. The per-table
+    /// trigger clears `pushInFlight` on any local mutation, so a
+    /// subsequent `markPushed` can detect "a fresh edit landed between
+    /// build and ack" and refuse to clear isDirty in that case.
+    public func markPushInFlight(
+        _ db: Database,
+        entityType: SyncEntityType,
+        entityId: String
+    ) throws {
+        try db.execute(sql: """
+            UPDATE \(SQL.stateTable) SET pushInFlight = 1
+                WHERE entityType = ? AND entityId = ?
+            """, arguments: [entityType.rawValue, entityId])
+    }
+
     /// Archive the system fields of a freshly-saved record so the next push
     /// can rehydrate it and get optimistic concurrency via the change tag.
-    /// Also clears `isDirty` since the push succeeded.
+    /// Only clears `isDirty` when `pushInFlight` is still 1 — meaning no
+    /// local edit fired a trigger between `markPushInFlight` and this ack.
+    /// If a racing edit cleared pushInFlight (trigger path), isDirty stays
+    /// 1 and the engine re-pushes on the next cycle.
     public func markPushed(
         _ db: Database,
         entityType: SyncEntityType,
@@ -57,19 +76,37 @@ public struct SyncStateStore: Sendable {
         let systemFields = Self.archiveSystemFields(of: record)
         try db.execute(sql: """
             INSERT INTO \(SQL.stateTable)
-                (entityType, entityId, systemFields, lastPushedAt, isDirty)
-                VALUES(?, ?, ?, ?, 0)
+                (entityType, entityId, systemFields, lastPushedAt, isDirty, pushInFlight)
+                VALUES(?, ?, ?, ?, 0, 0)
                 ON CONFLICT(entityType, entityId)
                     DO UPDATE SET
                         systemFields = excluded.systemFields,
                         lastPushedAt = excluded.lastPushedAt,
-                        isDirty = 0
+                        isDirty = CASE WHEN pushInFlight = 1 THEN 0 ELSE 1 END,
+                        pushInFlight = 0
             """, arguments: [
                 entityType.rawValue,
                 entityId,
                 systemFields,
                 Date()
             ])
+    }
+
+    /// Drop the cached system fields without touching dirty / pushInFlight.
+    /// Used on `.unknownItem`: the server says this record doesn't exist,
+    /// so our cached change tag is stale — on next push we must create a
+    /// fresh record rather than rehydrating. Dirty stays 1 so the retry
+    /// actually happens; the server either confirms a tombstone (pull
+    /// handles it) or accepts the fresh insert.
+    public func clearSystemFields(
+        _ db: Database,
+        entityType: SyncEntityType,
+        entityId: String
+    ) throws {
+        try db.execute(sql: """
+            UPDATE \(SQL.stateTable) SET systemFields = NULL
+                WHERE entityType = ? AND entityId = ?
+            """, arguments: [entityType.rawValue, entityId])
     }
 
     /// Archive system fields on pull too — we'll need the server's change
@@ -177,21 +214,46 @@ public struct SyncStateStore: Sendable {
     }
 
     /// Insert (or refresh) a tombstone. The delete trigger does this for
-    /// local deletes; the pull handler does this for remote deletes so any
-    /// concurrent local push of the same ID short-circuits via
-    /// `clearDirty` in the same transaction.
+    /// local deletes (unconfirmed); the pull handler does this for remote
+    /// deletes with `confirmedByServer=true` (the server already decided).
+    /// Unconfirmed tombstones are kept indefinitely by compaction until a
+    /// save-ack promotes them via `markTombstoneConfirmed`.
     public func upsertTombstone(
         _ db: Database,
         entityType: SyncEntityType,
         entityId: String,
-        deletedAt: Date = Date()
+        deletedAt: Date = Date(),
+        confirmedByServer: Bool = false
     ) throws {
         try db.execute(sql: """
-            INSERT INTO \(SQL.tombstoneTable)(entityType, entityId, deletedAt)
-                VALUES(?, ?, ?)
+            INSERT INTO \(SQL.tombstoneTable)(entityType, entityId, deletedAt, confirmedByServer)
+                VALUES(?, ?, ?, ?)
                 ON CONFLICT(entityType, entityId)
-                    DO UPDATE SET deletedAt = excluded.deletedAt
-            """, arguments: [entityType.rawValue, entityId, deletedAt])
+                    DO UPDATE SET
+                        deletedAt = excluded.deletedAt,
+                        confirmedByServer = CASE
+                            WHEN \(SQL.tombstoneTable).confirmedByServer = 1 THEN 1
+                            ELSE excluded.confirmedByServer
+                        END
+            """, arguments: [
+                entityType.rawValue,
+                entityId,
+                deletedAt,
+                confirmedByServer ? 1 : 0
+            ])
+    }
+
+    /// Promote a tombstone from unconfirmed (pending server ack) to
+    /// confirmed. Called from the sent-zone-changes success path for
+    /// deletions. Confirmed tombstones are eligible for GC.
+    public func markTombstoneConfirmed(
+        _ db: Database,
+        entityId: String
+    ) throws {
+        try db.execute(sql: """
+            UPDATE \(SQL.tombstoneTable) SET confirmedByServer = 1
+                WHERE entityId = ?
+            """, arguments: [entityId])
     }
 
     /// Purge a tombstone after the server has confirmed the delete (or has
@@ -207,17 +269,19 @@ public struct SyncStateStore: Sendable {
             """, arguments: [entityType.rawValue, entityId])
     }
 
-    /// Compact old tombstones. B12: tombstones are kept long enough to beat
-    /// any in-flight push, then garbage-collected so the table doesn't grow
-    /// forever. 30 days is the plan default.
+    /// Compact server-confirmed tombstones older than `cutoff`. Unconfirmed
+    /// tombstones (local delete not yet ack'd) are kept regardless of age —
+    /// evicting one can let a later server modification of the same
+    /// recordID resurrect the deleted row, breaking the "delete beats edit"
+    /// invariant.
     public func compactTombstones(
         _ db: Database,
         olderThan cutoff: Date
     ) throws {
-        try db.execute(
-            sql: "DELETE FROM \(SQL.tombstoneTable) WHERE deletedAt < ?",
-            arguments: [cutoff]
-        )
+        try db.execute(sql: """
+            DELETE FROM \(SQL.tombstoneTable)
+                WHERE deletedAt < ? AND confirmedByServer = 1
+            """, arguments: [cutoff])
     }
 
     // MARK: - System-fields codec

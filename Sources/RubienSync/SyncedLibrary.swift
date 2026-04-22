@@ -310,8 +310,15 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             // The closure is called once per recordID. Returning nil drops
             // it from the batch (e.g. row deleted locally between dirty-
             // flag and batch-build — tombstone will handle it instead).
+            //
+            // We use `.write` (not `.read`) so the same transaction that
+            // reads the row also stamps `pushInFlight=1` — closing the
+            // TOCTOU window on `isDirty`. A local edit that lands after
+            // this transaction commits will trigger the syncState upsert
+            // and clear pushInFlight, making the eventual save-ack leave
+            // `isDirty=1` for re-push.
             do {
-                return try await appDatabase.dbWriter.read { db in
+                return try await appDatabase.dbWriter.write { db in
                     let entityId = recordID.recordName
                     guard let entityType = Self.classifyEntityId(entityId, db: db) else {
                         return nil
@@ -321,11 +328,17 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                         entityType: entityType,
                         entityId: entityId
                     )
-                    return try entityType.buildPushRecord(
+                    guard let record = try entityType.buildPushRecord(
                         db: db,
                         entityId: entityId,
                         systemFields: systemFields
+                    ) else { return nil }
+                    try stateStore.markPushInFlight(
+                        db,
+                        entityType: entityType,
+                        entityId: entityId
                     )
+                    return record
                 }
             } catch {
                 log.error("buildPushRecord failed for \(recordID.recordName, privacy: .public): \(error.localizedDescription, privacy: .public)")
@@ -457,18 +470,16 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             }
         }
 
-        // Successful deletes: purge the tombstone the server has now
-        // confirmed.
+        // Successful deletes: promote the tombstone from unconfirmed to
+        // confirmed. Compaction now sees it as eligible for 30-day GC.
+        // We don't purge immediately — keeping the tombstone live a while
+        // longer lets any in-flight duplicate edit for the same record
+        // lose at `.unknownItem` rather than resurrecting the row.
         for deletedID in event.deletedRecordIDs {
-            // We don't know recordType from CKRecord.ID alone; try every
-            // tombstone row for this entityId. There won't be many — this
-            // is O(syncedTables.count) at most.
             let entityId = deletedID.recordName
             do {
                 try await appDatabase.dbWriter.write { [stateStore] db in
-                    for type in SyncEntityType.allCases {
-                        try stateStore.removeTombstone(db, entityType: type, entityId: entityId)
-                    }
+                    try stateStore.markTombstoneConfirmed(db, entityId: entityId)
                 }
             } catch {
                 log.error("removeTombstone failed: \(error.localizedDescription, privacy: .public)")
@@ -499,15 +510,19 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                 ])
 
             case .unknownItem:
-                // Server says this record doesn't exist. Could be: it was
-                // deleted remotely, or we're pushing stale state. Clear
-                // the local dirty flag and schedule a fetch — if the
-                // server has a tombstone we'll apply the deletion via
-                // the pull path; else we treat the record as freshly
-                // absent and a re-push will recreate it.
+                // Server says this record doesn't exist. Either (a) the
+                // server has a tombstone and our pending push lost the
+                // race, or (b) our cached systemFields reference a record
+                // that was never persisted (partial push / abandoned
+                // account). Either way the cached system fields are
+                // stale — drop them so the next push creates a fresh
+                // record. Leave isDirty=1 so the retry actually happens:
+                // if the server has a tombstone a subsequent fetch will
+                // deliver the deletion (pull path sets isDirty=0); if
+                // not, the fresh re-push succeeds.
                 do {
                     try await appDatabase.dbWriter.write { [stateStore] db in
-                        try stateStore.clearDirty(db, entityType: type, entityId: entityId)
+                        try stateStore.clearSystemFields(db, entityType: type, entityId: entityId)
                     }
                     // Schedule outside the delegate callback (Apple's docs:
                     // don't call fetchChanges synchronously from handleEvent).
