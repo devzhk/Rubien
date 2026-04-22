@@ -22,11 +22,18 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     private let appDatabase: AppDatabase
     private let stateStore: SyncStateStore
     private let engineStateStore: SyncEngineStateStore
-    private let container: CKContainer
 
-    /// Lazy — we only build the engine after init so the delegate (`self`)
-    /// is fully initialized. The CKSyncEngine API hands us back an async
-    /// callback chain; it must be safe to call the delegate immediately.
+    /// Lazy container factory. Deferring construction means unit tests can
+    /// exercise the actor's DB-touching side effects (baseline, tombstone
+    /// compaction, startup reconciliation) without triggering the CloudKit
+    /// runtime — which raises `CKException` in a process that has no
+    /// CloudKit entitlement (the case for XCTest without an app signing
+    /// context).
+    private let containerProvider: @Sendable () -> CKContainer
+    private var _container: CKContainer?
+
+    /// Lazy engine — built on demand so the delegate (`self`) is fully
+    /// initialized before the CKSyncEngine starts issuing async callbacks.
     private var _engine: CKSyncEngine?
 
     /// Set to true on the first successful startup reconciliation. Further
@@ -38,24 +45,82 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
 
     public init(
         appDatabase: AppDatabase,
-        container: CKContainer = CKContainer(identifier: SyncConstants.containerIdentifier),
-        stateFileURL: URL = AppDatabase.syncEngineStateURL
+        stateFileURL: URL = AppDatabase.syncEngineStateURL,
+        containerProvider: @escaping @Sendable () -> CKContainer = {
+            CKContainer(identifier: SyncConstants.containerIdentifier)
+        }
     ) {
         self.appDatabase = appDatabase
-        self.container = container
         self.stateStore = SyncStateStore()
         self.engineStateStore = SyncEngineStateStore(fileURL: stateFileURL)
+        self.containerProvider = containerProvider
+    }
+
+    private var container: CKContainer {
+        if let existing = _container { return existing }
+        let built = containerProvider()
+        _container = built
+        return built
     }
 
     // MARK: - Engine lifecycle
 
     /// Start the engine (creates it if needed). Idempotent; safe to call on
-    /// every app launch. The startup reconciliation pass runs once per
-    /// process lifetime and is safe even on a cold install (finds 0 dirty
-    /// rows, returns quickly).
+    /// every app launch. Runs (in order): baseline-if-pending → tombstone
+    /// compaction → startup reconciliation. Each step short-circuits if
+    /// nothing to do.
     public func start() async {
         _ = engine
+        await performInitialBaselineIfNeeded()
+        await compactStaleTombstones()
         await reconcilePendingChangesFromDatabase()
+    }
+
+    /// Install a GRDB `TransactionObserver` that forwards post-commit
+    /// activity into the engine automatically. One call at app startup,
+    /// after `start()`, is enough — app code doesn't have to manually
+    /// call `ingestPendingChanges` after each write.
+    ///
+    /// The observer only watches `syncState` / `tombstone` mutations
+    /// (which the per-entity triggers write to) so it's cheap — we don't
+    /// fire on every reference save that happens to touch a scalar.
+    public func installTransactionObserver() async {
+        let observer = SyncTransactionObserver(library: self)
+        appDatabase.dbWriter.add(transactionObserver: observer, extent: .observerLifetime)
+    }
+
+    /// Call from the app after any write transaction that might have left
+    /// rows dirty. Forwards freshly-dirty entity IDs and tombstones into the
+    /// engine's pending queue. Idempotent: CKSyncEngine dedups by recordID
+    /// across add calls.
+    ///
+    /// The natural caller is a GRDB `TransactionObserver.databaseDidCommit`
+    /// hook that dispatches into the actor — safe because it fires
+    /// post-commit (no mid-transaction mutation).
+    public func ingestPendingChanges() async {
+        do {
+            let dirty: [(SyncEntityType, String)]
+            let deleted: [(SyncEntityType, String)]
+            (dirty, deleted) = try await appDatabase.dbWriter.read { db in
+                (try self.stateStore.dirtyEntities(db),
+                 try self.stateStore.tombstones(db))
+            }
+
+            var pending: [CKSyncEngine.PendingRecordZoneChange] = []
+            pending.reserveCapacity(dirty.count + deleted.count)
+            for (_, id) in dirty {
+                pending.append(.saveRecord(recordID(for: id)))
+            }
+            for (_, id) in deleted {
+                pending.append(.deleteRecord(recordID(for: id)))
+            }
+
+            if !pending.isEmpty {
+                engine.state.add(pendingRecordZoneChanges: pending)
+            }
+        } catch {
+            log.error("ingestPendingChanges failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     private var engine: CKSyncEngine {
@@ -78,6 +143,81 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         let engine = CKSyncEngine(config)
         _engine = engine
         return engine
+    }
+
+    // MARK: - Initial baseline (plan B9)
+
+    /// Upload-existing-library one-shot. If the `baselineState` row in
+    /// `syncSession` is missing (fresh install with sync just enabled),
+    /// mark every row in every synced table as dirty so the startup
+    /// reconciliation pass later in `start()` can enqueue them.
+    ///
+    /// Gated by `baselineState=complete` afterwards so a restart doesn't
+    /// re-mark rows that are already in the engine's pending queue.
+    func performInitialBaselineIfNeeded() async {
+        do {
+            try await appDatabase.dbWriter.write { db in
+                let state = try String.fetchOne(db, sql: """
+                    SELECT value FROM syncSession WHERE key = 'baselineState' LIMIT 1
+                    """)
+                guard state == nil else { return }
+
+                // Marking the session row as done first means a crash
+                // between here and the INSERT loop leaves us with no
+                // baseline run on the next launch — acceptable because the
+                // user can re-enable sync or run `rubien-cli sync reset`.
+                // The alternative (marking after all INSERTs) would risk
+                // an infinite re-baseline loop if the loop itself crashed
+                // mid-way.
+                try db.execute(sql: """
+                    INSERT INTO syncSession(key, value) VALUES('baselineState', 'complete')
+                    """)
+
+                var totalMarked = 0
+                for type in SyncEntityType.allCases {
+                    let tableName = type.rawValue
+                    // Pivot has no surrogate id; composite key string is
+                    // what we insert instead.
+                    let idExpression: String
+                    switch type {
+                    case .referenceTag:
+                        idExpression = "referenceId || '/' || tagId"
+                    default:
+                        idExpression = "id"
+                    }
+                    // SQLite grammar quirk: the INSERT-SELECT form needs
+                    // an explicit `WHERE true` before `ON CONFLICT`,
+                    // otherwise the parser rejects the upsert clause as
+                    // ambiguous with the SELECT's WHERE slot.
+                    try db.execute(sql: """
+                        INSERT INTO syncState(entityType, entityId, isDirty)
+                            SELECT '\(tableName)', \(idExpression), 1 FROM \(tableName) WHERE true
+                            ON CONFLICT(entityType, entityId) DO UPDATE SET isDirty = 1
+                        """)
+                    totalMarked += db.changesCount
+                }
+                log.info("initial baseline marked \(totalMarked, privacy: .public) rows dirty")
+            }
+        } catch {
+            log.error("initial baseline failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    // MARK: - Tombstone compaction (plan B12)
+
+    /// Prune tombstones older than 30 days. Retention window covers any
+    /// in-flight push for a deleted row plus retry buffer; after that the
+    /// marker's sole purpose (short-circuiting stale local pushes via
+    /// `clearDirty`) is moot.
+    func compactStaleTombstones() async {
+        let cutoff = Date().addingTimeInterval(-30 * 24 * 60 * 60)
+        do {
+            try await appDatabase.dbWriter.write { db in
+                try self.stateStore.compactTombstones(db, olderThan: cutoff)
+            }
+        } catch {
+            log.error("tombstone compaction failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     // MARK: - Startup reconciliation (plan B4)
@@ -335,10 +475,114 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             }
         }
 
-        // TODO(B7): failedRecordSaves / failedRecordDeletes with
-        // .serverRecordChanged, .zoneNotFound, .unknownItem branches. These
-        // wire conflict resolution + recovery paths; implementing them
-        // properly needs the LWW merge policy in place.
+        // Failed saves: handle the three error classes we recover from
+        // automatically. Others (quota exceeded, etc.) are left to the
+        // engine's own retry policy.
+        for failure in event.failedRecordSaves {
+            guard let type = SyncEntityType.forRecordType(failure.record.recordType) else { continue }
+            let entityId = failure.record.recordID.recordName
+
+            switch failure.error.code {
+            case .serverRecordChanged:
+                await handleServerRecordChanged(
+                    type: type,
+                    entityId: entityId,
+                    error: failure.error
+                )
+
+            case .zoneNotFound:
+                // Library zone was deleted (or never created for this
+                // account). Recreate it — the engine retries the save
+                // once we acknowledge the zone creation.
+                engine.state.add(pendingDatabaseChanges: [
+                    .saveZone(CKRecordZone(zoneID: SyncConstants.libraryZoneID))
+                ])
+
+            case .unknownItem:
+                // Server says this record doesn't exist. Could be: it was
+                // deleted remotely, or we're pushing stale state. Clear
+                // the local dirty flag and schedule a fetch — if the
+                // server has a tombstone we'll apply the deletion via
+                // the pull path; else we treat the record as freshly
+                // absent and a re-push will recreate it.
+                do {
+                    try await appDatabase.dbWriter.write { [stateStore] db in
+                        try stateStore.clearDirty(db, entityType: type, entityId: entityId)
+                    }
+                    // Schedule outside the delegate callback (Apple's docs:
+                    // don't call fetchChanges synchronously from handleEvent).
+                    Task { [engine] in
+                        _ = try? await engine.fetchChanges()
+                    }
+                } catch {
+                    log.error("unknownItem recovery failed: \(error.localizedDescription, privacy: .public)")
+                }
+
+            default:
+                log.error(
+                    "unhandled record-save failure \(failure.error.code.rawValue, privacy: .public) for \(entityId, privacy: .public)"
+                )
+            }
+        }
+
+        // Failed deletes — typically .unknownItem (already gone server-
+        // side). Purge the tombstone so we don't keep retrying.
+        for failure in event.failedRecordDeletes {
+            if failure.value.code == .unknownItem {
+                let entityId = failure.key.recordName
+                do {
+                    try await appDatabase.dbWriter.write { [stateStore] db in
+                        for type in SyncEntityType.allCases {
+                            try stateStore.removeTombstone(db, entityType: type, entityId: entityId)
+                        }
+                    }
+                } catch {
+                    log.error("failed-delete tombstone purge failed: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+        }
+    }
+
+    /// Conflict resolution on `.serverRecordChanged`. CloudKit returns the
+    /// server's current version in the error payload; we rehydrate it as
+    /// the new systemFields baseline so the next push carries a valid
+    /// change tag, then leave the row dirty for that next push.
+    ///
+    /// Merge policy for v1: **server wins**. The pull path will overwrite
+    /// our local row with the server's scalars, and our local edits get
+    /// dropped. This matches the plan's LWW policy when the server's
+    /// `modificationDate` is newer (the common case — server's version is
+    /// only returned when ours lost the race). A future refinement can
+    /// compare local vs server `dateModified` for Reference and merge
+    /// field-by-field.
+    private func handleServerRecordChanged(
+        type: SyncEntityType,
+        entityId: String,
+        error: CKError
+    ) async {
+        guard let serverRecord = error.serverRecord else {
+            log.error("serverRecordChanged without serverRecord — re-fetch to recover")
+            Task { [engine] in
+                _ = try? await engine.fetchChanges()
+            }
+            return
+        }
+
+        do {
+            try await appDatabase.dbWriter.write { [stateStore] db in
+                try stateStore.setApplyingRemote(db)
+                try type.applyRemoteRecord(serverRecord, db: db)
+                try stateStore.markPulled(
+                    db,
+                    entityType: type,
+                    entityId: entityId,
+                    record: serverRecord
+                )
+                try stateStore.clearApplyingRemote(db)
+            }
+        } catch {
+            log.error("serverRecordChanged merge failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     // MARK: - Helpers
