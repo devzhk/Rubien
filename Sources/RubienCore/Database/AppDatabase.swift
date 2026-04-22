@@ -534,6 +534,15 @@ extension AppDatabase {
     public static var metadataArtifactsURL: URL {
         preferredStorageRoot(named: "Rubien/MetadataArtifacts")
     }
+
+    /// Sidecar file for `CKSyncEngine.State` serialization. Lives under the
+    /// same `Rubien/` directory as `library.sqlite` so all app state moves
+    /// together if the user ever reassigns Application Support. Kept outside
+    /// the DB so `sync reset` is a single file delete.
+    public static var syncEngineStateURL: URL {
+        preferredStorageRoot(named: "Rubien")
+            .appendingPathComponent("sync-engine-state.bin")
+    }
 }
 
 // MARK: - Reference CRUD
