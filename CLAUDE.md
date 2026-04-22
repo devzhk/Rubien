@@ -50,9 +50,10 @@ This nukes the per-package local checkouts and the SwiftPM state, then refetches
 
 ## Architecture
 
-Three Swift targets sit on top of one shared core (`Package.swift`):
+Four Swift targets sit on top of one shared core (`Package.swift`):
 
 - **`RubienCore`** (library) — everything usable without AppKit: GRDB models, migrations, metadata resolvers (CrossRef/arXiv/PubMed/ISBN/OpenAlex/Semantic Scholar), BibTeX/RIS importers, CSL/citeproc-js citation engines. This is the only target the CLI and tests depend on, so any logic that needs to be reused by `rubien-cli` must live here, not in `Rubien`.
+- **`RubienSync`** (library) — CloudKit mapping layer, `CKSyncEngine`-based push/pull. Depends on `RubienCore` and the system `CloudKit` framework. The CLI does **not** link it.
 - **`Rubien`** (app executable) — SwiftUI views, window management, readers (PDFKit + WKWebView). Depends on `RubienCore`.
 - **`RubienCLI`** (executable, binary name `rubien-cli`) — built with swift-argument-parser. Uses `RubienCore` only.
 
@@ -87,6 +88,32 @@ When adding a new built-in style, update both the Swift formatter (for speed) an
 
 `PDFReaderView` (PDFKit) and `WebReaderView` (WKWebView) share an annotation vocabulary (highlight / underline / anchored note) but persist to **two different tables** — `PDFAnnotationRecord` and `WebAnnotationRecord`. Web reader content comes from the `ReaderExtraction` pipeline (`ReaderExtractionManager.swift`) which runs Defuddle → Readability → YouTube InnerTube fallback via JS bundled in `Sources/Rubien/Resources/` (`ClipperDefuddle.js`, `Readability.js`, `ClipperReader.css`, `ClipperHighlighter.css`). The rich note editor is a TipTap/ProseMirror WebView whose JS bundle is built from `scripts/note-editor/` and copied into `Sources/Rubien/Resources/NoteEditor.html` by `npm run build`.
 
+### Sync (RubienSync)
+
+`RubienSync` maps local GRDB entities to CloudKit `CKRecord` objects and drives `CKSyncEngine`. The target is pre-Phase-B4 — the engine actor lives in the plan but not the repo yet; what's landed so far is the dirty-tracking schema in `AppDatabase.swift` plus the per-entity mapping files under `Sources/RubienSync/`. When adding the next entity's mapping, follow these patterns — they're load-bearing and easy to drift from.
+
+**Per-entity mapping file shape.** Each synced entity (Reference, Tag, ReferenceTag, …) gets its own `*Record.swift` under `Sources/RubienSync/` with three pieces on an extension of the model:
+
+- `populate(record:)` — mutate an existing `CKRecord` in place. This is the hot path: the caller holds a cached record carrying server-assigned system fields (for optimistic concurrency with `.ifServerRecordUnchanged`); reallocating drops the change-tag.
+- `makeRecord(recordName:...)` — first-push convenience when there's no cached record yet.
+- `init(record:)` — decode. Non-failable with safe fallbacks for optional-ish fields; use `init?` only when a missing field makes the row semantically meaningless (e.g. a pivot's FK pair).
+
+`RecordField` is a per-entity enum of static-let field-name strings so field keys aren't scattered as literals. Field names match the DB column names for easy grepping.
+
+**Identity rules.**
+
+- The local rowID (`Reference.id`, `Tag.id`, …) is **never** encoded into the `CKRecord`. `CKRecord.ID.recordName` is the canonical identity; decoded models keep `id = nil` and the caller resolves the local rowID.
+- Composite-key pivot rows (currently only `ReferenceTag`) use `"<id1>/<id2>"` as the recordName. The format must match the SQL expression emitted by the dirty-tracking triggers in `AppDatabase.swift` (see `pkExpression(table:prefix:)`). These two layers communicate via that string shape; drift silently breaks dirty-queue lookups.
+- FKs between entities are stored as plain values (Int64 today, String UUID post-A-pks), never as `CKRecord.Reference`. Cascade semantics belong to SQLite FKs locally; CloudKit's action types would fight us.
+
+**Forward-compat decode.** Unknown enum rawValues fall back to safe defaults (`.other`, `.unread`, `.legacy`) rather than throwing, per CKSyncEngine guidance — a newer peer writing a novel case must not crash an older decoder. Same rule applies to missing optional fields; treat absent as nil, not as an error.
+
+**Dirty-tracking triggers.** `AppDatabase.swift`'s v1 migration emits AFTER INSERT/UPDATE/DELETE triggers per synced table (driven by the `syncedTables` helper). They upsert `syncState.isDirty=1` or insert a `tombstone` row, and gate on `(SELECT value FROM syncSession WHERE key='applyingRemote') IS NULL` so the pull handler's transaction (which inserts that row) doesn't re-dirty the rows it's applying.
+
+Triggers do **not** self-`UPDATE` `dateModified`. SQLite has `recursive_triggers = ON` by default, so a trigger touching its own table loops. Stamp `dateModified` in the Swift mutation layer instead (matches the existing `Reference` mutation methods in `AppDatabase.swift`).
+
+**Constants.** Container ID, zone ID, and record-type names (`CDReference`, `CDTag`, `CDReferenceTag`, …) live in `Sources/RubienSync/SyncConstants.swift`. The CKRecord type names carry a `CD` prefix ("CloudKit Data") so grepping for `CDReference` vs. `Reference` disambiguates the sync-layer type from the local model.
+
 ### CLI
 
 `Sources/RubienCLI/RubienCLI.swift` is the single-file argument-parser entry with 14 subcommands (`search`, `list`, `get`, `add`, `update`, `delete`, `cite`, `import`, `export`, `tags`, `properties`, `views`, `annotations`, `styles`). JSON is the default output format — scripts depend on it, so don't change CLI output shape without updating tests in `Tests/RubienCLITests/`.
@@ -97,9 +124,10 @@ When adding a new built-in style, update both the Swift formatter (for speed) an
 
 ## Tests
 
-Three test targets mirror the product targets:
+Four test targets mirror the product targets:
 
-- `Tests/RubienCoreTests/` — the bulk of business-logic coverage (citations, metadata, importers, DB).
+- `Tests/RubienCoreTests/` — the bulk of business-logic coverage (citations, metadata, importers, DB, dirty-tracking triggers).
+- `Tests/RubienSyncTests/` — CKRecord ↔ model round-trip per entity. Pure in-memory; no CloudKit calls.
 - `Tests/RubienTests/` — app-level tests that can import SwiftUI code.
 - `Tests/RubienCLITests/` — exercises the built `rubien-cli` binary at `.build/debug/rubien-cli`; keep JSON contracts stable.
 
