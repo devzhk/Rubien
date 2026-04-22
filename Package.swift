@@ -7,6 +7,7 @@ let package = Package(
     platforms: [.macOS("14.4")],
     products: [
         .library(name: "RubienCore", targets: ["RubienCore"]),
+        .library(name: "RubienSync", targets: ["RubienSync"]),
         .executable(name: "Rubien", targets: ["Rubien"]),
         .executable(name: "rubien-cli", targets: ["RubienCLI"]),
     ],
@@ -22,6 +23,12 @@ let package = Package(
             ],
             resources: [
                 .copy("Resources")
+            ]
+        ),
+        .target(
+            name: "RubienSync",
+            dependencies: [
+                "RubienCore",
             ]
         ),
         .executableTarget(
@@ -48,6 +55,11 @@ let package = Package(
             name: "RubienCoreTests",
             dependencies: ["RubienCore"],
             path: "Tests/RubienCoreTests"
+        ),
+        .testTarget(
+            name: "RubienSyncTests",
+            dependencies: ["RubienSync", "RubienCore"],
+            path: "Tests/RubienSyncTests"
         ),
         .testTarget(
             name: "RubienTests",
