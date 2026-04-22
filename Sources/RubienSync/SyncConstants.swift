@@ -33,8 +33,22 @@ public enum SyncConstants {
         public static let propertyDefinition = "CDPropertyDefinition"
         public static let propertyValue      = "CDPropertyValue"
         public static let databaseView       = "CDDatabaseView"
-        /// Sibling of CDReference holding the optional PDF CKAsset and filename.
-        /// Kept separate so PDF attach/detach merges independently of scalar edits.
-        public static let referencePDF       = "CDReferencePDF"
+        // Note: CDReferencePDF (sibling asset record) is deferred to B8 when
+        // the CKAsset pipeline lands. Adding the constant without a
+        // corresponding `SyncEntityType` case creates silent drift: pull
+        // path's `forRecordType("CDReferencePDF")` would return nil and the
+        // unknown-type log would fire on every PDF record.
     }
+
+    /// Separator for composite-key pivot recordNames. `ReferenceTag`'s
+    /// recordName is `"<referenceId>\(pivotSeparator)<tagId>"`; the same
+    /// literal appears in `AppDatabase.pkExpression` trigger SQL. Keeping
+    /// one constant means a future rename can't desync the two layers.
+    public static let pivotSeparator: String = "/"
+
+    /// Age at which server-confirmed tombstones become eligible for GC.
+    /// Picked to exceed CKSyncEngine's worst-case retry + any plausible
+    /// in-flight push window; anything shorter risks evicting a marker
+    /// before a lingering push hits `.unknownItem`.
+    public static let tombstoneRetention: TimeInterval = 30 * 24 * 60 * 60
 }

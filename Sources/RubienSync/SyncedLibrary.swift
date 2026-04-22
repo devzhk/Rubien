@@ -36,11 +36,6 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     /// initialized before the CKSyncEngine starts issuing async callbacks.
     private var _engine: CKSyncEngine?
 
-    /// Set to true on the first successful startup reconciliation. Further
-    /// passes during the same process lifetime are no-ops (the engine state
-    /// is now the source of pending changes).
-    private var didRunStartupReconciliation = false
-
     // MARK: - Init
 
     public init(
@@ -73,7 +68,11 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         _ = engine
         await performInitialBaselineIfNeeded()
         await compactStaleTombstones()
-        await reconcilePendingChangesFromDatabase()
+        // Startup reconciliation — idempotent because
+        // `engine.state.add(pendingRecordZoneChanges:)` dedups internally,
+        // so recalling on every `start()` is cheap and doesn't need a
+        // process-lifetime guard.
+        await ingestPendingChanges()
     }
 
     /// Install a GRDB `TransactionObserver` that forwards post-commit
@@ -181,7 +180,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                     let idExpression: String
                     switch type {
                     case .referenceTag:
-                        idExpression = "referenceId || '/' || tagId"
+                        idExpression = "referenceId || '\(SyncConstants.pivotSeparator)' || tagId"
                     default:
                         idExpression = "id"
                     }
@@ -205,59 +204,17 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
 
     // MARK: - Tombstone compaction (plan B12)
 
-    /// Prune tombstones older than 30 days. Retention window covers any
-    /// in-flight push for a deleted row plus retry buffer; after that the
-    /// marker's sole purpose (short-circuiting stale local pushes via
-    /// `clearDirty`) is moot.
+    /// Prune server-confirmed tombstones past the retention window.
+    /// Unconfirmed (pending-ack) tombstones are kept indefinitely; see
+    /// `SyncStateStore.compactTombstones`.
     func compactStaleTombstones() async {
-        let cutoff = Date().addingTimeInterval(-30 * 24 * 60 * 60)
+        let cutoff = Date().addingTimeInterval(-SyncConstants.tombstoneRetention)
         do {
             try await appDatabase.dbWriter.write { db in
                 try self.stateStore.compactTombstones(db, olderThan: cutoff)
             }
         } catch {
             log.error("tombstone compaction failed: \(error.localizedDescription, privacy: .public)")
-        }
-    }
-
-    // MARK: - Startup reconciliation (plan B4)
-
-    /// On process start: walk `syncState.isDirty=1` and `tombstone` rows and
-    /// enqueue them in the engine. Recovers from crashes between the trigger
-    /// commit (which set isDirty=1) and the post-commit observer's
-    /// `engine.state.add(...)` call. Idempotent: `engine.state.add` dedups.
-    ///
-    /// Runs at most once per process lifetime — subsequent mutations flow
-    /// through the post-commit observer (wired in a later commit) and the
-    /// engine's own pending queue.
-    private func reconcilePendingChangesFromDatabase() async {
-        guard !didRunStartupReconciliation else { return }
-        didRunStartupReconciliation = true
-
-        do {
-            let dirty: [(SyncEntityType, String)]
-            let deleted: [(SyncEntityType, String)]
-
-            (dirty, deleted) = try await appDatabase.dbWriter.read { db in
-                (try self.stateStore.dirtyEntities(db),
-                 try self.stateStore.tombstones(db))
-            }
-
-            var pending: [CKSyncEngine.PendingRecordZoneChange] = []
-            pending.reserveCapacity(dirty.count + deleted.count)
-            for (_, id) in dirty {
-                pending.append(.saveRecord(recordID(for: id)))
-            }
-            for (_, id) in deleted {
-                pending.append(.deleteRecord(recordID(for: id)))
-            }
-
-            if !pending.isEmpty {
-                engine.state.add(pendingRecordZoneChanges: pending)
-                log.info("reconciled \(pending.count, privacy: .public) pending changes from DB")
-            }
-        } catch {
-            log.error("startup reconciliation failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 

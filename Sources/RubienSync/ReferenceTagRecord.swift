@@ -25,7 +25,7 @@ extension ReferenceTag {
     /// triggers in `AppDatabase.swift`, so a dirty-queue entry's entityId
     /// and the CKRecord's recordName are always the same string.
     public static func recordName(referenceId: Int64, tagId: Int64) -> String {
-        "\(referenceId)/\(tagId)"
+        "\(referenceId)\(SyncConstants.pivotSeparator)\(tagId)"
     }
 
     public var recordName: String {

@@ -480,8 +480,14 @@ public final class AppDatabase: Sendable {
     }
 
     /// The primary-key expression used inside triggers. `referenceTag` is a pivot with a
-    /// composite key; its synthesized entityId is `referenceId/tagId`. `prefix` is
+    /// composite key; its synthesized entityId is `referenceId<sep>tagId`. `prefix` is
     /// either "NEW" (INSERT/UPDATE) or "OLD" (DELETE).
+    ///
+    /// The separator literal `/` here must stay in lockstep with
+    /// `SyncConstants.pivotSeparator` in the RubienSync target — they form a
+    /// cross-layer contract (SQL trigger output vs Swift-side recordName
+    /// builder). RubienCore can't import RubienSync, so the constant can't
+    /// be shared; this comment is the only enforcement.
     private func pkExpression(table: String, prefix: String) -> String {
         switch table {
         case "referenceTag":

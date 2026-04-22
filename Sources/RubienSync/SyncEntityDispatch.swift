@@ -156,13 +156,13 @@ extension SyncEntityType {
             guard let id = Int64(entityId) else { return }
             var row = Reference(record: record)
             row.id = id
-            try Self.upsert(row, id: id, tableName: "reference", db: db) { try row.update(db) } insert: { try row.insert(db) }
+            try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
 
         case .tag:
             guard let id = Int64(entityId) else { return }
             var row = Tag(record: record)
             row.id = id
-            try Self.upsert(row, id: id, tableName: "tag", db: db) { try row.update(db) } insert: { try row.insert(db) }
+            try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
 
         case .referenceTag:
             guard let pivot = ReferenceTag(record: record) else { return }
@@ -179,40 +179,40 @@ extension SyncEntityType {
         case .pdfAnnotation:
             guard let id = Int64(entityId), var row = PDFAnnotationRecord(record: record) else { return }
             row.id = id
-            try Self.upsert(row, id: id, tableName: "pdfAnnotation", db: db) { try row.update(db) } insert: { try row.insert(db) }
+            try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
 
         case .webAnnotation:
             guard let id = Int64(entityId), var row = WebAnnotationRecord(record: record) else { return }
             row.id = id
-            try Self.upsert(row, id: id, tableName: "webAnnotation", db: db) { try row.update(db) } insert: { try row.insert(db) }
+            try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
 
         case .metadataIntake:
             guard let id = Int64(entityId) else { return }
             var row = MetadataIntake(record: record)
             row.id = id
-            try Self.upsert(row, id: id, tableName: "metadataIntake", db: db) { try row.update(db) } insert: { try row.insert(db) }
+            try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
 
         case .metadataEvidence:
             guard let id = Int64(entityId), var row = MetadataEvidence(record: record) else { return }
             row.id = id
-            try Self.upsert(row, id: id, tableName: "metadataEvidence", db: db) { try row.update(db) } insert: { try row.insert(db) }
+            try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
 
         case .propertyDefinition:
             guard let id = Int64(entityId) else { return }
             var row = PropertyDefinition(record: record)
             row.id = id
-            try Self.upsert(row, id: id, tableName: "propertyDefinition", db: db) { try row.update(db) } insert: { try row.insert(db) }
+            try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
 
         case .propertyValue:
             guard let id = Int64(entityId), var row = PropertyValue(record: record) else { return }
             row.id = id
-            try Self.upsert(row, id: id, tableName: "propertyValue", db: db) { try row.update(db) } insert: { try row.insert(db) }
+            try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
 
         case .databaseView:
             guard let id = Int64(entityId) else { return }
             var row = DatabaseView(record: record)
             row.id = id
-            try Self.upsert(row, id: id, tableName: "databaseView", db: db) { try row.update(db) } insert: { try row.insert(db) }
+            try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
         }
     }
 
@@ -250,7 +250,7 @@ extension SyncEntityType {
     // MARK: - Helpers
 
     private static func splitPivotID(_ entityId: String) -> (Int64, Int64)? {
-        let parts = entityId.split(separator: "/")
+        let parts = entityId.split(separator: Character(SyncConstants.pivotSeparator))
         guard parts.count == 2,
               let refId = Int64(parts[0]),
               let tagId = Int64(parts[1])
