@@ -26,9 +26,15 @@ let package = Package(
             ]
         ),
         .target(
+            name: "RubienExceptionCatcher",
+            path: "Sources/RubienExceptionCatcher",
+            publicHeadersPath: "include"
+        ),
+        .target(
             name: "RubienSync",
             dependencies: [
                 "RubienCore",
+                "RubienExceptionCatcher",
             ]
         ),
         .executableTarget(
@@ -58,7 +64,7 @@ let package = Package(
         ),
         .testTarget(
             name: "RubienSyncTests",
-            dependencies: ["RubienSync", "RubienCore"],
+            dependencies: ["RubienSync", "RubienCore", "RubienExceptionCatcher"],
             path: "Tests/RubienSyncTests"
         ),
         .testTarget(
