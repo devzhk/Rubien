@@ -28,6 +28,7 @@ rubien-cli <subcommand> [options]
 | `annotations` | List PDF annotations for a reference |
 | `styles` | List available citation styles |
 | `views` | Manage database views |
+| `sync status` | Inspect iCloud sync state (JSON only) |
 
 ---
 
@@ -551,6 +552,51 @@ Listing and create/rename emit a `DatabaseViewDTO`:
 ```
 
 `--query` emits a reference array (same shape as `list` / `search`).
+
+---
+
+## sync status
+
+Prints iCloud sync state as JSON. Never instantiates the CloudKit sync
+engine — reads `syncState` / `tombstone` / `syncSession` tables directly
+and probes entitlement / iCloud availability via OS-level APIs. Safe to
+run while the app is using the library (acquires and releases the sync
+file lock only to read `appLockHeld`).
+
+### Example
+
+```bash
+$ rubien-cli sync status
+{
+  "appLockHeld" : false,
+  "baselineState" : "complete",
+  "containerIdentifier" : "iCloud.com.rubien.app",
+  "dirtyByEntityType" : { "reference" : 3, "tag" : 0 },
+  "enabled" : true,
+  "entitlementPresent" : true,
+  "iCloudAccountAvailable" : true,
+  "schemaVersion" : "v1",
+  "syncEngineState" : {
+    "sidecarExists" : true,
+    "sidecarLastModified" : "2026-04-22T14:32:11Z",
+    "sidecarPath" : "/Users/.../Rubien/sync-engine-state.bin"
+  },
+  "tombstoneCount" : { "confirmed" : 12, "unconfirmed" : 0 }
+}
+```
+
+### Fields
+
+- `enabled` — user's preference value (UserDefaults `"rubien.sync.enabled"`)
+- `containerIdentifier` — resolved container ID, with env-var override applied
+- `entitlementPresent` — Info.plist entitlement probe
+- `iCloudAccountAvailable` — `FileManager.ubiquityIdentityToken != nil`
+- `appLockHeld` — non-blocking probe of the sync file lock; `true` means the app is currently using CloudKit
+- `baselineState` — `"pending"` or `"complete"`
+- `dirtyByEntityType` — per-table count of rows with `isDirty=1`
+- `tombstoneCount` — `.confirmed` (server ack'd) vs `.unconfirmed` (pending delete)
+- `syncEngineState` — sidecar-file metadata
+- `schemaVersion` — DB migration version
 
 ---
 

@@ -55,7 +55,7 @@ Four Swift targets sit on top of one shared core (`Package.swift`):
 - **`RubienCore`** (library) — everything usable without AppKit: GRDB models, migrations, metadata resolvers (CrossRef/arXiv/PubMed/ISBN/OpenAlex/Semantic Scholar), BibTeX/RIS importers, CSL/citeproc-js citation engines. This is the only target the CLI and tests depend on, so any logic that needs to be reused by `rubien-cli` must live here, not in `Rubien`.
 - **`RubienSync`** (library) — CloudKit mapping layer, `CKSyncEngine`-based push/pull. Depends on `RubienCore` and the system `CloudKit` framework. The CLI does **not** link it.
 - **`Rubien`** (app executable) — SwiftUI views, window management, readers (PDFKit + WKWebView). Depends on `RubienCore`.
-- **`RubienCLI`** (executable, binary name `rubien-cli`) — built with swift-argument-parser. Uses `RubienCore` only.
+- **`RubienCLI`** (executable, binary name `rubien-cli`) — built with swift-argument-parser. Links `RubienCore` and `RubienSync` (the latter for the `sync status` subcommand, which reads sync bookkeeping tables + the engine-state sidecar file).
 
 ### Data layer — GRDB + single migrator
 
@@ -116,7 +116,7 @@ Triggers do **not** self-`UPDATE` `dateModified`. SQLite has `recursive_triggers
 
 ### CLI
 
-`Sources/RubienCLI/RubienCLI.swift` is the single-file argument-parser entry with 14 subcommands (`search`, `list`, `get`, `add`, `update`, `delete`, `cite`, `import`, `export`, `tags`, `properties`, `views`, `annotations`, `styles`). JSON is the default output format — scripts depend on it, so don't change CLI output shape without updating tests in `Tests/RubienCLITests/`.
+`Sources/RubienCLI/RubienCLI.swift` is the single-file argument-parser entry with 15 subcommands (`search`, `list`, `get`, `add`, `update`, `delete`, `cite`, `import`, `export`, `tags`, `properties`, `views`, `annotations`, `styles`, `sync`). JSON is the default output format — scripts depend on it, so don't change CLI output shape without updating tests in `Tests/RubienCLITests/`.
 
 **Keep the CLI in sync with data-layer changes.** Any time `RubienCore` gains a new model, table, field, or mutation (e.g. custom property definitions, property values, new reference metadata fields), extend the CLI to cover it — new subcommand for new entities, fold new fields into existing `get`/`list`/`export` JSON. UI-only changes (column reorder, popover layout, detail-panel widths) do **not** need CLI parity; the line is "is this a new way to read or write data?" If yes, the CLI must expose it and `RubienCLITests` must cover the JSON contract.
 
