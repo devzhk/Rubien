@@ -294,8 +294,29 @@ public final class SyncCoordinator: ObservableObject {
         }
     }
 
-    /// Placeholder; Task 8 implements the real error-code remap rule.
-    private func mapStatus(_ raw: SyncStatus) async -> SyncStatus { raw }
+    /// Coordinator-level `.error → .unavailable / .signedOut` remap. Keeps
+    /// the actor ignorant of UX semantics and the UI layer ignorant of
+    /// raw CK error codes.
+    private func mapStatus(_ raw: SyncStatus) async -> SyncStatus {
+        switch raw {
+        case .error(let error):
+            switch error.code {
+            case .missingEntitlement:
+                return .unavailable(reason: "CloudKit container not registered or entitlement invalid")
+            case .notAuthenticated where !defaults.bool(forKey: DefaultsKey.didConfirmFirstRun):
+                return .signedOut
+            default:
+                return raw
+            }
+        default:
+            return raw
+        }
+    }
+
+    // Test hook
+    func mapStatusForTest(_ raw: SyncStatus) async -> SyncStatus {
+        await mapStatus(raw)
+    }
 
     // MARK: - Startup auto-start
 

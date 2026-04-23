@@ -1,6 +1,7 @@
 import XCTest
 import Foundation
 import GRDB
+import CloudKit
 @testable import Rubien
 @testable import RubienCore
 @testable import RubienSync
@@ -288,5 +289,37 @@ final class SyncCoordinatorTests: XCTestCase {
         await coordinator.startIfEnabled()
         XCTAssertNil(coordinator.librarySnapshotForTest)
         XCTAssertEqual(coordinator.status, .disabled)
+    }
+
+    // MARK: - Status mapping rule
+
+    func testMissingEntitlementRemapsToUnavailable() async {
+        let coordinator = SyncCoordinator(appDatabase: db, defaults: defaults)
+        let missing = CKError(_nsError: NSError(
+            domain: CKErrorDomain,
+            code: CKError.Code.missingEntitlement.rawValue
+        ))
+        let mapped = await coordinator.mapStatusForTest(.error(missing))
+        guard case .unavailable = mapped else {
+            return XCTFail("missingEntitlement must map to .unavailable, got \(mapped)")
+        }
+    }
+
+    func testOtherErrorCodesPassThrough() async {
+        let coordinator = SyncCoordinator(appDatabase: db, defaults: defaults)
+        let quota = CKError(_nsError: NSError(
+            domain: CKErrorDomain,
+            code: CKError.Code.quotaExceeded.rawValue
+        ))
+        let mapped = await coordinator.mapStatusForTest(.error(quota))
+        XCTAssertEqual(mapped, .error(quota))
+    }
+
+    func testNonErrorStatusPassesThrough() async {
+        let coordinator = SyncCoordinator(appDatabase: db, defaults: defaults)
+        let idleMapped = await coordinator.mapStatusForTest(.idle)
+        XCTAssertEqual(idleMapped, .idle)
+        let syncingMapped = await coordinator.mapStatusForTest(.syncing)
+        XCTAssertEqual(syncingMapped, .syncing)
     }
 }
