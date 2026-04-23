@@ -48,4 +48,62 @@ final class SyncCoordinatorTests: XCTestCase {
             "previously-enabled state must survive a relaunch"
         )
     }
+
+    // MARK: - Confirm flow
+
+    func testTogglingOnShowsPendingConfirmWithoutPersisting() {
+        let coordinator = SyncCoordinator(appDatabase: db, defaults: defaults)
+        coordinator.handleToggle(true)
+
+        XCTAssertTrue(coordinator.pendingConfirm, "confirm sheet must be pending")
+        XCTAssertFalse(
+            defaults.bool(forKey: SyncCoordinator.DefaultsKey.enabled),
+            "UserDefaults must not be written until user confirms — prevents the app-quit-mid-sheet inconsistency"
+        )
+    }
+
+    func testToggleBindingReflectsPendingConfirm() {
+        let coordinator = SyncCoordinator(appDatabase: db, defaults: defaults)
+        XCTAssertFalse(coordinator.toggleBinding.wrappedValue)
+
+        coordinator.handleToggle(true)
+        XCTAssertTrue(
+            coordinator.toggleBinding.wrappedValue,
+            "binding reads true while pendingConfirm is set, so the toggle stays visually ON during the confirm sheet"
+        )
+    }
+
+    func testCancelConfirmClearsPendingAndLeavesDisabled() {
+        let coordinator = SyncCoordinator(appDatabase: db, defaults: defaults)
+        coordinator.handleToggle(true)
+        coordinator.cancelConfirm()
+
+        XCTAssertFalse(coordinator.pendingConfirm)
+        XCTAssertFalse(coordinator.userEnabled)
+        XCTAssertEqual(coordinator.status, .disabled)
+        XCTAssertFalse(defaults.bool(forKey: SyncCoordinator.DefaultsKey.enabled))
+    }
+
+    func testConfirmEnablePersistsAndSetsFlag() {
+        let coordinator = SyncCoordinator(appDatabase: db, defaults: defaults)
+        coordinator.handleToggle(true)
+        coordinator.confirmEnable()
+
+        XCTAssertFalse(coordinator.pendingConfirm)
+        XCTAssertTrue(coordinator.userEnabled)
+        XCTAssertTrue(defaults.bool(forKey: SyncCoordinator.DefaultsKey.enabled))
+        XCTAssertTrue(defaults.bool(forKey: SyncCoordinator.DefaultsKey.didConfirmFirstRun))
+    }
+
+    func testSecondToggleSkipsConfirmSheet() {
+        defaults.set(true, forKey: SyncCoordinator.DefaultsKey.didConfirmFirstRun)
+        let coordinator = SyncCoordinator(appDatabase: db, defaults: defaults)
+
+        coordinator.handleToggle(true)
+        XCTAssertFalse(
+            coordinator.pendingConfirm,
+            "didConfirmFirstRun == true means we skip the sheet on subsequent toggles"
+        )
+        XCTAssertTrue(coordinator.userEnabled)
+    }
 }
