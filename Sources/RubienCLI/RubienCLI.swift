@@ -23,6 +23,7 @@ struct RubienCLI: AsyncParsableCommand {
             Styles.self,
             Export.self,
             Views.self,
+            SyncCommand.self,
         ]
     )
 }
