@@ -106,4 +106,89 @@ final class SyncCoordinatorTests: XCTestCase {
         )
         XCTAssertTrue(coordinator.userEnabled)
     }
+
+    // MARK: - Probe tests
+
+    func testProbeUnavailableWhenEntitlementAbsent() async {
+        let coordinator = SyncCoordinator(
+            appDatabase: db,
+            defaults: defaults,
+            probes: SyncCoordinator.Probes(
+                bundleHasEntitlement: { false },
+                ubiquityIdentityToken: { "token" as NSCoding },
+                tryCKContainerInit: { _ in nil },
+                accountStatus: { _ in .available }
+            )
+        )
+        let result = await coordinator.runPreflightProbes(containerIdentifier: "iCloud.test")
+        guard case .unavailable(let reason) = result else {
+            return XCTFail("expected .unavailable, got \(result)")
+        }
+        XCTAssertTrue(reason.contains("entitlement"))
+    }
+
+    func testProbeSignedOutWhenTokenNil() async {
+        let coordinator = SyncCoordinator(
+            appDatabase: db,
+            defaults: defaults,
+            probes: SyncCoordinator.Probes(
+                bundleHasEntitlement: { true },
+                ubiquityIdentityToken: { nil },
+                tryCKContainerInit: { _ in nil },
+                accountStatus: { _ in .available }
+            )
+        )
+        let result = await coordinator.runPreflightProbes(containerIdentifier: "iCloud.test")
+        XCTAssertEqual(result, .signedOut)
+    }
+
+    func testProbeUnavailableWhenCKContainerThrows() async {
+        let coordinator = SyncCoordinator(
+            appDatabase: db,
+            defaults: defaults,
+            probes: SyncCoordinator.Probes(
+                bundleHasEntitlement: { true },
+                ubiquityIdentityToken: { "token" as NSCoding },
+                tryCKContainerInit: { _ in
+                    NSException(name: .internalInconsistencyException, reason: "no container", userInfo: nil)
+                },
+                accountStatus: { _ in .available }
+            )
+        )
+        let result = await coordinator.runPreflightProbes(containerIdentifier: "iCloud.test")
+        guard case .unavailable(let reason) = result else {
+            return XCTFail("expected .unavailable, got \(result)")
+        }
+        XCTAssertTrue(reason.contains("Container"))
+    }
+
+    func testProbeSignedOutWhenAccountStatusNoAccount() async {
+        let coordinator = SyncCoordinator(
+            appDatabase: db,
+            defaults: defaults,
+            probes: SyncCoordinator.Probes(
+                bundleHasEntitlement: { true },
+                ubiquityIdentityToken: { "token" as NSCoding },
+                tryCKContainerInit: { _ in nil },
+                accountStatus: { _ in .noAccount }
+            )
+        )
+        let result = await coordinator.runPreflightProbes(containerIdentifier: "iCloud.test")
+        XCTAssertEqual(result, .signedOut)
+    }
+
+    func testProbeIdleWhenAllPass() async {
+        let coordinator = SyncCoordinator(
+            appDatabase: db,
+            defaults: defaults,
+            probes: SyncCoordinator.Probes(
+                bundleHasEntitlement: { true },
+                ubiquityIdentityToken: { "token" as NSCoding },
+                tryCKContainerInit: { _ in nil },
+                accountStatus: { _ in .available }
+            )
+        )
+        let result = await coordinator.runPreflightProbes(containerIdentifier: "iCloud.test")
+        XCTAssertEqual(result, .idle)
+    }
 }
