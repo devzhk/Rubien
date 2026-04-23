@@ -7,9 +7,15 @@ import CloudKit
 /// sync engine's zone/record-type references.
 public enum SyncConstants {
 
-    /// CloudKit container identifier. Must match the `com.apple.developer.icloud-container-identifiers`
-    /// entitlement on both the Mac and iPad apps. Pending user confirmation / dashboard registration.
-    public static let containerIdentifier = "iCloud.com.rubien.app"
+    /// CloudKit container identifier. Reads `RUBIEN_CLOUDKIT_CONTAINER`
+    /// env var first (dev override) and falls back to the hardcoded
+    /// production default. Must match the
+    /// `com.apple.developer.icloud-container-identifiers` entitlement
+    /// on both Mac and iPad builds.
+    public static var containerIdentifier: String {
+        ProcessInfo.processInfo.environment["RUBIEN_CLOUDKIT_CONTAINER"]
+            ?? "iCloud.com.rubien.app"
+    }
 
     /// Single custom zone holding all synced records. Custom zones (vs. the default zone)
     /// are required for `CKSyncEngine`'s incremental fetch and per-zone state tokens.
