@@ -279,6 +279,7 @@ public final class SyncCoordinator: ObservableObject {
     // MARK: - Status stream consumer
 
     private func startStatusConsumer(for library: SyncedLibrary) {
+        statusTask?.cancel()  // prevent leaking a prior consumer on retry
         let stream = library.statusStream
         let currentGeneration = lifecycleGeneration
         statusTask = Task { [weak self] in
