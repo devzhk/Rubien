@@ -191,4 +191,102 @@ final class SyncCoordinatorTests: XCTestCase {
         let result = await coordinator.runPreflightProbes(containerIdentifier: "iCloud.test")
         XCTAssertEqual(result, .idle)
     }
+
+    // MARK: - startSync / stopSync integration
+
+    /// Returns a `SyncedLibrary` factory that creates a library without
+    /// calling `start()`. This avoids `CKSyncEngine` init which requires
+    /// CloudKit entitlements and crashes in an unentitled XCTest process.
+    private func stubLibraryFactory() -> @Sendable (AppDatabase) async -> SyncedLibrary {
+        return { db in SyncedLibrary(appDatabase: db) }
+    }
+
+    func testStartSyncSetsUnavailableWhenProbeFails() async {
+        let coordinator = SyncCoordinator(
+            appDatabase: db,
+            defaults: defaults,
+            probes: SyncCoordinator.Probes(
+                bundleHasEntitlement: { false },
+                ubiquityIdentityToken: { "token" as NSCoding },
+                tryCKContainerInit: { _ in nil },
+                accountStatus: { _ in .available }
+            )
+        )
+        await coordinator.performStartSyncForTest()
+
+        guard case .unavailable = coordinator.status else {
+            return XCTFail("expected .unavailable, got \(coordinator.status)")
+        }
+        XCTAssertNil(coordinator.librarySnapshotForTest, "no library instantiated when probes fail")
+    }
+
+    func testStopSyncClearsLibraryAndCancelsStatusTask() async {
+        let coordinator = SyncCoordinator(
+            appDatabase: db,
+            defaults: defaults,
+            probes: SyncCoordinator.Probes(
+                bundleHasEntitlement: { true },
+                ubiquityIdentityToken: { "token" as NSCoding },
+                tryCKContainerInit: { _ in nil },
+                accountStatus: { _ in .available }
+            ),
+            makeLibrary: stubLibraryFactory()
+        )
+        await coordinator.performStartSyncForTest()
+        XCTAssertNotNil(coordinator.librarySnapshotForTest)
+
+        await coordinator.performStopSyncForTest()
+        XCTAssertNil(coordinator.librarySnapshotForTest)
+        XCTAssertEqual(coordinator.status, .disabled)
+    }
+
+    func testRapidToggleDoesNotLeakStaleLibrary() async {
+        let coordinator = SyncCoordinator(
+            appDatabase: db,
+            defaults: defaults,
+            probes: .init(
+                bundleHasEntitlement: { true },
+                ubiquityIdentityToken: { "token" as NSCoding },
+                tryCKContainerInit: { _ in nil },
+                accountStatus: { _ in .available }
+            ),
+            makeLibrary: stubLibraryFactory()
+        )
+        async let first: Void = coordinator.performStartSyncForTest()
+        await coordinator.performStopSyncForTest()
+        async let second: Void = coordinator.performStartSyncForTest()
+
+        _ = await (first, second)
+
+        XCTAssertNotNil(coordinator.librarySnapshotForTest)
+    }
+
+    func testStartIfEnabledLaunchesSyncWhenUserDefaultsPersisted() async {
+        defaults.set(true, forKey: SyncCoordinator.DefaultsKey.enabled)
+        defaults.set(true, forKey: SyncCoordinator.DefaultsKey.didConfirmFirstRun)
+
+        let coordinator = SyncCoordinator(
+            appDatabase: db,
+            defaults: defaults,
+            probes: .init(
+                bundleHasEntitlement: { true },
+                ubiquityIdentityToken: { "token" as NSCoding },
+                tryCKContainerInit: { _ in nil },
+                accountStatus: { _ in .available }
+            ),
+            makeLibrary: stubLibraryFactory()
+        )
+        await coordinator.startIfEnabled()
+        XCTAssertNotNil(
+            coordinator.librarySnapshotForTest,
+            "startIfEnabled must launch the library when userDefaults says enabled"
+        )
+    }
+
+    func testStartIfEnabledIsNoOpWhenDisabled() async {
+        let coordinator = SyncCoordinator(appDatabase: db, defaults: defaults)
+        await coordinator.startIfEnabled()
+        XCTAssertNil(coordinator.librarySnapshotForTest)
+        XCTAssertEqual(coordinator.status, .disabled)
+    }
 }

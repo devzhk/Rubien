@@ -71,16 +71,34 @@ public final class SyncCoordinator: ObservableObject {
 
     private let probes: Probes
 
+    /// Factory that creates and starts a `SyncedLibrary` for a given
+    /// database. The closure is responsible for both construction and
+    /// calling `start()` so tests can inject a factory that skips the
+    /// `CKSyncEngine` init (which requires CloudKit entitlements and
+    /// would crash in an unentitled XCTest process).
+    /// Production uses the default value which calls `start()`.
+    private let makeLibrary: @Sendable (AppDatabase) async -> SyncedLibrary
+
     // MARK: - Init
 
     public init(
         appDatabase: AppDatabase,
         defaults: UserDefaults = .standard,
-        probes: Probes = .live
+        probes: Probes = .live,
+        makeLibrary: (@Sendable (AppDatabase) async -> SyncedLibrary)? = nil
     ) {
         self.appDatabase = appDatabase
         self.defaults = defaults
         self.probes = probes
+        if let makeLibrary {
+            self.makeLibrary = makeLibrary
+        } else {
+            self.makeLibrary = { db in
+                let lib = SyncedLibrary(appDatabase: db)
+                await lib.start()
+                return lib
+            }
+        }
         self.userEnabled = defaults.bool(forKey: DefaultsKey.enabled)
     }
 
@@ -169,17 +187,146 @@ public final class SyncCoordinator: ObservableObject {
         defaults.set(value, forKey: DefaultsKey.enabled)
     }
 
-    // MARK: - Sync lifecycle (stubs until Task 7)
+    // MARK: - Lifecycle state
+
+    private var library: SyncedLibrary?
+    private var statusTask: Task<Void, Never>?
+    private var syncLock: SyncFileLock?
+    private var lifecycleGeneration: Int = 0
+
+    /// Test-only accessor; production callers never read the library
+    /// directly (status is the observable surface).
+    var librarySnapshotForTest: SyncedLibrary? { library }
+
+    // MARK: - Real startSync / stopSync
 
     private func startSync() {
-        // Task 7 fills this in; stub sets .idle so the toggle flow's
-        // status transitions look sane to tests that don't exercise
-        // the probe path.
-        status = .idle
+        Task { await performStartSync() }
     }
 
     private func stopSync() {
+        Task { await performStopSync() }
+    }
+
+    /// Internal async workhorse — exposed as `performStartSyncForTest`
+    /// so tests can await completion deterministically.
+    func performStartSync() async {
+        lifecycleGeneration += 1
+        let generation = lifecycleGeneration
+
+        let probeResult = await runPreflightProbes(containerIdentifier: SyncConstants.containerIdentifier)
+        // Stale-completion guard after each await suspension.
+        guard generation == lifecycleGeneration else { return }
+
+        if probeResult != .idle {
+            status = probeResult
+            return
+        }
+
+        // Acquire the single-writer lock before instantiating the
+        // library. A running CLI `sync status` probes this lock
+        // non-blockingly to report `appLockHeld`.
+        //
+        // If this coordinator already holds the lock (e.g. a rapid
+        // start → stop → start sequence where the first start acquired
+        // the lock but the stale-completion guard fires before the lock
+        // was released), we reuse the existing lock rather than
+        // attempting a second acquisition — flock(2) on macOS treats
+        // same-process attempts as conflicting.
+        if syncLock == nil {
+            do {
+                let lock = try SyncFileLock(fileURL: SyncFileLock.defaultURL)
+                guard try lock.tryLockExclusive() else {
+                    status = .unavailable(reason: "Another Rubien process is syncing")
+                    return
+                }
+                self.syncLock = lock
+            } catch {
+                status = .unavailable(reason: "Sync lock unavailable: \(error)")
+                return
+            }
+        }
+
+        let newLibrary = await makeLibrary(appDatabase)
+        await newLibrary.installTransactionObserver()
+
+        guard generation == lifecycleGeneration else {
+            await newLibrary.removeTransactionObserver()
+            try? syncLock?.unlock()
+            syncLock = nil
+            return
+        }
+
+        library = newLibrary
+        status = .idle
+        startStatusConsumer(for: newLibrary)
+    }
+
+    func performStopSync() async {
+        lifecycleGeneration += 1
+        statusTask?.cancel()
+        statusTask = nil
+
+        if let existing = library {
+            await existing.removeTransactionObserver()
+        }
+        library = nil
+        try? syncLock?.unlock()
+        syncLock = nil
         status = .disabled
+    }
+
+    // MARK: - Status stream consumer
+
+    private func startStatusConsumer(for library: SyncedLibrary) {
+        let stream = library.statusStream
+        let currentGeneration = lifecycleGeneration
+        statusTask = Task { [weak self] in
+            for await newStatus in stream {
+                guard let self = self else { return }
+                let mappedStatus = await self.mapStatus(newStatus)
+                await MainActor.run {
+                    guard currentGeneration == self.lifecycleGeneration else { return }
+                    self.status = mappedStatus
+                }
+            }
+        }
+    }
+
+    /// Placeholder; Task 8 implements the real error-code remap rule.
+    private func mapStatus(_ raw: SyncStatus) async -> SyncStatus { raw }
+
+    // MARK: - Startup auto-start
+
+    /// Call at app launch (from `.task` on the root scene) after the
+    /// coordinator is injected. If the user previously enabled sync,
+    /// kicks off the lifecycle automatically so they don't have to
+    /// re-toggle on every relaunch. Safe to call multiple times —
+    /// second call bumps the generation counter and early-returns if
+    /// the library is already live.
+    public func startIfEnabled() async {
+        guard userEnabled, library == nil else { return }
+        await performStartSync()
+    }
+
+    // MARK: - Public retry entry point
+
+    /// Used by the "Try again" button on the Settings `.unavailable`
+    /// state and by the error-banner retry action. Renamed from the
+    /// earlier test-only name so production UI isn't calling a
+    /// `*ForTest` method.
+    public func retryStartSync() async {
+        await performStartSync()
+    }
+
+    // MARK: - Test hooks
+
+    func performStartSyncForTest() async {
+        await performStartSync()
+    }
+
+    func performStopSyncForTest() async {
+        await performStopSync()
     }
 }
 
