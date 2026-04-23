@@ -56,6 +56,7 @@ let package = Package(
             name: "RubienCLI",
             dependencies: [
                 "RubienCore",
+                "RubienSync",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]
         ),
@@ -76,7 +77,7 @@ let package = Package(
         ),
         .testTarget(
             name: "RubienCLITests",
-            dependencies: [],
+            dependencies: ["RubienSync"],
             path: "Tests/RubienCLITests"
         ),
     ]
