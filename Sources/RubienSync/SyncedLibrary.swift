@@ -75,6 +75,13 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         await ingestPendingChanges()
     }
 
+    /// The post-commit observer that feeds mutations to the engine.
+    /// Retained here because GRDB's `.observerLifetime` extent keeps
+    /// only a **weak** reference to the observer; without this, the
+    /// local var would deallocate immediately after the `add(...)`
+    /// call and commits would never reach the engine.
+    private var transactionObserver: SyncTransactionObserver?
+
     /// Install a GRDB `TransactionObserver` that forwards post-commit
     /// activity into the engine automatically. One call at app startup,
     /// after `start()`, is enough — app code doesn't have to manually
@@ -85,7 +92,26 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     /// fire on every reference save that happens to touch a scalar.
     public func installTransactionObserver() async {
         let observer = SyncTransactionObserver(library: self)
+        transactionObserver = observer  // hold strong; GRDB's .observerLifetime is weak
         appDatabase.dbWriter.add(transactionObserver: observer, extent: .observerLifetime)
+    }
+
+    /// Stop receiving post-commit notifications. Used when the user
+    /// toggles sync off — we need both GRDB's explicit `remove` call
+    /// (to drop the registration synchronously) and to nil our own
+    /// retention (so the observer can deallocate).
+    public func removeTransactionObserver() async {
+        guard let observer = transactionObserver else { return }
+        appDatabase.dbWriter.remove(transactionObserver: observer)
+        transactionObserver = nil
+    }
+
+    /// Test-only accessor. We can't exercise the engine side of the
+    /// observer pipeline without a CloudKit entitlement, but retention
+    /// is the bug we're guarding against — a test can prove it by
+    /// reading this property after install / remove.
+    var hasTransactionObserver: Bool {
+        transactionObserver != nil
     }
 
     /// Call from the app after any write transaction that might have left
