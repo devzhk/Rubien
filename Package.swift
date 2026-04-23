@@ -41,6 +41,8 @@ let package = Package(
             name: "Rubien",
             dependencies: [
                 "RubienCore",
+                "RubienSync",
+                "RubienExceptionCatcher",
             ],
             exclude: [
                 "Rubien.entitlements"
@@ -69,7 +71,7 @@ let package = Package(
         ),
         .testTarget(
             name: "RubienTests",
-            dependencies: ["Rubien", "RubienCore"],
+            dependencies: ["Rubien", "RubienCore", "RubienSync"],
             path: "Tests/RubienTests"
         ),
         .testTarget(
