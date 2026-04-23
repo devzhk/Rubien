@@ -61,17 +61,83 @@ Current v1 policy: server-wins on `.serverRecordChanged`. True LWW by `dateModif
 
 ### Enrollment-gap behavior
 
-CloudKit raises `CKException` (an Objective-C `NSException`) when `CKContainer(identifier:)` or `privateCloudDatabase` is accessed in a process without the container entitlement. **Swift's `do/catch` does not catch `NSException`** — only Swift errors that conform to `Error`. This rules out a plain Swift `try/catch` approach.
+CloudKit raises `CKException` (an Objective-C `NSException`) when `CKContainer(identifier:)` or `privateCloudDatabase` is accessed in a process without a valid container entitlement. **Swift's `do/catch` does not catch `NSException`** — only Swift errors that conform to `Error`. This rules out a plain Swift `try/catch` approach.
 
-Pre-flight probe strategy (ordered): the coordinator checks the following before ever touching `CKContainer`:
+Three-layer detection strategy:
 
-1. `Bundle.main.object(forInfoDictionaryKey: "com.apple.developer.icloud-container-identifiers")` — returns nil in unentitled builds; immediate `.unavailable("No CloudKit entitlement in app bundle")`.
-2. `FileManager.default.ubiquityIdentityToken` — non-nil when the user is signed into an iCloud account; nil triggers `.signedOut` without touching CKContainer at all.
-3. Only after both probes pass do we construct `CKContainer` via the lazy `containerProvider` and instantiate `SyncedLibrary`.
+**Layer 1 — Bundle plist probe (coarse filter):**
+`Bundle.main.object(forInfoDictionaryKey: "com.apple.developer.icloud-container-identifiers")` — returns nil when the entitlement key was never declared. Fast, zero-risk, but **best-effort only**: the plist can carry the string in an ad-hoc / unsigned build where the signing process never granted it. Treat a present key as "may be entitled, proceed"; treat absent as definitely not.
 
-For the residual "probe said OK but CloudKit still raises" case (e.g., entitlement present in bundle but container not registered in the Dashboard — which Apple reports as an *async* `CKError.missingEntitlement` on first API call, not an NSException), the actor's `statusStream` carries the error out and the coordinator sets `.unavailable("Container not found: \(id)")`. That error path is a normal Swift error through CKSyncEngine's delegate — catchable.
+**Layer 2 — iCloud identity probe (no CKContainer required):**
+`FileManager.default.ubiquityIdentityToken` — returns non-nil when the user is signed into *an* iCloud account. This is a coarse signed-in check that never touches CloudKit. Nil → `.signedOut` immediately; skip any CKContainer call.
 
-UI: toolbar warning icon + Settings caption explaining the state. Manual "Try again" button in Settings that re-runs the probe + `startSync()` flow — useful for flipping the switch the moment entitlement arrives without re-toggling the preference.
+**Layer 3 — Objective-C exception shim (best-effort crash prevention):**
+
+Apple's CKContainer documentation **does not contractually guarantee** that a missing-entitlement failure raises a catchable `NSException`; our earlier XCTest session observed this empirically (SIGTRAP / "uncaught exception of type CKException") for a process with no CloudKit entitlement, but the behavior could change across OS versions. Layer 3 is therefore positioned as **hardening**, not guarantee: it catches the NSException when it's raised, and when it isn't, layer 4 (`CKContainer.accountStatus`) + the async delegate error path catch the failure as a regular Swift `CKError`.
+
+The shim catches only `NSException` (ObjC `@try/@catch`). It cannot catch Swift errors — those are returned via the delegate's `CKError` path and handled by the actor's statusStream. The two mechanisms are complementary, not redundant:
+
+```objc
+// Sources/RubienExceptionCatcher/include/ExceptionCatcher.h
+#import <Foundation/Foundation.h>
+
+NS_ASSUME_NONNULL_BEGIN
+
+@interface ExceptionCatcher : NSObject
++ (nullable NSException *)tryBlock:(NS_NOESCAPE void (^)(void))block;
+@end
+
+NS_ASSUME_NONNULL_END
+```
+
+```objc
+// Sources/RubienExceptionCatcher/ExceptionCatcher.m
+#import "ExceptionCatcher.h"
+
+@implementation ExceptionCatcher
++ (nullable NSException *)tryBlock:(NS_NOESCAPE void (^)(void))block {
+    @try { block(); return nil; }
+    @catch (NSException *e) { return e; }
+}
+@end
+```
+
+SwiftPM rule: a single target cannot mix `.swift` and `.m/.c` sources. The shim therefore lives in its own Clang target `RubienExceptionCatcher` that `RubienSync` depends on:
+
+```swift
+// Package.swift additions
+.target(
+    name: "RubienExceptionCatcher",
+    path: "Sources/RubienExceptionCatcher",
+    publicHeadersPath: "include"
+),
+.target(
+    name: "RubienSync",
+    dependencies: ["RubienCore", "RubienExceptionCatcher"]
+),
+```
+
+The Swift call site:
+
+```swift
+if let ex = ExceptionCatcher.tryBlock({ _ = CKContainer(identifier: id).privateCloudDatabase }) {
+    return .unavailable(reason: "Container construction raised \(ex.name.rawValue)")
+}
+```
+
+Wrap both the `CKContainer(identifier:)` init and the first `privateCloudDatabase` access. A non-nil return becomes `.unavailable(reason:)` and the actor is never instantiated.
+
+**Layer 4 — CloudKit-blessed account status (rich detection, post-construction):**
+Once the CKContainer is safely constructed, `container.accountStatus(completionHandler:)` returns `.available` / `.noAccount` / `.restricted` / `.temporarilyUnavailable` / `.couldNotDetermine`. The coordinator calls this once during `startSync()` after Layer 3 succeeds, and maps:
+- `.noAccount` / `.couldNotDetermine` → `.signedOut`
+- `.restricted` → `.error(.managedAccountRestricted)` (triggers the restricted banner from the error table)
+- `.temporarilyUnavailable` → `.error(.accountTemporarilyUnavailable)` — engine will retry automatically
+- `.available` → proceed; status transitions to `.idle` once engine start completes
+
+**Residual async failure path:**
+If all four layers pass but CloudKit still delivers `CKError.missingEntitlement` on a later API call (e.g., container name was registered locally but not yet propagated to CloudKit's servers), the actor's `statusStream` carries the error out. The coordinator's mapping rule (see "Status-mapping rule" in Error handling) remaps `.error(.missingEntitlement)` → `.unavailable(reason:)` so the UX stays consistent with the probe-level unavailable state.
+
+**UI:** toolbar warning icon + Settings caption explaining the state + "Try again" button that re-runs Layers 1–4 + `startSync()`. Useful for flipping the switch the moment entitlement arrives without re-toggling the preference.
 
 ## Architecture
 
@@ -191,15 +257,41 @@ Reads all of these **without instantiating `SyncedLibrary`** (and without constr
 
 Uses a transient `pendingConfirm` state (in-memory only, not persisted) so relaunches never land in "toggle says on but user never agreed":
 
-1. SwiftUI binds toggle to `coordinator.userEnabled`. Flip to `true` does **not** immediately persist — instead it sets `coordinator.pendingConfirm = true` and shows the confirm sheet. UserDefaults is not updated yet.
-2. **"Enable Sync"** → persist `UserDefaults["rubien.sync.enabled"] = true` + `"rubien.sync.didConfirmFirstRun"] = true`, clear `pendingConfirm`, run `startSync()`.
-3. **"Not Now"** → snap the toggle's visual state back to `false` (SwiftUI binding update), clear `pendingConfirm`, do nothing else.
-4. **App quit while sheet is open** → no UserDefaults change happened at step 1, so on relaunch the toggle reads `false` and the world is consistent.
-5. `startSync()` path: runs the entitlement + account pre-flight probes described in "Enrollment-gap behavior". If any probe fails, sets `status = .unavailable(reason)` or `.signedOut` and returns without instantiating `SyncedLibrary`. If probes pass, instantiates `SyncedLibrary`, awaits `start()`, awaits `installTransactionObserver()`, launches the consumer Task for `statusStream`.
-6. `start()` runs baseline (first time only), tombstone compaction, `ingestPendingChanges`.
-7. Actor's first engine-driven event emits `.idle` or `.syncing`; coordinator republishes. If CloudKit delivers an async error later (e.g. `.missingEntitlement` because the container wasn't registered in the Dashboard even though the bundle had the entitlement), actor emits `.error(...)` → coordinator sets `.unavailable`.
+**SwiftUI binding setup.** The toggle's visual state is driven by a computed `Binding<Bool>` on the coordinator, **not** a direct bind to `userEnabled`:
+```swift
+var toggleBinding: Binding<Bool> {
+    Binding(
+        get: { self.pendingConfirm || self.userEnabled },
+        set: { newValue in self.handleToggle(newValue) }
+    )
+}
+```
+The `get` returns `true` while the sheet is up (so the toggle appears ON during confirmation), and returns `false` once pendingConfirm clears if the user cancelled. No visual flicker: the transition is atomic in one SwiftUI update.
 
-Subsequent toggles (ON after a previous OFF): `didConfirmFirstRun` is already true, so step 1 skips the sheet and persists the toggle immediately.
+**Race safety via generation counter.** Concurrent or rapid on→off→on sequences could otherwise land stale `startSync` completions in a world where the user already toggled off. The coordinator stores `private var lifecycleGeneration: Int = 0`; each `startSync` / `stopSync` bumps it; the async completion only applies its side effects if the counter still matches:
+```swift
+let generation = (lifecycleGeneration += 1, lifecycleGeneration).1
+Task {
+    let result = await runPreflightAndStart()
+    guard generation == self.lifecycleGeneration else { return } // stale
+    self.applyStartResult(result)
+}
+```
+This guarantees that a rapid toggle off-and-on-again never leaves the coordinator in a mixed state even if the OS schedules the async tasks out of order.
+
+**Sequence:**
+
+1. User flips toggle. `handleToggle(true)` runs on `@MainActor`:
+   - If `didConfirmFirstRun == false` → set `pendingConfirm = true`, present confirm sheet. UserDefaults is **not** updated yet.
+   - Else → go directly to step 5 (subsequent toggles).
+2. **"Enable Sync"** → persist `UserDefaults["rubien.sync.enabled"] = true` + `"rubien.sync.didConfirmFirstRun"] = true`; clear `pendingConfirm`; call `startSync()` (bumps generation).
+3. **"Not Now"** → clear `pendingConfirm` (binding immediately re-reads as `false`); do nothing else.
+4. **App quit while sheet is open** → no UserDefaults change happened at step 1, so on relaunch the toggle reads `false` and the world is consistent.
+5. `startSync()` runs the four-layer entitlement + account probes described in "Enrollment-gap behavior". Any failure short-circuits with `status = .unavailable(reason)` / `.signedOut` without instantiating `SyncedLibrary`. Probes pass → instantiate `SyncedLibrary`, `await library.start()`, `await library.installTransactionObserver()`, launch consumer Task for `statusStream` (stored as `statusTask`).
+6. `start()` runs baseline (first time only), tombstone compaction, `ingestPendingChanges`.
+7. Actor's first engine-driven event emits `.idle` or `.syncing`; coordinator republishes after applying the `.error → .unavailable / .signedOut` mapping rule (see Error handling).
+
+Subsequent toggles (ON after a previous OFF): `didConfirmFirstRun` is already true, so step 1 skips the sheet, persists the toggle, and goes straight to step 5.
 
 ### Flow C — ongoing sync during normal use
 
@@ -243,18 +335,41 @@ ON again:
 | Status | Trigger | UI | Recovery |
 |---|---|---|---|
 | `.disabled` | Toggle off | Muted outline cloud; Settings caption "Off — local library only" | User flips toggle |
-| `.unavailable(reason)` | Entitlement absent from bundle OR container not registered (async `.missingEntitlement`) | Outline cloud with ⚠; no banner | Manual "Try again" in Settings or automatic on app foreground |
-| `.signedOut` | `handleAccountChange(.signOut)` / `.switchAccounts` / `ubiquityIdentityToken == nil` | Cloud-with-slash icon; banner "Signed out of iCloud — sync paused. Your library is safe locally." | Automatic on re-sign-in |
+| `.unavailable(reason)` | Entitlement absent from bundle OR container not registered OR coordinator mapped `.error(.missingEntitlement)` (see mapping rule below) | Outline cloud with ⚠; **non-blocking info banner "iCloud sync unavailable: \(reason)"** (top overlay, dismissible). See rule #6 reconciliation below. | Manual "Try again" in Settings or automatic on app foreground |
+| `.signedOut` | `handleAccountChange(.signOut)` / `.switchAccounts` / `ubiquityIdentityToken == nil` / `CKContainer.accountStatus == .noAccount` | Cloud-with-slash icon; banner "Signed out of iCloud — sync paused. Your library is safe locally." | Automatic on re-sign-in |
 | `.idle` | `.didFetchChanges` / `.didSendChanges` / end of start | Solid cloud, accent color | n/a |
 | `.syncing` | `.willFetchChanges` / `.willSendChanges` | Animated solid cloud | n/a |
 | `.error(.quotaExceeded)` | `.sentRecordZoneChanges` delivers this code | Red warning cloud; modal alert "iCloud storage full." + "Open iCloud Settings" button | User frees space; retry on foreground |
-| `.error(.networkUnavailable \| .networkFailure)` | Transient network | Warning cloud; no banner (transient) | CKSyncEngine auto-retries with backoff |
+| `.error(.networkUnavailable \| .networkFailure \| .serviceUnavailable)` | Transient network or iCloud service outage | Warning cloud; no banner (transient) | CKSyncEngine auto-retries with backoff |
 | `.error(.zoneBusy \| .requestRateLimited)` | Server backpressure; carries `retryAfter` | Warning cloud; no banner (transient) | Engine respects `retryAfter` automatically |
 | `.error(.limitExceeded)` | Batch exceeded 400 records / 2 MB | Warning cloud; no banner | Engine auto-paginates and retries — if recurring, log for investigation |
 | `.error(.batchRequestFailed)` | One record in the batch failed; others may have succeeded | Warning cloud; no banner | Engine splits the batch and retries individual records |
-| `.error(.serverRejectedRequest)` | Server rejected the operation outright (rare; schema / auth issue) | Red warning; non-modal banner "Sync paused — server rejected request. See Console for details." | Manual investigation required; engine keeps trying but likely needs intervention |
+| `.error(.accountTemporarilyUnavailable)` | iCloud account exists but momentarily unreachable (e.g., CloudKit's own auth token refresh in progress) | Warning cloud; no banner (transient) | Engine retries automatically within seconds |
+| `.error(.notAuthenticated)` | Authentication failure — token rejected or missing | Red warning cloud; non-modal banner "Sync authentication failed. Re-authenticate iCloud in System Settings." + **"Open System Settings" button** that opens `CKContainer.openSettingsURLString` (Apple's stable constant — forward-compatible across macOS versions; the raw URL strings change between OS releases) | User re-auths at OS level; on return to app, status recovers automatically when CloudKit accepts the new token |
+| `.error(.managedAccountRestricted)` | User's iCloud account is restricted by MDM policy from CloudKit | Outline cloud with ⚠; banner "Sync not available on this account (restricted by management policy). Your library stays local." | No user action possible; status is stable |
+| `.error(.tooManyRetries)` | CKSyncEngine gave up after its own retry budget | Red warning cloud; non-modal banner "Sync is stuck. See Console for details; tap 'Retry' to try again." + Retry button | Manual — user taps Retry; coordinator calls `engine.fetchChanges()` + `engine.sendChanges()` to kick |
+| `.error(.serverRejectedRequest)` | Server rejected the operation outright (rare; schema / auth issue) | Red warning cloud; non-modal banner "Sync paused — server rejected request. See Console for details." | Manual investigation required; engine keeps trying but likely needs intervention |
+| `.error(.missingEntitlement)` | Async mapping — see rule below | **Not displayed as `.error`** — coordinator remaps to `.unavailable(reason: "CloudKit container not registered or entitlement invalid")`. See mapping rule. | Same as `.unavailable` |
 | `.error(.changeTokenExpired)` | Server's change token has aged out | None (handled internally — engine re-fetches with no token) | No user-visible recovery needed |
 | `.error(other)` | Any other unhandled `CKError` | Warning cloud; non-modal banner "Sync error: \(localized). Will retry." | Engine retries; banner auto-dismisses on `.idle` |
+
+**Status-mapping rule (`.error` → `.unavailable` / `.signedOut` promotion)** — the actor emits raw `.error(CKError)` on its status stream. The coordinator's consumer maps before republishing as `@Published status`:
+
+```
+case .error(let error):
+    switch error.code {
+    case .missingEntitlement:
+        status = .unavailable(reason: "CloudKit container not registered or entitlement invalid")
+    case .notAuthenticated where !userHasEverSignedIn:
+        status = .signedOut
+    default:
+        status = .error(error)
+    }
+```
+
+This keeps the actor ignorant of UX semantics and the UI layer ignorant of raw CK error codes.
+
+**Components reconciliation:** the Components section's "`.alert`-based modal for `.error(.quotaExceeded)`; non-blocking overlay banner for `.signedOut` / `.unavailable`" was correct; the round-1 error table's "no banner" for `.unavailable` was a leftover. The table row above now specifies the overlay banner.
 
 **First-run confirm dialog** — only modal we show for sync, gated once per user via `UserDefaults["rubien.sync.didConfirmFirstRun"]`.
 
@@ -326,30 +441,36 @@ On Mac mini + MacBook, both signed into same iCloud account:
 
 Codex flagged the single-commit plan as too broad. Implementation ships as four focused commits, each independently buildable and testable:
 
-**Commit 1 — `SyncCoordinator` + state model** (scope: `Sources/RubienSync/SyncStatus.swift`, `Sources/RubienSync/SyncedLibrary.swift` stream additions, `Sources/Rubien/Sync/SyncCoordinator.swift`, tests)
-- `SyncStatus` enum
-- `SyncedLibrary.statusStream: AsyncStream<SyncStatus>` + publishStatus helper in existing delegate methods
-- `SyncCoordinator` class with UserDefaults-backed preference, pendingConfirm state machine, entitlement + account pre-flight probes, statusTask management
-- Unit tests for all the coordinator state transitions
-- No UI changes; coordinator isn't yet wired into `RubienApp`. Verify via tests only.
+**Commit 1 — `SyncCoordinator` + state model** (scope: `Sources/RubienSync/SyncStatus.swift`, `Sources/RubienSync/SyncedLibrary.swift` stream additions, new `Sources/RubienExceptionCatcher/` Clang target, `Package.swift` update, `Sources/Rubien/Sync/SyncCoordinator.swift`, tests)
+- `SyncStatus` enum (in RubienSync so both targets use it)
+- `SyncedLibrary.statusStream: AsyncStream<SyncStatus>` + `publishStatus(_:)` helper; existing delegate methods updated to publish alongside logging
+- New SPM target `RubienExceptionCatcher`: Clang-only, contains `include/ExceptionCatcher.h` + `ExceptionCatcher.m` (~15 LOC total). `Package.swift` grows one target + a dependency from `RubienSync`. No mixing `.swift` with `.m` in a single target — SwiftPM forbids that.
+- `SyncCoordinator` class: UserDefaults-backed preference, `pendingConfirm` + `lifecycleGeneration` state machine, four-layer entitlement+account probes (including the L3 ObjC shim call), `statusTask` management
+- Unit tests for all coordinator state transitions, plus one test for `ExceptionCatcher.tryBlock` round-trip (throw inside block → non-nil NSException returned; no throw → nil returned)
+
+**Commit 1 build guarantee.** `SyncCoordinator` lives in the `Rubien` executable target but isn't referenced by `RubienApp.swift` yet. Swift does not emit unused-declaration warnings for file-level types in a target, so this compiles without diagnostics. The coordinator is reached only by its own test file (`Tests/RubienTests/SyncCoordinatorTests.swift`) via `@testable import Rubien`. Confirmed against the existing `swift build` / `swift test` flow — no -Werror-style unused-symbol treatment is in place in `Package.swift`.
 
 **Commit 2 — SwiftUI surface** (scope: `RubienApp.swift`, `PreferencesView.swift`, `SyncStatusIcon.swift`, `SyncStatusBanner.swift`)
 - Inject `SyncCoordinator` as `@StateObject` via `.environmentObject`
-- Toolbar cloud icon with the seven visual states
-- Settings section with toggle, confirm sheet, status caption, "Try again" button
-- Banner view modifier at scene root
-- Smoke tested by running Rubien locally in "entitlement absent" mode — UI should show `.unavailable` cleanly
+- Toolbar cloud icon; eight visual states mapped from `SyncStatus` (7 listed in error table + `.disabled`)
+- Settings section with toggle (bound to `coordinator.toggleBinding`), confirm sheet, status caption, "Try again" button
+- Banner view modifier at scene root (modal alert for `.error(.quotaExceeded)`; overlay banner for `.signedOut` / `.unavailable` / `.error(.notAuthenticated | .managedAccountRestricted | .tooManyRetries | .serverRejectedRequest | other)`)
+- Smoke tested by running Rubien locally with no CloudKit entitlement — UI shows `.unavailable` cleanly via the plist probe at layer 1
 
 **Commit 3 — CLI `sync status`** (scope: `Package.swift` CLI→RubienSync dep, `Sources/RubienCLI/SyncCommands.swift`, `Tests/RubienCLITests/SyncCommandsTests.swift`, `CLAUDE.md` + `Docs/CLI-Reference.md` updates)
 - Subcommand structure, JSON contract per the shape above
-- `CLAUDE.md` amendment: RubienCLI now transitively imports CloudKit
+- `CLAUDE.md` amendment: RubienCLI now transitively imports CloudKit (via RubienSync)
 
-**Commit 4 — Operational hardening** (scope: `Rubien.entitlements`, `scripts/build-app.sh` notes, `Docs/superpowers/specs/2026-04-22-make-sync-runnable-setup.md`)
-- Entitlements entries (dormant until paid enrollment clears + container is registered)
-- Smoke test runbook
-- Container-creation steps in Developer Portal, signing setup
+**Commit 4 — Operational hardening** (scope: `Sources/Rubien/Rubien.entitlements`, `scripts/build-app.sh` notes, runbook doc)
+- Entitlement entries: `com.apple.developer.icloud-container-identifiers` (value: the container id string) + `com.apple.developer.icloud-services` = `CloudKit`. These are dormant until the container is registered and the user's signing team can grant them — before then the app is simply unsigned-or-locally-signed and the plist probe at layer 1 returns nil → `.unavailable`.
+- `scripts/build-app.sh` note: local DMG builds via `xcodebuild` handle entitlement injection automatically when a signing identity with the CloudKit capability is available. For pure `swift run Rubien` development, entitlements aren't attached at all — sync will always read as `.unavailable` in that path, which is fine for UI development.
+- xcconfig plumbing (for CI / scripted release builds that want a specific signing identity + container-id override) is the only piece deferred to a **separate later commit** under the "xcconfig-driven entitlements for CLI builds via `scripts/build-app.sh`" follow-up (tracked in Open follow-ups below). Commit 4 ships the entitlements file and a manual-setup runbook; xcconfig automation is a nice-to-have that doesn't block first smoke test.
 
-Commits 1–3 can land during enrollment gap. Commit 4 lands once the container is registered and verified.
+**Sequencing constraints:**
+- Commits 1–3 can land during the enrollment gap and compile/test cleanly without any Apple Developer state.
+- Commit 4's entitlement file changes are safe to land before enrollment clears: the plist probe short-circuits to `.unavailable`, the app doesn't crash, CI stays green.
+- First **real** (non-mock) smoke test requires enrollment + container registration + Xcode signing — that's the post-commit-4 validation step listed in the Testing section's "Manual smoke test" runbook.
+- xcconfig commit (open follow-up) isn't on the critical path and can land anytime after commit 4.
 
 ## Appendix — operational setup steps (user performs)
 
