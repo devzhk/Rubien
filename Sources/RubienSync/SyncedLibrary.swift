@@ -36,6 +36,15 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     /// initialized before the CKSyncEngine starts issuing async callbacks.
     private var _engine: CKSyncEngine?
 
+    // MARK: - Status stream
+
+    /// Observable state changes the coordinator republishes to SwiftUI.
+    /// One stream per actor lifetime; the actor calls `publishStatus(_:)`
+    /// from inside its delegate methods.
+    public nonisolated let statusStream: AsyncStream<SyncStatus>
+
+    private let statusContinuation: AsyncStream<SyncStatus>.Continuation
+
     // MARK: - Init
 
     public init(
@@ -45,6 +54,9 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             CKContainer(identifier: SyncConstants.containerIdentifier)
         }
     ) {
+        var continuation: AsyncStream<SyncStatus>.Continuation!
+        self.statusStream = AsyncStream { cont in continuation = cont }
+        self.statusContinuation = continuation
         self.appDatabase = appDatabase
         self.stateStore = SyncStateStore()
         self.engineStateStore = SyncEngineStateStore(fileURL: stateFileURL)
@@ -73,6 +85,25 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         // so recalling on every `start()` is cheap and doesn't need a
         // process-lifetime guard.
         await ingestPendingChanges()
+    }
+
+    // MARK: - Status publishing
+
+    func publishStatus(_ status: SyncStatus) {
+        statusContinuation.yield(status)
+        switch status {
+        case .error(let error):
+            log.error("sync status → error: \(error.localizedDescription, privacy: .public)")
+        case .unavailable(let reason):
+            log.info("sync status → unavailable: \(reason, privacy: .public)")
+        default:
+            log.debug("sync status → \(String(describing: status), privacy: .public)")
+        }
+    }
+
+    /// Test-only hook. Production callers go through `publishStatus`.
+    func publishStatusForTest(_ status: SyncStatus) {
+        publishStatus(status)
     }
 
     /// The post-commit observer that feeds mutations to the engine.
@@ -263,11 +294,16 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         case .sentRecordZoneChanges(let event):
             await handleSentZoneChanges(event)
 
+        case .willFetchChanges, .willSendChanges:
+            publishStatus(.syncing)
+
+        case .didFetchChanges, .didSendChanges:
+            publishStatus(.idle)
+
         case .fetchedDatabaseChanges,
              .sentDatabaseChanges,
-             .willFetchChanges, .willFetchRecordZoneChanges,
-             .didFetchRecordZoneChanges, .didFetchChanges,
-             .willSendChanges, .didSendChanges:
+             .willFetchRecordZoneChanges,
+             .didFetchRecordZoneChanges:
             // Lifecycle events we currently only observe. UI
             // syncing-indicator updates will hook in here in a later
             // commit.
