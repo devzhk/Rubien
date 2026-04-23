@@ -1,10 +1,12 @@
 import AppKit
 import SwiftUI
 import RubienCore
+import RubienSync
 
 @main
 struct RubienApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    @StateObject private var syncCoordinator = SyncCoordinator(appDatabase: AppDatabase.shared)
     @State private var addinToast: AddinToastPayload?
     @AppStorage(RubienPreferences.appendYouTubeTranscriptOnClipKey) private var appendYouTubeTranscriptOnClip = false
     private static let defaultWindowSize = preferredDefaultWindowSize()
@@ -12,12 +14,19 @@ struct RubienApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .environmentObject(syncCoordinator)
                 .overlay(alignment: .top) {
                     if let toast = addinToast {
                         AddinToast(message: toast.message, tone: toast.tone)
                             .padding(.top, 10)
                             .transition(.move(edge: .top).combined(with: .opacity))
                     }
+                }
+                .syncStatusBanner(status: syncCoordinator.status) {
+                    Task { await syncCoordinator.retryStartSync() }
+                }
+                .task {
+                    await syncCoordinator.startIfEnabled()
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .rubienClipImported)) { note in
                     let title = (note.userInfo?[RubienClipImportedKeys.title] as? String)?
@@ -26,6 +35,11 @@ struct RubienApp: App {
                     let fmt = String(localized: "Saved web clip: %@", bundle: .module)
                     let message = title.flatMap { !$0.isEmpty ? String(format: fmt, $0) : nil } ?? fallback
                     showToast(message, tone: .success)
+                }
+                .toolbar {
+                    ToolbarItem(placement: .primaryAction) {
+                        SyncStatusIcon(status: syncCoordinator.status)
+                    }
                 }
         }
         .windowStyle(.titleBar)
@@ -79,7 +93,8 @@ struct RubienApp: App {
             }
         }
         Settings {
-            EmptyView()
+            RubienSettingsView()
+                .environmentObject(syncCoordinator)
         }
     }
 
