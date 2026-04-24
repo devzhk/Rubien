@@ -24,6 +24,7 @@ struct ReferenceTableView: View {
     let db: AppDatabase
     let customPropertyValueMap: [Int64: [Int64: String]]
     @Binding var groupBy: GroupConfig?
+    @Binding var viewColumnWraps: Set<String>
     var viewName: String? = nil
     var isDirty: Bool = false
     var onSaveView: () -> Void = {}
@@ -32,6 +33,11 @@ struct ReferenceTableView: View {
     @State private var selection = Set<Reference.ID>()
     @State private var showDeleteConfirm = false
     @State private var showPropertyManager = false
+    // Owned here (not in `ReferenceTableContent`) so the Display menu in
+    // `ViewChromeBar` can see the same live state — a second UserDefaults
+    // read would be stale right after the user hides a column.
+    @State private var columnCustomization: TableColumnCustomization<Reference> =
+        RubienPreferences.loadTableColumnCustomization()
 
     var body: some View {
         // Hoist pipeline computations once per body render. `processedReferences`
@@ -48,6 +54,8 @@ struct ReferenceTableView: View {
                 filters: $filters,
                 sorts: $sorts,
                 groupBy: $groupBy,
+                columnWraps: $viewColumnWraps,
+                isColumnVisible: { id in columnCustomization[visibility: id] != .hidden },
                 tags: allTags,
                 propertyDefs: propertyDefs,
                 currentBuckets: buckets ?? [],
@@ -167,7 +175,9 @@ struct ReferenceTableView: View {
                 return !hardcodedKeys.contains(key)
             },
             customPropertyValueMap: customPropertyValueMap,
-            db: db
+            db: db,
+            wrapForColumn: { id in viewColumnWraps.contains(id) },
+            columnCustomization: $columnCustomization
         )
         .contextMenu(forSelectionType: Reference.ID.self) { ids in
             if let id = ids.first, let ref = references.first(where: { $0.id == id }) {
@@ -396,14 +406,8 @@ private struct ReferenceTableContent: View {
     let customProperties: [PropertyDefinition]
     let customPropertyValueMap: [Int64: [Int64: String]]
     let db: AppDatabase
-
-    @State private var columnCustomization: TableColumnCustomization<Reference> = {
-        guard let data = UserDefaults.standard.data(forKey: RubienPreferences.tableColumnCustomizationKey),
-              let decoded = try? JSONDecoder().decode(TableColumnCustomization<Reference>.self, from: data) else {
-            return TableColumnCustomization<Reference>()
-        }
-        return decoded
-    }()
+    let wrapForColumn: (String) -> Bool
+    @Binding var columnCustomization: TableColumnCustomization<Reference>
 
     @State private var editingCell: EditingCellID? = nil
 
@@ -428,7 +432,8 @@ private struct ReferenceTableContent: View {
     }
 
     // Tab skips columns hidden via `TableColumnCustomization` — landing on an
-    // invisible editor would strand `editingCell` and block Return-to-edit.
+    // invisible editor would strand `editingCell` with no way to commit or
+    // cancel, since the off-screen cell's focus chain is detached.
     private func editableColumnKeys() -> [String] {
         var keys: [String] = [ColumnIdentifier.title.rawValue]
         // Title has `.disabledCustomizationBehavior(.visibility)` — always visible.
@@ -464,6 +469,93 @@ private struct ReferenceTableContent: View {
         beginEdit(refId, keys[nextIdx])
     }
 
+    // Split out: inlining these tips the Table DSL past the type-checker's
+    // threshold.
+
+    @ViewBuilder
+    private func titleCell(for ref: Reference) -> some View {
+        EditableStringCell(
+            value: ref.title,
+            isEditing: isEditing(ref.id, "title"),
+            onBeginEdit: { beginEdit(ref.id, "title") },
+            onCommit: { val in
+                var u = ref
+                u.title = val
+                commitRef(u)
+            },
+            onCancel: cancel,
+            placeholder: "Untitled",
+            onTab: { back in
+                if let id = ref.id {
+                    advanceEdit(from: id, fieldKey: ColumnIdentifier.title.rawValue, backwards: back)
+                }
+            },
+            wrap: wrapForColumn(ColumnIdentifier.title.rawValue)
+        )
+    }
+
+    @ViewBuilder
+    private func authorsCell(for ref: Reference) -> some View {
+        EditableStringCell(
+            value: ref.authors.displayString,
+            isEditing: isEditing(ref.id, "authors"),
+            onBeginEdit: { beginEdit(ref.id, "authors") },
+            onCommit: { val in
+                var u = ref
+                u.authors = AuthorName.parseList(val)
+                commitRef(u)
+            },
+            onCancel: cancel,
+            onTab: { back in
+                if let id = ref.id {
+                    advanceEdit(from: id, fieldKey: ColumnIdentifier.authors.rawValue, backwards: back)
+                }
+            },
+            wrap: wrapForColumn(ColumnIdentifier.authors.rawValue)
+        )
+    }
+
+    @ViewBuilder
+    private func propertyCell(for ref: Reference, prop: PropertyDefinition) -> some View {
+        if prop.isDefault, let key = prop.defaultFieldKey {
+            EditableDefaultPropertyCell(
+                reference: ref,
+                fieldKey: key,
+                property: prop,
+                isEditing: { key in isEditing(ref.id, key) },
+                onBeginEdit: { key in beginEdit(ref.id, key) },
+                onCancel: cancel,
+                commitRef: commitRef,
+                onTab: { back in
+                    if let id = ref.id {
+                        advanceEdit(from: id, fieldKey: key, backwards: back)
+                    }
+                },
+                wrap: wrapForColumn(prop.customizationID)
+            )
+        } else if let refId = ref.id {
+            let customKey = "custom_\(prop.id ?? 0)"
+            EditableCustomPropertyCell(
+                referenceId: refId,
+                property: prop,
+                rawValue: customPropertyValueMap[refId]?[prop.id ?? 0],
+                isEditing: { key in isEditing(refId, key) },
+                onBeginEdit: { key in beginEdit(refId, key) },
+                onCancel: cancel,
+                commitCustom: commitCustom,
+                onCreateOption: onCreateOption,
+                onTab: { back in
+                    advanceEdit(from: refId, fieldKey: customKey, backwards: back)
+                },
+                wrap: wrapForColumn(prop.customizationID)
+            )
+        } else {
+            Text("—")
+                .font(.callout)
+                .foregroundStyle(.quaternary)
+        }
+    }
+
     var body: some View {
         Table(
             of: Reference.self,
@@ -472,45 +564,14 @@ private struct ReferenceTableContent: View {
             columnCustomization: $columnCustomization
         ) {
             TableColumn(ColumnIdentifier.title.header, value: \.title) { ref in
-                EditableStringCell(
-                    value: ref.title,
-                    isEditing: isEditing(ref.id, "title"),
-                    onBeginEdit: { beginEdit(ref.id, "title") },
-                    onCommit: { val in
-                        var u = ref
-                        u.title = val
-                        commitRef(u)
-                    },
-                    onCancel: cancel,
-                    placeholder: "Untitled",
-                    onTab: { back in
-                        if let id = ref.id {
-                            advanceEdit(from: id, fieldKey: ColumnIdentifier.title.rawValue, backwards: back)
-                        }
-                    }
-                )
+                titleCell(for: ref)
             }
             .width(min: 150, ideal: 250)
             .customizationID(ColumnIdentifier.title.rawValue)
             .disabledCustomizationBehavior(.visibility)
 
             TableColumn(ColumnIdentifier.authors.header, value: \.authorsNormalized) { ref in
-                EditableStringCell(
-                    value: ref.authors.displayString,
-                    isEditing: isEditing(ref.id, "authors"),
-                    onBeginEdit: { beginEdit(ref.id, "authors") },
-                    onCommit: { val in
-                        var u = ref
-                        u.authors = AuthorName.parseList(val)
-                        commitRef(u)
-                    },
-                    onCancel: cancel,
-                    onTab: { back in
-                        if let id = ref.id {
-                            advanceEdit(from: id, fieldKey: ColumnIdentifier.authors.rawValue, backwards: back)
-                        }
-                    }
-                )
+                authorsCell(for: ref)
             }
             .width(min: 80, ideal: 140)
             .customizationID(ColumnIdentifier.authors.rawValue)
@@ -544,41 +605,7 @@ private struct ReferenceTableContent: View {
 
             TableColumnForEach(customProperties) { prop in
                 TableColumn(prop.name) { ref in
-                    if prop.isDefault, let key = prop.defaultFieldKey {
-                        EditableDefaultPropertyCell(
-                            reference: ref,
-                            fieldKey: key,
-                            property: prop,
-                            isEditing: { key in isEditing(ref.id, key) },
-                            onBeginEdit: { key in beginEdit(ref.id, key) },
-                            onCancel: cancel,
-                            commitRef: commitRef,
-                            onTab: { back in
-                                if let id = ref.id {
-                                    advanceEdit(from: id, fieldKey: key, backwards: back)
-                                }
-                            }
-                        )
-                    } else if let refId = ref.id {
-                        let customKey = "custom_\(prop.id ?? 0)"
-                        EditableCustomPropertyCell(
-                            referenceId: refId,
-                            property: prop,
-                            rawValue: customPropertyValueMap[refId]?[prop.id ?? 0],
-                            isEditing: { key in isEditing(refId, key) },
-                            onBeginEdit: { key in beginEdit(refId, key) },
-                            onCancel: cancel,
-                            commitCustom: commitCustom,
-                            onCreateOption: onCreateOption,
-                            onTab: { back in
-                                advanceEdit(from: refId, fieldKey: customKey, backwards: back)
-                            }
-                        )
-                    } else {
-                        Text("—")
-                            .font(.callout)
-                            .foregroundStyle(.quaternary)
-                    }
+                    propertyCell(for: ref, prop: prop)
                 }
                 .width(min: 60, ideal: 100)
                 .customizationID(prop.customizationID)
@@ -601,15 +628,6 @@ private struct ReferenceTableContent: View {
                     TableRow(ref)
                 }
             }
-        }
-        .onKeyPress(.return) {
-            guard editingCell == nil,
-                  selection.count == 1,
-                  let id = selection.first ?? nil else {
-                return .ignored
-            }
-            beginEdit(id, ColumnIdentifier.title.rawValue)
-            return .handled
         }
         .onChange(of: columnCustomization) { _, newValue in
             persistColumnCustomization(newValue)
@@ -665,10 +683,7 @@ private struct ReferenceTableContent: View {
     }
 
     private func persistColumnCustomization(_ value: TableColumnCustomization<Reference>) {
-        let encoder = JSONEncoder()
-        if let data = try? encoder.encode(value) {
-            UserDefaults.standard.set(data, forKey: RubienPreferences.tableColumnCustomizationKey)
-        }
+        RubienPreferences.saveTableColumnCustomization(value)
     }
 }
 

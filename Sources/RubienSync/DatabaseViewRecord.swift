@@ -11,31 +11,33 @@ import RubienCore
 extension DatabaseView {
 
     public enum RecordField {
-        public static let name          = "name"
-        public static let icon          = "icon"
-        public static let scopeJSON     = "scopeJSON"
-        public static let columnsJSON   = "columnsJSON"
-        public static let filtersJSON   = "filtersJSON"
-        public static let sortsJSON     = "sortsJSON"
-        public static let groupByJSON   = "groupByJSON"
-        public static let isDefault     = "isDefault"
-        public static let displayOrder  = "displayOrder"
-        public static let dateCreated   = "dateCreated"
-        public static let dateModified  = "dateModified"
+        public static let name            = "name"
+        public static let icon            = "icon"
+        public static let scopeJSON       = "scopeJSON"
+        public static let columnsJSON     = "columnsJSON"
+        public static let filtersJSON     = "filtersJSON"
+        public static let sortsJSON       = "sortsJSON"
+        public static let groupByJSON     = "groupByJSON"
+        public static let columnWrapsJSON = "columnWrapsJSON"
+        public static let isDefault       = "isDefault"
+        public static let displayOrder    = "displayOrder"
+        public static let dateCreated     = "dateCreated"
+        public static let dateModified    = "dateModified"
     }
 
     public func populate(record: CKRecord) {
-        record[RecordField.name]         = name
-        record[RecordField.icon]         = icon
-        record[RecordField.scopeJSON]    = scopeJSON
-        record[RecordField.columnsJSON]  = columnsJSON
-        record[RecordField.filtersJSON]  = filtersJSON
-        record[RecordField.sortsJSON]    = sortsJSON
-        record[RecordField.groupByJSON]  = groupByJSON
-        record[RecordField.isDefault]    = isDefault ? Int64(1) : Int64(0)
-        record[RecordField.displayOrder] = Int64(displayOrder)
-        record[RecordField.dateCreated]  = dateCreated
-        record[RecordField.dateModified] = dateModified
+        record[RecordField.name]            = name
+        record[RecordField.icon]            = icon
+        record[RecordField.scopeJSON]       = scopeJSON
+        record[RecordField.columnsJSON]     = columnsJSON
+        record[RecordField.filtersJSON]     = filtersJSON
+        record[RecordField.sortsJSON]       = sortsJSON
+        record[RecordField.groupByJSON]     = groupByJSON
+        record[RecordField.columnWrapsJSON] = columnWrapsJSON
+        record[RecordField.isDefault]       = isDefault ? Int64(1) : Int64(0)
+        record[RecordField.displayOrder]    = Int64(displayOrder)
+        record[RecordField.dateCreated]     = dateCreated
+        record[RecordField.dateModified]    = dateModified
     }
 
     public static func makeRecord(
@@ -71,13 +73,14 @@ extension DatabaseView {
             dateModified: (record[RecordField.dateModified] as? Date) ?? Date()
         )
 
-        if let json = record[RecordField.scopeJSON]   as? String { self.scopeJSON = json }
-        if let json = record[RecordField.columnsJSON] as? String { self.columnsJSON = json }
-        if let json = record[RecordField.filtersJSON] as? String { self.filtersJSON = json }
-        if let json = record[RecordField.sortsJSON]   as? String { self.sortsJSON = json }
+        if let json = record[RecordField.scopeJSON]       as? String { self.scopeJSON = json }
+        if let json = record[RecordField.columnsJSON]     as? String { self.columnsJSON = json }
+        if let json = record[RecordField.filtersJSON]     as? String { self.filtersJSON = json }
+        if let json = record[RecordField.sortsJSON]       as? String { self.sortsJSON = json }
+        if let json = record[RecordField.columnWrapsJSON] as? String { self.columnWrapsJSON = json }
         // groupByJSON is optional in DB; only overwrite when the wire has it,
         // else preserve nil (no group-by).
-        if let json = record[RecordField.groupByJSON] as? String { self.groupByJSON = json }
+        if let json = record[RecordField.groupByJSON]     as? String { self.groupByJSON = json }
     }
 
     private static func decodeBool(_ value: CKRecordValue?) -> Bool {

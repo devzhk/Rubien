@@ -42,6 +42,7 @@ struct EditableStringCell: View {
     let onCancel: () -> Void
     var placeholder: String = "—"
     var onTab: ((_ backwards: Bool) -> Void)? = nil
+    var wrap: Bool = false
 
     @State private var editText = ""
     @State private var didCancel = false
@@ -49,7 +50,7 @@ struct EditableStringCell: View {
 
     var body: some View {
         if isEditing {
-            TextField(placeholder, text: $editText)
+            TextField(placeholder, text: $editText, axis: wrap ? .vertical : .horizontal)
                 .textFieldStyle(.plain)
                 .font(.callout)
                 .focused($isFocused)
@@ -79,8 +80,9 @@ struct EditableStringCell: View {
             Text(value.isEmpty ? placeholder : value)
                 .font(.callout)
                 .foregroundStyle(value.isEmpty ? .quaternary : .primary)
-                .lineLimit(1)
+                .lineLimit(wrap ? nil : 1)
                 .truncationMode(.middle)
+                .fixedSize(horizontal: false, vertical: wrap)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -96,6 +98,7 @@ struct EditableNumberCell: View {
     let onCancel: () -> Void
     var placeholder: String = "—"
     var onTab: ((_ backwards: Bool) -> Void)? = nil
+    var wrap: Bool = false
 
     @State private var editText = ""
     @State private var didCancel = false
@@ -136,7 +139,8 @@ struct EditableNumberCell: View {
                 .font(.callout)
                 .monospacedDigit()
                 .foregroundStyle(display.isEmpty ? .quaternary : .primary)
-                .lineLimit(1)
+                .lineLimit(wrap ? nil : 1)
+                .fixedSize(horizontal: false, vertical: wrap)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -151,6 +155,7 @@ struct EditableURLCell: View {
     let onCommit: (String) -> Void
     let onCancel: () -> Void
     var onTab: ((_ backwards: Bool) -> Void)? = nil
+    var wrap: Bool = false
 
     @State private var editText = ""
     @State private var didCancel = false
@@ -188,8 +193,9 @@ struct EditableURLCell: View {
             Text(value.isEmpty ? "—" : value)
                 .font(.callout)
                 .foregroundStyle(value.isEmpty ? .quaternary : .secondary)
-                .lineLimit(1)
+                .lineLimit(wrap ? nil : 1)
                 .truncationMode(.middle)
+                .fixedSize(horizontal: false, vertical: wrap)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -377,6 +383,7 @@ struct EditableDefaultPropertyCell: View {
     let onCancel: () -> Void
     let commitRef: (Reference) -> Void
     var onTab: ((_ backwards: Bool) -> Void)? = nil
+    var wrap: Bool = false
 
     var body: some View {
         switch fieldKey {
@@ -403,7 +410,8 @@ struct EditableDefaultPropertyCell: View {
                     commitRef(u)
                 },
                 onCancel: onCancel,
-                onTab: onTab
+                onTab: onTab,
+                wrap: wrap
             )
         case "doi":
             EditableURLCell(
@@ -416,7 +424,8 @@ struct EditableDefaultPropertyCell: View {
                     commitRef(u)
                 },
                 onCancel: onCancel,
-                onTab: onTab
+                onTab: onTab,
+                wrap: wrap
             )
         case "url":
             EditableURLCell(
@@ -429,7 +438,8 @@ struct EditableDefaultPropertyCell: View {
                     commitRef(u)
                 },
                 onCancel: onCancel,
-                onTab: onTab
+                onTab: onTab,
+                wrap: wrap
             )
         case "editors":
             EditableStringCell(
@@ -442,7 +452,8 @@ struct EditableDefaultPropertyCell: View {
                     commitRef(u)
                 },
                 onCancel: onCancel,
-                onTab: onTab
+                onTab: onTab,
+                wrap: wrap
             )
         case "translators":
             EditableStringCell(
@@ -455,7 +466,8 @@ struct EditableDefaultPropertyCell: View {
                     commitRef(u)
                 },
                 onCancel: onCancel,
-                onTab: onTab
+                onTab: onTab,
+                wrap: wrap
             )
         default:
             defaultStringCell
@@ -523,7 +535,8 @@ struct EditableDefaultPropertyCell: View {
                 commitRef(u)
             },
             onCancel: onCancel,
-            onTab: onTab
+            onTab: onTab,
+            wrap: wrap
         )
     }
 }
@@ -540,6 +553,7 @@ struct EditableCustomPropertyCell: View {
     let commitCustom: (Int64, Int64, String?) -> Void
     let onCreateOption: (Int64, String) -> Void
     var onTab: ((_ backwards: Bool) -> Void)? = nil
+    var wrap: Bool = false
 
     private var propId: Int64 { property.id ?? 0 }
     private var fieldKey: String { property.customizationID }
@@ -556,7 +570,8 @@ struct EditableCustomPropertyCell: View {
                     commitCustom(referenceId, propId, val.isEmpty ? nil : val)
                 },
                 onCancel: onCancel,
-                onTab: onTab
+                onTab: onTab,
+                wrap: wrap
             )
         case .url:
             EditableURLCell(
@@ -567,7 +582,8 @@ struct EditableCustomPropertyCell: View {
                     commitCustom(referenceId, propId, val.isEmpty ? nil : val)
                 },
                 onCancel: onCancel,
-                onTab: onTab
+                onTab: onTab,
+                wrap: wrap
             )
         case .number:
             EditableNumberCell(
@@ -578,7 +594,8 @@ struct EditableCustomPropertyCell: View {
                     commitCustom(referenceId, propId, val.map(String.init))
                 },
                 onCancel: onCancel,
-                onTab: onTab
+                onTab: onTab,
+                wrap: wrap
             )
         case .singleSelect:
             EditableSingleSelectCell(

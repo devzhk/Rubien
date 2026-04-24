@@ -73,19 +73,20 @@ struct GroupConfig {
 
 ### `DatabaseView`
 
-GRDB record backing the `databaseView` table. Holds four string-encoded JSON
+GRDB record backing the `databaseView` table. Holds string-encoded JSON
 blobs plus metadata:
 
-| Column        | Content                                     |
-|---------------|---------------------------------------------|
-| `scopeJSON`   | `ViewScope` — `all` or `tag(Int64)`         |
-| `columnsJSON` | `[ColumnConfig]` — visibility + order       |
-| `filtersJSON` | `[ViewFilter]`                              |
-| `sortsJSON`   | `[ViewSort]`                                |
-| `groupByJSON` | `GroupConfig?` (nullable)                   |
+| Column            | Content                                                           |
+|-------------------|-------------------------------------------------------------------|
+| `scopeJSON`       | `ViewScope` — `all` or `tag(Int64)`                               |
+| `columnsJSON`     | `[ColumnConfig]` — visibility + order                             |
+| `filtersJSON`     | `[ViewFilter]`                                                    |
+| `sortsJSON`       | `[ViewSort]`                                                      |
+| `groupByJSON`     | `GroupConfig?` (nullable)                                         |
+| `columnWrapsJSON` | `[String]` — sorted `customizationID`s whose columns render wrapped. Presence ≡ wrapped. Array (not `[String: Bool]`) so the dirty-compare baseline is stable and `{}` vs `{"foo": false}` can't diverge. |
 
 Decoders live on the struct (`parsedFilters`, `parsedSorts`, `parsedGroupBy`,
-etc.) so call sites work with typed values, not raw JSON.
+`parsedColumnWraps`, etc.) so call sites work with typed values, not raw JSON.
 
 ---
 

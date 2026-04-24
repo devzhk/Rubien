@@ -16,6 +16,7 @@ final class DatabaseViewRecordTests: XCTestCase {
             filters: [],
             sorts: [.defaultSort],
             groupBy: nil,
+            columnWraps: ["title", "custom_42"],
             isDefault: true,
             displayOrder: 0
         )
@@ -36,6 +37,27 @@ final class DatabaseViewRecordTests: XCTestCase {
         XCTAssertEqual(decoded.columnsJSON, original.columnsJSON)
         XCTAssertEqual(decoded.filtersJSON, original.filtersJSON)
         XCTAssertEqual(decoded.sortsJSON, original.sortsJSON)
+        XCTAssertEqual(decoded.columnWrapsJSON, original.columnWrapsJSON)
+        XCTAssertEqual(decoded.parsedColumnWraps, Set(["title", "custom_42"]))
+    }
+
+    func testColumnWrapsJSONOmittedByPeerFallsBackToDefault() {
+        // Older peer wrote no columnWrapsJSON field. Local decode must not
+        // crash or drop silently — we fall back to the "[]" default baked
+        // into the memberwise init.
+        let record = CKRecord(
+            recordType: SyncConstants.RecordType.databaseView,
+            recordID: CKRecord.ID(
+                recordName: recordName,
+                zoneID: SyncConstants.libraryZoneID
+            )
+        )
+        record[DatabaseView.RecordField.name] = "Partial"
+        // columnWrapsJSON intentionally not set
+
+        let decoded = DatabaseView(record: record)
+        XCTAssertEqual(decoded.columnWrapsJSON, "[]")
+        XCTAssertTrue(decoded.parsedColumnWraps.isEmpty)
     }
 
     func testGroupByJSONNilRoundTrip() {

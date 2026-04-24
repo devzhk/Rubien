@@ -140,6 +140,11 @@ public struct DatabaseView: Identifiable, Codable, Hashable, Sendable {
     public var filtersJSON: String
     public var sortsJSON: String
     public var groupByJSON: String?
+    /// JSON array of `customizationID` strings whose columns should render
+    /// wrapped (multi-line) instead of truncated. Per-view, uniform across
+    /// built-ins and custom props — mirrors the filter/sort pattern.
+    /// Presence ≡ wrapped; absent ≡ unwrapped.
+    public var columnWrapsJSON: String
     public var isDefault: Bool
     public var displayOrder: Int
     public var dateCreated: Date
@@ -154,6 +159,7 @@ public struct DatabaseView: Identifiable, Codable, Hashable, Sendable {
         filters: [ViewFilter] = [],
         sorts: [ViewSort] = [.defaultSort],
         groupBy: GroupConfig? = nil,
+        columnWraps: Set<String> = [],
         isDefault: Bool = false,
         displayOrder: Int = 0,
         dateCreated: Date = Date(),
@@ -167,6 +173,7 @@ public struct DatabaseView: Identifiable, Codable, Hashable, Sendable {
         self.filtersJSON = Self.encodeJSON(filters) ?? "[]"
         self.sortsJSON = Self.encodeJSON(sorts) ?? "[]"
         self.groupByJSON = groupBy.flatMap(Self.encodeJSON)
+        self.columnWrapsJSON = Self.encodeJSON(columnWraps.sorted()) ?? "[]"
         self.isDefault = isDefault
         self.displayOrder = displayOrder
         self.dateCreated = dateCreated
@@ -200,6 +207,14 @@ public struct DatabaseView: Identifiable, Codable, Hashable, Sendable {
         set { groupByJSON = newValue.flatMap(Self.encodeJSON) }
     }
 
+    public var parsedColumnWraps: Set<String> {
+        // Setter encodes a sorted array so the on-wire shape is deterministic
+        // — two devices toggling the same set produce identical JSON, which
+        // keeps CloudKit's change-tag and our local dirty-compare honest.
+        get { Set(Self.decodeJSON(columnWrapsJSON, as: [String].self) ?? []) }
+        set { columnWrapsJSON = Self.encodeJSON(newValue.sorted()) ?? "[]" }
+    }
+
     private static func encodeJSON<T: Encodable>(_ value: T) -> String? {
         (try? JSONEncoder().encode(value)).flatMap { String(data: $0, encoding: .utf8) }
     }
@@ -227,6 +242,7 @@ extension DatabaseView: FetchableRecord, MutablePersistableRecord {
 
     public enum Columns: String, ColumnExpression {
         case id, name, icon, scopeJSON, columnsJSON, filtersJSON, sortsJSON, groupByJSON
+        case columnWrapsJSON
         case isDefault, displayOrder, dateCreated, dateModified
     }
 }

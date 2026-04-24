@@ -234,6 +234,7 @@ public final class AppDatabase: Sendable {
                 t.column("filtersJSON", .text).notNull().defaults(to: "[]")
                 t.column("sortsJSON", .text).notNull().defaults(to: "[]")
                 t.column("groupByJSON", .text)
+                t.column("columnWrapsJSON", .text).notNull().defaults(to: "[]")
                 t.column("isDefault", .boolean).notNull().defaults(to: false)
                 t.column("displayOrder", .integer).notNull().defaults(to: 0)
                 t.column("dateCreated", .datetime).notNull()
@@ -250,8 +251,8 @@ public final class AppDatabase: Sendable {
             )) ?? "[]"
 
             try db.execute(sql: """
-                INSERT INTO databaseView (name, icon, scopeJSON, columnsJSON, filtersJSON, sortsJSON, isDefault, displayOrder, dateCreated, dateModified)
-                VALUES ('All References', 'books.vertical', '{"all":{}}', ?, '[]', ?, 1, 0, datetime('now'), datetime('now'))
+                INSERT INTO databaseView (name, icon, scopeJSON, columnsJSON, filtersJSON, sortsJSON, columnWrapsJSON, isDefault, displayOrder, dateCreated, dateModified)
+                VALUES ('All References', 'books.vertical', '{"all":{}}', ?, '[]', ?, '[]', 1, 0, datetime('now'), datetime('now'))
                 """, arguments: [defaultColumnsJSON, defaultSortsJSON])
 
             // Custom properties

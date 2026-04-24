@@ -91,6 +91,10 @@ final class LibraryViewModel: ObservableObject {
     @Published var viewGroupBy: GroupConfig? = nil {
         didSet { recomputeIsDirty() }
     }
+    /// Per-view wrap state. Presence of a `customizationID` ≡ wrapped.
+    @Published var viewColumnWraps: Set<String> = [] {
+        didSet { recomputeIsDirty() }
+    }
     @Published private(set) var isCurrentViewDirty: Bool = false
     /// All saved database views
     @Published var databaseViews: [DatabaseView] = []
@@ -460,6 +464,7 @@ final class LibraryViewModel: ObservableObject {
         var filters: [ViewFilter]
         var sorts: [ViewSort]
         var groupBy: GroupConfig?
+        var columnWraps: Set<String>
     }
     private var viewDrafts: [Int64: ViewDraft] = [:]
 
@@ -473,16 +478,19 @@ final class LibraryViewModel: ObservableObject {
             tableSorts = [.defaultSort]
             viewFilters = []
             viewGroupBy = nil
+            viewColumnWraps = []
             return
         }
         if let draft = viewDrafts[id] {
             tableSorts = draft.sorts
             viewFilters = draft.filters
             viewGroupBy = draft.groupBy
+            viewColumnWraps = draft.columnWraps
         } else {
             tableSorts = dbView.parsedSorts
             viewFilters = dbView.parsedFilters
             viewGroupBy = dbView.parsedGroupBy
+            viewColumnWraps = dbView.parsedColumnWraps
         }
     }
 
@@ -492,8 +500,14 @@ final class LibraryViewModel: ObservableObject {
         let dirty = viewFilters != dbView.parsedFilters
             || tableSorts != dbView.parsedSorts
             || viewGroupBy != dbView.parsedGroupBy
+            || viewColumnWraps != dbView.parsedColumnWraps
         if dirty {
-            viewDrafts[id] = ViewDraft(filters: viewFilters, sorts: tableSorts, groupBy: viewGroupBy)
+            viewDrafts[id] = ViewDraft(
+                filters: viewFilters,
+                sorts: tableSorts,
+                groupBy: viewGroupBy,
+                columnWraps: viewColumnWraps
+            )
         } else {
             viewDrafts.removeValue(forKey: id)
         }
@@ -507,6 +521,7 @@ final class LibraryViewModel: ObservableObject {
         isCurrentViewDirty = viewFilters != dbView.parsedFilters
             || tableSorts != dbView.parsedSorts
             || viewGroupBy != dbView.parsedGroupBy
+            || viewColumnWraps != dbView.parsedColumnWraps
     }
 
     var currentViewName: String? { currentDBView?.name }
@@ -516,6 +531,7 @@ final class LibraryViewModel: ObservableObject {
         dbView.parsedFilters = viewFilters
         dbView.parsedSorts = tableSorts
         dbView.parsedGroupBy = viewGroupBy
+        dbView.parsedColumnWraps = viewColumnWraps
         saveDatabaseView(&dbView)
         // `observeDatabaseViews` updates `databaseViews` asynchronously; patch
         // our local copy synchronously so the dirty-check baseline is correct
@@ -532,6 +548,7 @@ final class LibraryViewModel: ObservableObject {
         viewFilters = dbView.parsedFilters
         tableSorts = dbView.parsedSorts
         viewGroupBy = dbView.parsedGroupBy
+        viewColumnWraps = dbView.parsedColumnWraps
         viewDrafts.removeValue(forKey: id)
     }
 
@@ -756,6 +773,7 @@ struct ContentView: View {
                 db: viewModel.db,
                 customPropertyValueMap: viewModel.customPropertyValueMap,
                 groupBy: $viewModel.viewGroupBy,
+                viewColumnWraps: $viewModel.viewColumnWraps,
                 viewName: viewModel.currentViewName,
                 isDirty: viewModel.isCurrentViewDirty,
                 onSaveView: { viewModel.saveDraftForCurrentView() },

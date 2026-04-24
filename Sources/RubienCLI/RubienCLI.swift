@@ -1370,6 +1370,20 @@ struct Views: ParsableCommand {
     }
 }
 
+/// Forces an optional value to encode explicitly — `null` when absent rather
+/// than being omitted. Swift's synthesized Encodable calls `encodeIfPresent`
+/// for optionals and drops the key entirely, which would break the scripting
+/// contract that every DTO field is always present.
+struct AlwaysEncodedOptional<T: Encodable>: Encodable {
+    let value: T?
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.singleValueContainer()
+        if let value { try c.encode(value) }
+        else { try c.encodeNil() }
+    }
+}
+
 struct DatabaseViewDTO: Encodable {
     let id: Int64?
     let name: String
@@ -1380,7 +1394,7 @@ struct DatabaseViewDTO: Encodable {
     let columns: [ColumnConfig]
     let filters: [ViewFilter]
     let sorts: [ViewSort]
-    let groupBy: GroupConfig?
+    let groupBy: AlwaysEncodedOptional<GroupConfig>
     let dateCreated: Date
     let dateModified: Date
 
@@ -1394,7 +1408,7 @@ struct DatabaseViewDTO: Encodable {
         self.columns = view.parsedColumns
         self.filters = view.parsedFilters
         self.sorts = view.parsedSorts
-        self.groupBy = view.parsedGroupBy
+        self.groupBy = AlwaysEncodedOptional(value: view.parsedGroupBy)
         self.dateCreated = view.dateCreated
         self.dateModified = view.dateModified
     }
