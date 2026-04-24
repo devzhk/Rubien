@@ -25,6 +25,39 @@ final class SyncEntityDispatchTests: XCTestCase {
     // MARK: - Push path
 
     func testBuildPushRecordRehydratesCachedSystemFields() throws {
+        // recordName must carry the "<type>:" prefix — buildPushRecord
+        // rehydrates only when the cached recordName matches the expected
+        // prefixed form, otherwise it builds fresh (see the migration-path
+        // comment on rehydrateOrNew).
+        let cached = CKRecord(
+            recordType: SyncConstants.RecordType.tag,
+            recordID: CKRecord.ID(
+                recordName: "tag:1",
+                zoneID: SyncConstants.libraryZoneID
+            )
+        )
+        let systemFields = SyncStateStore.archiveSystemFields(of: cached)
+
+        try db.dbWriter.write { db in
+            try db.execute(sql: "INSERT INTO tag(id, name, color) VALUES(1, 'Alpha', '#111')")
+
+            let record = try SyncEntityType.tag.buildPushRecord(
+                db: db,
+                entityId: "1",
+                systemFields: systemFields
+            )
+            XCTAssertNotNil(record)
+            XCTAssertEqual(record?.recordID.recordName, "tag:1")
+            XCTAssertEqual(record?["name"] as? String, "Alpha")
+        }
+    }
+
+    func testBuildPushRecordDiscardsPrePrefixCachedSystemFields() throws {
+        // Upgrade scenario: a library synced before the prefix fix has
+        // cached systemFields with recordName="1" (no "tag:" prefix). On
+        // the next push, we MUST treat this as a fresh record (new server
+        // identity) — using the cached CKRecord would push under the old
+        // colliding name and revive the bug for that row.
         let cached = CKRecord(
             recordType: SyncConstants.RecordType.tag,
             recordID: CKRecord.ID(
@@ -42,9 +75,11 @@ final class SyncEntityDispatchTests: XCTestCase {
                 entityId: "1",
                 systemFields: systemFields
             )
-            XCTAssertNotNil(record)
-            XCTAssertEqual(record?.recordID.recordName, "1")
-            XCTAssertEqual(record?["name"] as? String, "Alpha")
+            XCTAssertEqual(
+                record?.recordID.recordName,
+                "tag:1",
+                "legacy unprefixed systemFields must be discarded so the push lands under the new prefixed name"
+            )
         }
     }
 
@@ -69,9 +104,9 @@ final class SyncEntityDispatchTests: XCTestCase {
             try self.store.setApplyingRemote(db)
 
             let ref = Reference(title: "Synced from Cloud")
-            let record = Reference.makeRecord(recordName: "42", reference: ref)
+            let record = Reference.makeRecord(recordName: "reference:42", reference: ref)
 
-            try SyncEntityType.reference.applyRemoteRecord(record, db: db)
+            try SyncEntityType.reference.applyRemoteRecord(record, entityId: "42", db: db)
 
             try self.store.clearApplyingRemote(db)
 
@@ -91,9 +126,9 @@ final class SyncEntityDispatchTests: XCTestCase {
 
             var updated = Reference(title: "updated")
             updated.id = 7
-            let record = Reference.makeRecord(recordName: "7", reference: updated)
+            let record = Reference.makeRecord(recordName: "reference:7", reference: updated)
 
-            try SyncEntityType.reference.applyRemoteRecord(record, db: db)
+            try SyncEntityType.reference.applyRemoteRecord(record, entityId: "7", db: db)
 
             try self.store.clearApplyingRemote(db)
 
@@ -129,8 +164,8 @@ final class SyncEntityDispatchTests: XCTestCase {
 
             var updated = Reference(title: "parent-renamed")
             updated.id = 10
-            let record = Reference.makeRecord(recordName: "10", reference: updated)
-            try SyncEntityType.reference.applyRemoteRecord(record, db: db)
+            let record = Reference.makeRecord(recordName: "reference:10", reference: updated)
+            try SyncEntityType.reference.applyRemoteRecord(record, entityId: "10", db: db)
 
             try self.store.clearApplyingRemote(db)
 
@@ -154,7 +189,7 @@ final class SyncEntityDispatchTests: XCTestCase {
             let record = ReferenceTag.makeRecord(
                 referenceTag: ReferenceTag(referenceId: 1, tagId: 2)
             )
-            try SyncEntityType.referenceTag.applyRemoteRecord(record, db: db)
+            try SyncEntityType.referenceTag.applyRemoteRecord(record, entityId: "1/2", db: db)
 
             try self.store.clearApplyingRemote(db)
 

@@ -32,7 +32,7 @@ extension SyncEntityType {
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
-                recordName: entityId
+                recordName: "\(rawValue):\(entityId)"
             )
             row.populate(record: record)
             return record
@@ -43,7 +43,7 @@ extension SyncEntityType {
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
-                recordName: entityId
+                recordName: "\(rawValue):\(entityId)"
             )
             row.populate(record: record)
             return record
@@ -57,7 +57,7 @@ extension SyncEntityType {
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
-                recordName: entityId
+                recordName: "\(rawValue):\(entityId)"
             )
             row.populate(record: record)
             return record
@@ -68,7 +68,7 @@ extension SyncEntityType {
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
-                recordName: entityId
+                recordName: "\(rawValue):\(entityId)"
             )
             row.populate(record: record)
             return record
@@ -79,7 +79,7 @@ extension SyncEntityType {
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
-                recordName: entityId
+                recordName: "\(rawValue):\(entityId)"
             )
             row.populate(record: record)
             return record
@@ -90,7 +90,7 @@ extension SyncEntityType {
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
-                recordName: entityId
+                recordName: "\(rawValue):\(entityId)"
             )
             row.populate(record: record)
             return record
@@ -101,7 +101,7 @@ extension SyncEntityType {
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
-                recordName: entityId
+                recordName: "\(rawValue):\(entityId)"
             )
             row.populate(record: record)
             return record
@@ -112,7 +112,7 @@ extension SyncEntityType {
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
-                recordName: entityId
+                recordName: "\(rawValue):\(entityId)"
             )
             row.populate(record: record)
             return record
@@ -123,7 +123,7 @@ extension SyncEntityType {
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
-                recordName: entityId
+                recordName: "\(rawValue):\(entityId)"
             )
             row.populate(record: record)
             return record
@@ -134,7 +134,7 @@ extension SyncEntityType {
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
-                recordName: entityId
+                recordName: "\(rawValue):\(entityId)"
             )
             row.populate(record: record)
             return record
@@ -148,9 +148,10 @@ extension SyncEntityType {
     ///
     /// Caller's transaction must have set `applyingRemote` in `syncSession`
     /// so the triggers don't re-dirty the row we just wrote.
-    public func applyRemoteRecord(_ record: CKRecord, db: Database) throws {
-        let entityId = record.recordID.recordName
-
+    public func applyRemoteRecord(_ record: CKRecord, entityId: String, db: Database) throws {
+        // `entityId` is the caller-stripped local id (no "<type>:" prefix).
+        // Don't read `record.recordID.recordName` directly — it carries the
+        // prefixed form so `Int64(...)` would fail for every row.
         switch self {
         case .reference:
             guard let id = Int64(entityId) else { return }
@@ -258,16 +259,24 @@ extension SyncEntityType {
         return (refId, tagId)
     }
 
-    /// Rehydrate the archived CKRecord if present, else build a fresh one.
-    /// Rehydration preserves the server's change tag — critical for
-    /// optimistic-concurrency conflict detection on the next save.
+    /// Rehydrate the archived CKRecord if present AND its recordName matches
+    /// the expected one, else build a fresh one. The recordName check
+    /// handles the type-prefix migration: old cached `systemFields` carry
+    /// the pre-prefix recordName (e.g. "1"), but we now need to push as
+    /// "<type>:<id>" (e.g. "reference:1"). Rehydrating the stale one and
+    /// pushing it would either revive the collision bug or get silently
+    /// rejected. When the cached recordName mismatches, discard the
+    /// change-tag (a fresh record is created server-side; the old one
+    /// becomes orphaned). Post-migration pushes land correctly under
+    /// the prefixed name.
     private static func rehydrateOrNew(
         systemFields: Data?,
         recordType: String,
         recordName: String
     ) -> CKRecord {
         if let data = systemFields,
-           let rehydrated = SyncStateStore.rehydrateRecord(from: data) {
+           let rehydrated = SyncStateStore.rehydrateRecord(from: data),
+           rehydrated.recordID.recordName == recordName {
             return rehydrated
         }
         let id = CKRecord.ID(recordName: recordName, zoneID: SyncConstants.libraryZoneID)
