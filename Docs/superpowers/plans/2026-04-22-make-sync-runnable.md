@@ -1001,7 +1001,7 @@ extension SyncCoordinator.Probes {
                 FileManager.default.ubiquityIdentityToken
             },
             tryCKContainerInit: { identifier in
-                ExceptionCatcher.tryBlock {
+                ExceptionCatcher.catchException {
                     _ = CKContainer(identifier: identifier).privateCloudDatabase
                 }
             },

@@ -338,7 +338,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             // `isDirty=1` for re-push.
             do {
                 return try await appDatabase.dbWriter.write { db in
-                    guard let (entityType, entityId) = Self.parseRecordName(recordID.recordName) else {
+                    guard let (entityType, entityId) = SyncEntityType.parseRecordName(recordID.recordName) else {
                         return nil
                     }
                     let systemFields = try stateStore.loadSystemFields(
@@ -430,11 +430,10 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                         log.error("unknown recordType \(mod.record.recordType, privacy: .public); skipping")
                         continue
                     }
-                    // Strip the "<type>:" prefix from recordName to get the
-                    // local entityId. Fall back to the raw name for older
-                    // records that predate the prefix scheme.
-                    let entityId = Self.parseRecordName(mod.record.recordID.recordName)?.1
-                        ?? mod.record.recordID.recordName
+                    guard let entityId = SyncEntityType.parseRecordName(mod.record.recordID.recordName)?.1 else {
+                        log.error("skipping malformed recordName \(mod.record.recordID.recordName, privacy: .public)")
+                        continue
+                    }
                     try type.applyRemoteRecord(mod.record, entityId: entityId, db: db)
                     try stateStore.markPulled(
                         db,
@@ -446,8 +445,10 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
 
                 for deletion in event.deletions {
                     guard let type = SyncEntityType.forRecordType(deletion.recordType) else { continue }
-                    let entityId = Self.parseRecordName(deletion.recordID.recordName)?.1
-                        ?? deletion.recordID.recordName
+                    guard let entityId = SyncEntityType.parseRecordName(deletion.recordID.recordName)?.1 else {
+                        log.error("skipping malformed delete recordName \(deletion.recordID.recordName, privacy: .public)")
+                        continue
+                    }
                     try type.applyRemoteDelete(entityId: entityId, db: db)
                     try stateStore.removeState(db, entityType: type, entityId: entityId)
                     try stateStore.upsertTombstone(
@@ -480,8 +481,10 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         // rehydrate with a valid change tag.
         for saved in event.savedRecords {
             guard let type = SyncEntityType.forRecordType(saved.recordType) else { continue }
-            let entityId = Self.parseRecordName(saved.recordID.recordName)?.1
-                ?? saved.recordID.recordName
+            guard let entityId = SyncEntityType.parseRecordName(saved.recordID.recordName)?.1 else {
+                log.error("skipping malformed saved recordName \(saved.recordID.recordName, privacy: .public)")
+                continue
+            }
             do {
                 try await appDatabase.dbWriter.write { [stateStore] db in
                     try stateStore.markPushed(
@@ -502,7 +505,10 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         // longer lets any in-flight duplicate edit for the same record
         // lose at `.unknownItem` rather than resurrecting the row.
         for deletedID in event.deletedRecordIDs {
-            let entityId = Self.parseRecordName(deletedID.recordName)?.1 ?? deletedID.recordName
+            guard let entityId = SyncEntityType.parseRecordName(deletedID.recordName)?.1 else {
+                log.error("skipping malformed deleted recordName \(deletedID.recordName, privacy: .public)")
+                continue
+            }
             do {
                 try await appDatabase.dbWriter.write { [stateStore] db in
                     try stateStore.markTombstoneConfirmed(db, entityId: entityId)
@@ -517,8 +523,10 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         // engine's own retry policy.
         for failure in event.failedRecordSaves {
             guard let type = SyncEntityType.forRecordType(failure.record.recordType) else { continue }
-            let entityId = Self.parseRecordName(failure.record.recordID.recordName)?.1
-                ?? failure.record.recordID.recordName
+            guard let entityId = SyncEntityType.parseRecordName(failure.record.recordID.recordName)?.1 else {
+                log.error("skipping malformed failed-save recordName \(failure.record.recordID.recordName, privacy: .public)")
+                continue
+            }
 
             switch failure.error.code {
             case .serverRecordChanged:
@@ -561,10 +569,8 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                 }
 
             default:
-                let ui = failure.error.userInfo
-                let desc = failure.error.localizedDescription
                 log.error(
-                    "unhandled record-save failure code=\(failure.error.code.rawValue, privacy: .public) type=\(failure.record.recordType, privacy: .public) id=\(entityId, privacy: .public) desc=\(desc, privacy: .public) userInfo=\(String(describing: ui), privacy: .public)"
+                    "unhandled record-save failure code=\(failure.error.code.rawValue, privacy: .public) type=\(failure.record.recordType, privacy: .public) id=\(entityId, privacy: .public): \(failure.error.localizedDescription, privacy: .public)"
                 )
             }
         }
@@ -573,8 +579,10 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         // side). Purge the tombstone so we don't keep retrying.
         for failure in event.failedRecordDeletes {
             if failure.value.code == .unknownItem {
-                let entityId = Self.parseRecordName(failure.key.recordName)?.1
-                    ?? failure.key.recordName
+                guard let entityId = SyncEntityType.parseRecordName(failure.key.recordName)?.1 else {
+                    log.error("skipping malformed failed-delete recordName \(failure.key.recordName, privacy: .public)")
+                    continue
+                }
                 do {
                     try await appDatabase.dbWriter.write { [stateStore] db in
                         for type in SyncEntityType.allCases {
@@ -632,30 +640,13 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
 
     // MARK: - Helpers
 
-    /// Build a `CKRecord.ID` with `recordName = "<entityType>:<entityId>"`.
-    /// The type prefix is required because CloudKit's record-ID key is
-    /// (recordName, zoneID) without record-type — so a Reference(1) and a
-    /// Tag(1) both pushed as recordName="1" collide on the server ("You
-    /// can't save and delete the same record in a single operation" /
-    /// invalidArguments). Pre-A-pks we use Int64 rowIDs which collide
-    /// across entity types; the prefix namespaces them. Post-A-pks
-    /// (UUID PKs), the prefix remains harmless and the parse path stays
-    /// identical.
+    /// Build a `CKRecord.ID` for a row of `type` with local `entityId`.
+    /// Uses `SyncEntityType.qualifiedRecordName` so compose/parse stay a
+    /// matched pair; see `SyncConstants.typeSeparator` for the separator.
     private func recordID(for entityId: String, type: SyncEntityType) -> CKRecord.ID {
         CKRecord.ID(
-            recordName: "\(type.rawValue):\(entityId)",
+            recordName: type.qualifiedRecordName(entityId: entityId),
             zoneID: SyncConstants.libraryZoneID
         )
-    }
-
-    /// Parse the "<entityType>:<entityId>" recordName back into components.
-    /// `entityId` may itself contain `:` (e.g. pivot composite keys), so
-    /// we split on the FIRST `:` only.
-    static func parseRecordName(_ recordName: String) -> (SyncEntityType, String)? {
-        guard let separatorIdx = recordName.firstIndex(of: ":") else { return nil }
-        let typeRaw = String(recordName[..<separatorIdx])
-        let entityId = String(recordName[recordName.index(after: separatorIdx)...])
-        guard let type = SyncEntityType(rawValue: typeRaw) else { return nil }
-        return (type, entityId)
     }
 }

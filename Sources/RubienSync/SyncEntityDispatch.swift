@@ -14,6 +14,25 @@ import RubienCore
 ///   and resolve both halves.
 extension SyncEntityType {
 
+    /// Compose the `"<type>:<entityId>"` CKRecord.recordName for a local row.
+    /// Inverse of `parseRecordName`.
+    public func qualifiedRecordName(entityId: String) -> String {
+        "\(rawValue)\(SyncConstants.typeSeparator)\(entityId)"
+    }
+
+    /// Parse `"<type>:<entityId>"` back into a (type, entityId) pair.
+    /// `entityId` may itself contain `:` in future schemes; we split on the
+    /// first occurrence only. Returns nil if the prefix isn't a known type.
+    public static func parseRecordName(_ recordName: String) -> (SyncEntityType, String)? {
+        guard let separatorIdx = recordName.firstIndex(of: SyncConstants.typeSeparator) else {
+            return nil
+        }
+        let typeRaw = String(recordName[..<separatorIdx])
+        let entityId = String(recordName[recordName.index(after: separatorIdx)...])
+        guard let type = SyncEntityType(rawValue: typeRaw) else { return nil }
+        return (type, entityId)
+    }
+
     /// Rehydrate a CKRecord suitable for pushing this row to the server.
     /// If we have cached system fields (i.e. we've synced before), rehydrate
     /// so the change-tag makes the save optimistic-concurrency-safe; else
@@ -32,7 +51,7 @@ extension SyncEntityType {
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
-                recordName: "\(rawValue):\(entityId)"
+                recordName: qualifiedRecordName(entityId: entityId)
             )
             row.populate(record: record)
             return record
@@ -43,7 +62,7 @@ extension SyncEntityType {
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
-                recordName: "\(rawValue):\(entityId)"
+                recordName: qualifiedRecordName(entityId: entityId)
             )
             row.populate(record: record)
             return record
@@ -57,7 +76,7 @@ extension SyncEntityType {
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
-                recordName: "\(rawValue):\(entityId)"
+                recordName: qualifiedRecordName(entityId: entityId)
             )
             row.populate(record: record)
             return record
@@ -68,7 +87,7 @@ extension SyncEntityType {
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
-                recordName: "\(rawValue):\(entityId)"
+                recordName: qualifiedRecordName(entityId: entityId)
             )
             row.populate(record: record)
             return record
@@ -79,7 +98,7 @@ extension SyncEntityType {
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
-                recordName: "\(rawValue):\(entityId)"
+                recordName: qualifiedRecordName(entityId: entityId)
             )
             row.populate(record: record)
             return record
@@ -90,7 +109,7 @@ extension SyncEntityType {
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
-                recordName: "\(rawValue):\(entityId)"
+                recordName: qualifiedRecordName(entityId: entityId)
             )
             row.populate(record: record)
             return record
@@ -101,7 +120,7 @@ extension SyncEntityType {
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
-                recordName: "\(rawValue):\(entityId)"
+                recordName: qualifiedRecordName(entityId: entityId)
             )
             row.populate(record: record)
             return record
@@ -112,7 +131,7 @@ extension SyncEntityType {
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
-                recordName: "\(rawValue):\(entityId)"
+                recordName: qualifiedRecordName(entityId: entityId)
             )
             row.populate(record: record)
             return record
@@ -123,7 +142,7 @@ extension SyncEntityType {
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
-                recordName: "\(rawValue):\(entityId)"
+                recordName: qualifiedRecordName(entityId: entityId)
             )
             row.populate(record: record)
             return record
@@ -134,7 +153,7 @@ extension SyncEntityType {
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
-                recordName: "\(rawValue):\(entityId)"
+                recordName: qualifiedRecordName(entityId: entityId)
             )
             row.populate(record: record)
             return record

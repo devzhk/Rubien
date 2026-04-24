@@ -52,6 +52,12 @@ public enum SyncConstants {
     /// one constant means a future rename can't desync the two layers.
     public static let pivotSeparator: String = "/"
 
+    /// Separator between the entity-type tag and the local id in a CKRecord
+    /// recordName: `"<type>\(typeSeparator)<entityId>"`. Required because
+    /// CloudKit's record key is `(recordName, zoneID)` without recordType,
+    /// so Reference(1) and Tag(1) would collide without a type namespace.
+    public static let typeSeparator: Character = ":"
+
     /// Age at which server-confirmed tombstones become eligible for GC.
     /// Picked to exceed CKSyncEngine's worst-case retry + any plausible
     /// in-flight push window; anything shorter risks evicting a marker
