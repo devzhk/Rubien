@@ -20,5 +20,9 @@
 	<array>
 		<string>CloudKit</string>
 	</array>
+	<key>com.apple.application-identifier</key>
+	<string>9TXK4V3SS8.com.rubien.app</string>
+	<key>com.apple.developer.team-identifier</key>
+	<string>9TXK4V3SS8</string>
 </dict>
 </plist>
