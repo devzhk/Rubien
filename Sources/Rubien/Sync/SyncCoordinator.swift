@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import CloudKit
+import Security
 import RubienCore
 import RubienSync
 import RubienExceptionCatcher
@@ -357,10 +358,32 @@ extension SyncCoordinator.Probes {
     public static var live: SyncCoordinator.Probes {
         SyncCoordinator.Probes(
             bundleHasEntitlement: {
-                Bundle.main.object(forInfoDictionaryKey: "com.apple.developer.icloud-container-identifiers") != nil
+                // Entitlements live in a signed blob on the executable, not
+                // in Info.plist. `SecTaskCopyValueForEntitlement` reads the
+                // runtime-effective entitlement for the current process —
+                // the canonical check for whether codesign+profile actually
+                // granted us CloudKit access.
+                guard let task = SecTaskCreateFromSelf(nil) else { return false }
+                let value = SecTaskCopyValueForEntitlement(
+                    task,
+                    "com.apple.developer.icloud-container-identifiers" as CFString,
+                    nil
+                )
+                return value != nil
             },
             ubiquityIdentityToken: {
-                FileManager.default.ubiquityIdentityToken
+                // Defer to Layer 4 (`CKContainer.accountStatus`) for the
+                // authoritative signed-in check — it works with just the
+                // `com.apple.developer.icloud-container-identifiers`
+                // entitlement we already have. `ubiquityIdentityToken`
+                // requires `com.apple.developer.ubiquity-kvstore-identifier`
+                // or `ubiquity-container-identifiers` to be readable from a
+                // sandboxed process; without them the API returns nil even
+                // when the user IS signed in, producing a spurious
+                // `.signedOut` from Layer 2. We don't need iCloud Drive
+                // ubiquity containers — only CloudKit — so returning a
+                // sentinel here keeps the probe flow coherent.
+                "sentinel" as NSString
             },
             tryCKContainerInit: { identifier in
                 ExceptionCatcher.catchException {
