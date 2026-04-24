@@ -1,0 +1,103 @@
+#!/bin/bash
+# One-command signed-and-relaunch loop for the sandboxed Rubien.app with
+# CloudKit entitlements. For sync testing — everyday dev work that doesn't
+# need sync can still use `swift run Rubien`, which is faster but has no
+# entitlement (sync stays .unavailable).
+#
+# What this does:
+#   1. Kill any running Rubien.app
+#   2. Build via scripts/build-app.sh with signing DISABLED (we do it here)
+#   3. Embed the provisioning profile + re-sign WITHOUT hardened runtime
+#      (hardened runtime strips com.apple.application-identifier from the
+#      DER entitlements blob, which causes cloudd to reject the connection
+#      with CKError 8; signing without it preserves the identifier)
+#   4. Launch the signed .app via `open`
+#
+# Configurable via env vars (defaults in [brackets]):
+#   CODESIGN_IDENTITY  signing identity to use [Apple Development]
+#   PROVISION_PROFILE  path to .provisionprofile [~/Downloads/Rubien_Mac_Dev-v2.provisionprofile]
+#   ENTITLEMENTS       path to .entitlements  [Sources/Rubien/Rubien.entitlements]
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_DIR"
+
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-Apple Development}"
+PROVISION_PROFILE="${PROVISION_PROFILE:-$HOME/Downloads/Rubien_Mac_Dev-v2.provisionprofile}"
+ENTITLEMENTS="${ENTITLEMENTS:-$PROJECT_DIR/Sources/Rubien/Rubien.entitlements}"
+
+APP_BUNDLE="$PROJECT_DIR/build/Rubien.app"
+
+if [ ! -f "$PROVISION_PROFILE" ]; then
+    echo "❌ Provisioning profile not found: $PROVISION_PROFILE" >&2
+    echo "   Download from https://developer.apple.com/account/resources/profiles/list" >&2
+    echo "   or set PROVISION_PROFILE=/path/to/file.provisionprofile" >&2
+    exit 1
+fi
+
+echo "▸ Stopping any running Rubien.app..."
+pkill -f "Rubien.app/Contents/MacOS/Rubien" 2>/dev/null || true
+sleep 1
+
+echo "▸ Building (signing deferred to this script)..."
+CODESIGN_ENABLED=0 ./scripts/build-app.sh debug
+
+echo "▸ Embedding provisioning profile..."
+cp "$PROVISION_PROFILE" "$APP_BUNDLE/Contents/embedded.provisionprofile"
+
+echo "▸ Staging + signing (in /tmp to dodge fileprovider xattr)..."
+# macOS auto-applies `com.apple.fileprovider.fpfs#P` + `com.apple.FinderInfo`
+# xattrs to files under the project tree (CloudKit/iCloud tracking path).
+# codesign rejects these as "resource fork, Finder information, or similar
+# detritus not allowed". Staging in /tmp avoids the auto-apply and lets us
+# strip cleanly. After signing we copy the bundle back to build/ — the
+# signature metadata is intrinsic to the bundle, so xattrs later re-added
+# to build/Rubien.app don't invalidate it.
+STAGE="/tmp/Rubien-sign-$$"
+rm -rf "$STAGE"
+mkdir -p "$STAGE"
+cp -R "$APP_BUNDLE" "$STAGE/Rubien.app"
+
+xattr -cr "$STAGE/Rubien.app"
+cp "$PROVISION_PROFILE" "$STAGE/Rubien.app/Contents/embedded.provisionprofile"
+xattr -cr "$STAGE/Rubien.app"
+
+# Sign helpers first, strip again, then sign outer bundle with entitlements.
+if [ -f "$STAGE/Rubien.app/Contents/Helpers/rubien-cli" ]; then
+    codesign --force --sign "$CODESIGN_IDENTITY" --timestamp=none \
+        "$STAGE/Rubien.app/Contents/Helpers/rubien-cli"
+fi
+xattr -cr "$STAGE/Rubien.app"
+codesign --force --sign "$CODESIGN_IDENTITY" \
+    --entitlements "$ENTITLEMENTS" \
+    --timestamp=none \
+    "$STAGE/Rubien.app"
+
+# Copy signed bundle back to build/
+rm -rf "$APP_BUNDLE"
+cp -R "$STAGE/Rubien.app" "$APP_BUNDLE"
+rm -rf "$STAGE"
+
+echo "▸ Verifying app-id entitlement landed..."
+if codesign -d --entitlements - "$APP_BUNDLE" 2>&1 | grep -q "com.apple.application-identifier"; then
+    echo "   ✓ com.apple.application-identifier present"
+else
+    echo "   ✗ com.apple.application-identifier MISSING — CloudKit will reject connections" >&2
+    exit 1
+fi
+
+echo "▸ Launching..."
+open "$APP_BUNDLE"
+sleep 2
+
+PID=$(pgrep -f "Rubien.app/Contents/MacOS/Rubien" | head -1 || true)
+if [ -n "$PID" ]; then
+    echo "✅ Rubien.app running (PID $PID)"
+    echo "   Sandbox DB: $HOME/Library/Containers/com.rubien.app/Data/Library/Application Support/Rubien/"
+    echo "   Logs: /usr/bin/log show --predicate 'process == \"Rubien\"' --last 2m --info"
+else
+    echo "❌ Failed to launch. Check Console.app for crash reports." >&2
+    exit 1
+fi

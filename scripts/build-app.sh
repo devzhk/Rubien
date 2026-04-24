@@ -28,6 +28,7 @@ HELPERS_DIR="$APP_BUNDLE/Contents/Helpers"
 
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 CODESIGN_ENABLED="${CODESIGN_ENABLED:-1}"
+CODESIGN_ENTITLEMENTS="${CODESIGN_ENTITLEMENTS:-}"
 
 build_app() {
     echo "▸ Building $APP_NAME app ($CONFIGURATION)..."
@@ -136,9 +137,22 @@ sign_bundle() {
     fi
 
     echo "▸ Codesigning embedded helpers and app bundle..."
+    # Strip xattrs (Finder info, resource forks) that codesign refuses.
+    # Downloaded JS bundles and icons often carry these from the toolchain.
+    xattr -cr "$APP_BUNDLE" 2>/dev/null || true
     codesign_target "$HELPERS_DIR/$CLI_NAME"
 
-    codesign --force --deep --sign "$CODESIGN_IDENTITY" --timestamp=none "$APP_BUNDLE"
+    # Sign outer bundle with entitlements if provided. CloudKit + iCloud
+    # entitlements only take effect when signed with a real Apple
+    # Development / Developer ID identity; ad-hoc ("-") signing strips
+    # them at runtime.
+    if [ -n "$CODESIGN_ENTITLEMENTS" ]; then
+        codesign --force --deep --sign "$CODESIGN_IDENTITY" \
+            --entitlements "$CODESIGN_ENTITLEMENTS" \
+            --timestamp=none --options runtime "$APP_BUNDLE"
+    else
+        codesign --force --deep --sign "$CODESIGN_IDENTITY" --timestamp=none "$APP_BUNDLE"
+    fi
 }
 
 embed_app_icon() {
