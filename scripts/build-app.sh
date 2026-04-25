@@ -12,6 +12,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
+# shellcheck source=lib/codesign.sh
+source "$SCRIPT_DIR/lib/codesign.sh"
+
 DERIVED_DATA="$PROJECT_DIR/.xcodebuild"
 PRODUCTS_DIR="$DERIVED_DATA/Build/Products/$CONFIGURATION"
 OUTPUT_DIR="$PROJECT_DIR/build"
@@ -29,6 +32,10 @@ HELPERS_DIR="$APP_BUNDLE/Contents/Helpers"
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 CODESIGN_ENABLED="${CODESIGN_ENABLED:-1}"
 CODESIGN_ENTITLEMENTS="${CODESIGN_ENTITLEMENTS:-}"
+# Embedded rubien-cli gets its own entitlements so it can claim the shared
+# App Group and read the same library.sqlite the app uses. Default points at
+# the in-repo plist; override via env var for custom builds.
+CLI_ENTITLEMENTS="${CLI_ENTITLEMENTS:-$PROJECT_DIR/Sources/RubienCLI/RubienCLI.entitlements}"
 
 build_app() {
     echo "▸ Building $APP_NAME app ($CONFIGURATION)..."
@@ -124,13 +131,6 @@ embed_helpers() {
     chmod 755 "$HELPERS_DIR/$CLI_NAME"
 }
 
-codesign_target() {
-    local target="$1"
-    if [ "$CODESIGN_ENABLED" != "0" ]; then
-        codesign --force --sign "$CODESIGN_IDENTITY" --timestamp=none "$target"
-    fi
-}
-
 sign_bundle() {
     if [ "$CODESIGN_ENABLED" = "0" ]; then
         return
@@ -140,12 +140,15 @@ sign_bundle() {
     # Strip xattrs (Finder info, resource forks) that codesign refuses.
     # Downloaded JS bundles and icons often carry these from the toolchain.
     xattr -cr "$APP_BUNDLE" 2>/dev/null || true
-    codesign_target "$HELPERS_DIR/$CLI_NAME"
+    # Embedded CLI gets its own entitlements so it joins the shared App Group.
+    # Ad-hoc ("-") signing can claim the entitlement structurally but it won't
+    # validate at runtime; fine for dev smoke-builds.
+    rubien_codesign_binary "$HELPERS_DIR/$CLI_NAME" "$CLI_ENTITLEMENTS"
 
-    # Sign outer bundle with entitlements if provided. CloudKit + iCloud
-    # entitlements only take effect when signed with a real Apple
-    # Development / Developer ID identity; ad-hoc ("-") signing strips
-    # them at runtime.
+    # Outer bundle keeps its own path here because --deep + --options runtime
+    # are specific to the release flow (dev-launch.sh deliberately avoids
+    # --options runtime for cloudd compatibility), so the shared helper
+    # doesn't fit.
     if [ -n "$CODESIGN_ENTITLEMENTS" ]; then
         codesign --force --deep --sign "$CODESIGN_IDENTITY" \
             --entitlements "$CODESIGN_ENTITLEMENTS" \

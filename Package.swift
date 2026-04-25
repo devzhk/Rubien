@@ -58,6 +58,9 @@ let package = Package(
                 "RubienCore",
                 "RubienSync",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            exclude: [
+                "RubienCLI.entitlements"
             ]
         ),
         .testTarget(

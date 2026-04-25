@@ -503,35 +503,84 @@ public final class AppDatabase: Sendable {
 extension AppDatabase {
     public static let shared = makeShared()
 
+    /// Shared App Group identifier. Both `Rubien.app` (sandboxed) and the
+    /// bundled `rubien-cli` helper claim this entitlement so they read/write
+    /// the same `library.sqlite` under `~/Library/Group Containers/`. SPM
+    /// dev builds (no entitlement) fall through to `.applicationSupportDirectory`.
+    private static let appGroupID = "9TXK4V3SS8.com.rubien.shared"
+
+    private static let storageRootLeaf = "Rubien"
+    private static let libraryFilename = "library.sqlite"
+    private static let syncEngineStateFilename = "sync-engine-state.bin"
+
+    /// Memoized once-per-process storage root. `containerURL` access state
+    /// doesn't flip mid-process (the entitlement is baked into the launched
+    /// binary), so the expensive write-probe in `canAccessGroupContainer`
+    /// runs exactly once instead of on every `pdfStorageURL` / subdir access.
+    private static let baseRoot: URL = preferredStorageRoot(named: storageRootLeaf)
+
     private static func preferredStorageRoot(named leaf: String) -> URL {
         let fm = FileManager.default
-        let candidates: [URL] = [
-            (try? fm.url(
-                for: .applicationSupportDirectory,
-                in: .userDomainMask,
-                appropriateFor: nil,
-                create: true
-            )),
-            fm.temporaryDirectory.appendingPathComponent("RubienFallback", isDirectory: true),
-        ].compactMap { $0 }
 
-        for base in candidates {
-            let dirURL = base.appendingPathComponent(leaf, isDirectory: true)
-            do {
-                try fm.createDirectory(at: dirURL, withIntermediateDirectories: true)
-                return dirURL
-            } catch {
-                appDatabaseLog.error("Failed to create directory at \(dirURL.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
-            }
+        // 1) App Group container (signed builds with the entitlement).
+        if let group = fm.containerURL(forSecurityApplicationGroupIdentifier: appGroupID),
+           canAccessGroupContainer(group) {
+            return ensureDirectory(group.appendingPathComponent(leaf, isDirectory: true), fallbackLeaf: leaf)
         }
 
+        // 2) Application Support (unsandboxed, or sandboxed without App Group).
+        //    On a sandboxed process macOS auto-redirects this to the per-app
+        //    container; on an unsandboxed process it resolves to
+        //    ~/Library/Application Support/. Either is fine — the migration
+        //    helper in makeShared() handles catching up old installs.
+        if let appSupport = try? fm.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        ) {
+            return ensureDirectory(appSupport.appendingPathComponent(leaf, isDirectory: true), fallbackLeaf: leaf)
+        }
+
+        // 3) Temp dir — last-resort so the app doesn't crash with no DB path.
         return fm.temporaryDirectory.appendingPathComponent(leaf, isDirectory: true)
     }
 
-    private static func makeShared() -> AppDatabase {
-        let dirURL = preferredStorageRoot(named: "Rubien")
+    /// On macOS, `containerURL(forSecurityApplicationGroupIdentifier:)` can
+    /// return a non-nil URL even when the container is not actually accessible
+    /// (entitlement invalidated, profile mismatch, cert revoked). Guard with an
+    /// actual write probe so we fall back to ~/Library/Application Support/ in
+    /// those cases instead of stranding data at an unreachable path.
+    private static func canAccessGroupContainer(_ url: URL) -> Bool {
+        let fm = FileManager.default
         do {
-            let dbURL = dirURL.appendingPathComponent("library.sqlite")
+            try fm.createDirectory(at: url, withIntermediateDirectories: true)
+            let sentinel = url.appendingPathComponent(".rubien-access-probe")
+            try Data().write(to: sentinel, options: .atomic)
+            try? fm.removeItem(at: sentinel)
+            return true
+        } catch {
+            appDatabaseLog.info("App Group container not writable: \(error.localizedDescription, privacy: .public) — falling back to Application Support")
+            return false
+        }
+    }
+
+    private static func ensureDirectory(_ url: URL, fallbackLeaf: String) -> URL {
+        do {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            return url
+        } catch {
+            appDatabaseLog.error("Failed to create directory at \(url.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return FileManager.default.temporaryDirectory.appendingPathComponent(fallbackLeaf, isDirectory: true)
+        }
+    }
+
+    private static func makeShared() -> AppDatabase {
+        let dirURL = baseRoot
+        migrateLegacyLibraryIfNeeded(destination: dirURL)
+
+        do {
+            let dbURL = dirURL.appendingPathComponent(libraryFilename)
             var config = Configuration()
             #if DEBUG
             if RubienCoreDebugLogging.sqlTrace {
@@ -553,13 +602,195 @@ extension AppDatabase {
         }
     }
 
+    // MARK: Legacy library migration
+
+    /// Sidecar entries that must move together with `library.sqlite`. Order
+    /// matters on copy: everything else first, `library.sqlite` **last**, so a
+    /// fully-populated staging directory is a reliable completion signal.
+    private static let migrationEntries: [String] = [
+        "\(libraryFilename)-wal",
+        "\(libraryFilename)-shm",
+        syncEngineStateFilename,
+        "PDFs",
+        "MetadataArtifacts",
+        libraryFilename,
+    ]
+
+    /// Default legacy roots scanned by `migrateLegacyLibraryIfNeeded` when no
+    /// explicit list is provided. Exposed `internal` for tests.
+    static func defaultLegacyRoots() -> [URL] {
+        let home = URL(fileURLWithPath: NSHomeDirectory())
+        return [
+            // Old sandbox per-app container (before App Group adoption).
+            home.appendingPathComponent("Library/Containers/com.rubien.app/Data/Library/Application Support/Rubien"),
+            // Old unsandboxed path (SPM dev builds, ad-hoc signed builds).
+            home.appendingPathComponent("Library/Application Support/Rubien"),
+        ]
+    }
+
+    /// One-shot migration from legacy library locations to the current
+    /// `preferredStorageRoot`. Idempotent: if the destination already contains
+    /// `library.sqlite`, no-op. Handles every transition direction (dev →
+    /// sandbox, sandbox → App Group, App Group → unsandbox after developer
+    /// program drop) because the destination-exists guard short-circuits once
+    /// a move has succeeded, and the source-delete step only runs after the
+    /// destination is fully populated.
+    ///
+    /// Copy-then-delete rather than move: an interrupted migration always
+    /// leaves the authoritative library at the source, so the next launch can
+    /// retry without data loss. The PID-scoped `.migrating-<pid>` scratch dir
+    /// is the only artifact of a partial run; `defer`-cleanup removes it.
+    ///
+    /// Exposed `internal` (via the injectable `legacyRoots` parameter) for
+    /// tests; production call sites pass `nil` to use `defaultLegacyRoots()`.
+    static func migrateLegacyLibraryIfNeeded(destination: URL, legacyRoots: [URL]? = nil) {
+        let fm = FileManager.default
+        let dstLibrary = destination.appendingPathComponent(libraryFilename)
+        if fm.fileExists(atPath: dstLibrary.path) { return }
+
+        let roots = legacyRoots ?? defaultLegacyRoots()
+
+        for root in roots {
+            let srcLibrary = root.appendingPathComponent(libraryFilename)
+            // Don't migrate from yourself.
+            if root.standardizedFileURL == destination.standardizedFileURL { continue }
+            guard fm.fileExists(atPath: srcLibrary.path) else { continue }
+
+            // PID-scoped staging so concurrent processes (e.g. app + CLI
+            // launched in the same second) don't stomp each other's work.
+            let staging = destination.appendingPathComponent(
+                ".migrating-\(ProcessInfo.processInfo.processIdentifier)",
+                isDirectory: true
+            )
+            defer { try? fm.removeItem(at: staging) }
+            do {
+                try fm.createDirectory(at: staging, withIntermediateDirectories: true)
+
+                try checkpointSourceWAL(at: srcLibrary)
+                try copyMigrationEntries(from: root, into: staging)
+
+                // promoteStaging returns false if another process beat us to
+                // it (destination library.sqlite already exists). In that
+                // case we just bail quietly — the other process's migration
+                // is authoritative.
+                guard try promoteStaging(staging, to: destination) else {
+                    appDatabaseLog.info("Migration race: another process completed the migration first")
+                    return
+                }
+
+                verifyIntegrity(at: dstLibrary)
+                deleteSourceEntries(from: root)
+
+                appDatabaseLog.info("Migrated Rubien library from \(root.path, privacy: .public) to \(destination.path, privacy: .public)")
+                return
+            } catch {
+                appDatabaseLog.error("Migration from \(root.path, privacy: .public) failed: \(error.localizedDescription, privacy: .public) — source left untouched, will retry next launch")
+                // Try the next legacy root.
+            }
+        }
+    }
+
+    private static func checkpointSourceWAL(at sqliteURL: URL) throws {
+        // Open briefly, checkpoint, close. Folds any outstanding WAL content
+        // back into library.sqlite so the copy below is authoritative even
+        // if the old app crashed mid-write.
+        let pool = try DatabasePool(path: sqliteURL.path)
+        try pool.writeWithoutTransaction { db in
+            try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)")
+        }
+    }
+
+    private static func copyMigrationEntries(from source: URL, into staging: URL) throws {
+        let fm = FileManager.default
+        for name in migrationEntries {
+            let src = source.appendingPathComponent(name)
+            guard fm.fileExists(atPath: src.path) else { continue }
+            let dst = staging.appendingPathComponent(name)
+            try fm.copyItem(at: src, to: dst)
+        }
+    }
+
+    /// Promotes staged files to their final destination. Returns `false` if
+    /// another process won the race (destination `library.sqlite` already
+    /// exists at promotion time, or appears between the pre-check and the
+    /// final `moveItem`). Returns `true` on successful promotion.
+    ///
+    /// The pre-check + moveItem sequence is not atomic — two processes could
+    /// both pass the pre-check and then race at the moveItem call. That's
+    /// handled explicitly rather than surfaced as a generic migration error,
+    /// so the log output stays clean for the common concurrent-launch case.
+    private static func promoteStaging(_ staging: URL, to destination: URL) throws -> Bool {
+        let fm = FileManager.default
+        let finalLibrary = destination.appendingPathComponent(libraryFilename)
+
+        // Early race check: if another process already wrote library.sqlite,
+        // we lost — bail without disturbing its work.
+        if fm.fileExists(atPath: finalLibrary.path) {
+            return false
+        }
+
+        for name in migrationEntries {
+            let staged = staging.appendingPathComponent(name)
+            guard fm.fileExists(atPath: staged.path) else { continue }
+            let final = destination.appendingPathComponent(name)
+            // Sidecar entries (PDFs/, MetadataArtifacts/, wal/shm) may
+            // already exist at the destination from a prior partial-but-
+            // not-library run; clear those. library.sqlite is handled by
+            // the late race check below.
+            if name != libraryFilename {
+                try? fm.removeItem(at: final)
+            }
+            do {
+                try fm.moveItem(at: staged, to: final)
+            } catch {
+                // Late race check: if another process wrote library.sqlite
+                // between the pre-check and this moveItem, treat the whole
+                // promotion as a clean lost-race rather than a failure.
+                if name == libraryFilename,
+                   fm.fileExists(atPath: finalLibrary.path) {
+                    return false
+                }
+                throw error
+            }
+        }
+        return true
+    }
+
+    private static func verifyIntegrity(at sqliteURL: URL) {
+        do {
+            let pool = try DatabasePool(path: sqliteURL.path)
+            try pool.read { db in
+                let result = try String.fetchOne(db, sql: "PRAGMA integrity_check") ?? ""
+                if result != "ok" {
+                    appDatabaseLog.error("Integrity check on migrated library reported: \(result, privacy: .public)")
+                }
+            }
+        } catch {
+            appDatabaseLog.error("Integrity check on migrated library failed to run: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private static func deleteSourceEntries(from root: URL) {
+        let fm = FileManager.default
+        for name in migrationEntries {
+            let path = root.appendingPathComponent(name)
+            if fm.fileExists(atPath: path.path) {
+                do {
+                    try fm.removeItem(at: path)
+                } catch {
+                    appDatabaseLog.info("Leftover source entry \(path.path, privacy: .public) could not be deleted: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+        }
+    }
+
     /// PDF storage directory
     public static var pdfStorageURL: URL {
-        preferredStorageRoot(named: "Rubien/PDFs")
+        ensureDirectory(baseRoot.appendingPathComponent("PDFs", isDirectory: true), fallbackLeaf: "PDFs")
     }
 
     public static var metadataArtifactsURL: URL {
-        preferredStorageRoot(named: "Rubien/MetadataArtifacts")
+        ensureDirectory(baseRoot.appendingPathComponent("MetadataArtifacts", isDirectory: true), fallbackLeaf: "MetadataArtifacts")
     }
 
     /// Sidecar file for `CKSyncEngine.State` serialization. Lives under the
@@ -567,8 +798,7 @@ extension AppDatabase {
     /// together if the user ever reassigns Application Support. Kept outside
     /// the DB so `sync reset` is a single file delete.
     public static var syncEngineStateURL: URL {
-        preferredStorageRoot(named: "Rubien")
-            .appendingPathComponent("sync-engine-state.bin")
+        baseRoot.appendingPathComponent(syncEngineStateFilename)
     }
 }
 

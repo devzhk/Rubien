@@ -24,9 +24,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
+# shellcheck source=lib/codesign.sh
+source "$SCRIPT_DIR/lib/codesign.sh"
+
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-Apple Development}"
 PROVISION_PROFILE="${PROVISION_PROFILE:-$HOME/Downloads/Rubien_Mac_Dev-v2.provisionprofile}"
 ENTITLEMENTS="${ENTITLEMENTS:-$PROJECT_DIR/Sources/Rubien/Rubien.entitlements}"
+RUBIEN_CLI_ENTITLEMENTS="${RUBIEN_CLI_ENTITLEMENTS:-$PROJECT_DIR/Sources/RubienCLI/RubienCLI.entitlements}"
 
 APP_BUNDLE="$PROJECT_DIR/build/Rubien.app"
 
@@ -65,9 +69,12 @@ cp "$PROVISION_PROFILE" "$STAGE/Rubien.app/Contents/embedded.provisionprofile"
 xattr -cr "$STAGE/Rubien.app"
 
 # Sign helpers first, strip again, then sign outer bundle with entitlements.
+# The helper needs its own entitlements so it can claim the shared App Group
+# and read the same library.sqlite as the app.
 if [ -f "$STAGE/Rubien.app/Contents/Helpers/rubien-cli" ]; then
-    codesign --force --sign "$CODESIGN_IDENTITY" --timestamp=none \
-        "$STAGE/Rubien.app/Contents/Helpers/rubien-cli"
+    rubien_codesign_binary \
+        "$STAGE/Rubien.app/Contents/Helpers/rubien-cli" \
+        "$RUBIEN_CLI_ENTITLEMENTS"
 fi
 xattr -cr "$STAGE/Rubien.app"
 codesign --force --sign "$CODESIGN_IDENTITY" \
@@ -80,12 +87,20 @@ rm -rf "$APP_BUNDLE"
 cp -R "$STAGE/Rubien.app" "$APP_BUNDLE"
 rm -rf "$STAGE"
 
-echo "▸ Verifying app-id entitlement landed..."
-if codesign -d --entitlements - "$APP_BUNDLE" 2>&1 | grep -q "com.apple.application-identifier"; then
-    echo "   ✓ com.apple.application-identifier present"
-else
-    echo "   ✗ com.apple.application-identifier MISSING — CloudKit will reject connections" >&2
-    exit 1
+echo "▸ Verifying entitlements landed..."
+rubien_require_entitlement "$APP_BUNDLE" \
+    "com.apple.application-identifier" \
+    "app-identifier" \
+    "CloudKit will reject connections"
+rubien_require_entitlement "$APP_BUNDLE" \
+    "$RUBIEN_APP_GROUP_ID" \
+    "App Group" \
+    "app and CLI will see different DBs"
+if [ -f "$APP_BUNDLE/Contents/Helpers/rubien-cli" ]; then
+    rubien_require_entitlement "$APP_BUNDLE/Contents/Helpers/rubien-cli" \
+        "$RUBIEN_APP_GROUP_ID" \
+        "App Group" \
+        "rubien-cli will hit unsandboxed DB, not the shared one"
 fi
 
 echo "▸ Launching..."

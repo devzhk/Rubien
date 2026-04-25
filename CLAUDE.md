@@ -61,7 +61,15 @@ Four Swift targets sit on top of one shared core (`Package.swift`):
 
 `Sources/RubienCore/Database/AppDatabase.swift` owns the only `DatabaseMigrator`. The app has not shipped, so all schema is defined in a single consolidated `"v1"` migration. Once the app ships, new schema changes go through new `registerMigration(...)` blocks — never edit an already-shipped migration. `eraseDatabaseOnSchemaChange` is opt-in via `SWIFTLIB_RESET_DB_ON_SCHEMA_CHANGE=1` in DEBUG builds only (env-var name kept from upstream for compatibility); production never wipes the library. Models in `Sources/RubienCore/Models/` are GRDB `Codable` records (`Reference`, `Tag`, `PDFAnnotationRecord`, `WebAnnotationRecord`, `MetadataIntake`, `MetadataVerification`). Full-text search uses SQLite FTS5 over reference fields.
 
-On-disk storage: the app writes its database and PDF attachments under `~/Library/Application Support/Rubien/` (see `AppDatabase.preferredStorageRoot(named:)`).
+**On-disk storage.** `AppDatabase.preferredStorageRoot(named:)` resolves the DB root in this order:
+
+1. **App Group shared container** — `~/Library/Group Containers/9TXK4V3SS8.com.rubien.shared/Rubien/`. Used whenever the running process (app or bundled `rubien-cli`) is signed with the `com.apple.security.application-groups` entitlement and the write-probe succeeds. This is the path for the signed, sandboxed app bundle + its embedded helper.
+2. **Unsandboxed Application Support** — `~/Library/Application Support/Rubien/`. Used by SPM dev builds (`swift run Rubien`, `.build/debug/rubien-cli`) that don't carry the entitlement, and for any build where the App Group entitlement has been invalidated (cert revoked, provisioning profile lapsed, etc.). The write-probe in `canAccessGroupContainer` is the safety net that catches the "entitlement returns a URL but the container isn't actually reachable" case on macOS.
+3. **Temp directory** — last-resort so the app still launches if both above fail.
+
+`pdfStorageURL` (`Rubien/PDFs/`), `metadataArtifactsURL` (`Rubien/MetadataArtifacts/`), and `syncEngineStateURL` (`Rubien/sync-engine-state.bin`) all ride on the same root, so the whole app state moves together when the path changes.
+
+**Legacy library migration.** `migrateLegacyLibraryIfNeeded` runs once inside `makeShared()` before opening the DB. If the resolved destination has no `library.sqlite` yet but a legacy location does (old per-app container at `~/Library/Containers/com.rubien.app/Data/...`, or the unsandboxed path), it (a) WAL-checkpoints the source, (b) copies `library.sqlite` + sidecars (`-wal`/`-shm`, `sync-engine-state.bin`, `PDFs/`, `MetadataArtifacts/`) into a PID-scoped `.migrating-<pid>/` staging dir, (c) atomically promotes the staging dir to the destination (race-safe: if another process beat it, it bails without touching their work), and (d) verifies integrity + deletes the source. Copy-then-delete means an interrupted run always leaves the authoritative library at the source, and the next launch retries automatically. Idempotent: once `destination/library.sqlite` exists, subsequent calls no-op.
 
 ### Metadata resolution pipeline
 

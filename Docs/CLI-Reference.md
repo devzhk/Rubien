@@ -1,6 +1,17 @@
 # rubien-cli — Command-Line Reference
 
-`rubien-cli` is the companion CLI for the Rubien reference manager. It operates on the same GRDB database as the app (`~/Library/Application Support/Rubien/`), so changes made via CLI are immediately visible in the GUI and vice versa.
+`rubien-cli` is the companion CLI for the Rubien reference manager. It operates on the same GRDB database as the app, so changes made via CLI are immediately visible in the GUI and vice versa.
+
+## Database location
+
+Which `library.sqlite` the CLI hits depends on how the running CLI binary was signed:
+
+| CLI invoked as | Resolved DB path |
+|---|---|
+| Embedded helper (`/Applications/Rubien.app/Contents/Helpers/rubien-cli`, signed with App Group entitlement) | `~/Library/Group Containers/9TXK4V3SS8.com.rubien.shared/Rubien/library.sqlite` |
+| SPM dev build (`.build/debug/rubien-cli` or `swift run rubien-cli`) | `~/Library/Application Support/Rubien/library.sqlite` |
+
+The signed app (`Rubien.app`) also resolves to the App Group path, so its data and the embedded helper's data are the same file. Dev builds intentionally hit a separate path so experiments don't scribble on your real library. A one-shot startup migration moves an existing library forward when you switch between these modes — see the "Data layer" section of `CLAUDE.md` for the mechanics.
 
 All commands output JSON to stdout (pretty-printed, sorted keys, ISO 8601 dates). Errors go to stderr as `{"error": "..."}`.
 

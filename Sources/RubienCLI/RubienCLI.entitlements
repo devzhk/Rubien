@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	    No com.apple.security.app-sandbox: headless CLI needs to read
+	    user-provided import/export paths without a Powerbox prompt.
+	    Non-sandboxed + App Group membership still gets a valid
+	    containerURL(forSecurityApplicationGroupIdentifier:) on macOS.
+	-->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>9TXK4V3SS8.com.rubien.shared</string>
+	</array>
+	<key>com.apple.application-identifier</key>
+	<string>9TXK4V3SS8.com.rubien.cli</string>
+	<key>com.apple.developer.team-identifier</key>
+	<string>9TXK4V3SS8</string>
+	<key>com.apple.security.network.client</key>
+	<true/>
+</dict>
+</plist>
