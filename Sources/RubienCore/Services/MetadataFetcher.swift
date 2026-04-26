@@ -57,7 +57,7 @@ public enum MetadataFetcher {
         case isbn(String)
     }
 
-    /// Parse raw text input and detect identifier type (priority: DOI > ISBN > arXiv > PMID)
+    /// Parse raw text input and detect identifier type (priority: DOI > arXiv > ISBN > PMID)
     public static func extractIdentifier(from text: String) -> Identifier? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -71,18 +71,10 @@ public enum MetadataFetcher {
             return .doi(doi)
         }
 
-        // ISBN: 10 or 13 digits
-        let digitsOnly = trimmed.replacingOccurrences(of: "[^0-9X]", with: "", options: .regularExpression)
-        if digitsOnly.count == 10 || digitsOnly.count == 13 {
-            if digitsOnly.count == 13 && (digitsOnly.hasPrefix("978") || digitsOnly.hasPrefix("979")) {
-                return .isbn(digitsOnly)
-            }
-            if digitsOnly.count == 10 {
-                return .isbn(digitsOnly)
-            }
-        }
-
-        // arXiv: YYMM.NNNNN or category/NNNNNNN
+        // arXiv: YYMM.NNNNN or category/NNNNNNN. Must precede the ISBN digit-count
+        // heuristic — a URL like "https://arxiv.org/abs/2501.07888v3" reduces to
+        // exactly 10 digits ("2501078883") after stripping non-[0-9X] chars and
+        // would otherwise be misclassified as ISBN.
         let arxivPatterns = [
             #"(\d{4}\.\d{4,5})(v\d+)?"#,
             #"([a-z\-]+/\d{7})"#,
@@ -93,6 +85,17 @@ public enum MetadataFetcher {
                let match = regex.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed)),
                let range = Range(match.range(at: 1), in: trimmed) {
                 return .arxiv(String(trimmed[range]))
+            }
+        }
+
+        // ISBN: 10 or 13 digits
+        let digitsOnly = trimmed.replacingOccurrences(of: "[^0-9X]", with: "", options: .regularExpression)
+        if digitsOnly.count == 10 || digitsOnly.count == 13 {
+            if digitsOnly.count == 13 && (digitsOnly.hasPrefix("978") || digitsOnly.hasPrefix("979")) {
+                return .isbn(digitsOnly)
+            }
+            if digitsOnly.count == 10 {
+                return .isbn(digitsOnly)
             }
         }
 

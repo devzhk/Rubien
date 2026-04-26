@@ -114,6 +114,16 @@ final class ImporterAndMetadataTests: XCTestCase {
             MetadataFetcher.extractIdentifier(from: "arXiv:2301.07041v2"),
             matches: .arxiv("2301.07041")
         )
+        // Lowercase arXiv URL with single-digit version: digits-only count is exactly 10
+        // ("2501078883"), which previously short-circuited to .isbn before the arXiv pattern ran.
+        assertIdentifier(
+            MetadataFetcher.extractIdentifier(from: "https://arxiv.org/abs/2501.07888v3"),
+            matches: .arxiv("2501.07888")
+        )
+        assertIdentifier(
+            MetadataFetcher.extractIdentifier(from: "arxiv:2501.07888v3"),
+            matches: .arxiv("2501.07888")
+        )
         assertIdentifier(
             MetadataFetcher.extractIdentifier(from: "12345678"),
             matches: .pmid("12345678")
