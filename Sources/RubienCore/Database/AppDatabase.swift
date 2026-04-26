@@ -519,8 +519,27 @@ extension AppDatabase {
     /// runs exactly once instead of on every `pdfStorageURL` / subdir access.
     private static let baseRoot: URL = preferredStorageRoot(named: storageRootLeaf)
 
+    /// Cached `RUBIEN_LIBRARY_ROOT` value (nil when unset/blank). Reading once
+    /// lets `makeShared()` cheaply gate legacy migration on "did the caller
+    /// pick this dir on purpose?" — otherwise an empty override target would
+    /// silently absorb data from the legacy roots in `defaultLegacyRoots()`.
+    private static let explicitStorageRoot: URL? = {
+        guard let raw = ProcessInfo.processInfo.environment["RUBIEN_LIBRARY_ROOT"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else { return nil }
+        let expanded = (raw as NSString).expandingTildeInPath
+        return URL(fileURLWithPath: expanded, isDirectory: true)
+    }()
+
     private static func preferredStorageRoot(named leaf: String) -> URL {
         let fm = FileManager.default
+
+        // 0) Explicit override — path used verbatim, `leaf` NOT appended.
+        //    Sandbox redirects override paths inside the GUI's container; only
+        //    the non-sandboxed CLI / SPM dev builds escape that.
+        if let override = explicitStorageRoot {
+            return ensureDirectory(override, fallbackLeaf: leaf)
+        }
 
         // 1) App Group container (signed builds with the entitlement).
         if let group = fm.containerURL(forSecurityApplicationGroupIdentifier: appGroupID),
@@ -577,7 +596,11 @@ extension AppDatabase {
 
     private static func makeShared() -> AppDatabase {
         let dirURL = baseRoot
-        migrateLegacyLibraryIfNeeded(destination: dirURL)
+        // Skip legacy migration when the caller pointed us at an explicit dir;
+        // they want isolation, not "and then we copied your old library in too."
+        if explicitStorageRoot == nil {
+            migrateLegacyLibraryIfNeeded(destination: dirURL)
+        }
 
         do {
             let dbURL = dirURL.appendingPathComponent(libraryFilename)

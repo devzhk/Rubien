@@ -16,6 +16,8 @@ The server is a thin Node/TypeScript process. It spawns `rubien-cli` under the h
 
 **Prefer the bundled helper**, because it's signed with the App Group entitlement and reads the same `library.sqlite` the Rubien app uses. A bare `rubien-cli` on PATH is typically an SPM dev build without the entitlement, which hits a *different* database — see the "Database location" note in `Docs/CLI-Reference.md`.
 
+To pin the spawned CLI to a specific library directory regardless of which binary resolves, set `RUBIEN_LIBRARY_ROOT` in the MCP server's `env` block (Claude Code: `claude mcp add rubien --env RUBIEN_LIBRARY_ROOT=...`; Claude Desktop: under `mcpServers.rubien.env` in `claude_desktop_config.json`). The path is used verbatim — point it at the directory that contains `library.sqlite` (e.g. `~/Library/Group Containers/9TXK4V3SS8.com.rubien.shared/Rubien` for the sandboxed library, or `~/Library/Application Support/Rubien` for the unsandboxed one).
+
 ## Install & build
 
 ```bash
