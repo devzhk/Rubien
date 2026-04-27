@@ -1,6 +1,9 @@
 import SwiftUI
 import Combine
+import os
 import RubienCore
+
+private let pdfDownloadLog = Logger(subsystem: "Rubien", category: "pdf-download")
 
 enum SidebarItem: Hashable {
     case allReferences
@@ -331,6 +334,22 @@ final class LibraryViewModel: ObservableObject {
             try db.saveReference(&ref)
         } catch {
             errorMessage = "Save failed: \(error.localizedDescription)"
+        }
+    }
+
+    /// Failures are logged silently rather than routed through `errorMessage`, because
+    /// that channel drives a modal alert and would interrupt the user after the import
+    /// sheet has already dismissed. The work runs detached so the GRDB writer queue
+    /// never blocks the main actor.
+    func downloadPDFInBackground(for reference: Reference, id: Int64) {
+        let db = self.db
+        Task.detached(priority: .userInitiated) {
+            do {
+                let newPath = try await PDFDownloadService.downloadPDF(for: reference)
+                try db.updateReferencePDFPath(id: id, pdfPath: newPath)
+            } catch {
+                pdfDownloadLog.error("Background PDF download failed: \(error.localizedDescription, privacy: .public)")
+            }
         }
     }
 
@@ -976,9 +995,12 @@ struct ContentView: View {
         .sheet(isPresented: $showAddByIdentifier) {
             AddByIdentifierView(
                 resolver: metadataResolver,
-                onSave: { ref in
+                onSave: { ref, downloadPDF in
                     var r = ref
                     viewModel.saveReference(&r)
+                    if downloadPDF, let id = r.id {
+                        viewModel.downloadPDFInBackground(for: r, id: id)
+                    }
                 },
                 onQueueResult: { result, input in
                     queueResolutionResult(

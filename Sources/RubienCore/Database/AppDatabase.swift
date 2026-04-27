@@ -857,6 +857,15 @@ extension AppDatabase {
         }
     }
 
+    public func updateReferencePDFPath(id: Int64, pdfPath: String?) throws {
+        try dbWriter.write { db in
+            try db.execute(
+                sql: "UPDATE reference SET pdfPath = ?, dateModified = ? WHERE id = ?",
+                arguments: [pdfPath, Date(), id]
+            )
+        }
+    }
+
     public func deleteReferences(ids: [Int64]) throws {
         try dbWriter.write { db in
             _ = try Reference.deleteAll(db, ids: ids)

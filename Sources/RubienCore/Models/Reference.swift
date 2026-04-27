@@ -386,6 +386,17 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
 }
 
 extension Reference {
+    /// True when an open-access PDF can plausibly be located for this reference.
+    /// Today the download pipeline (`PDFDownloadService`) supports two sources:
+    /// arXiv (matched via the abstract URL) and any DOI (looked up against
+    /// OpenAlex's best-OA-location). Anything else is unreachable and callers
+    /// should hide the download affordance.
+    public var canDownloadPDF: Bool {
+        if let doi, !doi.isEmpty { return true }
+        if let url, url.range(of: "arxiv.org/abs/", options: .caseInsensitive) != nil { return true }
+        return false
+    }
+
     public static func == (lhs: Reference, rhs: Reference) -> Bool {
         guard lhs.id == rhs.id else { return false }
         guard lhs.title == rhs.title,

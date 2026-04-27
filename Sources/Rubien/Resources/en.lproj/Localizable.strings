@@ -28,6 +28,7 @@
 "addByIdentifier.status.queryingMetadata" = "Querying metadata…";
 "addByIdentifier.error.empty" = "Enter a DOI, arXiv ID, PMID, ISBN, or paper title.";
 "addByIdentifier.error.notFound" = "No matching record found. Try a DOI, arXiv ID, PMID, or ISBN instead.";
+"addByIdentifier.downloadPDFOnImport" = "Download PDF when importing";
 
 // MARK: - Batch Import
 

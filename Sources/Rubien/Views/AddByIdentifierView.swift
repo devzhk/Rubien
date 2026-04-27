@@ -3,7 +3,7 @@ import RubienCore
 
 struct AddByIdentifierView: View {
     let resolver: MetadataResolver
-    let onSave: (Reference) -> Void
+    let onSave: (Reference, _ downloadPDF: Bool) -> Void
     let onQueueResult: (MetadataResolutionResult, String) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -13,6 +13,7 @@ struct AddByIdentifierView: View {
     @State private var pendingResolution: MetadataResolutionResult?
     @State private var errorMessage: String?
     @State private var statusMessage: String?
+    @State private var downloadPDFOnImport: Bool = true
 
     var body: some View {
         VStack(spacing: 16) {
@@ -69,6 +70,14 @@ struct AddByIdentifierView: View {
                     titleText: ref.title,
                     bodyText: verifiedSummary(for: ref)
                 )
+
+                Toggle(
+                    String(localized: "addByIdentifier.downloadPDFOnImport", bundle: .module),
+                    isOn: $downloadPDFOnImport
+                )
+                .toggleStyle(.checkbox)
+                .disabled(!ref.canDownloadPDF)
+                .frame(maxWidth: .infinity, alignment: .leading)
             } else if let pendingResolution {
                 resolutionCard(
                     title: String(localized: "Needs review:", bundle: .module),
@@ -94,7 +103,8 @@ struct AddByIdentifierView: View {
                 }
                 Button(String(localized: "Import to library", bundle: .module)) {
                     if let ref = fetchedReference {
-                        onSave(ref)
+                        let shouldDownload = downloadPDFOnImport && ref.canDownloadPDF
+                        onSave(ref, shouldDownload)
                         dismiss()
                     }
                 }

@@ -1015,11 +1015,7 @@ struct ReferenceDetailView: View {
 
     // MARK: - PDF Download
 
-    private var canDownloadPDF: Bool {
-        if let doi = reference.doi, !doi.isEmpty { return true }
-        if let url = reference.url, url.lowercased().contains("arxiv.org/abs/") { return true }
-        return false
-    }
+    private var canDownloadPDF: Bool { reference.canDownloadPDF }
 
     private func performPDFDownload() {
         pdfDownloadState = .downloading
