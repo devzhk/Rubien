@@ -1837,6 +1837,11 @@ public enum ReferenceScope: Sendable {
 
 /// Structured search predicates that can be pushed down to SQL.
 public struct ReferenceFilter: Sendable {
+    public enum KeywordOperator: String, Sendable {
+        case and
+        case or
+    }
+
     public var keyword: String = ""
     public var author: String = ""
     public var yearFrom: Int? = nil
@@ -1847,6 +1852,19 @@ public struct ReferenceFilter: Sendable {
     public var hasPDF: Bool? = nil
     public var readingStatus: ReadingStatus? = nil
 
+    /// FTS5 columns to constrain the keyword search to. Empty means "all
+    /// indexed columns" (the existing default behavior). When non-empty,
+    /// each token is wrapped as `(col1:"tok" OR col2:"tok" ...)`.
+    /// Allowed values mirror the `referenceFts` virtual table columns: title,
+    /// authorsNormalized, journal, abstract, notes, webContent, siteName,
+    /// doi, publisher, isbn, issn, institution.
+    public var keywordFields: [String] = []
+
+    /// How to combine multiple tokens within the keyword query (AND across
+    /// tokens — every token must match somewhere — vs OR — any token).
+    /// Default `.and` matches the legacy behavior.
+    public var keywordOperator: KeywordOperator = .and
+
     public var isEmpty: Bool {
         keyword.isEmpty && author.isEmpty && yearFrom == nil
             && yearTo == nil && journal.isEmpty && referenceType == nil
@@ -1855,6 +1873,91 @@ public struct ReferenceFilter: Sendable {
     }
 
     public init() {}
+}
+
+/// Single source of truth for the `referenceFts` columns exposed to
+/// `ReferenceFilter.keywordFields`. Each entry is `(public, canonical)` —
+/// the public name is what callers type at the CLI/MCP boundary; the
+/// canonical name is what FTS5 sees. Order is the user-facing display order.
+/// Adding a new searchable column = one entry here; everything below derives.
+private let referenceFTSColumns: [(public: String, canonical: String)] = [
+    ("title", "title"),
+    ("abstract", "abstract"),
+    ("notes", "notes"),
+    ("authors", "authorsNormalized"),
+    ("journal", "journal"),
+    ("doi", "doi"),
+    ("publisher", "publisher"),
+    ("isbn", "isbn"),
+    ("issn", "issn"),
+    ("institution", "institution"),
+    ("webContent", "webContent"),
+    ("siteName", "siteName")
+]
+
+private let referenceFTSColumnAllowlist: Set<String> = Set(referenceFTSColumns.map(\.canonical))
+
+private let referenceFTSColumnAliases: [String: String] = {
+    var dict: [String: String] = ["author": "authorsNormalized"]   // historical singular alias
+    for (publicName, canonical) in referenceFTSColumns where publicName != canonical {
+        dict[publicName] = canonical
+    }
+    return dict
+}()
+
+extension ReferenceFilter {
+    /// Caller-facing list of accepted column names for `keywordFields`,
+    /// derived from `referenceFTSColumns` (single source of truth). Surface
+    /// this in CLI/MCP help text.
+    public static let allowedKeywordFieldNames: [String] = referenceFTSColumns.map(\.public)
+
+    public enum KeywordFieldValidationError: Error, CustomStringConvertible, Equatable {
+        case unknownColumn(String)
+
+        public var description: String {
+            switch self {
+            case .unknownColumn(let value): return "unknown-column: \(value)"
+            }
+        }
+    }
+
+    /// Strict validator: resolves aliases, dedupes, and **throws** on any name
+    /// that's not in the allowlist. Use this at the CLI/MCP boundary so a typo
+    /// like `--in titel` errors out instead of silently widening the search to
+    /// all columns. Empty input returns `[]` (the "search every column"
+    /// signal — explicitly meaningful, not an error).
+    public static func validatedKeywordFields(_ raw: [String]) throws -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for r in raw {
+            let trimmed = r.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let canonical = referenceFTSColumnAliases[trimmed] ?? trimmed
+            guard referenceFTSColumnAllowlist.contains(canonical) else {
+                throw KeywordFieldValidationError.unknownColumn(trimmed)
+            }
+            if seen.insert(canonical).inserted { out.append(canonical) }
+        }
+        return out
+    }
+}
+
+/// Lenient internal sanitizer used by the FTS query builder as a defense-in-
+/// depth filter. Callers at the boundary should use
+/// `ReferenceFilter.validatedKeywordFields(_:)` to surface typed errors; this
+/// silently drops unknowns so an internally-stamped filter never produces a
+/// malformed `MATCH` expression.
+fileprivate func sanitizedFTSFields(_ raw: [String]) -> [String] {
+    var seen = Set<String>()
+    var out: [String] = []
+    for r in raw {
+        let trimmed = r.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { continue }
+        let resolved = referenceFTSColumnAliases[trimmed] ?? trimmed
+        guard referenceFTSColumnAllowlist.contains(resolved) else { continue }
+        if seen.insert(resolved).inserted { out.append(resolved) }
+    }
+    return out
 }
 
 extension AppDatabase {
@@ -1956,7 +2059,22 @@ extension AppDatabase {
                     request = request.filter(Reference.Columns.title.like("%\(token)%"))
                 }
             } else {
-                let ftsQuery = sanitizedKeywordTokens.map { "\"\($0)\" *" }.joined(separator: " AND ")
+                let ftsQuery: String
+                let fields = sanitizedFTSFields(filter.keywordFields)
+                let combinator = filter.keywordOperator == .or ? " OR " : " AND "
+                if fields.isEmpty {
+                    // Legacy default: all indexed columns, AND across tokens with prefix match.
+                    // Honor `keywordOperator` if explicitly set to .or.
+                    ftsQuery = sanitizedKeywordTokens.map { "\"\($0)\" *" }
+                        .joined(separator: combinator)
+                } else {
+                    // Column-qualified: each token expanded to (f1:"tok" OR f2:"tok" ...)*,
+                    // then groups joined by `combinator`.
+                    ftsQuery = sanitizedKeywordTokens.map { token in
+                        let perField = fields.map { "\($0):\"\(token)\" *" }.joined(separator: " OR ")
+                        return "(\(perField))"
+                    }.joined(separator: combinator)
+                }
                 request = request.filter(
                     sql: "id IN (SELECT rowid FROM referenceFts WHERE referenceFts MATCH ?)",
                     arguments: [ftsQuery]

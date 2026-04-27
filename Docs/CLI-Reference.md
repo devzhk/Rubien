@@ -39,22 +39,29 @@ rubien-cli <subcommand> [options]
 | `annotations` | List PDF annotations for a reference |
 | `styles` | List available citation styles |
 | `views` | Manage database views |
+| `pdf info` | Probe PDF: page count, text-layer flag, and outline-derived sections |
+| `pdf text` | Extract text from a reference's PDF by page range or section title |
+| `pdf page-image` | Render a PDF page as a base64-encoded JPEG/PNG |
 | `sync status` | Inspect iCloud sync state (JSON only) |
 
 ---
 
 ## search
 
-Full-text search across title, authors, journal, abstract, notes, DOI, and other indexed fields.
+Full-text search across the library. By default queries all 12 indexed FTS columns: `title`, `authorsNormalized` (alias `authors`), `journal`, `abstract`, `notes`, `webContent`, `siteName`, `doi`, `publisher`, `isbn`, `issn`, `institution`. Use `--in` to constrain (e.g. topic searches that should ignore notes/web content) and `--op or` to find references mentioning any of several terms.
 
 ```bash
 rubien-cli search "neural network" --limit 10
+rubien-cli search "transformer attention" --in title,abstract
+rubien-cli search "diffusion gan" --op or --in title --limit 50
 ```
 
 | Argument / Option | Type | Default | Description |
 |---|---|---|---|
-| `query` | String (required) | — | Search query |
+| `query` | String (required) | — | Search query (space-separated tokens) |
 | `-l, --limit` | Int | 20 | Maximum results |
+| `--in` | Comma list | (all 12 FTS columns) | Constrain to columns: `title`, `abstract`, `notes`, `authors`, `journal`, `doi`, `publisher`, `isbn`, `issn`, `institution`, `webContent`, `siteName` |
+| `--op` | `and` \| `or` | `and` | Combinator across query tokens — `and` = every token must match; `or` = any token |
 
 **Output:** JSON array of reference objects.
 
@@ -563,6 +570,142 @@ Listing and create/rename emit a `DatabaseViewDTO`:
 ```
 
 `--query` emits a reference array (same shape as `list` / `search`).
+
+---
+
+## pdf
+
+Inspect and extract content from a reference's attached PDF. All three
+subcommands operate on the file at `Reference.pdfPath` resolved through
+`PDFService.pdfURL(for:)`. Text extraction is text-layer only (no OCR);
+scanned/image-only PDFs return `hasTextLayer: false` and you should fall
+back to `pdf page-image`.
+
+### pdf info
+
+Probe a PDF's structure before fetching content. Returns page count,
+text-layer signal (sampled across first/middle/last page), file size,
+encryption flag, embedded title, and the flattened outline. The outline's
+`endPage` is computed via the "next entry at same-or-shallower level − 1"
+rule so a parent section's range correctly spans all its descendants.
+
+```bash
+rubien-cli pdf info 42
+```
+
+| Argument | Type | Description |
+|---|---|---|
+| `id` | Int64 (required) | Reference ID |
+
+**Output:**
+
+```json
+{
+  "id": 42,
+  "pageCount": 14,
+  "hasTextLayer": true,
+  "fileBytes": 1842331,
+  "isEncrypted": false,
+  "documentTitle": "Attention Is All You Need",
+  "sections": [
+    { "title": "1 Introduction", "level": 1, "startPage": 1, "endPage": 2 },
+    { "title": "2 Background", "level": 1, "startPage": 3, "endPage": 4 },
+    { "title": "3 Model Architecture", "level": 1, "startPage": 5, "endPage": 8 },
+    { "title": "5 Conclusion", "level": 1, "startPage": 13, "endPage": 14 }
+  ]
+}
+```
+
+`sections` is `null` when the PDF has no outline at all — fall back to
+`--pages` ranges in that case.
+
+### pdf text
+
+Extract page-keyed text. Two mutually-exclusive selection modes:
+
+- `--pages <range>` — explicit page numbers (e.g. `1-3`, `1-3,8-10`, `12-`).
+- `--section <title>` — case-insensitive substring match against the
+  outline (repeatable; multiple flags union their ranges). Errors with
+  `{"error":"no-outline"}` when the PDF has no outline.
+
+```bash
+rubien-cli pdf text 42 --pages 1-3
+rubien-cli pdf text 42 --section Introduction --section Conclusion
+rubien-cli pdf text 42 --section "Related Work" --max-chars 20000
+```
+
+| Argument / Option | Type | Default | Description |
+|---|---|---|---|
+| `id` | Int64 (required) | — | Reference ID |
+| `--pages` | String | (all pages) | Page range, e.g. `1-3,8-10`. Mutually exclusive with `--section`. |
+| `--section` | String (repeatable) | — | Section title substring (case-insensitive). Mutually exclusive with `--pages`. |
+| `--max-chars` | Int | 50000 | Cap total returned characters. Truncates at page boundary; first page always included. |
+
+**Output:**
+
+```json
+{
+  "id": 42,
+  "pageCount": 14,
+  "selection": {
+    "mode": "section",
+    "requested": ["Related Work", "Conclusion"],
+    "matchedSections": ["2 Related Work", "5 Conclusion"],
+    "unmatched": []
+  },
+  "pages": [
+    { "index": 3, "text": "...", "sectionPath": ["2 Related Work", "2.1 Transformers"] },
+    { "index": 4, "text": "...", "sectionPath": ["2 Related Work", "2.2 Attention"] },
+    { "index": 13, "text": "...", "sectionPath": ["5 Conclusion"] },
+    { "index": 14, "text": "...", "sectionPath": ["5 Conclusion"] }
+  ],
+  "truncated": false,
+  "hasTextLayer": true
+}
+```
+
+`sectionPath` is the breadcrumb of containing sections (shallowest →
+deepest); when several siblings share a page, the deepest/later one wins.
+A page outside the outline gets `sectionPath: []`.
+
+### pdf page-image
+
+Render a single page as a base64-encoded image — useful for tables,
+figures, equations, or pages where text extraction is sparse.
+
+JPEG by default with quality stepdown to honor `--max-bytes`; PNG mode is
+opt-in for lossless output but hard-fails on the byte cap.
+
+```bash
+rubien-cli pdf page-image 42 --page 7
+rubien-cli pdf page-image 42 --page 1 --scale 3.0 --format png
+```
+
+| Argument / Option | Type | Default | Description |
+|---|---|---|---|
+| `id` | Int64 (required) | — | Reference ID |
+| `--page` | Int (required) | — | Page number (1-indexed) |
+| `--scale` | Double | 2.0 | Render scale (≈ 192 DPI at 2.0). 1.0 ≈ 96 DPI. |
+| `--max-bytes` | Int | 2000000 | Hard cap on image bytes; JPEG retries at quality 0.9→0.75→0.6→0.45 |
+| `--format` | `jpeg` \| `png` | `jpeg` | Output format |
+
+**Output:**
+
+```json
+{
+  "id": 42,
+  "page": 7,
+  "mimeType": "image/jpeg",
+  "data": "<base64-encoded image bytes>",
+  "widthPx": 1632,
+  "heightPx": 2112,
+  "qualityUsed": 0.9
+}
+```
+
+`qualityUsed` is `null` for PNG output. The MCP wrapper decodes `data`
+and re-emits as an MCP image content block so claude.ai chat displays
+the page directly.
 
 ---
 

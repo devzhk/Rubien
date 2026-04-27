@@ -23,6 +23,7 @@ struct RubienCLI: AsyncParsableCommand {
             Styles.self,
             Export.self,
             Views.self,
+            Pdf.self,
             SyncCommand.self,
         ]
     )
@@ -263,8 +264,42 @@ struct Search: ParsableCommand {
     @Option(name: .shortAndLong, help: "Maximum number of results")
     var limit: Int = 20
 
+    @Option(
+        name: .customLong("in"),
+        help: "Restrict FTS to columns (comma-separated). Allowed: title, abstract, notes, authors, journal, doi, publisher, isbn, issn, institution, webContent, siteName."
+    )
+    var inFields: String?
+
+    @Option(
+        name: .customLong("op"),
+        help: "Combine multiple query tokens with 'and' (every token must match) or 'or' (any token). Default: and."
+    )
+    var op: String?
+
     func run() throws {
-        let refs = try AppDatabase.shared.searchReferences(query: query, limit: limit)
+        var filter = ReferenceFilter()
+        filter.keyword = query
+        if let inFields, !inFields.isEmpty {
+            let raw = inFields
+                .split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            do {
+                filter.keywordFields = try ReferenceFilter.validatedKeywordFields(raw)
+            } catch ReferenceFilter.KeywordFieldValidationError.unknownColumn(let bad) {
+                let allowed = ReferenceFilter.allowedKeywordFieldNames.joined(separator: ", ")
+                printJSONError("Unknown --in column '\(bad)'. Allowed: \(allowed)")
+                throw ExitCode.failure
+            }
+        }
+        if let op {
+            guard let parsed = ReferenceFilter.KeywordOperator(rawValue: op.lowercased()) else {
+                printJSONError("Unknown --op '\(op)'. Valid: and, or")
+                throw ExitCode.failure
+            }
+            filter.keywordOperator = parsed
+        }
+        let refs = try AppDatabase.shared.fetchReferences(scope: .all, filter: filter, limit: limit)
         printJSON(try mapReferenceDTOs(refs))
     }
 }
@@ -1444,5 +1479,227 @@ struct DatabaseViewDTO: Encodable {
         self.groupBy = AlwaysEncodedOptional(value: view.parsedGroupBy)
         self.dateCreated = view.dateCreated
         self.dateModified = view.dateModified
+    }
+}
+
+// MARK: - PDF Subcommands
+
+extension PDFExtractor.Format: ExpressibleByArgument {
+    public init?(argument: String) {
+        switch argument.lowercased() {
+        case "jpeg", "jpg": self = .jpeg
+        case "png": self = .png
+        default: return nil
+        }
+    }
+
+    public static var allValueStrings: [String] { ["jpeg", "png"] }
+}
+
+struct Pdf: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "pdf",
+        abstract: "Inspect and extract content from a reference's attached PDF",
+        subcommands: [PdfInfo.self, PdfText.self, PdfPageImage.self]
+    )
+}
+
+private func resolveReferencePDFURL(for id: Int64) throws -> URL {
+    guard let ref = try AppDatabase.shared.fetchReferences(ids: [id]).first else {
+        printJSONError("Reference \(id) not found")
+        throw ExitCode.failure
+    }
+    guard let pdfPath = ref.pdfPath, !pdfPath.isEmpty else {
+        printJSONError("Reference \(id) has no attached PDF")
+        throw ExitCode.failure
+    }
+    let url = PDFService.pdfURL(for: pdfPath)
+    guard FileManager.default.fileExists(atPath: url.path) else {
+        printJSONError("PDF file missing at \(url.path)")
+        throw ExitCode.failure
+    }
+    return url
+}
+
+private func emitPDFExtractError(_ error: PDFExtractor.ExtractError) {
+    var obj: [String: String] = ["error": error.code]
+    switch error {
+    case .pageOutOfRange(let p): obj["page"] = String(p)
+    case .maxBytesExceeded(let b): obj["maxBytes"] = String(b)
+    case .invalidPageRange(let s): obj["range"] = s
+    case .fileMissing(let p), .cannotOpen(let p): obj["path"] = p
+    default: break
+    }
+    if let data = try? jsonEncoder.encode(obj), let str = String(data: data, encoding: .utf8) {
+        FileHandle.standardError.write(Data((str + "\n").utf8))
+    }
+}
+
+/// Resolve `id` → PDF URL, run `extractor`, print its Encodable output, and
+/// translate `PDFExtractor.ExtractError` into the structured stderr envelope.
+/// Used by all three `pdf` subcommands so the resolve-try-catch boilerplate
+/// lives in one place.
+private func runPdfSubcommand<Result: Encodable>(
+    referenceId id: Int64,
+    _ extractor: (URL) throws -> Result
+) throws {
+    let url = try resolveReferencePDFURL(for: id)
+    do {
+        printJSON(try extractor(url))
+    } catch let e as PDFExtractor.ExtractError {
+        emitPDFExtractError(e)
+        throw ExitCode.failure
+    }
+}
+
+struct PdfInfoOutput: Encodable {
+    let id: Int64
+    let pageCount: Int
+    let hasTextLayer: Bool
+    let fileBytes: Int
+    let isEncrypted: Bool
+    let documentTitle: String?
+    let sections: [PDFExtractor.Section]?
+}
+
+struct PdfInfo: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "info",
+        abstract: "Print PDF metadata + outline-derived sections for a reference"
+    )
+
+    @Argument(help: "Reference ID")
+    var id: Int64
+
+    func run() throws {
+        try runPdfSubcommand(referenceId: id) { url in
+            let info = try PDFExtractor.info(at: url)
+            return PdfInfoOutput(
+                id: id,
+                pageCount: info.pageCount,
+                hasTextLayer: info.hasTextLayer,
+                fileBytes: info.fileBytes,
+                isEncrypted: info.isEncrypted,
+                documentTitle: info.documentTitle,
+                sections: info.sections
+            )
+        }
+    }
+}
+
+struct PdfTextOutput: Encodable {
+    let id: Int64
+    let pageCount: Int
+    let selection: PDFExtractor.SelectionEcho
+    let pages: [PDFExtractor.PageContent]
+    let truncated: Bool
+    let hasTextLayer: Bool
+}
+
+struct PdfText: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "text",
+        abstract: "Extract text from a reference's PDF by page range or section title"
+    )
+
+    @Argument(help: "Reference ID")
+    var id: Int64
+
+    @Option(
+        name: .customLong("pages"),
+        help: "Page range: e.g. 1-3, 1-3,8-10, 12-. Mutually exclusive with --section."
+    )
+    var pages: String?
+
+    @Option(
+        name: .customLong("section"),
+        parsing: .singleValue,
+        help: "Section title (case-insensitive substring match against the outline). Repeatable. Mutually exclusive with --pages."
+    )
+    var sections: [String] = []
+
+    @Option(
+        name: .customLong("max-chars"),
+        help: "Cap total returned characters (default 50000)"
+    )
+    var maxChars: Int = 50_000
+
+    func run() throws {
+        if pages != nil && !sections.isEmpty {
+            printJSONError("--pages and --section are mutually exclusive")
+            throw ExitCode.failure
+        }
+        try runPdfSubcommand(referenceId: id) { url in
+            let selection: PDFExtractor.Selection
+            if !sections.isEmpty {
+                selection = .sections(sections)
+            } else if let pages, !pages.isEmpty {
+                selection = .pagesString(pages)
+            } else {
+                selection = .allPages
+            }
+            let result = try PDFExtractor.extractText(at: url, selection: selection, maxChars: maxChars)
+            return PdfTextOutput(
+                id: id,
+                pageCount: result.pageCount,
+                selection: result.selection,
+                pages: result.pages,
+                truncated: result.truncated,
+                hasTextLayer: result.hasTextLayer
+            )
+        }
+    }
+}
+
+struct PdfPageImageOutput: Encodable {
+    let id: Int64
+    let page: Int
+    let mimeType: String
+    let data: String
+    let widthPx: Int
+    let heightPx: Int
+    let qualityUsed: Double?
+}
+
+struct PdfPageImage: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "page-image",
+        abstract: "Render a single PDF page to a base64-encoded image (JPEG by default)"
+    )
+
+    @Argument(help: "Reference ID")
+    var id: Int64
+
+    @Option(name: .customLong("page"), help: "Page number (1-indexed)")
+    var page: Int
+
+    @Option(name: .customLong("scale"), help: "Render scale (default 2.0 ≈ 192 DPI)")
+    var scale: Double = 2.0
+
+    @Option(name: .customLong("max-bytes"), help: "Cap rendered image bytes (default 2_000_000)")
+    var maxBytes: Int = 2_000_000
+
+    @Option(name: .customLong("format"), help: "Output format: jpeg or png (default jpeg)")
+    var format: PDFExtractor.Format = .jpeg
+
+    func run() throws {
+        try runPdfSubcommand(referenceId: id) { url in
+            let img = try PDFExtractor.renderPage(
+                at: url,
+                page: page,
+                scale: CGFloat(scale),
+                maxBytes: maxBytes,
+                format: format
+            )
+            return PdfPageImageOutput(
+                id: id,
+                page: img.page,
+                mimeType: img.mimeType,
+                data: img.data.base64EncodedString(),
+                widthPx: img.widthPx,
+                heightPx: img.heightPx,
+                qualityUsed: img.qualityUsed
+            )
+        }
     }
 }

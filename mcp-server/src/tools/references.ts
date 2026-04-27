@@ -8,16 +8,51 @@ export function registerReferenceTools(server: McpServer): void {
     {
       title: "Full-text search",
       description:
-        "Full-text search across the Rubien library (title, authors, abstract, notes, DOI). Returns an array of ReferenceDTO.",
+        "Full-text search across the Rubien library. By default searches all 12 indexed FTS columns (title, authors, abstract, notes, journal, doi, publisher, isbn, issn, institution, webContent, siteName). Use `in` to constrain to specific columns — e.g. `in: ['title','abstract']` for topic searches that should ignore notes/web content. Use `op: 'or'` when looking for any of several alternative terms instead of all of them. Returns an array of ReferenceDTO.",
       inputSchema: {
-        query: z.string().describe("Search query"),
+        query: z.string().describe("Search query (space-separated tokens)"),
         limit: z.number().int().positive().max(500).optional()
           .describe("Maximum results (default 20)"),
+        in: z
+          .array(
+            z.enum([
+              "title",
+              "abstract",
+              "notes",
+              "authors",
+              "journal",
+              "doi",
+              "publisher",
+              "isbn",
+              "issn",
+              "institution",
+              "webContent",
+              "siteName",
+            ]),
+          )
+          .optional()
+          .describe(
+            "Restrict FTS to these columns (default: all 12 indexed columns).",
+          ),
+        op: z
+          .enum(["and", "or"])
+          .optional()
+          .describe(
+            "Combine multiple query tokens with AND (every token must match) or OR (any token). Default: and.",
+          ),
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ query, limit }) =>
-      runCliAsTool(["search", query, ...flagsFromOptions({ "--limit": limit })]),
+    async ({ query, limit, in: inFields, op }) =>
+      runCliAsTool([
+        "search",
+        query,
+        ...flagsFromOptions({
+          "--limit": limit,
+          "--in": inFields && inFields.length > 0 ? inFields.join(",") : undefined,
+          "--op": op,
+        }),
+      ]),
   );
 
   server.registerTool(

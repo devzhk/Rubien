@@ -150,22 +150,18 @@ struct PDFOutlineSidebarView: View {
     private func loadOutline() {
         guard let pdfPath = reference.pdfPath else { return }
         let url = PDFService.pdfURL(for: pdfPath)
-        guard let doc = PDFDocument(url: url),
-              let root = doc.outlineRoot else { return }
-        outlineItems = collectOutline(from: root, level: 0, document: doc)
-    }
-
-    private func collectOutline(from outline: PDFOutline, level: Int, document: PDFDocument) -> [OutlineItem] {
-        var result: [OutlineItem] = []
-        for i in 0..<outline.numberOfChildren {
-            guard let child = outline.child(at: i) else { continue }
-            let title = child.label ?? ""
-            let dest = child.destination
-            let pageIndex = dest?.page.flatMap { document.index(for: $0) }
-            result.append(OutlineItem(title: title, level: level, pageIndex: pageIndex, destination: dest))
-            result.append(contentsOf: collectOutline(from: child, level: level + 1, document: document))
+        guard let doc = PDFDocument(url: url) else { return }
+        guard let nav = PDFExtractor.outlineForUI(from: doc) else { return }
+        // PDFExtractor uses 1-indexed level/startPage; sidebar uses 0-indexed
+        // for visual indentation and pageIndex.
+        outlineItems = nav.map { node in
+            OutlineItem(
+                title: node.title,
+                level: node.level - 1,
+                pageIndex: node.startPage - 1,
+                destination: node.destination
+            )
         }
-        return result
     }
 
     private func findPDFView() -> PDFView? {
