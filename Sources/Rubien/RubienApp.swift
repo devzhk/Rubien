@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import RubienCore
 import RubienSync
@@ -123,6 +124,8 @@ struct RubienApp: App {
 // MARK: - App Delegate
 
 class AppDelegate: NSObject, NSApplicationDelegate {
+    private var activationCancellables = Set<AnyCancellable>()
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
@@ -133,6 +136,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Pre-warm the JSCore engine for the style used in the last session,
         // so the first citation render doesn't pay the cold-start cost.
         CiteprocJSCorePool.shared.warmUpLastUsed()
+
+        // Belt-and-suspenders for the cross-process observation bridge: if a
+        // CLI write happened while the app was in the background and the
+        // Darwin notification didn't reach us (e.g. the broadcaster wasn't
+        // alive yet), refresh on every focus-gain.
+        NotificationCenter.default
+            .publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { _ in LibraryChangeBroadcaster.shared.triggerLocalRefresh() }
+            .store(in: &activationCancellables)
     }
 
     func applicationWillTerminate(_ notification: Notification) {

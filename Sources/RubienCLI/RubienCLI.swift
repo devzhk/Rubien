@@ -28,6 +28,17 @@ struct RubienCLI: AsyncParsableCommand {
     )
 }
 
+// MARK: - Cross-process change notification
+
+/// Posts a Darwin notification so the running Rubien app re-fetches its
+/// observation queries. Call this at the end of any subcommand branch that
+/// successfully wrote to the shared library. Read-only branches must not
+/// call it — extra notifications force every observer in the app to re-run.
+@inline(__always)
+func notifyLibraryChanged() {
+    LibraryChangeBroadcaster.postChangeNotification()
+}
+
 // MARK: - JSON Output Helpers
 
 let jsonEncoder: JSONEncoder = {
@@ -376,6 +387,7 @@ struct Add: AsyncParsableCommand {
             var ref = try await MetadataFetcher.fetch(from: id)
             ref = MetadataVerifier.manuallyVerified(ref, reviewedBy: "cli-identifier")
             try AppDatabase.shared.saveReference(&ref)
+            notifyLibraryChanged()
             // saveReference may dedupe onto an existing row; surface that row's
             // existing custom properties so the contract matches get/list/export.
             printJSON(try referenceDTO(for: ref))
@@ -390,10 +402,12 @@ struct Add: AsyncParsableCommand {
                 try AppDatabase.shared.saveReference(&ref)
                 saved.append(ref)
             }
+            notifyLibraryChanged()
             printJSON(try mapReferenceDTOs(saved))
         } else if let t = title {
             var ref = Reference(title: t)
             try AppDatabase.shared.saveReference(&ref)
+            notifyLibraryChanged()
             printJSON(try referenceDTO(for: ref))
         } else {
             printJSONError("Provide --identifier, --bibtex, or --title")
@@ -525,6 +539,7 @@ struct Update: ParsableCommand {
             }
         }
         try AppDatabase.shared.saveReference(&ref)
+        notifyLibraryChanged()
         printJSON(try referenceDTO(for: ref))
     }
 }
@@ -549,6 +564,7 @@ struct Delete: ParsableCommand {
             }
             let pdfPaths = try AppDatabase.shared.deleteReferencesReturningPDFPaths(ids: ids)
             for path in pdfPaths { PDFService.deletePDF(at: path) }
+            notifyLibraryChanged()
             printJSON(["deleted": ids.map(String.init).joined(separator: ",")])
         } else {
             printJSONError("Provide reference IDs as arguments")
@@ -685,6 +701,7 @@ struct Import: ParsableCommand {
         }
 
         let count = try AppDatabase.shared.batchImportReferences(refs)
+        notifyLibraryChanged()
         printJSON(["imported": "\(count)", "file": file])
     }
 
@@ -711,6 +728,7 @@ struct Import: ParsableCommand {
                 db: db,
                 propertyTarget: target
             )
+            notifyLibraryChanged()
             printJSON([
                 "imported": "\(result.imported)",
                 "attached": "\(result.attached)",
@@ -766,6 +784,7 @@ struct Tags: ParsableCommand {
     func run() throws {
         if let deleteId = delete {
             try AppDatabase.shared.deleteTag(id: deleteId)
+            notifyLibraryChanged()
             printJSON(["deleted": "\(deleteId)"])
         } else if create, let n = name {
             let resolvedColor: String
@@ -777,6 +796,7 @@ struct Tags: ParsableCommand {
             }
             var t = Tag(name: n, color: resolvedColor)
             try AppDatabase.shared.saveTag(&t)
+            notifyLibraryChanged()
             printJSON(["id": t.id.map(String.init) ?? "", "name": t.name, "color": t.color])
         } else if assign, let refId = reference {
             let tagIds = parseTagIds()
@@ -787,6 +807,7 @@ struct Tags: ParsableCommand {
             let existing = try AppDatabase.shared.fetchTags(forReference: refId).compactMap(\.id)
             let merged = Array(Set(existing + tagIds)).sorted()
             try AppDatabase.shared.setTags(forReference: refId, tagIds: merged)
+            notifyLibraryChanged()
             let result = try AppDatabase.shared.fetchTags(forReference: refId)
             printJSON(result.map { ["id": $0.id.map(String.init) ?? "", "name": $0.name, "color": $0.color] })
         } else if removeTags, let refId = reference {
@@ -798,6 +819,7 @@ struct Tags: ParsableCommand {
             let existing = try AppDatabase.shared.fetchTags(forReference: refId).compactMap(\.id)
             let remaining = existing.filter { !toRemove.contains($0) }
             try AppDatabase.shared.setTags(forReference: refId, tagIds: remaining)
+            notifyLibraryChanged()
             let result = try AppDatabase.shared.fetchTags(forReference: refId)
             printJSON(result.map { ["id": $0.id.map(String.init) ?? "", "name": $0.name, "color": $0.color] })
         } else if rename, let tagId = id, let n = name {
@@ -809,6 +831,7 @@ struct Tags: ParsableCommand {
             tag.name = n
             if let c = color { tag.color = c }
             try AppDatabase.shared.saveTag(&tag)
+            notifyLibraryChanged()
             printJSON(["id": tag.id.map(String.init) ?? "", "name": tag.name, "color": tag.color])
         } else if let refId = reference {
             // List tags for a specific reference
@@ -895,6 +918,7 @@ struct Properties: ParsableCommand {
                 throw ExitCode.failure
             }
             try AppDatabase.shared.deletePropertyDefinition(id: deleteId)
+            notifyLibraryChanged()
             printJSON(["deleted": "\(deleteId)"])
             return
         }
@@ -924,6 +948,7 @@ struct Properties: ParsableCommand {
                 isVisible: true
             )
             try AppDatabase.shared.savePropertyDefinition(&prop)
+            notifyLibraryChanged()
             printJSON(PropertyDefinitionDTO(from: prop))
             return
         }
@@ -944,6 +969,7 @@ struct Properties: ParsableCommand {
             }
             prop.name = n
             try AppDatabase.shared.savePropertyDefinition(&prop)
+            notifyLibraryChanged()
             printJSON(PropertyDefinitionDTO(from: prop))
             return
         }
@@ -954,6 +980,7 @@ struct Properties: ParsableCommand {
                 throw ExitCode.failure
             }
             try AppDatabase.shared.togglePropertyVisibility(id: propId, visible: show)
+            notifyLibraryChanged()
             let defs = try AppDatabase.shared.fetchAllPropertyDefinitions()
             guard let prop = defs.first(where: { $0.id == propId }) else {
                 printJSONError("Property \(propId) not found")
@@ -991,6 +1018,7 @@ struct Properties: ParsableCommand {
             opts.append(SelectOption(value: v, color: resolvedColor))
             prop.options = opts
             try AppDatabase.shared.savePropertyDefinition(&prop)
+            notifyLibraryChanged()
             printJSON(PropertyDefinitionDTO(from: prop))
             return
         }
@@ -1030,6 +1058,7 @@ struct Properties: ParsableCommand {
                 stored = v
             }
             try AppDatabase.shared.setPropertyValue(referenceId: refId, propertyId: propId, value: stored)
+            notifyLibraryChanged()
             printJSON(["referenceId": "\(refId)", "propertyId": "\(propId)", "value": stored])
             return
         }
@@ -1049,6 +1078,7 @@ struct Properties: ParsableCommand {
                 throw ExitCode.failure
             }
             try AppDatabase.shared.setPropertyValue(referenceId: refId, propertyId: propId, value: nil)
+            notifyLibraryChanged()
             printJSON(["cleared": "\(refId):\(propId)"])
             return
         }
@@ -1299,6 +1329,7 @@ struct Views: ParsableCommand {
                 displayOrder: maxOrder + 1
             )
             try db.saveDatabaseView(&view)
+            notifyLibraryChanged()
             printJSON(DatabaseViewDTO(from: view))
         } else if let deleteId = delete {
             guard let view = try db.fetchDatabaseView(id: deleteId) else {
@@ -1310,6 +1341,7 @@ struct Views: ParsableCommand {
                 throw ExitCode.failure
             }
             try db.deleteDatabaseView(id: deleteId)
+            notifyLibraryChanged()
             printJSON(["deleted": deleteId])
         } else if let queryId = query {
             guard let view = try db.fetchDatabaseView(id: queryId) else {
@@ -1348,6 +1380,7 @@ struct Views: ParsableCommand {
             }
             view.name = newName
             try db.saveDatabaseView(&view)
+            notifyLibraryChanged()
             printJSON(DatabaseViewDTO(from: view))
         } else {
             let views = try db.fetchAllDatabaseViews()

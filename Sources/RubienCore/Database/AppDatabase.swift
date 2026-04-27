@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import GRDB
 import os.log
@@ -507,7 +508,7 @@ extension AppDatabase {
     /// bundled `rubien-cli` helper claim this entitlement so they read/write
     /// the same `library.sqlite` under `~/Library/Group Containers/`. SPM
     /// dev builds (no entitlement) fall through to `.applicationSupportDirectory`.
-    private static let appGroupID = "9TXK4V3SS8.com.rubien.shared"
+    static let appGroupID = "9TXK4V3SS8.com.rubien.shared"
 
     private static let storageRootLeaf = "Rubien"
     private static let libraryFilename = "library.sqlite"
@@ -1726,12 +1727,9 @@ extension AppDatabase {
     }
 
     public func observeDatabaseViews() -> AnyPublisher<[DatabaseView], Error> {
-        ValueObservation
-            .tracking { db in
-                try DatabaseView.order(DatabaseView.Columns.displayOrder).fetchAll(db)
-            }
-            .publisher(in: dbWriter, scheduling: .immediate)
-            .eraseToAnyPublisher()
+        observePublisher { db in
+            try DatabaseView.order(DatabaseView.Columns.displayOrder).fetchAll(db)
+        }
     }
 }
 
@@ -1769,16 +1767,13 @@ extension AppDatabase {
     }
 
     public func observeAnnotations(referenceId: Int64) -> AnyPublisher<[PDFAnnotationRecord], Error> {
-        ValueObservation
-            .tracking { db in
-                try PDFAnnotationRecord
-                    .filter(PDFAnnotationRecord.Columns.referenceId == referenceId)
-                    .order(PDFAnnotationRecord.Columns.pageIndex)
-                    .order(PDFAnnotationRecord.Columns.dateCreated)
-                    .fetchAll(db)
-            }
-            .publisher(in: dbWriter, scheduling: .immediate)
-            .eraseToAnyPublisher()
+        observePublisher { db in
+            try PDFAnnotationRecord
+                .filter(PDFAnnotationRecord.Columns.referenceId == referenceId)
+                .order(PDFAnnotationRecord.Columns.pageIndex)
+                .order(PDFAnnotationRecord.Columns.dateCreated)
+                .fetchAll(db)
+        }
     }
 
     public func annotationCount(referenceId: Int64) throws -> Int {
@@ -1814,15 +1809,12 @@ extension AppDatabase {
     }
 
     public func observeWebAnnotations(referenceId: Int64) -> AnyPublisher<[WebAnnotationRecord], Error> {
-        ValueObservation
-            .tracking { db in
-                try WebAnnotationRecord
-                    .filter(WebAnnotationRecord.Columns.referenceId == referenceId)
-                    .order(WebAnnotationRecord.Columns.dateCreated)
-                    .fetchAll(db)
-            }
-            .publisher(in: dbWriter, scheduling: .immediate)
-            .eraseToAnyPublisher()
+        observePublisher { db in
+            try WebAnnotationRecord
+                .filter(WebAnnotationRecord.Columns.referenceId == referenceId)
+                .order(WebAnnotationRecord.Columns.dateCreated)
+                .fetchAll(db)
+        }
     }
 
     public func webAnnotationCount(referenceId: Int64) throws -> Int {
@@ -1835,7 +1827,6 @@ extension AppDatabase {
 }
 
 // MARK: - Observation with GRDBQuery
-import Combine
 
 /// Describes the active sidebar filter so the database layer can build
 /// the correct query without loading every row into memory first.
@@ -1867,13 +1858,34 @@ public struct ReferenceFilter: Sendable {
 }
 
 extension AppDatabase {
+    /// Wraps a fetch closure in a publisher that emits on:
+    /// - in-process commits (via `ValueObservation` on `dbWriter`)
+    /// - cross-process change notifications (via `LibraryChangeBroadcaster`)
+    ///
+    /// The cross-process branch is debounced 50ms to coalesce bursts (e.g. an
+    /// `import` writing many rows in one transaction notifies once, but a
+    /// shell loop calling `rubien-cli` repeatedly is dampened to one re-fetch
+    /// per burst window).
+    fileprivate func observePublisher<T: Sendable>(
+        scheduling: some ValueObservationScheduler = .immediate,
+        fetch: @escaping @Sendable (Database) throws -> T
+    ) -> AnyPublisher<T, Error> {
+        let live = ValueObservation
+            .tracking(fetch)
+            .publisher(in: dbWriter, scheduling: scheduling)
+
+        let nudged = LibraryChangeBroadcaster.shared.events
+            .debounce(for: .milliseconds(50), scheduler: DispatchQueue.main)
+            .setFailureType(to: Error.self)
+            .flatMap { [dbWriter] _ in dbWriter.readPublisher(value: fetch) }
+
+        return live.merge(with: nudged).eraseToAnyPublisher()
+    }
+
     public func observeReferences() -> AnyPublisher<[Reference], Error> {
-        ValueObservation
-            .tracking { db in
-                try Reference.order(Reference.Columns.dateAdded.desc).fetchAll(db)
-            }
-            .publisher(in: dbWriter, scheduling: .immediate)
-            .eraseToAnyPublisher()
+        observePublisher { db in
+            try Reference.order(Reference.Columns.dateAdded.desc).fetchAll(db)
+        }
     }
 
     /// Observe references with scope + filter pushed down to SQLite.
@@ -1886,18 +1898,23 @@ extension AppDatabase {
         filter: ReferenceFilter,
         limit: Int = 200
     ) -> AnyPublisher<[Reference], Error> {
-        ValueObservation
-            .tracking { [self] db in
-                try self.fetchReferences(
-                    db: db,
-                    scope: scope,
-                    filter: filter,
-                    limit: limit,
-                    selectedColumns: Reference.lightColumns
-                )
-            }
-            .publisher(in: dbWriter, scheduling: .async(onQueue: .main))
-            .eraseToAnyPublisher()
+        // The live `ValueObservation` here uses `.async(onQueue: .main)`
+        // (heavier query than the other observers — pushed off the writer
+        // queue). The call site in `LibraryViewModel.rebuildReferenceObserver`
+        // does not apply its own `.receive(on:)`, so we explicitly land the
+        // merged stream — including the off-main `readPublisher` branch —
+        // on main here.
+        return observePublisher(scheduling: .async(onQueue: .main)) { [self] db in
+            try self.fetchReferences(
+                db: db,
+                scope: scope,
+                filter: filter,
+                limit: limit,
+                selectedColumns: Reference.lightColumns
+            )
+        }
+        .receive(on: DispatchQueue.main)
+        .eraseToAnyPublisher()
     }
 
     // Internal helper used by both the publisher and direct fetch paths.
@@ -1988,39 +2005,30 @@ extension AppDatabase {
     }
 
     public func observePendingMetadataIntakes() -> AnyPublisher<[MetadataIntake], Error> {
-        ValueObservation
-            .tracking { db in
-                try MetadataIntake
-                    .filter(
-                        [VerificationStatus.seedOnly.rawValue,
-                         VerificationStatus.candidate.rawValue,
-                         VerificationStatus.blocked.rawValue,
-                         VerificationStatus.rejectedAmbiguous.rawValue]
-                            .contains(MetadataIntake.Columns.verificationStatus)
-                    )
-                    .order(MetadataIntake.Columns.updatedAt.desc)
-                    .fetchAll(db)
-            }
-            .publisher(in: dbWriter, scheduling: .immediate)
-            .eraseToAnyPublisher()
+        observePublisher { db in
+            try MetadataIntake
+                .filter(
+                    [VerificationStatus.seedOnly.rawValue,
+                     VerificationStatus.candidate.rawValue,
+                     VerificationStatus.blocked.rawValue,
+                     VerificationStatus.rejectedAmbiguous.rawValue]
+                        .contains(MetadataIntake.Columns.verificationStatus)
+                )
+                .order(MetadataIntake.Columns.updatedAt.desc)
+                .fetchAll(db)
+        }
     }
 
     public func observeTags() -> AnyPublisher<[Tag], Error> {
-        ValueObservation
-            .tracking { db in
-                try Tag.order(Tag.Columns.name).fetchAll(db)
-            }
-            .publisher(in: dbWriter, scheduling: .immediate)
-            .eraseToAnyPublisher()
+        observePublisher { db in
+            try Tag.order(Tag.Columns.name).fetchAll(db)
+        }
     }
 
     public func observeReferenceTagMappings() -> AnyPublisher<[Int64: [Tag]], Error> {
-        ValueObservation
-            .tracking { db in
-                try Self.loadReferenceTagMappings(db)
-            }
-            .publisher(in: dbWriter, scheduling: .immediate)
-            .eraseToAnyPublisher()
+        observePublisher { db in
+            try Self.loadReferenceTagMappings(db)
+        }
     }
 
     public func fetchReferenceTagMappings() throws -> [Int64: [Tag]] {
@@ -2106,14 +2114,11 @@ extension AppDatabase {
     }
 
     public func observePropertyDefinitions() -> AnyPublisher<[PropertyDefinition], Error> {
-        ValueObservation
-            .tracking { db in
-                try PropertyDefinition
-                    .order(PropertyDefinition.Columns.sortOrder)
-                    .fetchAll(db)
-            }
-            .publisher(in: dbWriter, scheduling: .immediate)
-            .eraseToAnyPublisher()
+        observePublisher { db in
+            try PropertyDefinition
+                .order(PropertyDefinition.Columns.sortOrder)
+                .fetchAll(db)
+        }
     }
 }
 
@@ -2184,18 +2189,15 @@ extension AppDatabase {
     }
 
     public func observeAllPropertyValues() -> AnyPublisher<[Int64: [Int64: String]], Error> {
-        ValueObservation
-            .tracking { db in
-                let rows = try PropertyValue.fetchAll(db)
-                var map: [Int64: [Int64: String]] = [:]
-                for row in rows {
-                    if let val = row.value {
-                        map[row.referenceId, default: [:]][row.propertyId] = val
-                    }
+        observePublisher { db in
+            let rows = try PropertyValue.fetchAll(db)
+            var map: [Int64: [Int64: String]] = [:]
+            for row in rows {
+                if let val = row.value {
+                    map[row.referenceId, default: [:]][row.propertyId] = val
                 }
-                return map
             }
-            .publisher(in: dbWriter, scheduling: .immediate)
-            .eraseToAnyPublisher()
+            return map
+        }
     }
 }
