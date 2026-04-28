@@ -690,13 +690,7 @@ private struct SelectionActionBar: View {
     @ObservedObject var viewModel: PDFReaderViewModel
     @State private var noteMarkdown = ""
     @State private var editorContentHeight: CGFloat = 36
-    @Environment(\.colorScheme) private var colorScheme
-
-    private var bgColor: Color {
-        colorScheme == .dark
-            ? Color(nsColor: NSColor(white: 0.22, alpha: 1))
-            : Color(nsColor: NSColor(white: 0.13, alpha: 1))
-    }
+    private let bgColor: Color = Color(nsColor: NSColor(white: 0.97, alpha: 1))
 
     var body: some View {
         VStack(spacing: 0) {
@@ -731,7 +725,8 @@ private struct SelectionActionBar: View {
                             .overlay(
                                 Circle()
                                     .strokeBorder(
-                                        isSelected ? Color.white : Color.white.opacity(0.2),
+                                        // White stays readable on every saturated palette hue; black would vanish on purple/pink.
+                                        isSelected ? Color.white : Color.black.opacity(0.20),
                                         lineWidth: isSelected ? 2 : 0.5
                                     )
                             )
@@ -755,7 +750,7 @@ private struct SelectionActionBar: View {
 
             // Divider
             Rectangle()
-                .fill(Color.white.opacity(0.1))
+                .fill(Color.black.opacity(0.08))
                 .frame(height: 0.5)
                 .padding(.horizontal, 8)
 
@@ -781,7 +776,7 @@ private struct SelectionActionBar: View {
                         viewModel.clearStagedSelection()
                     }
                     .buttonStyle(.plain)
-                    .foregroundStyle(.white.opacity(0.6))
+                    .foregroundStyle(.secondary)
                     .font(.system(size: 11))
 
                     Button(String(localized: "common.save", bundle: .module)) {
@@ -803,7 +798,7 @@ private struct SelectionActionBar: View {
                     .background(
                         Capsule(style: .continuous)
                             .fill(noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                  ? Color.accentColor.opacity(0.35)
+                                  ? Color.accentColor.opacity(0.50)
                                   : Color.accentColor)
                     )
                     .buttonStyle(.plain)
@@ -817,15 +812,16 @@ private struct SelectionActionBar: View {
         .background(bgColor, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .strokeBorder(Color.white.opacity(colorScheme == .dark ? 0.12 : 0.06), lineWidth: 0.5)
+                .strokeBorder(Color.black.opacity(0.14), lineWidth: 0.5)
         )
         .shadow(color: .black.opacity(0.28), radius: 16, y: 6)
         .shadow(color: .black.opacity(0.12), radius: 3, y: 1)
+        .environment(\.colorScheme, .light)
     }
 
     private var separator: some View {
         Rectangle()
-            .fill(Color.white.opacity(0.15))
+            .fill(Color.black.opacity(0.12))
             .frame(width: 1, height: 16)
             .padding(.horizontal, 2)
     }
@@ -834,7 +830,7 @@ private struct SelectionActionBar: View {
         Button(action: action) {
             Image(systemName: icon)
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.88))
+                .foregroundStyle(Color.primary.opacity(0.80))
                 .frame(width: 30, height: 28)
                 .contentShape(Rectangle())
         }
@@ -852,8 +848,8 @@ private struct NotionToolbarButtonStyle: ButtonStyle {
             .background(
                 RoundedRectangle(cornerRadius: 5, style: .continuous)
                     .fill(configuration.isPressed
-                          ? Color.white.opacity(0.18)
-                          : (isHovered ? Color.white.opacity(0.10) : Color.clear))
+                          ? Color.black.opacity(0.10)
+                          : (isHovered ? Color.black.opacity(0.06) : Color.clear))
             )
             .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
@@ -872,13 +868,7 @@ private struct AnnotationActionBar: View {
     @State private var editingMarkdown = ""
     @State private var autoSaveTask: Task<Void, Never>?
     @State private var editorContentHeight: CGFloat = 36
-    @Environment(\.colorScheme) private var colorScheme
-
-    private var bgColor: Color {
-        colorScheme == .dark
-            ? Color(nsColor: NSColor(white: 0.22, alpha: 1))
-            : Color(nsColor: NSColor(white: 0.13, alpha: 1))
-    }
+    private let bgColor: Color = Color(nsColor: NSColor(white: 0.97, alpha: 1))
 
     var body: some View {
         if let annotation = viewModel.clickedAnnotationRecord {
@@ -899,7 +889,8 @@ private struct AnnotationActionBar: View {
                                 .overlay(
                                     Circle()
                                         .strokeBorder(
-                                            isSelected ? Color.white : Color.white.opacity(0.2),
+                                            // White stays readable on every saturated palette hue; black would vanish on purple/pink.
+                                            isSelected ? Color.white : Color.black.opacity(0.20),
                                             lineWidth: isSelected ? 2 : 0.5
                                         )
                                 )
@@ -920,7 +911,7 @@ private struct AnnotationActionBar: View {
                     } label: {
                         Image(systemName: "trash")
                             .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.88))
+                            .foregroundStyle(Color.primary.opacity(0.80))
                             .frame(width: 30, height: 28)
                             .contentShape(Rectangle())
                     }
@@ -932,7 +923,7 @@ private struct AnnotationActionBar: View {
 
                 // Divider
                 Rectangle()
-                    .fill(Color.white.opacity(0.1))
+                    .fill(Color.black.opacity(0.08))
                     .frame(height: 0.5)
                     .padding(.horizontal, 8)
 
@@ -962,7 +953,7 @@ private struct AnnotationActionBar: View {
                             Text("Add a note…", bundle: .module)
                                 .font(.system(size: 11))
                         }
-                        .foregroundStyle(.white.opacity(0.5))
+                        .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 5)
@@ -975,10 +966,11 @@ private struct AnnotationActionBar: View {
             .background(bgColor, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .strokeBorder(Color.white.opacity(colorScheme == .dark ? 0.12 : 0.06), lineWidth: 0.5)
+                    .strokeBorder(Color.black.opacity(0.14), lineWidth: 0.5)
             )
             .shadow(color: .black.opacity(0.28), radius: 16, y: 6)
             .shadow(color: .black.opacity(0.12), radius: 3, y: 1)
+            .environment(\.colorScheme, .light)
             .onAppear {
                 let noteText = annotation.noteText ?? ""
                 editingMarkdown = noteText
@@ -1005,7 +997,7 @@ private struct AnnotationActionBar: View {
 
     private var separator: some View {
         Rectangle()
-            .fill(Color.white.opacity(0.15))
+            .fill(Color.black.opacity(0.12))
             .frame(width: 1, height: 16)
             .padding(.horizontal, 2)
     }
