@@ -32,19 +32,19 @@ public enum VerificationStatus: String, Codable, CaseIterable, DatabaseValueConv
     public var displayName: String {
         switch self {
         case .legacy:
-            return "历史条目"
+            return "Legacy"
         case .seedOnly:
-            return "仅种子"
+            return "Seed only"
         case .candidate:
-            return "待选候选"
+            return "Candidates pending"
         case .blocked:
-            return "抓取受阻"
+            return "Fetch blocked"
         case .rejectedAmbiguous:
-            return "验证未通过"
+            return "Verification rejected"
         case .verifiedAuto:
-            return "自动验证"
+            return "Auto-verified"
         case .verifiedManual:
-            return "人工确认"
+            return "Manually confirmed"
         }
     }
 }

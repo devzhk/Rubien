@@ -27,10 +27,10 @@ final class ClipperWebMetadataExtractor: NSObject, ObservableObject {
 
         var errorDescription: String? {
             switch self {
-            case .invalidURL: return "请输入以 http 或 https 开头的有效链接。"
-            case .webViewNotReady: return "网页组件尚未就绪，请稍候再试。"
-            case .timedOut: return "抓取超时，请检查网络或稍后重试。"
-            case .navigationFailed(let s): return "无法打开页面：\(s)"
+            case .invalidURL: return "Enter a valid http or https URL."
+            case .webViewNotReady: return "The web component isn't ready yet. Please try again in a moment."
+            case .timedOut: return "Extraction timed out. Check your network and try again."
+            case .navigationFailed(let s): return "Could not open page: \(s)"
             case .extractionFailed(let s): return s
             }
         }
@@ -100,7 +100,7 @@ final class ClipperWebMetadataExtractor: NSObject, ObservableObject {
 
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<ExtractResult, Error>) in
             guard pendingContinuation == nil else {
-                cont.resume(throwing: ExtractError.extractionFailed("已有进行中的抓取。"))
+                cont.resume(throwing: ExtractError.extractionFailed("Another extraction is already in progress."))
                 return
             }
             pendingContinuation = cont
@@ -208,6 +208,6 @@ extension ClipperWebMetadataExtractor: WKNavigationDelegate {
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         guard isExtracting else { return }
-        failExtraction(.extractionFailed("网页渲染进程已终止。"))
+        failExtraction(.extractionFailed("The web rendering process terminated."))
     }
 }

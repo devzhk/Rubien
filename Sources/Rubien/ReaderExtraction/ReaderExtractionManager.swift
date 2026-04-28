@@ -150,14 +150,14 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
         webView.evaluateJavaScript(js) { [weak self] result, error in
             guard let self else { return }
             if let error {
-                self.failOrRetry(webView: webView, message: "抽取脚本错误：\(error.localizedDescription)")
+                self.failOrRetry(webView: webView, message: "Extraction script error: \(error.localizedDescription)")
                 return
             }
             guard let jsonStr = result as? String,
                   let data = jsonStr.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else {
-                self.failOrRetry(webView: webView, message: "在线阅读失败：无法解析抽取结果。")
+                self.failOrRetry(webView: webView, message: "Online reading failed: could not parse extraction result.")
                 return
             }
 
@@ -169,7 +169,7 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
                     return
                 }
                 let err = (obj["err"] as? String) ?? "parse_failed"
-                self.failOrRetry(webView: webView, message: "无法从页面提取正文（\(err)）。可改用「剪藏正文」或检查是否需登录。")
+                self.failOrRetry(webView: webView, message: "Could not extract article from page (\(err)). Try Clipped, or check if the page requires login.")
                 return
             }
 
@@ -198,7 +198,7 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
                 else {
                     self.failOrRetry(
                         webView: webView,
-                        message: "YouTube 页面无法在应用内可靠生成摘要。请改用「剪藏正文」或在浏览器中打开原链接观看。"
+                        message: "Could not reliably summarize this YouTube page in-app. Try Clipped, or open the original link in your browser."
                     )
                     return
                 }
@@ -210,7 +210,7 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
             } catch {
                 self.failOrRetry(
                     webView: webView,
-                    message: "YouTube 摘要页生成失败：\(error.localizedDescription)。请改用「剪藏正文」或在浏览器中打开链接。"
+                    message: "YouTube summary page generation failed: \(error.localizedDescription). Try Clipped, or open the link in your browser."
                 )
             }
         }
@@ -261,7 +261,7 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
         else {
             return content
         }
-        let block = "<details class=\"rubien-yt-transcript\" open><summary>字幕 / Transcript</summary><pre>\(Self.htmlEscape(transcript))</pre></details>"
+        let block = "<details class=\"rubien-yt-transcript\" open><summary>Transcript</summary><pre>\(Self.htmlEscape(transcript))</pre></details>"
         if let range = content.range(of: "</article>", options: .backwards) {
             return String(content[..<range.lowerBound]) + block + String(content[range.lowerBound...])
         }
@@ -351,7 +351,7 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
         var title = meta('og:title', 'title').trim() || document.title || 'YouTube';
         var desc = meta('og:description', 'description').trim();
         if (!id) {
-          var html = '<article class="rubien-youtube-fallback"><p>未能从当前地址解析视频 ID。</p><p>请使用系统浏览器打开原链接观看。</p></article>';
+          var html = '<article class="rubien-youtube-fallback"><p>Could not parse a video ID from the current URL.</p><p>Please open the original link in your browser to watch.</p></article>';
           return JSON.stringify({ ok: true, title: title, content: html, excerpt: desc, byline: '' });
         }
         var html = '<article class="rubien-youtube-fallback"></article>';

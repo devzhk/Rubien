@@ -159,9 +159,9 @@ sign_bundle() {
 }
 
 embed_app_icon() {
-    local icon_src="$PROJECT_DIR/图标.png"
+    local icon_src="$PROJECT_DIR/icon.png"
     if [ ! -f "$icon_src" ]; then
-        echo "▸ Skipping icon embed (no 图标.png found)"
+        echo "▸ Skipping icon embed (no icon.png found)"
         return
     fi
     echo "▸ Embedding app icon..."

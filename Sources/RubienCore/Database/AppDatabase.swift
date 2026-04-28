@@ -1134,7 +1134,7 @@ extension AppDatabase {
             throw NSError(
                 domain: "Rubien.MetadataIntake",
                 code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "当前待验证条目缺少可确认的元数据快照。"]
+                userInfo: [NSLocalizedDescriptionKey: "Pending intake has no metadata snapshot to confirm."]
             )
         }
 
@@ -1157,7 +1157,7 @@ extension AppDatabase {
                 storedIntake.linkedReferenceId = reference.id
                 storedIntake.currentReferenceJSON = MetadataVerificationCodec.encodeToJSONString(reference)
                 storedIntake.updatedAt = Date()
-                storedIntake.statusMessage = "人工确认入库"
+                storedIntake.statusMessage = "Manually confirmed and added to library"
                 try storedIntake.save(db)
             }
         }
@@ -1247,7 +1247,7 @@ extension AppDatabase {
             throw NSError(
                 domain: "Rubien.AppDatabase",
                 code: 1001,
-                userInfo: [NSLocalizedDescriptionKey: "只有 verifiedAuto 或 verifiedManual 条目可写入正式资料库。"]
+                userInfo: [NSLocalizedDescriptionKey: "Only verifiedAuto or verifiedManual references can be written to the main library."]
             )
         }
     }
@@ -1266,7 +1266,7 @@ extension AppDatabase {
             ?? fallbackReference?.title.rubien_nilIfBlank
             ?? seed?.title.rubien_nilIfBlank
             ?? options.originalInput?.rubien_nilIfBlank
-            ?? "待验证元数据"
+            ?? "Untitled pending metadata"
 
         return MetadataIntake(
             id: options.existingIntakeId,
