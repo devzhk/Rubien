@@ -80,7 +80,7 @@ struct AddByIdentifierView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             } else if let pendingResolution {
                 resolutionCard(
-                    title: String(localized: "Needs review:", bundle: .module),
+                    title: pendingResolutionCardTitle(pendingResolution),
                     titleText: pendingResolutionTitle(pendingResolution),
                     bodyText: pendingResolutionMessage(pendingResolution)
                 )
@@ -211,6 +211,9 @@ struct AddByIdentifierView: View {
                 ?? envelope.seed?.title
                 ?? placeholder
         case .rejected(let envelope):
+            if isLookupFailure(envelope) {
+                return String(localized: "addByIdentifier.lookupFailed.placeholder", bundle: .module)
+            }
             return envelope.currentReference?.title
                 ?? envelope.fallbackReference?.title
                 ?? envelope.seed?.title
@@ -218,6 +221,22 @@ struct AddByIdentifierView: View {
         case .verified(let envelope):
             return envelope.reference.title
         }
+    }
+
+    private func pendingResolutionCardTitle(_ result: MetadataResolutionResult) -> String {
+        if case .rejected(let envelope) = result, isLookupFailure(envelope) {
+            return String(localized: "addByIdentifier.lookupFailed.cardTitle", bundle: .module)
+        }
+        return String(localized: "Needs review:", bundle: .module)
+    }
+
+    /// Network failures are the only producer of fully-empty rejected envelopes:
+    /// real verification rejections always carry a `currentReference` (the unverified
+    /// record) or a `seed` (from title search).
+    private func isLookupFailure(_ envelope: RejectedEnvelope) -> Bool {
+        envelope.currentReference == nil
+            && envelope.fallbackReference == nil
+            && envelope.seed == nil
     }
 
     private func pendingResolutionMessage(_ result: MetadataResolutionResult) -> String {

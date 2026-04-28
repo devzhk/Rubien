@@ -29,6 +29,8 @@
 "addByIdentifier.error.empty" = "Enter a DOI, arXiv ID, PMID, ISBN, or paper title.";
 "addByIdentifier.error.notFound" = "No matching record found. Try a DOI, arXiv ID, PMID, or ISBN instead.";
 "addByIdentifier.downloadPDFOnImport" = "Download PDF when importing";
+"addByIdentifier.lookupFailed.cardTitle" = "Lookup failed:";
+"addByIdentifier.lookupFailed.placeholder" = "Lookup failed";
 
 // MARK: - Batch Import
 

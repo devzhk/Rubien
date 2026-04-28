@@ -244,18 +244,18 @@ public enum MetadataFetcher {
             workData = json
         }
 
-        guard let invertedIndex = workData?["abstract_inverted_index"] as? [String: [Int]] else {
-            return nil
-        }
+        guard let work = workData else { return nil }
+        return decodeOpenAlexAbstract(from: work)
+    }
 
-        // Reconstruct abstract from inverted index format
+    /// Reconstruct an abstract from OpenAlex's `abstract_inverted_index` shape
+    /// (`{word: [position, ...]}`). Returns nil when the field is missing or empty.
+    private static func decodeOpenAlexAbstract(from work: [String: Any]) -> String? {
+        guard let invertedIndex = work["abstract_inverted_index"] as? [String: [Int]] else { return nil }
         var positions: [Int: String] = [:]
         for (word, indices) in invertedIndex {
-            for idx in indices {
-                positions[idx] = word
-            }
+            for idx in indices { positions[idx] = word }
         }
-
         guard !positions.isEmpty else { return nil }
         let abstract = positions.keys.sorted().compactMap { positions[$0] }.joined(separator: " ")
         return abstract.isEmpty ? nil : abstract
@@ -435,30 +435,49 @@ public enum MetadataFetcher {
 
     // MARK: - arXiv ID → arXiv API
 
-    /// Fetch metadata from arXiv ID via arXiv Atom API
+    /// Fetch metadata from arXiv ID. Tries the arXiv Atom API first; on terminal
+    /// failure (most often HTTP 429 — arXiv's "Rate exceeded" reflects shared
+    /// server capacity, not per-IP usage, so retrying our own backoff doesn't
+    /// help) falls back to OpenAlex via the arXiv DataCite DOI. OpenAlex indexes
+    /// arXiv preprints and has much higher headroom.
     public static func fetchFromArXiv(_ arxivId: String) async throws -> Reference {
         let cacheKey = "arxiv:\(arxivId)"
         if let cached = cachedReference(for: cacheKey) { return cached }
 
+        do {
+            let ref = try await fetchFromArXivAPI(arxivId)
+            cacheReference(ref, for: cacheKey)
+            return ref
+        } catch {
+            if let ref = try? await fetchFromOpenAlexByDOI("10.48550/arXiv.\(arxivId)") {
+                var withArxivURL = ref
+                withArxivURL.url = "https://arxiv.org/abs/\(arxivId)"
+                cacheReference(withArxivURL, for: cacheKey)
+                return withArxivURL
+            }
+            throw error
+        }
+    }
+
+    /// One-shot — no `withRetry`. arXiv's 429 ("Rate exceeded") is shared server
+    /// capacity, not per-IP usage, so 21s of exponential backoff before the
+    /// `fetchFromArXiv` OpenAlex fallback would buy nothing.
+    private static func fetchFromArXivAPI(_ arxivId: String) async throws -> Reference {
         let urlString = "https://export.arxiv.org/api/query?id_list=\(arxivId)&max_results=1"
         guard let url = URL(string: urlString) else {
             throw FetchError.invalidURL
         }
 
-        let ref = try await withRetry {
-            var request = URLRequest(url: url)
-            request.timeoutInterval = 15
+        var request = URLRequest(url: url)
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 15
 
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-                throw FetchError.httpError((response as? HTTPURLResponse)?.statusCode ?? 0)
-            }
-
-            return try parseArXivResponse(data, arxivId: arxivId)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            throw FetchError.httpError((response as? HTTPURLResponse)?.statusCode ?? 0)
         }
 
-        cacheReference(ref, for: cacheKey)
-        return ref
+        return try parseArXivResponse(data, arxivId: arxivId)
     }
 
     static func parseArXivResponse(_ data: Data, arxivId: String) throws -> Reference {
@@ -470,12 +489,12 @@ public enum MetadataFetcher {
         return entry
     }
 
-    // MARK: - OpenAlex Title Search (full metadata)
+    // MARK: - OpenAlex Full Metadata (title search + DOI lookup)
 
     /// Search OpenAlex by title and return a full Reference (for articles without identifiers)
     public static func fetchFromOpenAlexByTitle(_ title: String) async throws -> Reference? {
         let encoded = title.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? title
-        let urlString = "https://api.openalex.org/works?search=\(encoded)&select=id,doi,title,authorships,publication_year,primary_location,biblio,abstract_inverted_index,type&per-page=1"
+        let urlString = "https://api.openalex.org/works?search=\(encoded)&select=\(openAlexWorkSelect)&per-page=1"
         guard let url = URL(string: urlString) else { return nil }
 
         var request = URLRequest(url: url)
@@ -488,11 +507,33 @@ public enum MetadataFetcher {
               let work = results.first else {
             return nil
         }
+        return parseOpenAlexWork(work)
+    }
 
+    /// Fallback for arXiv API outages via the DataCite DOI form `10.48550/arXiv.<id>`.
+    public static func fetchFromOpenAlexByDOI(_ doi: String) async throws -> Reference? {
+        let encoded = doi.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? doi
+        let urlString = "https://api.openalex.org/works/doi:\(encoded)?select=\(openAlexWorkSelect)"
+        guard let url = URL(string: urlString) else { return nil }
+
+        var request = URLRequest(url: url)
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 10
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, http.statusCode != 200 { return nil }
+        guard let work = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return parseOpenAlexWork(work)
+    }
+
+    private static let openAlexWorkSelect = "id,doi,title,authorships,publication_year,primary_location,biblio,abstract_inverted_index,type"
+
+    private static func parseOpenAlexWork(_ work: [String: Any]) -> Reference? {
         let fetchedTitle = work["title"] as? String ?? "Untitled"
         let year = work["publication_year"] as? Int
 
-        // Authors
         let authors: [AuthorName] = {
             guard let authorships = work["authorships"] as? [[String: Any]] else { return [] }
             return authorships.compactMap { authorship -> AuthorName? in
@@ -502,7 +543,6 @@ public enum MetadataFetcher {
             }
         }()
 
-        // DOI
         let doi: String? = {
             guard let raw = work["doi"] as? String else { return nil }
             if let range = raw.range(of: "doi.org/") {
@@ -511,14 +551,12 @@ public enum MetadataFetcher {
             return raw
         }()
 
-        // Journal
         let journal: String? = {
             guard let location = work["primary_location"] as? [String: Any],
                   let source = location["source"] as? [String: Any] else { return nil }
             return source["display_name"] as? String
         }()
 
-        // Biblio
         let biblio = work["biblio"] as? [String: Any]
         let volume = biblio?["volume"] as? String
         let issue = biblio?["issue"] as? String
@@ -530,18 +568,8 @@ public enum MetadataFetcher {
             return f
         }()
 
-        // Abstract
-        let abstract: String? = {
-            guard let invertedIndex = work["abstract_inverted_index"] as? [String: [Int]] else { return nil }
-            var positions: [Int: String] = [:]
-            for (word, indices) in invertedIndex {
-                for idx in indices { positions[idx] = word }
-            }
-            guard !positions.isEmpty else { return nil }
-            return positions.keys.sorted().compactMap { positions[$0] }.joined(separator: " ")
-        }()
+        let abstract = decodeOpenAlexAbstract(from: work)
 
-        // Type
         let referenceType: ReferenceType = {
             switch work["type"] as? String {
             case "journal-article", "article": return .journalArticle
@@ -879,6 +907,7 @@ public enum MetadataFetcher {
         public var errorDescription: String? {
             switch self {
             case .invalidURL: return "Invalid URL"
+            case .httpError(429): return "Rate-limited by the metadata source. Please wait a minute and try again."
             case .httpError(let code): return "HTTP error \(code)"
             case .parseError: return "Failed to parse response"
             case .unrecognizedIdentifier: return "Could not recognize identifier (DOI, PMID, arXiv, or ISBN)"
