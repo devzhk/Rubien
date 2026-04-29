@@ -120,7 +120,10 @@ final class ReaderWindowManager {
         window.isReleasedWhenClosed = false
         window.minSize = minSize
         window.titlebarAppearsTransparent = false
-        window.titleVisibility = .visible
+        window.titleVisibility = {
+            if #available(macOS 26.0, *) { return .hidden }
+            return .visible
+        }()
         window.tabbingIdentifier = readerTabbingIdentifier
         window.tabbingMode = .preferred
 

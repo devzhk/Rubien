@@ -1827,7 +1827,7 @@ struct WebReaderView: View {
                     ProgressView(viewModel.isLiveReadableBusy ? String(localized: "Loading and extracting…", bundle: .module) : String(localized: "Rendering markdown…", bundle: .module))
                         .padding(.horizontal, 14)
                         .padding(.vertical, 10)
-                        .background(.regularMaterial, in: Capsule())
+                        .liquidGlassSurface(in: Capsule(), fallback: .regularMaterial)
                         .padding(.top, 14)
                 }
             }
@@ -1980,7 +1980,7 @@ struct WebReaderView: View {
                             Label(String(localized: "Collapse video", bundle: .module), systemImage: "xmark")
                                 .labelStyle(.iconOnly)
                                 .padding(9)
-                                .background(.ultraThinMaterial, in: Circle())
+                                .liquidGlassSurface(in: Circle(), fallback: .ultraThinMaterial)
                         }
                         .buttonStyle(.plain)
                         .padding(12)

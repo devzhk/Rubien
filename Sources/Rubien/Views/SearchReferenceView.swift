@@ -224,9 +224,7 @@ struct SearchOverlay: View {
                 Divider()
                 footer
             }
-            .background(.ultraThickMaterial)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .shadow(color: .black.opacity(0.3), radius: 30, y: 10)
+            .modifier(SearchPanelSurface())
             .frame(width: 560)
             .fixedSize(horizontal: false, vertical: true)
             .padding(.top, 60)
@@ -751,6 +749,25 @@ private struct SearchResultRow: View {
             return Color.primary.opacity(0.08)
         } else {
             return Color.clear
+        }
+    }
+}
+
+// MARK: - SearchPanelSurface
+
+private struct SearchPanelSurface: ViewModifier {
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        if #available(macOS 26.0, *) {
+            content
+                .glassEffect(.regular, in: shape)
+                .shadow(color: .black.opacity(0.3), radius: 30, y: 10)
+        } else {
+            content
+                .background(.ultraThickMaterial)
+                .clipShape(shape)
+                .shadow(color: .black.opacity(0.3), radius: 30, y: 10)
         }
     }
 }

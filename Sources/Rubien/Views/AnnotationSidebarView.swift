@@ -35,7 +35,7 @@ struct AnnotationSidebarView: View {
                 annotationList
             }
         }
-        .background(sidebarBackground)
+        .legacyBackground(sidebarBackground)
         .sheet(item: $editingAnnotation) { annotation in
             editNoteSheet(annotation: annotation)
         }

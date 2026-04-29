@@ -98,7 +98,7 @@ struct SidebarView: View {
         }
 
         }
-        .background(Color(nsColor: .controlBackgroundColor))
+        .legacyBackground(Color(nsColor: .controlBackgroundColor))
         .navigationTitle("Rubien")
         .sheet(isPresented: $showNewViewSheet) {
             NewViewSheet(name: $newViewName) {

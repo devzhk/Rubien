@@ -103,7 +103,7 @@ write_info_plist() {
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
+    <string>14.4</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSAppTransportSecurity</key>
@@ -137,24 +137,22 @@ sign_bundle() {
     fi
 
     echo "▸ Codesigning embedded helpers and app bundle..."
-    # Strip xattrs (Finder info, resource forks) that codesign refuses.
-    # Downloaded JS bundles and icons often carry these from the toolchain.
+    # Strip resource forks (com.apple.FinderInfo) and xattrs that codesign refuses.
+    # `dot_clean -m` clears FinderInfo metadata that `xattr -cr` alone leaves
+    # behind on resources copied from network shares or AFP volumes.
+    dot_clean -m "$APP_BUNDLE" 2>/dev/null || true
     xattr -cr "$APP_BUNDLE" 2>/dev/null || true
-    # Embedded CLI gets its own entitlements so it joins the shared App Group.
-    # Ad-hoc ("-") signing can claim the entitlement structurally but it won't
-    # validate at runtime; fine for dev smoke-builds.
     rubien_codesign_binary "$HELPERS_DIR/$CLI_NAME" "$CLI_ENTITLEMENTS"
 
-    # Outer bundle keeps its own path here because --deep + --options runtime
-    # are specific to the release flow (dev-launch.sh deliberately avoids
-    # --options runtime for cloudd compatibility), so the shared helper
-    # doesn't fit.
+    # No --deep on the outer call: the embedded CLI is already signed above
+    # and --deep just re-walks the signed tree, which historically chokes on
+    # xattrs that get re-added between the inner and outer sign steps.
     if [ -n "$CODESIGN_ENTITLEMENTS" ]; then
-        codesign --force --deep --sign "$CODESIGN_IDENTITY" \
+        codesign --force --sign "$CODESIGN_IDENTITY" \
             --entitlements "$CODESIGN_ENTITLEMENTS" \
             --timestamp=none --options runtime "$APP_BUNDLE"
     else
-        codesign --force --deep --sign "$CODESIGN_IDENTITY" --timestamp=none "$APP_BUNDLE"
+        codesign --force --sign "$CODESIGN_IDENTITY" --timestamp=none "$APP_BUNDLE"
     fi
 }
 

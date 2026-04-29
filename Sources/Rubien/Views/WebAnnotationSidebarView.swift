@@ -21,7 +21,7 @@ struct WebAnnotationSidebarView: View {
                 scrollableSidebarBody
             }
         }
-        .background(Color(nsColor: .controlBackgroundColor))
+        .legacyBackground(Color(nsColor: .controlBackgroundColor))
         .sheet(item: $editingAnnotation) { annotation in
             editNoteSheet(annotation: annotation)
         }

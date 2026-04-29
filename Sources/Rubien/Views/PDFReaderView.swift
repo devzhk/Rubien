@@ -396,7 +396,7 @@ struct PDFReaderView: View {
             value: viewModel.hasStagedSelection && viewModel.selectionToolbarLayout?.visible == true
         )
         .navigationTitle(viewModel.reference.title)
-        .toolbarBackground(pdfContainerBackground, for: .windowToolbar)
+        .legacyToolbarBackground(pdfContainerBackground, for: .windowToolbar)
         .onAppear {
             NoteEditorPool.shared.warmUp()
         }
@@ -481,13 +481,11 @@ struct PDFReaderView: View {
         }
         .padding(.horizontal, 5)
         .padding(.vertical, 5)
-        .background(.ultraThinMaterial, in: Capsule(style: .continuous))
-        .overlay(
-            Capsule(style: .continuous)
-                .strokeBorder(floatingOuterStroke, lineWidth: 0.55)
-        )
-        .shadow(color: floatingShadowPrimary, radius: 10, y: 4)
-        .shadow(color: floatingShadowSecondary, radius: 2, y: 1)
+        .modifier(FloatingReaderTabSurface(
+            outerStroke: floatingOuterStroke,
+            shadowPrimary: floatingShadowPrimary,
+            shadowSecondary: floatingShadowSecondary
+        ))
     }
 
     @ViewBuilder
@@ -1638,6 +1636,28 @@ struct AnnotatablePDFView: NSViewRepresentable {
             }
 
             return pageRects
+        }
+    }
+}
+
+private struct FloatingReaderTabSurface: ViewModifier {
+    let outerStroke: Color
+    let shadowPrimary: Color
+    let shadowSecondary: Color
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.glassEffect(.regular, in: Capsule(style: .continuous))
+        } else {
+            content
+                .background(.ultraThinMaterial, in: Capsule(style: .continuous))
+                .overlay(
+                    Capsule(style: .continuous)
+                        .strokeBorder(outerStroke, lineWidth: 0.55)
+                )
+                .shadow(color: shadowPrimary, radius: 10, y: 4)
+                .shadow(color: shadowSecondary, radius: 2, y: 1)
         }
     }
 }

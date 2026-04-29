@@ -1,9 +1,23 @@
 import SwiftUI
 import AppKit
 
-/// A ScrollView wrapper that forces overlay-style (thin) scrollbars,
-/// matching the appearance of PDFView's native scrollbars.
-struct OverlayScrollView<Content: View>: NSViewRepresentable {
+struct OverlayScrollView<Content: View>: View {
+    let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        if #available(macOS 26.0, *) {
+            ScrollView { content }
+        } else {
+            LegacyOverlayScrollView { content }
+        }
+    }
+}
+
+private struct LegacyOverlayScrollView<Content: View>: NSViewRepresentable {
     let content: Content
 
     init(@ViewBuilder content: () -> Content) {
@@ -23,11 +37,8 @@ struct OverlayScrollView<Content: View>: NSViewRepresentable {
 
         scrollView.documentView = hostingView
 
-        // Pin leading, trailing, and top to the clip view so the content
-        // fills the width and starts at the top.  Height is intentionally
-        // left unconstrained: NSHostingView reports its intrinsic content
-        // size to AppKit, which uses it to set the document view height and
-        // enable vertical scrolling automatically.
+        // Pinning leading/trailing/top (no bottom) lets NSHostingView's
+        // intrinsic height drive scroll content sizing.
         NSLayoutConstraint.activate([
             hostingView.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
             hostingView.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
@@ -41,7 +52,8 @@ struct OverlayScrollView<Content: View>: NSViewRepresentable {
         guard let hostingView = scrollView.documentView as? NSHostingView<Content> else { return }
         hostingView.rootView = content
         scrollView.applyRubienElegantScrollers()
-        // Nudge AppKit to recompute the document height after content changes.
+        // SwiftUI doesn't re-measure intrinsicContentSize on rootView swap;
+        // nudge AppKit to recompute it before the next layout pass.
         DispatchQueue.main.async {
             scrollView.documentView?.invalidateIntrinsicContentSize()
             scrollView.reflectScrolledClipView(scrollView.contentView)

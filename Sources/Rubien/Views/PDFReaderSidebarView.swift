@@ -29,7 +29,7 @@ struct PDFReaderSidebarView: View {
                 PDFInfoSidebarView(reference: reference)
             }
         }
-        .background(Color(nsColor: NSColor(name: nil) { trait in
+        .legacyBackground(Color(nsColor: NSColor(name: nil) { trait in
             trait.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
                 ? NSColor(calibratedWhite: 0.15, alpha: 1.0)
                 : NSColor(calibratedWhite: 0.90, alpha: 1.0)

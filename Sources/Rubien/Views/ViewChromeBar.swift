@@ -29,7 +29,7 @@ struct ViewChromeBar: View {
             row2
             Divider()
         }
-        .background(.bar)
+        .liquidGlassSurface(in: Rectangle(), fallback: .bar)
     }
 
     private var row1: some View {

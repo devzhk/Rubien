@@ -189,7 +189,7 @@ struct ReferenceListView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
-        .background(.bar)
+        .liquidGlassSurface(in: Rectangle(), fallback: .bar)
         .overlay(alignment: .top) {
             Divider()
         }

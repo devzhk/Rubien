@@ -70,26 +70,41 @@ struct NotePopoverView: View {
             .padding(.vertical, 8)
         }
         .frame(width: 340)
-        .background {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(colorScheme == .dark
-                    ? Color(nsColor: NSColor(white: 0.18, alpha: 1))
-                    : Color(nsColor: .controlBackgroundColor)
-                )
-        }
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(
-                    colorScheme == .dark
-                        ? Color.white.opacity(0.12)
-                        : Color.black.opacity(0.08),
-                    lineWidth: 0.5
-                )
-        )
-        .shadow(color: .black.opacity(0.22), radius: 16, y: 6)
-        .shadow(color: .black.opacity(0.08), radius: 3, y: 1)
+        .modifier(NotePopoverDecoration(colorScheme: colorScheme))
+        .liquidGlassPresentation()
         .onAppear {
             editingMarkdown = markdown
+        }
+    }
+}
+
+private struct NotePopoverDecoration: ViewModifier {
+    let colorScheme: ColorScheme
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content
+        } else {
+            content
+                .background {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(colorScheme == .dark
+                            ? Color(nsColor: NSColor(white: 0.18, alpha: 1))
+                            : Color(nsColor: .controlBackgroundColor)
+                        )
+                }
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(
+                            colorScheme == .dark
+                                ? Color.white.opacity(0.12)
+                                : Color.black.opacity(0.08),
+                            lineWidth: 0.5
+                        )
+                )
+                .shadow(color: .black.opacity(0.22), radius: 16, y: 6)
+                .shadow(color: .black.opacity(0.08), radius: 3, y: 1)
         }
     }
 }

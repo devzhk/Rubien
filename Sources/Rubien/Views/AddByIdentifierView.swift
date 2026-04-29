@@ -116,6 +116,7 @@ struct AddByIdentifierView: View {
         .padding(20)
         .frame(width: 440)
         .frame(minHeight: 280)
+        .liquidGlassPresentation()
     }
 
     @ViewBuilder
@@ -137,7 +138,7 @@ struct AddByIdentifierView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
-        .background(.quaternary.opacity(0.5))
+        .legacyBackground(.quaternary.opacity(0.5))
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 

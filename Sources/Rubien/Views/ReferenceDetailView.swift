@@ -1106,6 +1106,10 @@ struct ReferenceDetailView: View {
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
         window.minSize = minimumSize
+        window.titleVisibility = {
+            if #available(macOS 26.0, *) { return .hidden }
+            return .visible
+        }()
         window.setFrameAutosaveName(autosaveName)
         let restoredFrame = window.setFrameUsingName(autosaveName)
         enforceQuickPreviewWindowSizeIfNeeded(window, minimumSize: minimumSize, preferredSize: preferredSize)
