@@ -8,14 +8,22 @@
 	    Non-sandboxed + App Group membership still gets a valid
 	    containerURL(forSecurityApplicationGroupIdentifier:) on macOS.
 	-->
+	<!--
+	    No application-identifier or team-identifier: those are restricted
+	    entitlements that require a CLI-specific provisioning profile, and
+	    we don't have one (the bundle's profile only covers com.rubien.app).
+	    AMFI kills the helper on standalone terminal launch when it sees a
+	    restricted claim it can't authorize. App Groups is validation-required,
+	    not restricted, so it survives without profile authorization — the
+	    process just runs with entitlements-validated cleared. App Group
+	    binding still works because it's keyed on the codesign team prefix
+	    (9TXK4V3SS8 from the cert) + the App Group value below.
+	    See Apple DevForums thread 743979 (Quinn) and TN3125.
+	-->
 	<key>com.apple.security.application-groups</key>
 	<array>
 		<string>9TXK4V3SS8.com.rubien.shared</string>
 	</array>
-	<key>com.apple.application-identifier</key>
-	<string>9TXK4V3SS8.com.rubien.cli</string>
-	<key>com.apple.developer.team-identifier</key>
-	<string>9TXK4V3SS8</string>
 	<key>com.apple.security.network.client</key>
 	<true/>
 </dict>
