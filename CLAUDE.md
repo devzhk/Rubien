@@ -59,7 +59,7 @@ Four Swift targets sit on top of one shared core (`Package.swift`):
 
 ### Data layer — GRDB + single migrator
 
-`Sources/RubienCore/Database/AppDatabase.swift` owns the only `DatabaseMigrator`. The app has not shipped, so all schema is defined in a single consolidated `"v1"` migration. Once the app ships, new schema changes go through new `registerMigration(...)` blocks — never edit an already-shipped migration. `eraseDatabaseOnSchemaChange` is opt-in via `SWIFTLIB_RESET_DB_ON_SCHEMA_CHANGE=1` in DEBUG builds only (env-var name kept from upstream for compatibility); production never wipes the library. Models in `Sources/RubienCore/Models/` are GRDB `Codable` records (`Reference`, `Tag`, `PDFAnnotationRecord`, `WebAnnotationRecord`, `MetadataIntake`, `MetadataVerification`). Full-text search uses SQLite FTS5 over reference fields.
+`Sources/RubienCore/Database/AppDatabase.swift` owns the only `DatabaseMigrator`. **The v1 migration is shipped**: the developer's own library is live, populated with real references, and syncing via CloudKit. Never edit the v1 migration block. Any schema change — new column, new table, FK adjustment, index tweak — goes into a new `registerMigration("v2", ...)` block. Migrations must be additive and atomic; if a column needs to be renamed, copy data into the new column inside the migration rather than mutating the old one in place. CloudKit record types and their fields (CDReference, CDTag, …) are equally shipped — adding a field is fine (older peers fall back to safe defaults), but renaming or removing one breaks already-pushed records on iCloud and on every other device. `eraseDatabaseOnSchemaChange` is opt-in via `SWIFTLIB_RESET_DB_ON_SCHEMA_CHANGE=1` in DEBUG builds only (env-var name kept from upstream for compatibility); **production never wipes the library, and dev builds shouldn't either now that real data lives in the App Group container**. Models in `Sources/RubienCore/Models/` are GRDB `Codable` records (`Reference`, `Tag`, `PDFAnnotationRecord`, `WebAnnotationRecord`, `MetadataIntake`, `MetadataVerification`). Full-text search uses SQLite FTS5 over reference fields.
 
 **On-disk storage.** `AppDatabase.preferredStorageRoot(named:)` resolves the DB root in this order:
 
@@ -99,7 +99,9 @@ When adding a new built-in style, update both the Swift formatter (for speed) an
 
 ### Sync (RubienSync)
 
-`RubienSync` maps local GRDB entities to CloudKit `CKRecord` objects and drives `CKSyncEngine`. The target is pre-Phase-B4 — the engine actor lives in the plan but not the repo yet; what's landed so far is the dirty-tracking schema in `AppDatabase.swift` plus the per-entity mapping files under `Sources/RubienSync/`. When adding the next entity's mapping, follow these patterns — they're load-bearing and easy to drift from.
+`RubienSync` maps local GRDB entities to CloudKit `CKRecord` objects and drives `CKSyncEngine`. **Sync is fully landed and running** against `iCloud.com.rubien.app` in the developer's account. The engine actor (`SyncedLibrary.swift`), the file-lock single-writer guard (`SyncFileLock.swift`), the transaction observer (`SyncTransactionObserver.swift`), the in-app coordinator (`Sources/Rubien/Sync/SyncCoordinator.swift`) with its four-layer entitlement/account probe, the toolbar `SyncStatusIcon`, the Settings pane, and the `rubien-cli sync status` JSON subcommand all ship. See `Docs/Sync-Runbook.md` for operational steps and `scripts/dev-launch.sh` for the dev-signing loop.
+
+When adding a new entity's mapping or modifying an existing one, follow these patterns — they're load-bearing and easy to drift from.
 
 **Per-entity mapping file shape.** Each synced entity (Reference, Tag, ReferenceTag, …) gets its own `*Record.swift` under `Sources/RubienSync/` with three pieces on an extension of the model:
 
