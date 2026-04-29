@@ -4,6 +4,7 @@ import RubienCore
 
 struct PDFReaderSidebarView: View {
     let reference: Reference
+    @ObservedObject var viewModel: PDFReaderViewModel
     @Binding var selectedTab: PDFSidebarTab
 
     var body: some View {
@@ -12,6 +13,7 @@ struct PDFReaderSidebarView: View {
                 selection: $selectedTab,
                 items: [
                     (String(localized: "Outline", bundle: .module), .outline),
+                    (String(localized: "Search", bundle: .module), .search),
                     (String(localized: "Info", bundle: .module), .info),
                 ]
             )
@@ -23,6 +25,8 @@ struct PDFReaderSidebarView: View {
             switch selectedTab {
             case .outline:
                 PDFOutlineSidebarView(reference: reference)
+            case .search:
+                PDFSearchSidebarView(viewModel: viewModel)
             case .info:
                 PDFInfoSidebarView(reference: reference)
             case .annotations:

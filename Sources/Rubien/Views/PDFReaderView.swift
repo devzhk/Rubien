@@ -7,6 +7,7 @@ import RubienCore
 
 enum PDFSidebarTab: String, CaseIterable {
     case outline
+    case search
     case annotations
     case info
 }
@@ -67,6 +68,16 @@ struct SelectionToolbarLayout: Equatable {
     var visible: Bool
 }
 
+// MARK: - Search match
+
+struct PDFSearchMatch: Identifiable {
+    let id = UUID()
+    let pageIndex: Int
+    let pageLabel: String
+    let snippet: AttributedString
+    let selection: PDFSelection
+}
+
 // MARK: - PDFReader ViewModel
 
 @MainActor
@@ -91,16 +102,30 @@ final class PDFReaderViewModel: ObservableObject {
     @Published var clickedAnnotationRecord: PDFAnnotationRecord?
     @Published var annotationToolbarLayout: SelectionToolbarLayout?
 
+    // MARK: Search state
+    @Published var searchQuery: String = ""
+    @Published var searchMatches: [PDFSearchMatch] = []
+    @Published var activeMatchIndex: Int? = nil
+    @Published var searchCaseSensitive: Bool = false
+    @Published var isSearchInProgress: Bool = false
+    /// Bumped to request the search field steal first responder (e.g. when ⌘F is pressed).
+    @Published var searchFocusRequest: UUID = UUID()
+
     let reference: Reference
     let pdfURL: URL
     private let db: AppDatabase
     private var cancellables = Set<AnyCancellable>()
     private var stagedSelection: PDFSelection?
     private(set) var stagedSelectionPageRects: [Int: [CGRect]] = [:]
+    private var searchTask: Task<Void, Never>?
+
+    weak var pdfView: PDFView?
 
     var jumpToAnnotation: ((PDFAnnotationRecord) -> Void)?
     var clearSelectionInView: (() -> Void)?
     var onPageChanged: ((Int, Int) -> Void)?
+    /// Wired by PDFReaderView body; flips the left sidebar to the Search tab and focuses its field.
+    var openSearchUI: (() -> Void)?
 
     init(reference: Reference, db: AppDatabase = .shared) {
         self.reference = reference
@@ -122,6 +147,10 @@ final class PDFReaderViewModel: ObservableObject {
                 }
             )
             .store(in: &cancellables)
+    }
+
+    deinit {
+        searchTask?.cancel()
     }
 
     func addAnnotation(
@@ -189,6 +218,115 @@ final class PDFReaderViewModel: ObservableObject {
     func dismissAnnotationToolbar() {
         clickedAnnotationRecord = nil
         annotationToolbarLayout = nil
+    }
+
+    // MARK: Search
+
+    func runSearch(query: String) {
+        searchTask?.cancel()
+        searchQuery = query
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            searchTask = nil
+            searchMatches = []
+            activeMatchIndex = nil
+            isSearchInProgress = false
+            pdfView?.clearSelection()
+            return
+        }
+        guard let document = pdfView?.document else { return }
+        isSearchInProgress = true
+        let caseSensitive = searchCaseSensitive
+        searchTask = Task.detached(priority: .userInitiated) { [weak self] in
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            if Task.isCancelled { return }
+            let opts: NSString.CompareOptions = caseSensitive ? [] : [.caseInsensitive]
+            let selections = document.findString(trimmed, withOptions: opts)
+            if Task.isCancelled { return }
+            let matches = Self.makeSearchMatches(from: selections, query: trimmed, caseSensitive: caseSensitive)
+            if Task.isCancelled { return }
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.searchMatches = matches
+                self.activeMatchIndex = matches.isEmpty ? nil : 0
+                self.isSearchInProgress = false
+                if !matches.isEmpty {
+                    self.gotoMatch(at: 0)
+                } else {
+                    self.pdfView?.clearSelection()
+                }
+            }
+        }
+    }
+
+    func gotoMatch(at index: Int) {
+        guard index >= 0, index < searchMatches.count, let pdfView else { return }
+        activeMatchIndex = index
+        let match = searchMatches[index]
+        pdfView.setCurrentSelection(match.selection, animate: true)
+        pdfView.scrollSelectionToVisible(nil)
+    }
+
+    func nextMatch() {
+        guard !searchMatches.isEmpty else { return }
+        let next = ((activeMatchIndex ?? -1) + 1) % searchMatches.count
+        gotoMatch(at: next)
+    }
+
+    func previousMatch() {
+        guard !searchMatches.isEmpty else { return }
+        let prev = ((activeMatchIndex ?? 0) - 1 + searchMatches.count) % searchMatches.count
+        gotoMatch(at: prev)
+    }
+
+    func clearSearch() {
+        searchTask?.cancel()
+        searchTask = nil
+        searchQuery = ""
+        searchMatches = []
+        activeMatchIndex = nil
+        isSearchInProgress = false
+        pdfView?.clearSelection()
+    }
+
+    nonisolated private static func makeSearchMatches(from selections: [PDFSelection], query: String, caseSensitive: Bool) -> [PDFSearchMatch] {
+        var matches: [PDFSearchMatch] = []
+        matches.reserveCapacity(selections.count)
+        var pageStringCache: [ObjectIdentifier: NSString] = [:]
+        let contextSize = 40
+        for selection in selections {
+            guard let page = selection.pages.first,
+                  let document = page.document else { continue }
+            let pageKey = ObjectIdentifier(page)
+            let pageNS: NSString
+            if let cached = pageStringCache[pageKey] {
+                pageNS = cached
+            } else {
+                guard let pageString = page.string else { continue }
+                pageNS = pageString as NSString
+                pageStringCache[pageKey] = pageNS
+            }
+            let pageRange = selection.range(at: 0, on: page)
+            guard pageRange.location != NSNotFound, pageRange.length > 0 else { continue }
+            let pageLen = pageNS.length
+            let start = max(0, pageRange.location - contextSize)
+            let end = min(pageLen, pageRange.location + pageRange.length + contextSize)
+            guard end > start else { continue }
+            var window = pageNS.substring(with: NSRange(location: start, length: end - start))
+            window = window.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let prefix = start > 0 ? "…" : ""
+            let suffixEllipsis = end < pageLen ? "…" : ""
+            var attributed = AttributedString(prefix + window + suffixEllipsis)
+            if let matchRange = attributed.range(of: query, options: caseSensitive ? [] : [.caseInsensitive]) {
+                attributed[matchRange].inlinePresentationIntent = .stronglyEmphasized
+                attributed[matchRange].foregroundColor = .accentColor
+            }
+            let pageIndex = document.index(for: page)
+            let pageLabel = page.label ?? "\(pageIndex + 1)"
+            matches.append(PDFSearchMatch(pageIndex: pageIndex, pageLabel: pageLabel, snippet: attributed, selection: selection))
+        }
+        return matches
     }
 
     func navigateTo(_ annotation: PDFAnnotationRecord) {
@@ -285,7 +423,7 @@ struct PDFReaderView: View {
         HStack(spacing: 0) {
             // Left sidebar: TOC / Info
             if showOutlineSidebar {
-                PDFReaderSidebarView(reference: viewModel.reference, selectedTab: $outlineSidebarTab)
+                PDFReaderSidebarView(reference: viewModel.reference, viewModel: viewModel, selectedTab: $outlineSidebarTab)
                     .frame(width: min(max(outlineSidebarWidth + outlineDragOffset, 200), 400))
                     .transition(.move(edge: .leading))
 
@@ -399,6 +537,15 @@ struct PDFReaderView: View {
         .legacyToolbarBackground(pdfContainerBackground, for: .windowToolbar)
         .onAppear {
             NoteEditorPool.shared.warmUp()
+            viewModel.openSearchUI = {
+                if !showOutlineSidebar {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+                        showOutlineSidebar = true
+                    }
+                }
+                outlineSidebarTab = .search
+                viewModel.searchFocusRequest = UUID()
+            }
         }
     }
 
@@ -1007,21 +1154,36 @@ final class CommitAwarePDFView: PDFView {
     var onSelectionCommitted: ((PDFSelection) -> Void)?
     var onSelectionCleared: (() -> Void)?
     var onAnnotationClicked: ((PDFAnnotation) -> Void)?
+    var onShowSearchUI: (() -> Void)?
+
+    /// Arrow key codes (left, right, down, up) for keyboard text-selection extension.
+    private static let arrowKeyCodes: ClosedRange<Int> = 0x7B...0x7E
+
+    private var userIsSelecting = false
 
     override var acceptsFirstResponder: Bool { true }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "f" {
-            _ = NSApp.sendAction(#selector(NSResponder.performTextFinderAction(_:)), to: nil, from: self)
+            onShowSearchUI?()
             return true
         }
         return super.performKeyEquivalent(with: event)
     }
 
+    override func mouseDown(with event: NSEvent) {
+        userIsSelecting = true
+        super.mouseDown(with: event)
+    }
+
     override func mouseUp(with event: NSEvent) {
         super.mouseUp(with: event)
 
-        if let selection = currentSelection,
+        let wasUserSelecting = userIsSelecting
+        userIsSelecting = false
+
+        if wasUserSelecting,
+           let selection = currentSelection,
            let text = selection.string?.trimmingCharacters(in: .whitespacesAndNewlines),
            !text.isEmpty {
             commitSelectionIfNeeded()
@@ -1033,12 +1195,17 @@ final class CommitAwarePDFView: PDFView {
             return
         }
 
-        onSelectionCleared?()
+        if wasUserSelecting {
+            onSelectionCleared?()
+        }
     }
 
     override func keyUp(with event: NSEvent) {
         super.keyUp(with: event)
-        if currentSelection != nil {
+        // Only commit on shift+arrow (keyboard text-selection extend); never on bare keystrokes,
+        // which would fire on every keystroke after a programmatic selection (search, outline jump).
+        let isArrow = Self.arrowKeyCodes.contains(Int(event.keyCode))
+        if event.modifierFlags.contains(.shift), isArrow, currentSelection != nil {
             commitSelectionIfNeeded()
         }
     }
@@ -1103,6 +1270,7 @@ struct AnnotatablePDFView: NSViewRepresentable {
         }
 
         context.coordinator.pdfView = pdfView
+        viewModel.pdfView = pdfView
         context.coordinator.loadDocument(from: viewModel.pdfURL, into: pdfView)
         pdfView.onSelectionCommitted = { [weak coordinator = context.coordinator] selection in
             coordinator?.handleCommittedSelection(selection)
@@ -1112,6 +1280,9 @@ struct AnnotatablePDFView: NSViewRepresentable {
         }
         pdfView.onSelectionCleared = { [weak coordinator = context.coordinator] in
             coordinator?.handleClearedSelection()
+        }
+        pdfView.onShowSearchUI = { [weak viewModel = self.viewModel] in
+            viewModel?.openSearchUI?()
         }
 
         DispatchQueue.main.async { [weak coordinator = context.coordinator, weak pdfView] in
@@ -1148,8 +1319,12 @@ struct AnnotatablePDFView: NSViewRepresentable {
         pdfView.onSelectionCleared = { [weak coordinator = context.coordinator] in
             coordinator?.handleClearedSelection()
         }
+        pdfView.onShowSearchUI = { [weak viewModel = context.coordinator.viewModel] in
+            viewModel?.openSearchUI?()
+        }
 
         context.coordinator.ensureObservers(for: pdfView)
+        viewModel.pdfView = pdfView
         viewModel.clearSelectionInView = { [weak pdfView] in
             pdfView?.clearSelection()
         }
