@@ -138,7 +138,8 @@ struct ReferenceDetailView: View {
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
                     .contentShape(Rectangle())
                     .onTapGesture { beginEdit("authors") }
             } else {
