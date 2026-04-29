@@ -65,10 +65,9 @@ struct AddByIdentifierView: View {
             }
 
             if let ref = fetchedReference {
-                resolutionCard(
+                verifiedCard(
                     title: String(localized: "Verified:", bundle: .module),
-                    titleText: ref.title,
-                    bodyText: verifiedSummary(for: ref)
+                    reference: ref
                 )
 
                 Toggle(
@@ -79,10 +78,10 @@ struct AddByIdentifierView: View {
                 .disabled(!ref.canDownloadPDF)
                 .frame(maxWidth: .infinity, alignment: .leading)
             } else if let pendingResolution {
-                resolutionCard(
+                pendingCard(
                     title: pendingResolutionCardTitle(pendingResolution),
-                    titleText: pendingResolutionTitle(pendingResolution),
-                    bodyText: pendingResolutionMessage(pendingResolution)
+                    paperTitle: pendingResolutionTitle(pendingResolution),
+                    message: pendingResolutionMessage(pendingResolution)
                 )
             }
 
@@ -120,26 +119,70 @@ struct AddByIdentifierView: View {
     }
 
     @ViewBuilder
-    private func resolutionCard(title: String, titleText: String, bodyText: String) -> some View {
+    private func verifiedCard(title: String, reference: Reference) -> some View {
+        resolutionCard {
+            Text(title)
+
+            Text(reference.title)
+                .font(.body.bold())
+                .foregroundStyle(.primary)
+                .lineLimit(3)
+                .truncationMode(.tail)
+
+            if !reference.authors.displayString.isEmpty {
+                Text(reference.authors.displayString)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+            }
+            if let pub = publicationLine(for: reference) {
+                Text(pub)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            if let ids = identifierLine(for: reference) {
+                Text(ids)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            if let abstract = reference.abstract?.rubien_nilIfBlank {
+                Text(abstract)
+                    .lineLimit(4)
+                    .truncationMode(.tail)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func pendingCard(title: String, paperTitle: String, message: String) -> some View {
+        resolutionCard {
+            Text(title)
+
+            Text(paperTitle)
+                .font(.body.bold())
+                .foregroundStyle(.primary)
+                .lineLimit(3)
+                .truncationMode(.tail)
+
+            if !message.isEmpty {
+                Text(message)
+                    .lineLimit(8)
+                    .truncationMode(.tail)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func resolutionCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         Divider()
 
         VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            Text(titleText)
-                .font(.body.bold())
-
-            Text(bodyText)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            content()
         }
+        .font(.caption)
+        .foregroundStyle(.secondary)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
-        .legacyBackground(.quaternary.opacity(0.5))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func fetchMetadata() {
@@ -176,21 +219,19 @@ struct AddByIdentifierView: View {
         return String(localized: "addByIdentifier.status.queryingMetadata", bundle: .module)
     }
 
-    private func verifiedSummary(for reference: Reference) -> String {
-        let publicationLine = [reference.journal, reference.publisher, reference.year.map(String.init)]
-            .compactMap { $0 }
-            .joined(separator: " · ")
-        let identifierLine = [
+    private func publicationLine(for reference: Reference) -> String? {
+        let parts = [reference.journal, reference.publisher]
+            .compactMap { $0?.rubien_nilIfBlank }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    private func identifierLine(for reference: Reference) -> String? {
+        let parts = [
             reference.doi.map { "DOI: \($0)" },
             reference.isbn.map { "ISBN: \($0)" },
             reference.issn.map { "ISSN: \($0)" },
-        ]
-        .compactMap { $0 }
-        .joined(separator: " · ")
-        let abstract = reference.abstract?.rubien_nilIfBlank ?? ""
-        return [reference.authors.displayString, publicationLine, identifierLine, abstract]
-            .filter { !$0.isEmpty }
-            .joined(separator: "\n")
+        ].compactMap { $0?.rubien_nilIfBlank }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     private func pendingResolutionTitle(_ result: MetadataResolutionResult) -> String {
