@@ -484,9 +484,58 @@ public final class AppDatabase: Sendable {
                 t.column("queuedAt", .datetime).notNull().defaults(sql: sqlNowISO8601)
             }
             try db.create(index: "pdfUploadQueue_queuedAt", on: "pdfUploadQueue", columns: ["queuedAt"])
+
+            // Backfill existing pdfPath into the new tables. Hash is "pending"
+            // — recomputed lazily on first read or upload to keep launch fast.
+            try db.execute(sql: """
+                INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
+                SELECT id, pdfPath, 'pending', 1, dateModified, dateModified
+                FROM reference
+                WHERE pdfPath IS NOT NULL AND pdfPath != ''
+            """)
+            try db.execute(sql: """
+                INSERT INTO pdfUploadQueue(referenceId, localFilename, queuedAt)
+                SELECT id, pdfPath, dateModified
+                FROM reference
+                WHERE pdfPath IS NOT NULL AND pdfPath != ''
+            """)
         }
 
         return migrator
+    }
+
+    /// Test-only: applies the v2 schema/backfill steps to an arbitrary
+    /// queue that already carries a v1-shaped `reference` table. Used by
+    /// `MigrationV2Tests` to verify backfill without driving the full
+    /// AppDatabase init path.
+    public static func runV2MigrationForTesting(on queue: DatabaseQueue) throws {
+        var migrator = DatabaseMigrator()
+        migrator.registerMigration("v2") { db in
+            try db.create(table: "pdfCache") { t in
+                t.column("referenceId", .integer).primaryKey()
+                t.column("localFilename", .text).notNull()
+                t.column("contentHash", .text).notNull()
+                t.column("assetVersion", .integer).notNull().defaults(to: 1)
+                t.column("materializedAt", .datetime)
+                t.column("lastOpenedAt", .datetime).notNull().defaults(sql: "(datetime('now'))")
+            }
+            try db.create(table: "pdfUploadQueue") { t in
+                t.column("referenceId", .integer).primaryKey()
+                t.column("localFilename", .text).notNull()
+                t.column("queuedAt", .datetime).notNull().defaults(sql: "(datetime('now'))")
+            }
+            try db.execute(sql: """
+                INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
+                SELECT id, pdfPath, 'pending', 1, dateModified, dateModified
+                FROM reference WHERE pdfPath IS NOT NULL AND pdfPath != ''
+            """)
+            try db.execute(sql: """
+                INSERT INTO pdfUploadQueue(referenceId, localFilename, queuedAt)
+                SELECT id, pdfPath, dateModified
+                FROM reference WHERE pdfPath IS NOT NULL AND pdfPath != ''
+            """)
+        }
+        try migrator.migrate(queue)
     }
 
     /// Tables whose rows sync to CloudKit. Order is not significant here; pull-side
