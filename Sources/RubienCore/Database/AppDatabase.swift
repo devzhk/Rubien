@@ -461,6 +461,37 @@ public final class AppDatabase: Sendable {
             }
         }
 
+        migrator.registerMigration("v2") { db in
+            // Per-device PDF cache. NOT in syncedTables — never observed by
+            // dirty-tracking triggers, never has a CKRecord. The architectural
+            // invariant the schema-invariant test enforces: synced tables hold
+            // no local-only columns. Per-device materialization state is here,
+            // not on `reference`.
+            try db.create(table: "pdfCache") { t in
+                t.column("referenceId", .integer)
+                    .primaryKey()
+                    .references("reference", onDelete: .cascade)
+                t.column("localFilename", .text).notNull()
+                t.column("contentHash", .text).notNull()
+                t.column("assetVersion", .integer).notNull().defaults(to: 1)
+                t.column("materializedAt", .datetime)
+                t.column("lastOpenedAt", .datetime).notNull().defaults(sql: sqlNowISO8601)
+            }
+            try db.create(index: "pdfCache_lastOpenedAt", on: "pdfCache", columns: ["lastOpenedAt"])
+
+            // Per-device "yet to push" queue. Drained by PDFUploadQueue actor
+            // when sync is enabled. Same architectural rule as pdfCache:
+            // local-only, never synced.
+            try db.create(table: "pdfUploadQueue") { t in
+                t.column("referenceId", .integer)
+                    .primaryKey()
+                    .references("reference", onDelete: .cascade)
+                t.column("localFilename", .text).notNull()
+                t.column("queuedAt", .datetime).notNull().defaults(sql: sqlNowISO8601)
+            }
+            try db.create(index: "pdfUploadQueue_queuedAt", on: "pdfUploadQueue", columns: ["queuedAt"])
+        }
+
         return migrator
     }
 
