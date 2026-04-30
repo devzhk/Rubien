@@ -1525,7 +1525,7 @@ struct Pdf: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "pdf",
         abstract: "Inspect and extract content from a reference's attached PDF",
-        subcommands: [PdfInfo.self, PdfText.self, PdfPageImage.self]
+        subcommands: [PdfInfo.self, PdfText.self, PdfPageImage.self, PdfStatus.self]
     )
 }
 
@@ -1728,5 +1728,72 @@ struct PdfPageImage: ParsableCommand {
                 qualityUsed: img.qualityUsed
             )
         }
+    }
+}
+
+/// JSON shape for `pdf status`. Optional fields use `encodeIfPresent` so they
+/// are omitted entirely when nil — callers (scripts, the MCP server) treat
+/// key presence as the signal for "this device has a cache row".
+struct PdfStatusOutput: Encodable {
+    let referenceId: Int64
+    let cached: Bool
+    let localFilename: String?
+    let contentHash: String?
+    let assetVersion: Int64?
+    let materializedAt: Date?
+    let lastOpenedAt: Date?
+    let inUploadQueue: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case referenceId, cached, localFilename, contentHash, assetVersion
+        case materializedAt, lastOpenedAt, inUploadQueue
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(referenceId, forKey: .referenceId)
+        try c.encode(cached, forKey: .cached)
+        try c.encodeIfPresent(localFilename, forKey: .localFilename)
+        try c.encodeIfPresent(contentHash, forKey: .contentHash)
+        try c.encodeIfPresent(assetVersion, forKey: .assetVersion)
+        try c.encodeIfPresent(materializedAt, forKey: .materializedAt)
+        try c.encodeIfPresent(lastOpenedAt, forKey: .lastOpenedAt)
+        try c.encodeIfPresent(inUploadQueue, forKey: .inUploadQueue)
+    }
+}
+
+struct PdfStatus: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "status",
+        abstract: "Show PDF cache + upload-queue state for a reference"
+    )
+
+    @Argument(help: "Reference ID")
+    var id: Int64
+
+    func run() throws {
+        guard let status = try AppDatabase.shared.pdfCacheStatus(for: id) else {
+            printJSON(PdfStatusOutput(
+                referenceId: id,
+                cached: false,
+                localFilename: nil,
+                contentHash: nil,
+                assetVersion: nil,
+                materializedAt: nil,
+                lastOpenedAt: nil,
+                inUploadQueue: nil
+            ))
+            return
+        }
+        printJSON(PdfStatusOutput(
+            referenceId: status.referenceId,
+            cached: status.materializedAt != nil,
+            localFilename: status.localFilename,
+            contentHash: status.contentHash,
+            assetVersion: status.assetVersion,
+            materializedAt: status.materializedAt,
+            lastOpenedAt: status.lastOpenedAt,
+            inUploadQueue: status.inUploadQueue
+        ))
     }
 }

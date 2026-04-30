@@ -1041,6 +1041,49 @@ extension AppDatabase {
         }
     }
 
+    /// Snapshot of a reference's `pdfCache` row joined with the
+    /// `pdfUploadQueue` membership flag. Used by `rubien-cli pdf status` for
+    /// diagnostics — "is this PDF cached locally? what's its hash? is it
+    /// pending upload?" — without callers spelunking SQLite by hand.
+    public struct PDFCacheStatus: Sendable {
+        public let referenceId: Int64
+        public let localFilename: String
+        public let contentHash: String
+        public let assetVersion: Int64
+        /// Nil when the row exists but the asset hasn't been materialized on
+        /// this device yet (post-B8 pull-side placeholder).
+        public let materializedAt: Date?
+        public let lastOpenedAt: Date
+        public let inUploadQueue: Bool
+    }
+
+    /// Fetch the `pdfCache` row + upload-queue membership for a reference.
+    /// Returns nil when the reference has no cache row at all (i.e. never had
+    /// a PDF attached, or the row was evicted). The "row exists but not
+    /// materialized" case is signalled by `materializedAt == nil`.
+    public func pdfCacheStatus(for referenceId: Int64) throws -> PDFCacheStatus? {
+        try dbWriter.read { db in
+            guard let row = try Row.fetchOne(db, sql: """
+                SELECT localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt
+                FROM pdfCache WHERE referenceId = ?
+            """, arguments: [referenceId]) else {
+                return nil
+            }
+            let inQueue = (try Bool.fetchOne(db, sql: """
+                SELECT 1 FROM pdfUploadQueue WHERE referenceId = ? LIMIT 1
+            """, arguments: [referenceId])) ?? false
+            return PDFCacheStatus(
+                referenceId: referenceId,
+                localFilename: row["localFilename"],
+                contentHash: row["contentHash"],
+                assetVersion: row["assetVersion"],
+                materializedAt: row["materializedAt"],
+                lastOpenedAt: row["lastOpenedAt"],
+                inUploadQueue: inQueue
+            )
+        }
+    }
+
     /// Insert a pdfCache + pdfUploadQueue row for a freshly-imported PDF, but
     /// only when the row has no cache entry yet (preserves an existing PDF
     /// during merge). Caller-provided transaction so the cache write is

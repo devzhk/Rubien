@@ -42,6 +42,7 @@ rubien-cli <subcommand> [options]
 | `pdf info` | Probe PDF: page count, text-layer flag, and outline-derived sections |
 | `pdf text` | Extract text from a reference's PDF by page range or section title |
 | `pdf page-image` | Render a PDF page as a base64-encoded JPEG/PNG |
+| `pdf status` | Show PDF cache + upload-queue state for a reference (JSON only) |
 | `sync status` | Inspect iCloud sync state (JSON only) |
 
 ---
@@ -706,6 +707,52 @@ rubien-cli pdf page-image 42 --page 1 --scale 3.0 --format png
 `qualityUsed` is `null` for PNG output. The MCP wrapper decodes `data`
 and re-emits as an MCP image content block so claude.ai chat displays
 the page directly.
+
+### pdf status
+
+Diagnostic dump of a reference's `pdfCache` row + upload-queue state.
+Used to answer "is this PDF cached locally on this device? what's its
+hash? is it still pending upload?" without spelunking SQLite. Reads
+only — never mutates.
+
+```bash
+rubien-cli pdf status 42
+```
+
+| Argument | Type | Description |
+|---|---|---|
+| `id` | Int64 (required) | Reference ID |
+
+**Output (cached locally):**
+
+```json
+{
+  "referenceId": 42,
+  "cached": true,
+  "localFilename": "abc-123_paper.pdf",
+  "contentHash": "deadbeef...",
+  "assetVersion": 1,
+  "materializedAt": "2026-04-29T22:00:00Z",
+  "lastOpenedAt": "2026-04-29T22:00:00Z",
+  "inUploadQueue": false
+}
+```
+
+**Output (no cache row at all):**
+
+```json
+{
+  "referenceId": 999,
+  "cached": false
+}
+```
+
+When the reference has no `pdfCache` row, only `referenceId` and
+`cached: false` are emitted — the optional fields are omitted entirely
+so callers can rely on key presence as a signal. `cached` is `true`
+only when `materializedAt` is non-null (the file has actually been
+written to local storage on this device); a row whose `materializedAt`
+is `null` is a pull-side placeholder waiting to be downloaded.
 
 ---
 
