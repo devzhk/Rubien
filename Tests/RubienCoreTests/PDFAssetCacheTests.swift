@@ -139,4 +139,35 @@ final class PDFAssetCacheTests: XCTestCase {
         let entry = try await cache.metadataFor(referenceId: 999)
         XCTAssertNil(entry)
     }
+
+    // MARK: - AppDatabase.pdfFilename(for:) sync helper (Task 6)
+
+    func testAppDatabasePdfFilenameReturnsNilWhenNoRow() throws {
+        let filename = try db.pdfFilename(for: 999)
+        XCTAssertNil(filename)
+    }
+
+    func testAppDatabasePdfFilenameReturnsNilWhenNotMaterialized() throws {
+        try makeRef(id: 1)
+        try db.dbWriter.write { db in
+            try db.execute(sql: """
+                INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt)
+                VALUES(1, 'x.pdf', 'h', 1, NULL)
+            """)
+        }
+        let filename = try db.pdfFilename(for: 1)
+        XCTAssertNil(filename, "row exists but materializedAt is NULL — caller should treat as 'needs download'")
+    }
+
+    func testAppDatabasePdfFilenameReturnsFilenameWhenMaterialized() throws {
+        try makeRef(id: 1)
+        try db.dbWriter.write { db in
+            try db.execute(sql: """
+                INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt)
+                VALUES(1, 'abc-123.pdf', 'h', 1, ?)
+            """, arguments: [Date()])
+        }
+        let filename = try db.pdfFilename(for: 1)
+        XCTAssertEqual(filename, "abc-123.pdf")
+    }
 }

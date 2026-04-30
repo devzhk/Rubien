@@ -944,6 +944,26 @@ extension AppDatabase {
         }
     }
 
+    /// Resolve a Reference's local PDF filename via the cache. Returns nil
+    /// if this device has never seen the asset (no `pdfCache` row) OR if the
+    /// row exists but the file isn't materialized locally (caller should
+    /// treat the latter as "needs download").
+    ///
+    /// Sync companion to `PDFAssetCache.pathFor(referenceId:)` — for places
+    /// where threading async/await through is awkward (e.g., a SwiftUI view
+    /// init that synchronously needs to know whether to render a "PDF" chip).
+    /// Compose with `pdfStorageURL` to get the full URL, or use
+    /// `PDFAssetCache.pathFor(referenceId:)` for an async lookup that also
+    /// checks file existence.
+    public func pdfFilename(for referenceId: Int64) throws -> String? {
+        try dbWriter.read { db in
+            try String.fetchOne(db, sql: """
+                SELECT localFilename FROM pdfCache
+                WHERE referenceId = ? AND materializedAt IS NOT NULL
+            """, arguments: [referenceId])
+        }
+    }
+
     public func deleteReferences(ids: [Int64]) throws {
         try dbWriter.write { db in
             _ = try Reference.deleteAll(db, ids: ids)
