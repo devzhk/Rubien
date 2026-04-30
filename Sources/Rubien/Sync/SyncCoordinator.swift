@@ -103,7 +103,14 @@ public final class SyncCoordinator: ObservableObject {
             self.makeLibrary = makeLibrary
         } else {
             self.makeLibrary = { db in
-                let lib = SyncedLibrary(appDatabase: db)
+                // Inject the B8 PDF-asset-sync flag from the app target's
+                // RubienPreferences. RubienSync can't import Rubien (would
+                // create a target cycle), so the read goes through a
+                // closure resolved at construction.
+                let lib = SyncedLibrary(
+                    appDatabase: db,
+                    pdfAssetSyncEnabledProvider: { RubienPreferences.pdfAssetSyncEnabled }
+                )
                 await lib.start()
                 return lib
             }

@@ -23,6 +23,19 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     private let stateStore: SyncStateStore
     private let engineStateStore: SyncEngineStateStore
 
+    /// Per-device upload queue drained by `drainPDFUploadQueue()`.
+    /// Lazy because it's only used on the PDF push path; unrelated tests
+    /// (status stream, transaction observer retention) shouldn't pay the
+    /// actor-allocation cost.
+    private lazy var pdfUploadQueue: PDFUploadQueue = PDFUploadQueue(db: appDatabase)
+
+    /// Cross-target feature-flag accessor. `RubienPreferences.pdfAssetSyncEnabled`
+    /// lives in the `Rubien` app target which `RubienSync` cannot import
+    /// (would create a target cycle), so we inject the read as a closure
+    /// at construction. Production binding is `{ RubienPreferences.pdfAssetSyncEnabled }`
+    /// in `SyncCoordinator`; tests inject `{ true }` or `{ false }` directly.
+    private let pdfAssetSyncEnabledProvider: @Sendable () -> Bool
+
     /// Lazy container factory. Deferring construction means unit tests can
     /// exercise the actor's DB-touching side effects (baseline, tombstone
     /// compaction, startup reconciliation) without triggering the CloudKit
@@ -52,7 +65,14 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         stateFileURL: URL = AppDatabase.syncEngineStateURL,
         containerProvider: @escaping @Sendable () -> CKContainer = {
             CKContainer(identifier: SyncConstants.containerIdentifier)
-        }
+        },
+        // Tests default to `false` so the existing startup / observer /
+        // status-stream tests (which don't seed pdfUploadQueue rows) keep
+        // their behavior unchanged. Production callers in `SyncCoordinator`
+        // pass `{ RubienPreferences.pdfAssetSyncEnabled }`; the
+        // `PDFUploadDrainerTests` pass `{ true }` / `{ false }` explicitly
+        // to exercise the on/off branches.
+        pdfAssetSyncEnabledProvider: @escaping @Sendable () -> Bool = { false }
     ) {
         var continuation: AsyncStream<SyncStatus>.Continuation!
         self.statusStream = AsyncStream { cont in continuation = cont }
@@ -61,6 +81,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         self.stateStore = SyncStateStore()
         self.engineStateStore = SyncEngineStateStore(fileURL: stateFileURL)
         self.containerProvider = containerProvider
+        self.pdfAssetSyncEnabledProvider = pdfAssetSyncEnabledProvider
     }
 
     private var container: CKContainer {
@@ -74,8 +95,8 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
 
     /// Start the engine (creates it if needed). Idempotent; safe to call on
     /// every app launch. Runs (in order): baseline-if-pending → tombstone
-    /// compaction → startup reconciliation. Each step short-circuits if
-    /// nothing to do.
+    /// compaction → startup reconciliation → PDF-upload-queue drain. Each
+    /// step short-circuits if nothing to do.
     public func start() async {
         _ = engine
         await performInitialBaselineIfNeeded()
@@ -85,6 +106,98 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         // so recalling on every `start()` is cheap and doesn't need a
         // process-lifetime guard.
         await ingestPendingChanges()
+        // Drain any PDF rows queued by previous sessions (or by the v2
+        // migration backfill of the existing library). The drainer self-
+        // gates on the feature flag.
+        await drainPDFUploadQueue()
+    }
+
+    // MARK: - PDF upload queue drainer (B8 / Task 14)
+
+    /// Move queued PDF rows into the engine's pending-changes pipeline.
+    ///
+    /// Design — mark-dirty + eager-remove:
+    /// 1. Read pending reference IDs from `pdfUploadQueue` (FIFO order).
+    /// 2. UPSERT a `syncState(entityType='referencePDF', isDirty=1)` row
+    ///    per pending ID. This piggybacks on the existing dirty-row
+    ///    machinery: if the engine forgets the in-flight push (process
+    ///    crash, account churn, etc.), the next `start()` call's
+    ///    `ingestPendingChanges` will rediscover the dirty row and re-
+    ///    enqueue. Without this safety net an eager `pdfUploadQueue.remove`
+    ///    would silently drop the upload on engine error.
+    /// 3. Add `.saveRecord` pending-changes to the engine state. The
+    ///    engine then drives `nextRecordZoneChangeBatch` →
+    ///    `SyncEntityType.referencePDF.buildPushRecord` → CloudKit save.
+    ///    On save-ack, `markPushed` clears `isDirty`.
+    /// 4. Remove the row from `pdfUploadQueue`. The mark-dirty insert is
+    ///    now the durable record of "PDF needs pushing"; the queue table
+    ///    is a per-device "yet to be drained into syncState" buffer.
+    ///
+    /// Re-entrant safe: a second call sees an empty queue and no-ops; the
+    /// engine deduplicates pendingRecordZoneChanges by recordID. The
+    /// drainer self-gates on `pdfAssetSyncEnabledProvider()` so it stays a
+    /// no-op until Phase E flips the flag on by default.
+    public func drainPDFUploadQueue() async {
+        let drained = await drainPDFUploadQueueIntoSyncState()
+        guard !drained.isEmpty else { return }
+
+        // Hand the drained IDs to the engine. Idempotent: CKSyncEngine
+        // dedups pendingRecordZoneChanges by recordID, so re-adding an
+        // already-pending change is harmless. This is the only step that
+        // forces engine construction; XCTest exercises the DB side via
+        // `drainPDFUploadQueueIntoSyncState` directly so this path stays
+        // out of unentitled test runs.
+        let pending: [CKSyncEngine.PendingRecordZoneChange] = drained.map { id in
+            .saveRecord(recordID(for: String(id), type: .referencePDF))
+        }
+        engine.state.add(pendingRecordZoneChanges: pending)
+    }
+
+    /// DB-side half of the drainer. Returns the IDs that were marked dirty
+    /// and removed from the queue, so the caller can pass them to the
+    /// engine. Split out from `drainPDFUploadQueue` so tests (which run in
+    /// an unentitled XCTest process where touching CKSyncEngine raises
+    /// `CKException`) can exercise the DB effects without forcing engine
+    /// construction.
+    func drainPDFUploadQueueIntoSyncState() async -> [Int64] {
+        guard pdfAssetSyncEnabledProvider() else { return [] }
+
+        let pendingIds: [Int64]
+        do {
+            pendingIds = try await pdfUploadQueue.pendingReferenceIds()
+        } catch {
+            log.error("drainPDFUploadQueue: failed to read queue: \(error.localizedDescription, privacy: .public)")
+            return []
+        }
+        guard !pendingIds.isEmpty else { return [] }
+
+        // Mark each pending ID as dirty in syncState AND clear the queue
+        // row in one transaction. Atomicity here matters: if mark-dirty
+        // succeeded but queue-remove failed, the next drain pass would
+        // re-process the same IDs (harmless — UPSERT — but wasteful).
+        // Conversely if remove succeeded but mark-dirty failed, we'd lose
+        // the upload entirely (no syncState entry, no queue row). One
+        // transaction sidesteps both.
+        do {
+            try await appDatabase.dbWriter.write { db in
+                for id in pendingIds {
+                    try db.execute(sql: """
+                        INSERT INTO syncState(entityType, entityId, isDirty)
+                            VALUES(?, ?, 1)
+                            ON CONFLICT(entityType, entityId)
+                                DO UPDATE SET isDirty = 1
+                    """, arguments: [SyncEntityType.referencePDF.rawValue, String(id)])
+                    try db.execute(
+                        sql: "DELETE FROM pdfUploadQueue WHERE referenceId = ?",
+                        arguments: [id]
+                    )
+                }
+            }
+        } catch {
+            log.error("drainPDFUploadQueue: mark-dirty/clear write failed: \(error.localizedDescription, privacy: .public)")
+            return []
+        }
+        return pendingIds
     }
 
     // MARK: - Status publishing
