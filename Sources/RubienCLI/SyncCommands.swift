@@ -27,6 +27,7 @@ struct StatusCommand: ParsableCommand {
         let confirmed: Int
         let unconfirmed: Int
         let baselineState: String
+        let pdfBackfillRemaining: Int
 
         if let pool = try? makePool() {
             dirtyByType = (try? pool.read { db in
@@ -54,11 +55,16 @@ struct StatusCommand: ParsableCommand {
                 try String.fetchOne(db, sql: "SELECT value FROM syncSession WHERE key='baselineState'")
                     ?? "pending"
             }) ?? "pending"
+
+            pdfBackfillRemaining = (try? pool.read { db in
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM pdfUploadQueue") ?? 0
+            }) ?? 0
         } else {
             dirtyByType = [:]
             confirmed = 0
             unconfirmed = 0
             baselineState = "pending"
+            pdfBackfillRemaining = 0
         }
 
         let sidecarPath = AppDatabase.syncEngineStateURL
@@ -106,6 +112,7 @@ struct StatusCommand: ParsableCommand {
             "baselineState": baselineState,
             "dirtyByEntityType": dirtyByType,
             "tombstoneCount": ["confirmed": confirmed, "unconfirmed": unconfirmed],
+            "pdfBackfillRemaining": pdfBackfillRemaining,
             "syncEngineState": syncEngineState,
             "schemaVersion": "v1"
         ]

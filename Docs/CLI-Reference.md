@@ -776,6 +776,7 @@ $ rubien-cli sync status
   "enabled" : true,
   "entitlementPresent" : true,
   "iCloudAccountAvailable" : true,
+  "pdfBackfillRemaining" : 0,
   "schemaVersion" : "v1",
   "syncEngineState" : {
     "sidecarExists" : true,
@@ -796,6 +797,7 @@ $ rubien-cli sync status
 - `baselineState` — `"pending"` or `"complete"`
 - `dirtyByEntityType` — per-table count of rows with `isDirty=1`
 - `tombstoneCount` — `.confirmed` (server ack'd) vs `.unconfirmed` (pending delete)
+- `pdfBackfillRemaining` — count of `pdfUploadQueue` rows pending push (B8). Drains automatically when sync is enabled and the flag is on; non-zero means PDFs imported on this device haven't been pushed to CloudKit yet
 - `syncEngineState` — sidecar-file metadata
 - `schemaVersion` — DB migration version
 
