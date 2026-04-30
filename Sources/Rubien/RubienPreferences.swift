@@ -19,6 +19,19 @@ enum RubienPreferences {
         set { UserDefaults.standard.set(newValue, forKey: apiContactEmailKey) }
     }
 
+    /// Gates the B8 PDF asset sync (CDReferencePDF push/pull). Default
+    /// false from C2 → C5; flipped to true in Phase E (Task 35) once
+    /// the schema invariant test + dateModified cleanup land. Setting
+    /// to false at runtime stops the upload-queue drainer; existing
+    /// pdfUploadQueue rows accumulate harmlessly until the flag flips
+    /// back on.
+    static let pdfAssetSyncEnabledKey = "Rubien.pdfAssetSyncEnabled"
+
+    static var pdfAssetSyncEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: pdfAssetSyncEnabledKey) }
+        set { UserDefaults.standard.set(newValue, forKey: pdfAssetSyncEnabledKey) }
+    }
+
     static let columnConfigsKey = "Rubien.columnConfigs"
     static let tableColumnCustomizationKey = "Rubien.tableColumnCustomization"
 
