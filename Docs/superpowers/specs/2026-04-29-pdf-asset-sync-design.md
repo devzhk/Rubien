@@ -1,7 +1,29 @@
 # PDF asset sync (B8) — design
 
-**Status:** drafted 2026-04-29; awaiting user review before implementation plan.
+**Status:** drafted 2026-04-29; scope narrowed to Mac-only-first 2026-04-29 (see addendum below); implementation in progress on `pdf-asset-sync` branch.
 **Scope:** ship cross-device PDF binaries by adding a `CDReferencePDF` sibling CKRecord carrying a `CKAsset`, an on-demand download path for resource-constrained clients, LRU cache eviction, and a one-shot backfill of the developer's existing local PDFs. Establishes an architectural invariant — *no synced table holds a local-only column* — so the class of bug we hit on 2026-04-29 (silent `pdfPath` blanking on every pull) cannot recur.
+
+## Scope addendum (2026-04-29 — Mac-only-first)
+
+This spec was originally written assuming iOS was on the near roadmap and the design should accommodate resource-constrained clients from day 1. After review, scope was narrowed: ship the Mac-side of B8 first (every line of shipped code runs on a real binary), and revisit the iOS-specific paths when an iOS target is added to `Package.swift`. A separate iOS-port plan will be written when that work begins.
+
+**Folded into this ship (Mac-only):**
+- The architectural invariant: synced tables hold no local-only columns. (`pdfCache`, `pdfUploadQueue` as dedicated never-synced tables; `Reference.pdfPath` dropped.)
+- The schema-invariant test (`SyncSchemaInvariantTests`) — bug-class defense.
+- `dateModified` cleanup across record types.
+- `CDReferencePDF` push and pull (Mac always materializes on pull — no `#if os(iOS)` conditional).
+- One-shot backfill of existing local PDFs.
+- Settings UX showing cache size used + backfill progress.
+
+**Deferred to the iOS-port plan (separate spec):**
+- On-demand asset fetch (`SyncedLibrary.fetchAsset(refId:)`).
+- `PDFAvailability` `.downloading` state — Mac is always `.materialized` after pull, so the state machine is `.materialized` / `.notUploaded` / `.error` only.
+- LRU cache eviction (`PDFAssetCache.evictIfOverCap`).
+- Cache cap as a configurable concept.
+- Cellular-aware upload policy.
+- iOS-specific Settings UI for cache management.
+
+**Spec correction (codex review, 2026-04-29):** `materializedAt` on `pdfCache` is nullable, not `NOT NULL`. `NULL` is the load-bearing "metadata known but file isn't on this device" signal that the deferred iOS work will use; on Mac under this scope it's always non-NULL after pull, but the column type is the same.
 
 ## Context
 
@@ -61,7 +83,7 @@ The 1:1 mapping is enforced by recordName convention only — the local schema l
 
 ### Cache lives in `pdfCache`, not on Reference
 
-`pdfCache(referenceId PRIMARY KEY, localFilename TEXT NOT NULL, contentHash TEXT NOT NULL, assetVersion INTEGER NOT NULL, materializedAt DATETIME NOT NULL, lastOpenedAt DATETIME NOT NULL)` is a local-only table. `Reference.pdfPath` goes away. The lookup helper `AppDatabase.pdfFilename(for: refId)` joins through `pdfCache`. Foreign key from `pdfCache.referenceId` to `reference.id` with `ON DELETE CASCADE` so deleting a Reference correctly removes its cache row.
+`pdfCache(referenceId PRIMARY KEY, localFilename TEXT NOT NULL, contentHash TEXT NOT NULL, assetVersion INTEGER NOT NULL, materializedAt DATETIME, lastOpenedAt DATETIME NOT NULL)` is a local-only table. `Reference.pdfPath` goes away. The lookup helper `AppDatabase.pdfFilename(for: refId)` joins through `pdfCache`. Foreign key from `pdfCache.referenceId` to `reference.id` with `ON DELETE CASCADE` so deleting a Reference correctly removes its cache row.
 
 This is the single biggest concrete win against the bug class: post-B8, the `reference` table has zero columns that aren't in `CDReference`'s CKRecord schema, and the schema-invariant test will keep it that way.
 

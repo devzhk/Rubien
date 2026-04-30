@@ -12,6 +12,35 @@
 
 ---
 
+## Scope addendum (2026-04-29 — Mac-only-first)
+
+The plan was originally written assuming iOS was on the near roadmap. After Task 1 review, scope was narrowed to Mac-only-first: ship code that runs on a real binary today, defer the on-demand / eviction / cap pieces to a separate iOS-port plan when an iOS target gets added to `Package.swift`.
+
+**Active tasks under this scope:**
+
+- **Phase A (C1) — Tasks 1-9:** unchanged. Schema, cache table, queue table, callsite migration. Same as written.
+- **Phase B (C2) — Tasks 10-16:** unchanged in shape, but Task 11's `applyRemoteRecord(.referencePDF)` drops the `#if os(iOS)` branch — Mac always materializes on pull.
+- **Phase C (C3) — Tasks 17, 19, 20, 21:** simplified. PDFAvailability is a 3-state machine (`.materialized` / `.notUploaded` / `.error`), no `.downloading`. Reader integration (Task 19) doesn't need a "downloading" presentation state. Annotation count decoupling (Task 20) unchanged. **Task 18 (`SyncedLibrary.fetchAsset(refId:)`) deferred** — Mac doesn't need on-demand fetching since pull always materializes.
+- **Phase D (C4) — Tasks 24, 25, 27 only:** keep the CLI extensions and the phase checkpoint. **Tasks 22 (`evictIfOverCap`), 23 (eviction trigger), and Task 26's cap-progress-bar UX deferred.** Task 26 is reduced to "Settings shows current cache size used" without a cap context.
+- **Phase E (C5) — Tasks 28-36:** unchanged. The schema invariant test + `dateModified` cleanup is the load-bearing defense; ships in full.
+- **Phase F (C6) — Tasks 37-40:** Task 37's Settings progress bar collapses to a plain "Uploading X PDFs to iCloud" indicator (no cap context). Tasks 38-40 unchanged.
+
+**Effective task count: ~28** (down from 40).
+
+**Codex review note from Task 1, threaded into Task 2:** widen `MigrationV2Tests` (or add a new test file) to assert FK cascade behavior, nullability of `materializedAt`, and that the `sqlNowISO8601` defaults actually fire. Column-name sets alone don't catch a wrong default value silently surviving migration.
+
+**Tasks deferred to the future iOS-port plan:**
+- Task 18: `SyncedLibrary.fetchAsset(refId:)` for on-demand asset fetch.
+- Task 22: `PDFAssetCache.evictIfOverCap` with skip-upload-queue invariant.
+- Task 23: wire eviction trigger after each materialize.
+- Task 26 (partial): cache-used progress bar against cap; Settings cellular-sync toggle.
+- Re-introduction of `#if os(iOS)` branches in dispatch's apply path.
+- `PDFAvailability.downloading` state + reader's "downloading…" presentation.
+
+When the iOS work begins, that plan re-introduces these items.
+
+---
+
 ## File Structure
 
 **Create:**
