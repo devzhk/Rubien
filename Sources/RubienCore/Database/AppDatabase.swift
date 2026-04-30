@@ -955,6 +955,11 @@ extension AppDatabase {
     /// Compose with `pdfStorageURL` to get the full URL, or use
     /// `PDFAssetCache.pathFor(referenceId:)` for an async lookup that also
     /// checks file existence.
+    ///
+    /// Note: a non-nil return only confirms the cache row is marked
+    /// materialized, not that the file is currently reachable on disk. For
+    /// open-the-file paths, go through `PDFAssetCache.pathFor(referenceId:)`,
+    /// which also checks existence.
     public func pdfFilename(for referenceId: Int64) throws -> String? {
         try dbWriter.read { db in
             try String.fetchOne(db, sql: """
