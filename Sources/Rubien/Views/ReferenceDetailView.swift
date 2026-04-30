@@ -28,6 +28,8 @@ struct ReferenceDetailView: View {
     @State private var customValues: [Int64: String] = [:]
     @State private var showPropertyManager = false
 
+    @EnvironmentObject private var syncCoordinator: SyncCoordinator
+
     private enum PDFDownloadState {
         case idle, downloading, failed(String)
         var isDownloading: Bool { if case .downloading = self { return true } else { return false } }
@@ -1030,6 +1032,7 @@ struct ReferenceDetailView: View {
                 let newPath = try await PDFDownloadService.downloadPDF(for: reference)
                 if let id = reference.id {
                     try db.attachImportedPDFs(rowIds: [id], filenames: [newPath])
+                    Task { await syncCoordinator.kickPDFUploadDrainer() }
                 }
                 var updated = reference
                 updated.dateModified = Date()
@@ -1055,6 +1058,7 @@ struct ReferenceDetailView: View {
             PDFService.deletePDF(at: filename)
             return
         }
+        Task { await syncCoordinator.kickPDFUploadDrainer() }
         var updated = editedRef
         updated.dateModified = Date()
         onSave(updated)

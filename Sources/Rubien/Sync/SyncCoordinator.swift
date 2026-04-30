@@ -357,6 +357,16 @@ public final class SyncCoordinator: ObservableObject {
         await performStartSync()
     }
 
+    // MARK: - PDF upload-queue kick
+
+    /// Trigger the PDF upload-queue drainer immediately. Called from import
+    /// flows so newly-attached PDFs flow into CloudKit without waiting for
+    /// the next app launch's `SyncedLibrary.start()` drain. No-op when sync
+    /// isn't running (the queue rows persist; next start() will drain them).
+    public func kickPDFUploadDrainer() async {
+        await library?.drainPDFUploadQueue()
+    }
+
     // MARK: - Test hooks
 
     func performStartSyncForTest() async {

@@ -111,6 +111,10 @@ final class LibraryViewModel: ObservableObject {
     private var searchDebounceTask: Task<Void, Never>?
     /// The filter currently applied to the database query.
     private var activeFilter = ReferenceFilter()
+    /// Wired up by `ContentView` from its `@EnvironmentObject` so import
+    /// flows can kick the PDF upload-queue drainer immediately. Weak to
+    /// avoid retain cycles — the coordinator outlives the view model.
+    weak var syncCoordinator: SyncCoordinator?
 
     init(db: AppDatabase = .shared) {
         self.db = db
@@ -343,10 +347,12 @@ final class LibraryViewModel: ObservableObject {
     /// never blocks the main actor.
     func downloadPDFInBackground(for reference: Reference, id: Int64) {
         let db = self.db
+        let coordinator = self.syncCoordinator
         Task.detached(priority: .userInitiated) {
             do {
                 let newPath = try await PDFDownloadService.downloadPDF(for: reference)
                 try db.attachImportedPDFs(rowIds: [id], filenames: [newPath])
+                Task { await coordinator?.kickPDFUploadDrainer() }
             } catch {
                 pdfDownloadLog.error("Background PDF download failed: \(error.localizedDescription, privacy: .public)")
             }
@@ -388,6 +394,8 @@ final class LibraryViewModel: ObservableObject {
         if let pdfFilename, let id = ref.id {
             do {
                 try db.attachImportedPDFs(rowIds: [id], filenames: [pdfFilename])
+                let coordinator = syncCoordinator
+                Task { await coordinator?.kickPDFUploadDrainer() }
             } catch {
                 errorMessage = "Attach PDF failed: \(error.localizedDescription)"
             }
@@ -710,6 +718,7 @@ final class LibraryViewModel: ObservableObject {
 
 struct ContentView: View {
     @StateObject private var viewModel = LibraryViewModel()
+    @EnvironmentObject private var syncCoordinator: SyncCoordinator
     @AppStorage("hasPromptedCLIInstallation") private var hasPromptedCLIInstallation = false
     @State private var showCLIInstallPrompt = false
     @State private var cliInstallResult: CLIInstallResult?
@@ -1142,6 +1151,10 @@ struct ContentView: View {
             }
         }
         .onAppear {
+            // Hand the sync coordinator to the view model so import flows
+            // inside the model can kick the PDF upload-queue drainer.
+            viewModel.syncCoordinator = syncCoordinator
+
             // Skip the install prompt when running via `swift run` from .build/ —
             // /usr/local/bin isn't writable in that context and the prompt can't succeed.
             if !hasPromptedCLIInstallation
@@ -1261,6 +1274,7 @@ struct ContentView: View {
         if let pdfFilename, let id = mutable.id {
             do {
                 try viewModel.db.attachImportedPDFs(rowIds: [id], filenames: [pdfFilename])
+                Task { await syncCoordinator.kickPDFUploadDrainer() }
             } catch {
                 viewModel.errorMessage = "Attach PDF failed: \(error.localizedDescription)"
             }
