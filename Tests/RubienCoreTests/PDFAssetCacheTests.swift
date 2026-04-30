@@ -113,4 +113,30 @@ final class PDFAssetCacheTests: XCTestCase {
         XCTAssertNotNil(row, "row preserved so a future tap can re-fetch")
         XCTAssertNil(row?["materializedAt"] as String?)
     }
+
+    func testMetadataForReturnsRowEvenWhenNotMaterialized() async throws {
+        try makeRef(id: 1)
+        try await db.dbWriter.write { db in
+            try db.execute(sql: """
+                INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt)
+                VALUES(1, 'x.pdf', 'abcdef', 7, NULL)
+            """)
+        }
+        let cache = PDFAssetCache(db: db, storageRoot: tmpRoot)
+
+        let entry = try await cache.metadataFor(referenceId: 1)
+
+        XCTAssertNotNil(entry)
+        XCTAssertEqual(entry?.referenceId, 1)
+        XCTAssertEqual(entry?.localFilename, "x.pdf")
+        XCTAssertEqual(entry?.contentHash, "abcdef")
+        XCTAssertEqual(entry?.assetVersion, 7)
+        XCTAssertNil(entry?.materializedAt, "metadataFor returns the row even with materializedAt NULL")
+    }
+
+    func testMetadataForReturnsNilWhenNoRow() async throws {
+        let cache = PDFAssetCache(db: db, storageRoot: tmpRoot)
+        let entry = try await cache.metadataFor(referenceId: 999)
+        XCTAssertNil(entry)
+    }
 }

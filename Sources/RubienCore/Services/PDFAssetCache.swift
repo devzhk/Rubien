@@ -46,6 +46,9 @@ public actor PDFAssetCache {
     /// return the local URL + the file's SHA-256.
     ///
     /// Caller is responsible for ensuring `referenceId` exists in `reference`.
+    /// Each call generates a fresh UUID-prefixed filename, so calling twice
+    /// for the same `referenceId` orphans the previous file on disk — call
+    /// `dematerialize` first if you need to reclaim that space.
     public func materialize(
         referenceId: Int64,
         sourceURL: URL,
