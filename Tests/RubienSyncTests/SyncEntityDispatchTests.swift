@@ -280,6 +280,127 @@ final class SyncEntityDispatchTests: XCTestCase {
             XCTAssertEqual(count, 0)
         }
     }
+
+    // MARK: - Apply remote (referencePDF, B8)
+
+    func testApplyRemoteReferencePDFMaterializesAssetOnMac() throws {
+        let tmpFile = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).pdf")
+        try Data("%PDF-fake".utf8).write(to: tmpFile)
+        defer { try? FileManager.default.removeItem(at: tmpFile) }
+
+        try db.dbWriter.write { db in
+            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(11, 'r', ?, ?)", arguments: [Date(), Date()])
+
+            try self.store.setApplyingRemote(db)
+
+            let payload = ReferencePDFRecord(
+                referenceId: 11,
+                assetURL: tmpFile,
+                assetVersion: 1,
+                contentHash: "deadbeef",
+                originalFilename: "paper.pdf",
+                dateModified: Date()
+            )
+            let record = ReferencePDFRecord.makeRecord(recordName: "referencePDF:11", payload: payload)
+
+            try SyncEntityType.referencePDF.applyRemoteRecord(record, entityId: "11", db: db)
+
+            try self.store.clearApplyingRemote(db)
+
+            let cacheCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM pdfCache WHERE referenceId=11") ?? -1
+            XCTAssertEqual(cacheCount, 1)
+
+            let row = try Row.fetchOne(db, sql: "SELECT * FROM pdfCache WHERE referenceId=11")!
+            XCTAssertEqual(row["assetVersion"] as Int64?, 1)
+            XCTAssertEqual(row["contentHash"] as String?, "deadbeef")
+            // Mac eagerly materializes — file should be on disk under PDFs/.
+            XCTAssertNotNil(row["materializedAt"] as String?, "Mac should materialize on pull")
+        }
+    }
+
+    func testApplyRemoteReferencePDFDeleteRemovesCacheRow() throws {
+        try db.dbWriter.write { db in
+            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(11, 'r', ?, ?)", arguments: [Date(), Date()])
+            try db.execute(sql: """
+                INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt)
+                VALUES(11, 'x.pdf', 'h', 1, ?)
+            """, arguments: [Date()])
+
+            try self.store.setApplyingRemote(db)
+            try SyncEntityType.referencePDF.applyRemoteDelete(entityId: "11", db: db)
+            try self.store.clearApplyingRemote(db)
+
+            XCTAssertEqual(
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM pdfCache WHERE referenceId=11") ?? -1,
+                0
+            )
+        }
+    }
+
+    func testBuildPushRecordReferencePDFEmitsRecordWithAssetWhenCachedOnDisk() throws {
+        // Set up: a Reference + materialized pdfCache row whose file exists in PDFs/.
+        let pdfsDir = AppDatabase.pdfStorageURL
+        try FileManager.default.createDirectory(at: pdfsDir, withIntermediateDirectories: true)
+        let filename = "test-\(UUID().uuidString)_paper.pdf"
+        let fileURL = pdfsDir.appendingPathComponent(filename)
+        try Data("%PDF-fake-content".utf8).write(to: fileURL)
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        try db.dbWriter.write { db in
+            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(20, 'r', ?, ?)", arguments: [Date(), Date()])
+            try db.execute(sql: """
+                INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
+                VALUES(20, ?, 'somehash', 3, ?, ?)
+            """, arguments: [filename, Date(), Date()])
+
+            let record = try SyncEntityType.referencePDF.buildPushRecord(
+                db: db,
+                entityId: "20",
+                systemFields: nil
+            )
+            XCTAssertNotNil(record)
+            XCTAssertEqual(record?.recordID.recordName, "referencePDF:20")
+            XCTAssertEqual(record?[ReferencePDFRecord.RecordField.referenceId] as? Int64, 20)
+            XCTAssertEqual(record?[ReferencePDFRecord.RecordField.assetVersion] as? Int64, 3)
+            XCTAssertEqual(record?[ReferencePDFRecord.RecordField.contentHash] as? String, "somehash")
+            XCTAssertNotNil(record?[ReferencePDFRecord.RecordField.asset], "asset must be present when file exists")
+        }
+    }
+
+    func testBuildPushRecordReferencePDFReturnsNilWhenNoCacheRow() throws {
+        try db.dbWriter.read { db in
+            let record = try SyncEntityType.referencePDF.buildPushRecord(
+                db: db,
+                entityId: "999",
+                systemFields: nil
+            )
+            XCTAssertNil(
+                record,
+                "no pdfCache row → no push (delete propagation goes through tombstones, not push)"
+            )
+        }
+    }
+
+    func testBuildPushRecordReferencePDFReturnsNilWhenFileVanished() throws {
+        // Cache row says materialized but file is gone (drift case).
+        try db.dbWriter.write { db in
+            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(21, 'r', ?, ?)", arguments: [Date(), Date()])
+            try db.execute(sql: """
+                INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
+                VALUES(21, 'definitely-not-there-\(UUID().uuidString).pdf', 'h', 1, ?, ?)
+            """, arguments: [Date(), Date()])
+
+            let record = try SyncEntityType.referencePDF.buildPushRecord(
+                db: db,
+                entityId: "21",
+                systemFields: nil
+            )
+            XCTAssertNil(
+                record,
+                "cache row points at a missing file — better to skip the push than upload a stale/empty asset"
+            )
+        }
+    }
 }
 
 private extension Reference {

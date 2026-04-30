@@ -157,6 +157,35 @@ extension SyncEntityType {
             )
             row.populate(record: record)
             return record
+
+        case .referencePDF:
+            guard let id = Int64(entityId) else { return nil }
+            let row: Row? = try Row.fetchOne(db,
+                sql: "SELECT * FROM pdfCache WHERE referenceId = ? AND materializedAt IS NOT NULL",
+                arguments: [id])
+            guard let row else { return nil }
+            let filename: String = row["localFilename"]
+            let assetURL = AppDatabase.pdfStorageURL.appendingPathComponent(filename)
+            guard FileManager.default.fileExists(atPath: assetURL.path) else { return nil }
+            let payload = ReferencePDFRecord(
+                referenceId: id,
+                assetURL: assetURL,
+                assetVersion: row["assetVersion"],
+                contentHash: row["contentHash"],
+                originalFilename: filename,
+                // dateModified at push time = now. Per Task 10's reviewer:
+                // don't reuse pdfCache.lastOpenedAt (that's a UX timestamp,
+                // not content-version). assetVersion already handles
+                // last-write-wins; dateModified is debug/tiebreaker only.
+                dateModified: Date()
+            )
+            let record = Self.rehydrateOrNew(
+                systemFields: systemFields,
+                recordType: recordType,
+                recordName: qualifiedRecordName(entityId: entityId)
+            )
+            payload.populate(record: record)
+            return record
         }
     }
 
@@ -238,6 +267,30 @@ extension SyncEntityType {
             var row = DatabaseView(record: record)
             row.id = id
             try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
+
+        case .referencePDF:
+            guard let id = Int64(entityId), let payload = ReferencePDFRecord(record: record) else { return }
+            // Mac always materializes. Copy CKAsset's downloaded file into our
+            // PDFs/ dir under a UUID-prefixed name (mirrors PDFService.importPDF).
+            // The CKAsset's fileURL is in CloudKit's caches and may be cleaned
+            // up; copy promotes the bytes to permanent storage.
+            guard let srcURL = payload.assetURL else { return }
+            let localFilename = "\(UUID().uuidString)_\(payload.originalFilename)"
+            let dest = AppDatabase.pdfStorageURL.appendingPathComponent(localFilename)
+            try FileManager.default.createDirectory(at: AppDatabase.pdfStorageURL, withIntermediateDirectories: true)
+            if FileManager.default.fileExists(atPath: dest.path) {
+                try FileManager.default.removeItem(at: dest)
+            }
+            try FileManager.default.copyItem(at: srcURL, to: dest)
+            try db.execute(sql: """
+                INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
+                VALUES(?, ?, ?, ?, ?, ?)
+                ON CONFLICT(referenceId) DO UPDATE SET
+                    localFilename = excluded.localFilename,
+                    contentHash = excluded.contentHash,
+                    assetVersion = excluded.assetVersion,
+                    materializedAt = excluded.materializedAt
+            """, arguments: [id, localFilename, payload.contentHash, payload.assetVersion, Date(), Date()])
         }
     }
 
@@ -269,6 +322,18 @@ extension SyncEntityType {
             if let id = Int64(entityId) { _ = try PropertyValue.deleteOne(db, key: id) }
         case .databaseView:
             if let id = Int64(entityId) { _ = try DatabaseView.deleteOne(db, key: id) }
+        case .referencePDF:
+            if let id = Int64(entityId) {
+                // Capture filename before delete so we can also nuke the file.
+                let filename = try String.fetchOne(db,
+                    sql: "SELECT localFilename FROM pdfCache WHERE referenceId = ?",
+                    arguments: [id])
+                try db.execute(sql: "DELETE FROM pdfCache WHERE referenceId = ?", arguments: [id])
+                if let filename {
+                    let url = AppDatabase.pdfStorageURL.appendingPathComponent(filename)
+                    try? FileManager.default.removeItem(at: url)
+                }
+            }
         }
     }
 

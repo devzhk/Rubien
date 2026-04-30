@@ -231,14 +231,27 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
 
                 var totalMarked = 0
                 for type in SyncEntityType.allCases {
-                    let tableName = type.rawValue
-                    // Pivot has no surrogate id; composite key string is
-                    // what we insert instead.
+                    // Each entity type baselines from a source SQLite table
+                    // and an id expression. For most entities the table name
+                    // matches the rawValue and id is the surrogate PK;
+                    // referenceTag uses a composite key, and referencePDF
+                    // (a virtual sibling-record entity) reads from the
+                    // local-only `pdfCache` table keyed by referenceId.
+                    let sourceTable: String
                     let idExpression: String
                     switch type {
                     case .referenceTag:
+                        sourceTable = type.rawValue
                         idExpression = "referenceId || '\(SyncConstants.pivotSeparator)' || tagId"
+                    case .referencePDF:
+                        // No `referencePDF` SQLite table exists — the wire
+                        // format is synthesized from `pdfCache` rows.
+                        // entityId for syncState matches the dispatch path
+                        // (Int64(referenceId) stringified).
+                        sourceTable = "pdfCache"
+                        idExpression = "referenceId"
                     default:
+                        sourceTable = type.rawValue
                         idExpression = "id"
                     }
                     // SQLite grammar quirk: the INSERT-SELECT form needs
@@ -247,7 +260,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                     // ambiguous with the SELECT's WHERE slot.
                     try db.execute(sql: """
                         INSERT INTO syncState(entityType, entityId, isDirty)
-                            SELECT '\(tableName)', \(idExpression), 1 FROM \(tableName) WHERE true
+                            SELECT '\(type.rawValue)', \(idExpression), 1 FROM \(sourceTable) WHERE true
                             ON CONFLICT(entityType, entityId) DO UPDATE SET isDirty = 1
                         """)
                     totalMarked += db.changesCount

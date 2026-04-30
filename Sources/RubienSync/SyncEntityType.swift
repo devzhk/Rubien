@@ -18,6 +18,7 @@ public enum SyncEntityType: String, CaseIterable, Sendable {
     case propertyDefinition = "propertyDefinition"
     case propertyValue      = "propertyValue"
     case databaseView       = "databaseView"
+    case referencePDF       = "referencePDF"
 
     /// The CKRecord type name this entity pushes as. Mirrors
     /// `SyncConstants.RecordType.*`.
@@ -33,6 +34,7 @@ public enum SyncEntityType: String, CaseIterable, Sendable {
         case .propertyDefinition: return SyncConstants.RecordType.propertyDefinition
         case .propertyValue:      return SyncConstants.RecordType.propertyValue
         case .databaseView:       return SyncConstants.RecordType.databaseView
+        case .referencePDF:       return SyncConstants.RecordType.referencePDF
         }
     }
 
@@ -55,6 +57,7 @@ public enum SyncEntityType: String, CaseIterable, Sendable {
         case .referenceTag, .pdfAnnotation, .webAnnotation:       return 2
         case .propertyValue:                                      return 2  // FK → reference + propertyDefinition
         case .metadataIntake:                                     return 2  // FK → reference (nullable)
+        case .referencePDF:                                       return 2  // FK → reference (1:1 sibling)
         // Tier 3: FK to tier-2 / tier-1 (evidence FKs both intake + reference, nullable)
         case .metadataEvidence:                                   return 3
         }
