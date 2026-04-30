@@ -17,6 +17,11 @@ public actor PDFUploadQueue {
         self.db = db
     }
 
+    /// Enqueue a PDF for upload. Idempotent: re-enqueueing the same
+    /// `referenceId` (e.g., the user re-imports the same paper) replaces
+    /// the existing row and bumps `queuedAt` to now — newest write wins,
+    /// the row slides to the back of the FIFO. The drainer sees one row
+    /// per ref no matter how many times enqueue was called.
     public func enqueue(referenceId: Int64, localFilename: String) throws {
         try db.dbWriter.write { db in
             try db.execute(sql: """

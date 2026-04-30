@@ -75,4 +75,29 @@ final class PDFUploadQueueTests: XCTestCase {
         let count = try await queue.count()
         XCTAssertEqual(count, 1)
     }
+
+    /// Re-enqueueing the same referenceId replaces the row + bumps queuedAt
+    /// (per the INSERT OR REPLACE contract). Locks in the FIFO semantic so
+    /// a future refactor to INSERT OR IGNORE would trip this test.
+    func testEnqueueReplacesExistingRowAndBumpsQueuedAt() async throws {
+        try await db.dbWriter.write { db in
+            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(1, 'r', ?, ?)", arguments: [Date(), Date()])
+        }
+        let queue = PDFUploadQueue(db: db)
+        try await queue.enqueue(referenceId: 1, localFilename: "first.pdf")
+        let firstQueuedAt = try await db.dbWriter.read { db in
+            try Date.fetchOne(db, sql: "SELECT queuedAt FROM pdfUploadQueue WHERE referenceId=1")
+        }!
+        try await Task.sleep(nanoseconds: 10_000_000)
+        try await queue.enqueue(referenceId: 1, localFilename: "second.pdf")
+
+        let row = try await db.dbWriter.read { db in
+            try Row.fetchOne(db, sql: "SELECT * FROM pdfUploadQueue WHERE referenceId=1")
+        }!
+        XCTAssertEqual(row["localFilename"] as String?, "second.pdf", "newer enqueue replaces the filename")
+        let secondQueuedAt: Date = row["queuedAt"]
+        XCTAssertGreaterThan(secondQueuedAt, firstQueuedAt, "queuedAt must bump on replace so the row slides to the back of the FIFO")
+        let total = try await queue.count()
+        XCTAssertEqual(total, 1, "still exactly one row per referenceId")
+    }
 }
