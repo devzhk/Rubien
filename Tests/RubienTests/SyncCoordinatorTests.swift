@@ -12,6 +12,7 @@ final class SyncCoordinatorTests: XCTestCase {
 
     private var db: AppDatabase!
     private var defaults: UserDefaults!
+    private var tmpLockURL: URL!
     private let suiteName = "rubien.test.sync.\(UUID().uuidString)"
 
     override func setUpWithError() throws {
@@ -19,10 +20,15 @@ final class SyncCoordinatorTests: XCTestCase {
         db = try AppDatabase(DatabaseQueue())
         defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
+        // Per-test sync lock so tests don't collide with a real running
+        // Rubien.app holding the production lock at SyncFileLock.defaultURL.
+        tmpLockURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rubien-test-lock-\(UUID().uuidString).lock")
     }
 
     override func tearDown() {
         defaults?.removePersistentDomain(forName: suiteName)
+        if let tmpLockURL { try? FileManager.default.removeItem(at: tmpLockURL) }
         db = nil
         super.tearDown()
     }
@@ -231,7 +237,8 @@ final class SyncCoordinatorTests: XCTestCase {
                 tryCKContainerInit: { _ in nil },
                 accountStatus: { _ in .available }
             ),
-            makeLibrary: stubLibraryFactory()
+            makeLibrary: stubLibraryFactory(),
+            lockURL: tmpLockURL
         )
         await coordinator.performStartSyncForTest()
         XCTAssertNotNil(coordinator.librarySnapshotForTest)
@@ -251,7 +258,8 @@ final class SyncCoordinatorTests: XCTestCase {
                 tryCKContainerInit: { _ in nil },
                 accountStatus: { _ in .available }
             ),
-            makeLibrary: stubLibraryFactory()
+            makeLibrary: stubLibraryFactory(),
+            lockURL: tmpLockURL
         )
         async let first: Void = coordinator.performStartSyncForTest()
         await coordinator.performStopSyncForTest()
@@ -275,7 +283,8 @@ final class SyncCoordinatorTests: XCTestCase {
                 tryCKContainerInit: { _ in nil },
                 accountStatus: { _ in .available }
             ),
-            makeLibrary: stubLibraryFactory()
+            makeLibrary: stubLibraryFactory(),
+            lockURL: tmpLockURL
         )
         await coordinator.startIfEnabled()
         XCTAssertNotNil(

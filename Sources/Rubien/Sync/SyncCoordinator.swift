@@ -80,17 +80,25 @@ public final class SyncCoordinator: ObservableObject {
     /// Production uses the default value which calls `start()`.
     private let makeLibrary: @Sendable (AppDatabase) async -> SyncedLibrary
 
+    /// Path to the single-writer flock file. Production uses
+    /// `SyncFileLock.defaultURL` (one global lock per device); tests
+    /// inject a temp URL so they don't collide with a real running app
+    /// holding the production lock.
+    private let lockURL: URL
+
     // MARK: - Init
 
     public init(
         appDatabase: AppDatabase,
         defaults: UserDefaults = .standard,
         probes: Probes = .live,
-        makeLibrary: (@Sendable (AppDatabase) async -> SyncedLibrary)? = nil
+        makeLibrary: (@Sendable (AppDatabase) async -> SyncedLibrary)? = nil,
+        lockURL: URL = SyncFileLock.defaultURL
     ) {
         self.appDatabase = appDatabase
         self.defaults = defaults
         self.probes = probes
+        self.lockURL = lockURL
         if let makeLibrary {
             self.makeLibrary = makeLibrary
         } else {
@@ -236,7 +244,7 @@ public final class SyncCoordinator: ObservableObject {
         // same-process attempts as conflicting.
         if syncLock == nil {
             do {
-                let lock = try SyncFileLock(fileURL: SyncFileLock.defaultURL)
+                let lock = try SyncFileLock(fileURL: self.lockURL)
                 guard try lock.tryLockExclusive() else {
                     status = .unavailable(reason: "Another Rubien process is syncing")
                     return
