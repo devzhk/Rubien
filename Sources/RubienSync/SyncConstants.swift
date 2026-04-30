@@ -39,11 +39,7 @@ public enum SyncConstants {
         public static let propertyDefinition = "CDPropertyDefinition"
         public static let propertyValue      = "CDPropertyValue"
         public static let databaseView       = "CDDatabaseView"
-        // Note: CDReferencePDF (sibling asset record) is deferred to B8 when
-        // the CKAsset pipeline lands. Adding the constant without a
-        // corresponding `SyncEntityType` case creates silent drift: pull
-        // path's `forRecordType("CDReferencePDF")` would return nil and the
-        // unknown-type log would fire on every PDF record.
+        public static let referencePDF       = "CDReferencePDF"
     }
 
     /// Separator for composite-key pivot recordNames. `ReferenceTag`'s
