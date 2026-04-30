@@ -170,4 +170,30 @@ final class PDFAssetCacheTests: XCTestCase {
         let filename = try db.pdfFilename(for: 1)
         XCTAssertEqual(filename, "abc-123.pdf")
     }
+
+    func testPdfFilenamesForReferencesBulkLookup() throws {
+        try makeRef(id: 1)
+        try makeRef(id: 2)
+        try makeRef(id: 3)
+        try db.dbWriter.write { db in
+            try db.execute(sql: """
+                INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt)
+                VALUES
+                  (1, 'one.pdf',   'h1', 1, ?),
+                  (2, 'two.pdf',   'h2', 1, NULL),
+                  (3, 'three.pdf', 'h3', 1, ?)
+            """, arguments: [Date(), Date()])
+        }
+
+        let map = try db.pdfFilenames(forReferences: [1, 2, 3, 999])
+        XCTAssertEqual(map[1], "one.pdf")
+        XCTAssertNil(map[2], "ref 2 has cache row but not materialized — excluded from result")
+        XCTAssertEqual(map[3], "three.pdf")
+        XCTAssertNil(map[999], "ref 999 has no cache row")
+    }
+
+    func testPdfFilenamesForReferencesEmptyInput() throws {
+        let map = try db.pdfFilenames(forReferences: [])
+        XCTAssertTrue(map.isEmpty)
+    }
 }

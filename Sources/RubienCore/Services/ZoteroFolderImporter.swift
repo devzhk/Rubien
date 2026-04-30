@@ -66,8 +66,9 @@ public enum ZoteroFolderImporter {
         var prepared: [Reference] = []
         prepared.reserveCapacity(entries.count)
         // Per-prepared-row PDF filename, populated only when we actually copied
-        // a file for that row. Indexed by entry order so we can attach the
-        // right pdfCache row after `batchImportReferences` returns the row IDs.
+        // a file for that row. Aligned 1:1 with `prepared`; passed to
+        // `batchImportReferences(pdfFilenames:)` so the cache rows are written
+        // inside the same transaction as the reference inserts.
         var copiedFilenames: [String?] = []
         copiedFilenames.reserveCapacity(entries.count)
         var missing: [String] = []
@@ -112,19 +113,19 @@ public enum ZoteroFolderImporter {
             copiedFilenames.append(copiedThisRow)
         }
 
+        // Reference inserts + pdfCache attaches share one write transaction
+        // so a partial failure can't leave references without their cache
+        // rows. The `pdfFilenames` array aligns 1:1 with `prepared` and the
+        // attach is skipped per-row when the destination already has a cache
+        // entry — preserves prior attachments on merge, matching the
+        // "don't orphan an existing PDF" invariant the classifier enforces.
         let outcome: (count: Int, ids: [Int64])
         do {
-            outcome = try db.batchImportReferences(prepared, stamping: propertyTarget)
-        } catch {
-            for path in copiedPaths { PDFService.deletePDF(at: path) }
-            throw error
-        }
-
-        // After insert/merge, attach copied PDFs through the cache. We only
-        // overwrite when the destination row has no cache entry yet — same
-        // "don't orphan an existing PDF" invariant the classifier enforces.
-        do {
-            try db.attachImportedPDFs(rowIds: outcome.ids, filenames: copiedFilenames)
+            outcome = try db.batchImportReferences(
+                prepared,
+                stamping: propertyTarget,
+                pdfFilenames: copiedFilenames
+            )
         } catch {
             for path in copiedPaths { PDFService.deletePDF(at: path) }
             throw error

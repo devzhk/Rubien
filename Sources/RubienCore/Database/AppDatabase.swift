@@ -938,9 +938,15 @@ extension AppDatabase {
     /// Attach the freshly-imported PDF filenames (one per row, nil when no PDF was
     /// copied) to their corresponding pdfCache + pdfUploadQueue rows. Idempotent
     /// per-row: skips rows that already carry a cache entry, so a re-import of the
-    /// same Zotero folder doesn't orphan the prior PDF. Used by
-    /// `ZoteroFolderImporter` after `batchImportReferences` returns the row IDs.
-    func attachImportedPDFs(rowIds: [Int64], filenames: [String?]) throws {
+    /// same source doesn't orphan the prior PDF.
+    ///
+    /// Standalone helper kept for callers that insert references through paths
+    /// other than `batchImportReferences` and need to attach a copied PDF after
+    /// the fact. Note that this opens its own write transaction — callers that
+    /// own the reference insert (e.g. `ZoteroFolderImporter`) should pass
+    /// `pdfFilenames:` to `batchImportReferences` instead so the inserts and
+    /// attaches share one atomic transaction.
+    public func attachImportedPDFs(rowIds: [Int64], filenames: [String?]) throws {
         precondition(rowIds.count == filenames.count,
                      "attachImportedPDFs: rowIds and filenames must align 1:1")
         try dbWriter.write { db in
@@ -988,6 +994,26 @@ extension AppDatabase {
         }
     }
 
+    /// Bulk version of `pdfFilename(for:)` — single query for many refs.
+    /// Use from CLI list paths, table views, and any place rendering PDF
+    /// chips for N references at once. Returns a `[refId: filename]` map
+    /// containing only references whose pdfCache row is materialized.
+    public func pdfFilenames(forReferences ids: [Int64]) throws -> [Int64: String] {
+        guard !ids.isEmpty else { return [:] }
+        return try dbWriter.read { db in
+            var map: [Int64: String] = [:]
+            let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT referenceId, localFilename FROM pdfCache
+                WHERE referenceId IN (\(placeholders)) AND materializedAt IS NOT NULL
+            """, arguments: StatementArguments(ids))
+            for row in rows {
+                map[row["referenceId"]] = row["localFilename"]
+            }
+            return map
+        }
+    }
+
     /// All Reference IDs that have a cached PDF on this device. Used by the
     /// view pipeline to populate `PipelineContext.pdfAttachedRefIds` so the
     /// `.pdfAttached` filter/group/sort built-in keeps working post-B8 without
@@ -1005,9 +1031,8 @@ extension AppDatabase {
     /// only when the row has no cache entry yet (preserves an existing PDF
     /// during merge). Caller-provided transaction so the cache write is
     /// atomic with the surrounding Reference write. Used by
-    /// `persistMetadataResolution` and `confirmMetadataIntake`; the import
-    /// pipeline (`ZoteroFolderImporter`) goes through the public
-    /// `attachImportedPDFs` instead because it owns its own transaction.
+    /// `persistMetadataResolution`, `confirmMetadataIntake`, and
+    /// `batchImportReferences` (when its `pdfFilenames` parameter is set).
     private func attachPDFInTransaction(
         referenceId: Int64,
         filename: String,
@@ -1125,28 +1150,54 @@ extension AppDatabase {
         try batchImportReferences(references, stamping: nil).count
     }
 
-    /// Batch import with optional per-reference property stamping inside the same transaction.
+    /// Batch import with optional per-reference property stamping and optional
+    /// per-reference PDF attachment, all inside the same write transaction.
     /// Returns the count and the row IDs of every processed entry (existing row's ID on merge,
     /// newly-inserted ID on fresh insert).
+    ///
+    /// `pdfFilenames`, when non-nil, must align 1:1 with `references`: each
+    /// non-nil entry attaches a `pdfCache` + `pdfUploadQueue` row in the same
+    /// transaction as the Reference insert/merge so the import is atomic
+    /// (no orphaned references with missing cache rows on partial failure).
+    /// Pass nil entries for references that don't have a copied PDF.
+    /// Skips rows that already carry a cache entry — preserves an existing
+    /// PDF on merge.
     public func batchImportReferences(
         _ references: [Reference],
-        stamping target: ZoteroImportPropertyTarget?
+        stamping target: ZoteroImportPropertyTarget? = nil,
+        pdfFilenames: [String?]? = nil
     ) throws -> (count: Int, ids: [Int64]) {
         guard !references.isEmpty else { return (0, []) }
+        if let pdfFilenames {
+            precondition(pdfFilenames.count == references.count,
+                "pdfFilenames must align 1:1 with references; pass nil entries for refs without PDFs")
+        }
         return try dbWriter.write { db in
             var ids: [Int64] = []
             ids.reserveCapacity(references.count)
-            for var ref in references {
+            for (idx, original) in references.enumerated() {
+                var ref = original
                 try normalizeForDirectLibrarySave(&ref)
                 try ensureLibraryReady(ref)
+                let resolvedId: Int64?
                 if let match = try findDuplicateReferenceID(for: ref, db: db),
                    var existing = try Reference.fetchOne(db, id: match.id) {
                     existing = mergedReference(existing: existing, incoming: ref)
                     try existing.save(db)
-                    if let existingId = existing.id { ids.append(existingId) }
+                    resolvedId = existing.id
                 } else {
                     try ref.insert(db)
-                    if let newId = ref.id { ids.append(newId) }
+                    resolvedId = ref.id
+                }
+                if let id = resolvedId {
+                    ids.append(id)
+                    if let filename = pdfFilenames?[idx]?.rubien_nilIfBlank {
+                        try attachPDFInTransaction(
+                            referenceId: id,
+                            filename: filename,
+                            db: db
+                        )
+                    }
                 }
             }
             if let target {

@@ -163,9 +163,9 @@ struct ReferenceDTO: Encodable {
         self.dateModified = ref.dateModified
         // Post-B8: PDF lookup is per-device cache. The caller fetches all
         // filenames once and threads them in via pdfFilenamesByRef so the JSON
-        // output's "pdfPath" key still exposes the on-disk filename.
+        // output's "pdfPath" key still exposes the on-disk filename without
+        // an N+1 single-row pdfCache query per DTO.
         self.pdfPath = ref.id.flatMap { pdfFilenamesByRef[$0] }
-            ?? (ref.id.flatMap { try? AppDatabase.shared.pdfFilename(for: $0) })
         self.notes = ref.notes
         self.isbn = ref.isbn
         self.issn = ref.issn
@@ -233,12 +233,22 @@ struct CitationTextOutput: Encodable {
 
 /// Map a batch of references to DTOs, fetching property defs + values scoped
 /// to the returned references so a paged read doesn't scan the whole table.
+/// Bulk-fetches PDF filenames in a single query so each DTO doesn't issue
+/// its own pdfCache lookup (N+1 → 1+1).
 func mapReferenceDTOs(_ refs: [Reference]) throws -> [ReferenceDTO] {
     guard !refs.isEmpty else { return [] }
     let defs = try AppDatabase.shared.fetchAllPropertyDefinitions()
     let refIds = refs.compactMap(\.id)
     let valuesByRef = try AppDatabase.shared.fetchPropertyValues(forReferences: refIds)
-    return refs.map { ReferenceDTO(from: $0, defs: defs, valuesByRef: valuesByRef) }
+    let pdfFilenamesByRef = try AppDatabase.shared.pdfFilenames(forReferences: refIds)
+    return refs.map {
+        ReferenceDTO(
+            from: $0,
+            defs: defs,
+            valuesByRef: valuesByRef,
+            pdfFilenamesByRef: pdfFilenamesByRef
+        )
+    }
 }
 
 /// Build a DTO for a single reference, fetching just that reference's values.
@@ -255,7 +265,16 @@ func referenceDTO(for ref: Reference) throws -> ReferenceDTO {
     } else {
         valuesByRef = [:]
     }
-    return ReferenceDTO(from: ref, defs: defs, valuesByRef: valuesByRef)
+    var pdfFilenamesByRef: [Int64: String] = [:]
+    if let rid = ref.id, let filename = try AppDatabase.shared.pdfFilename(for: rid) {
+        pdfFilenamesByRef[rid] = filename
+    }
+    return ReferenceDTO(
+        from: ref,
+        defs: defs,
+        valuesByRef: valuesByRef,
+        pdfFilenamesByRef: pdfFilenamesByRef
+    )
 }
 
 // MARK: - Subcommands
