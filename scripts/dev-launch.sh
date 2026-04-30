@@ -15,7 +15,7 @@
 #
 # Configurable via env vars (defaults in [brackets]):
 #   CODESIGN_IDENTITY  signing identity to use [Apple Development]
-#   PROVISION_PROFILE  path to .provisionprofile [~/Downloads/Rubien_Mac_Dev-v2.provisionprofile]
+#   PROVISION_PROFILE  path to .provisionprofile [~/Downloads/Rubien_Mac_Dev.provisionprofile]
 #   ENTITLEMENTS       path to .entitlements  [Sources/Rubien/Rubien.entitlements]
 
 set -euo pipefail
@@ -28,7 +28,7 @@ cd "$PROJECT_DIR"
 source "$SCRIPT_DIR/lib/codesign.sh"
 
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-Apple Development}"
-PROVISION_PROFILE="${PROVISION_PROFILE:-$HOME/Downloads/Rubien_Mac_Dev-v2.provisionprofile}"
+PROVISION_PROFILE="${PROVISION_PROFILE:-$HOME/Downloads/Rubien_Mac_Dev.provisionprofile}"
 ENTITLEMENTS="${ENTITLEMENTS:-$PROJECT_DIR/Sources/Rubien/Rubien.entitlements}"
 RUBIEN_CLI_ENTITLEMENTS="${RUBIEN_CLI_ENTITLEMENTS:-$PROJECT_DIR/Sources/RubienCLI/RubienCLI.entitlements}"
 
