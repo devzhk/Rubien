@@ -62,6 +62,7 @@ public struct PropertyDefinition: Identifiable, Codable, Hashable, Sendable {
     public var isDefault: Bool
     public var defaultFieldKey: String?
     public var isVisible: Bool
+    public var dateModified: Date
 
     public init(
         id: Int64? = nil,
@@ -71,7 +72,8 @@ public struct PropertyDefinition: Identifiable, Codable, Hashable, Sendable {
         sortOrder: Int = 0,
         isDefault: Bool = false,
         defaultFieldKey: String? = nil,
-        isVisible: Bool = true
+        isVisible: Bool = true,
+        dateModified: Date = Date()
     ) {
         self.id = id
         self.name = name
@@ -81,6 +83,7 @@ public struct PropertyDefinition: Identifiable, Codable, Hashable, Sendable {
         self.isDefault = isDefault
         self.defaultFieldKey = defaultFieldKey
         self.isVisible = isVisible
+        self.dateModified = dateModified
     }
 
     // MARK: - Options accessors
@@ -143,6 +146,6 @@ extension PropertyDefinition: FetchableRecord, MutablePersistableRecord {
     }
 
     public enum Columns: String, ColumnExpression {
-        case id, name, type, optionsJSON, sortOrder, isDefault, defaultFieldKey, isVisible
+        case id, name, type, optionsJSON, sortOrder, isDefault, defaultFieldKey, isVisible, dateModified
     }
 }

@@ -20,7 +20,22 @@ extension WebAnnotationRecord {
         public static let prefixText   = "prefixText"
         public static let suffixText   = "suffixText"
         public static let dateCreated  = "dateCreated"
+        public static let dateModified = "dateModified"
     }
+
+    /// Schema-invariant test (Phase E) reads this. Keep in lockstep with `RecordField`.
+    public static let allFieldNames: [String] = [
+        RecordField.referenceId,
+        RecordField.type,
+        RecordField.selectedText,
+        RecordField.noteText,
+        RecordField.color,
+        RecordField.anchorText,
+        RecordField.prefixText,
+        RecordField.suffixText,
+        RecordField.dateCreated,
+        RecordField.dateModified,
+    ]
 
     public func populate(record: CKRecord) {
         record[RecordField.referenceId]  = referenceId
@@ -32,6 +47,7 @@ extension WebAnnotationRecord {
         record[RecordField.prefixText]   = prefixText
         record[RecordField.suffixText]   = suffixText
         record[RecordField.dateCreated]  = dateCreated
+        record[RecordField.dateModified] = dateModified
     }
 
     public static func makeRecord(
@@ -50,7 +66,9 @@ extension WebAnnotationRecord {
     /// Failable decode. `referenceId` and `anchorText` are both required —
     /// without them the row can't be anchored to a page or inserted
     /// (schema has both NOT NULL). Unknown `type` rawValues fall back to
-    /// `.highlight` per forward-compat guidance.
+    /// `.highlight` per forward-compat guidance. Missing `dateModified` falls
+    /// back to `Date()` for forward compat with peers that wrote the record
+    /// before this field was added.
     public init?(record: CKRecord) {
         guard
             let referenceId = record[RecordField.referenceId] as? Int64,
@@ -71,7 +89,8 @@ extension WebAnnotationRecord {
             anchorText: anchorText,
             prefixText: record[RecordField.prefixText] as? String,
             suffixText: record[RecordField.suffixText] as? String,
-            dateCreated: (record[RecordField.dateCreated] as? Date) ?? Date()
+            dateCreated: (record[RecordField.dateCreated] as? Date) ?? Date(),
+            dateModified: (record[RecordField.dateModified] as? Date) ?? Date()
         )
     }
 }

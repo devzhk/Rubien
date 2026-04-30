@@ -23,6 +23,19 @@ extension MetadataEvidence {
         public static let createdAt    = "createdAt"
     }
 
+    /// Schema-invariant test (Phase E) reads this. Keep in lockstep with `RecordField`.
+    public static let allFieldNames: [String] = [
+        RecordField.intakeId,
+        RecordField.referenceId,
+        RecordField.bundleHash,
+        RecordField.source,
+        RecordField.recordKey,
+        RecordField.sourceURL,
+        RecordField.fetchMode,
+        RecordField.payloadJSON,
+        RecordField.createdAt,
+    ]
+
     public func populate(record: CKRecord) {
         record[RecordField.intakeId]    = intakeId
         record[RecordField.referenceId] = referenceId

@@ -25,6 +25,22 @@ extension DatabaseView {
         public static let dateModified    = "dateModified"
     }
 
+    /// Schema-invariant test (Phase E) reads this. Keep in lockstep with `RecordField`.
+    public static let allFieldNames: [String] = [
+        RecordField.name,
+        RecordField.icon,
+        RecordField.scopeJSON,
+        RecordField.columnsJSON,
+        RecordField.filtersJSON,
+        RecordField.sortsJSON,
+        RecordField.groupByJSON,
+        RecordField.columnWrapsJSON,
+        RecordField.isDefault,
+        RecordField.displayOrder,
+        RecordField.dateCreated,
+        RecordField.dateModified,
+    ]
+
     public func populate(record: CKRecord) {
         record[RecordField.name]            = name
         record[RecordField.icon]            = icon

@@ -16,9 +16,21 @@ import RubienCore
 extension ReferenceTag {
 
     public enum RecordField {
-        public static let referenceId = "referenceId"
-        public static let tagId       = "tagId"
+        public static let referenceId  = "referenceId"
+        public static let tagId        = "tagId"
+        public static let dateModified = "dateModified"
     }
+
+    /// Schema-invariant test (Phase E) reads this. Keep in lockstep with `RecordField`.
+    /// The pivot encodes both FKs into the recordName too, but we still ship
+    /// them as record fields so a cold decode without the recordName context
+    /// is sufficient. `dateModified` is shipped to keep the schema-invariant
+    /// allow-list empty even though the apply path is insert-if-absent.
+    public static let allFieldNames: [String] = [
+        RecordField.referenceId,
+        RecordField.tagId,
+        RecordField.dateModified,
+    ]
 
     /// Build the canonical CloudKit recordName for this pivot row. Matches
     /// the expression emitted by the `referenceTag_ai` / `_au` / `_ad`
@@ -33,8 +45,9 @@ extension ReferenceTag {
     }
 
     public func populate(record: CKRecord) {
-        record[RecordField.referenceId] = referenceId
-        record[RecordField.tagId]       = tagId
+        record[RecordField.referenceId]  = referenceId
+        record[RecordField.tagId]        = tagId
+        record[RecordField.dateModified] = dateModified
     }
 
     public static func makeRecord(referenceTag: ReferenceTag) -> CKRecord {
@@ -53,7 +66,9 @@ extension ReferenceTag {
     /// Failable decode. The FK pair is required — a pivot row without both
     /// sides is meaningless and must not be persisted, so we return nil and
     /// let the pull handler log + skip rather than synthesising zero values
-    /// that would pollute the local DB with bad joins.
+    /// that would pollute the local DB with bad joins. Missing `dateModified`
+    /// falls back to `Date()` for forward compat with peers that wrote the
+    /// record before this field was added.
     public init?(record: CKRecord) {
         guard
             let referenceId = record[RecordField.referenceId] as? Int64,
@@ -61,6 +76,10 @@ extension ReferenceTag {
         else {
             return nil
         }
-        self.init(referenceId: referenceId, tagId: tagId)
+        self.init(
+            referenceId: referenceId,
+            tagId: tagId,
+            dateModified: (record[RecordField.dateModified] as? Date) ?? Date()
+        )
     }
 }

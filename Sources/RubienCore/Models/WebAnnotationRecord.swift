@@ -12,6 +12,7 @@ public struct WebAnnotationRecord: Identifiable, Codable, Hashable {
     public var prefixText: String?
     public var suffixText: String?
     public var dateCreated: Date
+    public var dateModified: Date
 
     public init(
         id: Int64? = nil,
@@ -23,7 +24,8 @@ public struct WebAnnotationRecord: Identifiable, Codable, Hashable {
         anchorText: String,
         prefixText: String? = nil,
         suffixText: String? = nil,
-        dateCreated: Date = Date()
+        dateCreated: Date = Date(),
+        dateModified: Date = Date()
     ) {
         self.id = id
         self.referenceId = referenceId
@@ -35,6 +37,7 @@ public struct WebAnnotationRecord: Identifiable, Codable, Hashable {
         self.prefixText = prefixText
         self.suffixText = suffixText
         self.dateCreated = dateCreated
+        self.dateModified = dateModified
     }
 }
 
@@ -47,6 +50,6 @@ extension WebAnnotationRecord: FetchableRecord, MutablePersistableRecord {
 
     public enum Columns: String, ColumnExpression {
         case id, referenceId, type, selectedText, noteText, color
-        case anchorText, prefixText, suffixText, dateCreated
+        case anchorText, prefixText, suffixText, dateCreated, dateModified
     }
 }

@@ -6,17 +6,20 @@ public struct PropertyValue: Identifiable, Codable, Hashable, Sendable {
     public var referenceId: Int64
     public var propertyId: Int64
     public var value: String?
+    public var dateModified: Date
 
     public init(
         id: Int64? = nil,
         referenceId: Int64,
         propertyId: Int64,
-        value: String? = nil
+        value: String? = nil,
+        dateModified: Date = Date()
     ) {
         self.id = id
         self.referenceId = referenceId
         self.propertyId = propertyId
         self.value = value
+        self.dateModified = dateModified
     }
 }
 
@@ -30,7 +33,7 @@ extension PropertyValue: FetchableRecord, MutablePersistableRecord {
     }
 
     public enum Columns: String, ColumnExpression {
-        case id, referenceId, propertyId, value
+        case id, referenceId, propertyId, value, dateModified
     }
 }
 

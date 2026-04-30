@@ -29,6 +29,27 @@ extension MetadataIntake {
         public static let updatedAt             = "updatedAt"
     }
 
+    /// Schema-invariant test (Phase E) reads this. Keep in lockstep with `RecordField`.
+    /// `linkedReferenceId` is intentionally absent from `Reference`'s schema
+    /// — intake rows live in their own table.
+    public static let allFieldNames: [String] = [
+        RecordField.sourceKind,
+        RecordField.verificationStatus,
+        RecordField.title,
+        RecordField.originalInput,
+        RecordField.sourceURL,
+        RecordField.pdfPath,
+        RecordField.seedJSON,
+        RecordField.fallbackReferenceJSON,
+        RecordField.currentReferenceJSON,
+        RecordField.candidatesJSON,
+        RecordField.statusMessage,
+        RecordField.linkedReferenceId,
+        RecordField.evidenceBundleHash,
+        RecordField.createdAt,
+        RecordField.updatedAt,
+    ]
+
     public func populate(record: CKRecord) {
         record[RecordField.sourceKind]            = sourceKind.rawValue
         record[RecordField.verificationStatus]    = verificationStatus.rawValue

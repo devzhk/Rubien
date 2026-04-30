@@ -67,6 +67,68 @@ extension Reference {
         public static let pmcid                 = "pmcid"
     }
 
+    /// Schema-invariant test (Phase E) reads this. The list is the set of
+    /// `reference` table columns this CKRecord schema covers — i.e. every
+    /// column whose value is round-tripped through `populate(record:)` /
+    /// `init(record:)`. Most entries match `RecordField.*` 1:1, but a few
+    /// CloudKit field names diverge from DB column names (the `*JSON`
+    /// wire-format keys for the parsed `authors`/`editors`/`translators`
+    /// arrays); `allFieldNames` lists the DB column name in those cases so
+    /// the schema-invariant diff against `pragma_table_info` works directly.
+    ///
+    /// Note: `pdfPath` is intentionally absent — per-device PDF state lives in
+    /// the local-only `pdfCache` table, never in the Reference CKRecord.
+    /// `authorsNormalized` is a computed Swift property recomputed on every
+    /// encode and never written to CloudKit (it's in `neverInRecord`).
+    public static let allFieldNames: [String] = [
+        RecordField.title,
+        "authors",            // wire: authorsJSON; column: authors
+        RecordField.year,
+        RecordField.journal,
+        RecordField.volume,
+        RecordField.issue,
+        RecordField.pages,
+        RecordField.doi,
+        RecordField.url,
+        RecordField.abstract,
+        RecordField.dateAdded,
+        RecordField.dateModified,
+        RecordField.notes,
+        RecordField.webContent,
+        RecordField.siteName,
+        RecordField.favicon,
+        RecordField.referenceType,
+        RecordField.metadataSource,
+        RecordField.verificationStatus,
+        RecordField.acceptedByRuleID,
+        RecordField.recordKey,
+        RecordField.verificationSourceURL,
+        RecordField.evidenceBundleHash,
+        RecordField.verifiedAt,
+        RecordField.reviewedBy,
+        RecordField.readingStatus,
+        RecordField.publisher,
+        RecordField.publisherPlace,
+        RecordField.edition,
+        "editors",            // wire: editorsJSON; column: editors
+        RecordField.isbn,
+        RecordField.issn,
+        RecordField.accessedDate,
+        RecordField.issuedMonth,
+        RecordField.issuedDay,
+        "translators",        // wire: translatorsJSON; column: translators
+        RecordField.eventTitle,
+        RecordField.eventPlace,
+        RecordField.genre,
+        RecordField.institution,
+        RecordField.number,
+        RecordField.collectionTitle,
+        RecordField.numberOfPages,
+        RecordField.language,
+        RecordField.pmid,
+        RecordField.pmcid,
+    ]
+
     // MARK: - Encode
 
     /// Write every syncable scalar into `record`. Does not write the local `id`

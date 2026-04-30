@@ -17,7 +17,20 @@ extension PropertyDefinition {
         public static let isDefault        = "isDefault"
         public static let defaultFieldKey  = "defaultFieldKey"
         public static let isVisible        = "isVisible"
+        public static let dateModified     = "dateModified"
     }
+
+    /// Schema-invariant test (Phase E) reads this. Keep in lockstep with `RecordField`.
+    public static let allFieldNames: [String] = [
+        RecordField.name,
+        RecordField.type,
+        RecordField.optionsJSON,
+        RecordField.sortOrder,
+        RecordField.isDefault,
+        RecordField.defaultFieldKey,
+        RecordField.isVisible,
+        RecordField.dateModified,
+    ]
 
     public func populate(record: CKRecord) {
         record[RecordField.name]            = name
@@ -27,6 +40,7 @@ extension PropertyDefinition {
         record[RecordField.isDefault]       = isDefault ? Int64(1) : Int64(0)
         record[RecordField.defaultFieldKey] = defaultFieldKey
         record[RecordField.isVisible]       = isVisible ? Int64(1) : Int64(0)
+        record[RecordField.dateModified]    = dateModified
     }
 
     public static func makeRecord(
@@ -47,6 +61,8 @@ extension PropertyDefinition {
     /// `PropertyType` rawValues fall back to `.string` per forward-compat
     /// guidance (e.g. a future peer introduces `.rating` — we shouldn't
     /// crash, just treat it as text until we ship an understanding of it).
+    /// Missing `dateModified` falls back to `Date()` for forward compat with
+    /// peers that wrote the record before this field was added.
     public init(record: CKRecord) {
         let type = (record[RecordField.type] as? String)
             .flatMap(PropertyType.init(rawValue:)) ?? .string
@@ -58,7 +74,8 @@ extension PropertyDefinition {
             sortOrder: Int((record[RecordField.sortOrder] as? Int64) ?? 0),
             isDefault: Self.decodeBool(record[RecordField.isDefault]),
             defaultFieldKey: record[RecordField.defaultFieldKey] as? String,
-            isVisible: Self.decodeBool(record[RecordField.isVisible], default: true)
+            isVisible: Self.decodeBool(record[RecordField.isVisible], default: true),
+            dateModified: (record[RecordField.dateModified] as? Date) ?? Date()
         )
 
         // Preserve the peer's options JSON verbatim — re-encoding via the

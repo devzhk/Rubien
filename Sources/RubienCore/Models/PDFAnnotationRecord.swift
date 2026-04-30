@@ -55,6 +55,7 @@ public struct PDFAnnotationRecord: Identifiable, Codable, Hashable {
     public var boundsHeight: Double
     public var rectsData: String
     public var dateCreated: Date
+    public var dateModified: Date
 
     public init(
         id: Int64? = nil,
@@ -65,7 +66,8 @@ public struct PDFAnnotationRecord: Identifiable, Codable, Hashable {
         color: String = "#FFDE59",
         pageIndex: Int,
         rects: [CGRect],
-        dateCreated: Date = Date()
+        dateCreated: Date = Date(),
+        dateModified: Date = Date()
     ) {
         let standardizedRects = rects.map { $0.standardized }
         let normalizedRects = standardizedRects.filter {
@@ -91,6 +93,7 @@ public struct PDFAnnotationRecord: Identifiable, Codable, Hashable {
             self.rectsData = "[]"
         }
         self.dateCreated = dateCreated
+        self.dateModified = dateModified
     }
 
     public var rects: [CGRect] {
@@ -134,7 +137,8 @@ extension PDFAnnotationRecord: FetchableRecord, MutablePersistableRecord {
 
     public enum Columns: String, ColumnExpression {
         case id, referenceId, type, selectedText, noteText, color
-        case pageIndex, boundsX, boundsY, boundsWidth, boundsHeight, rectsData, dateCreated
+        case pageIndex, boundsX, boundsY, boundsWidth, boundsHeight, rectsData
+        case dateCreated, dateModified
     }
 }
 
