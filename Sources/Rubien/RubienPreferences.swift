@@ -20,15 +20,23 @@ enum RubienPreferences {
     }
 
     /// Gates the B8 PDF asset sync (CDReferencePDF push/pull). Default
-    /// false from C2 → C5; flipped to true in Phase E (Task 35) once
-    /// the schema invariant test + dateModified cleanup land. Setting
-    /// to false at runtime stops the upload-queue drainer; existing
+    /// flipped from false → true in Phase E Task 35 once the schema
+    /// invariant test + dateModified cleanup landed. Users can still
+    /// opt out by setting the value to false explicitly. Setting at
+    /// runtime stops the upload-queue drainer; existing
     /// pdfUploadQueue rows accumulate harmlessly until the flag flips
     /// back on.
     static let pdfAssetSyncEnabledKey = "Rubien.pdfAssetSyncEnabled"
 
     static var pdfAssetSyncEnabled: Bool {
-        get { UserDefaults.standard.bool(forKey: pdfAssetSyncEnabledKey) }
+        get {
+            // Treat unset as true now that B8 has shipped. Users who
+            // explicitly set the key to false (via prefs or CLI) keep
+            // the asset sync disabled.
+            let defaults = UserDefaults.standard
+            if defaults.object(forKey: pdfAssetSyncEnabledKey) == nil { return true }
+            return defaults.bool(forKey: pdfAssetSyncEnabledKey)
+        }
         set { UserDefaults.standard.set(newValue, forKey: pdfAssetSyncEnabledKey) }
     }
 

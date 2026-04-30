@@ -34,10 +34,11 @@ final class RubienPreferencesTests: XCTestCase {
         super.tearDown()
     }
 
-    func testPdfAssetSyncEnabledDefaultsToFalse() {
-        XCTAssertFalse(
+    func testPdfAssetSyncEnabledDefaultsToTruePostB8() {
+        // Phase E Task 35 flipped the default. Unset → treat as true.
+        XCTAssertTrue(
             RubienPreferences.pdfAssetSyncEnabled,
-            "default must be false until Phase E flips it"
+            "post-Phase-E default must be true; users opt out by setting false"
         )
     }
 
