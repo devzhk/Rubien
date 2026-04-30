@@ -132,6 +132,26 @@ public actor PDFAssetCache {
         }
     }
 
+    /// Sum of byte sizes for currently-materialized files. Used by the
+    /// Settings "PDF cache used" display. Rows with `materializedAt = NULL`
+    /// are excluded — they exist as metadata only (iOS on-demand state),
+    /// not as bytes on this device's disk.
+    public func totalCacheSize() throws -> Int64 {
+        let filenames: [String] = try db.dbWriter.read { db in
+            try String.fetchAll(db, sql: """
+                SELECT localFilename FROM pdfCache WHERE materializedAt IS NOT NULL
+            """)
+        }
+        var total: Int64 = 0
+        for filename in filenames {
+            let url = storageRoot.appendingPathComponent(filename)
+            if let size = try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64 {
+                total += size
+            }
+        }
+        return total
+    }
+
     /// Delete the local file but keep the row so a future fetch can re-materialize.
     public func dematerialize(referenceId: Int64) throws {
         let filename: String? = try db.dbWriter.read { db in

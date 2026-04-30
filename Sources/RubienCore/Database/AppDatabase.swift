@@ -1008,6 +1008,14 @@ extension AppDatabase {
         }
     }
 
+    /// Count of pending PDF uploads (rows in `pdfUploadQueue`). Used by
+    /// the Settings "Uploading X PDFs..." indicator.
+    public func pdfUploadQueueCount() throws -> Int {
+        try dbWriter.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM pdfUploadQueue") ?? 0
+        }
+    }
+
     /// Bulk version of `pdfFilename(for:)` — single query for many refs.
     /// Use from CLI list paths, table views, and any place rendering PDF
     /// chips for N references at once. Returns a `[refId: filename]` map

@@ -196,4 +196,34 @@ final class PDFAssetCacheTests: XCTestCase {
         let map = try db.pdfFilenames(forReferences: [])
         XCTAssertTrue(map.isEmpty)
     }
+
+    // MARK: - totalCacheSize (Task 26)
+
+    func testTotalCacheSizeSumsMaterializedFiles() async throws {
+        try makeRef(id: 1)
+        try makeRef(id: 2)
+        try makeRef(id: 3)
+        let cache = PDFAssetCache(db: db, storageRoot: tmpRoot)
+
+        // Two materialized files, one cache row with materializedAt=NULL (not on disk).
+        let f1 = try makeFakePDF(name: "src1.pdf", contents: String(repeating: "x", count: 1000))
+        let f2 = try makeFakePDF(name: "src2.pdf", contents: String(repeating: "y", count: 500))
+        _ = try await cache.materialize(referenceId: 1, sourceURL: f1, originalFilename: "p1.pdf", assetVersion: 1)
+        _ = try await cache.materialize(referenceId: 2, sourceURL: f2, originalFilename: "p2.pdf", assetVersion: 1)
+        try await db.dbWriter.write { db in
+            try db.execute(sql: """
+                INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt)
+                VALUES(3, 'phantom.pdf', 'h', 1, NULL)
+            """)
+        }
+
+        let total = try await cache.totalCacheSize()
+        XCTAssertEqual(total, 1500, "sum of materialized file sizes only; phantom (materializedAt=NULL) excluded")
+    }
+
+    func testTotalCacheSizeIsZeroForEmptyCache() async throws {
+        let cache = PDFAssetCache(db: db, storageRoot: tmpRoot)
+        let total = try await cache.totalCacheSize()
+        XCTAssertEqual(total, 0)
+    }
 }
