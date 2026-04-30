@@ -9,6 +9,10 @@ struct ReferenceListView: View {
     let onSelect: (Int64) -> Void
     let onDelete: ([Reference]) -> Void
     let onRefreshMetadata: ([Reference]) -> Void
+    /// Set of reference IDs that have a materialized PDF in the local cache.
+    /// Pre-computed at the call site (typically via `db.pdfAttachedReferenceIDs()`)
+    /// so the row equatable check stays sync.
+    var pdfAttachedRefIds: Set<Int64> = []
     var isRefreshingMetadata = false
     var onDoubleClick: ((Int64) -> Void)? = nil
 
@@ -92,6 +96,7 @@ struct ReferenceListView: View {
                     } label: {
                         ReferenceRow(
                             reference: ref,
+                            hasPDF: pdfAttachedRefIds.contains(refId),
                             isSelected: isSelected,
                             isMultiSelected: isMultiSelected
                         )
@@ -274,6 +279,9 @@ struct ReferenceListView: View {
 
 struct ReferenceRow: View, Equatable {
     let reference: Reference
+    /// Pre-computed by the parent (`ReferenceListView`) from
+    /// `pdfAttachedRefIds` so the equatable check is pure-sync (no DB read).
+    let hasPDF: Bool
     let isSelected: Bool
     var isMultiSelected: Bool = false
 
@@ -287,7 +295,7 @@ struct ReferenceRow: View, Equatable {
         lhs.reference.authors == rhs.reference.authors &&
         lhs.reference.year == rhs.reference.year &&
         lhs.reference.journal == rhs.reference.journal &&
-        lhs.reference.pdfPath == rhs.reference.pdfPath &&
+        lhs.hasPDF == rhs.hasPDF &&
         lhs.reference.referenceType == rhs.reference.referenceType
     }
 
@@ -339,7 +347,7 @@ struct ReferenceRow: View, Equatable {
 
             Spacer(minLength: 0)
 
-            if reference.pdfPath != nil {
+            if hasPDF {
                 Image(systemName: "paperclip")
                     .font(.caption2)
                     .foregroundStyle(Color.secondary.opacity(0.5))

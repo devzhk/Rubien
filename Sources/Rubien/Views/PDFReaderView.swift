@@ -127,9 +127,9 @@ final class PDFReaderViewModel: ObservableObject {
     /// Wired by PDFReaderView body; flips the left sidebar to the Search tab and focuses its field.
     var openSearchUI: (() -> Void)?
 
-    init(reference: Reference, db: AppDatabase = .shared) {
+    init(reference: Reference, pdfURL: URL, db: AppDatabase = .shared) {
         self.reference = reference
-        self.pdfURL = PDFService.pdfURL(for: reference.pdfPath ?? "")
+        self.pdfURL = pdfURL
         self.db = db
 
         guard let refId = reference.id else { return }
@@ -414,9 +414,19 @@ struct PDFReaderView: View {
     @State private var pageInputText = ""
     private let onClose: (() -> Void)?
 
-    init(reference: Reference, onClose: (() -> Void)? = nil) {
+    init(reference: Reference, pdfURL: URL, onClose: (() -> Void)? = nil) {
         self.onClose = onClose
-        self._viewModel = StateObject(wrappedValue: PDFReaderViewModel(reference: reference))
+        self._viewModel = StateObject(wrappedValue: PDFReaderViewModel(reference: reference, pdfURL: pdfURL))
+    }
+
+    /// Convenience initializer that resolves the PDF URL via the cache.
+    /// Returns nil if the reference has no materialized PDF on disk —
+    /// callers should render a "no PDF" placeholder instead.
+    init?(reference: Reference, db: AppDatabase, onClose: (() -> Void)? = nil) {
+        guard let id = reference.id,
+              let filename = try? db.pdfFilename(for: id) else { return nil }
+        let url = AppDatabase.pdfStorageURL.appendingPathComponent(filename)
+        self.init(reference: reference, pdfURL: url, onClose: onClose)
     }
 
     var body: some View {

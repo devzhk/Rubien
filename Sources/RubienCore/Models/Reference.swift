@@ -873,3 +873,14 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
         case language, pmid, pmcid
     }
 }
+
+public extension Reference {
+    /// True iff this device has a *materialized* cache row for the reference.
+    /// Use for "show a PDF chip" UI in sync (view-init) contexts. Equivalent
+    /// to `db.pdfFilename(for: refId) != nil` but reads more cleanly at
+    /// callsites.
+    func hasPDFInCache(in db: AppDatabase) -> Bool {
+        guard let id else { return false }
+        return (try? db.pdfFilename(for: id)) != nil
+    }
+}

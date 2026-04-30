@@ -509,7 +509,11 @@ final class MetadataResolver {
             ref.volume = ref.volume ?? fallback.volume
             ref.issue = ref.issue ?? fallback.issue
             ref.pages = ref.pages ?? fallback.pages
-            ref.pdfPath = fallback.pdfPath
+            // Pre-B8 this also adopted `fallback.pdfPath` so the manually
+            // confirmed candidate inherited the imported PDF. Reference
+            // doesn't carry that field anymore — the PDF carry-through is now
+            // routed through `MetadataPersistenceOptions.preferredPDFPath`
+            // (resolved by the caller via `db.pdfFilename(for: fallbackId)`).
         }
         return ref
     }

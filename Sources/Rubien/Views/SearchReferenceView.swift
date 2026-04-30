@@ -165,6 +165,7 @@ struct SearchOverlay: View {
 
                                     SearchResultRow(
                                         reference: ref,
+                                        hasPDF: ref.hasPDFInCache(in: db),
                                         isHighlighted: !isMultiSelectMode && selectedIndex == index,
                                         isMultiSelected: isMultiSelected
                                     )
@@ -677,6 +678,8 @@ private struct FilterPillMenu<Content: View>: View {
 
 private struct SearchResultRow: View {
     let reference: Reference
+    /// Pre-computed by the parent so the row body stays sync.
+    let hasPDF: Bool
     let isHighlighted: Bool
     var isMultiSelected: Bool = false
 
@@ -729,7 +732,7 @@ private struct SearchResultRow: View {
 
             Spacer(minLength: 0)
 
-            if reference.pdfPath != nil {
+            if hasPDF {
                 Image(systemName: "paperclip")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)

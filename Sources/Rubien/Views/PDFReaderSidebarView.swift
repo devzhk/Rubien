@@ -24,7 +24,7 @@ struct PDFReaderSidebarView: View {
 
             switch selectedTab {
             case .outline:
-                PDFOutlineSidebarView(reference: reference)
+                PDFOutlineSidebarView(reference: reference, pdfURL: viewModel.pdfURL)
             case .search:
                 PDFSearchSidebarView(viewModel: viewModel)
             case .info:

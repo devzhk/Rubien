@@ -969,6 +969,20 @@ extension AppDatabase {
         }
     }
 
+    /// Drop a reference's `pdfCache` + `pdfUploadQueue` rows. Caller is
+    /// responsible for removing the on-disk file (the cache row holds the
+    /// only reference to its filename, so do that lookup *before* calling
+    /// this). Used when the user explicitly detaches a PDF or swaps it for a
+    /// freshly downloaded one — those flows want full row deletion, not the
+    /// `dematerialize` semantic that keeps the row but nulls
+    /// `materializedAt`.
+    public func detachReferencePDF(id: Int64) throws {
+        try dbWriter.write { db in
+            try db.execute(sql: "DELETE FROM pdfCache WHERE referenceId = ?", arguments: [id])
+            try db.execute(sql: "DELETE FROM pdfUploadQueue WHERE referenceId = ?", arguments: [id])
+        }
+    }
+
     /// Resolve a Reference's local PDF filename via the cache. Returns nil
     /// if this device has never seen the asset (no `pdfCache` row) OR if the
     /// row exists but the file isn't materialized locally (caller should

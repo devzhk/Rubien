@@ -242,10 +242,12 @@ struct ReferenceTableView: View {
     // MARK: - Pipeline
 
     private var pipelineContext: PipelineContext {
-        PipelineContext(
+        let pdfAttachedIds = (try? db.pdfAttachedReferenceIDs()) ?? []
+        return PipelineContext(
             tagMap: tagMap,
             propertyValueMap: customPropertyValueMap,
             propertyDefs: propertyDefs,
+            pdfAttachedRefIds: pdfAttachedIds,
             now: Date()
         )
     }

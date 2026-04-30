@@ -346,7 +346,7 @@ final class LibraryViewModel: ObservableObject {
         Task.detached(priority: .userInitiated) {
             do {
                 let newPath = try await PDFDownloadService.downloadPDF(for: reference)
-                try db.updateReferencePDFPath(id: id, pdfPath: newPath)
+                try db.attachImportedPDFs(rowIds: [id], filenames: [newPath])
             } catch {
                 pdfDownloadLog.error("Background PDF download failed: \(error.localizedDescription, privacy: .public)")
             }
@@ -376,11 +376,22 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
-    func saveManualReference(_ ref: inout Reference, reviewedBy: String = "manual-entry") {
+    func saveManualReference(
+        _ ref: inout Reference,
+        reviewedBy: String = "manual-entry",
+        pdfFilename: String? = nil
+    ) {
         if ref.id == nil && !ref.verificationStatus.isLibraryReady {
             ref = MetadataVerifier.manuallyVerified(ref, reviewedBy: reviewedBy)
         }
         saveReference(&ref)
+        if let pdfFilename, let id = ref.id {
+            do {
+                try db.attachImportedPDFs(rowIds: [id], filenames: [pdfFilename])
+            } catch {
+                errorMessage = "Attach PDF failed: \(error.localizedDescription)"
+            }
+        }
     }
 
     func batchImportReferences(_ refs: [Reference]) {
@@ -815,7 +826,7 @@ struct ContentView: View {
                         deleteReferences([ref])
                     },
                     onOpenPDFReader: { r in
-                        ReaderWindowManager.shared.openPDFReader(for: r)
+                        ReaderWindowManager.shared.openPDFReader(for: r, db: viewModel.db)
                     },
                     onOpenWebReader: { r in
                         ReaderWindowManager.shared.openWebReader(for: r)
@@ -923,9 +934,9 @@ struct ContentView: View {
         })
         .sheet(isPresented: $showAddReference) {
             AddReferenceView(
-                onSave: { ref in
+                onSave: { ref, pdfFilename in
                     var r = ref
-                    viewModel.saveManualReference(&r)
+                    viewModel.saveManualReference(&r, pdfFilename: pdfFilename)
                 },
                 initialReferenceType: addReferenceInitialType
             )
@@ -1198,7 +1209,11 @@ struct ContentView: View {
         Task { @MainActor in
             do {
                 let prepared = try PDFService.prepareImportedPDF(from: url)
-                let fallbackReference = prepared.reference
+                // `prepared.pdfPath` is the bare filename of the freshly copied
+                // PDF under `pdfStorageURL`. We carry it through the resolution
+                // flow so the eventual save can register a cache row pointing
+                // at the file.
+                let preparedPDFFilename = prepared.pdfPath
                 _ = MetadataResolutionSeed.fromImportedPDF(url: url, extracted: prepared.extracted)
 
                 if let doi = prepared.extracted.doi, !doi.isEmpty {
@@ -1210,22 +1225,25 @@ struct ContentView: View {
 
                 switch resolution {
                 case .verified(let envelope):
-                    var reference = envelope.reference
-                    reference.pdfPath = fallbackReference.pdfPath
+                    let reference = envelope.reference
                     let fmt = String(localized: "Imported: %@", bundle: .module)
-                    finishPDFImport(with: reference, message: String(format: fmt, reference.title))
+                    finishPDFImport(
+                        with: reference,
+                        pdfFilename: preparedPDFFilename,
+                        message: String(format: fmt, reference.title)
+                    )
 
                 case .candidate, .blocked, .seedOnly, .rejected:
                     let queued = queueResolutionResult(
                         resolution,
                         options: MetadataPersistenceOptions(
                             sourceKind: .importedPDF,
-                            preferredPDFPath: fallbackReference.pdfPath
+                            preferredPDFPath: preparedPDFFilename
                         ),
                         successMessage: String(localized: "Couldn't auto-verify — added to the pending queue", bundle: .module)
                     )
-                    if queued == nil, let pdfPath = fallbackReference.pdfPath {
-                        PDFService.deletePDF(at: pdfPath)
+                    if queued == nil {
+                        PDFService.deletePDF(at: preparedPDFFilename)
                     }
                 }
             } catch {
@@ -1237,9 +1255,16 @@ struct ContentView: View {
         }
     }
 
-    private func finishPDFImport(with reference: Reference, message: String?) {
+    private func finishPDFImport(with reference: Reference, pdfFilename: String?, message: String?) {
         var mutable = reference
         viewModel.saveReference(&mutable)
+        if let pdfFilename, let id = mutable.id {
+            do {
+                try viewModel.db.attachImportedPDFs(rowIds: [id], filenames: [pdfFilename])
+            } catch {
+                viewModel.errorMessage = "Attach PDF failed: \(error.localizedDescription)"
+            }
+        }
         selectedId = mutable.id
         viewModel.isImporting = false
         viewModel.importProgress = message
@@ -1488,8 +1513,8 @@ struct ContentView: View {
 
     private func openReader(for referenceID: Int64) {
         guard let reference = try? viewModel.db.fetchReferences(ids: [referenceID]).first else { return }
-        if reference.pdfPath != nil {
-            ReaderWindowManager.shared.openPDFReader(for: reference)
+        if reference.hasPDFInCache(in: viewModel.db) {
+            ReaderWindowManager.shared.openPDFReader(for: reference, db: viewModel.db)
         } else if reference.canOpenWebReader {
             ReaderWindowManager.shared.openWebReader(for: reference)
         }

@@ -3,7 +3,12 @@ import SwiftUI
 import RubienCore
 
 struct AddReferenceView: View {
-    let onSave: (Reference) -> Void
+    /// Closure receives both the new `Reference` and the optional PDF filename
+    /// the user attached during entry. The caller is responsible for inserting
+    /// the reference and, if a filename is provided, calling
+    /// `db.attachImportedPDFs(rowIds:filenames:)` so the cache row tracks the
+    /// already-copied file.
+    let onSave: (Reference, String?) -> Void
     let initialReferenceType: ReferenceType
 
     @Environment(\.dismiss) private var dismiss
@@ -34,7 +39,7 @@ struct AddReferenceView: View {
     @State private var pdfPath: String?
 
     init(
-        onSave: @escaping (Reference) -> Void,
+        onSave: @escaping (Reference, String?) -> Void,
         initialReferenceType: ReferenceType = .journalArticle
     ) {
         self.onSave = onSave
@@ -156,7 +161,6 @@ struct AddReferenceView: View {
             doi: doi.isEmpty ? nil : doi,
             url: urlTrimmed.isEmpty ? nil : urlTrimmed,
             abstract: abstract.isEmpty ? nil : abstract,
-            pdfPath: pdfPath,
             notes: notes.isEmpty ? nil : notes,
             siteName: nil,
             referenceType: referenceType,
@@ -172,7 +176,7 @@ struct AddReferenceView: View {
             numberOfPages: numberOfPages.isEmpty ? nil : numberOfPages,
             language: language.isEmpty ? nil : language
         )
-        onSave(ref)
+        onSave(ref, pdfPath)
         dismiss()
     }
 

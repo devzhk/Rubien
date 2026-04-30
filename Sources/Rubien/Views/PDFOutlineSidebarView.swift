@@ -4,6 +4,9 @@ import RubienCore
 
 struct PDFOutlineSidebarView: View {
     let reference: Reference
+    /// The on-disk URL of the PDF — sourced from the cache by the parent
+    /// reader (which already resolved it via `db.pdfFilename(for:)`).
+    let pdfURL: URL
 
     @State private var outlineItems: [OutlineItem] = []
     @State private var activeOutlineItemId: UUID?
@@ -148,9 +151,7 @@ struct PDFOutlineSidebarView: View {
     }
 
     private func loadOutline() {
-        guard let pdfPath = reference.pdfPath else { return }
-        let url = PDFService.pdfURL(for: pdfPath)
-        guard let doc = PDFDocument(url: url) else { return }
+        guard let doc = PDFDocument(url: pdfURL) else { return }
         guard let nav = PDFExtractor.outlineForUI(from: doc) else { return }
         // PDFExtractor uses 1-indexed level/startPage; sidebar uses 0-indexed
         // for visual indentation and pageIndex.

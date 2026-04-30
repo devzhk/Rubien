@@ -63,7 +63,7 @@ struct ReferenceDetailView: View {
                 headerSection
                 propertiesCard
                 if canOpenWebReader { webReaderCard }
-                if reference.pdfPath != nil { pdfCard }
+                if reference.hasPDFInCache(in: db) { pdfCard }
                 abstractSection
                 notesSection
                 footerSection
@@ -72,7 +72,7 @@ struct ReferenceDetailView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background {
-            if editingField == nil, reference.pdfPath != nil {
+            if editingField == nil, reference.hasPDFInCache(in: db) {
                 quickPreviewShortcut
             }
         }
@@ -191,14 +191,13 @@ struct ReferenceDetailView: View {
             // PDF attach/remove actions
             Divider().padding(.leading, 100)
             PropertyRowLayout(label: "PDF") {
-                if editedRef.pdfPath != nil {
+                if editedRef.hasPDFInCache(in: db) {
                     HStack(spacing: 8) {
                         Label("Attached", systemImage: "doc.fill")
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                         Button("Remove") {
-                            editedRef.pdfPath = nil
-                            commitDefaultSave()
+                            removeAttachedPDF()
                         }
                         .font(.system(size: 11))
                         .buttonStyle(.plain)
@@ -206,10 +205,8 @@ struct ReferenceDetailView: View {
                     }
                 } else {
                     Button {
-                        if let url = OpenPanelPicker.pickPDFFile(),
-                           let path = try? PDFService.importPDF(from: url) {
-                            editedRef.pdfPath = path
-                            commitDefaultSave()
+                        if let url = OpenPanelPicker.pickPDFFile() {
+                            attachPDF(from: url)
                         }
                     } label: {
                         Label("Attach PDF...", systemImage: "plus")
@@ -887,7 +884,7 @@ struct ReferenceDetailView: View {
                     .foregroundStyle(.tertiary)
                 Spacer()
                 Button {
-                    if reference.pdfPath != nil {
+                    if reference.hasPDFInCache(in: db) {
                         showOverwriteConfirmation = true
                     } else {
                         performPDFDownload()
@@ -1022,12 +1019,19 @@ struct ReferenceDetailView: View {
         pdfDownloadState = .downloading
         Task {
             do {
-                if let oldPath = reference.pdfPath {
-                    PDFService.deletePDF(at: oldPath)
+                // Swap out any prior PDF: remove the on-disk file + cache row
+                // first so the new download doesn't orphan the old asset.
+                if let id = reference.id,
+                   let oldFilename = try? db.pdfFilename(for: id) {
+                    let oldURL = AppDatabase.pdfStorageURL.appendingPathComponent(oldFilename)
+                    try? FileManager.default.removeItem(at: oldURL)
+                    try? db.detachReferencePDF(id: id)
                 }
                 let newPath = try await PDFDownloadService.downloadPDF(for: reference)
+                if let id = reference.id {
+                    try db.attachImportedPDFs(rowIds: [id], filenames: [newPath])
+                }
                 var updated = reference
-                updated.pdfPath = newPath
                 updated.dateModified = Date()
                 onSave(updated)
                 pdfDownloadState = .idle
@@ -1035,6 +1039,40 @@ struct ReferenceDetailView: View {
                 pdfDownloadState = .failed(error.localizedDescription)
             }
         }
+    }
+
+    /// Copy a user-picked PDF into storage and register a fresh cache row +
+    /// upload-queue row for the reference. Bumps `dateModified` so the
+    /// reference still reflects "recently changed" in the UI even though the
+    /// reference row itself hasn't changed any fields.
+    private func attachPDF(from sourceURL: URL) {
+        guard let id = editedRef.id else { return }
+        guard let filename = try? PDFService.importPDF(from: sourceURL) else { return }
+        do {
+            try db.attachImportedPDFs(rowIds: [id], filenames: [filename])
+        } catch {
+            // Roll back the on-disk copy so we don't orphan a file with no cache row.
+            PDFService.deletePDF(at: filename)
+            return
+        }
+        var updated = editedRef
+        updated.dateModified = Date()
+        onSave(updated)
+    }
+
+    /// Detach the currently-cached PDF from this reference: removes the file
+    /// from disk plus the `pdfCache` and `pdfUploadQueue` rows. Bumps
+    /// `dateModified` like the attach path.
+    private func removeAttachedPDF() {
+        guard let id = editedRef.id else { return }
+        if let filename = try? db.pdfFilename(for: id) {
+            let url = AppDatabase.pdfStorageURL.appendingPathComponent(filename)
+            try? FileManager.default.removeItem(at: url)
+        }
+        try? db.detachReferencePDF(id: id)
+        var updated = editedRef
+        updated.dateModified = Date()
+        onSave(updated)
     }
 
     // MARK: - Web Reader
@@ -1078,8 +1116,9 @@ struct ReferenceDetailView: View {
     }
 
     private func openQuickPreviewWindow() {
-        guard let path = reference.pdfPath else { return }
-        let url = PDFService.pdfURL(for: path)
+        guard let id = reference.id,
+              let filename = try? db.pdfFilename(for: id) else { return }
+        let url = AppDatabase.pdfStorageURL.appendingPathComponent(filename)
         let minimumSize = NSSize(width: 760, height: 900)
         let preferredSize = preferredQuickPreviewWindowSize(minimumSize: minimumSize)
         let autosaveName = "RubienPDFQuickPreview"

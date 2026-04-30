@@ -32,8 +32,11 @@ final class ReaderWindowManager {
     // MARK: - Public API
 
     /// Open (or re-activate) a PDF reader window for the given reference.
-    func openPDFReader(for reference: Reference) {
-        guard let refId = reference.id, reference.pdfPath != nil else { return }
+    /// No-ops when the reference has no materialized PDF on disk.
+    func openPDFReader(for reference: Reference, db: AppDatabase) {
+        guard let refId = reference.id,
+              let filename = try? db.pdfFilename(for: refId) else { return }
+        let pdfURL = AppDatabase.pdfStorageURL.appendingPathComponent(filename)
 
         // Already open → bring to front (select its tab if tabbed).
         // Check visibility, miniaturized, or part of a tab group to avoid
@@ -53,7 +56,7 @@ final class ReaderWindowManager {
             minSize: NSSize(width: 800, height: 600)
         )
 
-        let readerView = PDFReaderView(reference: reference) { [weak self] in
+        let readerView = PDFReaderView(reference: reference, pdfURL: pdfURL) { [weak self] in
             self?.closeWindow(forReferenceId: refId)
         }
         .frame(minWidth: 800, minHeight: 600)
