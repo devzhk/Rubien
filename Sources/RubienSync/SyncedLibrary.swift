@@ -133,10 +133,16 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     ///    now the durable record of "PDF needs pushing"; the queue table
     ///    is a per-device "yet to be drained into syncState" buffer.
     ///
-    /// Re-entrant safe: a second call sees an empty queue and no-ops; the
-    /// engine deduplicates pendingRecordZoneChanges by recordID. The
-    /// drainer self-gates on `pdfAssetSyncEnabledProvider()` so it stays a
-    /// no-op until Phase E flips the flag on by default.
+    /// Re-entrant safe by *idempotency*, not by serialization: actor
+    /// suspensions at `await pendingReferenceIds()` and `await dbWriter.write`
+    /// let a second concurrent caller read the same pendingIds before the
+    /// first transaction commits. The safety net is three-layered: (a) the
+    /// `syncState` UPSERT is idempotent (re-marking dirty is a no-op);
+    /// (b) DELETE-WHERE on already-removed rows is a no-op; (c) CKSyncEngine
+    /// dedups `pendingRecordZoneChanges` by recordID. Net effect: two
+    /// concurrent drains are equivalent to one. The drainer self-gates on
+    /// `pdfAssetSyncEnabledProvider()` so it stays a no-op until Phase E
+    /// flips the flag on by default.
     public func drainPDFUploadQueue() async {
         let drained = await drainPDFUploadQueueIntoSyncState()
         guard !drained.isEmpty else { return }
