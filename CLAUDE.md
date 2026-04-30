@@ -125,6 +125,12 @@ Triggers do **not** self-`UPDATE` `dateModified`. SQLite has `recursive_triggers
 
 **Constants.** Container ID, zone ID, and record-type names (`CDReference`, `CDTag`, `CDReferenceTag`, …) live in `Sources/RubienSync/SyncConstants.swift`. The CKRecord type names carry a `CD` prefix ("CloudKit Data") so grepping for `CDReference` vs. `Reference` disambiguates the sync-layer type from the local model.
 
+**PDF asset sync (B8).** PDF binaries sync as a sibling `CDReferencePDF` record carrying a `CKAsset`. Per-device materialization state lives in the local-only `pdfCache` table (never observed by sync triggers, never has a CKRecord). On Mac, `applyRemoteRecord(.referencePDF)` materializes the asset eagerly. iOS-specific paths (on-demand fetch, LRU eviction, `.downloading` UI state, cellular policy) are deferred to the iOS-port plan; current code is Mac-only-first.
+
+The architectural invariant *"synced tables hold no local-only columns"* is enforced by `Tests/RubienSyncTests/SyncSchemaInvariantTests.swift`. If you add a column to a synced table, you must also add the corresponding CKRecord field; otherwise the test fails with a message naming the 2026-04-29 incident. The allow-list is empty by design — adding to it requires a justifying comment.
+
+The flag `RubienPreferences.pdfAssetSyncEnabled` defaults to true post-Phase-E; users can opt out by setting it to false. Diagnostic CLI: `rubien-cli pdf status <id>` and the `pdfBackfillRemaining` field on `rubien-cli sync status`.
+
 ### CLI
 
 `Sources/RubienCLI/RubienCLI.swift` is the single-file argument-parser entry with 15 subcommands (`search`, `list`, `get`, `add`, `update`, `delete`, `cite`, `import`, `export`, `tags`, `properties`, `views`, `annotations`, `styles`, `sync`). JSON is the default output format — scripts depend on it, so don't change CLI output shape without updating tests in `Tests/RubienCLITests/`.

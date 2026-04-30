@@ -54,7 +54,19 @@ On the Mac you use for development:
 6. Edit the same reference on both within a few seconds; observe "server wins" behavior (whichever pushed first, other side overwrites — documented quirk of v1 merge policy)
 7. Delete on Mac A; verify removal on Mac B within ~10s
 
-### 5. Failure diagnostics
+### 5. PDF asset sync smoke test (post-B8)
+
+After enabling sync on two Macs running B8 builds:
+
+1. **Mac A:** Import a small PDF (5–10 MB) onto a new Reference. Watch Settings → Sync → "Uploading 1 of 1 PDF to iCloud" briefly; the indicator should clear within ~30s on a normal connection.
+2. **Mac B:** Wait ~30–60s for the next pull cycle. Open the same Reference. The PDF should render in the reader.
+3. **Mac A:** Edit the Reference's `notes` field. The CDReferencePDF asset should NOT re-upload — it's a separate record from CDReference, so scalar edits don't touch it. Confirm via `rubien-cli sync status`: `pdfBackfillRemaining` stays 0.
+4. **Mac A:** Delete the Reference. Mac B should drop both the Reference row AND the local PDF file via tombstone propagation + FK cascade on `pdfCache`.
+5. **iCloud quota smoke:** if you have a small free-tier account and want to verify quota handling, use a large library — when the engine returns `.quotaExceeded`, the existing sync banner surfaces.
+
+If any step fails, see the general "Failure diagnostics" section below. Asset-specific diagnostic: `rubien-cli pdf status <id>` shows the cache row state for one Reference (cached/version/hash/inUploadQueue).
+
+### 6. Failure diagnostics
 
 From the CLI: `swift run rubien-cli sync status` gives JSON.
 
@@ -64,7 +76,7 @@ From the CLI: `swift run rubien-cli sync status` gives JSON.
 - `dirtyByEntityType` not draining → engine isn't pushing; check Console for CKError codes
 - `tombstoneCount.unconfirmed > 0` after pushes drain → deletes aren't being ack'd by the server (likely transient; retry on next app foreground)
 
-### 6. Reset (destructive, only if stuck)
+### 7. Reset (destructive, only if stuck)
 
 To force a full re-sync:
 
