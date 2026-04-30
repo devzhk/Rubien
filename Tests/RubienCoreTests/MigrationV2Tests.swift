@@ -129,4 +129,16 @@ final class MigrationV2Tests: XCTestCase {
             XCTAssertEqual(queueCount, 0, "pdfUploadQueue FK cascade must delete the row when its Reference is deleted")
         }
     }
+
+    func testV2DropsPdfPathColumn() throws {
+        let db = try AppDatabase(DatabaseQueue())
+        try db.dbWriter.read { db in
+            let refCols = try Row.fetchAll(db, sql: "SELECT name FROM pragma_table_info('reference')")
+                .map { $0["name"] as String }
+            XCTAssertFalse(
+                refCols.contains("pdfPath"),
+                "pdfPath column must be dropped from reference; lookups go through pdfCache"
+            )
+        }
+    }
 }

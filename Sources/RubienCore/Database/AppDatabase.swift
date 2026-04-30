@@ -499,6 +499,10 @@ public final class AppDatabase: Sendable {
                 FROM reference
                 WHERE pdfPath IS NOT NULL AND pdfPath != ''
             """)
+
+            // Drop the now-orphan column. SQLite 3.35+ supports this directly.
+            // macOS 14 ships SQLite 3.41+; we're well past the support floor.
+            try db.execute(sql: "ALTER TABLE reference DROP COLUMN pdfPath")
         }
 
         return migrator
