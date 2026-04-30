@@ -176,6 +176,14 @@ extension SyncEntityType {
             guard let id = Int64(entityId) else { return }
             var row = Reference(record: record)
             row.id = id
+            // pdfPath is a device-local file pointer — the PDF lives in this
+            // device's Group Container, not in CloudKit. The CKRecord schema
+            // omits it on purpose, so the decode above sets it to nil. Copy
+            // the existing local value forward so a remote pull doesn't
+            // detach the reference from its on-disk PDF.
+            if let existing = try Reference.fetchOne(db, key: id) {
+                row.pdfPath = existing.pdfPath
+            }
             try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
 
         case .tag:

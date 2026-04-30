@@ -143,6 +143,39 @@ final class SyncEntityDispatchTests: XCTestCase {
         }
     }
 
+    func testApplyRemotePreservesLocalPDFPath() throws {
+        // pdfPath is a device-local file pointer — the PDF lives in this
+        // device's Group Container PDFs/ dir, not in CloudKit. Reference's
+        // CKRecord schema intentionally omits it (see populate(record:)),
+        // so a fresh Reference(record:) decode sets pdfPath = nil. The
+        // apply path must preserve the existing local pdfPath; otherwise
+        // every pull detaches every reference from its on-disk PDF.
+        try db.dbWriter.write { db in
+            var local = Reference(title: "with-pdf")
+            local.id = 11
+            local.pdfPath = "PDFs/abc-123_arxiv_2503.19009.pdf"
+            try local.insert(db)
+
+            try self.store.setApplyingRemote(db)
+
+            var remote = Reference(title: "with-pdf-renamed")
+            remote.id = 11
+            let record = Reference.makeRecord(recordName: "reference:11", reference: remote)
+
+            try SyncEntityType.reference.applyRemoteRecord(record, entityId: "11", db: db)
+
+            try self.store.clearApplyingRemote(db)
+
+            let fetched = try Reference.fetchOne(db, key: 11)
+            XCTAssertEqual(fetched?.title, "with-pdf-renamed", "synced fields update")
+            XCTAssertEqual(
+                fetched?.pdfPath,
+                "PDFs/abc-123_arxiv_2503.19009.pdf",
+                "pdfPath is local-only and must survive remote upserts"
+            )
+        }
+    }
+
     func testApplyRemoteUpsertDoesNotCascadeDeleteChildren() throws {
         // The motivating reason we use INSERT + UPDATE instead of
         // INSERT OR REPLACE — replace would trigger the FK cascade and
