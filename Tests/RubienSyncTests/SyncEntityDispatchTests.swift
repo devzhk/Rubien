@@ -318,13 +318,22 @@ final class SyncEntityDispatchTests: XCTestCase {
         }
     }
 
-    func testApplyRemoteReferencePDFDeleteRemovesCacheRow() throws {
+    func testApplyRemoteReferencePDFDeleteRemovesCacheRowAndFile() throws {
+        // Create a real file in PDFs/ so we can verify the apply-delete path
+        // also nukes the on-disk file (not just the cache row).
+        let pdfsDir = AppDatabase.pdfStorageURL
+        try FileManager.default.createDirectory(at: pdfsDir, withIntermediateDirectories: true)
+        let filename = "delete-test-\(UUID().uuidString)_x.pdf"
+        let fileURL = pdfsDir.appendingPathComponent(filename)
+        try Data("%PDF-to-be-deleted".utf8).write(to: fileURL)
+        // No defer cleanup — the test itself verifies the file is gone.
+
         try db.dbWriter.write { db in
             try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(11, 'r', ?, ?)", arguments: [Date(), Date()])
             try db.execute(sql: """
                 INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt)
-                VALUES(11, 'x.pdf', 'h', 1, ?)
-            """, arguments: [Date()])
+                VALUES(11, ?, 'h', 1, ?)
+            """, arguments: [filename, Date()])
 
             try self.store.setApplyingRemote(db)
             try SyncEntityType.referencePDF.applyRemoteDelete(entityId: "11", db: db)
@@ -332,9 +341,14 @@ final class SyncEntityDispatchTests: XCTestCase {
 
             XCTAssertEqual(
                 try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM pdfCache WHERE referenceId=11") ?? -1,
-                0
+                0,
+                "cache row dropped"
             )
         }
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fileURL.path),
+            "apply-delete must also remove the on-disk file, not just the cache row"
+        )
     }
 
     func testBuildPushRecordReferencePDFEmitsRecordWithAssetWhenCachedOnDisk() throws {
@@ -363,7 +377,10 @@ final class SyncEntityDispatchTests: XCTestCase {
             XCTAssertEqual(record?[ReferencePDFRecord.RecordField.referenceId] as? Int64, 20)
             XCTAssertEqual(record?[ReferencePDFRecord.RecordField.assetVersion] as? Int64, 3)
             XCTAssertEqual(record?[ReferencePDFRecord.RecordField.contentHash] as? String, "somehash")
-            XCTAssertNotNil(record?[ReferencePDFRecord.RecordField.asset], "asset must be present when file exists")
+            XCTAssertNotNil(
+                record?[ReferencePDFRecord.RecordField.asset] as? CKAsset,
+                "asset must be present and decode as a CKAsset when file exists"
+            )
         }
     }
 

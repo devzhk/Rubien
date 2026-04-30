@@ -248,6 +248,12 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                         // format is synthesized from `pdfCache` rows.
                         // entityId for syncState matches the dispatch path
                         // (Int64(referenceId) stringified).
+                        //
+                        // Future synthesized/sibling-record entities (records
+                        // that don't 1:1 with a SQLite table) should add their
+                        // own case here following this shape: pick the local
+                        // source table, pick the column whose value the
+                        // dispatch path expects to parse from entityId.
                         sourceTable = "pdfCache"
                         idExpression = "referenceId"
                     default:

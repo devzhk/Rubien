@@ -282,6 +282,12 @@ extension SyncEntityType {
                 try FileManager.default.removeItem(at: dest)
             }
             try FileManager.default.copyItem(at: srcURL, to: dest)
+            // ON CONFLICT deliberately omits `lastOpenedAt = excluded.lastOpenedAt`
+            // (differs from PDFAssetCache.materialize which DOES bump it).
+            // Rationale: a remote pull is the cloud telling us new bytes exist,
+            // not the user opening the file. Bumping lastOpenedAt here would
+            // distort the LRU signal that drives eviction (deferred to iOS-port
+            // plan but the column semantics need to stay clean now).
             try db.execute(sql: """
                 INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
                 VALUES(?, ?, ?, ?, ?, ?)
