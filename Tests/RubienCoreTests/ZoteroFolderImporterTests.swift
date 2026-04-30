@@ -68,8 +68,21 @@ final class ZoteroFolderImporterTests: XCTestCase {
             propertyTarget: target
         )
         let refs = try db.fetchAllReferences()
-        copiedPDFPaths.append(contentsOf: refs.compactMap(\.pdfPath))
+        // Post-B8: the importer writes pdfCache rows. Pull every cached
+        // filename so tearDownWithError can clean them up.
+        for ref in refs {
+            if let id = ref.id, let filename = try db.pdfFilename(for: id) {
+                copiedPDFPaths.append(filename)
+            }
+        }
         return result
+    }
+
+    /// Convenience for tests asserting that a Reference has an attached PDF.
+    /// Pre-B8 these called `ref.pdfPath`; post-B8 we look it up via cache.
+    private func cachedFilename(for ref: Reference, db: AppDatabase) throws -> String? {
+        guard let id = ref.id else { return nil }
+        return try db.pdfFilename(for: id)
     }
 
     // MARK: - Tests
@@ -112,7 +125,7 @@ final class ZoteroFolderImporterTests: XCTestCase {
         let refs = try db.fetchAllReferences().sorted { ($0.title ?? "") < ($1.title ?? "") }
         XCTAssertEqual(refs.count, 2)
         for ref in refs {
-            let stored = try XCTUnwrap(ref.pdfPath)
+            let stored = try XCTUnwrap(try cachedFilename(for: ref, db: db))
             XCTAssertTrue(FileManager.default.fileExists(atPath: PDFService.pdfURL(for: stored).path))
             let tags = try db.fetchTags(forReference: ref.id!)
             XCTAssertEqual(tags.map(\.name), ["RL"])
@@ -135,7 +148,7 @@ final class ZoteroFolderImporterTests: XCTestCase {
         XCTAssertEqual(result.attached, 0)
         XCTAssertEqual(result.missingPDFs, ["files/1/a.pdf"])
         let refs = try db.fetchAllReferences()
-        XCTAssertNil(refs.first?.pdfPath)
+        XCTAssertNil(try cachedFilename(for: try XCTUnwrap(refs.first), db: db))
     }
 
     func testRejectedAbsolutePathsSurfaceAsMissing() throws {
@@ -290,7 +303,7 @@ final class ZoteroFolderImporterTests: XCTestCase {
         var stub = Reference(title: "Stub"); stub.doi = "10.1/stub"
         try db.saveReference(&stub)
         let stubId = try XCTUnwrap(stub.id)
-        XCTAssertNil(try XCTUnwrap(db.fetchReferences(ids: [stubId]).first).pdfPath)
+        XCTAssertNil(try db.pdfFilename(for: stubId))
 
         let bibtex = """
         @article{a, title = {Full Paper}, doi = {10.1/stub},
@@ -309,23 +322,30 @@ final class ZoteroFolderImporterTests: XCTestCase {
         XCTAssertEqual(result.attached, 1, "PDF should be copied to backfill the attachment-less stub")
         XCTAssertEqual(result.duplicatesSkipped, 1, "Still a duplicate — merged, not inserted")
 
-        // The stub now has a pdfPath, and the file actually exists.
+        // The stub now has a pdfCache row, and the file actually exists.
         let merged = try XCTUnwrap(db.fetchReferences(ids: [stubId]).first)
-        let stored = try XCTUnwrap(merged.pdfPath)
+        let stored = try XCTUnwrap(try cachedFilename(for: merged, db: db))
         XCTAssertTrue(FileManager.default.fileExists(atPath: PDFService.pdfURL(for: stored).path))
         XCTAssertEqual(try db.fetchAllReferences().count, 1)
     }
 
     func testExistingPDFNotOverwrittenAndNoOrphan() throws {
         let db = try makeDatabase()
-        // Seed a reference that already has its own PDF attached.
+        // Seed a reference that already has its own PDF attached (post-B8:
+        // attached via pdfCache row, not Reference.pdfPath).
         let priorSource = try makeFakeSourcePDF(name: "prior.pdf", data: Data("prior".utf8))
         let prior = try PDFService.importPDF(from: priorSource)
         copiedPDFPaths.append(prior)
         var existing = Reference(title: "Existing")
         existing.doi = "10.1/already"
-        existing.pdfPath = prior
         try db.saveReference(&existing)
+        let existingId = try XCTUnwrap(existing.id)
+        try db.dbWriter.write { db in
+            try db.execute(sql: """
+                INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
+                VALUES(?, ?, 'h', 1, ?, ?)
+            """, arguments: [existingId, prior, Date(), Date()])
+        }
 
         let storeURL = AppDatabase.pdfStorageURL
         let before = Set((try? FileManager.default.contentsOfDirectory(atPath: storeURL.path)) ?? [])
@@ -347,8 +367,9 @@ final class ZoteroFolderImporterTests: XCTestCase {
         XCTAssertEqual(result.attached, 0, "Should not copy when existing row already has a PDF")
         XCTAssertEqual(result.duplicatesSkipped, 1)
 
-        let merged = try XCTUnwrap(db.fetchReferences(ids: [existing.id!]).first)
-        XCTAssertEqual(merged.pdfPath, prior, "Existing PDF must be preserved, not overwritten")
+        let merged = try XCTUnwrap(db.fetchReferences(ids: [existingId]).first)
+        XCTAssertEqual(try cachedFilename(for: merged, db: db), prior,
+                       "Existing PDF must be preserved, not overwritten")
 
         let after = Set((try? FileManager.default.contentsOfDirectory(atPath: storeURL.path)) ?? [])
         XCTAssertEqual(after.subtracting(before), [], "No new PDFs should appear in the store")
@@ -386,7 +407,7 @@ final class ZoteroFolderImporterTests: XCTestCase {
         // Exactly one row, pointing at the first PDF.
         let refs = try db.fetchAllReferences()
         XCTAssertEqual(refs.count, 1)
-        let stored = try XCTUnwrap(refs.first?.pdfPath)
+        let stored = try XCTUnwrap(try cachedFilename(for: try XCTUnwrap(refs.first), db: db))
         XCTAssertTrue(FileManager.default.fileExists(atPath: PDFService.pdfURL(for: stored).path))
 
         // No orphans.
@@ -433,12 +454,13 @@ final class ZoteroFolderImporterTests: XCTestCase {
         XCTAssertEqual(result.imported, 4)
         XCTAssertEqual(result.duplicatesSkipped, 3, "3 of 4 entries should be detected as duplicates")
         XCTAssertEqual(result.attached, 4,
-                       "All 4 PDFs should be copied — the 3 seeds lack pdfPath, so the merge backfills them")
+                       "All 4 PDFs should be copied — the 3 seeds lack a pdfCache row, so the merge backfills them")
 
         // Library still has 4 distinct refs (3 merged into existing, 1 new).
         XCTAssertEqual(try db.fetchAllReferences().count, 4)
         for ref in try db.fetchAllReferences() {
-            XCTAssertNotNil(ref.pdfPath, "Every row should now carry an attached PDF")
+            XCTAssertNotNil(try cachedFilename(for: ref, db: db),
+                            "Every row should now carry a cached PDF filename")
         }
         // All 4 carry the "Batch" tag.
         let allTags = try db.fetchAllTags()

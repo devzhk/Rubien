@@ -3,21 +3,29 @@ import Foundation
 /// Shared inputs for the filter/sort/group engines. `now` is injectable so
 /// relative date presets are deterministic in tests and stable across a
 /// single render pass.
+///
+/// `pdfAttachedRefIds` carries which Reference rows have a `pdfCache` row on
+/// this device — populated by the caller (typically with one query) and read
+/// by `FieldResolver.resolveBuiltin(.pdfAttached, …)`. Post-B8 PDF presence
+/// is per-device, so it can't live on the Reference value type.
 public struct PipelineContext: Sendable {
     public let tagMap: [Int64: [Tag]]
     public let propertyValueMap: [Int64: [Int64: String]]
     public let propertyDefs: [PropertyDefinition]
+    public let pdfAttachedRefIds: Set<Int64>
     public let now: Date
 
     public init(
         tagMap: [Int64: [Tag]] = [:],
         propertyValueMap: [Int64: [Int64: String]] = [:],
         propertyDefs: [PropertyDefinition] = [],
+        pdfAttachedRefIds: Set<Int64> = [],
         now: Date = Date()
     ) {
         self.tagMap = tagMap
         self.propertyValueMap = propertyValueMap
         self.propertyDefs = propertyDefs
+        self.pdfAttachedRefIds = pdfAttachedRefIds
         self.now = now
     }
 }
@@ -44,7 +52,8 @@ public enum FilterEngine {
             row: row,
             tagMap: context.tagMap,
             propertyValueMap: context.propertyValueMap,
-            propertyDefs: context.propertyDefs
+            propertyDefs: context.propertyDefs,
+            pdfAttachedRefIds: context.pdfAttachedRefIds
         )
 
         switch filter.op {

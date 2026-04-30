@@ -145,7 +145,8 @@ struct ReferenceDTO: Encodable {
 
     init(from ref: Reference,
          defs: [PropertyDefinition] = [],
-         valuesByRef: [Int64: [Int64: String]] = [:]) {
+         valuesByRef: [Int64: [Int64: String]] = [:],
+         pdfFilenamesByRef: [Int64: String] = [:]) {
         self.id = ref.id
         self.title = ref.title
         self.authors = ref.authors.displayString
@@ -160,7 +161,11 @@ struct ReferenceDTO: Encodable {
         self.referenceType = ref.referenceType.rawValue
         self.dateAdded = ref.dateAdded
         self.dateModified = ref.dateModified
-        self.pdfPath = ref.pdfPath
+        // Post-B8: PDF lookup is per-device cache. The caller fetches all
+        // filenames once and threads them in via pdfFilenamesByRef so the JSON
+        // output's "pdfPath" key still exposes the on-disk filename.
+        self.pdfPath = ref.id.flatMap { pdfFilenamesByRef[$0] }
+            ?? (ref.id.flatMap { try? AppDatabase.shared.pdfFilename(for: $0) })
         self.notes = ref.notes
         self.isbn = ref.isbn
         self.issn = ref.issn
@@ -1398,7 +1403,8 @@ struct Views: ParsableCommand {
             let context = PipelineContext(
                 tagMap: try db.fetchReferenceTagMappings(),
                 propertyValueMap: try db.fetchAllPropertyValues(),
-                propertyDefs: try db.fetchAllPropertyDefinitions()
+                propertyDefs: try db.fetchAllPropertyDefinitions(),
+                pdfAttachedRefIds: try db.pdfAttachedReferenceIDs()
             )
             let filtered = FilterEngine.apply(refs, filters: view.parsedFilters, context: context)
             let sorted = SortEngine.apply(filtered, sorts: view.parsedSorts, context: context)
@@ -1509,7 +1515,9 @@ private func resolveReferencePDFURL(for id: Int64) throws -> URL {
         printJSONError("Reference \(id) not found")
         throw ExitCode.failure
     }
-    guard let pdfPath = ref.pdfPath, !pdfPath.isEmpty else {
+    guard let refId = ref.id,
+          let pdfPath = (try? AppDatabase.shared.pdfFilename(for: refId)),
+          !pdfPath.isEmpty else {
         printJSONError("Reference \(id) has no attached PDF")
         throw ExitCode.failure
     }

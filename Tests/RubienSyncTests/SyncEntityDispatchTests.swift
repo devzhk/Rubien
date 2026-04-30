@@ -143,18 +143,18 @@ final class SyncEntityDispatchTests: XCTestCase {
         }
     }
 
-    func testApplyRemotePreservesLocalPDFPath() throws {
-        // pdfPath is a device-local file pointer — the PDF lives in this
-        // device's Group Container PDFs/ dir, not in CloudKit. Reference's
-        // CKRecord schema intentionally omits it (see populate(record:)),
-        // so a fresh Reference(record:) decode sets pdfPath = nil. The
-        // apply path must preserve the existing local pdfPath; otherwise
-        // every pull detaches every reference from its on-disk PDF.
+    /// pdfPath is gone from Reference (B8). The new structural property:
+    /// applying a remote Reference record must not touch the pdfCache row
+    /// for that reference — pdfCache is a local-only table never observed
+    /// by sync triggers and never present in the CKRecord schema.
+    func testApplyRemoteReferenceDoesNotTouchPDFCache() throws {
         try db.dbWriter.write { db in
-            var local = Reference(title: "with-pdf")
-            local.id = 11
-            local.pdfPath = "PDFs/abc-123_arxiv_2503.19009.pdf"
-            try local.insert(db)
+            // Local state: ref + an existing cache row.
+            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(11, 'r', ?, ?)", arguments: [Date(), Date()])
+            try db.execute(sql: """
+                INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
+                VALUES(11, 'abc-123_arxiv.pdf', 'h', 1, ?, ?)
+            """, arguments: [Date(), Date()])
 
             try self.store.setApplyingRemote(db)
 
@@ -166,13 +166,13 @@ final class SyncEntityDispatchTests: XCTestCase {
 
             try self.store.clearApplyingRemote(db)
 
+            // Reference scalar updated:
             let fetched = try Reference.fetchOne(db, key: 11)
-            XCTAssertEqual(fetched?.title, "with-pdf-renamed", "synced fields update")
-            XCTAssertEqual(
-                fetched?.pdfPath,
-                "PDFs/abc-123_arxiv_2503.19009.pdf",
-                "pdfPath is local-only and must survive remote upserts"
-            )
+            XCTAssertEqual(fetched?.title, "with-pdf-renamed")
+            // pdfCache row untouched (the structural invariant):
+            let cacheFilename = try String.fetchOne(db, sql: "SELECT localFilename FROM pdfCache WHERE referenceId = 11")
+            XCTAssertEqual(cacheFilename, "abc-123_arxiv.pdf",
+                "Reference apply path must not touch pdfCache — pdfCache is local-only, has no CKRecord schema")
         }
     }
 

@@ -10,12 +10,11 @@ enum ReferenceFixtures {
         journal: String? = nil,
         readingStatus: ReadingStatus = .unread,
         referenceType: ReferenceType = .journalArticle,
-        pdfPath: String? = nil,
         dateAdded: Date = Date()
     ) -> Reference {
         Reference(
             id: id, title: title, authors: authors, year: year, journal: journal,
-            dateAdded: dateAdded, pdfPath: pdfPath,
+            dateAdded: dateAdded,
             referenceType: referenceType, readingStatus: readingStatus
         )
     }

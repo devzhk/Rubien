@@ -221,12 +221,12 @@ public struct MetadataResolutionSeed: Hashable, Codable, Sendable {
     }
 
     public static func fromReference(_ reference: Reference) -> MetadataResolutionSeed {
-        let fileNameSource: String = {
-            if let pdfPath = reference.pdfPath?.rubien_nilIfBlank {
-                return URL(fileURLWithPath: pdfPath).deletingPathExtension().lastPathComponent
-            }
-            return reference.title
-        }()
+        // Post-B8: Reference no longer carries a PDF filename. The seed-from-
+        // reference path is fed by the cached library row, where the title is
+        // the most reliable handle for re-deriving a parsed-name seed. The
+        // import-time "use the PDF filename" hint flows in via
+        // `MetadataResolutionSeed.fromImportedPDF`, not through here.
+        let fileNameSource = reference.title
 
         let cleanedFileName = MetadataResolution.cleanPDFSeedFilename(fileNameSource)
         let parsed = MetadataResolution.parsePDFFileNameSeed(cleanedFileName)
@@ -286,7 +286,6 @@ public enum MetadataResolution {
         merged.url = primary.url.rubien_nilIfBlank ?? fallback.url
         merged.abstract = primary.abstract.rubien_nilIfBlank ?? fallback.abstract
         merged.notes = primary.notes.rubien_nilIfBlank ?? fallback.notes
-        merged.pdfPath = primary.pdfPath.rubien_nilIfBlank ?? fallback.pdfPath
         merged.siteName = primary.siteName.rubien_nilIfBlank ?? fallback.siteName
         merged.metadataSource = primary.metadataSource ?? fallback.metadataSource
         merged.verificationStatus = primary.verificationStatus
@@ -329,7 +328,6 @@ public enum MetadataResolution {
         var merged = mergeReference(primary: primary, fallback: existing)
         merged.id = existing.id
         merged.notes = existing.notes.rubien_nilIfBlank ?? primary.notes
-        merged.pdfPath = existing.pdfPath.rubien_nilIfBlank ?? primary.pdfPath
         merged.metadataSource = primary.metadataSource ?? existing.metadataSource
         merged.webContent = primary.webContent ?? existing.webContent
         merged.favicon = primary.favicon ?? existing.favicon

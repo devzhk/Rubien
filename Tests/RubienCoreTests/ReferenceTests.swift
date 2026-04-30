@@ -12,7 +12,6 @@ final class ReferenceTests: XCTestCase {
         XCTAssertNil(ref.year)
         XCTAssertNil(ref.journal)
         XCTAssertNil(ref.doi)
-        XCTAssertNil(ref.pdfPath)
         XCTAssertTrue(ref.authors.isEmpty)
     }
 

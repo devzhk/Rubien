@@ -74,16 +74,12 @@ final class GroupEngineTests: XCTestCase {
     }
 
     func testCheckboxGrouping() {
-        let rows = [
-            makeRef(id: 1),
-            {
-                var ref = makeRef(id: 2)
-                ref.pdfPath = "/path.pdf"
-                return ref
-            }(),
-        ]
+        // Post-B8: pdfAttached is a per-device cache fact carried via
+        // PipelineContext.pdfAttachedRefIds, not on the Reference itself.
+        let rows = [makeRef(id: 1), makeRef(id: 2)]
         let config = GroupConfig(target: .builtin(.pdfAttached))
-        let buckets = GroupEngine.apply(rows, config: config, context: PipelineContext())
+        let ctx = PipelineContext(pdfAttachedRefIds: [2])
+        let buckets = GroupEngine.apply(rows, config: config, context: ctx)
         let byKey = Dictionary(uniqueKeysWithValues: buckets.map { ($0.key, $0.references.map(\.id)) })
         XCTAssertEqual(byKey["false"], [1])
         XCTAssertEqual(byKey["true"], [2])

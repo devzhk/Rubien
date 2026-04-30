@@ -483,7 +483,6 @@ public enum PDFService {
             journal: meta.journal,
             doi: meta.doi,
             abstract: meta.abstract,
-            pdfPath: fileName,
             referenceType: meta.workKindHint.referenceType,
             publisher: meta.publisher,
             edition: meta.edition,

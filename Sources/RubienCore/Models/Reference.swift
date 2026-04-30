@@ -199,7 +199,6 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
     public var abstract: String?
     public var dateAdded: Date
     public var dateModified: Date
-    public var pdfPath: String?
     public var notes: String?
     public var webContent: String?
     public var siteName: String?
@@ -262,7 +261,6 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
         abstract: String? = nil,
         dateAdded: Date = Date(),
         dateModified: Date = Date(),
-        pdfPath: String? = nil,
         notes: String? = nil,
         webContent: String? = nil,
         siteName: String? = nil,
@@ -314,7 +312,6 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
         self.abstract = abstract
         self.dateAdded = dateAdded
         self.dateModified = dateModified
-        self.pdfPath = pdfPath
         self.notes = notes
         self.webContent = webContent
         self.siteName = siteName
@@ -411,7 +408,6 @@ extension Reference {
               lhs.abstract == rhs.abstract,
               lhs.dateAdded == rhs.dateAdded,
               lhs.dateModified == rhs.dateModified,
-              lhs.pdfPath == rhs.pdfPath,
               lhs.notes == rhs.notes,
               lhs.webContent == rhs.webContent,
               lhs.siteName == rhs.siteName,
@@ -473,7 +469,6 @@ extension Reference {
         hasher.combine(abstract)
         hasher.combine(dateAdded)
         hasher.combine(dateModified)
-        hasher.combine(pdfPath)
         hasher.combine(notes)
         hasher.combine(webContent)
         hasher.combine(siteName)
@@ -526,7 +521,6 @@ extension Reference {
         Columns.abstract,
         Columns.dateAdded,
         Columns.dateModified,
-        Columns.pdfPath,
         Columns.notes,
         Columns.siteName,
         Columns.favicon,
@@ -760,7 +754,6 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
         abstract = row["abstract"]
         dateAdded = row["dateAdded"]
         dateModified = row["dateModified"]
-        pdfPath = row["pdfPath"]
         notes = row["notes"]
         webContent = row["webContent"]
         siteName = row["siteName"]
@@ -824,7 +817,6 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
         container["abstract"] = abstract
         container["dateAdded"] = dateAdded
         container["dateModified"] = dateModified
-        container["pdfPath"] = pdfPath
         container["notes"] = notes
         container["webContent"] = webContent
         container["siteName"] = siteName
@@ -870,7 +862,7 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
     public enum Columns: String, ColumnExpression {
         case id, title, authors, authorsNormalized, year, journal, volume, issue, pages
         case doi, url, abstract, dateAdded, dateModified
-        case pdfPath, notes, webContent, siteName, favicon, referenceType, metadataSource
+        case notes, webContent, siteName, favicon, referenceType, metadataSource
         case verificationStatus, acceptedByRuleID, recordKey, verificationSourceURL, evidenceBundleHash, verifiedAt, reviewedBy
         case readingStatus
         // Extended metadata

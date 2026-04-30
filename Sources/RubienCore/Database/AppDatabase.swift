@@ -935,12 +935,31 @@ extension AppDatabase {
         }
     }
 
-    public func updateReferencePDFPath(id: Int64, pdfPath: String?) throws {
+    /// Attach the freshly-imported PDF filenames (one per row, nil when no PDF was
+    /// copied) to their corresponding pdfCache + pdfUploadQueue rows. Idempotent
+    /// per-row: skips rows that already carry a cache entry, so a re-import of the
+    /// same Zotero folder doesn't orphan the prior PDF. Used by
+    /// `ZoteroFolderImporter` after `batchImportReferences` returns the row IDs.
+    func attachImportedPDFs(rowIds: [Int64], filenames: [String?]) throws {
+        precondition(rowIds.count == filenames.count,
+                     "attachImportedPDFs: rowIds and filenames must align 1:1")
         try dbWriter.write { db in
-            try db.execute(
-                sql: "UPDATE reference SET pdfPath = ?, dateModified = ? WHERE id = ?",
-                arguments: [pdfPath, Date(), id]
-            )
+            for (id, filename) in zip(rowIds, filenames) {
+                guard let filename else { continue }
+                let alreadyCached = try Bool.fetchOne(db, sql: """
+                    SELECT 1 FROM pdfCache WHERE referenceId = ? LIMIT 1
+                """, arguments: [id]) ?? false
+                if alreadyCached { continue }
+                let now = Date()
+                try db.execute(sql: """
+                    INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
+                    VALUES(?, ?, 'pending', 1, ?, ?)
+                """, arguments: [id, filename, now, now])
+                try db.execute(sql: """
+                    INSERT OR REPLACE INTO pdfUploadQueue(referenceId, localFilename, queuedAt)
+                    VALUES(?, ?, ?)
+                """, arguments: [id, filename, now])
+            }
         }
     }
 
@@ -969,23 +988,68 @@ extension AppDatabase {
         }
     }
 
+    /// All Reference IDs that have a cached PDF on this device. Used by the
+    /// view pipeline to populate `PipelineContext.pdfAttachedRefIds` so the
+    /// `.pdfAttached` filter/group/sort built-in keeps working post-B8 without
+    /// `Reference.pdfPath`.
+    public func pdfAttachedReferenceIDs() throws -> Set<Int64> {
+        try dbWriter.read { db in
+            let ids = try Int64.fetchAll(db, sql: """
+                SELECT referenceId FROM pdfCache
+            """)
+            return Set(ids)
+        }
+    }
+
+    /// Insert a pdfCache + pdfUploadQueue row for a freshly-imported PDF, but
+    /// only when the row has no cache entry yet (preserves an existing PDF
+    /// during merge). Caller-provided transaction so the cache write is
+    /// atomic with the surrounding Reference write. Used by
+    /// `persistMetadataResolution` and `confirmMetadataIntake`; the import
+    /// pipeline (`ZoteroFolderImporter`) goes through the public
+    /// `attachImportedPDFs` instead because it owns its own transaction.
+    private func attachPDFInTransaction(
+        referenceId: Int64,
+        filename: String,
+        db: Database
+    ) throws {
+        let alreadyCached = try Bool.fetchOne(db, sql: """
+            SELECT 1 FROM pdfCache WHERE referenceId = ? LIMIT 1
+        """, arguments: [referenceId]) ?? false
+        guard !alreadyCached else { return }
+        let now = Date()
+        try db.execute(sql: """
+            INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
+            VALUES(?, ?, 'pending', 1, ?, ?)
+        """, arguments: [referenceId, filename, now, now])
+        try db.execute(sql: """
+            INSERT OR REPLACE INTO pdfUploadQueue(referenceId, localFilename, queuedAt)
+            VALUES(?, ?, ?)
+        """, arguments: [referenceId, filename, now])
+    }
+
     public func deleteReferences(ids: [Int64]) throws {
         try dbWriter.write { db in
             _ = try Reference.deleteAll(db, ids: ids)
         }
     }
 
-    /// Collect associated PDF paths inside the same transaction so callers can
-    /// safely delete files only after the database delete succeeds.
+    /// Collect associated PDF filenames inside the same transaction so callers can
+    /// safely delete files only after the database delete succeeds. Reads
+    /// `pdfCache.localFilename` (the post-B8 source of truth); the FK cascade
+    /// from `reference` deletes the matching `pdfCache` row, but we capture the
+    /// filename first so the caller can remove the on-disk file.
     public func deleteReferencesReturningPDFPaths(ids: [Int64]) throws -> [String] {
         guard !ids.isEmpty else { return [] }
         return try dbWriter.write { db in
-            let references = try Reference
-                .filter(ids.contains(Reference.Columns.id))
-                .fetchAll(db)
-            let pdfPaths = references.compactMap(\.pdfPath)
+            let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
+            let filenames = try String.fetchAll(
+                db,
+                sql: "SELECT localFilename FROM pdfCache WHERE referenceId IN (\(placeholders))",
+                arguments: StatementArguments(ids)
+            )
             _ = try Reference.deleteAll(db, ids: ids)
-            return pdfPaths
+            return filenames
         }
     }
 
@@ -1141,16 +1205,23 @@ extension AppDatabase {
         try dbWriter.write { db in
             switch result {
             case .verified(var envelope):
-                if let preferredPDFPath = options.preferredPDFPath?.rubien_nilIfBlank,
-                   envelope.reference.pdfPath == nil {
-                    envelope.reference.pdfPath = preferredPDFPath
-                }
                 try ensureLibraryReady(envelope.reference)
                 try saveResolvedReference(
                     &envelope.reference,
                     linkedReferenceId: options.linkedReferenceId,
                     db: db
                 )
+                // Attach the import-time PDF (post-B8: lives in pdfCache, not
+                // on Reference itself). Skipped if the row already has a cache
+                // entry — preserves prior attachments on merge.
+                if let preferredPDFPath = options.preferredPDFPath?.rubien_nilIfBlank,
+                   let savedId = envelope.reference.id {
+                    try attachPDFInTransaction(
+                        referenceId: savedId,
+                        filename: preferredPDFPath,
+                        db: db
+                    )
+                }
 
                 if let existingIntakeId = options.existingIntakeId,
                    var existingIntake = try MetadataIntake.fetchOne(db, id: existingIntakeId) {
@@ -1242,9 +1313,6 @@ extension AppDatabase {
         }
 
         reference = MetadataVerifier.manuallyVerified(reference, reviewedBy: reviewedBy)
-        if let pdfPath = intake.pdfPath?.rubien_nilIfBlank, reference.pdfPath == nil {
-            reference.pdfPath = pdfPath
-        }
 
         try dbWriter.write { db in
             try normalizeForDirectLibrarySave(&reference)
@@ -1254,6 +1322,19 @@ extension AppDatabase {
                 linkedReferenceId: intake.linkedReferenceId,
                 db: db
             )
+
+            // Carry forward the intake's PDF (post-B8: pdfCache). The intake
+            // table still keeps its own pdfPath column — that's its handoff
+            // medium during candidate review; we promote it to the cache when
+            // the user confirms.
+            if let pdfPath = intake.pdfPath?.rubien_nilIfBlank,
+               let savedId = reference.id {
+                try attachPDFInTransaction(
+                    referenceId: savedId,
+                    filename: pdfPath,
+                    db: db
+                )
+            }
 
             if var storedIntake = try MetadataIntake.fetchOne(db, id: intake.id) {
                 storedIntake.verificationStatus = .verifiedManual
@@ -1381,7 +1462,7 @@ extension AppDatabase {
                 ?? currentReference?.url
                 ?? fallbackReference?.url
                 ?? seed?.sourceURL,
-            pdfPath: options.preferredPDFPath?.rubien_nilIfBlank ?? fallbackReference?.pdfPath ?? currentReference?.pdfPath,
+            pdfPath: options.preferredPDFPath?.rubien_nilIfBlank,
             seedJSON: MetadataVerificationCodec.encodeToJSONString(seed),
             fallbackReferenceJSON: MetadataVerificationCodec.encodeToJSONString(fallbackReference),
             currentReferenceJSON: MetadataVerificationCodec.encodeToJSONString(currentReference),
@@ -1460,33 +1541,55 @@ extension AppDatabase {
     }
 
     func findDuplicateReferenceID(for reference: Reference, db: Database) throws -> DuplicateMatch? {
+        // Per-strategy: SELECT the matched reference row + its cache filename
+        // (via LEFT JOIN on pdfCache). Post-B8 the "does the row already have a
+        // PDF" hint that callers want lives in pdfCache, not on `reference`.
+        // LEFT JOIN means rows with no cache entry come back with NULL p.
+        let baseSelect = "SELECT r.id AS id, c.localFilename AS p"
+
         if let doi = normalizedDOI(reference.doi),
-           let row = try Row.fetchOne(db, sql: "SELECT id, pdfPath FROM reference WHERE lower(doi) = ? LIMIT 1", arguments: [doi]) {
-            return DuplicateMatch(id: row["id"], pdfPath: row["pdfPath"])
+           let row = try Row.fetchOne(
+            db,
+            sql: "\(baseSelect), r.title AS title FROM reference r LEFT JOIN pdfCache c ON c.referenceId = r.id WHERE lower(r.doi) = ? LIMIT 1",
+            arguments: [doi]
+           ) {
+            return DuplicateMatch(id: row["id"], pdfPath: row["p"])
         }
 
         if let pmid = normalizedPMID(reference.pmid),
-           let row = try Row.fetchOne(db, sql: "SELECT id, pdfPath FROM reference WHERE pmid = ? LIMIT 1", arguments: [pmid]) {
-            return DuplicateMatch(id: row["id"], pdfPath: row["pdfPath"])
+           let row = try Row.fetchOne(
+            db,
+            sql: "\(baseSelect), r.title AS title FROM reference r LEFT JOIN pdfCache c ON c.referenceId = r.id WHERE r.pmid = ? LIMIT 1",
+            arguments: [pmid]
+           ) {
+            return DuplicateMatch(id: row["id"], pdfPath: row["p"])
         }
 
         if let pmcid = normalizedPMCID(reference.pmcid),
-           let row = try Row.fetchOne(db, sql: "SELECT id, pdfPath FROM reference WHERE upper(pmcid) = ? LIMIT 1", arguments: [pmcid]) {
-            return DuplicateMatch(id: row["id"], pdfPath: row["pdfPath"])
+           let row = try Row.fetchOne(
+            db,
+            sql: "\(baseSelect), r.title AS title FROM reference r LEFT JOIN pdfCache c ON c.referenceId = r.id WHERE upper(r.pmcid) = ? LIMIT 1",
+            arguments: [pmcid]
+           ) {
+            return DuplicateMatch(id: row["id"], pdfPath: row["p"])
         }
 
         if let isbn = normalizedISBN(reference.isbn),
            let row = try Row.fetchOne(
             db,
-            sql: "SELECT id, pdfPath FROM reference WHERE replace(replace(upper(isbn), '-', ''), ' ', '') = ? LIMIT 1",
+            sql: "\(baseSelect), r.title AS title FROM reference r LEFT JOIN pdfCache c ON c.referenceId = r.id WHERE replace(replace(upper(r.isbn), '-', ''), ' ', '') = ? LIMIT 1",
             arguments: [isbn]
            ) {
-            return DuplicateMatch(id: row["id"], pdfPath: row["pdfPath"])
+            return DuplicateMatch(id: row["id"], pdfPath: row["p"])
         }
 
         if let url = reference.url?.trimmingCharacters(in: .whitespacesAndNewlines), !url.isEmpty,
-           let row = try Row.fetchOne(db, sql: "SELECT id, pdfPath FROM reference WHERE url = ? LIMIT 1", arguments: [url]) {
-            return DuplicateMatch(id: row["id"], pdfPath: row["pdfPath"])
+           let row = try Row.fetchOne(
+            db,
+            sql: "\(baseSelect), r.title AS title FROM reference r LEFT JOIN pdfCache c ON c.referenceId = r.id WHERE r.url = ? LIMIT 1",
+            arguments: [url]
+           ) {
+            return DuplicateMatch(id: row["id"], pdfPath: row["p"])
         }
 
         if let issn = normalizedISSN(reference.issn),
@@ -1495,16 +1598,16 @@ extension AppDatabase {
             let rows = try Row.fetchAll(
                 db,
                 sql: """
-                    SELECT id, title, pdfPath
-                    FROM reference
-                    WHERE replace(replace(upper(issn), '-', ''), ' ', '') = ?
-                      AND year = ?
+                    \(baseSelect), r.title AS title
+                    FROM reference r LEFT JOIN pdfCache c ON c.referenceId = r.id
+                    WHERE replace(replace(upper(r.issn), '-', ''), ' ', '') = ?
+                      AND r.year = ?
                     LIMIT 20
                     """,
                 arguments: [issn, year]
             )
             if let row = rows.first(where: { normalizedTitleKey(($0["title"] as String?)) == normalizedTitle }) {
-                return DuplicateMatch(id: row["id"], pdfPath: row["pdfPath"])
+                return DuplicateMatch(id: row["id"], pdfPath: row["p"])
             }
         }
 
@@ -1514,16 +1617,16 @@ extension AppDatabase {
             let rows = try Row.fetchAll(
                 db,
                 sql: """
-                    SELECT id, title, pdfPath
-                    FROM reference
-                    WHERE year = ?
-                      AND lower(trim(authorsNormalized)) = ?
+                    \(baseSelect), r.title AS title
+                    FROM reference r LEFT JOIN pdfCache c ON c.referenceId = r.id
+                    WHERE r.year = ?
+                      AND lower(trim(r.authorsNormalized)) = ?
                     LIMIT 50
                     """,
                 arguments: [year, normalizedAuthors]
             )
             if let row = rows.first(where: { normalizedTitleKey(($0["title"] as String?)) == normalizedTitle }) {
-                return DuplicateMatch(id: row["id"], pdfPath: row["pdfPath"])
+                return DuplicateMatch(id: row["id"], pdfPath: row["p"])
             }
         }
 
@@ -1563,33 +1666,37 @@ extension AppDatabase {
             var isbnMap: [String: String?] = [:]
             var urlMap: [String: String?] = [:]
 
+            // The `p` column carries the cached PDF filename via LEFT JOIN on
+            // pdfCache (post-B8). NULL means "row exists, no PDF cached on
+            // this device" — the .dbDuplicateWithoutPDF branch below treats
+            // that as "safe to copy + merge will adopt".
             try fetchIdentifierMatches(
                 db: db,
-                sqlTemplate: "SELECT lower(doi) AS k, pdfPath AS p FROM reference WHERE lower(doi) IN (%@)",
+                sqlTemplate: "SELECT lower(r.doi) AS k, c.localFilename AS p FROM reference r LEFT JOIN pdfCache c ON c.referenceId = r.id WHERE lower(r.doi) IN (%@)",
                 keys: Array(doiKeys),
                 into: &doiMap
             )
             try fetchIdentifierMatches(
                 db: db,
-                sqlTemplate: "SELECT pmid AS k, pdfPath AS p FROM reference WHERE pmid IN (%@)",
+                sqlTemplate: "SELECT r.pmid AS k, c.localFilename AS p FROM reference r LEFT JOIN pdfCache c ON c.referenceId = r.id WHERE r.pmid IN (%@)",
                 keys: Array(pmidKeys),
                 into: &pmidMap
             )
             try fetchIdentifierMatches(
                 db: db,
-                sqlTemplate: "SELECT upper(pmcid) AS k, pdfPath AS p FROM reference WHERE upper(pmcid) IN (%@)",
+                sqlTemplate: "SELECT upper(r.pmcid) AS k, c.localFilename AS p FROM reference r LEFT JOIN pdfCache c ON c.referenceId = r.id WHERE upper(r.pmcid) IN (%@)",
                 keys: Array(pmcidKeys),
                 into: &pmcidMap
             )
             try fetchIdentifierMatches(
                 db: db,
-                sqlTemplate: "SELECT replace(replace(upper(isbn), '-', ''), ' ', '') AS k, pdfPath AS p FROM reference WHERE replace(replace(upper(isbn), '-', ''), ' ', '') IN (%@)",
+                sqlTemplate: "SELECT replace(replace(upper(r.isbn), '-', ''), ' ', '') AS k, c.localFilename AS p FROM reference r LEFT JOIN pdfCache c ON c.referenceId = r.id WHERE replace(replace(upper(r.isbn), '-', ''), ' ', '') IN (%@)",
                 keys: Array(isbnKeys),
                 into: &isbnMap
             )
             try fetchIdentifierMatches(
                 db: db,
-                sqlTemplate: "SELECT url AS k, pdfPath AS p FROM reference WHERE url IN (%@)",
+                sqlTemplate: "SELECT r.url AS k, c.localFilename AS p FROM reference r LEFT JOIN pdfCache c ON c.referenceId = r.id WHERE r.url IN (%@)",
                 keys: Array(urlKeys),
                 into: &urlMap
             )
@@ -1723,7 +1830,6 @@ extension AppDatabase {
         merged.doi = preferred(incoming.doi, over: existing.doi)
         merged.url = preferred(incoming.url, over: existing.url)
         merged.abstract = preferredLongest(incoming.abstract, over: existing.abstract)
-        merged.pdfPath = preferred(incoming.pdfPath, over: existing.pdfPath)
         merged.notes = preferredLongest(incoming.notes, over: existing.notes)
         merged.webContent = preferredLongest(incoming.webContent, over: existing.webContent)
         merged.siteName = preferred(incoming.siteName, over: existing.siteName)
@@ -2213,9 +2319,13 @@ extension AppDatabase {
             request = request.filter(Reference.Columns.referenceType == type.rawValue)
         }
         if let hasPDF = filter.hasPDF {
-            request = hasPDF
-                ? request.filter(Reference.Columns.pdfPath != nil)
-                : request.filter(Reference.Columns.pdfPath == nil)
+            // Post-B8: PDF presence lives on pdfCache (per-device), not on
+            // Reference. EXISTS / NOT EXISTS subquery against pdfCache is the
+            // straight rewrite of the prior `pdfPath IS [NOT] NULL`.
+            let predicate = SQL(sql: hasPDF
+                ? "EXISTS (SELECT 1 FROM pdfCache WHERE pdfCache.referenceId = reference.id)"
+                : "NOT EXISTS (SELECT 1 FROM pdfCache WHERE pdfCache.referenceId = reference.id)")
+            request = request.filter(literal: predicate)
         }
         if let rs = filter.readingStatus {
             request = request.filter(Reference.Columns.readingStatus == rs.rawValue)

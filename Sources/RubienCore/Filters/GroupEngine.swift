@@ -29,7 +29,8 @@ public enum GroupEngine {
         for row in rows {
             let resolved = FieldResolver.resolve(
                 target: config.target, row: row,
-                tagMap: context.tagMap, propertyValueMap: context.propertyValueMap, propertyDefs: context.propertyDefs
+                tagMap: context.tagMap, propertyValueMap: context.propertyValueMap, propertyDefs: context.propertyDefs,
+                pdfAttachedRefIds: context.pdfAttachedRefIds
             )
             for (key, label) in keyLabelPairs(for: resolved, config: config) {
                 if buckets[key] == nil {

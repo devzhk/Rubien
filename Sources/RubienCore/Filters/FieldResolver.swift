@@ -30,11 +30,12 @@ public enum FieldResolver {
         row: Reference,
         tagMap: [Int64: [Tag]],
         propertyValueMap: [Int64: [Int64: String]],
-        propertyDefs: [PropertyDefinition]
+        propertyDefs: [PropertyDefinition],
+        pdfAttachedRefIds: Set<Int64> = []
     ) -> ResolvedValue {
         switch target {
         case .builtin(let column):
-            return resolveBuiltin(column, row: row, tagMap: tagMap)
+            return resolveBuiltin(column, row: row, tagMap: tagMap, pdfAttachedRefIds: pdfAttachedRefIds)
         case .custom(let propertyId):
             return resolveCustom(
                 propertyId: propertyId,
@@ -45,7 +46,12 @@ public enum FieldResolver {
         }
     }
 
-    private static func resolveBuiltin(_ column: ColumnIdentifier, row: Reference, tagMap: [Int64: [Tag]]) -> ResolvedValue {
+    private static func resolveBuiltin(
+        _ column: ColumnIdentifier,
+        row: Reference,
+        tagMap: [Int64: [Tag]],
+        pdfAttachedRefIds: Set<Int64>
+    ) -> ResolvedValue {
         switch column {
         case .title:         return .text(row.title)
         case .authors:       return .text(row.authorsNormalized.isEmpty ? nil : row.authorsNormalized)
@@ -65,7 +71,11 @@ public enum FieldResolver {
             let ids = tagMap[rid]?.compactMap { $0.id.map(String.init) } ?? []
             return .multiSelect(Set(ids))
         case .pdfAttached:
-            return .checkbox(!(row.pdfPath?.isEmpty ?? true))
+            // Post-B8: PDF presence comes from pdfCache (per-device). The
+            // caller pre-populates `pdfAttachedRefIds` from a single query;
+            // a row without an `id` (unsaved) is never attached.
+            guard let rid = row.id else { return .checkbox(false) }
+            return .checkbox(pdfAttachedRefIds.contains(rid))
         }
     }
 

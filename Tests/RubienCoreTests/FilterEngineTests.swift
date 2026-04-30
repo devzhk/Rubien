@@ -11,13 +11,12 @@ final class FilterEngineTests: XCTestCase {
         journal: String? = nil,
         readingStatus: ReadingStatus = .unread,
         referenceType: ReferenceType = .journalArticle,
-        pdfPath: String? = nil,
         dateAdded: Date = Date()
     ) -> Reference {
         ReferenceFixtures.makeRef(
             id: id, title: title, authors: authors, year: year, journal: journal,
             readingStatus: readingStatus, referenceType: referenceType,
-            pdfPath: pdfPath, dateAdded: dateAdded
+            dateAdded: dateAdded
         )
     }
 
@@ -108,12 +107,15 @@ final class FilterEngineTests: XCTestCase {
     // MARK: - Checkbox
 
     func testPdfAttachedCheckbox() {
-        let withPdf = makeRef(id: 1, pdfPath: "/path/to.pdf")
-        let withoutPdf = makeRef(id: 2, pdfPath: nil)
+        // Post-B8: PDF presence is a per-device cache fact, not a Reference
+        // property. The filter pipeline reads it from PipelineContext.
+        let withPdf = makeRef(id: 1)
+        let withoutPdf = makeRef(id: 2)
+        let ctx = PipelineContext(pdfAttachedRefIds: [1])
         let checked = ViewFilter(target: .builtin(.pdfAttached), op: .isChecked, value: .none)
         let unchecked = ViewFilter(target: .builtin(.pdfAttached), op: .isUnchecked, value: .none)
-        XCTAssertTrue(FilterEngine.evaluate(checked, row: withPdf, context: context))
-        XCTAssertTrue(FilterEngine.evaluate(unchecked, row: withoutPdf, context: context))
+        XCTAssertTrue(FilterEngine.evaluate(checked, row: withPdf, context: ctx))
+        XCTAssertTrue(FilterEngine.evaluate(unchecked, row: withoutPdf, context: ctx))
     }
 
     // MARK: - Empty / not empty

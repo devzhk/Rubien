@@ -34,7 +34,6 @@ final class ReferenceRecordTests: XCTestCase {
             abstract: "The dominant sequence transduction models ...",
             dateAdded: fixedDate(0),
             dateModified: fixedDate(3600),
-            pdfPath: "uuid_attention.pdf",  // must NOT appear in the CKRecord
             notes: "Foundational paper",
             webContent: "<p>cached</p>",
             siteName: "arXiv",
@@ -146,9 +145,11 @@ final class ReferenceRecordTests: XCTestCase {
     }
 
     func testPdfPathIsNotEncodedInRecord() {
-        let original = makeFullReference()
-        XCTAssertNotNil(original.pdfPath, "fixture must set pdfPath for this test to be meaningful")
-        let record = Reference.makeRecord(recordName: recordName, reference: original)
+        // Post-B8: Reference.pdfPath is gone, so the encoder couldn't write it
+        // even if it tried. The CKRecord invariant remains worth asserting:
+        // CDReference must never carry a `pdfPath` field — attachments live
+        // on the sibling CDReferencePDF record (still to land in Phase B).
+        let record = Reference.makeRecord(recordName: recordName, reference: makeFullReference())
         XCTAssertNil(
             record["pdfPath"],
             "pdfPath belongs on the sibling CDReferencePDF record, not on CDReference"

@@ -90,26 +90,37 @@ final class AppDatabaseTests: XCTestCase {
     func testDeleteReferencesReturningPDFPathsDeletesDatabaseRowsAtomically() throws {
         let db = try makeDatabase()
         var ref = Reference(title: "Delete With PDF")
-        ref.pdfPath = "PDFs/example.pdf"
         try db.saveReference(&ref)
+        let id = try XCTUnwrap(ref.id)
+        // Post-B8: PDF presence lives in pdfCache, not on Reference.
+        try db.dbWriter.write { db in
+            try db.execute(sql: """
+                INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
+                VALUES(?, 'PDFs/example.pdf', 'h', 1, ?, ?)
+            """, arguments: [id, Date(), Date()])
+        }
 
-        let pdfPaths = try db.deleteReferencesReturningPDFPaths(ids: [try XCTUnwrap(ref.id)])
+        let pdfPaths = try db.deleteReferencesReturningPDFPaths(ids: [id])
 
         XCTAssertEqual(pdfPaths, ["PDFs/example.pdf"])
-        XCTAssertTrue(try db.fetchReferences(ids: [try XCTUnwrap(ref.id)]).isEmpty)
+        XCTAssertTrue(try db.fetchReferences(ids: [id]).isEmpty)
     }
 
     func testSaveReferenceWithPDFPathIsTreatedAsManualDirectSave() throws {
+        // The original test asserted that setting `Reference.pdfPath` flipped
+        // the row to `verifiedManual` via `normalizeForDirectLibrarySave`.
+        // Post-B8 the pdfPath property is gone, but the same direct-save path
+        // still flips to `verifiedManual` for any reference inserted without
+        // `metadataSource` set — the trigger is the lifecycle, not the PDF.
         let db = try makeDatabase()
-        var ref = Reference(title: "Manual PDF Entry")
-        ref.pdfPath = "PDFs/manual.pdf"
+        var ref = Reference(title: "Manual Entry")
 
         try db.saveReference(&ref)
 
-        let stored = try XCTUnwrap(try db.fetchReferences(ids: [try XCTUnwrap(ref.id)]).first)
+        let id = try XCTUnwrap(ref.id)
+        let stored = try XCTUnwrap(try db.fetchReferences(ids: [id]).first)
         XCTAssertEqual(stored.verificationStatus, .verifiedManual)
         XCTAssertEqual(stored.reviewedBy, "direct-save")
-        XCTAssertEqual(stored.pdfPath, "PDFs/manual.pdf")
     }
 
     func testSaveReferenceMergesDuplicateDOIAndKeepsBestMetadata() throws {
@@ -123,7 +134,6 @@ final class AppDatabaseTests: XCTestCase {
         var duplicate = Reference(title: "Better Title")
         duplicate.doi = "10.1000/example"
         duplicate.abstract = "A much longer abstract than before"
-        duplicate.pdfPath = "PDFs/duplicate.pdf"
         try db.saveReference(&duplicate)
 
         let all = try db.fetchAllReferences()
@@ -131,7 +141,6 @@ final class AppDatabaseTests: XCTestCase {
         let merged = try XCTUnwrap(all.first)
         XCTAssertEqual(merged.title, "Better Title")
         XCTAssertEqual(merged.abstract, "A much longer abstract than before")
-        XCTAssertEqual(merged.pdfPath, "PDFs/duplicate.pdf")
         XCTAssertEqual(duplicate.id, merged.id)
     }
 
@@ -318,7 +327,10 @@ final class AppDatabaseTests: XCTestCase {
         let confirmed = try db.confirmMetadataIntake(intake, reviewedBy: "unit-test")
         XCTAssertEqual(confirmed.verificationStatus, .verifiedManual)
         XCTAssertEqual(confirmed.reviewedBy, "unit-test")
-        XCTAssertEqual(confirmed.pdfPath, "PDFs/queued.pdf")
+        // Post-B8: confirm promotes the intake's pdfPath into a pdfCache row
+        // tied to the new Reference id.
+        let confirmedId = try XCTUnwrap(confirmed.id)
+        XCTAssertEqual(try db.pdfFilename(for: confirmedId), "PDFs/queued.pdf")
         XCTAssertEqual(try db.referenceCount(), 1)
         XCTAssertTrue(try db.fetchPendingMetadataIntakes().isEmpty)
     }

@@ -65,6 +65,11 @@ public enum ZoteroFolderImporter {
 
         var prepared: [Reference] = []
         prepared.reserveCapacity(entries.count)
+        // Per-prepared-row PDF filename, populated only when we actually copied
+        // a file for that row. Indexed by entry order so we can attach the
+        // right pdfCache row after `batchImportReferences` returns the row IDs.
+        var copiedFilenames: [String?] = []
+        copiedFilenames.reserveCapacity(entries.count)
         var missing: [String] = []
         var attachedCount = 0
         var duplicatesSkipped = 0
@@ -73,7 +78,7 @@ public enum ZoteroFolderImporter {
         var copiedPaths: [String] = []
 
         for (index, entry) in entries.enumerated() {
-            var ref = entry.reference
+            let ref = entry.reference
             missing.append(contentsOf: entry.rejectedAttachmentPaths)
 
             let kind = classifications[index]
@@ -87,12 +92,13 @@ public enum ZoteroFolderImporter {
                 }
             }()
 
+            var copiedThisRow: String? = nil
             if shouldCopy, let relPath = entry.attachmentPaths.first {
                 let sourceURL = folderURL.appendingPathComponent(relPath)
                 if FileManager.default.fileExists(atPath: sourceURL.path) {
                     do {
                         let stored = try PDFService.importPDF(from: sourceURL)
-                        ref.pdfPath = stored
+                        copiedThisRow = stored
                         copiedPaths.append(stored)
                         attachedCount += 1
                     } catch {
@@ -103,11 +109,22 @@ public enum ZoteroFolderImporter {
                 }
             }
             prepared.append(ref)
+            copiedFilenames.append(copiedThisRow)
         }
 
         let outcome: (count: Int, ids: [Int64])
         do {
             outcome = try db.batchImportReferences(prepared, stamping: propertyTarget)
+        } catch {
+            for path in copiedPaths { PDFService.deletePDF(at: path) }
+            throw error
+        }
+
+        // After insert/merge, attach copied PDFs through the cache. We only
+        // overwrite when the destination row has no cache entry yet — same
+        // "don't orphan an existing PDF" invariant the classifier enforces.
+        do {
+            try db.attachImportedPDFs(rowIds: outcome.ids, filenames: copiedFilenames)
         } catch {
             for path in copiedPaths { PDFService.deletePDF(at: path) }
             throw error

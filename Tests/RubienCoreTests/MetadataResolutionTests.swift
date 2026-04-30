@@ -66,13 +66,15 @@ final class MetadataResolutionTests: XCTestCase {
         XCTAssertFalse(MetadataResolution.shouldAcceptDOIReference(sparse, seed: seed))
     }
 
-    func testReferenceSeedFallsBackToPDFFileName() {
+    func testReferenceSeedDerivesFromExistingFields() {
+        // Post-B8: Reference.pdfPath is gone; the seed-from-reference path
+        // derives its filename hint from the title (the PDF cache is
+        // per-device and not part of the seed contract).
         let reference = Reference(
             title: "Untitled",
             authors: [],
             year: 2023,
-            journal: "NeurIPS",
-            pdfPath: "/tmp/attention-is-all-you-need-vaswani.pdf"
+            journal: "NeurIPS"
         )
 
         let seed = MetadataResolutionSeed.fromReference(reference)
@@ -108,6 +110,11 @@ final class MetadataResolutionTests: XCTestCase {
     }
 
     func testMergeRefreshedReferencePreservesLocalFields() {
+        // Post-B8: Reference.pdfPath is gone; PDF survival across refresh now
+        // lives at the pdfCache layer (not exercised here — that's
+        // AppDatabaseTests / PDFAssetCache territory). This test still
+        // guards the *other* local-only fields that mergeRefreshedReference
+        // must preserve when authoritative metadata replaces the bib data.
         let existing = Reference(
             id: 42,
             title: "Old Title",
@@ -117,7 +124,6 @@ final class MetadataResolutionTests: XCTestCase {
             doi: nil,
             url: "https://example.com/original",
             abstract: "Old abstract",
-            pdfPath: "/tmp/sample.pdf",
             notes: "My notes",
             webContent: "<article>cached</article>",
             siteName: "Custom Site",
@@ -138,7 +144,6 @@ final class MetadataResolutionTests: XCTestCase {
         let merged = MetadataResolution.mergeRefreshedReference(primary: refreshed, existing: existing)
 
         XCTAssertEqual(merged.id, 42)
-        XCTAssertEqual(merged.pdfPath, "/tmp/sample.pdf")
         XCTAssertEqual(merged.notes, "My notes")
         XCTAssertEqual(merged.webContent, "<article>cached</article>")
         XCTAssertEqual(merged.title, "Attention Is All You Need")

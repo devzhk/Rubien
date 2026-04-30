@@ -34,11 +34,13 @@ public enum SortEngine {
     ) -> ComparisonResult {
         let va = FieldResolver.resolve(
             target: sort.target, row: a,
-            tagMap: context.tagMap, propertyValueMap: context.propertyValueMap, propertyDefs: context.propertyDefs
+            tagMap: context.tagMap, propertyValueMap: context.propertyValueMap, propertyDefs: context.propertyDefs,
+            pdfAttachedRefIds: context.pdfAttachedRefIds
         )
         let vb = FieldResolver.resolve(
             target: sort.target, row: b,
-            tagMap: context.tagMap, propertyValueMap: context.propertyValueMap, propertyDefs: context.propertyDefs
+            tagMap: context.tagMap, propertyValueMap: context.propertyValueMap, propertyDefs: context.propertyDefs,
+            pdfAttachedRefIds: context.pdfAttachedRefIds
         )
         return compareResolved(va, vb, ascending: sort.ascending)
     }
