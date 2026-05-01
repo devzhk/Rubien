@@ -318,6 +318,62 @@ final class SyncEntityDispatchTests: XCTestCase {
         }
     }
 
+    func testApplyRemoteReferencePDFUnlinksPreviousFileOnReDownload() throws {
+        // Scenario: device pulls a CDReferencePDF asset, then later pulls a
+        // newer assetVersion of the same referenceId. The first file must not
+        // remain orphaned in PDFs/ after the second pull updates the row.
+        try FileManager.default.createDirectory(at: AppDatabase.pdfStorageURL, withIntermediateDirectories: true)
+
+        let firstSrc = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).pdf")
+        try Data("%PDF-v1".utf8).write(to: firstSrc)
+        defer { try? FileManager.default.removeItem(at: firstSrc) }
+
+        let secondSrc = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).pdf")
+        try Data("%PDF-v2-newer".utf8).write(to: secondSrc)
+        defer { try? FileManager.default.removeItem(at: secondSrc) }
+
+        let firstFilename: String = try db.dbWriter.write { db in
+            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(33, 'r', ?, ?)", arguments: [Date(), Date()])
+            try self.store.setApplyingRemote(db)
+
+            let p1 = ReferencePDFRecord(
+                referenceId: 33, assetURL: firstSrc, assetVersion: 1,
+                contentHash: "v1hash", originalFilename: "paper.pdf",
+                dateModified: Date()
+            )
+            try SyncEntityType.referencePDF.applyRemoteRecord(
+                ReferencePDFRecord.makeRecord(recordName: "referencePDF:33", payload: p1),
+                entityId: "33", db: db
+            )
+            return try String.fetchOne(db, sql: "SELECT localFilename FROM pdfCache WHERE referenceId=33")!
+        }
+        let firstURL = AppDatabase.pdfStorageURL.appendingPathComponent(firstFilename)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: firstURL.path), "first pull should have written a file")
+
+        let secondFilename: String = try db.dbWriter.write { db in
+            let p2 = ReferencePDFRecord(
+                referenceId: 33, assetURL: secondSrc, assetVersion: 2,
+                contentHash: "v2hash", originalFilename: "paper.pdf",
+                dateModified: Date()
+            )
+            try SyncEntityType.referencePDF.applyRemoteRecord(
+                ReferencePDFRecord.makeRecord(recordName: "referencePDF:33", payload: p2),
+                entityId: "33", db: db
+            )
+            try self.store.clearApplyingRemote(db)
+            return try String.fetchOne(db, sql: "SELECT localFilename FROM pdfCache WHERE referenceId=33")!
+        }
+        XCTAssertNotEqual(firstFilename, secondFilename, "second pull writes under a fresh UUID-prefixed name")
+
+        let secondURL = AppDatabase.pdfStorageURL.appendingPathComponent(secondFilename)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: secondURL.path), "second pull's file must exist")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: firstURL.path),
+                       "first pull's file must be unlinked once the row points at the second one")
+
+        // Cleanup so other tests don't see leftover files.
+        try? FileManager.default.removeItem(at: secondURL)
+    }
+
     func testApplyRemoteReferencePDFDeleteRemovesCacheRowAndFile() throws {
         // Create a real file in PDFs/ so we can verify the apply-delete path
         // also nukes the on-disk file (not just the cache row).

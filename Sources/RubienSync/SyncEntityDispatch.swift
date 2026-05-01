@@ -275,6 +275,13 @@ extension SyncEntityType {
             // The CKAsset's fileURL is in CloudKit's caches and may be cleaned
             // up; copy promotes the bytes to permanent storage.
             guard let srcURL = payload.assetURL else { return }
+            // Capture the previous localFilename so we can unlink it after the
+            // upsert succeeds. Without this, an asset re-pull (assetVersion bump)
+            // overwrites the row's filename pointer but leaves the old file
+            // orphaned in PDFs/ forever.
+            let previousFilename = try String.fetchOne(db,
+                sql: "SELECT localFilename FROM pdfCache WHERE referenceId = ?",
+                arguments: [id])
             let localFilename = "\(UUID().uuidString)_\(payload.originalFilename)"
             let dest = AppDatabase.pdfStorageURL.appendingPathComponent(localFilename)
             try FileManager.default.createDirectory(at: AppDatabase.pdfStorageURL, withIntermediateDirectories: true)
@@ -297,6 +304,12 @@ extension SyncEntityType {
                     assetVersion = excluded.assetVersion,
                     materializedAt = excluded.materializedAt
             """, arguments: [id, localFilename, payload.contentHash, payload.assetVersion, Date(), Date()])
+            // Best-effort unlink of the prior file. Skip if same name (shouldn't
+            // happen — new name is always UUID-prefixed) or already gone.
+            if let previousFilename, previousFilename != localFilename {
+                let oldURL = AppDatabase.pdfStorageURL.appendingPathComponent(previousFilename)
+                try? FileManager.default.removeItem(at: oldURL)
+            }
         }
     }
 
