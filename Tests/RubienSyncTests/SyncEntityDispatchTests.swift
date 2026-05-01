@@ -374,6 +374,84 @@ final class SyncEntityDispatchTests: XCTestCase {
         try? FileManager.default.removeItem(at: secondURL)
     }
 
+    /// Mirrors the SyncedLibrary.applyFetchedZoneChanges deletion loop:
+    /// setApplyingRemote → applyRemoteDelete(.reference) → removeState
+    /// → upsertTombstone(confirmedByServer:true) → clearDirty →
+    /// clearApplyingRemote. Asserts that a remote-pull delete of a
+    /// Reference cascades to its sibling CDReferencePDF state on this
+    /// device:
+    /// - parent reference tombstone is marked server-confirmed (so it
+    ///   isn't re-pushed on the next cycle — Codex review finding);
+    /// - on-disk PDF file is unlinked;
+    /// - pdfCache row dropped via FK cascade;
+    /// - any orphan syncState/tombstone for the sibling referencePDF
+    ///   is cleared (no spurious push back to the cloud).
+    func testApplyRemoteDeleteReferenceWrapperCleansUpOrphanReferencePDFState() throws {
+        let pdfsDir = AppDatabase.pdfStorageURL
+        try FileManager.default.createDirectory(at: pdfsDir, withIntermediateDirectories: true)
+        let filename = "remote-delete-\(UUID().uuidString)_x.pdf"
+        let fileURL = pdfsDir.appendingPathComponent(filename)
+        try Data("%PDF-bytes-to-be-unlinked".utf8).write(to: fileURL)
+
+        try db.dbWriter.write { db in
+            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(55, 'r', ?, ?)", arguments: [Date(), Date()])
+            try db.execute(sql: """
+                INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt)
+                VALUES(55, ?, 'h', 1, ?)
+            """, arguments: [filename, Date()])
+            // Stale sibling syncState + tombstone left over from earlier
+            // local activity. Wrapper must clear both so the dead row
+            // doesn't re-push.
+            try db.execute(sql: """
+                INSERT INTO syncState(entityType, entityId, isDirty, pushInFlight)
+                VALUES('referencePDF', '55', 1, 0)
+            """)
+            try db.execute(sql: """
+                INSERT INTO tombstone(entityType, entityId, deletedAt, confirmedByServer)
+                VALUES('referencePDF', '55', '2026-01-01T00:00:00.000Z', 0)
+            """)
+
+            try self.store.setApplyingRemote(db)
+            try SyncEntityType.reference.applyRemoteDelete(entityId: "55", db: db)
+            try self.store.removeState(db, entityType: .reference, entityId: "55")
+            try self.store.upsertTombstone(
+                db,
+                entityType: .reference,
+                entityId: "55",
+                confirmedByServer: true
+            )
+            try self.store.clearDirty(db, entityType: .reference, entityId: "55")
+            try self.store.clearApplyingRemote(db)
+
+            XCTAssertEqual(
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM reference WHERE id=55") ?? -1, 0,
+                "reference row removed"
+            )
+            XCTAssertEqual(
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM pdfCache WHERE referenceId=55") ?? -1, 0,
+                "pdfCache row dropped via FK cascade"
+            )
+            XCTAssertEqual(
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM syncState WHERE entityType='referencePDF' AND entityId='55'") ?? -1, 0,
+                "orphan referencePDF syncState cleared"
+            )
+            XCTAssertEqual(
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM tombstone WHERE entityType='referencePDF' AND entityId='55'") ?? -1, 0,
+                "orphan referencePDF tombstone cleared (remote already authoritatively deleted parent)"
+            )
+            // Parent reference tombstone must be confirmed so the next push
+            // cycle doesn't re-send it as if local-originated.
+            let confirmed = try Int.fetchOne(db,
+                sql: "SELECT confirmedByServer FROM tombstone WHERE entityType='reference' AND entityId='55'") ?? -1
+            XCTAssertEqual(confirmed, 1, "pull-side tombstone must be confirmedByServer=1")
+        }
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fileURL.path),
+            "on-disk PDF must be unlinked even though FK cascade only drops the DB row"
+        )
+    }
+
     func testApplyRemoteReferencePDFDeleteRemovesCacheRowAndFile() throws {
         // Create a real file in PDFs/ so we can verify the apply-delete path
         // also nukes the on-disk file (not just the cache row).

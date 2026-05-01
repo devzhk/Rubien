@@ -333,7 +333,28 @@ extension SyncEntityType {
     public func applyRemoteDelete(entityId: String, db: Database) throws {
         switch self {
         case .reference:
-            if let id = Int64(entityId) { _ = try Reference.deleteOne(db, key: id) }
+            if let id = Int64(entityId) {
+                // Capture the PDF filename before delete; FK cascade will drop
+                // the pdfCache row, but the on-disk file in PDFs/ has no FK so
+                // it would persist forever. Also clear any orphan syncState /
+                // tombstone for the sibling referencePDF entityType — the
+                // remote already authoritatively deleted the parent, no need
+                // to push a tombstone back from this device.
+                let pdfFilename = try String.fetchOne(db,
+                    sql: "SELECT localFilename FROM pdfCache WHERE referenceId = ?",
+                    arguments: [id])
+                _ = try Reference.deleteOne(db, key: id)
+                if let pdfFilename {
+                    let url = AppDatabase.pdfStorageURL.appendingPathComponent(pdfFilename)
+                    try? FileManager.default.removeItem(at: url)
+                }
+                try db.execute(sql: """
+                    DELETE FROM syncState WHERE entityType='referencePDF' AND entityId=?
+                    """, arguments: [String(id)])
+                try db.execute(sql: """
+                    DELETE FROM tombstone WHERE entityType='referencePDF' AND entityId=?
+                    """, arguments: [String(id)])
+            }
         case .tag:
             if let id = Int64(entityId) { _ = try Tag.deleteOne(db, key: id) }
         case .referenceTag:

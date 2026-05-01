@@ -1139,6 +1139,7 @@ extension AppDatabase {
 
     public func deleteReferences(ids: [Int64]) throws {
         try dbWriter.write { db in
+            try Self.emitReferencePDFTombstonesIfCached(ids: ids, db: db)
             _ = try Reference.deleteAll(db, ids: ids)
         }
     }
@@ -1157,8 +1158,53 @@ extension AppDatabase {
                 sql: "SELECT localFilename FROM pdfCache WHERE referenceId IN (\(placeholders))",
                 arguments: StatementArguments(ids)
             )
+            try Self.emitReferencePDFTombstonesIfCached(ids: ids, db: db)
             _ = try Reference.deleteAll(db, ids: ids)
             return filenames
+        }
+    }
+
+    /// Emit a `referencePDF` tombstone for any deleted reference IDs that
+    /// have a `pdfCache` row, so the sibling CDReferencePDF record gets
+    /// torn down on iCloud and on every other device.
+    ///
+    /// The v1 `reference_ad` trigger emits the parent `reference`
+    /// tombstone automatically, but `pdfCache` is intentionally outside
+    /// `syncedTables` (no triggers) — so the sibling tombstone has to
+    /// come from Swift. Without this, deleting a Reference left its
+    /// CDReferencePDF orphaned on the server (asset bytes counting
+    /// against the user's iCloud quota) until manual zone reset.
+    ///
+    /// Must run BEFORE `Reference.deleteAll` so the FK cascade hasn't
+    /// dropped the `pdfCache` rows yet (otherwise we couldn't tell
+    /// which IDs deserve a tombstone vs. which were PDF-less).
+    ///
+    /// Only fires for local deletes — `applyRemoteDelete` calls
+    /// `Reference.deleteOne` directly and skips this codepath, so
+    /// remote-driven deletions don't echo back as new tombstones.
+    private static func emitReferencePDFTombstonesIfCached(
+        ids: [Int64],
+        db: Database
+    ) throws {
+        guard !ids.isEmpty else { return }
+        let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
+        let cachedIds = try Int64.fetchAll(
+            db,
+            sql: "SELECT referenceId FROM pdfCache WHERE referenceId IN (\(placeholders))",
+            arguments: StatementArguments(ids)
+        )
+        for id in cachedIds {
+            let entityId = String(id)
+            // Mirrors the SQL the reference_ad trigger emits for the parent.
+            try db.execute(sql: """
+                INSERT INTO tombstone(entityType, entityId, deletedAt)
+                    VALUES('referencePDF', ?, \(sqlNowISO8601))
+                    ON CONFLICT(entityType, entityId)
+                        DO UPDATE SET deletedAt = excluded.deletedAt;
+                """, arguments: [entityId])
+            try db.execute(sql: """
+                DELETE FROM syncState WHERE entityType='referencePDF' AND entityId=?
+                """, arguments: [entityId])
         }
     }
 

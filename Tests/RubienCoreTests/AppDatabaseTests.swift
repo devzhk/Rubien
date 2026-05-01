@@ -618,6 +618,91 @@ final class AppDatabaseTests: XCTestCase {
         XCTAssertEqual(count, 2)
     }
 
+    // MARK: - referencePDF tombstone propagation on Reference delete
+
+    /// Local delete of a Reference with a cached PDF must emit a
+    /// `referencePDF` tombstone so peers tear down the sibling
+    /// CDReferencePDF record (and its asset bytes against quota).
+    func testDeleteReferencesEmitsReferencePDFTombstoneWhenCacheRowExists() throws {
+        let db = try makeDatabase()
+        var ref = Reference(title: "with PDF")
+        try db.saveReference(&ref)
+        let id = ref.id!
+        try db.dbWriter.write { db in
+            try db.execute(sql: """
+                INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
+                VALUES(?, 'paper.pdf', 'h', 1, ?, ?)
+            """, arguments: [id, Date(), Date()])
+        }
+
+        try db.deleteReferences(ids: [id])
+
+        try db.dbWriter.read { db in
+            // Parent reference tombstone (from v1 trigger).
+            let refTomb = try Int.fetchOne(db,
+                sql: "SELECT COUNT(*) FROM tombstone WHERE entityType='reference' AND entityId=?",
+                arguments: [String(id)]) ?? -1
+            XCTAssertEqual(refTomb, 1, "parent reference tombstone from trigger")
+
+            // Sibling referencePDF tombstone (from the new Swift emit).
+            let pdfTomb = try Int.fetchOne(db,
+                sql: "SELECT COUNT(*) FROM tombstone WHERE entityType='referencePDF' AND entityId=?",
+                arguments: [String(id)]) ?? -1
+            XCTAssertEqual(pdfTomb, 1, "sibling referencePDF tombstone must propagate the delete to peers")
+
+            // pdfCache row dropped via FK cascade.
+            let cache = try Int.fetchOne(db,
+                sql: "SELECT COUNT(*) FROM pdfCache WHERE referenceId=?",
+                arguments: [id]) ?? -1
+            XCTAssertEqual(cache, 0)
+        }
+    }
+
+    /// Don't emit spurious tombstones for references that never had a PDF —
+    /// peers would receive a CDReferencePDF tombstone for a record that
+    /// never existed.
+    func testDeleteReferencesSkipsReferencePDFTombstoneWhenNoCacheRow() throws {
+        let db = try makeDatabase()
+        var ref = Reference(title: "no PDF")
+        try db.saveReference(&ref)
+        let id = ref.id!
+
+        try db.deleteReferences(ids: [id])
+
+        try db.dbWriter.read { db in
+            let pdfTomb = try Int.fetchOne(db,
+                sql: "SELECT COUNT(*) FROM tombstone WHERE entityType='referencePDF' AND entityId=?",
+                arguments: [String(id)]) ?? -1
+            XCTAssertEqual(pdfTomb, 0, "no pdfCache row → no referencePDF tombstone")
+        }
+    }
+
+    /// Same coverage for the production-used variant — the app and CLI
+    /// delete via `deleteReferencesReturningPDFPaths`, not the simpler
+    /// `deleteReferences`. Both must emit the sibling tombstone.
+    func testDeleteReferencesReturningPDFPathsEmitsReferencePDFTombstone() throws {
+        let db = try makeDatabase()
+        var ref = Reference(title: "with PDF for return-paths variant")
+        try db.saveReference(&ref)
+        let id = ref.id!
+        try db.dbWriter.write { db in
+            try db.execute(sql: """
+                INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
+                VALUES(?, 'returned-name.pdf', 'h', 1, ?, ?)
+            """, arguments: [id, Date(), Date()])
+        }
+
+        let returned = try db.deleteReferencesReturningPDFPaths(ids: [id])
+        XCTAssertEqual(returned, ["returned-name.pdf"])
+
+        try db.dbWriter.read { db in
+            let pdfTomb = try Int.fetchOne(db,
+                sql: "SELECT COUNT(*) FROM tombstone WHERE entityType='referencePDF' AND entityId=?",
+                arguments: [String(id)]) ?? -1
+            XCTAssertEqual(pdfTomb, 1)
+        }
+    }
+
     // MARK: - dirtyReferencePDFCount
 
     func testDirtyReferencePDFCountIsZeroOnFreshDB() throws {

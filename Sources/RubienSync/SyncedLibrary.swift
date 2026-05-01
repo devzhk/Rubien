@@ -589,10 +589,15 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                     }
                     try type.applyRemoteDelete(entityId: entityId, db: db)
                     try stateStore.removeState(db, entityType: type, entityId: entityId)
+                    // Server-driven delete: the cloud already decided. Marking
+                    // confirmed prevents this row from being re-pushed in the
+                    // next push cycle (and matches upsertTombstone's own
+                    // documented contract for pull-side calls).
                     try stateStore.upsertTombstone(
                         db,
                         entityType: type,
-                        entityId: entityId
+                        entityId: entityId,
+                        confirmedByServer: true
                     )
                     try stateStore.clearDirty(db, entityType: type, entityId: entityId)
                 }
