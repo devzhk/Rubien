@@ -56,8 +56,13 @@ struct StatusCommand: ParsableCommand {
                     ?? "pending"
             }) ?? "pending"
 
+            // Counts dirty referencePDF syncState rows — what's actually
+            // in flight to CloudKit. pdfUploadQueue empties at drainer
+            // hand-off, so reading from there would bottom out long
+            // before the upload completes (matches dirtyByEntityType).
             pdfBackfillRemaining = (try? pool.read { db in
-                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM pdfUploadQueue") ?? 0
+                try Int.fetchOne(db,
+                    sql: "SELECT COUNT(*) FROM syncState WHERE entityType='referencePDF' AND isDirty=1") ?? 0
             }) ?? 0
         } else {
             dirtyByType = [:]

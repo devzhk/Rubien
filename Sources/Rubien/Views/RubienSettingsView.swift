@@ -99,20 +99,25 @@ struct RubienSettingsView: View {
         .formStyle(.grouped)
     }
 
-    /// One-shot read of cache size + queue depth, then poll every 2s while
-    /// the queue is non-empty so the indicator updates as the drainer makes
-    /// progress. Stops polling once the queue is empty (or the task is
-    /// cancelled, e.g. when the Settings window closes).
+    /// One-shot read of cache size + in-flight upload count, then poll
+    /// every 2s while uploads are pending so the indicator updates as
+    /// CKSyncEngine drains them. Stops polling once nothing is in flight
+    /// (or the task is cancelled, e.g. when the Settings window closes).
     ///
-    /// `initialBackfillCount` is latched the first poll where the queue is
-    /// non-empty, then cleared when the queue empties — so the indicator
-    /// renders as "Uploading 4 of 31 PDFs" with a real progress bar, and a
-    /// future upload session re-latches with its own denominator instead of
-    /// reusing a stale one.
+    /// Source is `dirtyReferencePDFCount` — `syncState` rows for
+    /// `referencePDF` still flagged dirty — NOT the `pdfUploadQueue`
+    /// table, which empties at drainer hand-off. With the queue the bar
+    /// would zero out long before the engine actually finished pushing.
+    ///
+    /// `initialBackfillCount` is latched the first poll where the count
+    /// is non-zero, then cleared when it returns to zero — so the
+    /// indicator renders as "Uploading 4 of 31 PDFs" with a real
+    /// progress bar, and a future upload session re-latches with its
+    /// own denominator instead of reusing a stale one.
     private func refreshCacheStatsLoop() async {
         repeat {
             cacheBytes = (try? await pdfAssetCache.totalCacheSize()) ?? 0
-            let count = (try? AppDatabase.shared.pdfUploadQueueCount()) ?? 0
+            let count = (try? AppDatabase.shared.dirtyReferencePDFCount()) ?? 0
             if initialBackfillCount == nil, count > 0 {
                 initialBackfillCount = count
             }

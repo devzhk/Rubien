@@ -1020,6 +1020,21 @@ extension AppDatabase {
         }
     }
 
+    /// Count of in-flight CDReferencePDF pushes — `syncState` rows for
+    /// `referencePDF` still flagged dirty. Differs from
+    /// `pdfUploadQueueCount`: the queue empties at drainer hand-off
+    /// (engine.state.add), but the syncState row stays dirty until
+    /// CKSyncEngine confirms the server-side write. The Settings
+    /// progress indicator wants the latter signal — using the queue
+    /// would drop the bar to 0 long before the asset has actually
+    /// uploaded.
+    public func dirtyReferencePDFCount() throws -> Int {
+        try dbWriter.read { db in
+            try Int.fetchOne(db,
+                sql: "SELECT COUNT(*) FROM syncState WHERE entityType='referencePDF' AND isDirty=1") ?? 0
+        }
+    }
+
     /// Bulk version of `pdfFilename(for:)` — single query for many refs.
     /// Use from CLI list paths, table views, and any place rendering PDF
     /// chips for N references at once. Returns a `[refId: filename]` map

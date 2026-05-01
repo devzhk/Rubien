@@ -617,4 +617,33 @@ final class AppDatabaseTests: XCTestCase {
         let count = try db.webAnnotationCount(referenceId: ref.id!)
         XCTAssertEqual(count, 2)
     }
+
+    // MARK: - dirtyReferencePDFCount
+
+    func testDirtyReferencePDFCountIsZeroOnFreshDB() throws {
+        let db = try makeDatabase()
+        XCTAssertEqual(try db.dirtyReferencePDFCount(), 0)
+    }
+
+    func testDirtyReferencePDFCountOnlyCountsDirtyReferencePDFRows() throws {
+        let db = try makeDatabase()
+        try db.dbWriter.write { db in
+            // Two dirty referencePDF rows — should be counted.
+            try db.execute(sql: """
+                INSERT INTO syncState(entityType, entityId, isDirty, pushInFlight)
+                VALUES('referencePDF', '1', 1, 0), ('referencePDF', '2', 1, 0)
+            """)
+            // Clean referencePDF row — must NOT count.
+            try db.execute(sql: """
+                INSERT INTO syncState(entityType, entityId, isDirty, pushInFlight)
+                VALUES('referencePDF', '3', 0, 0)
+            """)
+            // Dirty row of a different entityType — must NOT count.
+            try db.execute(sql: """
+                INSERT INTO syncState(entityType, entityId, isDirty, pushInFlight)
+                VALUES('reference', '99', 1, 0)
+            """)
+        }
+        XCTAssertEqual(try db.dirtyReferencePDFCount(), 2)
+    }
 }
