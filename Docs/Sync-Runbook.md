@@ -88,6 +88,25 @@ rm "$HOME/Library/Application Support/Rubien/sync-engine-state.bin"
 
 To wipe the iCloud copy (can't be undone): use the CloudKit Dashboard "Delete Zone" action in the Library zone. The next app launch with sync enabled will re-upload everything as a fresh baseline.
 
+### 8. Schema migrations (v1 → v2 → vN)
+
+`rubien-cli sync status` reports the live schema version under `schemaVersion`. The constant lives at `AppDatabase.currentSchemaVersion` and must be bumped in lock-step with each new `migrator.registerMigration(...)` block.
+
+- **v1** (shipped) — initial schema. CloudKit container live with real data.
+- **v2** (B8) — added per-device `pdfCache` + `pdfUploadQueue` tables, dropped the `reference.pdfPath` column. Backfills existing pdfPaths into both tables with `contentHash='pending'` (the push path re-hashes on first send).
+
+**Forward-only.** Migrations are one-way. A v1 binary opening a v2 DB errors with `no such column: pdfPath` (the failure mode that hit the dev when the worktree migrated the live library before the matching binary shipped). Always upgrade the binary first, then let it migrate the DB on launch.
+
+**Cross-device skew.** A v1 device on the same iCloud account does not push `CDReferencePDF` records — those are introduced by v2. Once that device upgrades and runs the v2 migration, its existing PDFs ride the upload queue to the cloud and become visible to all other v2 devices.
+
+**Procedure for v3+.**
+
+1. Add a new `migrator.registerMigration("v3") { db in ... }` block in `AppDatabase.swift`. Never edit v2 (or v1).
+2. Bump `AppDatabase.currentSchemaVersion = "v3"`.
+3. Update the `XCTAssertEqual(json?["schemaVersion"] as? String, "vN")` assertion in `Tests/RubienCLITests/SyncStatusCommandTests.swift`.
+4. Add a one-paragraph entry to this section summarizing what changed and any forward/backward-compat implications.
+5. If the change adds a column to a synced table or alters a CloudKit record shape, also follow the rules in `CLAUDE.md`'s Sync section (CKRecord field names match DB columns; never remove fields; `SyncSchemaInvariantTests` must stay green).
+
 ## Known follow-ups
 
 - A-pks migration (UUID primary keys) — currently using stringified Int64 rowIDs; two devices inserting independently offline can collide on rowID. Sync one device first before inserting on the second until A-pks ships.
