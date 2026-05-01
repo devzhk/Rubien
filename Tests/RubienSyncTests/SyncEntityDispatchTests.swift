@@ -454,6 +454,46 @@ final class SyncEntityDispatchTests: XCTestCase {
         }
     }
 
+    func testBuildPushRecordReferencePDFRecomputesPendingHash() throws {
+        // The v2 migration backfilled existing reference.pdfPath rows into
+        // pdfCache with contentHash='pending' (skipped hashing to keep launch
+        // fast). On first push, buildPushRecord must recompute the real
+        // SHA-256 and persist it, so peers don't receive a placeholder they
+        // can't verify against.
+        let pdfsDir = AppDatabase.pdfStorageURL
+        try FileManager.default.createDirectory(at: pdfsDir, withIntermediateDirectories: true)
+        let filename = "pending-\(UUID().uuidString)_paper.pdf"
+        let fileURL = pdfsDir.appendingPathComponent(filename)
+        let bytes = Data("%PDF-content-with-known-hash-\(UUID().uuidString)".utf8)
+        try bytes.write(to: fileURL)
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        let expectedHash = try PDFContentHasher.sha256(of: fileURL)
+
+        try db.dbWriter.write { db in
+            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(40, 'r', ?, ?)", arguments: [Date(), Date()])
+            try db.execute(sql: """
+                INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
+                VALUES(40, ?, 'pending', 1, ?, ?)
+            """, arguments: [filename, Date(), Date()])
+
+            let record = try SyncEntityType.referencePDF.buildPushRecord(
+                db: db,
+                entityId: "40",
+                systemFields: nil
+            )
+            XCTAssertNotNil(record)
+            let pushedHash = record?[ReferencePDFRecord.RecordField.contentHash] as? String
+            XCTAssertEqual(pushedHash, expectedHash, "pushed hash must be the recomputed SHA-256, not 'pending'")
+            XCTAssertEqual(pushedHash?.count, 64, "SHA-256 hex digest is 64 chars")
+
+            let storedHash = try String.fetchOne(db,
+                sql: "SELECT contentHash FROM pdfCache WHERE referenceId=40")
+            XCTAssertEqual(storedHash, expectedHash,
+                           "recomputed hash must be persisted so subsequent pushes don't re-hash")
+        }
+    }
+
     func testBuildPushRecordReferencePDFReturnsNilWhenFileVanished() throws {
         // Cache row says materialized but file is gone (drift case).
         try db.dbWriter.write { db in

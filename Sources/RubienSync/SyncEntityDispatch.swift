@@ -167,11 +167,26 @@ extension SyncEntityType {
             let filename: String = row["localFilename"]
             let assetURL = AppDatabase.pdfStorageURL.appendingPathComponent(filename)
             guard FileManager.default.fileExists(atPath: assetURL.path) else { return nil }
+            // Resolve "pending" placeholders. The v2 migration backfilled
+            // existing pdfPaths with contentHash='pending' (skipping the
+            // hash to keep launch fast). Recompute on first push so peers
+            // receive a real SHA-256 they can verify against, and persist
+            // the result so subsequent pushes don't re-hash.
+            // PDFContentHasher streams in 1 MB chunks — safe inside the
+            // push transaction.
+            var contentHash: String = row["contentHash"]
+            if contentHash == "pending" {
+                contentHash = try PDFContentHasher.sha256(of: assetURL)
+                try db.execute(
+                    sql: "UPDATE pdfCache SET contentHash = ? WHERE referenceId = ?",
+                    arguments: [contentHash, id]
+                )
+            }
             let payload = ReferencePDFRecord(
                 referenceId: id,
                 assetURL: assetURL,
                 assetVersion: row["assetVersion"],
-                contentHash: row["contentHash"],
+                contentHash: contentHash,
                 originalFilename: filename,
                 // dateModified at push time = now. Per Task 10's reviewer:
                 // don't reuse pdfCache.lastOpenedAt (that's a UX timestamp,
