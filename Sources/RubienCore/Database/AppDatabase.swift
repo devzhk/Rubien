@@ -23,6 +23,10 @@ enum ImportClassification: Equatable {
 }
 
 public final class AppDatabase: Sendable {
+    /// Bumped whenever a new migration is registered. Surfaced in
+    /// `rubien-cli sync status` JSON for diagnostics.
+    public static let currentSchemaVersion = "v2"
+
     public let dbWriter: any DatabaseWriter
 
     public init(_ dbWriter: any DatabaseWriter) throws {

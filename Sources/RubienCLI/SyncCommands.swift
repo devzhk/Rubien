@@ -114,7 +114,7 @@ struct StatusCommand: ParsableCommand {
             "tombstoneCount": ["confirmed": confirmed, "unconfirmed": unconfirmed],
             "pdfBackfillRemaining": pdfBackfillRemaining,
             "syncEngineState": syncEngineState,
-            "schemaVersion": "v1"
+            "schemaVersion": AppDatabase.currentSchemaVersion
         ]
 
         let data = try JSONSerialization.data(

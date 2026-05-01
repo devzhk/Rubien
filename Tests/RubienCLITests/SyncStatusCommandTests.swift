@@ -33,5 +33,10 @@ final class SyncStatusCommandTests: XCTestCase {
         ] {
             XCTAssertNotNil(json?[key], "missing field '\(key)' in JSON output")
         }
+
+        // schemaVersion must reflect the current AppDatabase migration tag,
+        // not the placeholder v1 the CLI shipped before B8 v2 landed.
+        XCTAssertEqual(json?["schemaVersion"] as? String, "v2",
+                       "schemaVersion should match AppDatabase.currentSchemaVersion")
     }
 }
