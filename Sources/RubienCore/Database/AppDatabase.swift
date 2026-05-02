@@ -84,7 +84,7 @@ public final class AppDatabase: Sendable {
                 t.column("evidenceBundleHash", .text)
                 t.column("verifiedAt", .datetime)
                 t.column("reviewedBy", .text)
-                t.column("readingStatus", .text).notNull().defaults(to: ReadingStatus.unread.rawValue)
+                t.column("readingStatus", .text).notNull().defaults(to: ReadingStatus.unread)
                 // Extended metadata (P0)
                 t.column("publisher", .text)
                 t.column("publisherPlace", .text)
@@ -2333,7 +2333,7 @@ public struct ReferenceFilter: Sendable {
     public var referenceType: ReferenceType? = nil
     public var titleOnly: Bool = false
     public var hasPDF: Bool? = nil
-    public var readingStatus: ReadingStatus? = nil
+    public var readingStatus: String? = nil
 
     /// FTS5 columns to constrain the keyword search to. Empty means "all
     /// indexed columns" (the existing default behavior). When non-empty,
@@ -2593,7 +2593,7 @@ extension AppDatabase {
             request = request.filter(literal: predicate)
         }
         if let rs = filter.readingStatus {
-            request = request.filter(Reference.Columns.readingStatus == rs.rawValue)
+            request = request.filter(Reference.Columns.readingStatus == rs)
         }
 
         // ── 3. Order + limit ──────────────────────────────────────────────
@@ -2717,6 +2717,129 @@ extension AppDatabase {
             )
         }
     }
+
+    /// Rename a single-select option on a PropertyDefinition AND bulk-update
+    /// every reference row that points to the old value so the rename actually
+    /// takes effect across the library.
+    ///
+    /// For default properties bound to a Reference column (e.g. Status →
+    /// `readingStatus`), the bulk-update writes to that column directly. For
+    /// user-created custom properties, it writes to `propertyValue.value`.
+    /// Both paths and the optionsJSON update happen in the same transaction
+    /// so observers either see the consistent post-rename state or nothing.
+    ///
+    /// Throws `PropertyOptionError.optionNotFound` if the property exists but
+    /// has no option matching `from`. No-op if `from == to`.
+    public func renamePropertyOption(propertyId: Int64, from: String, to: String) throws {
+        guard from != to else { return }
+        try dbWriter.write { db in
+            guard var prop = try PropertyDefinition.fetchOne(db, id: propertyId) else {
+                throw PropertyOptionError.propertyNotFound
+            }
+            var options = prop.options
+            guard let idx = options.firstIndex(where: { $0.value == from }) else {
+                throw PropertyOptionError.optionNotFound
+            }
+            options[idx] = SelectOption(value: to, color: options[idx].color)
+            prop.options = options
+            prop.dateModified = Date()
+            try prop.update(db)
+
+            // Bulk-update affected rows. Type is locked from option mutations
+            // (see CLI gate), but Status (readingStatus) and any custom
+            // single-select property may be renamed.
+            if let key = prop.defaultFieldKey,
+               Self.builtInSingleSelectKeys.contains(key) {
+                // Reference column rename. Column name comes from a fixed
+                // allow-list to avoid SQL injection through `defaultFieldKey`.
+                try db.execute(
+                    sql: "UPDATE reference SET \(key) = ? WHERE \(key) = ?",
+                    arguments: [to, from]
+                )
+            } else {
+                // Custom singleSelect: value lives in propertyValue rows.
+                try db.execute(
+                    sql: "UPDATE propertyValue SET value = ? WHERE propertyId = ? AND value = ?",
+                    arguments: [to, propertyId, from]
+                )
+            }
+        }
+    }
+
+    /// Delete a single-select option from a PropertyDefinition. References
+    /// that currently point to the deleted option are reassigned to
+    /// `replaceWith` if non-nil; otherwise the operation throws
+    /// `PropertyOptionError.optionInUse` so the caller can prompt for a
+    /// replacement instead of silently orphaning data.
+    public func deletePropertyOption(propertyId: Int64, value: String, replaceWith: String? = nil) throws {
+        try dbWriter.write { db in
+            guard var prop = try PropertyDefinition.fetchOne(db, id: propertyId) else {
+                throw PropertyOptionError.propertyNotFound
+            }
+            var options = prop.options
+            guard options.contains(where: { $0.value == value }) else {
+                throw PropertyOptionError.optionNotFound
+            }
+
+            // Count affected references first so we can decide whether to
+            // throw .optionInUse or proceed.
+            let affectedCount: Int
+            if let key = prop.defaultFieldKey,
+               Self.builtInSingleSelectKeys.contains(key) {
+                affectedCount = try Int.fetchOne(
+                    db,
+                    sql: "SELECT COUNT(*) FROM reference WHERE \(key) = ?",
+                    arguments: [value]
+                ) ?? 0
+            } else {
+                affectedCount = try Int.fetchOne(
+                    db,
+                    sql: "SELECT COUNT(*) FROM propertyValue WHERE propertyId = ? AND value = ?",
+                    arguments: [propertyId, value]
+                ) ?? 0
+            }
+
+            if affectedCount > 0 {
+                guard let replacement = replaceWith else {
+                    throw PropertyOptionError.optionInUse(count: affectedCount)
+                }
+                guard options.contains(where: { $0.value == replacement }) || replacement == value else {
+                    // Replacement must already exist as another option (we're
+                    // about to delete `value`, so it can't be the replacement).
+                    throw PropertyOptionError.replacementNotFound(replacement)
+                }
+                if let key = prop.defaultFieldKey,
+                   Self.builtInSingleSelectKeys.contains(key) {
+                    try db.execute(
+                        sql: "UPDATE reference SET \(key) = ? WHERE \(key) = ?",
+                        arguments: [replacement, value]
+                    )
+                } else {
+                    try db.execute(
+                        sql: "UPDATE propertyValue SET value = ? WHERE propertyId = ? AND value = ?",
+                        arguments: [replacement, propertyId, value]
+                    )
+                }
+            }
+
+            options.removeAll { $0.value == value }
+            prop.options = options
+            prop.dateModified = Date()
+            try prop.update(db)
+        }
+    }
+
+    /// Allow-list of `defaultFieldKey` values that bind a PropertyDefinition
+    /// to a Reference column (vs. living in `propertyValue` like custom
+    /// properties). Used by the option-mutation paths to interpolate column
+    /// names safely without a generic identifier-quoting routine.
+    fileprivate static let builtInSingleSelectKeys: Set<String> = [
+        "readingStatus",
+        // `referenceType` is on this list for completeness but is locked
+        // from option mutations at the CLI/UI gate (Type = BibTeX bucket,
+        // not a free-form organization axis — see Phase 3).
+        "referenceType",
+    ]
 
     public func observePropertyDefinitions() -> AnyPublisher<[PropertyDefinition], Error> {
         observePublisher { db in

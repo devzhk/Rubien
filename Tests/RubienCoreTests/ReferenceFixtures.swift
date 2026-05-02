@@ -8,7 +8,7 @@ enum ReferenceFixtures {
         authors: [AuthorName] = [],
         year: Int? = nil,
         journal: String? = nil,
-        readingStatus: ReadingStatus = .unread,
+        readingStatus: String = ReadingStatus.unread,
         referenceType: ReferenceType = .journalArticle,
         dateAdded: Date = Date()
     ) -> Reference {

@@ -149,3 +149,20 @@ extension PropertyDefinition: FetchableRecord, MutablePersistableRecord {
         case id, name, type, optionsJSON, sortOrder, isDefault, defaultFieldKey, isVisible, dateModified
     }
 }
+
+// MARK: - Option mutation errors
+
+/// Surfaced by `AppDatabase.renamePropertyOption` and `deletePropertyOption`
+/// when the requested mutation can't be performed safely. Callers decide
+/// whether to abort, prompt the user for a replacement, or log + skip.
+public enum PropertyOptionError: Error, Equatable {
+    /// No PropertyDefinition with the given id.
+    case propertyNotFound
+    /// The target option value isn't present in the property's `options` list.
+    case optionNotFound
+    /// The option being deleted is in active use by `count` rows and the
+    /// caller didn't supply a `replaceWith` value to migrate them to.
+    case optionInUse(count: Int)
+    /// `replaceWith` was supplied but doesn't match any other existing option.
+    case replacementNotFound(String)
+}

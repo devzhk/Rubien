@@ -65,7 +65,7 @@ public enum FieldResolver {
         case .dateAdded:     return .date(row.dateAdded)
         case .dateModified:  return .date(row.dateModified)
         case .referenceType: return .singleSelect(row.referenceType.rawValue)
-        case .readingStatus: return .singleSelect(row.readingStatus.rawValue)
+        case .readingStatus: return .singleSelect(row.readingStatus)
         case .tags:
             guard let rid = row.id else { return .multiSelect([]) }
             let ids = tagMap[rid]?.compactMap { $0.id.map(String.init) } ?? []

@@ -62,6 +62,20 @@ func printJSONError(_ message: String) {
     }
 }
 
+// MARK: - Status validation
+
+/// Live values of the Status (`readingStatus`) PropertyDefinition. Status is
+/// user-extensible post-Phase-2, so CLI validation can't be a static enum
+/// list — it must reflect whatever the user has configured. Falls back to
+/// the 4 seeded built-ins if the def is missing for any reason.
+func liveStatusOptionValues() throws -> [String] {
+    let defs = try AppDatabase.shared.fetchAllPropertyDefinitions()
+    if let def = defs.first(where: { $0.defaultFieldKey == "readingStatus" }) {
+        return def.options.map(\.value)
+    }
+    return ReadingStatus.builtIn
+}
+
 // MARK: - BibTeX Helpers
 
 /// Escape special BibTeX characters in a field value.
@@ -172,7 +186,7 @@ struct ReferenceDTO: Encodable {
         self.publisher = ref.publisher
         self.language = ref.language
         self.edition = ref.edition
-        self.readingStatus = ref.readingStatus.rawValue
+        self.readingStatus = ref.readingStatus
 
         let refValues = ref.id.flatMap { valuesByRef[$0] } ?? [:]
         let customDefs = defs.filter { !$0.isDefault }
@@ -385,12 +399,15 @@ struct List: ParsableCommand {
             if let k = keyword { filter.keyword = k }
             if hasPdf { filter.hasPDF = true }
             if let rs = readingStatus {
-                guard let status = ReadingStatus(rawValue: rs) else {
-                    let valid = ReadingStatus.allCases.map(\.rawValue).joined(separator: ", ")
+                // Status is user-extensible: validate against the live Status
+                // PropertyDefinition options instead of a fixed enum.
+                let liveOptions = try liveStatusOptionValues()
+                guard liveOptions.contains(rs) else {
+                    let valid = liveOptions.joined(separator: ", ")
                     printJSONError("Unknown reading status '\(rs)'. Valid: \(valid)")
                     throw ExitCode.failure
                 }
-                filter.readingStatus = status
+                filter.readingStatus = rs
             }
             if let rt = referenceType {
                 guard let type = ReferenceType(rawValue: rt) else {
@@ -548,12 +565,15 @@ struct Update: ParsableCommand {
         if let y = year { ref.year = y }
         if let a = authors { ref.authors = AuthorName.parseList(a) }
         if let rs = readingStatus {
-            guard let status = ReadingStatus(rawValue: rs) else {
-                let valid = ReadingStatus.allCases.map(\.rawValue).joined(separator: ", ")
+            // Status is user-extensible: validate against the live Status
+            // PropertyDefinition options instead of a fixed enum.
+            let liveOptions = try liveStatusOptionValues()
+            guard liveOptions.contains(rs) else {
+                let valid = liveOptions.joined(separator: ", ")
                 printJSONError("Unknown reading status '\(rs)'. Valid: \(valid)")
                 throw ExitCode.failure
             }
-            ref.readingStatus = status
+            ref.readingStatus = rs
         }
         if let rt = referenceType {
             guard let type = ReferenceType(rawValue: rt) else {
@@ -947,14 +967,29 @@ struct Properties: ParsableCommand {
     @Flag(name: .customLong("add-option"), help: "Append a select option to an existing property")
     var addOption = false
 
-    @Option(name: .long, help: "Property definition ID (with --rename, --show, --hide, --add-option, --set, --clear)")
+    @Flag(name: .customLong("rename-option"), help: "Rename a select option (requires --id, --from, --to). Bulk-updates affected reference rows.")
+    var renameOption = false
+
+    @Flag(name: .customLong("delete-option"), help: "Remove a select option (requires --id, --value). If the option is in use, supply --replace-with to migrate affected rows.")
+    var deleteOption = false
+
+    @Option(name: .long, help: "Property definition ID (with --rename, --show, --hide, --add-option, --rename-option, --delete-option, --set, --clear)")
     var id: Int64?
 
-    @Option(name: .long, help: "Option value (with --add-option or --set on select types)")
+    @Option(name: .long, help: "Option value (with --add-option, --delete-option, or --set on select types)")
     var value: String?
 
     @Option(name: .long, help: "Option color as hex (with --add-option, auto-assigned if omitted)")
     var color: String?
+
+    @Option(name: .customLong("from"), help: "Existing option value to rename (with --rename-option)")
+    var fromValue: String?
+
+    @Option(name: .customLong("to"), help: "New option value (with --rename-option)")
+    var toValue: String?
+
+    @Option(name: .customLong("replace-with"), help: "Replacement option for in-use values when deleting (with --delete-option)")
+    var replaceWith: String?
 
     @Flag(name: .long, help: "Upsert a property value on a reference (requires --reference, --id, --value)")
     var set = false
@@ -1059,8 +1094,8 @@ struct Properties: ParsableCommand {
                 printJSONError("Property \(propId) not found")
                 throw ExitCode.failure
             }
-            if prop.isDefault {
-                printJSONError("Cannot add options to built-in property '\(prop.name)'. Built-in select values are backed by enums and cannot be extended.")
+            if prop.isDefault, !Self.optionsMutable(for: prop) {
+                printJSONError(typeFixedHintMessage(propertyName: prop.name))
                 throw ExitCode.failure
             }
             guard prop.type == .singleSelect || prop.type == .multiSelect else {
@@ -1079,6 +1114,64 @@ struct Properties: ParsableCommand {
             try AppDatabase.shared.savePropertyDefinition(&prop)
             notifyLibraryChanged()
             printJSON(PropertyDefinitionDTO(from: prop))
+            return
+        }
+
+        if renameOption {
+            guard let propId = id, let from = fromValue, let to = toValue else {
+                printJSONError("--rename-option requires --id, --from, and --to")
+                throw ExitCode.failure
+            }
+            let defs = try AppDatabase.shared.fetchAllPropertyDefinitions()
+            guard let prop = defs.first(where: { $0.id == propId }) else {
+                printJSONError("Property \(propId) not found")
+                throw ExitCode.failure
+            }
+            if prop.isDefault, !Self.optionsMutable(for: prop) {
+                printJSONError(typeFixedHintMessage(propertyName: prop.name))
+                throw ExitCode.failure
+            }
+            do {
+                try AppDatabase.shared.renamePropertyOption(propertyId: propId, from: from, to: to)
+            } catch let error as PropertyOptionError {
+                printJSONError(describePropertyOptionError(error))
+                throw ExitCode.failure
+            }
+            notifyLibraryChanged()
+            let updated = try AppDatabase.shared.fetchAllPropertyDefinitions()
+                .first { $0.id == propId }!
+            printJSON(PropertyDefinitionDTO(from: updated))
+            return
+        }
+
+        if deleteOption {
+            guard let propId = id, let v = value else {
+                printJSONError("--delete-option requires --id and --value")
+                throw ExitCode.failure
+            }
+            let defs = try AppDatabase.shared.fetchAllPropertyDefinitions()
+            guard let prop = defs.first(where: { $0.id == propId }) else {
+                printJSONError("Property \(propId) not found")
+                throw ExitCode.failure
+            }
+            if prop.isDefault, !Self.optionsMutable(for: prop) {
+                printJSONError(typeFixedHintMessage(propertyName: prop.name))
+                throw ExitCode.failure
+            }
+            do {
+                try AppDatabase.shared.deletePropertyOption(
+                    propertyId: propId,
+                    value: v,
+                    replaceWith: replaceWith
+                )
+            } catch let error as PropertyOptionError {
+                printJSONError(describePropertyOptionError(error))
+                throw ExitCode.failure
+            }
+            notifyLibraryChanged()
+            let updated = try AppDatabase.shared.fetchAllPropertyDefinitions()
+                .first { $0.id == propId }!
+            printJSON(PropertyDefinitionDTO(from: updated))
             return
         }
 
@@ -1167,6 +1260,33 @@ struct Properties: ParsableCommand {
             ? try AppDatabase.shared.fetchVisiblePropertyDefinitions()
             : try AppDatabase.shared.fetchAllPropertyDefinitions()
         printJSON(defs.map(PropertyDefinitionDTO.init))
+    }
+
+    /// Defaults bound to a Reference column whose options users may now edit
+    /// post-Phase-2. Status is the only one currently; Type stays locked.
+    private static func optionsMutable(for prop: PropertyDefinition) -> Bool {
+        prop.defaultFieldKey == "readingStatus"
+    }
+
+    /// Error message shown when a user tries to add/rename/delete options on
+    /// a built-in property whose options are intentionally fixed (currently
+    /// only Type). Points at the right tools for organizational categorization.
+    private func typeFixedHintMessage(propertyName: String) -> String {
+        "'\(propertyName)' is a fixed built-in property because it drives BibTeX/RIS export buckets. For organization, use Tags ('rubien-cli tags create') or create a custom singleSelect property ('rubien-cli properties --create')."
+    }
+
+    /// Map a `PropertyOptionError` to a user-visible CLI error string.
+    private func describePropertyOptionError(_ error: PropertyOptionError) -> String {
+        switch error {
+        case .propertyNotFound:
+            return "Property not found"
+        case .optionNotFound:
+            return "Option not found in this property"
+        case .optionInUse(let count):
+            return "Cannot delete: \(count) reference\(count == 1 ? "" : "s") still use this option. Pass --replace-with <existing-value> to migrate them."
+        case .replacementNotFound(let name):
+            return "Replacement option '\(name)' is not an existing option on this property."
+        }
     }
 
     private func parseOptions(_ raw: String?) -> [SelectOption] {

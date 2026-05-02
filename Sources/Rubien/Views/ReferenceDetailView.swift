@@ -295,13 +295,14 @@ struct ReferenceDetailView: View {
         case "readingStatus":
             InlineSingleSelectRow(
                 label: prop.name,
-                value: editedRef.readingStatus.label,
+                value: editedRef.readingStatus,
                 options: prop.options,
                 onSelect: { value in
-                    if let status = ReadingStatus.allCases.first(where: { $0.label == value }) {
-                        editedRef.readingStatus = status
-                        commitDefaultSave()
-                    }
+                    // Post-Phase-2: the option's `value` is the canonical
+                    // string identity for the status — assign it directly.
+                    // User-added options also flow through this path.
+                    editedRef.readingStatus = value
+                    commitDefaultSave()
                 }
             )
         case "tags":

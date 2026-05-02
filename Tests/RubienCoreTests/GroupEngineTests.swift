@@ -5,7 +5,7 @@ final class GroupEngineTests: XCTestCase {
 
     private func makeRef(
         id: Int64,
-        readingStatus: ReadingStatus = .unread,
+        readingStatus: String = ReadingStatus.unread,
         dateAdded: Date = Date()
     ) -> Reference {
         ReferenceFixtures.makeRef(id: id, title: "ref\(id)", readingStatus: readingStatus, dateAdded: dateAdded)
@@ -13,10 +13,10 @@ final class GroupEngineTests: XCTestCase {
 
     func testGroupBySingleSelect() {
         let rows = [
-            makeRef(id: 1, readingStatus: .reading),
-            makeRef(id: 2, readingStatus: .read),
-            makeRef(id: 3, readingStatus: .reading),
-            makeRef(id: 4, readingStatus: .unread),
+            makeRef(id: 1, readingStatus: ReadingStatus.reading),
+            makeRef(id: 2, readingStatus: ReadingStatus.read),
+            makeRef(id: 3, readingStatus: ReadingStatus.reading),
+            makeRef(id: 4, readingStatus: ReadingStatus.unread),
         ]
         let config = GroupConfig(target: .builtin(.readingStatus))
         let buckets = GroupEngine.apply(rows, config: config, context: PipelineContext())
@@ -61,9 +61,9 @@ final class GroupEngineTests: XCTestCase {
 
     func testCustomOrderOverridesNatural() {
         let rows = [
-            makeRef(id: 1, readingStatus: .reading),
-            makeRef(id: 2, readingStatus: .read),
-            makeRef(id: 3, readingStatus: .unread),
+            makeRef(id: 1, readingStatus: ReadingStatus.reading),
+            makeRef(id: 2, readingStatus: ReadingStatus.read),
+            makeRef(id: 3, readingStatus: ReadingStatus.unread),
         ]
         let config = GroupConfig(
             target: .builtin(.readingStatus),

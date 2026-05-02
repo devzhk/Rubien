@@ -47,7 +47,7 @@ final class ReferenceRecordTests: XCTestCase {
             evidenceBundleHash: "sha256:abcdef",
             verifiedAt: fixedDate(7200),
             reviewedBy: "alice",
-            readingStatus: .read,
+            readingStatus: ReadingStatus.read,
             publisher: "ACM",
             publisherPlace: "New York",
             edition: "1st",
@@ -180,7 +180,7 @@ final class ReferenceRecordTests: XCTestCase {
         XCTAssertNil(decoded.journal)
         XCTAssertNil(decoded.doi)
         XCTAssertEqual(decoded.referenceType, .journalArticle, "default type round-trips")
-        XCTAssertEqual(decoded.readingStatus, .unread)
+        XCTAssertEqual(decoded.readingStatus, ReadingStatus.unread)
         XCTAssertEqual(decoded.verificationStatus, .legacy)
     }
 
@@ -195,12 +195,15 @@ final class ReferenceRecordTests: XCTestCase {
         record[Reference.RecordField.dateAdded] = fixedDate(0)
         record[Reference.RecordField.dateModified] = fixedDate(0)
         record[Reference.RecordField.referenceType] = "SomeFutureType"  // unknown rawValue
-        record[Reference.RecordField.readingStatus] = "obsessed"         // unknown
+        record[Reference.RecordField.readingStatus] = "obsessed"         // user-added status
         record[Reference.RecordField.verificationStatus] = "quantum"      // unknown
 
         let decoded = Reference(record: record)
         XCTAssertEqual(decoded.referenceType, .other, "unknown type falls back to .other")
-        XCTAssertEqual(decoded.readingStatus, .unread, "unknown readingStatus falls back to .unread")
+        // Post-Phase-2: readingStatus is free-form String, so user-added
+        // values pass through unchanged (no enum coercion). Sync forward-compat
+        // is now structurally trivial — peers see whatever the writer wrote.
+        XCTAssertEqual(decoded.readingStatus, "obsessed", "free-form readingStatus passes through unchanged")
         XCTAssertEqual(decoded.verificationStatus, .legacy, "unknown verificationStatus falls back to .legacy")
     }
 

@@ -252,7 +252,12 @@ struct FilterEditorPopover: View {
     private func selectOptions(for target: FieldTarget) -> [(key: String, label: String)] {
         switch target {
         case .builtin(.readingStatus):
-            return ReadingStatus.allCases.map { (key: $0.rawValue, label: $0.label) }
+            // Status is user-extensible: pull options from the live Status
+            // PropertyDefinition. Falls back to the 4 built-ins if missing.
+            if let def = propertyDefs.first(where: { $0.defaultFieldKey == "readingStatus" }) {
+                return def.options.map { (key: $0.value, label: $0.value) }
+            }
+            return ReadingStatus.builtIn.map { (key: $0, label: $0) }
         case .builtin(.referenceType):
             return ReferenceType.allCases.map { (key: $0.rawValue, label: $0.rawValue) }
         case .builtin(.tags):

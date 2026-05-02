@@ -160,7 +160,7 @@ extension Reference {
         record[RecordField.evidenceBundleHash]    = evidenceBundleHash
         record[RecordField.verifiedAt]            = verifiedAt
         record[RecordField.reviewedBy]            = reviewedBy
-        record[RecordField.readingStatus]         = readingStatus.rawValue
+        record[RecordField.readingStatus]         = readingStatus
         record[RecordField.publisher]             = publisher
         record[RecordField.publisherPlace]        = publisherPlace
         record[RecordField.edition]               = edition
@@ -228,8 +228,10 @@ extension Reference {
             .flatMap(MetadataSource.init(rawValue:))
         self.verificationStatus = (record[RecordField.verificationStatus] as? String)
             .flatMap(VerificationStatus.init(rawValue:)) ?? .legacy
-        self.readingStatus = (record[RecordField.readingStatus] as? String)
-            .flatMap(ReadingStatus.init(rawValue:)) ?? .unread
+        // Post-Phase-2: readingStatus is a free-form String. Pass through the
+        // CKRecord value unchanged; if missing, fall back to the seeded
+        // built-in "Unread".
+        self.readingStatus = (record[RecordField.readingStatus] as? String) ?? ReadingStatus.unread
 
         self.acceptedByRuleID      = record[RecordField.acceptedByRuleID] as? String
         self.recordKey             = record[RecordField.recordKey] as? String

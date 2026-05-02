@@ -8,7 +8,7 @@ final class SortEngineTests: XCTestCase {
         title: String = "Untitled",
         year: Int? = nil,
         journal: String? = nil,
-        readingStatus: ReadingStatus = .unread,
+        readingStatus: String = ReadingStatus.unread,
         dateAdded: Date = Date()
     ) -> Reference {
         ReferenceFixtures.makeRef(

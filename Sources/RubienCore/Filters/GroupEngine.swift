@@ -82,12 +82,11 @@ public enum GroupEngine {
     }
 
     /// Maps a raw resolver key to a human-readable label for group headers.
-    /// Built-in enums with a separate `.label` (currently `ReadingStatus`)
-    /// need this translation; other cases pass through unchanged.
+    /// Post-Phase-2 the `readingStatus` value IS its own label (no enum
+    /// indirection), so most targets just pass the key through; only `tags`
+    /// has a special note.
     private static func readableLabel(forKey key: String, target: FieldTarget) -> String {
         switch target {
-        case .builtin(.readingStatus):
-            return ReadingStatus(rawValue: key)?.label ?? key
         case .builtin(.tags):
             // Tag keys are stringified ids; caller should resolve via tagMap
             // for display. Fall back to the key itself (bucket will show an

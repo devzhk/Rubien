@@ -230,7 +230,7 @@ struct ReferenceTableView: View {
         case .title:           return KeyPathComparator(\.title, order: order)
         case .authors:         return KeyPathComparator(\.authorsNormalized, order: order)
         case .dateAdded:       return KeyPathComparator(\.dateAdded, order: order)
-        case .readingStatus:   return KeyPathComparator(\.readingStatus.rawValue, order: order)
+        case .readingStatus:   return KeyPathComparator(\.readingStatus, order: order)
         default:               return nil
         }
     }
@@ -266,7 +266,7 @@ struct ReferenceTableView: View {
         case \Reference.dateModified:     return .dateModified
         case \Reference.year:             return .year
         case \Reference.journal:          return .journal
-        case \Reference.readingStatus.rawValue: return .readingStatus
+        case \Reference.readingStatus: return .readingStatus
         default: return .dateAdded
         }
     }
@@ -591,8 +591,12 @@ private struct ReferenceTableContent: View {
             .width(min: 60, ideal: 120)
             .customizationID(ColumnIdentifier.tags.rawValue)
 
-            TableColumn(ColumnIdentifier.readingStatus.header, value: \.readingStatus.rawValue) { ref in
-                ReadingStatusCell(reference: ref, onUpdate: onUpdateReference)
+            TableColumn(ColumnIdentifier.readingStatus.header, value: \.readingStatus) { ref in
+                ReadingStatusCell(
+                    reference: ref,
+                    propertyDefs: customProperties,
+                    onUpdate: onUpdateReference
+                )
             }
             .width(min: 70, ideal: 90)
             .customizationID(ColumnIdentifier.readingStatus.rawValue)
@@ -693,28 +697,43 @@ private struct ReferenceTableContent: View {
 
 struct ReadingStatusCell: View {
     let reference: Reference
+    let propertyDefs: [PropertyDefinition]
     let onUpdate: (Reference) -> Void
 
     @State private var showPicker = false
+
+    /// Live Status options driven by the seeded PropertyDefinition (post-Phase-2
+    /// users can add/rename/delete options). Falls back to the 4 built-ins.
+    private var statusOptions: [SelectOption] {
+        if let def = propertyDefs.first(where: { $0.defaultFieldKey == "readingStatus" }) {
+            return def.options
+        }
+        return [
+            SelectOption(value: ReadingStatus.unread,  color: "#8E8E93"),
+            SelectOption(value: ReadingStatus.reading, color: "#007AFF"),
+            SelectOption(value: ReadingStatus.skimmed, color: "#FF9500"),
+            SelectOption(value: ReadingStatus.read,    color: "#34C759"),
+        ]
+    }
 
     var body: some View {
         Button {
             showPicker = true
         } label: {
-            Text(reference.readingStatus.label)
+            Text(reference.readingStatus)
                 .font(.callout)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 1)
-                .chipBackground(statusColor(for: reference.readingStatus))
+                .chipBackground(color(forStatus: reference.readingStatus))
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showPicker) {
             VStack(alignment: .leading, spacing: 0) {
-                ForEach(ReadingStatus.allCases, id: \.self) { status in
-                    let isSelected = status == reference.readingStatus
+                ForEach(statusOptions, id: \.value) { option in
+                    let isSelected = option.value == reference.readingStatus
                     Button {
                         var updated = reference
-                        updated.readingStatus = status
+                        updated.readingStatus = option.value
                         onUpdate(updated)
                         showPicker = false
                     } label: {
@@ -722,11 +741,11 @@ struct ReadingStatusCell: View {
                             Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                                 .font(.system(size: 13))
                                 .foregroundStyle(isSelected ? Color.accentColor : .secondary)
-                            Text(status.label)
+                            Text(option.value)
                                 .font(.callout)
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 1)
-                                .chipBackground(statusColor(for: status))
+                                .chipBackground(Color(hex: option.color))
                             Spacer()
                         }
                         .contentShape(Rectangle())
@@ -741,13 +760,13 @@ struct ReadingStatusCell: View {
         }
     }
 
-    private func statusColor(for status: ReadingStatus) -> Color {
-        switch status {
-        case .unread: return .gray
-        case .reading: return .blue
-        case .skimmed: return .orange
-        case .read: return .green
+    /// Resolve a status value to a chip color via the SelectOption.color field.
+    /// Unknown values (e.g. a custom status that was deleted) get a neutral gray.
+    private func color(forStatus value: String) -> Color {
+        if let opt = statusOptions.first(where: { $0.value == value }) {
+            return Color(hex: opt.color)
         }
+        return .gray
     }
 }
 

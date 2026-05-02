@@ -452,25 +452,85 @@ final class RubienCLITests: XCTestCase {
         XCTAssertEqual(stillThere?["name"] as? String, originalName, "name must be unchanged")
     }
 
-    func testPropertiesAddOptionToDefaultIsRefused() throws {
+    /// Type is permanently locked from option mutations because it drives
+    /// BibTeX/RIS export buckets. The error message must point users at the
+    /// alternatives (Tags or custom singleSelect properties).
+    func testPropertiesAddOptionToTypeIsRefused() throws {
         try skipIfBinaryMissing()
         let all = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
-        // Find a default singleSelect — Type / Reading Status both qualify.
-        guard let defaultSelect = all.first(where: {
-            ($0["isDefault"] as? Bool) == true && ($0["type"] as? String) == "singleSelect"
-        }), let idStr = defaultSelect["id"] as? String else {
-            XCTFail("No default singleSelect property seeded")
+        guard let typeProp = all.first(where: { ($0["defaultFieldKey"] as? String) == "referenceType" }),
+              let idStr = typeProp["id"] as? String else {
+            XCTFail("Type PropertyDefinition not seeded")
             return
         }
-        let originalCount = (defaultSelect["options"] as? [Any])?.count ?? 0
+        let originalCount = (typeProp["options"] as? [Any])?.count ?? 0
 
         let result = try runCLI(["properties", "--add-option", "--id", idStr, "--value", "Bogus"])
-        XCTAssertNotEqual(result.exitCode, 0, "--add-option on a built-in property should fail")
+        XCTAssertNotEqual(result.exitCode, 0, "--add-option on Type must fail")
+        XCTAssertTrue(
+            result.stdout.contains("BibTeX") || result.stdout.contains("Tags"),
+            "error must point user at the right alternative (Tags or custom property): \(result.stdout)"
+        )
 
         let after = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
         let stillThere = after.first { ($0["id"] as? String) == idStr }
         let nowCount = (stillThere?["options"] as? [Any])?.count ?? 0
         XCTAssertEqual(nowCount, originalCount, "options list must be unchanged")
+    }
+
+    /// Status is user-extensible post-Phase-2: --add-option must succeed on it.
+    /// We add a unique option, verify it lands, and clean up via --delete-option
+    /// so the test can run multiple times without drift.
+    func testPropertiesAddOptionToStatusSucceeds() throws {
+        try skipIfBinaryMissing()
+        let all = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
+        guard let statusProp = all.first(where: { ($0["defaultFieldKey"] as? String) == "readingStatus" }),
+              let idStr = statusProp["id"] as? String else {
+            XCTFail("Status PropertyDefinition not seeded")
+            return
+        }
+        let testValue = "TestStatus-\(UUID().uuidString.prefix(8))"
+        defer { _ = try? runCLI(["properties", "--delete-option", "--id", idStr, "--value", testValue]) }
+
+        let result = try runCLI(["properties", "--add-option", "--id", idStr, "--value", testValue])
+        XCTAssertEqual(result.exitCode, 0, "Status options are user-extensible: \(result.stderr)")
+
+        let after = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
+        let updated = after.first { ($0["id"] as? String) == idStr }
+        let optionValues = (updated?["options"] as? [[String: Any]])?.compactMap { $0["value"] as? String } ?? []
+        XCTAssertTrue(optionValues.contains(testValue), "added option must appear in the live options list")
+    }
+
+    /// Renaming a Status option via the CLI bulk-updates the affected
+    /// reference rows. Smoke-tests the round-trip end-to-end against the
+    /// real binary.
+    func testPropertiesRenameOptionRoundTrip() throws {
+        try skipIfBinaryMissing()
+        let all = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
+        guard let statusProp = all.first(where: { ($0["defaultFieldKey"] as? String) == "readingStatus" }),
+              let idStr = statusProp["id"] as? String else {
+            XCTFail("Status PropertyDefinition not seeded")
+            return
+        }
+        let original = "RenameTest-\(UUID().uuidString.prefix(8))"
+        let renamed = "RenameTest-\(UUID().uuidString.prefix(8))"
+        defer {
+            _ = try? runCLI(["properties", "--delete-option", "--id", idStr, "--value", original])
+            _ = try? runCLI(["properties", "--delete-option", "--id", idStr, "--value", renamed])
+        }
+        _ = try runCLI(["properties", "--add-option", "--id", idStr, "--value", original])
+
+        let result = try runCLI([
+            "properties", "--rename-option", "--id", idStr,
+            "--from", original, "--to", renamed,
+        ])
+        XCTAssertEqual(result.exitCode, 0, "rename must succeed: \(result.stderr)")
+
+        let after = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
+        let updated = after.first { ($0["id"] as? String) == idStr }
+        let optionValues = (updated?["options"] as? [[String: Any]])?.compactMap { $0["value"] as? String } ?? []
+        XCTAssertFalse(optionValues.contains(original), "old option name must be gone")
+        XCTAssertTrue(optionValues.contains(renamed), "new option name must be present")
     }
 
     func testPropertiesSetDefaultPropertyIsRefused() throws {

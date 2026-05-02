@@ -9,7 +9,7 @@ final class FilterEngineTests: XCTestCase {
         authors: [AuthorName] = [],
         year: Int? = nil,
         journal: String? = nil,
-        readingStatus: ReadingStatus = .unread,
+        readingStatus: String = ReadingStatus.unread,
         referenceType: ReferenceType = .journalArticle,
         dateAdded: Date = Date()
     ) -> Reference {
@@ -75,7 +75,7 @@ final class FilterEngineTests: XCTestCase {
     // MARK: - Single-select operators
 
     func testSingleSelectEqualsAndIsAnyOf() {
-        let row = makeRef(id: 1, readingStatus: .reading)
+        let row = makeRef(id: 1, readingStatus: ReadingStatus.reading)
         let equals = ViewFilter(target: .builtin(.readingStatus), op: .equals, value: .selectKeys(["Reading"]))
         let anyOf = ViewFilter(target: .builtin(.readingStatus), op: .isAnyOf, value: .selectKeys(["Reading", "Read"]))
         let noneOf = ViewFilter(target: .builtin(.readingStatus), op: .isNoneOf, value: .selectKeys(["Reading", "Read"]))
@@ -134,9 +134,9 @@ final class FilterEngineTests: XCTestCase {
 
     func testMultipleFiltersAllMustMatch() {
         let rows = [
-            makeRef(id: 1, year: 2024, readingStatus: .reading),
-            makeRef(id: 2, year: 2024, readingStatus: .read),
-            makeRef(id: 3, year: 2020, readingStatus: .reading),
+            makeRef(id: 1, year: 2024, readingStatus: ReadingStatus.reading),
+            makeRef(id: 2, year: 2024, readingStatus: ReadingStatus.read),
+            makeRef(id: 3, year: 2020, readingStatus: ReadingStatus.reading),
         ]
         let filters: [ViewFilter] = [
             .init(target: .builtin(.year), op: .greaterOrEqual, value: .number(2024)),

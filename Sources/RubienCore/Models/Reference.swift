@@ -133,27 +133,24 @@ extension Array where Element == AuthorName {
     }
 }
 
-/// Raw values capitalized post-v3 (2026-05) to match the seeded Status
-/// PropertyDefinition labels and the v3-migrated column values. Phase 2 will
-/// drop this enum entirely in favor of free-form `String` storage with options
-/// driven by the PropertyDefinition; for now the enum stays as a compile-time
-/// constants list for the 4 built-in statuses.
-public enum ReadingStatus: String, Codable, CaseIterable, DatabaseValueConvertible, Sendable {
-    case unread  = "Unread"
-    case reading = "Reading"
-    case skimmed = "Skimmed"
-    case read    = "Read"
+/// Reading status is now free-form: `Reference.readingStatus` is `String` and
+/// the live option set is driven by the Status PropertyDefinition (seeded in
+/// `AppDatabase.swift` and editable by users post-Phase-2). This namespace
+/// exposes the 4 seeded built-in values as compile-time constants for use in
+/// fixtures, defaults, and sync forward-compat fallbacks. The UI renders a
+/// Notion-style colored chip per option (color comes from `SelectOption.color`),
+/// so no icon glyph is needed.
+public enum ReadingStatus {
+    public static let unread  = "Unread"
+    public static let reading = "Reading"
+    public static let skimmed = "Skimmed"
+    public static let read    = "Read"
 
-    public var label: String { rawValue }
-
-    public var icon: String {
-        switch self {
-        case .unread:  return "circle"
-        case .reading: return "book.fill"
-        case .skimmed: return "eye"
-        case .read:    return "checkmark.circle.fill"
-        }
-    }
+    /// Names of the 4 built-ins that ship with a fresh database. The runtime
+    /// option set is whatever lives in the Status PropertyDefinition's
+    /// `optionsJSON` and may include user-added values; consumers that need
+    /// the *live* set should fetch it from `PropertyDefinition`, not this list.
+    public static let builtIn: [String] = [unread, reading, skimmed, read]
 }
 
 public struct Reference: Identifiable, Codable, Hashable, Sendable {
@@ -184,7 +181,10 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
     public var verifiedAt: Date?
     public var reviewedBy: String?
     // MARK: - User workflow fields
-    public var readingStatus: ReadingStatus
+    /// Free-form post-Phase-2: holds any string the Status PropertyDefinition
+    /// has an option for. Built-in values are seeded as `ReadingStatus.unread`
+    /// etc.; users can add/rename/delete options via the property manager.
+    public var readingStatus: String
 
     // MARK: - Extended metadata (P0)
     public var publisher: String?
@@ -245,7 +245,7 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
         evidenceBundleHash: String? = nil,
         verifiedAt: Date? = nil,
         reviewedBy: String? = nil,
-        readingStatus: ReadingStatus = .unread,
+        readingStatus: String = ReadingStatus.unread,
         // Extended metadata (P0)
         publisher: String? = nil,
         publisherPlace: String? = nil,
@@ -738,7 +738,7 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
         evidenceBundleHash = row["evidenceBundleHash"]
         verifiedAt = row["verifiedAt"]
         reviewedBy = row["reviewedBy"]
-        readingStatus = row["readingStatus"] ?? .unread
+        readingStatus = row["readingStatus"] ?? ReadingStatus.unread
 
         // Extended metadata (P0)
         publisher = row["publisher"]
