@@ -1,54 +1,27 @@
 import Foundation
 import GRDB
 
+/// Pruned 2026-05 (v3) from 21 cases to 6. Type now maps 1:1 to BibTeX entry
+/// types; categorization beyond that goes to Tags or custom singleSelect
+/// properties. `webpage` is kept despite collapsing to `@misc` in BibTeX
+/// because it gates the in-app web reader (`Reference.canOpenWebReader`,
+/// `WebReaderView`, `WebImportView`).
 public enum ReferenceType: String, Codable, CaseIterable, DatabaseValueConvertible, Sendable {
-    case journalArticle = "Journal Article"
-    case magazineArticle = "Magazine Article"
-    case newspaperArticle = "Newspaper Article"
-    case preprint = "Preprint"
-    case book = "Book"
-    case bookSection = "Book Section"
+    case journalArticle  = "Journal Article"
     case conferencePaper = "Conference Paper"
-    case thesis = "Thesis"
-    case dataset = "Dataset"
-    case software = "Software"
-    case standard = "Standard"
-    case manuscript = "Manuscript"
-    case interview = "Interview"
-    case presentation = "Presentation"
-    case blogPost = "Blog Post"
-    case forumPost = "Forum Post"
-    case legalCase = "Legal Case"
-    case legislation = "Legislation"
-    case webpage = "Web Page"
-    case report = "Report"
-    case patent = "Patent"
-    case other = "Other"
+    case book            = "Book"
+    case thesis          = "Thesis"
+    case webpage         = "Web Page"
+    case other           = "Other"
 
     public var icon: String {
         switch self {
-        case .journalArticle: return "doc.text"
-        case .magazineArticle: return "doc.text.image"
-        case .newspaperArticle: return "newspaper"
-        case .preprint: return "doc.text.magnifyingglass"
-        case .book: return "book.closed"
-        case .bookSection: return "book"
+        case .journalArticle:  return "doc.text"
         case .conferencePaper: return "person.3"
-        case .thesis: return "graduationcap"
-        case .dataset: return "tablecells"
-        case .software: return "app.connected.to.app.below.fill"
-        case .standard: return "checklist"
-        case .manuscript: return "doc.plaintext"
-        case .interview: return "person.text.rectangle"
-        case .presentation: return "rectangle.on.rectangle"
-        case .blogPost: return "text.bubble"
-        case .forumPost: return "bubble.left.and.bubble.right"
-        case .legalCase: return "building.columns"
-        case .legislation: return "scroll"
-        case .webpage: return "globe"
-        case .report: return "doc.richtext"
-        case .patent: return "seal"
-        case .other: return "doc"
+        case .book:            return "book.closed"
+        case .thesis:          return "graduationcap"
+        case .webpage:         return "globe"
+        case .other:           return "doc"
         }
     }
 }
@@ -160,27 +133,25 @@ extension Array where Element == AuthorName {
     }
 }
 
+/// Raw values capitalized post-v3 (2026-05) to match the seeded Status
+/// PropertyDefinition labels and the v3-migrated column values. Phase 2 will
+/// drop this enum entirely in favor of free-form `String` storage with options
+/// driven by the PropertyDefinition; for now the enum stays as a compile-time
+/// constants list for the 4 built-in statuses.
 public enum ReadingStatus: String, Codable, CaseIterable, DatabaseValueConvertible, Sendable {
-    case unread
-    case reading
-    case skimmed
-    case read
+    case unread  = "Unread"
+    case reading = "Reading"
+    case skimmed = "Skimmed"
+    case read    = "Read"
 
-    public var label: String {
-        switch self {
-        case .unread: return "Unread"
-        case .reading: return "Reading"
-        case .skimmed: return "Skimmed"
-        case .read: return "Read"
-        }
-    }
+    public var label: String { rawValue }
 
     public var icon: String {
         switch self {
-        case .unread: return "circle"
+        case .unread:  return "circle"
         case .reading: return "book.fill"
         case .skimmed: return "eye"
-        case .read: return "checkmark.circle.fill"
+        case .read:    return "checkmark.circle.fill"
         }
     }
 }

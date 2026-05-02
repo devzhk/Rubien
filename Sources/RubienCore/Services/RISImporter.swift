@@ -49,11 +49,13 @@ public enum RISImporter {
             switch risType {
             case "JOUR": return .journalArticle
             case "BOOK": return .book
-            case "CHAP": return .bookSection
+            // CHAP (book chapter) collapsed into Book post-v3 prune.
+            case "CHAP": return .book
             case "CONF", "CPAPER": return .conferencePaper
             case "THES": return .thesis
+            // ELEC stays as Web Page so the in-app web reader can pick it up.
             case "ELEC": return .webpage
-            case "RPRT": return .report
+            // RPRT (technical report) collapsed into Other post-v3 prune.
             default: return .other
             }
         }()
@@ -71,7 +73,7 @@ public enum RISImporter {
 
         // Determine ISBN vs ISSN from SN tag based on reference type
         let snValue = fields["SN"]?.first
-        let isbn: String? = (refType == .book || refType == .bookSection) ? snValue : nil
+        let isbn: String? = (refType == .book) ? snValue : nil
         let issn: String? = (refType == .journalArticle) ? snValue : nil
 
         // Parse month from date fields

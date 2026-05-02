@@ -98,7 +98,8 @@ final class ImporterAndMetadataTests: XCTestCase {
         XCTAssertEqual(chapter.authors, [AuthorName(given: "Pat", family: "Lee")])
         XCTAssertEqual(chapter.year, 2021)
         XCTAssertEqual(chapter.journal, "Great Book")
-        XCTAssertEqual(chapter.referenceType, .bookSection)
+        // CHAP folds into Book post-v3 prune (no separate book-chapter type).
+        XCTAssertEqual(chapter.referenceType, .book)
     }
 
     func testMetadataFetcherExtractIdentifierPrioritizesSupportedFormats() {

@@ -76,9 +76,9 @@ final class FilterEngineTests: XCTestCase {
 
     func testSingleSelectEqualsAndIsAnyOf() {
         let row = makeRef(id: 1, readingStatus: .reading)
-        let equals = ViewFilter(target: .builtin(.readingStatus), op: .equals, value: .selectKeys(["reading"]))
-        let anyOf = ViewFilter(target: .builtin(.readingStatus), op: .isAnyOf, value: .selectKeys(["reading", "read"]))
-        let noneOf = ViewFilter(target: .builtin(.readingStatus), op: .isNoneOf, value: .selectKeys(["reading", "read"]))
+        let equals = ViewFilter(target: .builtin(.readingStatus), op: .equals, value: .selectKeys(["Reading"]))
+        let anyOf = ViewFilter(target: .builtin(.readingStatus), op: .isAnyOf, value: .selectKeys(["Reading", "Read"]))
+        let noneOf = ViewFilter(target: .builtin(.readingStatus), op: .isNoneOf, value: .selectKeys(["Reading", "Read"]))
         XCTAssertTrue(FilterEngine.evaluate(equals, row: row, context: context))
         XCTAssertTrue(FilterEngine.evaluate(anyOf, row: row, context: context))
         XCTAssertFalse(FilterEngine.evaluate(noneOf, row: row, context: context))
@@ -140,7 +140,7 @@ final class FilterEngineTests: XCTestCase {
         ]
         let filters: [ViewFilter] = [
             .init(target: .builtin(.year), op: .greaterOrEqual, value: .number(2024)),
-            .init(target: .builtin(.readingStatus), op: .equals, value: .selectKeys(["reading"])),
+            .init(target: .builtin(.readingStatus), op: .equals, value: .selectKeys(["Reading"])),
         ]
         let out = FilterEngine.apply(rows, filters: filters, context: context)
         XCTAssertEqual(out.map(\.id), [1])

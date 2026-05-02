@@ -57,44 +57,24 @@ final class ReferenceTests: XCTestCase {
     }
 
     func testReferenceTypeRawValues() {
-        XCTAssertEqual(ReferenceType.journalArticle.rawValue, "Journal Article")
-        XCTAssertEqual(ReferenceType.magazineArticle.rawValue, "Magazine Article")
-        XCTAssertEqual(ReferenceType.newspaperArticle.rawValue, "Newspaper Article")
-        XCTAssertEqual(ReferenceType.preprint.rawValue, "Preprint")
-        XCTAssertEqual(ReferenceType.book.rawValue, "Book")
-        XCTAssertEqual(ReferenceType.bookSection.rawValue, "Book Section")
+        // Post-v3 prune: 6 BibTeX-derived types remain. Anything else collapses
+        // into Other; for organization, use Tags or a custom property.
+        XCTAssertEqual(ReferenceType.journalArticle.rawValue,  "Journal Article")
         XCTAssertEqual(ReferenceType.conferencePaper.rawValue, "Conference Paper")
-        XCTAssertEqual(ReferenceType.thesis.rawValue, "Thesis")
-        XCTAssertEqual(ReferenceType.dataset.rawValue, "Dataset")
-        XCTAssertEqual(ReferenceType.software.rawValue, "Software")
-        XCTAssertEqual(ReferenceType.standard.rawValue, "Standard")
-        XCTAssertEqual(ReferenceType.manuscript.rawValue, "Manuscript")
-        XCTAssertEqual(ReferenceType.interview.rawValue, "Interview")
-        XCTAssertEqual(ReferenceType.presentation.rawValue, "Presentation")
-        XCTAssertEqual(ReferenceType.blogPost.rawValue, "Blog Post")
-        XCTAssertEqual(ReferenceType.forumPost.rawValue, "Forum Post")
-        XCTAssertEqual(ReferenceType.legalCase.rawValue, "Legal Case")
-        XCTAssertEqual(ReferenceType.legislation.rawValue, "Legislation")
-        XCTAssertEqual(ReferenceType.webpage.rawValue, "Web Page")
-        XCTAssertEqual(ReferenceType.report.rawValue, "Report")
-        XCTAssertEqual(ReferenceType.patent.rawValue, "Patent")
-        XCTAssertEqual(ReferenceType.other.rawValue, "Other")
+        XCTAssertEqual(ReferenceType.book.rawValue,            "Book")
+        XCTAssertEqual(ReferenceType.thesis.rawValue,          "Thesis")
+        XCTAssertEqual(ReferenceType.webpage.rawValue,         "Web Page")
+        XCTAssertEqual(ReferenceType.other.rawValue,           "Other")
+        XCTAssertEqual(ReferenceType.allCases.count, 6)
     }
 
-    func testReferenceTypeCSLTypeMappingForExpandedTypes() {
-        XCTAssertEqual(ReferenceType.magazineArticle.cslType, "article-magazine")
-        XCTAssertEqual(ReferenceType.newspaperArticle.cslType, "article-newspaper")
-        XCTAssertEqual(ReferenceType.preprint.cslType, "article")
-        XCTAssertEqual(ReferenceType.dataset.cslType, "dataset")
-        XCTAssertEqual(ReferenceType.software.cslType, "software")
-        XCTAssertEqual(ReferenceType.standard.cslType, "standard")
-        XCTAssertEqual(ReferenceType.manuscript.cslType, "manuscript")
-        XCTAssertEqual(ReferenceType.interview.cslType, "interview")
-        XCTAssertEqual(ReferenceType.presentation.cslType, "speech")
-        XCTAssertEqual(ReferenceType.blogPost.cslType, "post-weblog")
-        XCTAssertEqual(ReferenceType.forumPost.cslType, "post")
-        XCTAssertEqual(ReferenceType.legalCase.cslType, "legal_case")
-        XCTAssertEqual(ReferenceType.legislation.cslType, "legislation")
+    func testReferenceTypeCSLTypeMapping() {
+        XCTAssertEqual(ReferenceType.journalArticle.cslType,  "article-journal")
+        XCTAssertEqual(ReferenceType.conferencePaper.cslType, "paper-conference")
+        XCTAssertEqual(ReferenceType.book.cslType,            "book")
+        XCTAssertEqual(ReferenceType.thesis.cslType,          "thesis")
+        XCTAssertEqual(ReferenceType.webpage.cslType,         "webpage")
+        XCTAssertEqual(ReferenceType.other.cslType,           "article")
     }
 
     // MARK: - AuthorName

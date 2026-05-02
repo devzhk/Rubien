@@ -19,9 +19,9 @@ public enum MetadataVerifier {
         switch reference.referenceType {
         case .thesis:
             return verifyThesis(reference: reference, seed: seed, evidence: evidence)
-        case .book, .bookSection:
+        case .book:
             return verifyBook(reference: reference, seed: seed, evidence: evidence)
-        default:
+        case .journalArticle, .conferencePaper, .webpage, .other:
             return verifyJournalLike(reference: reference, seed: seed, evidence: evidence)
         }
     }

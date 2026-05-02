@@ -21,9 +21,9 @@ final class GroupEngineTests: XCTestCase {
         let config = GroupConfig(target: .builtin(.readingStatus))
         let buckets = GroupEngine.apply(rows, config: config, context: PipelineContext())
         let byKey = Dictionary(uniqueKeysWithValues: buckets.map { ($0.key, $0.references.map(\.id)) })
-        XCTAssertEqual(byKey["reading"], [1, 3])
-        XCTAssertEqual(byKey["read"], [2])
-        XCTAssertEqual(byKey["unread"], [4])
+        XCTAssertEqual(byKey["Reading"], [1, 3])
+        XCTAssertEqual(byKey["Read"], [2])
+        XCTAssertEqual(byKey["Unread"], [4])
     }
 
     func testGroupByMultiSelectPlacesRefInEveryGroup() {
@@ -67,10 +67,10 @@ final class GroupEngineTests: XCTestCase {
         ]
         let config = GroupConfig(
             target: .builtin(.readingStatus),
-            customOrder: ["reading", "unread", "read"]
+            customOrder: ["Reading", "Unread", "Read"]
         )
         let buckets = GroupEngine.apply(rows, config: config, context: PipelineContext())
-        XCTAssertEqual(buckets.map(\.key), ["reading", "unread", "read"])
+        XCTAssertEqual(buckets.map(\.key), ["Reading", "Unread", "Read"])
     }
 
     func testCheckboxGrouping() {

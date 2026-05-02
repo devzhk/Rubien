@@ -25,7 +25,7 @@ enum ImportClassification: Equatable {
 public final class AppDatabase: Sendable {
     /// Bumped whenever a new migration is registered. Surfaced in
     /// `rubien-cli sync status` JSON for diagnostics.
-    public static let currentSchemaVersion = "v2"
+    public static let currentSchemaVersion = "v3"
 
     public let dbWriter: any DatabaseWriter
 
@@ -509,7 +509,81 @@ public final class AppDatabase: Sendable {
             try db.execute(sql: "ALTER TABLE reference DROP COLUMN pdfPath")
         }
 
+        migrator.registerMigration("v3") { db in
+            try Self.applyV3Body(db)
+        }
+
         return migrator
+    }
+
+    /// v3 migration body: prune `referenceType` from 21 → 6 by remapping
+    /// legacy values, capitalize legacy lowercase `readingStatus` values to
+    /// match the seeded PropertyDefinition labels, and refresh the Type
+    /// PropertyDefinition's `optionsJSON` to advertise the 6-option set.
+    ///
+    /// Idempotent: each `UPDATE` is a no-op if no rows match.
+    fileprivate static func applyV3Body(_ db: Database) throws {
+        // Suppress dirty-tracking triggers for the duration of the migration:
+        // these UPDATEs are local data normalization, not user-initiated edits,
+        // so they shouldn't queue every migrated row for a redundant CloudKit
+        // push. The `applyingRemote` session key is the same gate the pull
+        // handler uses; migrations reuse it for the same reason — "the change
+        // didn't originate from a user action on this device."
+        try db.execute(sql: """
+            INSERT INTO syncSession(key, value) VALUES('applyingRemote','1')
+                ON CONFLICT(key) DO UPDATE SET value='1'
+        """)
+        defer {
+            try? db.execute(sql: "DELETE FROM syncSession WHERE key='applyingRemote'")
+        }
+
+        // Reference.referenceType prune (15 dropped types → 4 surviving buckets).
+        try db.execute(sql: """
+            UPDATE reference SET referenceType = 'Journal Article'
+                WHERE referenceType IN ('Magazine Article', 'Newspaper Article', 'Preprint')
+        """)
+        try db.execute(sql: """
+            UPDATE reference SET referenceType = 'Book'
+                WHERE referenceType = 'Book Section'
+        """)
+        try db.execute(sql: """
+            UPDATE reference SET referenceType = 'Web Page'
+                WHERE referenceType IN ('Blog Post', 'Forum Post')
+        """)
+        try db.execute(sql: """
+            UPDATE reference SET referenceType = 'Other'
+                WHERE referenceType IN (
+                    'Manuscript', 'Dataset', 'Software', 'Standard',
+                    'Interview', 'Presentation', 'Report',
+                    'Legal Case', 'Legislation', 'Patent'
+                )
+        """)
+
+        // Reference.readingStatus capitalization (4 legacy lowercase → 4 capitalized).
+        // Only touches the exact known legacy raw values; custom statuses pass through.
+        try db.execute(sql: "UPDATE reference SET readingStatus = 'Unread'   WHERE readingStatus = 'unread'")
+        try db.execute(sql: "UPDATE reference SET readingStatus = 'Reading'  WHERE readingStatus = 'reading'")
+        try db.execute(sql: "UPDATE reference SET readingStatus = 'Skimmed'  WHERE readingStatus = 'skimmed'")
+        try db.execute(sql: "UPDATE reference SET readingStatus = 'Read'     WHERE readingStatus = 'read'")
+
+        // Type PropertyDefinition optionsJSON: rewrite to the 6-option set,
+        // preserving the original colors per option.
+        let prunedTypeOptions: [SelectOption] = [
+            .init(value: "Journal Article",  color: "#007AFF"),
+            .init(value: "Conference Paper", color: "#AF52DE"),
+            .init(value: "Book",             color: "#34C759"),
+            .init(value: "Thesis",           color: "#FF9500"),
+            .init(value: "Web Page",         color: "#30B0C7"),
+            .init(value: "Other",            color: "#8E8E93"),
+        ]
+        let prunedJSON = (try? String(
+            data: JSONEncoder().encode(prunedTypeOptions),
+            encoding: .utf8
+        )) ?? "[]"
+        try db.execute(
+            sql: "UPDATE propertyDefinition SET optionsJSON = ? WHERE defaultFieldKey = 'referenceType'",
+            arguments: [prunedJSON]
+        )
     }
 
     /// Test-only: applies the v2 schema/backfill steps to an arbitrary
@@ -544,6 +618,16 @@ public final class AppDatabase: Sendable {
             """)
         }
         try migrator.migrate(queue)
+    }
+
+    /// Test-only: applies the v3 prune/normalize body to an arbitrary queue
+    /// that already carries v2-shaped `reference` and `propertyDefinition`
+    /// tables. Used by `MigrationV3Tests` to verify behavior without driving
+    /// the full AppDatabase init path. Idempotent — calls `applyV3Body` directly.
+    public static func runV3MigrationForTesting(on queue: DatabaseQueue) throws {
+        try queue.write { db in
+            try Self.applyV3Body(db)
+        }
     }
 
     /// Tables whose rows sync to CloudKit. Order is not significant here; pull-side

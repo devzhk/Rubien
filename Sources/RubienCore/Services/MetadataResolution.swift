@@ -35,8 +35,11 @@ public enum MetadataWorkKind: String, Codable, CaseIterable, Sendable {
             return .thesis
         case .conferencePaper:
             return .conferencePaper
+        // Reports collapsed into Other post-v3 prune. The .report workKind
+        // still exists internally because PDFService.detectWorkKind classifies
+        // some PDFs as reports — but the user-facing type is Other.
         case .report:
-            return .report
+            return .other
         case .unknown:
             return .other
         }
@@ -372,28 +375,15 @@ public enum MetadataResolution {
 
     public static func workKind(for referenceType: ReferenceType) -> MetadataWorkKind {
         switch referenceType {
-        case .journalArticle, .magazineArticle, .newspaperArticle, .preprint:
+        case .journalArticle:
             return .journalArticle
-        case .book, .bookSection:
-            return .book
         case .conferencePaper:
             return .conferencePaper
+        case .book:
+            return .book
         case .thesis:
             return .thesis
-        case .report, .standard:
-            return .report
-        case .dataset,
-             .software,
-             .manuscript,
-             .interview,
-             .presentation,
-             .blogPost,
-             .forumPost,
-             .legalCase,
-             .legislation,
-             .webpage,
-             .patent,
-             .other:
+        case .webpage, .other:
             return .unknown
         }
     }

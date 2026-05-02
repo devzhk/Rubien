@@ -104,11 +104,14 @@ public enum BibTeXImporter {
                 switch entryType {
                 case "article": return .journalArticle
                 case "book": return .book
-                case "inbook", "incollection": return .bookSection
+                // @inbook / @incollection collapsed into Book post-v3 prune.
+                case "inbook", "incollection": return .book
                 case "inproceedings", "conference": return .conferencePaper
                 case "phdthesis", "mastersthesis": return .thesis
+                // @misc / @online flow into Web Page so the in-app web reader
+                // (which gates on .webpage) can pick them up.
                 case "misc", "online": return .webpage
-                case "techreport": return .report
+                // @techreport collapsed into Other post-v3 prune.
                 default: return .other
                 }
             }()

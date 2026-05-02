@@ -178,28 +178,12 @@ public final class CSLEngine {
 
     private func mapReferenceType(_ type: ReferenceType) -> String {
         switch type {
-        case .journalArticle: return "article-journal"
-        case .magazineArticle: return "article-magazine"
-        case .newspaperArticle: return "article-newspaper"
-        case .preprint: return "article"
-        case .book: return "book"
-        case .bookSection: return "chapter"
+        case .journalArticle:  return "article-journal"
         case .conferencePaper: return "paper-conference"
-        case .thesis: return "thesis"
-        case .dataset: return "dataset"
-        case .software: return "software"
-        case .standard: return "standard"
-        case .manuscript: return "manuscript"
-        case .interview: return "interview"
-        case .presentation: return "speech"
-        case .blogPost: return "post-weblog"
-        case .forumPost: return "post"
-        case .legalCase: return "legal_case"
-        case .legislation: return "legislation"
-        case .webpage: return "webpage"
-        case .report: return "report"
-        case .patent: return "patent"
-        case .other: return "article"
+        case .book:            return "book"
+        case .thesis:          return "thesis"
+        case .webpage:         return "webpage"
+        case .other:           return "article"
         }
     }
 

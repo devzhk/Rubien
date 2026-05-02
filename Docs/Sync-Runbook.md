@@ -94,10 +94,13 @@ To wipe the iCloud copy (can't be undone): use the CloudKit Dashboard "Delete Zo
 
 - **v1** (shipped) — initial schema. CloudKit container live with real data.
 - **v2** (B8) — added per-device `pdfCache` + `pdfUploadQueue` tables, dropped the `reference.pdfPath` column. Backfills existing pdfPaths into both tables with `contentHash='pending'` (the push path re-hashes on first send).
+- **v3** (Type prune + Status case fixup, 2026-05) — collapsed `ReferenceType` from 21 cases to 6 (`Journal Article`, `Conference Paper`, `Book`, `Thesis`, `Web Page`, `Other`), bulk-remapping the 15 dropped values per a fixed table (e.g. `Magazine Article` → `Journal Article`, `Blog Post` → `Web Page`, `Software` → `Other`). Also normalized `reference.readingStatus` from lowercase enum raw values to capitalized labels (`unread` → `Unread`, etc.) so they match the seeded Status PropertyDefinition. Refreshed Type PropertyDefinition's `optionsJSON` to advertise the 6-option set. **No schema change** — `referenceType` and `readingStatus` stay TEXT columns. Migration body wraps in `applyingRemote=1` so the dirty triggers don't queue every migrated row for a redundant CloudKit push.
 
 **Forward-only.** Migrations are one-way. A v1 binary opening a v2 DB errors with `no such column: pdfPath` (the failure mode that hit the dev when the worktree migrated the live library before the matching binary shipped). Always upgrade the binary first, then let it migrate the DB on launch.
 
-**Cross-device skew.** A v1 device on the same iCloud account does not push `CDReferencePDF` records — those are introduced by v2. Once that device upgrades and runs the v2 migration, its existing PDFs ride the upload queue to the cloud and become visible to all other v2 devices.
+**Cross-device skew.**
+- v1 device + v2 cloud: a v1 device on the same iCloud account does not push `CDReferencePDF` records — those are introduced by v2. Once that device upgrades and runs the v2 migration, its existing PDFs ride the upload queue to the cloud and become visible to all other v2 devices.
+- v2 device + v3 cloud: the v3 migration only normalizes column values that the CKRecord schema already carries as String; nothing was added or removed. A still-on-v2 peer pulling a v3-migrated reference whose `referenceType` is now (say) `Other` instead of `Software` decodes the unknown value via the existing forward-compat fallback to `.other`. Same for `readingStatus = "Unread"` (capitalized) — v2's `ReadingStatus(rawValue:)` returns nil, falls back to `.unread`, and on next mutation writes `"unread"` (lowercase) back. The next v3 device that pulls that row will re-normalize it. Single-user / single-Mac libraries are unaffected; multi-device users should upgrade all peers in the same session to avoid the back-and-forth.
 
 **Procedure for v3+.**
 

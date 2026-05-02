@@ -311,20 +311,24 @@ public enum MetadataFetcher {
             return nil
         }()
 
-        // Reference type
+        // Reference type — collapsed to the v3 6-bucket set.
         let referenceType: ReferenceType = {
             guard let type = result["type"] as? String else { return .journalArticle }
             switch type {
-            case "journal-article": return .journalArticle
-            case "newspaper-article": return .newspaperArticle
-            case "book", "monograph", "edited-book": return .book
-            case "book-chapter", "book-section": return .bookSection
-            case "proceedings-article": return .conferencePaper
-            case "dissertation": return .thesis
-            case "report", "report-component": return .report
-            case "standard": return .standard
-            case "posted-content": return .preprint
-            default: return .other
+            case "journal-article", "newspaper-article", "magazine-article":
+                return .journalArticle
+            case "book", "monograph", "edited-book", "book-chapter", "book-section":
+                return .book
+            case "proceedings-article":
+                return .conferencePaper
+            case "dissertation":
+                return .thesis
+            // CrossRef has no "webpage" type. "posted-content" (preprints) folds
+            // into Journal Article per Scholar convention.
+            case "posted-content":
+                return .journalArticle
+            default:
+                return .other
             }
         }()
 
@@ -570,16 +574,20 @@ public enum MetadataFetcher {
 
         let abstract = decodeOpenAlexAbstract(from: work)
 
+        // OpenAlex type → v3 6-bucket set. Preprints fold into Journal Article
+        // per Scholar convention; reports and book chapters fold into Other/Book.
         let referenceType: ReferenceType = {
             switch work["type"] as? String {
-            case "journal-article", "article": return .journalArticle
-            case "book", "monograph", "edited-book": return .book
-            case "book-chapter", "book-section": return .bookSection
-            case "proceedings-article": return .conferencePaper
-            case "dissertation": return .thesis
-            case "preprint", "posted-content": return .preprint
-            case "report": return .report
-            default: return .journalArticle
+            case "journal-article", "article", "preprint", "posted-content":
+                return .journalArticle
+            case "book", "monograph", "edited-book", "book-chapter", "book-section":
+                return .book
+            case "proceedings-article":
+                return .conferencePaper
+            case "dissertation":
+                return .thesis
+            default:
+                return .other
             }
         }()
 
