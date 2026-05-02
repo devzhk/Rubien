@@ -12,12 +12,36 @@ final class SyncEntityDispatchTests: XCTestCase {
     private var db: AppDatabase!
     private let store = SyncStateStore()
 
+    /// Snapshot of `AppDatabase.pdfStorageURL` contents at test start.
+    /// `applyRemoteRecord(.referencePDF)` resolves its destination via the
+    /// class-load-time static `pdfStorageURL`, so tests that exercise the
+    /// pull path write into the dev's real PDFs/ dir on this machine.
+    /// Without an after-test sweep, every run leaves behind a
+    /// `<UUID>_paper.pdf` 9-byte fake.
+    ///
+    /// Diffing the dir contents in `setUp` / `tearDown` removes any file
+    /// that wasn't there when the test started — belt-and-suspenders for
+    /// individual tests that forget to clean up their own copy.
+    private var pdfsAtSetUp: Set<String> = []
+
     override func setUpWithError() throws {
         try super.setUpWithError()
         db = try AppDatabase(DatabaseQueue())
+        let dir = AppDatabase.pdfStorageURL
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        pdfsAtSetUp = Set(
+            (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        )
     }
 
     override func tearDown() {
+        let dir = AppDatabase.pdfStorageURL
+        let after = Set(
+            (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        )
+        for newFile in after.subtracting(pdfsAtSetUp) {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent(newFile))
+        }
         db = nil
         super.tearDown()
     }
