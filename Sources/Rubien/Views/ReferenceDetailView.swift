@@ -318,6 +318,26 @@ struct ReferenceDetailView: View {
                         _ = statusDef.addOptionIfMissing(newOption)
                         try? db.savePropertyDefinition(&statusDef)
                     }
+                },
+                onDeleteOption: { option in
+                    // Try clean delete first; on .optionInUse, auto-reassign
+                    // to the first remaining option. Mirrors the table-cell
+                    // behavior — finer-grained replacement is via the CLI's
+                    // --replace-with flag.
+                    guard let statusDef = propertyDefs.first(where: { $0.defaultFieldKey == "readingStatus" }),
+                          let propId = statusDef.id else { return }
+                    do {
+                        try db.deletePropertyOption(propertyId: propId, value: option, replaceWith: nil)
+                    } catch PropertyOptionError.optionInUse {
+                        let fallback = statusDef.options
+                            .first(where: { $0.value != option })?
+                            .value
+                        guard let replacement = fallback else { return }
+                        try? db.deletePropertyOption(propertyId: propId, value: option, replaceWith: replacement)
+                    } catch {
+                        // .optionNotFound / .unsupportedPropertyType / etc.
+                        // shouldn't happen for Status; swallow.
+                    }
                 }
             )
         case "tags":

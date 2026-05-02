@@ -131,6 +131,10 @@ struct InlineSingleSelectRow: View {
     /// the current options list (used for Type, whose options drive BibTeX
     /// buckets and cannot be user-extended).
     var onCreateOption: ((String) -> Void)? = nil
+    /// Pass non-nil to expose a trash affordance on each option row (revealed
+    /// on hover). The caller handles persistence + the in-use reassignment
+    /// path. See `SelectOptionPicker.onDeleteOption`.
+    var onDeleteOption: ((String) -> Void)? = nil
     /// Optional explanatory message rendered at the bottom of the picker when
     /// `onCreateOption` is nil. See `SelectOptionPicker.lockedHint`.
     var lockedHint: String? = nil
@@ -163,6 +167,7 @@ struct InlineSingleSelectRow: View {
                     }
                 },
                 onCreateOption: onCreateOption,
+                onDeleteOption: onDeleteOption,
                 lockedHint: lockedHint
             )
         }
@@ -421,6 +426,11 @@ struct SelectOptionPicker: View {
     /// fixed (currently only Type post-Phase-3); the picker hides the create
     /// path entirely so users aren't led to expect mutability that doesn't apply.
     let onCreateOption: ((String) -> Void)?
+    /// When non-nil, each option row shows a small trash button on hover that
+    /// invokes this callback with the option value. Caller is responsible for
+    /// the actual mutation (calling `db.deletePropertyOption`) and any in-use
+    /// reassignment. Nil hides the affordance entirely (Type / read-only paths).
+    var onDeleteOption: ((String) -> Void)? = nil
     /// Optional explanatory message shown at the bottom of the picker when
     /// `onCreateOption` is nil. Lets us tell the user *why* creation is locked.
     var lockedHint: String? = nil
@@ -470,35 +480,24 @@ struct SelectOptionPicker: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(filteredOptions, id: \.value) { option in
-                        let selected = localSelected.contains(option.value)
-                        Button {
-                            if isSingleSelect {
-                                localSelected = [option.value]
-                                onCommit([option.value])
-                                dismiss()
-                            } else if selected {
-                                localSelected.remove(option.value)
-                            } else {
-                                localSelected.insert(option.value)
+                        SelectOptionPickerRow(
+                            option: option,
+                            isSelected: localSelected.contains(option.value),
+                            onTap: {
+                                if isSingleSelect {
+                                    localSelected = [option.value]
+                                    onCommit([option.value])
+                                    dismiss()
+                                } else if localSelected.contains(option.value) {
+                                    localSelected.remove(option.value)
+                                } else {
+                                    localSelected.insert(option.value)
+                                }
+                            },
+                            onDelete: onDeleteOption.map { handler in
+                                { handler(option.value) }
                             }
-                        } label: {
-                            HStack(spacing: 8) {
-                                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                                    .font(.system(size: 13))
-                                    .foregroundStyle(selected ? Color.accentColor : .secondary)
-                                Text(option.value)
-                                    .font(.system(size: 12))
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Color(hex: option.color).opacity(0.2))
-                                    .clipShape(Capsule())
-                                Spacer()
-                            }
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 5)
+                        )
                     }
 
                     if let onCreateOption,
@@ -561,5 +560,51 @@ struct SelectOptionPicker: View {
             guard !isSingleSelect else { return }
             onCommit(Array(localSelected))
         }
+    }
+}
+
+// MARK: - Single option row inside the picker
+
+/// A single row inside `SelectOptionPicker`. Factored out so the trash
+/// affordance can be hover-revealed via local `@State` without re-rendering
+/// the whole option list on every mouse move.
+private struct SelectOptionPickerRow: View {
+    let option: SelectOption
+    let isSelected: Bool
+    let onTap: () -> Void
+    /// When non-nil, a small trash button appears on hover.
+    let onDelete: (() -> Void)?
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 8) {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 13))
+                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                Text(option.value)
+                    .font(.system(size: 12))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color(hex: option.color).opacity(0.2))
+                    .clipShape(Capsule())
+                Spacer()
+                if let onDelete, isHovering {
+                    Button(action: onDelete) {
+                        Image(systemName: "trash")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Delete option")
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 5)
+        .onHover { isHovering = $0 }
     }
 }

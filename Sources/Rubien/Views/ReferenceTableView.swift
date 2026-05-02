@@ -595,7 +595,48 @@ private struct ReferenceTableContent: View {
                 ReadingStatusCell(
                     reference: ref,
                     propertyDefs: customProperties,
-                    onUpdate: onUpdateReference
+                    onUpdate: onUpdateReference,
+                    onCreateStatusOption: { newOption in
+                        // Append to the seeded Status PropertyDefinition and
+                        // persist. The picker also commits the new option as
+                        // the selected value via `onCommit`.
+                        guard var def = customProperties.first(where: {
+                            $0.defaultFieldKey == "readingStatus"
+                        }) else { return }
+                        _ = def.addOptionIfMissing(newOption)
+                        try? db.savePropertyDefinition(&def)
+                    },
+                    onDeleteStatusOption: { option in
+                        guard let def = customProperties.first(where: {
+                            $0.defaultFieldKey == "readingStatus"
+                        }), let propId = def.id else { return }
+                        // Try a clean delete first; if the option is in use,
+                        // auto-reassign affected rows to the first remaining
+                        // option (deterministic, doesn't prompt). Power users
+                        // can reach for `rubien-cli properties --delete-option`
+                        // with `--replace-with` for finer control.
+                        do {
+                            try db.deletePropertyOption(
+                                propertyId: propId,
+                                value: option,
+                                replaceWith: nil
+                            )
+                        } catch PropertyOptionError.optionInUse {
+                            let fallback = def.options
+                                .first(where: { $0.value != option })?
+                                .value
+                            guard let replacement = fallback else { return }
+                            try? db.deletePropertyOption(
+                                propertyId: propId,
+                                value: option,
+                                replaceWith: replacement
+                            )
+                        } catch {
+                            // Other errors (.optionNotFound,
+                            // .unsupportedPropertyType) shouldn't happen for
+                            // Status — silently swallow rather than crash.
+                        }
+                    }
                 )
             }
             .width(min: 70, ideal: 90)
@@ -699,6 +740,14 @@ struct ReadingStatusCell: View {
     let reference: Reference
     let propertyDefs: [PropertyDefinition]
     let onUpdate: (Reference) -> Void
+    /// Wired by the parent table view to `db.savePropertyDefinition` after
+    /// `addOptionIfMissing`. Lets users add a new Status option inline by
+    /// typing in the picker's search field.
+    let onCreateStatusOption: (String) -> Void
+    /// Wired by the parent to `db.deletePropertyOption` (with auto-reassign
+    /// on `.optionInUse`). Lets users delete a Status option via the trash
+    /// affordance on each option row.
+    let onDeleteStatusOption: (String) -> Void
 
     @State private var showPicker = false
 
@@ -728,35 +777,29 @@ struct ReadingStatusCell: View {
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showPicker) {
-            VStack(alignment: .leading, spacing: 0) {
-                ForEach(statusOptions, id: \.value) { option in
-                    let isSelected = option.value == reference.readingStatus
-                    Button {
-                        var updated = reference
-                        updated.readingStatus = option.value
-                        onUpdate(updated)
-                        showPicker = false
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                                .font(.system(size: 13))
-                                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
-                            Text(option.value)
-                                .font(.callout)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 1)
-                                .chipBackground(Color(hex: option.color))
-                            Spacer()
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 5)
+            // Use the shared SelectOptionPicker so the Status cell gets
+            // search-or-create + the per-row trash affordance for free
+            // (matches the detail-panel picker behavior).
+            SelectOptionPicker(
+                selectedValues: reference.readingStatus.isEmpty ? [] : [reference.readingStatus],
+                options: statusOptions,
+                isSingleSelect: true,
+                onCommit: { values in
+                    guard let selected = values.first else { return }
+                    var updated = reference
+                    updated.readingStatus = selected
+                    onUpdate(updated)
+                },
+                onCreateOption: { newOption in
+                    onCreateStatusOption(newOption)
+                    // Picker also commits the new option as the selected
+                    // value via onCommit above; we just need to make sure
+                    // the option exists in the live def first.
+                },
+                onDeleteOption: { option in
+                    onDeleteStatusOption(option)
                 }
-            }
-            .padding(.vertical, 4)
-            .frame(width: 180)
+            )
         }
     }
 
