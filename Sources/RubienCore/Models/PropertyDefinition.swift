@@ -165,4 +165,13 @@ public enum PropertyOptionError: Error, Equatable {
     case optionInUse(count: Int)
     /// `replaceWith` was supplied but doesn't match any other existing option.
     case replacementNotFound(String)
+    /// The rename target is already an existing option on the same property.
+    /// Renaming would create two options with the same value and break the
+    /// single-select identity assumption used by pickers and lookups.
+    case duplicateValue(String)
+    /// Option mutations only apply to singleSelect properties. multiSelect
+    /// values are JSON-encoded arrays in `propertyValue.value` so a scalar
+    /// equality bulk-update would silently miss in-use values; full multi-
+    /// select rename support is intentionally deferred.
+    case unsupportedPropertyType
 }

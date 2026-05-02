@@ -241,7 +241,12 @@ struct EditableSingleSelectCell: View {
                 onCommit: { values in
                     if let selected = values.first { onSelect(selected) }
                 },
-                onCreateOption: onCreateOption ?? { _ in }
+                // Pass the optional through directly so callers that don't
+                // provide a creation closure get a picker without the inline
+                // "create" affordance — Type relies on this to lock its
+                // option set (it would otherwise display "Create X" but the
+                // value would be silently dropped by the rawValue guard).
+                onCreateOption: onCreateOption
             )
         }
     }
@@ -294,7 +299,7 @@ struct EditableMultiSelectCell: View {
                 selectedValues: selectedValues,
                 options: options,
                 onCommit: onUpdate,
-                onCreateOption: onCreateOption ?? { _ in }
+                onCreateOption: onCreateOption
             )
         }
     }

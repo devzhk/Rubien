@@ -194,6 +194,52 @@ final class StatusOptionMutationTests: XCTestCase {
         XCTAssertFalse(after.options.contains { $0.value == "Skimmed" })
     }
 
+    /// Renaming an option to a value that already exists on the same property
+    /// would collapse two distinct options into one — surface .duplicateValue.
+    func testRenameToExistingValueThrowsDuplicateValue() throws {
+        let db = try makeDB()
+        let prop = try statusDef(db)
+        XCTAssertThrowsError(
+            try db.renamePropertyOption(propertyId: prop.id!, from: "Reading", to: "Read")
+        ) { error in
+            XCTAssertEqual(error as? PropertyOptionError, .duplicateValue("Read"))
+        }
+        // Both Reading and Read must still be present and distinct.
+        let after = try statusDef(db)
+        XCTAssertTrue(after.options.contains { $0.value == "Reading" })
+        XCTAssertTrue(after.options.contains { $0.value == "Read" })
+    }
+
+    /// Option mutations on a multiSelect property are intentionally
+    /// rejected — the value lives in JSON-encoded arrays so a scalar
+    /// equality bulk-update would silently miss in-use values.
+    func testRenameOnMultiSelectThrowsUnsupported() throws {
+        let db = try makeDB()
+        var custom = PropertyDefinition(
+            name: "Themes",
+            type: .multiSelect,
+            options: [
+                SelectOption(value: "ML", color: "#007AFF"),
+                SelectOption(value: "Systems", color: "#34C759"),
+            ],
+            sortOrder: 99,
+            isDefault: false,
+            isVisible: true
+        )
+        try db.savePropertyDefinition(&custom)
+
+        XCTAssertThrowsError(
+            try db.renamePropertyOption(propertyId: custom.id!, from: "ML", to: "MachineLearning")
+        ) { error in
+            XCTAssertEqual(error as? PropertyOptionError, .unsupportedPropertyType)
+        }
+        XCTAssertThrowsError(
+            try db.deletePropertyOption(propertyId: custom.id!, value: "ML", replaceWith: nil)
+        ) { error in
+            XCTAssertEqual(error as? PropertyOptionError, .unsupportedPropertyType)
+        }
+    }
+
     /// Supplying a replacement that isn't itself an existing option is a
     /// caller bug; surface it instead of writing a dangling value.
     func testDeleteWithUnknownReplacementThrowsReplacementNotFound() throws {

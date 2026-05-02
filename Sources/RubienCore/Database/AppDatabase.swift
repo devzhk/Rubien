@@ -2736,9 +2736,22 @@ extension AppDatabase {
             guard var prop = try PropertyDefinition.fetchOne(db, id: propertyId) else {
                 throw PropertyOptionError.propertyNotFound
             }
+            // multiSelect option mutations are intentionally not supported:
+            // values are JSON-encoded arrays and a scalar equality bulk-update
+            // would miss every multi-value row. Surface this rather than
+            // silently leaving stored selections stale.
+            guard prop.type == .singleSelect else {
+                throw PropertyOptionError.unsupportedPropertyType
+            }
             var options = prop.options
             guard let idx = options.firstIndex(where: { $0.value == from }) else {
                 throw PropertyOptionError.optionNotFound
+            }
+            // Renaming onto an existing option's value would collapse two
+            // distinct options into one — break the single-select identity
+            // assumption. Surface and let the caller decide.
+            if options.contains(where: { $0.value == to }) {
+                throw PropertyOptionError.duplicateValue(to)
             }
             options[idx] = SelectOption(value: to, color: options[idx].color)
             prop.options = options
@@ -2775,6 +2788,12 @@ extension AppDatabase {
         try dbWriter.write { db in
             guard var prop = try PropertyDefinition.fetchOne(db, id: propertyId) else {
                 throw PropertyOptionError.propertyNotFound
+            }
+            // multiSelect option deletion via this path would only match
+            // scalar `value` rows, missing the JSON-array case. See the
+            // matching guard in `renamePropertyOption`.
+            guard prop.type == .singleSelect else {
+                throw PropertyOptionError.unsupportedPropertyType
             }
             var options = prop.options
             guard options.contains(where: { $0.value == value }) else {

@@ -375,7 +375,7 @@ struct List: ParsableCommand {
     @Option(name: .long, help: "Keyword search across title, abstract, and notes")
     var keyword: String?
 
-    @Option(name: .customLong("reading-status"), help: "Filter by reading status (unread, reading, skimmed, read)")
+    @Option(name: .customLong("reading-status"), help: "Filter by reading status (Unread, Reading, Skimmed, Read — or any user-added Status option)")
     var readingStatus: String?
 
     @Option(name: .customLong("sort-by"), help: "Sort by field (year, dateAdded, title)")
@@ -552,7 +552,7 @@ struct Update: ParsableCommand {
     @Option(name: .customLong("clear-field"), help: "Clear a single field (repeatable, e.g. --clear-field doi)")
     var clearFields: [String] = []
 
-    @Option(name: .customLong("reading-status"), help: "Set reading status (unread, reading, skimmed, read)")
+    @Option(name: .customLong("reading-status"), help: "Set reading status (Unread, Reading, Skimmed, Read — or any user-added Status option)")
     var readingStatus: String?
 
     func run() throws {
@@ -1102,6 +1102,14 @@ struct Properties: ParsableCommand {
                 printJSONError("--add-option only applies to singleSelect or multiSelect types")
                 throw ExitCode.failure
             }
+            // Reject duplicates explicitly: a second `--add-option --value X`
+            // would otherwise append a second SelectOption with the same value
+            // and break the single-select identity assumption used by pickers
+            // and the rename/delete code paths.
+            if prop.options.contains(where: { $0.value == v }) {
+                printJSONError("Option '\(v)' already exists on '\(prop.name)'")
+                throw ExitCode.failure
+            }
             var opts = prop.options
             let resolvedColor: String
             if let c = color {
@@ -1286,6 +1294,10 @@ struct Properties: ParsableCommand {
             return "Cannot delete: \(count) reference\(count == 1 ? "" : "s") still use this option. Pass --replace-with <existing-value> to migrate them."
         case .replacementNotFound(let name):
             return "Replacement option '\(name)' is not an existing option on this property."
+        case .duplicateValue(let name):
+            return "An option with value '\(name)' already exists on this property — pick a different rename target."
+        case .unsupportedPropertyType:
+            return "Option rename / delete is currently only supported for singleSelect properties. multiSelect values are JSON arrays and need a different code path."
         }
     }
 
