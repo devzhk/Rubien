@@ -281,6 +281,10 @@ struct ReferenceDetailView: View {
     private func defaultPropertyRow(for prop: PropertyDefinition) -> some View {
         switch prop.defaultFieldKey {
         case "referenceType":
+            // Type drives BibTeX/RIS export buckets — its option set is fixed.
+            // The picker hides the inline "create" affordance and shows a
+            // footer hint pointing users at Tags or custom properties for
+            // free-form organization.
             InlineSingleSelectRow(
                 label: prop.name,
                 value: editedRef.referenceType.rawValue,
@@ -290,7 +294,9 @@ struct ReferenceDetailView: View {
                         editedRef.referenceType = type
                         commitDefaultSave()
                     }
-                }
+                },
+                onCreateOption: nil,
+                lockedHint: "Type is fixed (drives BibTeX/RIS export). Use Tags or a custom property for organization."
             )
         case "readingStatus":
             InlineSingleSelectRow(
@@ -303,6 +309,15 @@ struct ReferenceDetailView: View {
                     // User-added options also flow through this path.
                     editedRef.readingStatus = value
                     commitDefaultSave()
+                },
+                onCreateOption: { newOption in
+                    // Append the new option to the seeded Status PropertyDefinition
+                    // and persist; the Reference's status is set by `onSelect`
+                    // (which fires after this with the same value).
+                    if var statusDef = propertyDefs.first(where: { $0.defaultFieldKey == "readingStatus" }) {
+                        _ = statusDef.addOptionIfMissing(newOption)
+                        try? db.savePropertyDefinition(&statusDef)
+                    }
                 }
             )
         case "tags":

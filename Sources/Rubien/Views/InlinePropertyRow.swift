@@ -127,7 +127,13 @@ struct InlineSingleSelectRow: View {
     let value: String
     let options: [SelectOption]
     let onSelect: (String) -> Void
+    /// Pass non-nil to expose inline option creation. Nil locks the picker to
+    /// the current options list (used for Type, whose options drive BibTeX
+    /// buckets and cannot be user-extended).
     var onCreateOption: ((String) -> Void)? = nil
+    /// Optional explanatory message rendered at the bottom of the picker when
+    /// `onCreateOption` is nil. See `SelectOptionPicker.lockedHint`.
+    var lockedHint: String? = nil
 
     @State private var showPicker = false
 
@@ -156,7 +162,8 @@ struct InlineSingleSelectRow: View {
                         onSelect(selected)
                     }
                 },
-                onCreateOption: onCreateOption ?? { _ in }
+                onCreateOption: onCreateOption,
+                lockedHint: lockedHint
             )
         }
     }
@@ -408,7 +415,15 @@ struct SelectOptionPicker: View {
     let options: [SelectOption]
     var isSingleSelect: Bool = false
     let onCommit: ([String]) -> Void
-    let onCreateOption: (String) -> Void
+    /// When non-nil, the picker exposes an inline "create new option" affordance
+    /// (typing in the search field + pressing Enter, plus a "create X" row when
+    /// the search has no exact match). Nil for properties whose options are
+    /// fixed (currently only Type post-Phase-3); the picker hides the create
+    /// path entirely so users aren't led to expect mutability that doesn't apply.
+    let onCreateOption: ((String) -> Void)?
+    /// Optional explanatory message shown at the bottom of the picker when
+    /// `onCreateOption` is nil. Lets us tell the user *why* creation is locked.
+    var lockedHint: String? = nil
 
     @State private var search = ""
     @State private var localSelected: Set<String> = []
@@ -419,16 +434,19 @@ struct SelectOptionPicker: View {
         return options.filter { $0.value.localizedCaseInsensitiveContains(search) }
     }
 
+    private var canCreate: Bool { onCreateOption != nil }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
-                TextField("Search or create…", text: $search)
+                TextField(canCreate ? "Search or create…" : "Search…", text: $search)
                     .textFieldStyle(.plain)
                     .font(.system(size: 12))
                     .onSubmit {
+                        guard let onCreateOption else { return }
                         let trimmed = search.trimmingCharacters(in: .whitespaces)
                         if !trimmed.isEmpty && !options.contains(where: { $0.value.lowercased() == trimmed.lowercased() }) {
                             onCreateOption(trimmed)
@@ -483,7 +501,9 @@ struct SelectOptionPicker: View {
                         .padding(.vertical, 5)
                     }
 
-                    if !search.isEmpty && !options.contains(where: { $0.value.lowercased() == search.trimmingCharacters(in: .whitespaces).lowercased() }) {
+                    if let onCreateOption,
+                       !search.isEmpty,
+                       !options.contains(where: { $0.value.lowercased() == search.trimmingCharacters(in: .whitespaces).lowercased() }) {
                         Button {
                             let trimmed = search.trimmingCharacters(in: .whitespaces)
                             if !trimmed.isEmpty {
@@ -518,6 +538,20 @@ struct SelectOptionPicker: View {
                 .padding(.vertical, 4)
             }
             .frame(maxHeight: 200)
+
+            // Footer hint for properties whose options are intentionally fixed
+            // (Type drives BibTeX export buckets — see PropertyManagerPopover /
+            // CLAUDE.md). Helps users find the right tool when their reach for
+            // "add a Type option" is really an organization need.
+            if !canCreate, let lockedHint {
+                Divider()
+                Text(lockedHint)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .frame(width: 220)
         .onAppear {
