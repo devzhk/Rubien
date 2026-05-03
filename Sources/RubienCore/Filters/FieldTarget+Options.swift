@@ -21,7 +21,7 @@ extension FieldTarget {
             // set from the seeded Status PropertyDefinition (defaultFieldKey
             // == "readingStatus") so user-added values appear in filters/groups.
             // Falls back to the 4 built-ins if the def is missing for any reason.
-            if let def = propertyDefs.first(where: { $0.defaultFieldKey == "readingStatus" }) {
+            if let def = propertyDefs.first(forFieldKey: PropertyDefinition.readingStatusFieldKey) {
                 return def.options.map(\.value)
             }
             return ReadingStatus.builtIn

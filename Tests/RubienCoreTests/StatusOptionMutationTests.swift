@@ -29,8 +29,8 @@ final class StatusOptionMutationTests: XCTestCase {
         try db.dbWriter.write { writer in
             try writer.execute(sql: """
                 INSERT INTO reference(id, title, dateAdded, dateModified, readingStatus)
-                VALUES (1, 'a', ?, ?, 'Reading'),
-                       (2, 'b', ?, ?, 'Reading'),
+                VALUES (1, 'a', ?, ?, 'Skimmed'),
+                       (2, 'b', ?, ?, 'Skimmed'),
                        (3, 'c', ?, ?, 'Read')
             """, arguments: [
                 Date(), Date(), Date(), Date(), Date(), Date()
@@ -38,17 +38,17 @@ final class StatusOptionMutationTests: XCTestCase {
         }
 
         let prop = try statusDef(db)
-        try db.renamePropertyOption(propertyId: prop.id!, from: "Reading", to: "In Progress")
+        try db.renamePropertyOption(propertyId: prop.id!, from: "Skimmed", to: "Glanced")
 
         try db.dbWriter.read { reader in
             let renamedCount = try Int.fetchOne(
                 reader,
-                sql: "SELECT COUNT(*) FROM reference WHERE readingStatus = 'In Progress'"
+                sql: "SELECT COUNT(*) FROM reference WHERE readingStatus = 'Glanced'"
             ) ?? -1
-            XCTAssertEqual(renamedCount, 2, "both references previously 'Reading' must now show 'In Progress'")
+            XCTAssertEqual(renamedCount, 2, "both references previously 'Skimmed' must now show 'Glanced'")
             let strayCount = try Int.fetchOne(
                 reader,
-                sql: "SELECT COUNT(*) FROM reference WHERE readingStatus = 'Reading'"
+                sql: "SELECT COUNT(*) FROM reference WHERE readingStatus = 'Skimmed'"
             ) ?? -1
             XCTAssertEqual(strayCount, 0, "no references must still point at the old value")
             let untouched = try Int.fetchOne(
@@ -61,11 +61,11 @@ final class StatusOptionMutationTests: XCTestCase {
         let updated = try statusDef(db)
         XCTAssertEqual(
             updated.options.map(\.value).sorted(),
-            ["In Progress", "Read", "Skimmed", "Unread"],
+            ["Glanced", "Read", "Unread"],
             "optionsJSON must reflect the rename, with the original color preserved on the renamed option"
         )
-        let renamedOption = updated.options.first { $0.value == "In Progress" }!
-        XCTAssertEqual(renamedOption.color, "#007AFF", "Reading's blue color must follow the option through the rename")
+        let renamedOption = updated.options.first { $0.value == "Glanced" }!
+        XCTAssertEqual(renamedOption.color, "#FF9500", "Skimmed's orange color must follow the option through the rename")
     }
 
     /// Adding a custom Status option then renaming it works identically to
@@ -96,7 +96,7 @@ final class StatusOptionMutationTests: XCTestCase {
         let db = try makeDB()
         let prop = try statusDef(db)
         let before = prop.options
-        try db.renamePropertyOption(propertyId: prop.id!, from: "Reading", to: "Reading")
+        try db.renamePropertyOption(propertyId: prop.id!, from: "Skimmed", to: "Skimmed")
         let after = try statusDef(db).options
         XCTAssertEqual(before, after, "no-op rename must leave optionsJSON exactly as it was")
     }
@@ -145,19 +145,19 @@ final class StatusOptionMutationTests: XCTestCase {
         try db.dbWriter.write { writer in
             try writer.execute(sql: """
                 INSERT INTO reference(id, title, dateAdded, dateModified, readingStatus)
-                VALUES (1, 'a', ?, ?, 'Reading'),
-                       (2, 'b', ?, ?, 'Reading')
+                VALUES (1, 'a', ?, ?, 'Skimmed'),
+                       (2, 'b', ?, ?, 'Skimmed')
             """, arguments: [Date(), Date(), Date(), Date()])
         }
         XCTAssertThrowsError(
-            try db.deletePropertyOption(propertyId: prop.id!, value: "Reading", replaceWith: nil)
+            try db.deletePropertyOption(propertyId: prop.id!, value: "Skimmed", replaceWith: nil)
         ) { error in
             XCTAssertEqual(error as? PropertyOptionError, .optionInUse(count: 2))
         }
         // The option must still be present — the throw must not have partially
         // applied the delete.
         let after = try statusDef(db)
-        XCTAssertTrue(after.options.contains { $0.value == "Reading" })
+        XCTAssertTrue(after.options.contains { $0.value == "Skimmed" })
     }
 
     /// Deleting an in-use option WITH a replacement reassigns the affected
@@ -200,13 +200,13 @@ final class StatusOptionMutationTests: XCTestCase {
         let db = try makeDB()
         let prop = try statusDef(db)
         XCTAssertThrowsError(
-            try db.renamePropertyOption(propertyId: prop.id!, from: "Reading", to: "Read")
+            try db.renamePropertyOption(propertyId: prop.id!, from: "Skimmed", to: "Read")
         ) { error in
             XCTAssertEqual(error as? PropertyOptionError, .duplicateValue("Read"))
         }
-        // Both Reading and Read must still be present and distinct.
+        // Both Skimmed and Read must still be present and distinct.
         let after = try statusDef(db)
-        XCTAssertTrue(after.options.contains { $0.value == "Reading" })
+        XCTAssertTrue(after.options.contains { $0.value == "Skimmed" })
         XCTAssertTrue(after.options.contains { $0.value == "Read" })
     }
 
@@ -248,13 +248,13 @@ final class StatusOptionMutationTests: XCTestCase {
         try db.dbWriter.write { writer in
             try writer.execute(sql: """
                 INSERT INTO reference(id, title, dateAdded, dateModified, readingStatus)
-                VALUES (1, 'a', ?, ?, 'Reading')
+                VALUES (1, 'a', ?, ?, 'Skimmed')
             """, arguments: [Date(), Date()])
         }
         XCTAssertThrowsError(
             try db.deletePropertyOption(
                 propertyId: prop.id!,
-                value: "Reading",
+                value: "Skimmed",
                 replaceWith: "MadeUpStatus"
             )
         ) { error in

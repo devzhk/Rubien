@@ -565,9 +565,11 @@ struct SelectOptionPicker: View {
 
 // MARK: - Single option row inside the picker
 
-/// A single row inside `SelectOptionPicker`. Factored out so the trash
-/// affordance can be hover-revealed via local `@State` without re-rendering
-/// the whole option list on every mouse move.
+/// One row in `SelectOptionPicker`. Local `@State` keeps hover updates row-scoped.
+/// Row uses `.onTapGesture` instead of a wrapping `Button` so the inner trash
+/// `Button` actually receives its taps (nested `.plain` Buttons on macOS route
+/// inner taps to the outer one, dismissing the popover before delete fires —
+/// same sibling-target pattern as `TagPickerPopover`).
 private struct SelectOptionPickerRow: View {
     let option: SelectOption
     let isSelected: Bool
@@ -578,33 +580,30 @@ private struct SelectOptionPickerRow: View {
     @State private var isHovering = false
 
     var body: some View {
-        Button(action: onTap) {
-            HStack(spacing: 8) {
-                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 13))
-                    .foregroundStyle(isSelected ? Color.accentColor : .secondary)
-                Text(option.value)
-                    .font(.system(size: 12))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Color(hex: option.color).opacity(0.2))
-                    .clipShape(Capsule())
-                Spacer()
-                if let onDelete, isHovering {
-                    Button(action: onDelete) {
-                        Image(systemName: "trash")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Delete option")
+        HStack(spacing: 8) {
+            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                .font(.system(size: 13))
+                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+            Text(option.value)
+                .font(.system(size: 12))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .chipBackground(Color(hex: option.color))
+            Spacer()
+            if let onDelete, isHovering {
+                Button(action: onDelete) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
                 }
+                .buttonStyle(.plain)
+                .help("Delete option")
             }
-            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
         .padding(.horizontal, 12)
         .padding(.vertical, 5)
+        .contentShape(Rectangle())
+        .onTapGesture { onTap() }
         .onHover { isHovering = $0 }
     }
 }

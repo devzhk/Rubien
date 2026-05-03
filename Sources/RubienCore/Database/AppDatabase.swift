@@ -312,9 +312,12 @@ public final class AppDatabase: Sendable {
             ]
             let typeOptionsJSON = (try? String(data: JSONEncoder().encode(typeOptions), encoding: .utf8)) ?? "[]"
 
+            // Seeded set covers depth (got the gist vs. read in depth) without
+            // a transient "Reading" state — papers usually finish in one
+            // session, so "Reading" rarely earns its keep. Status is now
+            // user-extensible (Phase 2) so this is just a starting point.
             let statusOptions: [SelectOption] = [
                 .init(value: "Unread", color: "#8E8E93"),
-                .init(value: "Reading", color: "#007AFF"),
                 .init(value: "Skimmed", color: "#FF9500"),
                 .init(value: "Read", color: "#34C759"),
             ]

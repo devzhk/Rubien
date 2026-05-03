@@ -254,7 +254,7 @@ struct FilterEditorPopover: View {
         case .builtin(.readingStatus):
             // Status is user-extensible: pull options from the live Status
             // PropertyDefinition. Falls back to the 4 built-ins if missing.
-            if let def = propertyDefs.first(where: { $0.defaultFieldKey == "readingStatus" }) {
+            if let def = propertyDefs.first(forFieldKey: PropertyDefinition.readingStatusFieldKey) {
                 return def.options.map { (key: $0.value, label: $0.value) }
             }
             return ReadingStatus.builtIn.map { (key: $0, label: $0) }

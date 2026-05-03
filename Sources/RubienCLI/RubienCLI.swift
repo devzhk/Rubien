@@ -70,7 +70,7 @@ func printJSONError(_ message: String) {
 /// the 4 seeded built-ins if the def is missing for any reason.
 func liveStatusOptionValues() throws -> [String] {
     let defs = try AppDatabase.shared.fetchAllPropertyDefinitions()
-    if let def = defs.first(where: { $0.defaultFieldKey == "readingStatus" }) {
+    if let def = defs.first(forFieldKey: PropertyDefinition.readingStatusFieldKey) {
         return def.options.map(\.value)
     }
     return ReadingStatus.builtIn
@@ -1273,7 +1273,7 @@ struct Properties: ParsableCommand {
     /// Defaults bound to a Reference column whose options users may now edit
     /// post-Phase-2. Status is the only one currently; Type stays locked.
     private static func optionsMutable(for prop: PropertyDefinition) -> Bool {
-        prop.defaultFieldKey == "readingStatus"
+        prop.defaultFieldKey == PropertyDefinition.readingStatusFieldKey
     }
 
     /// Error message shown when a user tries to add/rename/delete options on

@@ -146,11 +146,13 @@ public enum ReadingStatus {
     public static let skimmed = "Skimmed"
     public static let read    = "Read"
 
-    /// Names of the 4 built-ins that ship with a fresh database. The runtime
-    /// option set is whatever lives in the Status PropertyDefinition's
-    /// `optionsJSON` and may include user-added values; consumers that need
-    /// the *live* set should fetch it from `PropertyDefinition`, not this list.
-    public static let builtIn: [String] = [unread, reading, skimmed, read]
+    /// Values seeded by the v1 migration. The runtime option set is whatever
+    /// lives in the Status PropertyDefinition's `optionsJSON` and may include
+    /// user-added or user-removed values; consumers that need the *live* set
+    /// should fetch it from `PropertyDefinition`, not this list. `reading` is
+    /// kept as a compile-time constant for tests and forward-compat with
+    /// pre-Phase-4 libraries that may still have it as a value.
+    public static let builtIn: [String] = [unread, skimmed, read]
 }
 
 public struct Reference: Identifiable, Codable, Hashable, Sendable {

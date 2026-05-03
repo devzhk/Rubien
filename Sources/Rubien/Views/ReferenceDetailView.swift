@@ -314,7 +314,7 @@ struct ReferenceDetailView: View {
                     // Append the new option to the seeded Status PropertyDefinition
                     // and persist; the Reference's status is set by `onSelect`
                     // (which fires after this with the same value).
-                    if var statusDef = propertyDefs.first(where: { $0.defaultFieldKey == "readingStatus" }) {
+                    if var statusDef = propertyDefs.first(forFieldKey: PropertyDefinition.readingStatusFieldKey) {
                         _ = statusDef.addOptionIfMissing(newOption)
                         try? db.savePropertyDefinition(&statusDef)
                     }
@@ -324,7 +324,7 @@ struct ReferenceDetailView: View {
                     // to the first remaining option. Mirrors the table-cell
                     // behavior — finer-grained replacement is via the CLI's
                     // --replace-with flag.
-                    guard let statusDef = propertyDefs.first(where: { $0.defaultFieldKey == "readingStatus" }),
+                    guard let statusDef = propertyDefs.first(forFieldKey: PropertyDefinition.readingStatusFieldKey),
                           let propId = statusDef.id else { return }
                     do {
                         try db.deletePropertyOption(propertyId: propId, value: option, replaceWith: nil)

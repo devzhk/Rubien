@@ -174,6 +174,7 @@ struct ReferenceTableView: View {
                 guard let key = prop.defaultFieldKey else { return false }
                 return !hardcodedKeys.contains(key)
             },
+            statusDef: propertyDefs.first(forFieldKey: PropertyDefinition.readingStatusFieldKey),
             customPropertyValueMap: customPropertyValueMap,
             db: db,
             wrapForColumn: { id in viewColumnWraps.contains(id) },
@@ -406,6 +407,9 @@ private struct ReferenceTableContent: View {
     let onDeleteTag: (Int64) -> Void
     let onCreateOption: (Int64, String) -> Void
     let customProperties: [PropertyDefinition]
+    /// Status PropertyDefinition. Passed separately because `customProperties`
+    /// filters Status out (the table renders a hardcoded Status column).
+    let statusDef: PropertyDefinition?
     let customPropertyValueMap: [Int64: [Int64: String]]
     let db: AppDatabase
     let wrapForColumn: (String) -> Bool
@@ -594,22 +598,18 @@ private struct ReferenceTableContent: View {
             TableColumn(ColumnIdentifier.readingStatus.header, value: \.readingStatus) { ref in
                 ReadingStatusCell(
                     reference: ref,
-                    propertyDefs: customProperties,
+                    statusDef: statusDef,
                     onUpdate: onUpdateReference,
                     onCreateStatusOption: { newOption in
                         // Append to the seeded Status PropertyDefinition and
                         // persist. The picker also commits the new option as
                         // the selected value via `onCommit`.
-                        guard var def = customProperties.first(where: {
-                            $0.defaultFieldKey == "readingStatus"
-                        }) else { return }
+                        guard var def = statusDef else { return }
                         _ = def.addOptionIfMissing(newOption)
                         try? db.savePropertyDefinition(&def)
                     },
                     onDeleteStatusOption: { option in
-                        guard let def = customProperties.first(where: {
-                            $0.defaultFieldKey == "readingStatus"
-                        }), let propId = def.id else { return }
+                        guard let def = statusDef, let propId = def.id else { return }
                         // Try a clean delete first; if the option is in use,
                         // auto-reassign affected rows to the first remaining
                         // option (deterministic, doesn't prompt). Power users
@@ -738,7 +738,8 @@ private struct ReferenceTableContent: View {
 
 struct ReadingStatusCell: View {
     let reference: Reference
-    let propertyDefs: [PropertyDefinition]
+    /// Seeded in v1; nil only if the seed was bypassed (defensive fallback below).
+    let statusDef: PropertyDefinition?
     let onUpdate: (Reference) -> Void
     /// Wired by the parent table view to `db.savePropertyDefinition` after
     /// `addOptionIfMissing`. Lets users add a new Status option inline by
@@ -754,12 +755,13 @@ struct ReadingStatusCell: View {
     /// Live Status options driven by the seeded PropertyDefinition (post-Phase-2
     /// users can add/rename/delete options). Falls back to the 4 built-ins.
     private var statusOptions: [SelectOption] {
-        if let def = propertyDefs.first(where: { $0.defaultFieldKey == "readingStatus" }) {
+        if let def = statusDef {
             return def.options
         }
+        // Defensive fallback only — `statusDef` is seeded by v1 and should
+        // always be present in practice. Mirrors `AppDatabase.swift` seed.
         return [
             SelectOption(value: ReadingStatus.unread,  color: "#8E8E93"),
-            SelectOption(value: ReadingStatus.reading, color: "#007AFF"),
             SelectOption(value: ReadingStatus.skimmed, color: "#FF9500"),
             SelectOption(value: ReadingStatus.read,    color: "#34C759"),
         ]

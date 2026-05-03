@@ -118,6 +118,10 @@ public struct PropertyDefinition: Identifiable, Codable, Hashable, Sendable {
 
     /// `defaultFieldKey` value for the built-in Tags property (routes writes through the Tag table).
     public static let tagsFieldKey = "tags"
+    /// `defaultFieldKey` value for the built-in Status property (`Reference.readingStatus` column).
+    public static let readingStatusFieldKey = "readingStatus"
+    /// `defaultFieldKey` value for the built-in Type property (`Reference.referenceType` column).
+    public static let referenceTypeFieldKey = "referenceType"
     /// Display name of the built-in Tags property.
     public static let tagsPropertyName = "Tags"
 
@@ -133,6 +137,15 @@ public struct PropertyDefinition: Identifiable, Codable, Hashable, Sendable {
         current.append(SelectOption(value: trimmed, color: ColorPalette.nextUnused(excluding: used)))
         options = current
         return true
+    }
+}
+
+extension Sequence where Element == PropertyDefinition {
+    /// Find the seeded built-in PropertyDefinition for a given Reference column.
+    /// Pair with `PropertyDefinition.*FieldKey` constants to avoid scattering
+    /// the `defaultFieldKey == "..."` predicate across views.
+    public func first(forFieldKey key: String) -> PropertyDefinition? {
+        first { $0.defaultFieldKey == key }
     }
 }
 
