@@ -21,6 +21,25 @@ rubien-cli <subcommand> [options]
 
 ---
 
+## Putting `rubien-cli` on your `$PATH`
+
+The CLI binary ships inside the app bundle at `/Applications/Rubien.app/Contents/Helpers/rubien-cli` and is fully runnable from that path. Because Rubien is a sandboxed app, it can't install the CLI for you — drop a symlink yourself when you want to type `rubien-cli` from anywhere:
+
+```sh
+# Option 1: symlink into /usr/local/bin (already on $PATH for most setups).
+sudo ln -sf /Applications/Rubien.app/Contents/Helpers/rubien-cli /usr/local/bin/rubien-cli
+
+# Option 2: symlink into ~/bin if you keep one on $PATH.
+mkdir -p ~/bin
+ln -sf /Applications/Rubien.app/Contents/Helpers/rubien-cli ~/bin/rubien-cli
+```
+
+A symlink is preferable to a copy: app updates automatically pick up the new binary. To remove it later: `rm /usr/local/bin/rubien-cli` (or `~/bin/rubien-cli`).
+
+For SPM dev builds, run `.build/debug/rubien-cli` directly or add `.build/debug` to `$PATH` for the duration of the dev loop.
+
+---
+
 ## Subcommands
 
 | Command | Description |

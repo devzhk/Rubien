@@ -52,45 +52,6 @@ struct RubienApp: App {
                     String(localized: "Append YouTube transcript to note on clip", bundle: .module),
                     isOn: $appendYouTubeTranscriptOnClip
                 )
-
-                Divider()
-
-                Button(
-                    CLIInstaller.isInstalled
-                        ? String(localized: "Reinstall command-line tool", bundle: .module)
-                        : String(localized: "Install command-line tool", bundle: .module)
-                ) {
-                    do {
-                        try CLIInstaller.install()
-                        let fmt = String(localized: "Installed command-line tool at %@", bundle: .module)
-                        showToast(String(format: fmt, CLIInstaller.installURL.path), tone: .success)
-                    } catch {
-                        let fmt = String(localized: "content.cli.install.failure", bundle: .module)
-                        showToast(String(format: fmt, error.localizedDescription), tone: .error, hideAfter: 5)
-                    }
-                }
-
-                Button(String(localized: "Uninstall command-line tool", bundle: .module)) {
-                    CLIInstaller.uninstall()
-                    showToast(
-                        String(localized: "Command-line tool uninstalled", bundle: .module),
-                        tone: .info,
-                        hideAfter: 2.5
-                    )
-                }
-                .disabled(!CLIInstaller.isInstalled)
-
-                Button(String(localized: "Reveal in Finder", bundle: .module)) {
-                    CLIInstaller.revealInFinder()
-                }
-
-                Divider()
-
-                let installed = CLIInstaller.isInstalled
-                let statusText = installed
-                    ? String(localized: "Status: ✅ Installed  ·  %@", bundle: .module)
-                    : String(localized: "Status: ❌ Not installed  ·  %@", bundle: .module)
-                Text(String(format: statusText, CLIInstaller.installURL.path))
             }
         }
         Settings {

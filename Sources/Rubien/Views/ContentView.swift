@@ -719,9 +719,6 @@ final class LibraryViewModel: ObservableObject {
 struct ContentView: View {
     @StateObject private var viewModel = LibraryViewModel()
     @EnvironmentObject private var syncCoordinator: SyncCoordinator
-    @AppStorage("hasPromptedCLIInstallation") private var hasPromptedCLIInstallation = false
-    @State private var showCLIInstallPrompt = false
-    @State private var cliInstallResult: CLIInstallResult?
     @State private var showSearch = false
     @State private var showAddReference = false
     @State private var addReferenceInitialType: ReferenceType = .journalArticle
@@ -1154,48 +1151,6 @@ struct ContentView: View {
             // Hand the sync coordinator to the view model so import flows
             // inside the model can kick the PDF upload-queue drainer.
             viewModel.syncCoordinator = syncCoordinator
-
-            // Skip the install prompt when running via `swift run` from .build/ —
-            // /usr/local/bin isn't writable in that context and the prompt can't succeed.
-            if !hasPromptedCLIInstallation
-                && !CLIInstaller.isInstalled
-                && !CLIInstaller.isRunningFromDevBuild {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                    showCLIInstallPrompt = true
-                }
-            }
-        }
-        .alert(
-            String(localized: "content.cli.installPrompt.title", bundle: .module),
-            isPresented: $showCLIInstallPrompt
-        ) {
-            Button(String(localized: "content.cli.installPrompt.install", bundle: .module)) {
-                hasPromptedCLIInstallation = true
-                do {
-                    try CLIInstaller.install()
-                    cliInstallResult = .success
-                } catch {
-                    cliInstallResult = .failure(error.localizedDescription)
-                }
-            }
-            Button(String(localized: "content.cli.installPrompt.later", bundle: .module), role: .cancel) {
-                hasPromptedCLIInstallation = true
-            }
-        } message: {
-            Text("content.cli.installPrompt.message", bundle: .module)
-        }
-        .alert(
-            cliInstallResult?.isSuccess == true
-                ? String(localized: "Install succeeded", bundle: .module)
-                : String(localized: "Install failed", bundle: .module),
-            isPresented: Binding(
-                get: { cliInstallResult != nil },
-                set: { if !$0 { cliInstallResult = nil } }
-            )
-        ) {
-            Button(String(localized: "common.ok", bundle: .module)) { cliInstallResult = nil }
-        } message: {
-            Text(cliInstallResult?.message ?? "")
         }
     }
 
@@ -1572,25 +1527,3 @@ private struct FloatingProgressToast: View {
     }
 }
 
-// MARK: - CLI Install Result
-
-private enum CLIInstallResult {
-    case success
-    case failure(String)
-
-    var isSuccess: Bool {
-        if case .success = self { return true }
-        return false
-    }
-
-    var message: String {
-        switch self {
-        case .success:
-            let fmt = String(localized: "content.cli.install.success", bundle: .module)
-            return String(format: fmt, CLIInstaller.installURL.path)
-        case .failure(let reason):
-            let fmt = String(localized: "content.cli.install.failure", bundle: .module)
-            return String(format: fmt, reason)
-        }
-    }
-}
