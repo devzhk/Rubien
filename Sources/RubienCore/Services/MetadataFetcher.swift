@@ -439,33 +439,78 @@ public enum MetadataFetcher {
 
     // MARK: - arXiv ID → arXiv API
 
-    /// Fetch metadata from arXiv ID. Tries the arXiv Atom API first; on terminal
-    /// failure (most often HTTP 429 — arXiv's "Rate exceeded" reflects shared
-    /// server capacity, not per-IP usage, so retrying our own backoff doesn't
-    /// help) falls back to OpenAlex via the arXiv DataCite DOI. OpenAlex indexes
-    /// arXiv preprints and has much higher headroom.
+    /// Fetch metadata for an arXiv ID by racing the arXiv Atom API against an
+    /// OpenAlex DataCite-DOI lookup. First success wins; the loser is cancelled.
+    /// arXiv's `export.arxiv.org` is fronted by Fastly and has occasional POP
+    /// stalls where TCP connects but no HTTP response arrives — sequential
+    /// fallback would force the full URLSession timeout before recovering. The
+    /// race bounds user-visible latency at `min(arXiv, OpenAlex)`.
     public static func fetchFromArXiv(_ arxivId: String) async throws -> Reference {
         let cacheKey = "arxiv:\(arxivId)"
         if let cached = cachedReference(for: cacheKey) { return cached }
 
-        do {
-            let ref = try await fetchFromArXivAPI(arxivId)
-            cacheReference(ref, for: cacheKey)
-            return ref
-        } catch {
-            if let ref = try? await fetchFromOpenAlexByDOI("10.48550/arXiv.\(arxivId)") {
-                var withArxivURL = ref
-                withArxivURL.url = "https://arxiv.org/abs/\(arxivId)"
-                cacheReference(withArxivURL, for: cacheKey)
-                return withArxivURL
+        let winner = try await raceArxivAndOpenAlex(
+            arxivId: arxivId,
+            arxivFetch: { id in try await Self.fetchFromArXivAPI(id) },
+            openAlexFetch: { doi in try await Self.fetchFromOpenAlexByDOI(doi) }
+        )
+        cacheReference(winner, for: cacheKey)
+        return winner
+    }
+
+    /// Race arXiv and OpenAlex for the same arXiv ID. Internal so tests can
+    /// drive it deterministically with closures rather than URLSession stubs.
+    /// On dual failure, throws the arXiv error to preserve prior semantics.
+    internal static func raceArxivAndOpenAlex(
+        arxivId: String,
+        arxivFetch: @Sendable @escaping (String) async throws -> Reference,
+        openAlexFetch: @Sendable @escaping (String) async throws -> Reference?
+    ) async throws -> Reference {
+        enum Outcome {
+            case arxiv(Result<Reference, Error>)
+            case openAlex(Result<Reference, Error>)
+        }
+
+        return try await withThrowingTaskGroup(of: Outcome.self) { group in
+            group.addTask {
+                do { return .arxiv(.success(try await arxivFetch(arxivId))) }
+                catch { return .arxiv(.failure(error)) }
             }
-            throw error
+            group.addTask {
+                do {
+                    guard let ref = try await openAlexFetch("10.48550/arXiv.\(arxivId)") else {
+                        return .openAlex(.failure(FetchError.parseError))
+                    }
+                    var stamped = ref
+                    stamped.url = "https://arxiv.org/abs/\(arxivId)"
+                    return .openAlex(.success(stamped))
+                } catch {
+                    return .openAlex(.failure(error))
+                }
+            }
+
+            var arxivError: Error?
+            var openAlexError: Error?
+            for try await outcome in group {
+                switch outcome {
+                case .arxiv(.success(let ref)), .openAlex(.success(let ref)):
+                    group.cancelAll()
+                    return ref
+                case .arxiv(.failure(let err)):
+                    arxivError = err
+                case .openAlex(.failure(let err)):
+                    openAlexError = err
+                }
+            }
+            throw arxivError ?? openAlexError ?? FetchError.parseError
         }
     }
 
     /// One-shot — no `withRetry`. arXiv's 429 ("Rate exceeded") is shared server
-    /// capacity, not per-IP usage, so 21s of exponential backoff before the
-    /// `fetchFromArXiv` OpenAlex fallback would buy nothing.
+    /// capacity, not per-IP usage, so exponential backoff buys nothing; the
+    /// race against OpenAlex above is the actual recovery path. The 8 s ceiling
+    /// is just an upper bound for cases where OpenAlex doesn't have the paper
+    /// AND arXiv hangs — both unusual.
     private static func fetchFromArXivAPI(_ arxivId: String) async throws -> Reference {
         let urlString = "https://export.arxiv.org/api/query?id_list=\(arxivId)&max_results=1"
         guard let url = URL(string: urlString) else {
@@ -474,7 +519,7 @@ public enum MetadataFetcher {
 
         var request = URLRequest(url: url)
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        request.timeoutInterval = 15
+        request.timeoutInterval = 8
 
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {

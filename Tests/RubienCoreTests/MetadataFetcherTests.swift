@@ -165,4 +165,84 @@ final class MetadataFetcherTests: XCTestCase {
         let error = MetadataFetcher.FetchError.httpError(404)
         XCTAssertFalse(error.isRetryable, "404 not-found errors should not be retryable")
     }
+
+    // MARK: - arXiv ↔ OpenAlex race
+
+    func testRaceArxivWinsWhenOpenAlexSlow() async throws {
+        let result = try await MetadataFetcher.raceArxivAndOpenAlex(
+            arxivId: "2410.08260",
+            arxivFetch: { id in
+                try await Task.sleep(nanoseconds: 20_000_000)
+                return Reference(title: "From arXiv", url: "https://arxiv.org/abs/\(id)")
+            },
+            openAlexFetch: { _ in
+                try await Task.sleep(nanoseconds: 200_000_000)
+                return Reference(title: "From OpenAlex")
+            }
+        )
+        XCTAssertEqual(result.title, "From arXiv")
+        XCTAssertEqual(result.url, "https://arxiv.org/abs/2410.08260")
+    }
+
+    func testRaceOpenAlexWinsWhenArxivStalls() async throws {
+        let result = try await MetadataFetcher.raceArxivAndOpenAlex(
+            arxivId: "2410.08260",
+            arxivFetch: { _ in
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+                return Reference(title: "Should not win")
+            },
+            openAlexFetch: { _ in
+                try await Task.sleep(nanoseconds: 10_000_000)
+                return Reference(title: "From OpenAlex")
+            }
+        )
+        XCTAssertEqual(result.title, "From OpenAlex")
+        XCTAssertEqual(result.url, "https://arxiv.org/abs/2410.08260")
+    }
+
+    func testRaceBothFailRethrowsArxivError() async {
+        struct ArxivErr: Error {}
+        struct OAErr: Error {}
+        do {
+            _ = try await MetadataFetcher.raceArxivAndOpenAlex(
+                arxivId: "2410.08260",
+                arxivFetch: { _ in throw ArxivErr() },
+                openAlexFetch: { _ in throw OAErr() }
+            )
+            XCTFail("expected throw")
+        } catch is ArxivErr {
+            // expected — arXiv error preserved on dual failure
+        } catch {
+            XCTFail("expected ArxivErr, got \(error)")
+        }
+    }
+
+    func testRaceOpenAlexNilDoesNotMaskArxivSuccess() async throws {
+        let result = try await MetadataFetcher.raceArxivAndOpenAlex(
+            arxivId: "2410.08260",
+            arxivFetch: { id in
+                try await Task.sleep(nanoseconds: 20_000_000)
+                return Reference(title: "From arXiv", url: "https://arxiv.org/abs/\(id)")
+            },
+            openAlexFetch: { _ in nil /* OpenAlex 404 / not yet indexed */ }
+        )
+        XCTAssertEqual(result.title, "From arXiv")
+    }
+
+    func testRaceSimultaneousSuccessReturnsOneWithoutDeadlock() async throws {
+        // Both children resolve on the same scheduling tick — exercises the
+        // for-await loop when outcomes pile up. Either may win.
+        let result = try await MetadataFetcher.raceArxivAndOpenAlex(
+            arxivId: "2410.08260",
+            arxivFetch: { id in
+                try await Task.sleep(nanoseconds: 10_000_000)
+                return Reference(title: "From arXiv", url: "https://arxiv.org/abs/\(id)")
+            },
+            openAlexFetch: { _ in
+                try await Task.sleep(nanoseconds: 10_000_000)
+                return Reference(title: "From OpenAlex")
+            }
+        )
+        XCTAssertTrue(["From arXiv", "From OpenAlex"].contains(result.title))
+    }
 }
