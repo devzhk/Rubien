@@ -164,4 +164,26 @@ export function registerPdfTools(server: McpServer): void {
       }
     },
   );
+
+  server.registerTool(
+    "rubien_pdf_download",
+    {
+      title: "Download the open-access PDF for a reference",
+      description:
+        "Fetch the open-access PDF (via DOI or arXiv resolution) and attach it to the reference. Skip-if-attached by default; pass `force: true` to detach the existing PDF and re-download. Side effects: writes a file under the library's PDF storage and inserts a pdfCache row + pdfUploadQueue row (so the running app's sync engine will push to CloudKit). Returns `{ id, ok, action, filename? }` where `action` is `\"downloaded\" | \"replaced\" | \"already-attached\" | \"already-pending\"`. Errors (isError) when the reference is missing, has no DOI/arXiv, or the network fetch fails. Long-running — up to 5 minutes.",
+      inputSchema: {
+        id: z.number().int().describe("Reference ID"),
+        force: z
+          .boolean()
+          .optional()
+          .describe("Replace an existing attached PDF instead of skipping."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false },
+    },
+    async ({ id, force }) => {
+      const args = ["pdf", "download", String(id)];
+      if (force) args.push("--force");
+      return runCliAsTool(args, { timeoutMs: 300_000 });
+    },
+  );
 }

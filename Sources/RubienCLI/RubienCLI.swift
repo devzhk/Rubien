@@ -243,6 +243,109 @@ struct CitationTextOutput: Encodable {
     let bibliography: [String]
 }
 
+// MARK: - PDF download
+
+/// Stable JSON string for the `action` field across both PDF-download
+/// outputs. Used by `pdf download <id>` and `add --identifier --download-pdf`.
+enum PDFDownloadAction: String, Encodable {
+    case downloaded
+    case replaced
+    case alreadyAttached = "already-attached"
+    case alreadyPending = "already-pending"
+    case skipped
+}
+
+struct PDFDownloadStatusDTO: Encodable {
+    let ok: Bool
+    let action: PDFDownloadAction?
+    let filename: String?
+    let error: String?
+}
+
+struct AddWithPDFOutput: Encodable {
+    let reference: ReferenceDTO
+    let pdfDownload: PDFDownloadStatusDTO
+}
+
+/// Download via `PDFDownloadService`, attach via `attachImportedPDFs`,
+/// and clean up the on-disk file if the attach throws. Returns the local
+/// filename on success. Callers handle verification-after-attach and
+/// the success notifications.
+private func downloadAndAttachPDF(for ref: Reference, refId: Int64) async throws -> String {
+    let filename = try await PDFDownloadService.downloadPDF(for: ref)
+    do {
+        try AppDatabase.shared.attachImportedPDFs(rowIds: [refId], filenames: [filename])
+    } catch {
+        try? FileManager.default.removeItem(
+            at: AppDatabase.pdfStorageURL.appendingPathComponent(filename))
+        throw error
+    }
+    return filename
+}
+
+/// Best-effort PDF download for `add --identifier --download-pdf`. The
+/// reference is already saved by the caller, so all error paths must
+/// soft-fail into the DTO so the command still exits 0.
+func attemptPDFDownload(for ref: Reference) async -> PDFDownloadStatusDTO {
+    guard let refId = ref.id else {
+        return PDFDownloadStatusDTO(ok: false, action: nil, filename: nil,
+                                    error: "Reference has no id")
+    }
+    let existing: AppDatabase.PDFCacheStatus?
+    do {
+        existing = try AppDatabase.shared.pdfCacheStatus(for: refId)
+    } catch {
+        return PDFDownloadStatusDTO(ok: false, action: nil, filename: nil,
+                                    error: "Failed to read PDF cache state: \(error.localizedDescription)")
+    }
+    if let existing {
+        let materialized = existing.materializedAt != nil
+        return PDFDownloadStatusDTO(
+            ok: true,
+            action: materialized ? .alreadyAttached : .alreadyPending,
+            filename: materialized ? existing.localFilename : nil,
+            error: nil)
+    }
+    guard ref.canDownloadPDF else {
+        return PDFDownloadStatusDTO(ok: false, action: .skipped, filename: nil,
+                                    error: "No DOI or arXiv identifier available")
+    }
+    let filename: String
+    do {
+        filename = try await downloadAndAttachPDF(for: ref, refId: refId)
+    } catch let err as PDFDownloadService.DownloadError {
+        return PDFDownloadStatusDTO(ok: false, action: nil, filename: nil,
+                                    error: err.localizedDescription)
+    } catch {
+        return PDFDownloadStatusDTO(ok: false, action: nil, filename: nil,
+                                    error: "Failed to attach PDF: \(error.localizedDescription)")
+    }
+    // Verify-after-attach: `attachImportedPDFs` silently no-ops on an
+    // existing `pdfCache` row, so a concurrent writer can leave our
+    // file orphaned. On a verify-read failure, do NOT delete the file —
+    // state is ambiguous; preserve the filename in the soft-fail DTO.
+    let post: String?
+    do {
+        post = try AppDatabase.shared.pdfFilename(for: refId)
+    } catch {
+        return PDFDownloadStatusDTO(
+            ok: false, action: .downloaded, filename: filename,
+            error: "Attached PDF but verification read failed; library may need reconciliation: \(error.localizedDescription)")
+    }
+    if post != filename {
+        try? FileManager.default.removeItem(
+            at: AppDatabase.pdfStorageURL.appendingPathComponent(filename))
+        return PDFDownloadStatusDTO(
+            ok: true,
+            action: post != nil ? .alreadyAttached : .alreadyPending,
+            filename: post, error: nil)
+    }
+    notifyLibraryChanged()
+    PDFUploadQueueBroadcaster.postChangeNotification()
+    return PDFDownloadStatusDTO(ok: true, action: .downloaded,
+                                filename: filename, error: nil)
+}
+
 // MARK: - Reference DTO helpers
 
 /// Map a batch of references to DTOs, fetching property defs + values scoped
@@ -458,15 +561,31 @@ struct Add: AsyncParsableCommand {
     @Option(name: .long, help: "Title (for manual entry)")
     var title: String?
 
+    @Flag(name: .customLong("download-pdf"),
+          help: "After resolving the identifier, fetch the open-access PDF. Only valid with --identifier.")
+    var downloadPdf: Bool = false
+
     func run() async throws {
+        if downloadPdf && identifier == nil {
+            printJSONError("--download-pdf requires --identifier")
+            throw ExitCode.failure
+        }
         if let id = identifier {
             var ref = try await MetadataFetcher.fetch(from: id)
             ref = MetadataVerifier.manuallyVerified(ref, reviewedBy: "cli-identifier")
             try AppDatabase.shared.saveReference(&ref)
             notifyLibraryChanged()
-            // saveReference may dedupe onto an existing row; surface that row's
-            // existing custom properties so the contract matches get/list/export.
-            printJSON(try referenceDTO(for: ref))
+            if downloadPdf {
+                let status = await attemptPDFDownload(for: ref)
+                // `referenceDTO` resolves `pdfPath` via the per-device cache
+                // table, so no refetch needed — `ref` doesn't carry that field.
+                let dto = try referenceDTO(for: ref)
+                printJSON(AddWithPDFOutput(reference: dto, pdfDownload: status))
+            } else {
+                // saveReference may dedupe onto an existing row; surface that row's
+                // existing custom properties so the contract matches get/list/export.
+                printJSON(try referenceDTO(for: ref))
+            }
         } else if let bib = bibtex {
             let refs = BibTeXImporter.parse(bib)
             guard !refs.isEmpty else {
@@ -1633,11 +1752,11 @@ extension PDFExtractor.Format: ExpressibleByArgument {
     public static var allValueStrings: [String] { ["jpeg", "png"] }
 }
 
-struct Pdf: ParsableCommand {
+struct Pdf: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "pdf",
         abstract: "Inspect and extract content from a reference's attached PDF",
-        subcommands: [PdfInfo.self, PdfText.self, PdfPageImage.self, PdfStatus.self]
+        subcommands: [PdfInfo.self, PdfText.self, PdfPageImage.self, PdfStatus.self, PdfDownload.self]
     )
 }
 
@@ -1907,5 +2026,113 @@ struct PdfStatus: ParsableCommand {
             lastOpenedAt: status.lastOpenedAt,
             inUploadQueue: status.inUploadQueue
         ))
+    }
+}
+
+struct PdfDownloadOutput: Encodable {
+    let id: Int64
+    let ok: Bool
+    let action: PDFDownloadAction
+    let filename: String?
+}
+
+struct PdfDownload: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "download",
+        abstract: "Fetch the open-access PDF for a reference and attach it."
+    )
+
+    @Argument(help: "Reference ID")
+    var id: Int64
+
+    @Flag(name: .long, help: "Replace any attached PDF instead of skipping.")
+    var force: Bool = false
+
+    func run() async throws {
+        let refs = try AppDatabase.shared.fetchReferences(ids: [id])
+        guard let ref = refs.first else {
+            printJSONError("Reference \(id) not found")
+            throw ExitCode.failure
+        }
+
+        // Explicit do/catch keeps the failure on stderr as `{"error":...}`
+        // (MCP contract), not as swift-argument-parser's default formatting.
+        let existing: AppDatabase.PDFCacheStatus?
+        do {
+            existing = try AppDatabase.shared.pdfCacheStatus(for: id)
+        } catch {
+            printJSONError("Failed to read PDF cache state: \(error.localizedDescription)")
+            throw ExitCode.failure
+        }
+        let materialized = existing?.materializedAt != nil
+        let existingFilename = materialized ? existing?.localFilename : nil
+
+        // Skip-if-attached (default).
+        if existing != nil && !force {
+            printJSON(PdfDownloadOutput(
+                id: id, ok: true,
+                action: materialized ? .alreadyAttached : .alreadyPending,
+                filename: existingFilename))
+            return
+        }
+
+        guard ref.canDownloadPDF else {
+            printJSONError("No DOI or arXiv identifier available for reference \(id)")
+            throw ExitCode.failure
+        }
+
+        // --force replace: DB detach FIRST so attach can't no-op. If detach
+        // throws, disk state stays unchanged.
+        if existing != nil {
+            do {
+                try AppDatabase.shared.detachReferencePDF(id: id)
+            } catch {
+                printJSONError("Failed to detach existing PDF: \(error.localizedDescription)")
+                throw ExitCode.failure
+            }
+            if let old = existingFilename {
+                try? FileManager.default.removeItem(
+                    at: AppDatabase.pdfStorageURL.appendingPathComponent(old))
+            }
+        }
+
+        let filename: String
+        do {
+            filename = try await downloadAndAttachPDF(for: ref, refId: id)
+        } catch let err as PDFDownloadService.DownloadError {
+            printJSONError(err.localizedDescription)
+            throw ExitCode.failure
+        } catch {
+            printJSONError("Failed to attach PDF: \(error.localizedDescription)")
+            throw ExitCode.failure
+        }
+
+        // Verify-after-attach: a concurrent writer can have inserted a
+        // `pdfCache` row, in which case our `attachImportedPDFs` silently
+        // no-op'd and our file is orphaned. On verify-read failure, do NOT
+        // delete the file — state is ambiguous.
+        let post: String?
+        do {
+            post = try AppDatabase.shared.pdfFilename(for: id)
+        } catch {
+            printJSONError("Attached PDF but verification read failed; library may need reconciliation: \(error.localizedDescription)")
+            throw ExitCode.failure
+        }
+        if post != filename {
+            try? FileManager.default.removeItem(
+                at: AppDatabase.pdfStorageURL.appendingPathComponent(filename))
+            printJSON(PdfDownloadOutput(
+                id: id, ok: true,
+                action: post != nil ? .alreadyAttached : .alreadyPending,
+                filename: post))
+            return
+        }
+        notifyLibraryChanged()
+        PDFUploadQueueBroadcaster.postChangeNotification()
+
+        printJSON(PdfDownloadOutput(
+            id: id, ok: true,
+            action: existing != nil ? .replaced : .downloaded,
+            filename: filename))
     }
 }

@@ -234,6 +234,57 @@ final class RubienCLITests: XCTestCase {
         XCTAssertNotEqual(verifyResult.exitCode, 0, "Get after delete should fail")
     }
 
+    // MARK: - PDF download rejection paths
+    //
+    // Success paths require live network (stable arXiv id 2106.04561 makes a
+    // good manual smoke test) and aren't covered here. The three tests below
+    // exercise the offline rejection envelope: each must exit non-zero with
+    // stderr parsing to `{"error": ...}` per the CLI/MCP contract.
+
+    func testAddDownloadPdfRequiresIdentifier() throws {
+        try skipIfBinaryMissing()
+        let result = try runCLI(["add", "--title", "X \(UUID().uuidString)", "--download-pdf"])
+        XCTAssertNotEqual(result.exitCode, 0,
+                          "--download-pdf without --identifier should fail")
+        let errJson = try JSONSerialization.jsonObject(with: Data(result.stderr.utf8)) as? [String: Any]
+        let message = errJson?["error"] as? String ?? ""
+        XCTAssertTrue(message.contains("--download-pdf requires --identifier"),
+                      "stderr error message did not name the constraint; got: \(message)")
+    }
+
+    func testPdfDownloadReferenceNotFound() throws {
+        try skipIfBinaryMissing()
+        let result = try runCLI(["pdf", "download", "999999999"])
+        XCTAssertNotEqual(result.exitCode, 0,
+                          "pdf download for a missing reference should fail")
+        let errJson = try JSONSerialization.jsonObject(with: Data(result.stderr.utf8)) as? [String: Any]
+        let message = errJson?["error"] as? String ?? ""
+        XCTAssertTrue(message.contains("not found"),
+                      "stderr error message did not contain 'not found'; got: \(message)")
+    }
+
+    func testPdfDownloadIncapableReference() throws {
+        try skipIfBinaryMissing()
+
+        // Manual-entry reference has no DOI/arXiv URL, so canDownloadPDF is false.
+        let addResult = try runCLI(["add", "--title", "Incapable \(UUID().uuidString)"])
+        XCTAssertEqual(addResult.exitCode, 0)
+        let addJson = try JSONSerialization.jsonObject(with: Data(addResult.stdout.utf8)) as? [String: Any]
+        guard let refId = addJson?["id"] as? Int64 ?? (addJson?["id"] as? Int).map(Int64.init) else {
+            XCTFail("Add output should contain an integer 'id'")
+            return
+        }
+        defer { _ = try? runCLI(["delete", "\(refId)", "--force"]) }
+
+        let result = try runCLI(["pdf", "download", "\(refId)"])
+        XCTAssertNotEqual(result.exitCode, 0,
+                          "pdf download on an incapable reference should fail")
+        let errJson = try JSONSerialization.jsonObject(with: Data(result.stderr.utf8)) as? [String: Any]
+        let message = errJson?["error"] as? String ?? ""
+        XCTAssertTrue(message.contains("No DOI or arXiv identifier"),
+                      "stderr error message did not explain the cause; got: \(message)")
+    }
+
     // MARK: - Import Help mentions stdin
 
     func testImportHelpMentionsStdin() throws {

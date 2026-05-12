@@ -238,6 +238,7 @@ final class SyncCoordinatorTests: XCTestCase {
                 accountStatus: { _ in .available }
             ),
             makeLibrary: stubLibraryFactory(),
+            startLibrary: { _ in },
             lockURL: tmpLockURL
         )
         await coordinator.performStartSyncForTest()
@@ -259,6 +260,7 @@ final class SyncCoordinatorTests: XCTestCase {
                 accountStatus: { _ in .available }
             ),
             makeLibrary: stubLibraryFactory(),
+            startLibrary: { _ in },
             lockURL: tmpLockURL
         )
         async let first: Void = coordinator.performStartSyncForTest()
@@ -284,6 +286,7 @@ final class SyncCoordinatorTests: XCTestCase {
                 accountStatus: { _ in .available }
             ),
             makeLibrary: stubLibraryFactory(),
+            startLibrary: { _ in },
             lockURL: tmpLockURL
         )
         await coordinator.startIfEnabled()

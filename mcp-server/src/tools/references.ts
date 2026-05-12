@@ -122,7 +122,7 @@ export function registerReferenceTools(server: McpServer): void {
     {
       title: "Add reference",
       description:
-        "Create a new reference. Choose one input method: identifier (DOI/arXiv/PMID/ISBN, triggers metadata lookup, slow), bibtex (inline BibTeX/BibLaTeX string, may return array for multi-entry), or title (minimal manual entry).",
+        "Create a new reference. Choose one input method: identifier (DOI/arXiv/PMID/ISBN, triggers metadata lookup, slow), bibtex (inline BibTeX/BibLaTeX string, may return array for multi-entry), or title (minimal manual entry). Pass `downloadPdf: true` (identifier only) to also fetch the open-access PDF — output becomes `{ reference, pdfDownload: { ok, action?, filename?, error? } }`; the reference saves either way.",
       inputSchema: {
         method: z.enum(["identifier", "bibtex", "title"]),
         value: z
@@ -130,18 +130,43 @@ export function registerReferenceTools(server: McpServer): void {
           .describe(
             "The identifier / BibTeX source / title, depending on method.",
           ),
+        downloadPdf: z
+          .boolean()
+          .optional()
+          .describe(
+            "Only valid with method='identifier'. After metadata lookup, attempt to fetch the open-access PDF. Reference is still saved if the PDF fetch fails. Adds up to ~3min to the timeout.",
+          ),
       },
+      annotations: { readOnlyHint: false, destructiveHint: false },
     },
-    async ({ method, value }) => {
+    async ({ method, value, downloadPdf }) => {
+      if (downloadPdf && method !== "identifier") {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                error: "downloadPdf requires method='identifier'",
+              }),
+            },
+          ],
+          isError: true,
+        };
+      }
       const flag =
         method === "identifier"
           ? "--identifier"
           : method === "bibtex"
             ? "--bibtex"
             : "--title";
-      return runCliAsTool(["add", flag, value], {
-        timeoutMs: method === "identifier" ? 120_000 : undefined,
-      });
+      const args = ["add", flag, value];
+      if (downloadPdf) args.push("--download-pdf");
+      const timeoutMs = downloadPdf
+        ? 300_000
+        : method === "identifier"
+          ? 120_000
+          : undefined;
+      return runCliAsTool(args, { timeoutMs });
     },
   );
 

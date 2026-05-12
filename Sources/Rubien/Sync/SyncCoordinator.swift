@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import SwiftUI
 import CloudKit
@@ -72,13 +73,14 @@ public final class SyncCoordinator: ObservableObject {
 
     private let probes: Probes
 
-    /// Factory that creates and starts a `SyncedLibrary` for a given
-    /// database. The closure is responsible for both construction and
-    /// calling `start()` so tests can inject a factory that skips the
-    /// `CKSyncEngine` init (which requires CloudKit entitlements and
-    /// would crash in an unentitled XCTest process).
-    /// Production uses the default value which calls `start()`.
+    /// Pure factory — must NOT call `start()`. Split from `startLibrary`
+    /// so `performStartSync` can install the PDF-upload-queue broadcaster
+    /// subscription before `start()`'s initial drain runs.
     private let makeLibrary: @Sendable (AppDatabase) async -> SyncedLibrary
+
+    /// Runs `start()` on the library after the broadcaster subscription
+    /// is installed. Tests inject a no-op to skip `CKSyncEngine` init.
+    private let startLibrary: @Sendable (SyncedLibrary) async -> Void
 
     /// Path to the single-writer flock file. Production uses
     /// `SyncFileLock.defaultURL` (one global lock per device); tests
@@ -93,6 +95,7 @@ public final class SyncCoordinator: ObservableObject {
         defaults: UserDefaults = .standard,
         probes: Probes = .live,
         makeLibrary: (@Sendable (AppDatabase) async -> SyncedLibrary)? = nil,
+        startLibrary: (@Sendable (SyncedLibrary) async -> Void)? = nil,
         lockURL: URL = SyncFileLock.defaultURL
     ) {
         self.appDatabase = appDatabase
@@ -103,17 +106,18 @@ public final class SyncCoordinator: ObservableObject {
             self.makeLibrary = makeLibrary
         } else {
             self.makeLibrary = { db in
-                // Inject the B8 PDF-asset-sync flag from the app target's
-                // RubienPreferences. RubienSync can't import Rubien (would
-                // create a target cycle), so the read goes through a
-                // closure resolved at construction.
-                let lib = SyncedLibrary(
+                // Injects the B8 PDF-asset-sync flag from RubienPreferences
+                // (RubienSync can't import Rubien without a target cycle).
+                SyncedLibrary(
                     appDatabase: db,
                     pdfAssetSyncEnabledProvider: { RubienPreferences.pdfAssetSyncEnabled }
                 )
-                await lib.start()
-                return lib
             }
+        }
+        if let startLibrary {
+            self.startLibrary = startLibrary
+        } else {
+            self.startLibrary = { await $0.start() }
         }
         self.userEnabled = defaults.bool(forKey: DefaultsKey.enabled)
     }
@@ -210,6 +214,10 @@ public final class SyncCoordinator: ObservableObject {
     private var syncLock: SyncFileLock?
     private var lifecycleGeneration: Int = 0
 
+    /// Subscription must capture `newLibrary` directly (not `self.library`)
+    /// so kicks fired during `performStartSync` can't hit a nil library.
+    private var pdfQueueKickCancellable: AnyCancellable?
+
     /// Test-only accessor; production callers never read the library
     /// directly (status is the observable surface).
     var librarySnapshotForTest: SyncedLibrary? { library }
@@ -264,24 +272,41 @@ public final class SyncCoordinator: ObservableObject {
         }
 
         let newLibrary = await makeLibrary(appDatabase)
+
+        // Install the broadcaster subscription before `start()` so kicks
+        // posted during the initial drain don't fall on the floor.
+        pdfQueueKickCancellable = PDFUploadQueueBroadcaster.shared.events
+            .sink { [weak newLibrary] _ in
+                Task { await newLibrary?.drainPDFUploadQueue() }
+            }
+
+        await startLibrary(newLibrary)
         await newLibrary.installTransactionObserver()
 
         guard generation == lifecycleGeneration else {
             await newLibrary.removeTransactionObserver()
             try? syncLock?.unlock()
             syncLock = nil
+            pdfQueueKickCancellable = nil
             return
         }
 
         library = newLibrary
         status = .idle
         startStatusConsumer(for: newLibrary)
+
+        // Catch-up drain in case a kick fired between coordinator init
+        // and the subscription assignment. `drainPDFUploadQueue` is
+        // idempotent + re-entrant safe; offloaded to a Task so it doesn't
+        // delay the `.idle` status surfacing to the UI.
+        Task { [weak newLibrary] in await newLibrary?.drainPDFUploadQueue() }
     }
 
     func performStopSync() async {
         lifecycleGeneration += 1
         statusTask?.cancel()
         statusTask = nil
+        pdfQueueKickCancellable = nil
 
         if let existing = library {
             await existing.removeTransactionObserver()

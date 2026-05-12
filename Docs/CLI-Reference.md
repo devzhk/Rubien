@@ -62,6 +62,7 @@ For SPM dev builds, run `.build/debug/rubien-cli` directly or add `.build/debug`
 | `pdf text` | Extract text from a reference's PDF by page range or section title |
 | `pdf page-image` | Render a PDF page as a base64-encoded JPEG/PNG |
 | `pdf status` | Show PDF cache + upload-queue state for a reference (JSON only) |
+| `pdf download` | Fetch the open-access PDF for a reference and attach it (skip-if-attached; `--force` to replace) |
 | `sync status` | Inspect iCloud sync state (JSON only) |
 
 ---
@@ -139,6 +140,7 @@ Add a reference via DOI/PMID/arXiv ID, BibTeX string, or manual title.
 
 ```bash
 rubien-cli add --identifier "10.1038/s41586-021-03819-2"
+rubien-cli add --identifier "2106.04561" --download-pdf
 rubien-cli add --bibtex '@article{..., title={...}, ...}'
 rubien-cli add --title "My Paper"
 ```
@@ -148,10 +150,13 @@ rubien-cli add --title "My Paper"
 | `--identifier` | String | DOI, PMID, or arXiv ID — metadata is fetched automatically |
 | `--bibtex` | String | BibTeX source string (can contain multiple entries) |
 | `--title` | String | Title for manual entry (creates a minimal reference) |
+| `--download-pdf` | Flag | Only valid with `--identifier`. After metadata lookup, fetch the open-access PDF. The reference is saved either way; PDF failures are reported in the envelope rather than aborting. |
 
 Exactly one of `--identifier`, `--bibtex`, or `--title` is required.
 
 **Output:** JSON reference object (or array if BibTeX contains multiple entries).
+
+**Output with `--download-pdf`:** envelope `{ "reference": ReferenceDTO, "pdfDownload": { "ok": Bool, "action": String?, "filename": String?, "error": String? } }`. `action` values: `"downloaded"`, `"already-attached"`, `"already-pending"` (cache row exists but the file hasn't been materialized yet — sync will deliver it), `"skipped"` (the reference has no DOI/arXiv to fetch from). The command exits 0 regardless of `pdfDownload.ok`.
 
 ---
 
@@ -268,7 +273,7 @@ RL/
   files/845/Paper B.pdf
 ```
 
-- The parser reads the `file = {PDF:files/…/name.pdf:application/pdf}` field on each BibTeX entry, copies the referenced PDF into `~/Library/Application Support/Rubien/PDFs/`, and sets the new reference's `pdfPath` accordingly. Non-PDF attachments are ignored.
+- The parser reads the `file = {PDF:files/…/name.pdf:application/pdf}` field on each BibTeX entry, copies the referenced PDF into the library's PDF storage directory, and registers it in `pdfCache` so the reference appears as having a PDF. Non-PDF attachments are ignored.
 - Each imported reference is stamped with one value on the chosen property. `Tags` (the default) routes through the Tag table; other `multiSelect`, `singleSelect`, `string`, and `url` properties are written to `propertyValue`. Passing `--property` with a `number`/`date`/`checkbox` type errors out.
 - Re-importing the same folder is safe: existing references are merged (by DOI/PMID/PMCID/ISBN/arXiv/record key), tags aren't duplicated, and previously-copied PDFs aren't re-copied.
 - Linked-file Zotero exports (absolute PDF paths) are reported in `missingPDFs`; re-export the collection with "Files copied into export" to attach them.
@@ -595,11 +600,14 @@ Listing and create/rename emit a `DatabaseViewDTO`:
 
 ## pdf
 
-Inspect and extract content from a reference's attached PDF. All three
-subcommands operate on the file at `Reference.pdfPath` resolved through
-`PDFService.pdfURL(for:)`. Text extraction is text-layer only (no OCR);
-scanned/image-only PDFs return `hasTextLayer: false` and you should fall
-back to `pdf page-image`.
+Inspect, fetch, and extract content from a reference's attached PDF. The
+read subcommands (`info` / `text` / `page-image`) operate on the local
+file resolved via `AppDatabase.pdfFilename(for:)` (the per-device
+`pdfCache` row's `localFilename`, joined to the library's PDF storage
+directory). Text extraction is text-layer only (no OCR); scanned /
+image-only PDFs return `hasTextLayer: false` and you should fall back to
+`pdf page-image`. `pdf download` mutates: it fetches the open-access PDF
+and attaches it to the reference.
 
 ### pdf info
 
@@ -773,6 +781,55 @@ only when `materializedAt` is non-null (the file has actually been
 written to local storage on this device); a row whose `materializedAt`
 is `null` is a pull-side placeholder waiting to be downloaded.
 
+### pdf download
+
+Fetch the open-access PDF for a reference (via DOI or arXiv resolution)
+and attach it. Skip-if-attached by default; `--force` detaches the
+existing PDF (file + cache row) and re-downloads. Mirrors the GUI's
+detail-view "Download PDF" button.
+
+```bash
+rubien-cli pdf download 42
+rubien-cli pdf download 42 --force
+```
+
+| Argument / Option | Type | Description |
+|---|---|---|
+| `id` | Int64 (required) | Reference ID |
+| `--force` | Flag | Replace an existing attached PDF instead of skipping. Detaches and removes the old file before fetching. |
+
+**Output (success):**
+
+```json
+{
+  "id": 42,
+  "ok": true,
+  "action": "downloaded",
+  "filename": "abc-2106.04561.pdf"
+}
+```
+
+`action` values:
+
+- `"downloaded"` — first attach for this reference.
+- `"replaced"` — `--force` swapped out a prior PDF.
+- `"already-attached"` — skip path; the file is on disk locally. `filename` is the existing filename.
+- `"already-pending"` — a `pdfCache` row exists but `materializedAt` is `null` (sync will deliver the asset). `filename` is `null`. We do not re-fetch in this state to avoid colliding with the incoming sync delivery.
+
+**Failure modes** (exit non-zero, `{"error": ...}` on stderr):
+
+- Reference not found.
+- Reference has no DOI or arXiv identifier (`canDownloadPDF` is false).
+- Network failure or non-PDF response from the upstream source.
+- DB write failure on attach.
+- Verification read failure after attach (rare; library may need reconciliation — run `pdf download <id>` again).
+
+**Cross-process sync kick.** After a successful attach, the CLI posts a
+Darwin notification (`PDFUploadQueueBroadcaster`); the running app's
+`SyncCoordinator` subscribes and kicks the PDF upload-queue drainer
+immediately, so the new attachment uploads to CloudKit without waiting
+for the next app launch.
+
 ---
 
 ## sync status
@@ -842,7 +899,7 @@ All commands that return references use this structure:
   "referenceType": "Conference Paper",
   "dateAdded": "2024-01-15T10:30:00Z",
   "dateModified": "2024-01-15T10:30:00Z",
-  "pdfPath": "/path/to/file.pdf",
+  "pdfPath": "abc-1706.03762.pdf",
   "notes": null,
   "isbn": null,
   "issn": null,
@@ -858,6 +915,8 @@ All commands that return references use this structure:
 ```
 
 `customProperties` is always present (may be an empty array). Each entry corresponds to a **non-default** property definition that has a value set on this reference; built-in fields like `year` and `doi` live at the top level. For `multiSelect`, `value` is a JSON-encoded `[String]` literal — decode it client-side.
+
+`pdfPath` is the **local filename** of the attached PDF (relative to the library's PDF storage directory), resolved per-device through `pdfCache`. Compose it with the library's PDF directory (printed by `rubien-cli sync status` or visible in Settings) to get an absolute path. The field is `null` when this device has no materialized PDF for the reference — it may still arrive via sync.
 
 ---
 
