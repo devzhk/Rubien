@@ -139,6 +139,89 @@ final class ImporterAndMetadataTests: XCTestCase {
         )
     }
 
+    func testMetadataFetcherRecognizesPMCIDInput() {
+        // Bare canonical form
+        assertIdentifier(
+            MetadataFetcher.extractIdentifier(from: "PMC1234567"),
+            matches: .pmcid("PMC1234567")
+        )
+        // Lowercase normalizes to canonical
+        assertIdentifier(
+            MetadataFetcher.extractIdentifier(from: "pmc1234567"),
+            matches: .pmcid("PMC1234567")
+        )
+        // Leading/trailing whitespace is fine; trim respects \s
+        assertIdentifier(
+            MetadataFetcher.extractIdentifier(from: "  PMC9999999  "),
+            matches: .pmcid("PMC9999999")
+        )
+        // Canonical PMC article URL
+        assertIdentifier(
+            MetadataFetcher.extractIdentifier(from: "https://pmc.ncbi.nlm.nih.gov/articles/PMC9999999/"),
+            matches: .pmcid("PMC9999999")
+        )
+        // Legacy host form
+        assertIdentifier(
+            MetadataFetcher.extractIdentifier(from: "https://www.ncbi.nlm.nih.gov/pmc/articles/PMC9999999/"),
+            matches: .pmcid("PMC9999999")
+        )
+        // URL with query and fragment must still extract cleanly
+        assertIdentifier(
+            MetadataFetcher.extractIdentifier(from: "https://pmc.ncbi.nlm.nih.gov/articles/PMC9999999/?utm=x#section"),
+            matches: .pmcid("PMC9999999")
+        )
+        // Case-insensitive on the URL path too
+        assertIdentifier(
+            MetadataFetcher.extractIdentifier(from: "https://pmc.ncbi.nlm.nih.gov/articles/pmc9999999/"),
+            matches: .pmcid("PMC9999999")
+        )
+
+        // Negatives — must NOT match
+        // Unanchored: substring containing PMC should fall through to title search
+        XCTAssertNil(MetadataFetcher.extractIdentifier(from: "see PMC1234567 in the intro"))
+        // Versioned PMCID — out of scope, must not slip in
+        XCTAssertNil(MetadataFetcher.extractIdentifier(from: "PMC1234567.1"))
+        // Bare PMID (8-digit) still routes to .pmid, not .pmcid
+        assertIdentifier(
+            MetadataFetcher.extractIdentifier(from: "25719670"),
+            matches: .pmid("25719670")
+        )
+        // Wrong host must be rejected even with PMC in the path
+        XCTAssertNil(MetadataFetcher.extractIdentifier(from: "https://example.com/articles/PMC1234567/"))
+    }
+
+    func testParsePMCIDConverterResponseAcceptsStringOrIntPMID() throws {
+        // PMID as string (legacy shape)
+        let stringJSON = Data(#"""
+        {"status":"ok","records":[{"pmcid":"PMC1234567","pmid":"16401177","doi":"10.1000/x"}]}
+        """#.utf8)
+        let stringResult = try MetadataFetcher.parsePMCIDConverterResponse(stringJSON)
+        XCTAssertEqual(stringResult.pmid, "16401177")
+        XCTAssertEqual(stringResult.doi, "10.1000/x")
+        XCTAssertNil(stringResult.warning)
+
+        // PMID as number (newer shape) — must still parse
+        let intJSON = Data(#"""
+        {"records":[{"pmcid":"PMC1234567","pmid":16401177,"doi":"10.1000/x"}]}
+        """#.utf8)
+        let intResult = try MetadataFetcher.parsePMCIDConverterResponse(intJSON)
+        XCTAssertEqual(intResult.pmid, "16401177")
+
+        // Per-record error → throws
+        let errJSON = Data(#"""
+        {"records":[{"pmcid":"PMC9999999","status":"error","errmsg":"invalid article id"}]}
+        """#.utf8)
+        XCTAssertThrowsError(try MetadataFetcher.parsePMCIDConverterResponse(errJSON))
+
+        // live=false → warning, but still returns pmid for delegation
+        let embargoJSON = Data(#"""
+        {"records":[{"pmcid":"PMC1234567","pmid":"16401177","live":false}]}
+        """#.utf8)
+        let embargoResult = try MetadataFetcher.parsePMCIDConverterResponse(embargoJSON)
+        XCTAssertEqual(embargoResult.pmid, "16401177")
+        XCTAssertNotNil(embargoResult.warning)
+    }
+
     private func assertIdentifier(_ actual: MetadataFetcher.Identifier?, matches expected: MetadataFetcher.Identifier) {
         switch (actual, expected) {
         case (.doi(let lhs), .doi(let rhs)):
@@ -148,6 +231,8 @@ final class ImporterAndMetadataTests: XCTestCase {
         case (.arxiv(let lhs), .arxiv(let rhs)):
             XCTAssertEqual(lhs, rhs)
         case (.isbn(let lhs), .isbn(let rhs)):
+            XCTAssertEqual(lhs, rhs)
+        case (.pmcid(let lhs), .pmcid(let rhs)):
             XCTAssertEqual(lhs, rhs)
         default:
             XCTFail("Identifier mismatch: actual=\(String(describing: actual)) expected=\(expected)")

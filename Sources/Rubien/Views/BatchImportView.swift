@@ -98,6 +98,7 @@ struct BatchImportView: View {
                             9780262035613
                             arXiv:1706.03762
                             PMID: 25719670
+                            PMC4587766
                             Attention Is All You Need
                             """)
                             .font(.caption)

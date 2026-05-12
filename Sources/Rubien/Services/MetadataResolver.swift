@@ -97,7 +97,7 @@ final class MetadataResolver {
                     seed: nil,
                     fallbackReference: nil,
                     reason: .unsupportedRoute,
-                    message: "Enter a DOI, arXiv ID, PMID, ISBN, or paper title."
+                    message: "Enter a DOI, arXiv ID, PMID, PMCID, ISBN, or paper title."
                 )
             )
         }
@@ -121,7 +121,7 @@ final class MetadataResolver {
                 fallbackReference: nil,
                 currentReference: nil,
                 reason: .insufficientEvidence,
-                message: "No matching record found. Try a DOI, arXiv ID, PMID, or ISBN instead."
+                message: "No matching record found. Try a DOI, arXiv ID, PMID, PMCID, or ISBN instead."
             )
         )
     }
@@ -380,6 +380,8 @@ final class MetadataResolver {
                 reference = try await MetadataFetcher.fetchFromArXiv(value)
             case .isbn(let value):
                 reference = try await MetadataFetcher.fetchFromISBN(value)
+            case .pmcid(let value):
+                reference = try await MetadataFetcher.fetchFromPMCID(value)
             }
 
             let evidence = buildGenericEvidence(

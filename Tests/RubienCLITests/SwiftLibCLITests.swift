@@ -34,11 +34,34 @@ final class RubienCLITests: XCTestCase {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
+        // Drain pipes concurrently on dedicated background threads. The OS
+        // pipe buffer is ~64KB; if we wait for exit before reading, a child
+        // that writes more than that blocks on fwrite and we deadlock —
+        // `export --format json` on a populated fixture is the pathological
+        // case. `readDataToEndOfFile` blocks until EOF, so each thread
+        // returns exactly the full content of its pipe.
+        var stdoutData = Data()
+        var stderrData = Data()
+        let readGroup = DispatchGroup()
+        let readQueue = DispatchQueue.global(qos: .userInitiated)
+
+        readGroup.enter()
+        readQueue.async {
+            stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            readGroup.leave()
+        }
+        readGroup.enter()
+        readQueue.async {
+            stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            readGroup.leave()
+        }
+
         try process.run()
         process.waitUntilExit()
-
-        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        // Both reader threads see EOF once the child's pipe ends are closed,
+        // which happens on exit. Wait for them to finish so the captured
+        // Data values are fully populated before we read them.
+        readGroup.wait()
 
         return (
             stdout: String(data: stdoutData, encoding: .utf8) ?? "",
@@ -523,9 +546,10 @@ final class RubienCLITests: XCTestCase {
 
         let result = try runCLI(["properties", "--add-option", "--id", idStr, "--value", "Bogus"])
         XCTAssertNotEqual(result.exitCode, 0, "--add-option on Type must fail")
+        // printJSONError writes the JSON error envelope to stderr, not stdout.
         XCTAssertTrue(
-            result.stdout.contains("BibTeX") || result.stdout.contains("Tags"),
-            "error must point user at the right alternative (Tags or custom property): \(result.stdout)"
+            result.stderr.contains("BibTeX") || result.stderr.contains("Tags"),
+            "error must point user at the right alternative (Tags or custom property): stderr=\(result.stderr) stdout=\(result.stdout)"
         )
 
         let after = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []

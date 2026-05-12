@@ -136,18 +136,20 @@ rubien-cli get 42
 
 ## add
 
-Add a reference via DOI/PMID/arXiv ID, BibTeX string, or manual title.
+Add a reference via DOI/arXiv/PMID/PMCID/ISBN, BibTeX string, or manual title.
 
 ```bash
 rubien-cli add --identifier "10.1038/s41586-021-03819-2"
 rubien-cli add --identifier "2106.04561" --download-pdf
+rubien-cli add --identifier "PMC4587766"
+rubien-cli add --identifier "https://pmc.ncbi.nlm.nih.gov/articles/PMC4587766/"
 rubien-cli add --bibtex '@article{..., title={...}, ...}'
 rubien-cli add --title "My Paper"
 ```
 
 | Option | Type | Description |
 |---|---|---|
-| `--identifier` | String | DOI, PMID, or arXiv ID — metadata is fetched automatically |
+| `--identifier` | String | DOI, arXiv ID, PMID, PMCID, or ISBN — metadata is fetched automatically. PMCIDs (`PMC1234567` or `pmc.ncbi.nlm.nih.gov/articles/PMC.../`) resolve via NCBI's ID converter then delegate to PubMed/CrossRef. |
 | `--bibtex` | String | BibTeX source string (can contain multiple entries) |
 | `--title` | String | Title for manual entry (creates a minimal reference) |
 | `--download-pdf` | Flag | Only valid with `--identifier`. After metadata lookup, fetch the open-access PDF. The reference is saved either way; PDF failures are reported in the envelope rather than aborting. |
@@ -788,10 +790,12 @@ is `null` is a pull-side placeholder waiting to be downloaded.
 
 ### pdf download
 
-Fetch the open-access PDF for a reference (via DOI or arXiv resolution)
-and attach it. Skip-if-attached by default; `--force` detaches the
-existing PDF (file + cache row) and re-downloads. Mirrors the GUI's
-detail-view "Download PDF" button.
+Fetch the open-access PDF for a reference and attach it. Resolution order:
+arXiv direct (if the reference has an arXiv ID), then bioRxiv/medRxiv
+direct (when `doi` starts with `10.1101/` AND `journal` is `bioRxiv` or
+`medRxiv`), then OpenAlex OA lookup by DOI. Skip-if-attached by default;
+`--force` detaches the existing PDF (file + cache row) and re-downloads.
+Mirrors the GUI's detail-view "Download PDF" button.
 
 ```bash
 rubien-cli pdf download 42

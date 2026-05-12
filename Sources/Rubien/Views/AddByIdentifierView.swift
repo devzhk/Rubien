@@ -39,7 +39,7 @@ struct AddByIdentifierView: View {
                 .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isFetching)
             }
 
-            Text("Supports DOI · arXiv · PMID · ISBN · paper title")
+            Text("Supports DOI · arXiv · PMID · PMCID · ISBN · paper title")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .frame(maxWidth: .infinity, alignment: .leading)

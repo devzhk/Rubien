@@ -50,16 +50,24 @@ public enum MetadataFetcher {
 
     // MARK: - Identifier Detection
 
-    public enum Identifier {
+    public enum Identifier: Equatable {
         case doi(String)
         case pmid(String)
         case arxiv(String)
         case isbn(String)
+        case pmcid(String)
     }
 
-    /// Parse raw text input and detect identifier type (priority: DOI > arXiv > ISBN > PMID)
+    /// Parse raw text input and detect identifier type (priority: DOI > arXiv > ISBN > PMCID > PMID)
     public static func extractIdentifier(from text: String) -> Identifier? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // PMCID URL: pmc.ncbi.nlm.nih.gov / www.ncbi.nlm.nih.gov articles path.
+        // Checked before DOI so a `pmc.ncbi.nlm.nih.gov/articles/PMC.../doi:...` URL
+        // (rare but possible) doesn't accidentally route through DOI extraction.
+        if let pmcid = extractPMCIDFromURL(trimmed) {
+            return .pmcid(pmcid)
+        }
 
         // DOI: 10.XXXX/... (most specific)
         if let doi = cleanDOI(trimmed) {
@@ -69,6 +77,14 @@ public enum MetadataFetcher {
                 return .arxiv(arxivID)
             }
             return .doi(doi)
+        }
+
+        // PMCID bare form: `PMC1234567` (case-insensitive). Anchored to the whole
+        // trimmed input so substrings like "see PMC1234567 above" don't trigger
+        // identifier routing and bypass title search. Must come before the PMID
+        // bare-digit check below since PMID accepts the digit suffix alone.
+        if let pmcid = extractPMCIDBare(trimmed) {
+            return .pmcid(pmcid)
         }
 
         // arXiv: YYMM.NNNNN or category/NNNNNNN. Must precede the ISBN digit-count
@@ -121,6 +137,42 @@ public enum MetadataFetcher {
             options: .regularExpression
         )
         return stripped.isEmpty ? nil : stripped
+    }
+
+    /// Extract canonical PMCID (e.g. `PMC1234567`) from a bare-string input.
+    /// Anchored: the whole trimmed input must be `PMC` + digits (case-insensitive),
+    /// optionally with surrounding whitespace. Returns nil otherwise.
+    /// Versioned PMCIDs (`PMC1234567.1`) are intentionally rejected — see
+    /// fetchFromPMCID for the rationale.
+    private static func extractPMCIDBare(_ input: String) -> String? {
+        let pattern = #"^\s*PMC(\d+)\s*$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
+              let match = regex.firstMatch(in: input, range: NSRange(input.startIndex..., in: input)),
+              let digitsRange = Range(match.range(at: 1), in: input)
+        else { return nil }
+        return "PMC\(input[digitsRange])"
+    }
+
+    /// Extract canonical PMCID from a PMC article URL. Returns nil unless the URL
+    /// host is `pmc.ncbi.nlm.nih.gov` or `www.ncbi.nlm.nih.gov` and the path
+    /// contains `articles/PMC\d+` (case-insensitive match on `PMC`).
+    private static func extractPMCIDFromURL(_ input: String) -> String? {
+        guard let components = URLComponents(string: input),
+              let host = components.host?.lowercased() else { return nil }
+        let validHosts: Set<String> = ["pmc.ncbi.nlm.nih.gov", "www.ncbi.nlm.nih.gov"]
+        guard validHosts.contains(host) else { return nil }
+        // URLComponents.path already strips query/fragment. Split into segments
+        // and look for `articles` followed immediately by a PMC\d+ segment.
+        let segments = components.path.split(separator: "/").map(String.init)
+        guard let articlesIdx = segments.firstIndex(of: "articles"),
+              articlesIdx + 1 < segments.count else { return nil }
+        let candidate = segments[articlesIdx + 1]
+        let pattern = #"^PMC(\d+)$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
+              let match = regex.firstMatch(in: candidate, range: NSRange(candidate.startIndex..., in: candidate)),
+              let digitsRange = Range(match.range(at: 1), in: candidate)
+        else { return nil }
+        return "PMC\(candidate[digitsRange])"
     }
 
     /// Clean and extract DOI from various formats (URL, bare DOI, etc.)
@@ -435,6 +487,123 @@ public enum MetadataFetcher {
             pmid: pmid,
             pmcid: pmcid
         )
+    }
+
+    // MARK: - PMCID → NCBI ID converter → PubMed/CrossRef
+
+    /// Fetch metadata for a PMCID by converting it to a PMID (preferred) or DOI
+    /// via the NCBI ID converter, then delegating to the existing PubMed or
+    /// CrossRef resolver. The PubMed path already populates `pmcid`, so a
+    /// PMCID→PMID→PubMed round-trip preserves the input ID in the result.
+    ///
+    /// Versioned PMCIDs (`PMC1234567.1`) are out of scope: extractIdentifier
+    /// rejects them, and this function sends the bare ID without `versions=yes`,
+    /// so the converter returns the article-level (latest version) record.
+    public static func fetchFromPMCID(_ pmcid: String) async throws -> Reference {
+        let normalized = pmcid.uppercased()
+        let cacheKey = "pmcid:\(normalized)"
+        if let cached = cachedReference(for: cacheKey) { return cached }
+
+        let (pmid, doi, warning) = try await withRetry {
+            try await fetchPMCIDConverterMapping(normalized)
+        }
+
+        if let pmid = pmid {
+            var ref = try await fetchFromPMID(pmid)
+            // Ensure pmcid is populated even if PubMed's articleids didn't echo it
+            if ref.pmcid == nil { ref.pmcid = normalized }
+            cacheReference(ref, for: cacheKey)
+            return ref
+        }
+        if let doi = doi {
+            var ref = try await fetchFromDOI(doi)
+            ref.pmcid = normalized
+            cacheReference(ref, for: cacheKey)
+            return ref
+        }
+        let suffix = warning.map { " (\($0))" } ?? ""
+        throw FetchError.unsupported("Could not resolve \(normalized) via NCBI ID converter\(suffix)")
+    }
+
+    /// Hit NCBI's ID converter and parse `(pmid, doi, warning)` from the
+    /// response. The legacy `www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/`
+    /// endpoint is still live. If it ever deprecates, swap the host to
+    /// `pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles/` — the parser is
+    /// tolerant of both response shapes.
+    private static func fetchPMCIDConverterMapping(
+        _ normalized: String
+    ) async throws -> (pmid: String?, doi: String?, warning: String?) {
+        var components = URLComponents(string: "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/")
+        var items: [URLQueryItem] = [
+            URLQueryItem(name: "ids", value: normalized),
+            URLQueryItem(name: "format", value: "json"),
+            URLQueryItem(name: "tool", value: "Rubien"),
+        ]
+        let email = contactEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !email.isEmpty, email.contains("@") {
+            items.append(URLQueryItem(name: "email", value: email))
+        }
+        components?.queryItems = items
+        guard let url = components?.url else { throw FetchError.invalidURL }
+
+        var request = URLRequest(url: url)
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 15
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            throw FetchError.httpError((response as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try parsePMCIDConverterResponse(data)
+    }
+
+    /// Internal so tests can drive the parser against synthetic JSON without
+    /// needing a network stub. Accepts `pmid` / `pmcid` as String OR Int.
+    internal static func parsePMCIDConverterResponse(
+        _ data: Data
+    ) throws -> (pmid: String?, doi: String?, warning: String?) {
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw FetchError.parseError
+        }
+
+        // Top-level error envelope (e.g. malformed request)
+        if let topStatus = (json["status"] as? String)?.lowercased(), topStatus == "error" {
+            let msg = (json["errmsg"] as? String) ?? "NCBI converter returned error status"
+            throw FetchError.unsupported(msg)
+        }
+
+        guard let records = json["records"] as? [[String: Any]], let record = records.first else {
+            throw FetchError.parseError
+        }
+
+        // Per-record error
+        if let recStatus = (record["status"] as? String)?.lowercased(), recStatus == "error" {
+            let msg = (record["errmsg"] as? String) ?? "NCBI converter could not resolve PMCID"
+            throw FetchError.unsupported(msg)
+        }
+
+        let pmid = stringOrInt(record["pmid"])
+        let doi = record["doi"] as? String
+
+        // Soft warning — embargoed / not-yet-live records may still convert.
+        var warning: String? = nil
+        if let live = record["live"] as? Bool, live == false {
+            warning = "record marked live=false (embargoed?)"
+        } else if let liveStr = (record["live"] as? String)?.lowercased(), liveStr == "false" {
+            warning = "record marked live=false (embargoed?)"
+        }
+
+        return (pmid: pmid, doi: doi, warning: warning)
+    }
+
+    /// Coerce a JSON value that may be a String or a numeric type into a
+    /// non-empty String. Returns nil for missing/empty/unrecognized shapes.
+    private static func stringOrInt(_ value: Any?) -> String? {
+        if let s = value as? String, !s.isEmpty { return s }
+        if let i = value as? Int { return String(i) }
+        if let i = value as? Int64 { return String(i) }
+        if let n = value as? NSNumber { return n.stringValue }
+        return nil
     }
 
     // MARK: - arXiv ID → arXiv API
@@ -924,6 +1093,8 @@ public enum MetadataFetcher {
             return try await fetchFromArXiv(id)
         case .isbn(let isbn):
             return try await fetchFromISBN(isbn)
+        case .pmcid(let pmcid):
+            return try await fetchFromPMCID(pmcid)
         }
     }
 
@@ -963,7 +1134,7 @@ public enum MetadataFetcher {
             case .httpError(429): return "Rate-limited by the metadata source. Please wait a minute and try again."
             case .httpError(let code): return "HTTP error \(code)"
             case .parseError: return "Failed to parse response"
-            case .unrecognizedIdentifier: return "Could not recognize identifier (DOI, PMID, arXiv, or ISBN)"
+            case .unrecognizedIdentifier: return "Could not recognize identifier (DOI, arXiv, PMID, PMCID, or ISBN)"
             case .unsupported(let msg): return msg
             }
         }
