@@ -11,11 +11,26 @@ The name means *the keeper of borrowed knowledge.*
 ## Features
 
 - **PDF reader + annotations** — native PDFKit rendering with highlight / underline / anchored notes. Thumbnails, outline, full-text search.
-- **Metadata fetching** — direct HTTP to CrossRef, arXiv, PubMed, ISBN, OpenAlex, Semantic Scholar. No API keys. In-memory response cache.
+- **Metadata fetching** — paste a DOI, arXiv ID, PMID, PMCID, ISBN, URL, or paper title. See [Supported sources](#supported-sources). No API keys.
 - **FTS5 search** — SQLite full-text search across title, authors, journal, abstract, notes, DOI.
 - **BibTeX / RIS import & export** — standard parsers, round-trip friendly.
 - **iCloud sync** — `CKSyncEngine`-backed two-way sync of references, tags, annotations, custom properties, and views across Macs signed into the same iCloud account. Toggle in Settings → iCloud Sync.
 - **CLI** — `rubien-cli` with 16 subcommands: `search`, `list`, `get`, `add`, `update`, `delete`, `cite`, `import`, `export`, `tags`, `properties`, `views`, `annotations`, `styles`, `pdf`, `sync`. JSON output for scripting.
+
+## Supported sources
+
+Rubien adds references from:
+
+- Any paper with a DOI (most academic journals)
+- arXiv
+- bioRxiv and medRxiv
+- PubMed and PubMed Central (PMC)
+- Books (by ISBN)
+- Title search when you don't have an identifier
+
+Paste a URL, an identifier, or a title — Rubien figures out the rest.
+
+PDF auto-download works for arXiv, bioRxiv, medRxiv, and any open-access paper. Paywalled PDFs aren't fetched, but metadata and abstract still come through.
 
 ## Requirements
 
