@@ -216,35 +216,44 @@ struct FilterEditorPopover: View {
     @ViewBuilder
     private func selectOptionsList(allowMultiple: Bool) -> some View {
         let options = selectOptions(for: target)
-        let selected: Set<String> = {
-            if case .selectKeys(let keys) = value { return Set(keys) }
-            return []
-        }()
-        ScrollView {
-            FlowLayout(spacing: 6) {
-                ForEach(options, id: \.key) { option in
-                    let isSelected = selected.contains(option.key)
-                    Button {
-                        var updated = selected
-                        if allowMultiple {
-                            if isSelected { updated.remove(option.key) } else { updated.insert(option.key) }
-                        } else {
-                            updated = isSelected ? [] : [option.key]
+        if options.isEmpty {
+            Text("No options available")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else {
+            let selected: Set<String> = {
+                if case .selectKeys(let keys) = value { return Set(keys) }
+                return []
+            }()
+            ScrollView {
+                FlowLayout(spacing: 6) {
+                    ForEach(options, id: \.key) { option in
+                        let isSelected = selected.contains(option.key)
+                        Button {
+                            var updated = selected
+                            if allowMultiple {
+                                if isSelected { updated.remove(option.key) } else { updated.insert(option.key) }
+                            } else {
+                                updated = isSelected ? [] : [option.key]
+                            }
+                            value = .selectKeys(Array(updated).sorted())
+                        } label: {
+                            Text(option.label)
+                                .font(.system(size: 11))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .chipBackground(isSelected ? Color.accentColor : Color.secondary)
                         }
-                        value = .selectKeys(Array(updated).sorted())
-                    } label: {
-                        Text(option.label)
-                            .font(.system(size: 11))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .chipBackground(isSelected ? Color.accentColor : Color.secondary)
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
+                // Force the popover width into FlowLayout's proposal;
+                // otherwise it sizes to one row and the ScrollView collapses.
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 2)
             }
-            .padding(.vertical, 2)
+            .frame(maxHeight: 80)
         }
-        .frame(maxHeight: 160)
     }
 
     // MARK: - Option resolution
