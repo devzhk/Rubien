@@ -122,7 +122,7 @@ export function registerReferenceTools(server: McpServer): void {
     {
       title: "Add reference",
       description:
-        "Create a new reference. Choose one input method: identifier (DOI/arXiv/PMID/ISBN, triggers metadata lookup, slow), bibtex (inline BibTeX/BibLaTeX string, may return array for multi-entry), or title (minimal manual entry). Pass `downloadPdf: true` (identifier only) to also fetch the open-access PDF — output becomes `{ reference, pdfDownload: { ok, action?, filename?, error? } }`; the reference saves either way.",
+        "Create a reference (or surface an existing one). Choose one input method: identifier (DOI/arXiv/PMID/ISBN, triggers metadata lookup, slow), bibtex (inline BibTeX/BibLaTeX string, returns array of envelopes for multi-entry), or title (minimal manual entry). Output is an envelope: `{ reference: ReferenceDTO, status: 'created' | 'existing', pdfDownload: { ok, action?, filename?, error? } | null }`. `status='existing'` means the input matched an existing row (deduped by normalized DOI / PMID / PMCID / ISBN / URL / ISSN+title+year); `mergedReference` folded any non-empty incoming fields into the existing row, and `reference.id` is the existing row's id. `pdfDownload` is always present: `null` unless `downloadPdf: true` was set (identifier only). For `method='bibtex'`, output is an array of envelopes, one per parsed entry.",
       inputSchema: {
         method: z.enum(["identifier", "bibtex", "title"]),
         value: z

@@ -212,9 +212,10 @@ final class RubienCLITests: XCTestCase {
         XCTAssertEqual(addResult.exitCode, 0, "Add should succeed")
         let addData = Data(addResult.stdout.utf8)
         let addJson = try JSONSerialization.jsonObject(with: addData) as? [String: Any]
-        XCTAssertNotNil(addJson, "Add output should be a JSON object")
-        guard let refId = addJson?["id"] as? Int64 ?? (addJson?["id"] as? Int).map(Int64.init) else {
-            XCTFail("Add output should contain an integer 'id'")
+        XCTAssertNotNil(addJson, "Add output should be a JSON envelope")
+        let refDict = addJson?["reference"] as? [String: Any]
+        guard let refId = refDict?["id"] as? Int64 ?? (refDict?["id"] as? Int).map(Int64.init) else {
+            XCTFail("Add envelope should contain reference.id")
             return
         }
 
@@ -270,8 +271,9 @@ final class RubienCLITests: XCTestCase {
         let addResult = try runCLI(["add", "--title", "Incapable \(UUID().uuidString)"])
         XCTAssertEqual(addResult.exitCode, 0)
         let addJson = try JSONSerialization.jsonObject(with: Data(addResult.stdout.utf8)) as? [String: Any]
-        guard let refId = addJson?["id"] as? Int64 ?? (addJson?["id"] as? Int).map(Int64.init) else {
-            XCTFail("Add output should contain an integer 'id'")
+        let refDict = addJson?["reference"] as? [String: Any]
+        guard let refId = refDict?["id"] as? Int64 ?? (refDict?["id"] as? Int).map(Int64.init) else {
+            XCTFail("Add envelope should contain reference.id")
             return
         }
         defer { _ = try? runCLI(["delete", "\(refId)", "--force"]) }
@@ -307,11 +309,14 @@ final class RubienCLITests: XCTestCase {
     // MARK: - Properties
 
     /// Read an integer id out of a JSON object emitted by the CLI.
+    /// Handles both the `add` envelope shape (`reference.id`) and the
+    /// flat shape used by other CLI commands (`properties --create`, etc).
     private func parseId(from data: Data) -> Int64? {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-        if let s = obj["id"] as? String { return Int64(s) }
-        if let i = obj["id"] as? Int64 { return i }
-        if let i = obj["id"] as? Int { return Int64(i) }
+        let container = (obj["reference"] as? [String: Any]) ?? obj
+        if let s = container["id"] as? String { return Int64(s) }
+        if let i = container["id"] as? Int64 { return i }
+        if let i = container["id"] as? Int { return Int64(i) }
         return nil
     }
 
@@ -692,10 +697,13 @@ final class RubienCLITests: XCTestCase {
         XCTAssertEqual(firstAdd.exitCode, 0)
         let firstArr = try JSONSerialization.jsonObject(with: Data(firstAdd.stdout.utf8)) as? [[String: Any]] ?? []
         guard let firstObj = firstArr.first,
-              let refIdInt = firstObj["id"] as? Int64 ?? (firstObj["id"] as? Int).map(Int64.init) else {
-            XCTFail("first add should return JSON array with one ref id")
+              let firstRef = firstObj["reference"] as? [String: Any],
+              let refIdInt = firstRef["id"] as? Int64 ?? (firstRef["id"] as? Int).map(Int64.init) else {
+            XCTFail("first add should return JSON array of envelopes with reference.id")
             return
         }
+        XCTAssertEqual(firstObj["status"] as? String, "created",
+                       "first add should report status=created")
         let refId = refIdInt
         defer { _ = try? runCLI(["delete", String(refId), "--force"]) }
 
@@ -720,13 +728,53 @@ final class RubienCLITests: XCTestCase {
         let secondAdd = try runCLI(["add", "--bibtex", bib])
         XCTAssertEqual(secondAdd.exitCode, 0)
         let secondArr = try JSONSerialization.jsonObject(with: Data(secondAdd.stdout.utf8)) as? [[String: Any]] ?? []
-        guard let secondObj = secondArr.first else {
-            XCTFail("second add should return JSON array")
+        guard let secondObj = secondArr.first,
+              let secondRef = secondObj["reference"] as? [String: Any] else {
+            XCTFail("second add should return JSON array of envelopes")
             return
         }
-        let custom = secondObj["customProperties"] as? [[String: Any]] ?? []
+        XCTAssertEqual(secondObj["status"] as? String, "existing",
+                       "re-add of duplicate BibTeX must report status=existing")
+        let custom = secondRef["customProperties"] as? [[String: Any]] ?? []
         XCTAssertTrue(custom.contains { ($0["value"] as? String) == "preserve-me" },
                       "dedup-add output must echo existing custom properties; got \(custom)")
+    }
+
+    func testAddTitleEmitsCreatedStatus() throws {
+        try skipIfBinaryMissing()
+
+        let addResult = try runCLI(["add", "--title", "Created-Status \(UUID().uuidString)"])
+        XCTAssertEqual(addResult.exitCode, 0)
+        let json = try JSONSerialization.jsonObject(with: Data(addResult.stdout.utf8)) as? [String: Any]
+        XCTAssertEqual(json?["status"] as? String, "created",
+                       "title-add should always report status=created")
+        guard let refDict = json?["reference"] as? [String: Any],
+              let refId = refDict["id"] as? Int64 ?? (refDict["id"] as? Int).map(Int64.init) else {
+            XCTFail("Add envelope should contain reference.id")
+            return
+        }
+        _ = try runCLI(["delete", "\(refId)", "--force"])
+    }
+
+    func testAddIdentifierStatusEnvelopeShape() throws {
+        try skipIfBinaryMissing()
+
+        // Use --title to avoid network. Asserts envelope contract:
+        //   - top-level keys: reference, status, pdfDownload
+        //   - pdfDownload is explicit null (not key-absent) when --download-pdf not set
+        let addResult = try runCLI(["add", "--title", "Envelope-Shape \(UUID().uuidString)"])
+        XCTAssertEqual(addResult.exitCode, 0)
+        let json = try JSONSerialization.jsonObject(with: Data(addResult.stdout.utf8)) as? [String: Any]
+        XCTAssertNotNil(json?["reference"], "envelope must have reference key")
+        XCTAssertNotNil(json?["status"], "envelope must have status key")
+        XCTAssertTrue(json?.keys.contains("pdfDownload") ?? false,
+                      "envelope must have pdfDownload key, even when --download-pdf not set")
+        XCTAssertTrue(json?["pdfDownload"] is NSNull,
+                      "pdfDownload should be explicit null (NSNull) when --download-pdf not set; got \(String(describing: json?["pdfDownload"]))")
+        if let refDict = json?["reference"] as? [String: Any],
+           let refId = refDict["id"] as? Int64 ?? (refDict["id"] as? Int).map(Int64.init) {
+            _ = try runCLI(["delete", "\(refId)", "--force"])
+        }
     }
 
     func testExportJSONIncludesCustomPropertiesField() throws {

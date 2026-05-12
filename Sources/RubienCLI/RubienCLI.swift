@@ -262,9 +262,18 @@ struct PDFDownloadStatusDTO: Encodable {
     let error: String?
 }
 
-struct AddWithPDFOutput: Encodable {
+struct AddStatusOutput: Encodable {
     let reference: ReferenceDTO
-    let pdfDownload: PDFDownloadStatusDTO
+    let status: AppDatabase.ReferenceSaveResult
+    let pdfDownload: AlwaysEncodedOptional<PDFDownloadStatusDTO>
+
+    init(reference: ReferenceDTO,
+         status: AppDatabase.ReferenceSaveResult,
+         pdfDownload: PDFDownloadStatusDTO? = nil) {
+        self.reference = reference
+        self.status = status
+        self.pdfDownload = AlwaysEncodedOptional(value: pdfDownload)
+    }
 }
 
 /// Download via `PDFDownloadService`, attach via `attachImportedPDFs`,
@@ -573,37 +582,35 @@ struct Add: AsyncParsableCommand {
         if let id = identifier {
             var ref = try await MetadataFetcher.fetch(from: id)
             ref = MetadataVerifier.manuallyVerified(ref, reviewedBy: "cli-identifier")
-            try AppDatabase.shared.saveReference(&ref)
+            let result = try AppDatabase.shared.saveReference(&ref)
             notifyLibraryChanged()
-            if downloadPdf {
-                let status = await attemptPDFDownload(for: ref)
-                // `referenceDTO` resolves `pdfPath` via the per-device cache
-                // table, so no refetch needed — `ref` doesn't carry that field.
-                let dto = try referenceDTO(for: ref)
-                printJSON(AddWithPDFOutput(reference: dto, pdfDownload: status))
-            } else {
-                // saveReference may dedupe onto an existing row; surface that row's
-                // existing custom properties so the contract matches get/list/export.
-                printJSON(try referenceDTO(for: ref))
-            }
+            let pdfStatus = downloadPdf ? await attemptPDFDownload(for: ref) : nil
+            let dto = try referenceDTO(for: ref)
+            printJSON(AddStatusOutput(reference: dto, status: result, pdfDownload: pdfStatus))
         } else if let bib = bibtex {
-            let refs = BibTeXImporter.parse(bib)
-            guard !refs.isEmpty else {
+            let parsed = BibTeXImporter.parse(bib)
+            guard !parsed.isEmpty else {
                 printJSONError("No valid BibTeX entries found")
                 throw ExitCode.failure
             }
             var saved: [Reference] = []
-            for var ref in refs {
-                try AppDatabase.shared.saveReference(&ref)
+            var statuses: [AppDatabase.ReferenceSaveResult] = []
+            for var ref in parsed {
+                statuses.append(try AppDatabase.shared.saveReference(&ref))
                 saved.append(ref)
             }
             notifyLibraryChanged()
-            printJSON(try mapReferenceDTOs(saved))
+            let dtos = try mapReferenceDTOs(saved)
+            let envelopes = zip(dtos, statuses).map {
+                AddStatusOutput(reference: $0, status: $1)
+            }
+            printJSON(envelopes)
         } else if let t = title {
             var ref = Reference(title: t)
-            try AppDatabase.shared.saveReference(&ref)
+            let result = try AppDatabase.shared.saveReference(&ref)
             notifyLibraryChanged()
-            printJSON(try referenceDTO(for: ref))
+            let dto = try referenceDTO(for: ref)
+            printJSON(AddStatusOutput(reference: dto, status: result))
         } else {
             printJSONError("Provide --identifier, --bibtex, or --title")
             throw ExitCode.failure

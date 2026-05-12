@@ -68,6 +68,30 @@ export const PropertyDefinitionDTO = z.object({
 });
 export type PropertyDefinitionDTO = z.infer<typeof PropertyDefinitionDTO>;
 
+// PDF-download status DTO emitted by `add --identifier --download-pdf` and by
+// `pdf download <id>`. Mirrors PDFDownloadStatusDTO in RubienCLI.swift.
+// `action` is the raw value of PDFDownloadAction (downloaded | already-attached
+// | already-pending | skipped). All fields except `ok` use plain `Optional` in
+// Swift → key omitted when nil → `.optional()` here.
+export const PDFDownloadStatusDTO = z.object({
+  ok: z.boolean(),
+  action: z.string().optional(),
+  filename: z.string().optional(),
+  error: z.string().optional(),
+});
+export type PDFDownloadStatusDTO = z.infer<typeof PDFDownloadStatusDTO>;
+
+// Envelope returned by `add` (single object) or `add --bibtex` (array of these).
+// `status` mirrors AppDatabase.ReferenceSaveResult.
+// `pdfDownload` is an AlwaysEncodedOptional in Swift, so it's always present
+// in the JSON — explicit `null` when --download-pdf wasn't set.
+export const AddStatusOutput = z.object({
+  reference: ReferenceDTO,
+  status: z.enum(["created", "existing"]),
+  pdfDownload: PDFDownloadStatusDTO.nullable(),
+});
+export type AddStatusOutput = z.infer<typeof AddStatusOutput>;
+
 export const TagDTO = z.object({
   id: z.number().int(),
   name: z.string(),

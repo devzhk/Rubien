@@ -997,7 +997,14 @@ extension AppDatabase {
 
 // MARK: - Reference CRUD
 extension AppDatabase {
-    public func saveReference(_ reference: inout Reference) throws {
+    public enum ReferenceSaveResult: String, Sendable, Encodable {
+        case created
+        case existing
+    }
+
+    @discardableResult
+    public func saveReference(_ reference: inout Reference) throws -> ReferenceSaveResult {
+        var result: ReferenceSaveResult = .created
         try dbWriter.write { db in
             try normalizeForDirectLibrarySave(&reference)
 
@@ -1011,10 +1018,12 @@ extension AppDatabase {
                 existing = mergedReference(existing: existing, incoming: reference)
                 try existing.save(db)
                 reference = existing
+                result = .existing
             } else {
                 try reference.save(db)
             }
         }
+        return result
     }
 
     public func updateReferenceWebContent(id: Int64, webContent: String?) throws {

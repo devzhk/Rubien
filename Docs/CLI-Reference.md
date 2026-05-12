@@ -154,9 +154,14 @@ rubien-cli add --title "My Paper"
 
 Exactly one of `--identifier`, `--bibtex`, or `--title` is required.
 
-**Output:** JSON reference object (or array if BibTeX contains multiple entries).
+**Output:** JSON envelope `{ "reference": ReferenceDTO, "status": "created" | "existing", "pdfDownload": PDFDownloadStatusDTO | null }`. For `--bibtex`, output is a JSON array of envelopes, one per parsed entry.
 
-**Output with `--download-pdf`:** envelope `{ "reference": ReferenceDTO, "pdfDownload": { "ok": Bool, "action": String?, "filename": String?, "error": String? } }`. `action` values: `"downloaded"`, `"already-attached"`, `"already-pending"` (cache row exists but the file hasn't been materialized yet — sync will deliver it), `"skipped"` (the reference has no DOI/arXiv to fetch from). The command exits 0 regardless of `pdfDownload.ok`.
+- `status` is always one of:
+  - `"created"` — a new reference row was inserted.
+  - `"existing"` — the input matched an existing reference (deduped by normalized DOI / PMID / PMCID / ISBN / URL / ISSN+title+year); `mergedReference` folded any non-empty incoming fields into the existing row. `reference.id` is the existing row's id.
+- `pdfDownload` is always present (explicit `null`, not omitted):
+  - `null` when `--download-pdf` was not set.
+  - `{ "ok": Bool, "action": String?, "filename": String?, "error": String? }` when `--download-pdf` was set. `action` values: `"downloaded"`, `"already-attached"`, `"already-pending"` (cache row exists but the file hasn't been materialized yet — sync will deliver it), `"skipped"` (the reference has no DOI/arXiv to fetch from). The command exits 0 regardless of `pdfDownload.ok`.
 
 ---
 
