@@ -1,8 +1,12 @@
+<p align="center">
+  <img src="icon.png" alt="Rubien" width="160" height="160">
+</p>
+
 # Rubien
 
-A native macOS reference manager for English-speaking researchers. Rubien is a personal fork of [SwiftLib](https://github.com/NickHood1984/SwiftLib) with the Chinese-academic-database integrations, Zotero translation-server, and Word add-in removed, and the metadata pipeline retargeted to international sources (CrossRef, arXiv, PubMed, ISBN, OpenAlex, Semantic Scholar).
+Rubien is a native macOS reference manager built on one principle: **one library, two front doors.** A single local SQLite database holds every reference, tag, annotation, custom property, and view — and you reach it through either a Notion-style SwiftUI app for humans, or a scriptable `rubien-cli` for agents and automation. Both speak to the same store; neither is a second-class citizen. The icon — a cube whose faces are a Notion-style UI on one side and a terminal on the other — is the architecture in one image.
 
-The name is a variant of **Rubick**, the Grand Magus from Dota 2 — a sorcerer who copies other heroes' abilities. A fitting metaphor for a reference manager: the keeper of borrowed knowledge.
+The name means *the keeper of borrowed knowledge.*
 
 ## Features
 
