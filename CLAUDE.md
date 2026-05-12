@@ -133,7 +133,7 @@ The flag `RubienPreferences.pdfAssetSyncEnabled` defaults to true post-Phase-E; 
 
 ### CLI
 
-`Sources/RubienCLI/RubienCLI.swift` is the single-file argument-parser entry with 15 subcommands (`search`, `list`, `get`, `add`, `update`, `delete`, `cite`, `import`, `export`, `tags`, `properties`, `views`, `annotations`, `styles`, `sync`). JSON is the default output format — scripts depend on it, so don't change CLI output shape without updating tests in `Tests/RubienCLITests/`.
+`Sources/RubienCLI/RubienCLI.swift` is the single-file argument-parser entry with 16 subcommands (`search`, `list`, `get`, `add`, `update`, `delete`, `cite`, `import`, `export`, `tags`, `properties`, `views`, `annotations`, `styles`, `pdf`, `sync`). JSON is the default output format — scripts depend on it, so don't change CLI output shape without updating tests in `Tests/RubienCLITests/`.
 
 **Keep the CLI in sync with data-layer changes.** Any time `RubienCore` gains a new model, table, field, or mutation (e.g. custom property definitions, property values, new reference metadata fields), extend the CLI to cover it — new subcommand for new entities, fold new fields into existing `get`/`list`/`export` JSON. UI-only changes (column reorder, popover layout, detail-panel widths) do **not** need CLI parity; the line is "is this a new way to read or write data?" If yes, the CLI must expose it and `RubienCLITests` must cover the JSON contract.
 

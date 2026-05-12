@@ -11,13 +11,11 @@ The name means *the keeper of borrowed knowledge.*
 ## Features
 
 - **PDF reader + annotations** — native PDFKit rendering with highlight / underline / anchored notes. Thumbnails, outline, full-text search.
-- **Web reader + clipper** — Defuddle + Readability extraction pipeline, same annotation tools as PDFs, YouTube transcript import.
 - **Metadata fetching** — direct HTTP to CrossRef, arXiv, PubMed, ISBN, OpenAlex, Semantic Scholar. No API keys. In-memory response cache.
-- **Citation engine** — citeproc-js embedded via JavaScriptCore. 100+ CSL styles. APA 7 default, plus IEEE / MLA / Chicago / Harvard / Vancouver / Nature.
 - **FTS5 search** — SQLite full-text search across title, authors, journal, abstract, notes, DOI.
 - **BibTeX / RIS import & export** — standard parsers, round-trip friendly.
 - **iCloud sync** — `CKSyncEngine`-backed two-way sync of references, tags, annotations, custom properties, and views across Macs signed into the same iCloud account. Toggle in Settings → iCloud Sync.
-- **CLI** — `rubien-cli` with 15 subcommands: `search`, `list`, `get`, `add`, `update`, `delete`, `cite`, `import`, `export`, `tags`, `properties`, `views`, `annotations`, `styles`, `sync`. JSON output for scripting.
+- **CLI** — `rubien-cli` with 16 subcommands: `search`, `list`, `get`, `add`, `update`, `delete`, `cite`, `import`, `export`, `tags`, `properties`, `views`, `annotations`, `styles`, `pdf`, `sync`. JSON output for scripting.
 
 ## Requirements
 
