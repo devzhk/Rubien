@@ -739,12 +739,12 @@ struct ReferenceDetailView: View {
                 }
             )
         case .date:
-            let dateValue = ISO8601DateFormatter().date(from: currentValue)
+            let dateValue = cachedISO8601DateFormatter.date(from: currentValue)
             InlineDateRow(
                 label: prop.name,
                 value: dateValue,
                 onCommit: { date in
-                    let str = date.map { ISO8601DateFormatter().string(from: $0) }
+                    let str = date.map { cachedISO8601DateFormatter.string(from: $0) }
                     saveCustomValue(propId: propId, value: str)
                 }
             )

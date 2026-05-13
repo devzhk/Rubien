@@ -488,10 +488,18 @@ struct SelectOptionPicker: View {
                                     localSelected = [option.value]
                                     onCommit([option.value])
                                     dismiss()
-                                } else if localSelected.contains(option.value) {
-                                    localSelected.remove(option.value)
                                 } else {
-                                    localSelected.insert(option.value)
+                                    if localSelected.contains(option.value) {
+                                        localSelected.remove(option.value)
+                                    } else {
+                                        localSelected.insert(option.value)
+                                    }
+                                    // Eager commit so the cell behind the popover
+                                    // updates without waiting for NSPopover's
+                                    // dismiss animation. Matches the existing
+                                    // eager-commit pattern in the create paths
+                                    // below (line ~466 and ~516).
+                                    onCommit(Array(localSelected))
                                 }
                             },
                             onDelete: onDeleteOption.map { handler in
@@ -556,10 +564,10 @@ struct SelectOptionPicker: View {
         .onAppear {
             localSelected = Set(selectedValues)
         }
-        .onDisappear {
-            guard !isSingleSelect else { return }
-            onCommit(Array(localSelected))
-        }
+        // No `onDisappear { onCommit(...) }` — both branches commit eagerly
+        // now (single-select on tap, multi-select on each toggle). Deferring
+        // to disappear would wait for NSPopover's ~500–800ms dismiss
+        // animation before the cell update.
     }
 }
 

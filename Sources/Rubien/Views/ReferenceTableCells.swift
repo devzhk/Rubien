@@ -1,6 +1,104 @@
 import SwiftUI
 import RubienCore
 
+// Apple's docs explicitly warn that `ISO8601DateFormatter` is expensive to
+// create. Date-property cells are evaluated per row per body re-eval, so
+// instantiating a fresh formatter inside the cell body costs tens of ms across
+// the visible row set. One shared instance is fine — we only touch it from
+// the main thread (SwiftUI view body, MainActor-isolated), so concurrent
+// access is a non-concern for current usage. Module-internal so that
+// `ReferenceDetailView`'s date-property row can reuse the same instance
+// without duplicating the cache.
+let cachedISO8601DateFormatter = ISO8601DateFormatter()
+
+// MARK: - Field-specific equality helpers (cell Equatable optimization)
+//
+// The synthesized / manual `==` on `Reference`, `Tag`, and `PropertyDefinition`
+// includes `dateModified`, which is stamped on every save. Delegating cell `==`
+// to those would defeat the whole optimization — every edit invalidates every
+// visible cell on that row, even cells that don't display the edited field.
+//
+// These helpers compare only the fields each cell body actually reads. They are
+// `internal` (no access modifier) so `ReadingStatusCell` / `TagsCellView` in
+// `ReferenceTableView.swift` can reuse them.
+
+/// Compare a Reference for cell-body purposes: identity + the one field
+/// indexed by `field`. Excludes `dateModified` / `verifiedAt` etc. The default
+/// branch returns `false` so an unknown field forces re-render (perf miss)
+/// rather than risking stale UI (correctness bug). Keep the case list synced
+/// with `defaultStringCell` below and the explicit branches in
+/// `EditableDefaultPropertyCell.body`.
+@inline(__always)
+func referenceFieldEqual(_ a: Reference, _ b: Reference, field: String) -> Bool {
+    guard a.id == b.id else { return false }
+    switch field {
+    case "title":           return a.title == b.title
+    case "authors":         return a.authorsNormalized == b.authorsNormalized
+    case "year":            return a.year == b.year
+    case "journal":         return a.journal == b.journal
+    case "volume":          return a.volume == b.volume
+    case "issue":           return a.issue == b.issue
+    case "pages":           return a.pages == b.pages
+    case "doi":             return a.doi == b.doi
+    case "url":             return a.url == b.url
+    case "abstract":        return a.abstract == b.abstract
+    case "notes":           return a.notes == b.notes
+    case "publisher":       return a.publisher == b.publisher
+    case "publisherPlace":  return a.publisherPlace == b.publisherPlace
+    case "edition":         return a.edition == b.edition
+    case "editors":         return a.editors == b.editors
+    case "translators":     return a.translators == b.translators
+    case "isbn":            return a.isbn == b.isbn
+    case "issn":            return a.issn == b.issn
+    case "language":        return a.language == b.language
+    case "pmid":            return a.pmid == b.pmid
+    case "pmcid":           return a.pmcid == b.pmcid
+    case "referenceType":   return a.referenceType == b.referenceType
+    case "readingStatus":   return a.readingStatus == b.readingStatus
+    case "dateAdded":       return a.dateAdded == b.dateAdded
+    // Hidden-by-default reference properties that the user can reveal as
+    // visible columns via `defaultStringCell` (~line 494). Without these
+    // cases, the conservative `default: false` causes unnecessary re-renders
+    // on those columns.
+    case "accessedDate":    return a.accessedDate == b.accessedDate
+    case "eventTitle":      return a.eventTitle == b.eventTitle
+    case "eventPlace":      return a.eventPlace == b.eventPlace
+    case "genre":           return a.genre == b.genre
+    case "institution":     return a.institution == b.institution
+    case "number":          return a.number == b.number
+    case "collectionTitle": return a.collectionTitle == b.collectionTitle
+    case "numberOfPages":   return a.numberOfPages == b.numberOfPages
+    default:                return false
+    }
+}
+
+/// Compare a PropertyDefinition for cell-body purposes: only the fields the
+/// dispatcher cells read after the `isEditing` Bool refactor (`id`, `type`,
+/// `options`). Excludes `dateModified`, `sortOrder`, `isDefault`, `isVisible`,
+/// `name` (none of which affect cell rendering — `name` renders in table
+/// headers, not in cell bodies). Pre-refactor, `customizationID` was read via
+/// the computed `fieldKey` to dispatch closures; post-refactor that read is
+/// gone (closures are pre-resolved by the parent).
+@inline(__always)
+func propertyDefVisuallyEqual(_ a: PropertyDefinition, _ b: PropertyDefinition) -> Bool {
+    a.id == b.id && a.type == b.type && a.options == b.options
+}
+
+/// Compare a `[Tag]` list element-wise by `id`, `name`, `color`. `Tag` is
+/// `Hashable` via synthesis and includes `dateModified`, which would
+/// invalidate every visible tag cell on a tag-timestamp-only save. This
+/// helper sidesteps that without touching the model's `==`.
+@inline(__always)
+func tagListVisuallyEqual(_ a: [Tag], _ b: [Tag]) -> Bool {
+    guard a.count == b.count else { return false }
+    for i in a.indices {
+        if a[i].id != b[i].id || a[i].name != b[i].name || a[i].color != b[i].color {
+            return false
+        }
+    }
+    return true
+}
+
 // MARK: - Editing Cell ID
 
 struct EditingCellID: Equatable {
@@ -34,7 +132,7 @@ private extension View {
 
 // MARK: - Editable String Cell
 
-struct EditableStringCell: View {
+struct EditableStringCell: View, Equatable {
     let value: String
     let isEditing: Bool
     let onBeginEdit: () -> Void
@@ -43,6 +141,15 @@ struct EditableStringCell: View {
     var placeholder: String = "—"
     var onTab: ((_ backwards: Bool) -> Void)? = nil
     var wrap: Bool = false
+
+    // Closures (onBeginEdit/onCommit/onCancel/onTab) are tap/commit handlers,
+    // not read in body. Safe to exclude per the plan's safety invariant.
+    static func == (lhs: EditableStringCell, rhs: EditableStringCell) -> Bool {
+        lhs.value == rhs.value
+            && lhs.isEditing == rhs.isEditing
+            && lhs.placeholder == rhs.placeholder
+            && lhs.wrap == rhs.wrap
+    }
 
     @State private var editText = ""
     @State private var didCancel = false
@@ -90,7 +197,7 @@ struct EditableStringCell: View {
 
 // MARK: - Editable Number Cell
 
-struct EditableNumberCell: View {
+struct EditableNumberCell: View, Equatable {
     let value: Int?
     let isEditing: Bool
     let onBeginEdit: () -> Void
@@ -99,6 +206,13 @@ struct EditableNumberCell: View {
     var placeholder: String = "—"
     var onTab: ((_ backwards: Bool) -> Void)? = nil
     var wrap: Bool = false
+
+    static func == (lhs: EditableNumberCell, rhs: EditableNumberCell) -> Bool {
+        lhs.value == rhs.value
+            && lhs.isEditing == rhs.isEditing
+            && lhs.placeholder == rhs.placeholder
+            && lhs.wrap == rhs.wrap
+    }
 
     @State private var editText = ""
     @State private var didCancel = false
@@ -148,7 +262,7 @@ struct EditableNumberCell: View {
 
 // MARK: - Editable URL Cell
 
-struct EditableURLCell: View {
+struct EditableURLCell: View, Equatable {
     let value: String
     let isEditing: Bool
     let onBeginEdit: () -> Void
@@ -156,6 +270,12 @@ struct EditableURLCell: View {
     let onCancel: () -> Void
     var onTab: ((_ backwards: Bool) -> Void)? = nil
     var wrap: Bool = false
+
+    static func == (lhs: EditableURLCell, rhs: EditableURLCell) -> Bool {
+        lhs.value == rhs.value
+            && lhs.isEditing == rhs.isEditing
+            && lhs.wrap == rhs.wrap
+    }
 
     @State private var editText = ""
     @State private var didCancel = false
@@ -203,11 +323,15 @@ struct EditableURLCell: View {
 
 // MARK: - Editable Single-Select Cell
 
-struct EditableSingleSelectCell: View {
+struct EditableSingleSelectCell: View, Equatable {
     let value: String
     let options: [SelectOption]
     let onSelect: (String) -> Void
     var onCreateOption: ((String) -> Void)? = nil
+
+    static func == (lhs: EditableSingleSelectCell, rhs: EditableSingleSelectCell) -> Bool {
+        lhs.value == rhs.value && lhs.options == rhs.options
+    }
 
     @State private var showPicker = false
 
@@ -254,11 +378,15 @@ struct EditableSingleSelectCell: View {
 
 // MARK: - Editable Multi-Select Cell
 
-struct EditableMultiSelectCell: View {
+struct EditableMultiSelectCell: View, Equatable {
     let selectedValues: [String]
     let options: [SelectOption]
     let onUpdate: ([String]) -> Void
     var onCreateOption: ((String) -> Void)? = nil
+
+    static func == (lhs: EditableMultiSelectCell, rhs: EditableMultiSelectCell) -> Bool {
+        lhs.selectedValues == rhs.selectedValues && lhs.options == rhs.options
+    }
 
     @State private var showPicker = false
 
@@ -307,9 +435,13 @@ struct EditableMultiSelectCell: View {
 
 // MARK: - Editable Checkbox Cell
 
-struct EditableCheckboxCell: View {
+struct EditableCheckboxCell: View, Equatable {
     let isChecked: Bool
     let onToggle: (Bool) -> Void
+
+    static func == (lhs: EditableCheckboxCell, rhs: EditableCheckboxCell) -> Bool {
+        lhs.isChecked == rhs.isChecked
+    }
 
     var body: some View {
         Toggle("", isOn: Binding(
@@ -324,9 +456,13 @@ struct EditableCheckboxCell: View {
 
 // MARK: - Editable Date Cell
 
-struct EditableDateCell: View {
+struct EditableDateCell: View, Equatable {
     let value: Date?
     let onCommit: (Date?) -> Void
+
+    static func == (lhs: EditableDateCell, rhs: EditableDateCell) -> Bool {
+        lhs.value == rhs.value
+    }
 
     @State private var showPicker = false
     @State private var editDate = Date()
@@ -379,16 +515,29 @@ struct EditableDateCell: View {
 
 // MARK: - Default Property Dispatcher Cell
 
-struct EditableDefaultPropertyCell: View {
+struct EditableDefaultPropertyCell: View, Equatable {
     let reference: Reference
     let fieldKey: String
     let property: PropertyDefinition
-    let isEditing: (String) -> Bool
-    let onBeginEdit: (String) -> Void
+    // Pre-resolved by the parent for this cell's one `fieldKey` so it
+    // participates in `==` as an Equatable Bool. Must not be a closure read
+    // inside `body` — a closure-typed input can't be compared in `==`, so
+    // changes to edit-state would be silently skipped and the cell would
+    // fail to enter edit mode.
+    let isEditing: Bool
+    let onBeginEdit: () -> Void
     let onCancel: () -> Void
     let commitRef: (Reference) -> Void
     var onTab: ((_ backwards: Bool) -> Void)? = nil
     var wrap: Bool = false
+
+    static func == (lhs: EditableDefaultPropertyCell, rhs: EditableDefaultPropertyCell) -> Bool {
+        lhs.fieldKey == rhs.fieldKey
+            && lhs.isEditing == rhs.isEditing
+            && lhs.wrap == rhs.wrap
+            && propertyDefVisuallyEqual(lhs.property, rhs.property)
+            && referenceFieldEqual(lhs.reference, rhs.reference, field: lhs.fieldKey)
+    }
 
     var body: some View {
         switch fieldKey {
@@ -404,11 +553,12 @@ struct EditableDefaultPropertyCell: View {
                     }
                 }
             )
+            .equatable()
         case "year":
             EditableNumberCell(
                 value: reference.year,
-                isEditing: isEditing("year"),
-                onBeginEdit: { onBeginEdit("year") },
+                isEditing: isEditing,
+                onBeginEdit: onBeginEdit,
                 onCommit: { val in
                     var u = reference
                     u.year = val
@@ -418,11 +568,12 @@ struct EditableDefaultPropertyCell: View {
                 onTab: onTab,
                 wrap: wrap
             )
+            .equatable()
         case "doi":
             EditableURLCell(
                 value: reference.doi ?? "",
-                isEditing: isEditing("doi"),
-                onBeginEdit: { onBeginEdit("doi") },
+                isEditing: isEditing,
+                onBeginEdit: onBeginEdit,
                 onCommit: { val in
                     var u = reference
                     u.doi = val.isEmpty ? nil : val
@@ -432,11 +583,12 @@ struct EditableDefaultPropertyCell: View {
                 onTab: onTab,
                 wrap: wrap
             )
+            .equatable()
         case "url":
             EditableURLCell(
                 value: reference.url ?? "",
-                isEditing: isEditing("url"),
-                onBeginEdit: { onBeginEdit("url") },
+                isEditing: isEditing,
+                onBeginEdit: onBeginEdit,
                 onCommit: { val in
                     var u = reference
                     u.url = val.isEmpty ? nil : val
@@ -446,11 +598,12 @@ struct EditableDefaultPropertyCell: View {
                 onTab: onTab,
                 wrap: wrap
             )
+            .equatable()
         case "editors":
             EditableStringCell(
                 value: reference.parsedEditors.displayString,
-                isEditing: isEditing("editors"),
-                onBeginEdit: { onBeginEdit("editors") },
+                isEditing: isEditing,
+                onBeginEdit: onBeginEdit,
                 onCommit: { val in
                     var u = reference
                     u.editors = val.isEmpty ? nil : Reference.encodeNames(AuthorName.parseList(val))
@@ -460,11 +613,12 @@ struct EditableDefaultPropertyCell: View {
                 onTab: onTab,
                 wrap: wrap
             )
+            .equatable()
         case "translators":
             EditableStringCell(
                 value: reference.parsedTranslators.displayString,
-                isEditing: isEditing("translators"),
-                onBeginEdit: { onBeginEdit("translators") },
+                isEditing: isEditing,
+                onBeginEdit: onBeginEdit,
                 onCommit: { val in
                     var u = reference
                     u.translators = val.isEmpty ? nil : Reference.encodeNames(AuthorName.parseList(val))
@@ -474,6 +628,7 @@ struct EditableDefaultPropertyCell: View {
                 onTab: onTab,
                 wrap: wrap
             )
+            .equatable()
         default:
             defaultStringCell
         }
@@ -509,8 +664,8 @@ struct EditableDefaultPropertyCell: View {
 
         EditableStringCell(
             value: getter(),
-            isEditing: isEditing(fieldKey),
-            onBeginEdit: { onBeginEdit(fieldKey) },
+            isEditing: isEditing,
+            onBeginEdit: onBeginEdit,
             onCommit: { val in
                 var u = reference
                 let v: String? = val.isEmpty ? nil : val
@@ -543,17 +698,21 @@ struct EditableDefaultPropertyCell: View {
             onTab: onTab,
             wrap: wrap
         )
+        .equatable()
     }
 }
 
 // MARK: - Custom Property Dispatcher Cell
 
-struct EditableCustomPropertyCell: View {
+struct EditableCustomPropertyCell: View, Equatable {
     let referenceId: Int64
     let property: PropertyDefinition
     let rawValue: String?
-    let isEditing: (String) -> Bool
-    let onBeginEdit: (String) -> Void
+    // Pre-resolved by the parent for this cell's `property.customizationID`.
+    // Was a closure `(String) -> Bool` read inside body; now a stored Bool
+    // that participates in `==`.
+    let isEditing: Bool
+    let onBeginEdit: () -> Void
     let onCancel: () -> Void
     let commitCustom: (Int64, Int64, String?) -> Void
     let onCreateOption: (Int64, String) -> Void
@@ -561,16 +720,23 @@ struct EditableCustomPropertyCell: View {
     var wrap: Bool = false
 
     private var propId: Int64 { property.id ?? 0 }
-    private var fieldKey: String { property.customizationID }
     private var currentValue: String { rawValue ?? "" }
+
+    static func == (lhs: EditableCustomPropertyCell, rhs: EditableCustomPropertyCell) -> Bool {
+        lhs.referenceId == rhs.referenceId
+            && lhs.rawValue == rhs.rawValue
+            && lhs.isEditing == rhs.isEditing
+            && lhs.wrap == rhs.wrap
+            && propertyDefVisuallyEqual(lhs.property, rhs.property)
+    }
 
     var body: some View {
         switch property.type {
         case .string:
             EditableStringCell(
                 value: currentValue,
-                isEditing: isEditing(fieldKey),
-                onBeginEdit: { onBeginEdit(fieldKey) },
+                isEditing: isEditing,
+                onBeginEdit: onBeginEdit,
                 onCommit: { val in
                     commitCustom(referenceId, propId, val.isEmpty ? nil : val)
                 },
@@ -578,11 +744,12 @@ struct EditableCustomPropertyCell: View {
                 onTab: onTab,
                 wrap: wrap
             )
+            .equatable()
         case .url:
             EditableURLCell(
                 value: currentValue,
-                isEditing: isEditing(fieldKey),
-                onBeginEdit: { onBeginEdit(fieldKey) },
+                isEditing: isEditing,
+                onBeginEdit: onBeginEdit,
                 onCommit: { val in
                     commitCustom(referenceId, propId, val.isEmpty ? nil : val)
                 },
@@ -590,11 +757,12 @@ struct EditableCustomPropertyCell: View {
                 onTab: onTab,
                 wrap: wrap
             )
+            .equatable()
         case .number:
             EditableNumberCell(
                 value: Int(currentValue),
-                isEditing: isEditing(fieldKey),
-                onBeginEdit: { onBeginEdit(fieldKey) },
+                isEditing: isEditing,
+                onBeginEdit: onBeginEdit,
                 onCommit: { val in
                     commitCustom(referenceId, propId, val.map(String.init))
                 },
@@ -602,6 +770,7 @@ struct EditableCustomPropertyCell: View {
                 onTab: onTab,
                 wrap: wrap
             )
+            .equatable()
         case .singleSelect:
             EditableSingleSelectCell(
                 value: currentValue,
@@ -613,6 +782,7 @@ struct EditableCustomPropertyCell: View {
                     onCreateOption(propId, newName)
                 }
             )
+            .equatable()
         case .multiSelect:
             let selected = PropertyValue.decodeMultiSelect(currentValue)
             EditableMultiSelectCell(
@@ -626,6 +796,7 @@ struct EditableCustomPropertyCell: View {
                     onCreateOption(propId, newName)
                 }
             )
+            .equatable()
         case .checkbox:
             EditableCheckboxCell(
                 isChecked: currentValue == "true",
@@ -633,15 +804,17 @@ struct EditableCustomPropertyCell: View {
                     commitCustom(referenceId, propId, checked ? "true" : "false")
                 }
             )
+            .equatable()
         case .date:
-            let dateValue = ISO8601DateFormatter().date(from: currentValue)
+            let dateValue = cachedISO8601DateFormatter.date(from: currentValue)
             EditableDateCell(
                 value: dateValue,
                 onCommit: { date in
-                    let str = date.map { ISO8601DateFormatter().string(from: $0) }
+                    let str = date.map { cachedISO8601DateFormatter.string(from: $0) }
                     commitCustom(referenceId, propId, str)
                 }
             )
+            .equatable()
         }
     }
 

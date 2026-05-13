@@ -45,10 +45,13 @@ extension PropertyValue: FetchableRecord, MutablePersistableRecord {
 // row when they receive an empty result.
 
 extension PropertyValue {
+    private static let multiSelectDecoder = JSONDecoder()
+    private static let multiSelectEncoder = JSONEncoder()
+
     public static func decodeMultiSelect(_ raw: String) -> [String] {
         guard !raw.isEmpty,
               let data = raw.data(using: .utf8),
-              let arr = try? JSONDecoder().decode([String].self, from: data) else {
+              let arr = try? multiSelectDecoder.decode([String].self, from: data) else {
             return []
         }
         return arr
@@ -56,7 +59,7 @@ extension PropertyValue {
 
     public static func encodeMultiSelect(_ values: [String]) -> String {
         guard !values.isEmpty,
-              let data = try? JSONEncoder().encode(values),
+              let data = try? multiSelectEncoder.encode(values),
               let json = String(data: data, encoding: .utf8) else {
             return ""
         }

@@ -240,15 +240,32 @@ private struct SidebarRow<Trailing: View>: View {
     }
 }
 
+// Per-cell chips (tags, status, select options) hit `Color(hex:)` hundreds of
+// times per body re-eval. The Scanner-based parse allocates each call, which
+// is measurable in aggregate across the visible row set. The set of distinct
+// hex strings in a library is small (tag/option palette), so memoizing yields
+// straight cache hits after warmup. Cache is keyed on the *trimmed* hex string
+// so `"#FF0000"` and `"FF0000"` share an entry. All call sites are SwiftUI
+// view bodies (MainActor-isolated), so the cache and the initializer are both
+// @MainActor — no synchronization needed.
+@MainActor private var colorHexCache: [String: Color] = [:]
+
 extension Color {
+    @MainActor
     init(hex: String) {
-        let hex = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+        let trimmed = hex.trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+        if let cached = colorHexCache[trimmed] {
+            self = cached
+            return
+        }
         var int: UInt64 = 0
-        Scanner(string: hex).scanHexInt64(&int)
+        Scanner(string: trimmed).scanHexInt64(&int)
         let r = Double((int >> 16) & 0xFF) / 255.0
         let g = Double((int >> 8) & 0xFF) / 255.0
         let b = Double(int & 0xFF) / 255.0
-        self.init(red: r, green: g, blue: b)
+        let color = Color(red: r, green: g, blue: b)
+        colorHexCache[trimmed] = color
+        self = color
     }
 }
 

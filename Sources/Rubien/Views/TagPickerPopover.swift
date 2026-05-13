@@ -6,10 +6,10 @@ struct TagPickerPopover: View {
     let allTags: [Tag]
     let onCommit: ([Int64]) -> Void
     /// Creates a new tag and returns its id. The popover adds the id to its
-    /// local selection so the eventual `onCommit` in `.onDisappear` saves the
-    /// new tag as assigned — a plain `(String) -> Void` signature would race
-    /// with the popover's own commit flow and the new tag would flicker in
-    /// then disappear.
+    /// local selection and immediately fires `onCommit` so the cell behind the
+    /// popover reflects the new state without waiting for the NSPopover dismiss
+    /// animation. The `Int64?` return is required so the popover can include
+    /// the newly-created id in that immediate commit.
     let onCreateTag: (String) -> Int64?
     let onDeleteTag: (Int64) -> Void
     @State private var search = ""
@@ -26,9 +26,18 @@ struct TagPickerPopover: View {
         return localIds.contains(id)
     }
 
+    /// Fire `onCommit` synchronously after a local mutation so the table cell
+    /// updates while the popover is still open. Deferring to `onDisappear`
+    /// waits for NSPopover's ~500–800ms dismiss animation before the cell
+    /// reflects the change.
+    private func flushCommit() {
+        onCommit(Array(localIds))
+    }
+
     private func handleCreate(_ name: String) {
         if let newId = onCreateTag(name) {
             localIds.insert(newId)
+            flushCommit()
         }
         search = ""
     }
@@ -63,6 +72,7 @@ struct TagPickerPopover: View {
                             Button {
                                 if let id = tag.id {
                                     if localIds.contains(id) { localIds.remove(id) } else { localIds.insert(id) }
+                                    flushCommit()
                                 }
                             } label: {
                                 HStack(spacing: 8) {
@@ -82,7 +92,14 @@ struct TagPickerPopover: View {
 
                             Button {
                                 if let id = tag.id {
+                                    // Commit the per-reference removal first
+                                    // (defensive — both orderings converge via
+                                    // the FK cascade-delete on referenceTag,
+                                    // but writing without the about-to-delete
+                                    // tag id avoids a brief inconsistent
+                                    // intermediate state).
                                     localIds.remove(id)
+                                    flushCommit()
                                     onDeleteTag(id)
                                 }
                             } label: {
@@ -129,8 +146,9 @@ struct TagPickerPopover: View {
             localIds = Set(assignedTags.compactMap(\.id))
             DispatchQueue.main.async { isSearchFocused = true }
         }
-        .onDisappear {
-            onCommit(Array(localIds))
-        }
+        // No `onDisappear { onCommit(...) }` — every mutation path above already
+        // fires `flushCommit()`. Deferring to disappear would wait for
+        // NSPopover's ~500–800ms dismiss animation before the cell update,
+        // which is the lag pattern this refactor eliminates.
     }
 }

@@ -498,6 +498,7 @@ private struct ReferenceTableContent: View {
             },
             wrap: wrapForColumn(ColumnIdentifier.title.rawValue)
         )
+        .equatable()
     }
 
     @ViewBuilder
@@ -519,17 +520,20 @@ private struct ReferenceTableContent: View {
             },
             wrap: wrapForColumn(ColumnIdentifier.authors.rawValue)
         )
+        .equatable()
     }
 
     @ViewBuilder
     private func propertyCell(for ref: Reference, prop: PropertyDefinition) -> some View {
         if prop.isDefault, let key = prop.defaultFieldKey {
+            // Resolve `isEditing` once at construction so the cell can compare
+            // it via `==` — see EditableDefaultPropertyCell's Equatable conformance.
             EditableDefaultPropertyCell(
                 reference: ref,
                 fieldKey: key,
                 property: prop,
-                isEditing: { key in isEditing(ref.id, key) },
-                onBeginEdit: { key in beginEdit(ref.id, key) },
+                isEditing: isEditing(ref.id, key),
+                onBeginEdit: { beginEdit(ref.id, key) },
                 onCancel: cancel,
                 commitRef: commitRef,
                 onTab: { back in
@@ -539,14 +543,15 @@ private struct ReferenceTableContent: View {
                 },
                 wrap: wrapForColumn(prop.customizationID)
             )
+            .equatable()
         } else if let refId = ref.id {
             let customKey = "custom_\(prop.id ?? 0)"
             EditableCustomPropertyCell(
                 referenceId: refId,
                 property: prop,
                 rawValue: customPropertyValueMap[refId]?[prop.id ?? 0],
-                isEditing: { key in isEditing(refId, key) },
-                onBeginEdit: { key in beginEdit(refId, key) },
+                isEditing: isEditing(refId, prop.customizationID),
+                onBeginEdit: { beginEdit(refId, prop.customizationID) },
                 onCancel: cancel,
                 commitCustom: commitCustom,
                 onCreateOption: onCreateOption,
@@ -555,6 +560,7 @@ private struct ReferenceTableContent: View {
                 },
                 wrap: wrapForColumn(prop.customizationID)
             )
+            .equatable()
         } else {
             Text("—")
                 .font(.callout)
@@ -591,6 +597,7 @@ private struct ReferenceTableContent: View {
                     onCreateTag: onCreateTag,
                     onDeleteTag: onDeleteTag
                 )
+                .equatable()
             }
             .width(min: 60, ideal: 120)
             .customizationID(ColumnIdentifier.tags.rawValue)
@@ -638,6 +645,7 @@ private struct ReferenceTableContent: View {
                         }
                     }
                 )
+                .equatable()
             }
             .width(min: 70, ideal: 90)
             .customizationID(ColumnIdentifier.readingStatus.rawValue)
@@ -736,7 +744,7 @@ private struct ReferenceTableContent: View {
 
 // MARK: - Inline Editing Cells
 
-struct ReadingStatusCell: View {
+struct ReadingStatusCell: View, Equatable {
     let reference: Reference
     /// Seeded in v1; nil only if the seed was bypassed (defensive fallback below).
     let statusDef: PropertyDefinition?
@@ -751,6 +759,24 @@ struct ReadingStatusCell: View {
     let onDeleteStatusOption: (String) -> Void
 
     @State private var showPicker = false
+
+    // Body reads only `reference.id`, `reference.readingStatus`, and the
+    // status options (via `statusOptions` computed from `statusDef`). Whole-
+    // Reference equality would invalidate this cell on every edit because
+    // `Reference.dateModified` is stamped on every save.
+    static func == (lhs: ReadingStatusCell, rhs: ReadingStatusCell) -> Bool {
+        guard lhs.reference.id == rhs.reference.id,
+              lhs.reference.readingStatus == rhs.reference.readingStatus
+        else { return false }
+        switch (lhs.statusDef, rhs.statusDef) {
+        case (nil, nil):
+            return true
+        case let (l?, r?):
+            return l.id == r.id && l.options == r.options
+        default:
+            return false
+        }
+    }
 
     /// Live Status options driven by the seeded PropertyDefinition (post-Phase-2
     /// users can add/rename/delete options). Falls back to the 4 built-ins.
@@ -815,7 +841,7 @@ struct ReadingStatusCell: View {
     }
 }
 
-struct TagsCellView: View {
+struct TagsCellView: View, Equatable {
     let tags: [Tag]
     let allTags: [Tag]
     let referenceId: Int64
@@ -824,6 +850,15 @@ struct TagsCellView: View {
     let onDeleteTag: (Int64) -> Void
 
     @State private var showPopover = false
+
+    // Use the file-private helper (declared in ReferenceTableCells.swift) so
+    // `Tag.dateModified` churn doesn't invalidate every visible tag cell on a
+    // tag-timestamp-only save.
+    static func == (lhs: TagsCellView, rhs: TagsCellView) -> Bool {
+        lhs.referenceId == rhs.referenceId
+            && tagListVisuallyEqual(lhs.tags, rhs.tags)
+            && tagListVisuallyEqual(lhs.allTags, rhs.allTags)
+    }
 
     var body: some View {
         Button {
