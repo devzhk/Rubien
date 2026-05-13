@@ -916,6 +916,8 @@ All commands that return references use this structure:
   "language": "en",
   "edition": null,
   "readingStatus": "unread",
+  "lastReadAt": "2026-05-12T15:30:00.000Z",
+  "readCount": 3,
   "customProperties": [
     {"propertyId": "17", "name": "Status", "type": "singleSelect", "value": "doing"},
     {"propertyId": "18", "name": "Tags2",  "type": "multiSelect",  "value": "[\"ml\",\"nlp\"]"}
@@ -926,6 +928,10 @@ All commands that return references use this structure:
 `customProperties` is always present (may be an empty array). Each entry corresponds to a **non-default** property definition that has a value set on this reference; built-in fields like `year` and `doi` live at the top level. For `multiSelect`, `value` is a JSON-encoded `[String]` literal — decode it client-side.
 
 `pdfPath` is the **local filename** of the attached PDF (relative to the library's PDF storage directory), resolved per-device through `pdfCache`. Compose it with the library's PDF directory (printed by `rubien-cli sync status` or visible in Settings) to get an absolute path. The field is `null` when this device has no materialized PDF for the reference — it may still arrive via sync.
+
+`lastReadAt` is the most-recent reader-open timestamp (ISO-8601), stamped automatically whenever the PDF or web reader opens the reference. The field is **omitted entirely** (not `null`) when the reference has never been opened in a reader post-v4 — Swift `Date?` semantics. Sort or filter by it via the standard sort/filter DSL (key: `"lastReadAt"`).
+
+`readCount` is the count of distinct reading sessions. Each reader open bumps the counter at most once per ~10-minute window (so quick-toggle flows don't inflate it). Always present in JSON; `0` for references that haven't been opened. Sort or filter by it via `"readCount"`.
 
 ---
 

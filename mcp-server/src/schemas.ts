@@ -46,6 +46,12 @@ export const ReferenceDTO = z.object({
   language: z.string().optional(),
   edition: z.string().optional(),
   readingStatus: z.string(),
+  // Reader activity (v4). `lastReadAt` is a Swift `Date?` and is omitted from
+  // CLI output when the reference has never been opened — `.optional()`, not
+  // `.nullable()` (see header comment). `readCount` is non-optional and
+  // always present, defaulting to 0.
+  lastReadAt: isoDateString.optional(),
+  readCount: z.number().int(),
   customProperties: z.array(CustomPropertyValueDTO),
 });
 export type ReferenceDTO = z.infer<typeof ReferenceDTO>;

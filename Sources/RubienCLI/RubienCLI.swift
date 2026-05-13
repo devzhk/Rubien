@@ -155,6 +155,13 @@ struct ReferenceDTO: Encodable {
     let language: String?
     let edition: String?
     let readingStatus: String
+    /// Most-recent reader-open timestamp. Omitted from JSON when nil (the
+    /// reference has never been opened in a reader post-v4), per Swift's
+    /// synthesized Encodable behavior for plain Optionals.
+    let lastReadAt: Date?
+    /// Distinct reading-session count (10-minute debounce on the write side).
+    /// Always present in JSON; defaults to 0 for never-opened references.
+    let readCount: Int
     let customProperties: [CustomPropertyValueDTO]
 
     init(from ref: Reference,
@@ -187,6 +194,8 @@ struct ReferenceDTO: Encodable {
         self.language = ref.language
         self.edition = ref.edition
         self.readingStatus = ref.readingStatus
+        self.lastReadAt = ref.lastReadAt
+        self.readCount = ref.readCount
 
         let refValues = ref.id.flatMap { valuesByRef[$0] } ?? [:]
         let customDefs = defs.filter { !$0.isDefault }

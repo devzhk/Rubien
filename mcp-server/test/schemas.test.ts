@@ -16,6 +16,7 @@ import {
 describe("zod schemas", () => {
   it("accepts ReferenceDTO with most optional fields omitted", () => {
     // Matches Swift JSONEncoder's default behavior: nil Optionals are absent.
+    // `readCount` is non-optional and always present (defaults to 0).
     const minimal = {
       title: "A paper",
       authors: "Alice; Bob",
@@ -23,6 +24,7 @@ describe("zod schemas", () => {
       dateAdded: "2026-04-24T10:00:00.000Z",
       dateModified: "2026-04-24T10:00:00.000Z",
       readingStatus: "unread",
+      readCount: 0,
       customProperties: [],
     };
     expect(() => ReferenceDTO.parse(minimal)).not.toThrow();
@@ -39,9 +41,56 @@ describe("zod schemas", () => {
       dateAdded: "2026-04-24T10:00:00.000Z",
       dateModified: "2026-04-24T10:00:00.000Z",
       readingStatus: "unread",
+      readCount: 0,
       customProperties: [],
     };
     expect(() => ReferenceDTO.parse(withNull)).toThrow();
+  });
+
+  it("accepts ReferenceDTO with lastReadAt set", () => {
+    // After a reader open, Swift writes lastReadAt as an ISO string.
+    const opened = {
+      title: "Opened paper",
+      authors: "Alice",
+      referenceType: "Journal Article",
+      dateAdded: "2026-04-24T10:00:00.000Z",
+      dateModified: "2026-04-24T10:00:00.000Z",
+      readingStatus: "unread",
+      lastReadAt: "2026-05-12T15:30:00.000Z",
+      readCount: 3,
+      customProperties: [],
+    };
+    expect(() => ReferenceDTO.parse(opened)).not.toThrow();
+  });
+
+  it("rejects ReferenceDTO with explicit null lastReadAt", () => {
+    // Same Swift-Optional contract as `year`: nil → absent key, not null.
+    const withNullRead = {
+      title: "A paper",
+      authors: "Alice",
+      referenceType: "Journal Article",
+      dateAdded: "2026-04-24T10:00:00.000Z",
+      dateModified: "2026-04-24T10:00:00.000Z",
+      readingStatus: "unread",
+      lastReadAt: null, // <-- contract violation
+      readCount: 0,
+      customProperties: [],
+    };
+    expect(() => ReferenceDTO.parse(withNullRead)).toThrow();
+  });
+
+  it("rejects ReferenceDTO missing readCount", () => {
+    // readCount is required — CLI always emits it (defaults to 0).
+    const missingReadCount = {
+      title: "A paper",
+      authors: "Alice",
+      referenceType: "Journal Article",
+      dateAdded: "2026-04-24T10:00:00.000Z",
+      dateModified: "2026-04-24T10:00:00.000Z",
+      readingStatus: "unread",
+      customProperties: [],
+    };
+    expect(() => ReferenceDTO.parse(missingReadCount)).toThrow();
   });
 
   it("accepts DatabaseViewDTO with groupBy explicitly null", () => {

@@ -812,6 +812,47 @@ final class RubienCLITests: XCTestCase {
         }
     }
 
+    /// Fresh references must always carry `readCount: 0` and must NOT carry a
+    /// `lastReadAt` key at all (Swift `Date?` → key omitted when nil). This
+    /// pins the JSON contract that the MCP server's zod schema relies on.
+    func testGetIncludesReaderActivityFields() throws {
+        try skipIfBinaryMissing()
+        let addResult = try runCLI(["add", "--title", "ReaderActivity-\(UUID().uuidString)"])
+        XCTAssertEqual(addResult.exitCode, 0)
+        let addObj = try JSONSerialization.jsonObject(with: Data(addResult.stdout.utf8)) as? [String: Any]
+        guard let refDict = addObj?["reference"] as? [String: Any],
+              let refId = refDict["id"] as? Int64 ?? (refDict["id"] as? Int).map(Int64.init) else {
+            XCTFail("add envelope must contain reference.id")
+            return
+        }
+        defer { _ = try? runCLI(["delete", "\(refId)", "--force"]) }
+
+        let getResult = try runCLI(["get", "\(refId)"])
+        XCTAssertEqual(getResult.exitCode, 0)
+        let getObj = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(getResult.stdout.utf8)) as? [String: Any]
+        )
+
+        XCTAssertEqual(getObj["readCount"] as? Int, 0,
+                       "fresh references must report readCount=0 in JSON output")
+        XCTAssertFalse(getObj.keys.contains("lastReadAt"),
+                       "never-opened references must omit lastReadAt entirely (Swift Date? → absent key)")
+    }
+
+    /// `export --format json` must emit the same reader-activity fields for
+    /// every reference. Spot-check the first row.
+    func testExportIncludesReaderActivityFields() throws {
+        try skipIfBinaryMissing()
+        let result = try runCLI(["export", "--format", "json"])
+        XCTAssertEqual(result.exitCode, 0)
+        let arr = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [[String: Any]] ?? []
+        guard let first = arr.first else {
+            // No references in the library; nothing to assert against.
+            return
+        }
+        XCTAssertNotNil(first["readCount"], "every exported reference must carry readCount (non-optional in JSON)")
+    }
+
     // MARK: - Views
     //
     // These tests lock the JSON contract for the `views` subcommand:
