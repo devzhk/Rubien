@@ -25,7 +25,7 @@ enum ImportClassification: Equatable {
 public final class AppDatabase: Sendable {
     /// Bumped whenever a new migration is registered. Surfaced in
     /// `rubien-cli sync status` JSON for diagnostics.
-    public static let currentSchemaVersion = "v3"
+    public static let currentSchemaVersion = "v4"
 
     public let dbWriter: any DatabaseWriter
 
@@ -516,6 +516,25 @@ public final class AppDatabase: Sendable {
             try Self.applyV3Body(db)
         }
 
+        // v4 (2026-05): add reader-open tracking columns on `reference`.
+        // `lastReadAt` is the most recent reader-open timestamp, advanced
+        // monotonically by `markReferenceRead`. `readCount` is bumped at most
+        // once per ~10-minute window so it approximates distinct reading
+        // sessions, not raw window-open events. Both fields sync via CKRecord;
+        // the matching mapping lives in `ReferenceRecord.swift` and must land
+        // in the same commit (see SyncSchemaInvariantTests).
+        //
+        // No data backfill. `lastReadAt` starts NULL, `readCount` starts 0 for
+        // all existing references — the sort key starts showing useful data
+        // the day the user opens a reader post-upgrade. The `pdfCache.lastOpenedAt`
+        // column is not a usable backfill source: `PDFAssetCache.markOpened`
+        // is unused in production, so the value is effectively "first cached at".
+        migrator.registerMigration("v4") { db in
+            try db.execute(sql: "ALTER TABLE reference ADD COLUMN lastReadAt DATETIME")
+            try db.execute(sql: "ALTER TABLE reference ADD COLUMN readCount INTEGER NOT NULL DEFAULT 0")
+            try db.create(index: "reference_lastReadAt", on: "reference", columns: ["lastReadAt"])
+        }
+
         return migrator
     }
 
@@ -631,6 +650,19 @@ public final class AppDatabase: Sendable {
         try queue.write { db in
             try Self.applyV3Body(db)
         }
+    }
+
+    /// Test-only: applies the v4 ADD COLUMN body to an arbitrary queue that
+    /// already carries a `reference` table without the v4 columns. Used by
+    /// `MigrationV4Tests`.
+    public static func runV4MigrationForTesting(on queue: DatabaseQueue) throws {
+        var migrator = DatabaseMigrator()
+        migrator.registerMigration("v4") { db in
+            try db.execute(sql: "ALTER TABLE reference ADD COLUMN lastReadAt DATETIME")
+            try db.execute(sql: "ALTER TABLE reference ADD COLUMN readCount INTEGER NOT NULL DEFAULT 0")
+            try db.create(index: "reference_lastReadAt", on: "reference", columns: ["lastReadAt"])
+        }
+        try migrator.migrate(queue)
     }
 
     /// Tables whose rows sync to CloudKit. Order is not significant here; pull-side
@@ -1032,6 +1064,55 @@ extension AppDatabase {
                 sql: "UPDATE reference SET webContent = ?, dateModified = ? WHERE id = ?",
                 arguments: [webContent, Date(), id]
             )
+        }
+    }
+
+    /// Stamp a reader-open event on a reference. Always advances `lastReadAt`
+    /// (monotonically — clock skew can't push it backwards) and increments
+    /// `readCount` once per ~10-minute window so distinct reading sessions are
+    /// counted, not raw window-open events.
+    ///
+    /// Does NOT touch `dateModified` — that field reflects user-visible
+    /// content edits, not usage metrics. The AFTER UPDATE dirty-tracking
+    /// trigger still fires, so the change rides the next CKRecord push.
+    ///
+    /// Safe to call for a non-existent `id`: the UPDATE matches no rows,
+    /// nothing happens, no error thrown. Caller paths (`ReaderWindowManager`)
+    /// already gate on resolving a reference before opening a reader.
+    public func markReferenceRead(id: Int64, now: Date = Date()) throws {
+        try dbWriter.write { db in
+            let existing: Date? = try Date.fetchOne(
+                db,
+                sql: "SELECT lastReadAt FROM reference WHERE id = ?",
+                arguments: [id]
+            )
+            // Monotonic guard: a peer write could land a future-dated
+            // lastReadAt on this device; a local open in the meantime must not
+            // regress that value just because our clock thinks "now" is earlier.
+            let effectiveStamp = max(now, existing ?? .distantPast)
+            // Within the debounce window, only advance the timestamp (if it
+            // actually changed); past the window, also bump the count.
+            // A "future" existing timestamp (effectively negative interval)
+            // counts as recent and skips the bump.
+            let shouldBumpCount: Bool
+            if let existing {
+                shouldBumpCount = now.timeIntervalSince(existing) > 600
+            } else {
+                shouldBumpCount = true
+            }
+            if shouldBumpCount {
+                try db.execute(
+                    sql: "UPDATE reference SET lastReadAt = ?, readCount = readCount + 1 WHERE id = ?",
+                    arguments: [effectiveStamp, id]
+                )
+            } else if effectiveStamp != existing {
+                try db.execute(
+                    sql: "UPDATE reference SET lastReadAt = ? WHERE id = ?",
+                    arguments: [effectiveStamp, id]
+                )
+            }
+            // else: clock-skew kept the existing timestamp AND we're inside
+            // the debounce window — nothing to write, don't dirty the row.
         }
     }
 

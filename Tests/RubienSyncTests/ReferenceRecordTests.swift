@@ -70,6 +70,8 @@ final class ReferenceRecordTests: XCTestCase {
             pmcid: "PMC1234567"
         )
         ref.id = 42  // local rowID, must NOT be encoded into the CKRecord
+        ref.lastReadAt = fixedDate(10_800)
+        ref.readCount = 7
         return ref
     }
 
@@ -114,6 +116,8 @@ final class ReferenceRecordTests: XCTestCase {
         XCTAssertEqual(decoded.verifiedAt, original.verifiedAt)
         XCTAssertEqual(decoded.reviewedBy, original.reviewedBy)
         XCTAssertEqual(decoded.readingStatus, original.readingStatus)
+        XCTAssertEqual(decoded.lastReadAt, original.lastReadAt)
+        XCTAssertEqual(decoded.readCount, original.readCount)
         XCTAssertEqual(decoded.publisher, original.publisher)
         XCTAssertEqual(decoded.publisherPlace, original.publisherPlace)
         XCTAssertEqual(decoded.edition, original.edition)
@@ -182,6 +186,25 @@ final class ReferenceRecordTests: XCTestCase {
         XCTAssertEqual(decoded.referenceType, .journalArticle, "default type round-trips")
         XCTAssertEqual(decoded.readingStatus, ReadingStatus.unread)
         XCTAssertEqual(decoded.verificationStatus, .legacy)
+        XCTAssertNil(decoded.lastReadAt, "fresh reference has never been read")
+        XCTAssertEqual(decoded.readCount, 0)
+    }
+
+    /// Records written by a pre-v4 peer don't carry `lastReadAt` / `readCount`.
+    /// Our decoder must fall back to the "never read" defaults rather than
+    /// throwing or producing garbage values.
+    func testPreV4RecordDecodesToNeverReadDefaults() {
+        let id = CKRecord.ID(recordName: recordName, zoneID: SyncConstants.libraryZoneID)
+        let record = CKRecord(recordType: SyncConstants.RecordType.reference, recordID: id)
+        record[Reference.RecordField.title] = "t"
+        record[Reference.RecordField.dateAdded] = fixedDate(0)
+        record[Reference.RecordField.dateModified] = fixedDate(0)
+        // Deliberately do NOT set lastReadAt or readCount — simulates a peer
+        // that has not yet upgraded to v4.
+
+        let decoded = Reference(record: record)
+        XCTAssertNil(decoded.lastReadAt, "missing lastReadAt must decode to nil")
+        XCTAssertEqual(decoded.readCount, 0, "missing readCount must decode to 0")
     }
 
     // MARK: - Enum fallback

@@ -45,6 +45,8 @@ extension Reference {
         public static let verifiedAt            = "verifiedAt"
         public static let reviewedBy            = "reviewedBy"
         public static let readingStatus         = "readingStatus"
+        public static let lastReadAt            = "lastReadAt"
+        public static let readCount             = "readCount"
         public static let publisher             = "publisher"
         public static let publisherPlace        = "publisherPlace"
         public static let edition               = "edition"
@@ -107,6 +109,8 @@ extension Reference {
         RecordField.verifiedAt,
         RecordField.reviewedBy,
         RecordField.readingStatus,
+        RecordField.lastReadAt,
+        RecordField.readCount,
         RecordField.publisher,
         RecordField.publisherPlace,
         RecordField.edition,
@@ -161,6 +165,8 @@ extension Reference {
         record[RecordField.verifiedAt]            = verifiedAt
         record[RecordField.reviewedBy]            = reviewedBy
         record[RecordField.readingStatus]         = readingStatus
+        record[RecordField.lastReadAt]            = lastReadAt
+        record[RecordField.readCount]             = Int64(readCount)
         record[RecordField.publisher]             = publisher
         record[RecordField.publisherPlace]        = publisherPlace
         record[RecordField.edition]               = edition
@@ -232,6 +238,12 @@ extension Reference {
         // CKRecord value unchanged; if missing, fall back to the seeded
         // built-in "Unread".
         self.readingStatus = (record[RecordField.readingStatus] as? String) ?? ReadingStatus.unread
+
+        // v4: reader activity. Both fields are absent on records written by
+        // pre-v4 peers — fall back to "never read" semantics rather than
+        // throwing, per the same forward-compat rule as the enums above.
+        self.lastReadAt = record[RecordField.lastReadAt] as? Date
+        self.readCount = (record[RecordField.readCount] as? Int64).map(Int.init) ?? 0
 
         self.acceptedByRuleID      = record[RecordField.acceptedByRuleID] as? String
         self.recordKey             = record[RecordField.recordKey] as? String

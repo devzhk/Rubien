@@ -188,6 +188,17 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
     /// etc.; users can add/rename/delete options via the property manager.
     public var readingStatus: String
 
+    // MARK: - Reader activity (v4)
+    /// Most-recent reader-open timestamp, written by `AppDatabase.markReferenceRead`.
+    /// Always advances (monotonic); `nil` until the user first opens a reader
+    /// post-v4. Synced — recently-read state aggregates across devices.
+    public var lastReadAt: Date?
+    /// Approximate number of distinct reading sessions (10-minute debounce
+    /// inside `markReferenceRead` keeps quick re-opens from inflating it).
+    /// Synced. CloudKit conflicts are last-writer-wins, so a concurrent
+    /// peer push may drop an increment; acceptable for a usage metric.
+    public var readCount: Int
+
     // MARK: - Extended metadata (P0)
     public var publisher: String?
     public var publisherPlace: String?
@@ -248,6 +259,9 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
         verifiedAt: Date? = nil,
         reviewedBy: String? = nil,
         readingStatus: String = ReadingStatus.unread,
+        // Reader activity (v4)
+        lastReadAt: Date? = nil,
+        readCount: Int = 0,
         // Extended metadata (P0)
         publisher: String? = nil,
         publisherPlace: String? = nil,
@@ -299,6 +313,9 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
         self.verifiedAt = verifiedAt
         self.reviewedBy = reviewedBy
         self.readingStatus = readingStatus
+        // Reader activity (v4)
+        self.lastReadAt = lastReadAt
+        self.readCount = readCount
         // Extended metadata (P0)
         self.publisher = publisher
         self.publisherPlace = publisherPlace
@@ -394,7 +411,9 @@ extension Reference {
               lhs.evidenceBundleHash == rhs.evidenceBundleHash,
               lhs.verifiedAt == rhs.verifiedAt,
               lhs.reviewedBy == rhs.reviewedBy,
-              lhs.readingStatus == rhs.readingStatus else {
+              lhs.readingStatus == rhs.readingStatus,
+              lhs.lastReadAt == rhs.lastReadAt,
+              lhs.readCount == rhs.readCount else {
             return false
         }
 
@@ -456,6 +475,8 @@ extension Reference {
         hasher.combine(verifiedAt)
         hasher.combine(reviewedBy)
         hasher.combine(readingStatus)
+        hasher.combine(lastReadAt)
+        hasher.combine(readCount)
         hasher.combine(publisher)
         hasher.combine(publisherPlace)
         hasher.combine(edition)
@@ -507,6 +528,8 @@ extension Reference {
         Columns.verifiedAt,
         Columns.reviewedBy,
         Columns.readingStatus,
+        Columns.lastReadAt,
+        Columns.readCount,
         Columns.publisher,
         Columns.publisherPlace,
         Columns.edition,
@@ -742,6 +765,10 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
         reviewedBy = row["reviewedBy"]
         readingStatus = row["readingStatus"] ?? ReadingStatus.unread
 
+        // Reader activity (v4)
+        lastReadAt = row["lastReadAt"]
+        readCount = row["readCount"] ?? 0
+
         // Extended metadata (P0)
         publisher = row["publisher"]
         publisherPlace = row["publisherPlace"]
@@ -805,6 +832,10 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
         container["reviewedBy"] = reviewedBy
         container["readingStatus"] = readingStatus
 
+        // Reader activity (v4)
+        container["lastReadAt"] = lastReadAt
+        container["readCount"] = readCount
+
         // Extended metadata (P0)
         container["publisher"] = publisher
         container["publisherPlace"] = publisherPlace
@@ -838,6 +869,8 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
         case notes, webContent, siteName, favicon, referenceType, metadataSource
         case verificationStatus, acceptedByRuleID, recordKey, verificationSourceURL, evidenceBundleHash, verifiedAt, reviewedBy
         case readingStatus
+        // Reader activity (v4)
+        case lastReadAt, readCount
         // Extended metadata
         case publisher, publisherPlace, edition, editors, isbn, issn
         case accessedDate, issuedMonth, issuedDay

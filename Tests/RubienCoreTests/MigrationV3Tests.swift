@@ -260,9 +260,4 @@ final class MigrationV3Tests: XCTestCase {
         }
     }
 
-    /// Full migration through AppDatabase produces a v3 schema and the
-    /// `currentSchemaVersion` constant matches.
-    func testCurrentSchemaVersionIsV3() throws {
-        XCTAssertEqual(AppDatabase.currentSchemaVersion, "v3")
-    }
 }
