@@ -25,7 +25,7 @@ enum ImportClassification: Equatable {
 public final class AppDatabase: Sendable {
     /// Bumped whenever a new migration is registered. Surfaced in
     /// `rubien-cli sync status` JSON for diagnostics.
-    public static let currentSchemaVersion = "v4"
+    public static let currentSchemaVersion = "v5"
 
     public let dbWriter: any DatabaseWriter
 
@@ -535,7 +535,40 @@ public final class AppDatabase: Sendable {
             try db.create(index: "reference_lastReadAt", on: "reference", columns: ["lastReadAt"])
         }
 
+        // v5 (2026-05): seed the v4 reader-activity columns as built-in
+        // PropertyDefinitions so they surface in the Property Manager,
+        // column-visibility customization, and detail view. Seeded as hidden
+        // — the user opts in rather than getting two new columns by default.
+        //
+        // Known fragility (pre-existing, not unique to v5): if a user already
+        // has a custom "Last Read" PropertyDefinition at a different local
+        // id, a peer's pull of this v5 row would collide on UNIQUE(name).
+        // The same shape exists for every v1 seed today. Resolution waits on
+        // the planned A-pks migration that gives seeded rows deterministic
+        // UUIDs (see PropertyDefinitionRecord.swift).
+        migrator.registerMigration("v5") { db in
+            try Self.applyV5Body(db)
+        }
+
         return migrator
+    }
+
+    fileprivate static func applyV5Body(_ db: Database) throws {
+        let maxOrder = try Int.fetchOne(
+            db,
+            sql: "SELECT COALESCE(MAX(sortOrder), -1) FROM propertyDefinition"
+        ) ?? -1
+        let v5Defaults: [(name: String, type: String, fieldKey: String)] = [
+            ("Last Read", PropertyType.date.rawValue, "lastReadAt"),
+            ("Read Count", PropertyType.number.rawValue, "readCount"),
+        ]
+        for (offset, def) in v5Defaults.enumerated() {
+            try db.execute(sql: """
+                INSERT OR IGNORE INTO propertyDefinition
+                    (name, type, optionsJSON, sortOrder, isDefault, defaultFieldKey, isVisible)
+                    VALUES (?, ?, '[]', ?, 1, ?, 0)
+                """, arguments: [def.name, def.type, maxOrder + 1 + offset, def.fieldKey])
+        }
     }
 
     /// v3 migration body: prune `referenceType` from 21 → 6 by remapping
@@ -663,6 +696,14 @@ public final class AppDatabase: Sendable {
             try db.create(index: "reference_lastReadAt", on: "reference", columns: ["lastReadAt"])
         }
         try migrator.migrate(queue)
+    }
+
+    /// Test-only: applies the v5 PropertyDefinition-seeding body to a
+    /// v4-shaped queue. Used by `MigrationV5Tests`.
+    public static func runV5MigrationForTesting(on queue: DatabaseQueue) throws {
+        try queue.write { db in
+            try Self.applyV5Body(db)
+        }
     }
 
     /// Tables whose rows sync to CloudKit. Order is not significant here; pull-side

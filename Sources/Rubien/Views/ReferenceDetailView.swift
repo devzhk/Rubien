@@ -655,6 +655,26 @@ struct ReferenceDetailView: View {
                 },
                 onCancel: { cancelEdit() }
             )
+        case "lastReadAt":
+            // Auto-stamped by `AppDatabase.markReferenceRead` on reader open;
+            // not user-editable.
+            PropertyRowLayout(label: prop.name) {
+                if let date = editedRef.lastReadAt {
+                    Text(date, format: .dateTime.year().month().day().hour().minute())
+                        .font(.system(size: 13))
+                        .foregroundStyle(.primary)
+                } else {
+                    Text("Never opened")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.quaternary)
+                }
+            }
+        case "readCount":
+            PropertyRowLayout(label: prop.name) {
+                Text(editedRef.readCount, format: .number)
+                    .font(.system(size: 13))
+                    .foregroundStyle(editedRef.readCount == 0 ? .quaternary : .primary)
+            }
         default:
             EmptyView()
         }

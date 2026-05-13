@@ -109,12 +109,7 @@ final class MigrationV4Tests: XCTestCase {
         }
     }
 
-    /// Full-stack migration through AppDatabase pins the version constant.
-    func testCurrentSchemaVersionIsV4() throws {
-        XCTAssertEqual(AppDatabase.currentSchemaVersion, "v4")
-    }
-
-    func testFullStackMigrationProducesV4Schema() throws {
+    func testFullStackMigrationProducesV4Columns() throws {
         let db = try AppDatabase(DatabaseQueue())
         try db.dbWriter.read { db in
             let columns: [String] = try Row.fetchAll(

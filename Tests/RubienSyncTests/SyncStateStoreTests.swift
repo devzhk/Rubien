@@ -312,6 +312,12 @@ final class SyncStateStoreTests: XCTestCase {
 
     func testDirtyEntitiesReflectsTriggerActivity() throws {
         try db.dbWriter.write { db in
+            // Clear the syncState rows left over from migrations (v1's seeded
+            // PropertyDefinitions and v5's Last Read / Read Count seeds all
+            // fire the dirty trigger on insert). We're testing the trigger
+            // behavior for the two tag inserts that follow.
+            try db.execute(sql: "DELETE FROM syncState")
+
             try db.execute(sql: "INSERT INTO tag(id, name, color) VALUES(1, 'a', '#fff')")
             try db.execute(sql: "INSERT INTO tag(id, name, color) VALUES(2, 'b', '#fff')")
 

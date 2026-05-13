@@ -58,7 +58,7 @@ final class SyncedLibraryStartupTests: XCTestCase {
             return (props, views, state)
         }
 
-        XCTAssertEqual(propertyCount, 28, "all 28 seeded property definitions must be marked dirty")
+        XCTAssertEqual(propertyCount, 30, "all 30 seeded property definitions (v1: 28 + v5: 2) must be marked dirty")
         XCTAssertEqual(viewCount, 1, "seeded default view must be marked dirty")
         XCTAssertEqual(sessionValue, "complete", "baselineState must be gated after first run")
     }

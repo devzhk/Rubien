@@ -83,6 +83,8 @@ public struct ColumnConfig: Codable, Hashable, Sendable {
         .init(columnId: .issue,         isVisible: false, displayOrder: 12),
         .init(columnId: .pages,         isVisible: false, displayOrder: 13),
         .init(columnId: .pdfAttached,   isVisible: false, displayOrder: 14),
+        .init(columnId: .lastReadAt,    isVisible: false, displayOrder: 15),
+        .init(columnId: .readCount,     isVisible: false, displayOrder: 16),
     ]
 }
 

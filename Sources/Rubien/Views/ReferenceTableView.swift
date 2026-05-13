@@ -2,6 +2,14 @@ import SwiftUI
 import RubienCore
 
 struct ReferenceTableView: View {
+    /// `defaultFieldKey` values for properties that already have their own
+    /// hardcoded `TableColumn` in `ReferenceTableContent.body`. The
+    /// `customProperties` filter excludes these so they don't render twice
+    /// when the user toggles them visible in the Property Manager.
+    private static let hardcodedDefaultFieldKeys: Set<String> = [
+        "tags", "readingStatus", "lastReadAt", "readCount",
+    ]
+
     let references: [Reference]
     let tagMap: [Int64: [Tag]]
     let allTags: [Tag]
@@ -169,10 +177,9 @@ struct ReferenceTableView: View {
             customProperties: propertyDefs.filter { prop in
                 guard prop.isVisible else { return false }
                 if !prop.isDefault { return true }
-                // Include visible defaults that don't have hardcoded columns
-                let hardcodedKeys: Set<String> = ["tags", "readingStatus"]
+                // Skip defaults that have a dedicated TableColumn below.
                 guard let key = prop.defaultFieldKey else { return false }
-                return !hardcodedKeys.contains(key)
+                return !Self.hardcodedDefaultFieldKeys.contains(key)
             },
             statusDef: propertyDefs.first(forFieldKey: PropertyDefinition.readingStatusFieldKey),
             customPropertyValueMap: customPropertyValueMap,
@@ -657,6 +664,28 @@ private struct ReferenceTableContent: View {
             }
             .width(min: 70, ideal: 90)
             .customizationID(ColumnIdentifier.dateAdded.rawValue)
+
+            TableColumn(ColumnIdentifier.lastReadAt.header) { ref in
+                if let date = ref.lastReadAt {
+                    Text(date, style: .date)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("—")
+                        .font(.callout)
+                        .foregroundStyle(.quaternary)
+                }
+            }
+            .width(min: 70, ideal: 90)
+            .customizationID(ColumnIdentifier.lastReadAt.rawValue)
+
+            TableColumn(ColumnIdentifier.readCount.header, value: \.readCount) { ref in
+                Text(ref.readCount, format: .number)
+                    .font(.callout)
+                    .foregroundStyle(ref.readCount == 0 ? .quaternary : .secondary)
+            }
+            .width(min: 50, ideal: 70)
+            .customizationID(ColumnIdentifier.readCount.rawValue)
 
             TableColumnForEach(customProperties) { prop in
                 TableColumn(prop.name) { ref in
