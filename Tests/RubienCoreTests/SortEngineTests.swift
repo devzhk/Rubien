@@ -126,4 +126,32 @@ final class SortEngineTests: XCTestCase {
         let out = SortEngine.apply(rows, sorts: sorts, context: context)
         XCTAssertEqual(out.map(\.id), [2, 3, 1])
     }
+
+    // MARK: - Reader activity (v4)
+
+    func testSortByLastReadAtDescendingNullsLast() {
+        let now = Date()
+        let rows = [
+            ReferenceFixtures.makeRef(id: 1, lastReadAt: now.addingTimeInterval(-3600)),
+            ReferenceFixtures.makeRef(id: 2, lastReadAt: nil),
+            ReferenceFixtures.makeRef(id: 3, lastReadAt: now),
+            ReferenceFixtures.makeRef(id: 4, lastReadAt: nil),
+        ]
+        let sorts = [ViewSort(target: .builtin(.lastReadAt), ascending: false)]
+        let out = SortEngine.apply(rows, sorts: sorts, context: context)
+        // Recent reads first, never-read entries at the bottom.
+        XCTAssertEqual(Array(out.map(\.id).prefix(2)), [3, 1])
+        XCTAssertEqual(Set(out.suffix(2).map(\.id)), [2, 4])
+    }
+
+    func testSortByReadCountDescending() {
+        let rows = [
+            ReferenceFixtures.makeRef(id: 1, readCount: 0),
+            ReferenceFixtures.makeRef(id: 2, readCount: 7),
+            ReferenceFixtures.makeRef(id: 3, readCount: 3),
+        ]
+        let sorts = [ViewSort(target: .builtin(.readCount), ascending: false)]
+        let out = SortEngine.apply(rows, sorts: sorts, context: context)
+        XCTAssertEqual(out.map(\.id), [2, 3, 1])
+    }
 }

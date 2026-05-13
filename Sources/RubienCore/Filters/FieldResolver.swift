@@ -64,6 +64,8 @@ public enum FieldResolver {
         case .year:          return .number(row.year.map(Double.init))
         case .dateAdded:     return .date(row.dateAdded)
         case .dateModified:  return .date(row.dateModified)
+        case .lastReadAt:    return .date(row.lastReadAt)
+        case .readCount:     return .number(Double(row.readCount))
         case .referenceType: return .singleSelect(row.referenceType.rawValue)
         case .readingStatus: return .singleSelect(row.readingStatus)
         case .tags:

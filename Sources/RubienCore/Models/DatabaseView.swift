@@ -7,6 +7,7 @@ public enum ColumnIdentifier: String, Codable, CaseIterable, Sendable {
     case title, authors, year, journal, referenceType, tags
     case readingStatus, dateAdded, dateModified
     case doi, publisher, volume, issue, pages, pdfAttached
+    case lastReadAt, readCount
 
     public var header: String {
         switch self {
@@ -25,6 +26,8 @@ public enum ColumnIdentifier: String, Codable, CaseIterable, Sendable {
         case .issue: return "Issue"
         case .pages: return "Pages"
         case .pdfAttached: return "PDF"
+        case .lastReadAt: return "Last Read"
+        case .readCount: return "Read Count"
         }
     }
 
@@ -44,6 +47,8 @@ public enum ColumnIdentifier: String, Codable, CaseIterable, Sendable {
         case .issue: return "issue"
         case .pages: return "pages"
         case .pdfAttached: return "pdfPath"
+        case .lastReadAt: return "lastReadAt"
+        case .readCount: return "readCount"
         case .tags: return nil
         }
     }

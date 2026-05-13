@@ -213,4 +213,49 @@ final class FilterEngineTests: XCTestCase {
         let filter = ViewFilter(target: .custom(50), op: .containsAllOf, value: .selectKeys(["ml", "llm"]))
         XCTAssertTrue(FilterEngine.evaluate(filter, row: row, context: ctx))
     }
+
+    // MARK: - Reader activity (v4)
+
+    func testReadCountGreaterThanZeroFiltersNeverRead() {
+        let opened = ReferenceFixtures.makeRef(id: 1, readCount: 3)
+        let neverRead = ReferenceFixtures.makeRef(id: 2, readCount: 0)
+        let filter = ViewFilter(target: .builtin(.readCount), op: .greaterThan, value: .number(0))
+        XCTAssertTrue(FilterEngine.evaluate(filter, row: opened, context: context))
+        XCTAssertFalse(FilterEngine.evaluate(filter, row: neverRead, context: context))
+    }
+
+    func testLastReadAtIsWithinLastSevenDays() {
+        let now = Date()
+        let recent = Calendar.current.date(byAdding: .day, value: -3, to: now)!
+        let stale = Calendar.current.date(byAdding: .day, value: -30, to: now)!
+        let ctx = PipelineContext(now: now)
+        let filter = ViewFilter(
+            target: .builtin(.lastReadAt),
+            op: .isWithin,
+            value: .datePreset(.lastNDays(7))
+        )
+        XCTAssertTrue(FilterEngine.evaluate(
+            filter,
+            row: ReferenceFixtures.makeRef(id: 1, lastReadAt: recent),
+            context: ctx
+        ))
+        XCTAssertFalse(FilterEngine.evaluate(
+            filter,
+            row: ReferenceFixtures.makeRef(id: 2, lastReadAt: stale),
+            context: ctx
+        ))
+        XCTAssertFalse(FilterEngine.evaluate(
+            filter,
+            row: ReferenceFixtures.makeRef(id: 3, lastReadAt: nil),
+            context: ctx
+        ), "never-read references must not match isWithin")
+    }
+
+    func testLastReadAtIsEmptyMatchesNeverRead() {
+        let neverRead = ReferenceFixtures.makeRef(id: 1, lastReadAt: nil)
+        let opened = ReferenceFixtures.makeRef(id: 2, lastReadAt: Date())
+        let filter = ViewFilter(target: .builtin(.lastReadAt), op: .isEmpty, value: .none)
+        XCTAssertTrue(FilterEngine.evaluate(filter, row: neverRead, context: context))
+        XCTAssertFalse(FilterEngine.evaluate(filter, row: opened, context: context))
+    }
 }

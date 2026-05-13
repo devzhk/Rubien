@@ -14,9 +14,9 @@ extension ColumnIdentifier {
         switch self {
         case .title, .authors, .journal, .doi, .publisher, .volume, .issue, .pages:
             return .text
-        case .year:
+        case .year, .readCount:
             return .number
-        case .dateAdded, .dateModified:
+        case .dateAdded, .dateModified, .lastReadAt:
             return .date
         case .referenceType, .readingStatus:
             return .singleSelect
