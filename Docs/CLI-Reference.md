@@ -487,8 +487,9 @@ Identifies the column a filter/sort/group targets. Tagged union:
 ```
 
 Built-in `value` is one of: `title`, `authors`, `year`, `journal`,
-`referenceType`, `tags`, `readingStatus`, `dateAdded`, `dateModified`, `doi`,
-`publisher`, `volume`, `issue`, `pages`, `pdfAttached`.
+`referenceType`, `tags`, `readingStatus`, `dateAdded`, `dateModified`,
+`lastReadAt`, `readCount`, `doi`, `publisher`, `volume`, `issue`, `pages`,
+`pdfAttached`.
 
 Custom `value` is a `propertyDefinition.id` (from `rubien-cli properties`).
 

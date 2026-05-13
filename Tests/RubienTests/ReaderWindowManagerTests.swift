@@ -66,6 +66,24 @@ final class ReaderWindowManagerTests: XCTestCase {
         XCTAssertEqual(state.readCount, 0)
     }
 
+    func testReopeningAlreadyOpenPDFWindowDoesNotRestamp() throws {
+        let db = try makeDatabase()
+        let refId = try insertReference(in: db)
+        try attachPDFCacheRow(refId: refId, in: db)
+
+        let reference = try XCTUnwrap(try db.fetchReferences(ids: [refId]).first)
+        ReaderWindowManager.shared.openPDFReader(for: reference, db: db)
+        let firstState = try readState(refId: refId, in: db)
+
+        ReaderWindowManager.shared.openPDFReader(for: reference, db: db)
+        let secondState = try readState(refId: refId, in: db)
+
+        XCTAssertEqual(secondState.readCount, firstState.readCount,
+                       "refocusing an open PDF reader must not bump readCount")
+        XCTAssertEqual(secondState.lastReadAt, firstState.lastReadAt,
+                       "refocusing an open PDF reader must not re-advance lastReadAt")
+    }
+
     // MARK: - Web reader path
 
     func testOpenWebReaderStampsReadOnFreshOpen() throws {
@@ -91,6 +109,23 @@ final class ReaderWindowManagerTests: XCTestCase {
         let state = try readState(refId: refId, in: db)
         XCTAssertNil(state.lastReadAt, "non-webpage references → early return → no stamping")
         XCTAssertEqual(state.readCount, 0)
+    }
+
+    func testReopeningAlreadyOpenWebWindowDoesNotRestamp() throws {
+        let db = try makeDatabase()
+        let refId = try insertWebpageReference(in: db)
+
+        let reference = try XCTUnwrap(try db.fetchReferences(ids: [refId]).first)
+        ReaderWindowManager.shared.openWebReader(for: reference, db: db)
+        let firstState = try readState(refId: refId, in: db)
+
+        ReaderWindowManager.shared.openWebReader(for: reference, db: db)
+        let secondState = try readState(refId: refId, in: db)
+
+        XCTAssertEqual(secondState.readCount, firstState.readCount,
+                       "refocusing an open web reader must not bump readCount")
+        XCTAssertEqual(secondState.lastReadAt, firstState.lastReadAt,
+                       "refocusing an open web reader must not re-advance lastReadAt")
     }
 
     // MARK: - Helpers
