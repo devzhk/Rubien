@@ -1,6 +1,9 @@
 import AppKit
+import os.log
 import SwiftUI
 import RubienCore
+
+private let readerWindowLog = Logger(subsystem: "Rubien", category: "reader-window")
 
 // MARK: - ReaderWindowManager
 
@@ -49,6 +52,8 @@ final class ReaderWindowManager {
             return
         }
 
+        recordReaderOpen(referenceId: refId, db: db)
+
         let title = windowTitle(for: reference, suffix: "PDF")
         let window = makeWindow(
             title: title,
@@ -66,7 +71,7 @@ final class ReaderWindowManager {
     }
 
     /// Open (or re-activate) a Web reader window for the given reference.
-    func openWebReader(for reference: Reference) {
+    func openWebReader(for reference: Reference, db: AppDatabase) {
         guard let refId = reference.id, reference.canOpenWebReader else { return }
 
         // Already open → bring to front (select its tab if tabbed).
@@ -77,6 +82,8 @@ final class ReaderWindowManager {
             NSApp.activate(ignoringOtherApps: true)
             return
         }
+
+        recordReaderOpen(referenceId: refId, db: db)
 
         let title = windowTitle(for: reference, suffix: "Web")
         let window = makeWindow(
@@ -109,6 +116,24 @@ final class ReaderWindowManager {
     }
 
     // MARK: - Private helpers
+
+    /// Stamp a reader-open event on the reference. Pulled into its own
+    /// function so the two reader paths share identical "open side effects"
+    /// (timestamp bump + os.Logger trace on failure) and so tests can verify
+    /// the wiring without spinning up an NSWindow.
+    func recordReaderOpen(referenceId: Int64, db: AppDatabase) {
+        do {
+            try db.markReferenceRead(id: referenceId)
+        } catch {
+            // Fire-and-forget by design — a transient DB failure must not
+            // block the user from opening their PDF. Log so persistent
+            // failures still surface in Console.app under the "reader-window"
+            // category.
+            readerWindowLog.error(
+                "markReferenceRead failed for reference \(referenceId, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
 
     private func makeWindow(title: String, autosaveName: String, minSize: NSSize) -> NSWindow {
         let preferredSize = preferredWindowSize(minSize: minSize)

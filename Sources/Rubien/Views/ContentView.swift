@@ -835,7 +835,7 @@ struct ContentView: View {
                         ReaderWindowManager.shared.openPDFReader(for: r, db: viewModel.db)
                     },
                     onOpenWebReader: { r in
-                        ReaderWindowManager.shared.openWebReader(for: r)
+                        ReaderWindowManager.shared.openWebReader(for: r, db: viewModel.db)
                     },
                     onUpdateTags: { refId, tagIds in viewModel.setTags(forReference: refId, tagIds: tagIds) },
                     onCreateTag: { name in viewModel.createTag(name: name) },
@@ -1485,7 +1485,7 @@ struct ContentView: View {
         if reference.hasPDFInCache(in: viewModel.db) {
             ReaderWindowManager.shared.openPDFReader(for: reference, db: viewModel.db)
         } else if reference.canOpenWebReader {
-            ReaderWindowManager.shared.openWebReader(for: reference)
+            ReaderWindowManager.shared.openWebReader(for: reference, db: viewModel.db)
         }
     }
 }
