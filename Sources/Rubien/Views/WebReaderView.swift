@@ -55,7 +55,7 @@ final class WebReaderViewModel: ObservableObject {
     /// 非 nil 时由顶部原生 WKWebView 加载该 YouTube 观看页 URL（含可选 `t=` 跳转）。
     @Published private(set) var youTubeInlineWatchURL: URL?
 
-    let reference: Reference
+    var reference: Reference
     private let db: AppDatabase
     private var cancellables = Set<AnyCancellable>()
     /// 在线阅读整段流程（加载原文 + 注入脚本 + 抽取 + 组 HTML）防挂起超时。
@@ -119,15 +119,22 @@ final class WebReaderViewModel: ObservableObject {
         self.reference = reference
         self.db = db
         observeAnnotations()
-        let clipEmpty = reference.decodedWebContent == nil
-        let urlStr = reference.resolvedWebReaderURLString()?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let canLiveRead = reference.referenceType == .webpage && clipEmpty && !urlStr.isEmpty && URL(string: urlStr) != nil
+        // Re-fetch the webContent column from disk so a stale snapshot from a
+        // list view (captured before a prior persistLiveBodyToReference write
+        // committed) doesn't force us back into live mode despite the row on
+        // disk already carrying webContent.
+        if let refId = reference.id, let fresh = try? db.fetchWebContent(id: refId) {
+            self.reference.webContent = fresh
+        }
+        let clipEmpty = self.reference.decodedWebContent == nil
+        let urlStr = self.reference.resolvedWebReaderURLString()?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let canLiveRead = self.reference.referenceType == .webpage && clipEmpty && !urlStr.isEmpty && URL(string: urlStr) != nil
         if canLiveRead {
             displayMode = .liveReadable
             shouldLoadOriginalURLForReadable = true
             isLiveReadableBusy = true
             scheduleLiveReadableSafetyTimeout()
-            renderedHTML = Self.emptyDocument(title: reference.title)
+            renderedHTML = Self.emptyDocument(title: self.reference.title)
         } else {
             renderContent()
         }
@@ -142,19 +149,25 @@ final class WebReaderViewModel: ObservableObject {
     }
 
     func stageSelection(_ selection: WebSelectionSnapshot?, viewportSize: CGSize) {
-        dismissAnnotationToolbar()
+        let trimmed = selection?.text.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if trimmed.isEmpty {
+            if selectionToolbarLayout?.visible == true, pendingSelection != nil { return }
+            pendingSelection = nil
+            selectionToolbarLayout = nil
+            return
+        }
+
         guard let selection else {
             pendingSelection = nil
             selectionToolbarLayout = nil
             return
         }
 
-        let trimmed = selection.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            pendingSelection = nil
-            selectionToolbarLayout = nil
-            return
-        }
+        // Only dismiss the existing-annotation popover once we know we have a
+        // real new selection to stage. Calling it unconditionally above would
+        // also tear down the existing-annotation popover on transient empty-
+        // selection events that don't end up changing the staged selection.
+        dismissAnnotationToolbar()
 
         pendingSelection = WebSelectionSnapshot(
             text: trimmed,
@@ -275,7 +288,7 @@ final class WebReaderViewModel: ObservableObject {
             isLiveReadableBusy = true
             scheduleLiveReadableSafetyTimeout()
             let host = URL(string: u)?.host ?? ""
-            onlineReadableLog.notice("开始在线阅读 host=\(host, privacy: .public) youtube=\(self.reference.isLikelyYouTubeWatchURL, privacy: .public) — 使用内置 ClipperDefuddle.js，非扩展的 reader-script / Reader.apply")
+            onlineReadableLog.notice("Starting online reading host=\(host, privacy: .public) youtube=\(self.reference.isLikelyYouTubeWatchURL, privacy: .public) using bundled ClipperDefuddle.js")
         }
     }
 
@@ -306,7 +319,7 @@ final class WebReaderViewModel: ObservableObject {
         cancelLiveReadableSafetyTimeout()
         isLiveReadableBusy = false
         liveReadableUserMessage = message
-        onlineReadableLog.error("在线阅读失败: \(message, privacy: .public)")
+        onlineReadableLog.error("Online reading failed: \(message, privacy: .public)")
         displayMode = .clippedMarkdown
         renderContent()
     }
@@ -362,7 +375,42 @@ final class WebReaderViewModel: ObservableObject {
                 self.cancelLiveReadableSafetyTimeout()
                 if let vid = ref.youTubeVideoId {
                     self.scheduleYouTubeTranscriptMerge(videoId: vid)
+                } else {
+                    // Cache the live-extracted body so subsequent reader opens
+                    // render from storage instead of re-fetching + re-extracting
+                    // online every time. YouTube takes a separate path because
+                    // its body needs the transcript merge first (see
+                    // persistTranscriptIntoStoredReferenceIfNeeded).
+                    self.persistLiveBodyToReference(finalBody)
                 }
+            }
+        }
+    }
+
+    /// Save a freshly live-extracted article body back to `reference.webContent`
+    /// so the next reader open displays the clipped copy immediately rather than
+    /// kicking off another network fetch + Defuddle/Readability pass. Caller
+    /// should already have a non-YouTube reference (YouTube uses the transcript-
+    /// merge-aware `persistTranscriptIntoStoredReferenceIfNeeded` instead).
+    private func persistLiveBodyToReference(_ articleBodyHTML: String) {
+        guard let referenceID = reference.id,
+              let encoded = Reference.encodeWebContent(articleBodyHTML, format: .html) else {
+            onlineReadableLog.notice("Skipped persisting live-extracted body refId=\(self.reference.id ?? -1, privacy: .public) (encode failed or no id)")
+            return
+        }
+        // Update the in-memory reference immediately so the user toggling to the
+        // Clipped tab in the same session renders from the live-extracted body
+        // instead of an empty document. The detached DB write below carries the
+        // same encoded value to disk for subsequent sessions.
+        reference.webContent = encoded
+        let db = self.db
+        let length = articleBodyHTML.count
+        Task.detached(priority: .utility) {
+            do {
+                try db.updateReferenceWebContent(id: referenceID, webContent: encoded)
+                onlineReadableLog.notice("Persisted live-extracted body refId=\(referenceID, privacy: .public) length=\(length, privacy: .public)")
+            } catch {
+                onlineReadableLog.error("Failed to persist live-extracted body refId=\(referenceID, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
             }
         }
     }
@@ -371,7 +419,7 @@ final class WebReaderViewModel: ObservableObject {
     private func scheduleYouTubeTranscriptMerge(videoId: String) {
         cancelTranscriptLoad()
         if Self.htmlContainsRenderedTranscriptBlock(renderedHTML) {
-            onlineReadableLog.notice("YouTube 字幕已存在于页内 fallback，跳过网络抓取 vid=\(videoId)")
+            onlineReadableLog.notice("YouTube transcript already present from in-page fallback, skipping network fetch vid=\(videoId)")
             return
         }
         // 先插入"正在加载字幕"占位符
@@ -428,7 +476,7 @@ final class WebReaderViewModel: ObservableObject {
             return nil
         }
 
-        onlineReadableLog.notice("并行启动隐藏 WKWebView transcript DOM fallback vid=\(videoId, privacy: .public)")
+        onlineReadableLog.notice("Starting hidden WKWebView transcript DOM fallback in parallel vid=\(videoId, privacy: .public)")
         guard let transcript = await fetcher(urlString) else {
             return nil
         }
@@ -455,7 +503,7 @@ final class WebReaderViewModel: ObservableObject {
         case .success(let text):
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else {
-                onlineReadableLog.notice("YouTube 网络字幕为空 vid=\(videoId, privacy: .public)")
+                onlineReadableLog.notice("YouTube network transcript returned empty vid=\(videoId, privacy: .public)")
                 recordTranscriptFailure(
                     source: .network,
                     message: String(localized: "This video has no caption content.", bundle: .module),
@@ -463,11 +511,11 @@ final class WebReaderViewModel: ObservableObject {
                 )
                 return
             }
-            onlineReadableLog.notice("YouTube 网络字幕成功 vid=\(videoId, privacy: .public) length=\(trimmed.count, privacy: .public)")
+            onlineReadableLog.notice("YouTube network transcript succeeded vid=\(videoId, privacy: .public) length=\(trimmed.count, privacy: .public)")
             completeTranscriptLoad(with: trimmed, source: .network, videoId: videoId, sequence: sequence)
         case .failure(let error):
             let msg = (error as? YouTubeTranscriptFetcher.FetchError)?.errorDescription ?? error.localizedDescription
-            onlineReadableLog.error("YouTube 网络字幕失败 vid=\(videoId, privacy: .public) error=\(msg, privacy: .public)")
+            onlineReadableLog.error("YouTube network transcript failed vid=\(videoId, privacy: .public) error=\(msg, privacy: .public)")
             recordTranscriptFailure(source: .network, message: msg, sequence: sequence)
         }
     }
@@ -480,7 +528,7 @@ final class WebReaderViewModel: ObservableObject {
         }
 
         guard let transcript else {
-            onlineReadableLog.notice("YouTube transcript DOM fallback 未返回内容 vid=\(videoId, privacy: .public)")
+            onlineReadableLog.notice("YouTube transcript DOM fallback returned no content vid=\(videoId, privacy: .public)")
             recordTranscriptFailure(
                 source: .dom,
                 message: String(localized: "The page's transcript panel returned no content.", bundle: .module),
@@ -491,7 +539,7 @@ final class WebReaderViewModel: ObservableObject {
 
         let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            onlineReadableLog.notice("YouTube transcript DOM fallback 返回空字幕 vid=\(videoId, privacy: .public)")
+            onlineReadableLog.notice("YouTube transcript DOM fallback returned empty transcript vid=\(videoId, privacy: .public)")
             recordTranscriptFailure(
                 source: .dom,
                 message: String(localized: "The page's transcript panel returned no content.", bundle: .module),
@@ -500,7 +548,7 @@ final class WebReaderViewModel: ObservableObject {
             return
         }
 
-        onlineReadableLog.notice("YouTube transcript DOM fallback 成功 vid=\(videoId, privacy: .public) length=\(trimmed.count, privacy: .public)")
+        onlineReadableLog.notice("YouTube transcript DOM fallback succeeded vid=\(videoId, privacy: .public) length=\(trimmed.count, privacy: .public)")
         completeTranscriptLoad(with: trimmed, source: .dom, videoId: videoId, sequence: sequence)
     }
 
@@ -552,7 +600,7 @@ final class WebReaderViewModel: ObservableObject {
             currentArticleBodyHTML = mergedBodyHTML
             persistTranscriptIntoStoredReferenceIfNeeded(mergedBodyHTML)
         }
-        onlineReadableLog.notice("YouTube 字幕完成 source=\(String(describing: source), privacy: .public) vid=\(videoId, privacy: .public)")
+        onlineReadableLog.notice("YouTube transcript complete source=\(String(describing: source), privacy: .public) vid=\(videoId, privacy: .public)")
     }
 
     private func recordTranscriptFailure(
@@ -591,7 +639,7 @@ final class WebReaderViewModel: ObservableObject {
         transcriptLoadState = state
         cancelTranscriptLoadTasks()
         let message = Self.transcriptTimeoutMessage(failures: state.failures)
-        onlineReadableLog.error("YouTube 字幕加载超时 vid=\(videoId, privacy: .public) message=\(message, privacy: .public)")
+        onlineReadableLog.error("YouTube transcript load timed out vid=\(videoId, privacy: .public) message=\(message, privacy: .public)")
         replaceTranscriptPlaceholder(with: message)
     }
 
@@ -626,7 +674,7 @@ final class WebReaderViewModel: ObservableObject {
             do {
                 try db.updateReferenceWebContent(id: referenceID, webContent: encoded)
             } catch {
-                onlineReadableLog.error("缓存 YouTube 正文失败 refId=\(referenceID, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+                onlineReadableLog.error("Failed to cache YouTube body refId=\(referenceID, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
             }
         }
     }
@@ -869,6 +917,59 @@ final class WebReaderViewModel: ObservableObject {
             return nil
         }
         return r + "\n" + h
+    }
+
+    /// KaTeX (math typesetting) head injection. CSS + JS + auto-render are inlined
+    /// directly into the rendered HTML; woff2 fonts are base64-data-URI substituted
+    /// in the CSS so we don't need a custom WKURLSchemeHandler and the rendering
+    /// works offline. One-time-cached at first access.
+    nonisolated private static let bundledKaTeXHeadInjection: String = {
+        guard
+            let cssURL = Bundle.module.url(forResource: "katex.min", withExtension: "css"),
+            let jsURL  = Bundle.module.url(forResource: "katex.min", withExtension: "js"),
+            let arURL  = Bundle.module.url(forResource: "auto-render.min", withExtension: "js"),
+            let rawCSS = try? String(contentsOf: cssURL, encoding: .utf8),
+            let jsBody = try? String(contentsOf: jsURL,  encoding: .utf8),
+            let arBody = try? String(contentsOf: arURL,  encoding: .utf8)
+        else { return "" }
+        let inlined = inlineKaTeXFontsAsDataURIs(in: rawCSS)
+        return """
+          <style>\(inlined)</style>
+          <script>\(jsBody)</script>
+          <script>\(arBody)</script>
+        """
+    }()
+
+    /// Rewrites `url(KaTeX_*.woff2)` references in KaTeX CSS to inline `data:` URIs
+    /// by looking each woff2 up at the bundle root (flat layout — see CLAUDE.md
+    /// resource attachment notes). Unknown filenames are left untouched so KaTeX
+    /// degrades to default browser fonts for that variant.
+    nonisolated private static func inlineKaTeXFontsAsDataURIs(in css: String) -> String {
+        let pattern = #"url\(\s*["']?([^"')]+\.woff2)["']?\s*\)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else {
+            return css
+        }
+        let ns = css as NSString
+        var output = ""
+        var cursor = 0
+        let matches = regex.matches(in: css, options: [], range: NSRange(location: 0, length: ns.length))
+        for m in matches {
+            guard m.numberOfRanges >= 2 else { continue }
+            let full = m.range(at: 0)
+            let fileRel = ns.substring(with: m.range(at: 1))
+            output += ns.substring(with: NSRange(location: cursor, length: full.location - cursor))
+            let filename = (fileRel as NSString).lastPathComponent
+            let stem = (filename as NSString).deletingPathExtension
+            if let fontURL = Bundle.module.url(forResource: stem, withExtension: "woff2"),
+               let data = try? Data(contentsOf: fontURL) {
+                output += "url(data:font/woff2;base64,\(data.base64EncodedString()))"
+            } else {
+                output += ns.substring(with: full)
+            }
+            cursor = full.location + full.length
+        }
+        output += ns.substring(from: cursor)
+        return output
     }
 
     /// - Parameters:
@@ -1154,6 +1255,16 @@ final class WebReaderViewModel: ObservableObject {
               text-decoration: underline;
             }
 
+            .rubien-cover-image {
+              margin: 0 0 1.6em 0;
+            }
+            .rubien-cover-image img {
+              display: block;
+              width: 100%;
+              height: auto;
+              border-radius: 8px;
+            }
+
             .rubien-annotation {
               border-radius: 5px;
               cursor: pointer;
@@ -1294,6 +1405,7 @@ final class WebReaderViewModel: ObservableObject {
             }
           </style>
         \(clipperHeadInjection)
+        \(Self.bundledKaTeXHeadInjection)
         </head>
         <body>
         \(bodyLeadScript)<main id="reader-root">
@@ -1436,15 +1548,72 @@ final class WebReaderViewModel: ObservableObject {
               }
 
               function wrapRange(range, annotation) {
-                const span = document.createElement('span');
-                applyAnnotationStyle(span, annotation);
+                // Single-text-node range: surroundContents works and is cheapest.
+                if (
+                  range.startContainer === range.endContainer &&
+                  range.startContainer.nodeType === Node.TEXT_NODE
+                ) {
+                  const span = document.createElement('span');
+                  applyAnnotationStyle(span, annotation);
+                  try {
+                    range.surroundContents(span);
+                    return true;
+                  } catch (_) {
+                    // fall through to per-slice path below
+                  }
+                }
 
+                // Multi-element range (paragraphs, list items, blockquotes, etc.).
+                // DO NOT use range.extractContents()/insertNode here — pulling
+                // <li>/<p>/etc. out of their parent <ul>/<ol> and rewrapping in
+                // a <span> orphans block elements (renders stray bullets / loses
+                // layout). Instead, walk the text nodes the range covers and
+                // wrap EACH text-node slice in its own annotation span. The
+                // element tree stays untouched; only the text gets new spans
+                // around it.
+                const slices = [];
+                const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT, {
+                  acceptNode(node) {
+                    if (!node.nodeValue || !node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
+                    if (node.parentElement && node.parentElement.closest('[data-annotation-id]')) return NodeFilter.FILTER_REJECT;
+                    return NodeFilter.FILTER_ACCEPT;
+                  }
+                });
+                while (walker.nextNode()) {
+                  const node = walker.currentNode;
+                  if (!range.intersectsNode(node)) continue;
+                  const value = node.nodeValue;
+                  let s = 0, e = value.length;
+                  if (node === range.startContainer) s = range.startOffset;
+                  if (node === range.endContainer) e = range.endOffset;
+                  if (s >= e) continue;
+                  slices.push({ node, start: s, end: e });
+                }
+                if (slices.length === 0) return false;
                 try {
-                  range.surroundContents(span);
-                } catch (_) {
-                  const fragment = range.extractContents();
-                  span.appendChild(fragment);
-                  range.insertNode(span);
+                  for (const slice of slices) {
+                    let target = slice.node;
+                    if (slice.end < target.nodeValue.length) {
+                      target.splitText(slice.end);
+                    }
+                    if (slice.start > 0) {
+                      target = target.splitText(slice.start);
+                    }
+                    const span = document.createElement('span');
+                    applyAnnotationStyle(span, annotation);
+                    target.parentNode.insertBefore(span, target);
+                    span.appendChild(target);
+                  }
+                  return true;
+                } catch (err) {
+                  send('RubienClipperDebug', {
+                    phase: 'wrap_range_failed',
+                    detail: JSON.stringify({
+                      annId: annotation.id,
+                      error: String(err && err.message || err)
+                    })
+                  });
+                  return false;
                 }
               }
 
@@ -1456,17 +1625,127 @@ final class WebReaderViewModel: ObservableObject {
                 });
               }
 
+              let mathRendered = false;
+              function renderMath() {
+                if (mathRendered) return;
+                if (typeof renderMathInElement !== 'function') return;
+                try {
+                  // Delimiter escaping: this JS lives inside a Swift triple-quoted
+                  // string. Swift collapses two backslashes to one before the JS
+                  // engine sees the source, and JS then collapses two backslashes
+                  // to one again. Hence the four backslashes here, which produce
+                  // a single backslash in the runtime string KaTeX matches against.
+                  renderMathInElement(article, {
+                    delimiters: [
+                      { left: '$$',     right: '$$',     display: true  },
+                      { left: '\\\\[',  right: '\\\\]',  display: true  },
+                      { left: '$',      right: '$',      display: false },
+                      { left: '\\\\(',  right: '\\\\)',  display: false }
+                    ],
+                    throwOnError: false,
+                    ignoredTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
+                  });
+                  mathRendered = true;
+                } catch (_) {}
+              }
+
               function setAnnotations(annotations) {
-                unwrapAnnotations();
-                (annotations || []).forEach((annotation) => {
-                  const range = locateRange(annotation);
-                  if (range) {
-                    wrapRange(range, annotation);
+                // Safety net: snapshot the article body before mutating so we
+                // can roll back if anything throws unexpectedly. The article DOM
+                // is the user's primary content — losing it is catastrophic; a
+                // missed highlight is recoverable.
+                const snapshot = article.innerHTML;
+                try {
+                  unwrapAnnotations();
+                  (annotations || []).forEach((annotation) => {
+                    const range = locateRange(annotation);
+                    if (range) {
+                      wrapRange(range, annotation);
+                    } else if (annotation.anchorText) {
+                      diagnoseLocateFailure(annotation);
+                    }
+                  });
+                  if (activeId !== null) {
+                    setActive(activeId);
+                  }
+                  // Render math AFTER annotation wrapping. The first effective
+                  // call (post-didFinish) sees raw LaTeX text so legacy anchors
+                  // whose anchorText contains LaTeX source still locate. KaTeX's
+                  // auto-render is idempotent (skips already-rendered .katex
+                  // nodes), so re-calling on subsequent annotation updates is safe.
+                  renderMath();
+                } catch (err) {
+                  article.innerHTML = snapshot;
+                  send('RubienClipperDebug', {
+                    phase: 'set_annotations_failed',
+                    detail: JSON.stringify({ error: String(err && err.message || err) })
+                  });
+                }
+              }
+
+              function diagnoseLocateFailure(annotation) {
+                try {
+                  const indexed = buildIndex(article);
+                  const anchor = annotation.anchorText;
+                  const sample = function(s, n) {
+                    return s.length > n ? s.slice(0, n) + '…+' + (s.length - n) : s;
+                  };
+                  const collapsedAnchor = anchor.replace(/\\s+/g, ' ');
+                  const collapsedText = indexed.text.replace(/\\s+/g, ' ');
+                  const collapsedIdx = collapsedText.indexOf(collapsedAnchor);
+                  let nfcIdx = -1;
+                  try {
+                    nfcIdx = indexed.text.normalize('NFC').indexOf(anchor.normalize('NFC'));
+                  } catch (_) {}
+                  const head32 = anchor.slice(0, 32).replace(/\\s+/g, ' ');
+                  const headIdx = collapsedText.indexOf(head32);
+                  const vicinity = headIdx >= 0
+                    ? collapsedText.slice(Math.max(0, headIdx - 20), headIdx + 160)
+                    : null;
+                  const detail = JSON.stringify({
+                    annId: annotation.id,
+                    anchorLen: anchor.length,
+                    anchorHead: sample(anchor, 80),
+                    anchorTail: anchor.length > 80 ? anchor.slice(-40) : null,
+                    fullTextLen: indexed.text.length,
+                    collapsedMatchIdx: collapsedIdx,
+                    nfcMatchIdx: nfcIdx,
+                    headVicinity: vicinity ? sample(vicinity, 200) : null,
+                    anchorHasNBSP: / /.test(anchor),
+                    textHasNBSP: / /.test(indexed.text),
+                    katexNodeCount: document.querySelectorAll('.katex').length
+                  });
+                  send('RubienClipperDebug', { phase: 'annotation_locate_failed', detail: detail });
+                } catch (_) {}
+              }
+
+              // Walk Text descendants of the article in document order, slicing
+              // on the range's start/end offsets, and concatenate nodeValues
+              // with NO separator. This intentionally mirrors buildIndex so the
+              // saved anchorText is byte-identical to what locateRange sees.
+              // Avoids WebKit's range.toString / selection.toString quirk where
+              // block boundaries get a line break that nodeValue concatenation
+              // never produces, which silently breaks multi-paragraph anchors.
+              function collectRangeText(range) {
+                if (!range || range.collapsed) return '';
+                const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT, {
+                  acceptNode(node) {
+                    if (!node.nodeValue || !node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
+                    if (node.parentElement && node.parentElement.closest('[data-annotation-id]')) return NodeFilter.FILTER_REJECT;
+                    return NodeFilter.FILTER_ACCEPT;
                   }
                 });
-                if (activeId !== null) {
-                  setActive(activeId);
+                let text = '';
+                while (walker.nextNode()) {
+                  const node = walker.currentNode;
+                  if (!range.intersectsNode(node)) continue;
+                  const value = node.nodeValue;
+                  let s = 0, e = value.length;
+                  if (node === range.startContainer) s = range.startOffset;
+                  if (node === range.endContainer) e = range.endOffset;
+                  text += value.slice(s, e);
                 }
+                return text;
               }
 
               function currentSelectionPayload() {
@@ -1475,7 +1754,7 @@ final class WebReaderViewModel: ObservableObject {
                 const range = selection.getRangeAt(0);
                 if (!article.contains(range.commonAncestorContainer)) return null;
 
-                const text = selection.toString().trim();
+                const text = collectRangeText(range).trim();
                 if (!text) return null;
 
                 const prefixRange = range.cloneRange();
@@ -1530,7 +1809,18 @@ final class WebReaderViewModel: ObservableObject {
                 const target = event.target;
                 if (!(target instanceof Element)) return;
                 const marker = target.closest('[data-annotation-id]');
-                if (!marker) return;
+                if (!marker) {
+                  // The click event fires at the end of a drag-selection
+                  // gesture too, with the freshly staged selection still
+                  // active. Suppressing articleClickEmpty in that case avoids
+                  // racing the selectionChanged that's about to open the
+                  // popover. A genuine click-elsewhere collapses the prior
+                  // selection on mousedown, so by `click` time it IS collapsed.
+                  const sel = window.getSelection();
+                  if (sel && sel.rangeCount > 0 && !sel.isCollapsed) return;
+                  send('articleClickEmpty', {});
+                  return;
+                }
                 const id = Number(marker.dataset.annotationId);
                 setActive(id);
                 const rect = marker.getBoundingClientRect();
@@ -1799,6 +2089,12 @@ struct WebReaderView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @State private var showAnnotationSidebar = true
+    /// Note-draft text for the selection popover. Lifted from the deleted WebSelectionActionBar
+    /// so the shared AnnotationSelectionPopover can take a Binding into the same state across
+    /// rebuilds. The `.onChange(of: viewModel.pendingSelection?.text ?? "")` modifier below
+    /// resets it on any external dismissal path (JS-driven selection clear, annotation
+    /// activation, highlight/underline buttons) without going through onDismiss.
+    @State private var noteMarkdownForSelection: String = ""
     private let onClose: (() -> Void)?
 
     init(reference: Reference, onClose: (() -> Void)? = nil) {
@@ -1867,6 +2163,13 @@ struct WebReaderView: View {
             .spring(response: 0.3, dampingFraction: 0.82),
             value: viewModel.hasSelection && viewModel.selectionToolbarLayout?.visible == true
         )
+        // Reset the lifted note draft on every selection-text transition (cleared,
+        // emptied, or replaced with different text). Catches JS-driven dismissals,
+        // annotation-activation transitions, and highlight/underline button clears
+        // — paths that don't run our onDismiss closure.
+        .onChange(of: viewModel.pendingSelection?.text ?? "") { _, _ in
+            noteMarkdownForSelection = ""
+        }
         .toolbar {
             ToolbarItemGroup(placement: .automatic) {
                 if viewModel.allowsDisplayModeSwitching {
@@ -2002,26 +2305,68 @@ struct WebReaderView: View {
         let shouldShow = viewModel.hasSelection
             && viewModel.selectionToolbarLayout?.visible == true
         if shouldShow, let layout = viewModel.selectionToolbarLayout {
-            WebSelectionActionBar(viewModel: viewModel)
-                .fixedSize()
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .offset(x: max(8, layout.center.x - 170), y: layout.center.y - 17)
-                .allowsHitTesting(true)
-                .transition(.scale(scale: 0.92, anchor: .top).combined(with: .opacity))
-                .animation(.spring(response: 0.25, dampingFraction: 0.82), value: layout.center)
+            AnnotationSelectionPopover(
+                currentColorHex: $viewModel.currentColorHex,
+                noteMarkdown: $noteMarkdownForSelection,
+                onHighlight: { viewModel.applySelectionAction(.highlight) },
+                onUnderline: { viewModel.applySelectionAction(.underline) },
+                onPickColor: { _ in viewModel.applySelectionAction(.highlight) },
+                onCopy: {
+                    guard let text = viewModel.pendingSelection?.text, !text.isEmpty else { return }
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                },
+                onSaveNote: { md in
+                    if let sel = viewModel.pendingSelection {
+                        viewModel.addAnnotation(type: .note, selection: sel, noteText: md)
+                    }
+                    viewModel.clearSelection()
+                    noteMarkdownForSelection = ""
+                },
+                onDismiss: {
+                    viewModel.clearSelection()
+                    noteMarkdownForSelection = ""
+                }
+            )
+            .fixedSize()
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .offset(x: max(8, layout.center.x - 170), y: layout.center.y - 17)
+            .allowsHitTesting(true)
+            .transition(.scale(scale: 0.92, anchor: .top).combined(with: .opacity))
+            .animation(.spring(response: 0.25, dampingFraction: 0.82), value: layout.center)
         }
     }
 
     @ViewBuilder
     private var webAnnotationToolbarOverlay: some View {
-        if viewModel.clickedAnnotationRecord != nil,
+        if let annotation = viewModel.clickedAnnotationRecord,
            let layout = viewModel.annotationToolbarLayout, layout.visible {
-            WebAnnotationActionBar(viewModel: viewModel)
-                .fixedSize()
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .offset(x: max(8, layout.center.x - 170), y: layout.center.y - 17)
-                .allowsHitTesting(true)
-                .transition(.opacity)
+            ExistingAnnotationPopover(
+                annotationId: AnyHashable(annotation.id ?? -1),
+                currentColor: annotation.color,
+                initialNoteText: annotation.noteText,
+                onPickColor: { hex in
+                    viewModel.updateAnnotationColor(annotation, color: hex)
+                    if let updated = viewModel.annotations.first(where: { $0.id == annotation.id }) {
+                        viewModel.clickedAnnotationRecord = updated
+                    }
+                },
+                onDelete: {
+                    viewModel.deleteAnnotation(annotation)
+                    viewModel.dismissAnnotationToolbar()
+                },
+                onNoteAutosave: { trimmed in
+                    if let ann = viewModel.clickedAnnotationRecord {
+                        viewModel.updateAnnotationNote(ann, noteText: trimmed)
+                    }
+                },
+                onDismiss: { viewModel.dismissAnnotationToolbar() }
+            )
+            .fixedSize()
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .offset(x: max(8, layout.center.x - 170), y: layout.center.y - 17)
+            .allowsHitTesting(true)
+            .transition(.opacity)
         }
     }
 
@@ -2177,332 +2522,9 @@ private struct YouTubeWatchPlayPlaceholder: View {
     }
 }
 
-private struct WebSelectionActionBar: View {
-    @ObservedObject var viewModel: WebReaderViewModel
-    @State private var noteMarkdown = ""
-    @State private var editorContentHeight: CGFloat = 36
-    @Environment(\.colorScheme) private var colorScheme
-
-    private var bgColor: Color {
-        colorScheme == .dark
-            ? Color(nsColor: NSColor(white: 0.22, alpha: 1))
-            : Color(nsColor: NSColor(white: 0.13, alpha: 1))
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 2) {
-                toolbarButton(icon: "highlighter", label: String(localized: "Highlight", bundle: .module)) {
-                    viewModel.applySelectionAction(.highlight)
-                }
-
-                toolbarButton(icon: "underline", label: String(localized: "Underline", bundle: .module)) {
-                    viewModel.applySelectionAction(.underline)
-                }
-
-                toolbarButton(icon: "doc.on.doc", label: String(localized: "Copy", bundle: .module)) {
-                    if let text = viewModel.pendingSelection?.text, !text.isEmpty {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(text, forType: .string)
-                    }
-                }
-
-                separator
-
-                ForEach(AnnotationColor.palette) { color in
-                    let isSelected = viewModel.currentColorHex == color.id
-                    Button {
-                        viewModel.currentColorHex = color.id
-                        viewModel.applySelectionAction(.highlight)
-                    } label: {
-                        Circle()
-                            .fill(Color(nsColor: color.nsColor.withAlphaComponent(1.0)))
-                            .frame(width: 16, height: 16)
-                            .overlay(
-                                Circle()
-                                    .strokeBorder(
-                                        isSelected ? Color.white : Color.white.opacity(0.2),
-                                        lineWidth: isSelected ? 2 : 0.5
-                                    )
-                            )
-                            .scaleEffect(isSelected ? 1.12 : 1.0)
-                            .frame(width: 22, height: 28)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help(color.name)
-                    .animation(.easeOut(duration: 0.12), value: isSelected)
-                }
-
-                separator
-
-                toolbarButton(icon: "trash", label: String(localized: "Clear selection", bundle: .module)) {
-                    viewModel.clearSelection()
-                }
-            }
-            .padding(.horizontal, 5)
-            .padding(.vertical, 3)
-
-            Rectangle()
-                .fill(Color.white.opacity(0.1))
-                .frame(height: 0.5)
-                .padding(.horizontal, 8)
-
-            // Note section: always-visible inline editor
-            VStack(spacing: 0) {
-                RichNoteEditorView(
-                    markdown: $noteMarkdown,
-                    placeholder: String(localized: "Add a note…", bundle: .module),
-                    autoFocus: false,
-                    onContentHeightChanged: { height in
-                        editorContentHeight = height
-                    }
-                )
-                .frame(height: min(max(editorContentHeight, 36), 180))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .padding(.horizontal, 8)
-                .padding(.top, 6)
-
-                HStack(spacing: 8) {
-                    Spacer()
-                    Button(String(localized: "common.cancel", bundle: .module)) {
-                        noteMarkdown = ""
-                        viewModel.clearSelection()
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.white.opacity(0.6))
-                    .font(.system(size: 11))
-
-                    Button(String(localized: "common.save", bundle: .module)) {
-                        let md = noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !md.isEmpty, let selection = viewModel.pendingSelection else { return }
-                        viewModel.addAnnotation(type: .note, selection: selection, noteText: md)
-                        noteMarkdown = ""
-                        viewModel.clearSelection()
-                    }
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 4)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill(noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                  ? Color.accentColor.opacity(0.35)
-                                  : Color.accentColor)
-                    )
-                    .buttonStyle(.plain)
-                    .disabled(noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-            }
-        }
-        .frame(width: 340)
-        .background(bgColor, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .strokeBorder(
-                    colorScheme == .dark
-                        ? Color.white.opacity(0.12)
-                        : Color.black.opacity(0.08),
-                    lineWidth: 0.5
-                )
-        )
-        .shadow(
-            color: .black.opacity(colorScheme == .dark ? 0.28 : 0.12),
-            radius: colorScheme == .dark ? 16 : 10,
-            y: colorScheme == .dark ? 6 : 3
-        )
-        .shadow(
-            color: .black.opacity(colorScheme == .dark ? 0.12 : 0.06),
-            radius: 3,
-            y: 1
-        )
-    }
-
-    private var separator: some View {
-        Rectangle()
-            .fill(colorScheme == .dark ? Color.white.opacity(0.15) : Color.black.opacity(0.12))
-            .frame(width: 1, height: 16)
-            .padding(.horizontal, 2)
-    }
-
-    private func toolbarButton(icon: String, label: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.88))
-                .frame(width: 30, height: 28)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(WebNotionToolbarButtonStyle())
-        .help(label)
-        .accessibilityLabel(label)
-    }
-}
-
-private struct WebNotionToolbarButtonStyle: ButtonStyle {
-    @State private var isHovered = false
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(configuration.isPressed
-                          ? Color.white.opacity(0.18)
-                          : (isHovered ? Color.white.opacity(0.10) : Color.clear))
-            )
-            .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
-            .animation(.easeOut(duration: 0.12), value: isHovered)
-            .onHover { isHovered = $0 }
-    }
-}
-
-// MARK: - Web Annotation Action Bar (for clicked existing highlights)
-
-private struct WebAnnotationActionBar: View {
-    @ObservedObject var viewModel: WebReaderViewModel
-    @State private var isEditingNote = false
-    @State private var editingMarkdown = ""
-    @State private var autoSaveTask: Task<Void, Never>?
-    @State private var editorContentHeight: CGFloat = 36
-    @Environment(\.colorScheme) private var colorScheme
-
-    private var bgColor: Color {
-        colorScheme == .dark
-            ? Color(nsColor: NSColor(white: 0.22, alpha: 1))
-            : Color(nsColor: NSColor(white: 0.13, alpha: 1))
-    }
-
-    var body: some View {
-        if let annotation = viewModel.clickedAnnotationRecord {
-            VStack(spacing: 0) {
-                HStack(spacing: 2) {
-                    ForEach(AnnotationColor.palette) { color in
-                        let isSelected = annotation.color == color.id
-                        Button {
-                            viewModel.updateAnnotationColor(annotation, color: color.id)
-                            if let updated = viewModel.annotations.first(where: { $0.id == annotation.id }) {
-                                viewModel.clickedAnnotationRecord = updated
-                            }
-                        } label: {
-                            Circle()
-                                .fill(Color(nsColor: color.nsColor.withAlphaComponent(1.0)))
-                                .frame(width: 16, height: 16)
-                                .overlay(
-                                    Circle()
-                                        .strokeBorder(
-                                            isSelected ? Color.white : Color.white.opacity(0.2),
-                                            lineWidth: isSelected ? 2 : 0.5
-                                        )
-                                )
-                                .scaleEffect(isSelected ? 1.12 : 1.0)
-                                .frame(width: 22, height: 28)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .help(color.name)
-                        .animation(.easeOut(duration: 0.12), value: isSelected)
-                    }
-
-                    separator
-
-                    Button {
-                        viewModel.deleteAnnotation(annotation)
-                        viewModel.dismissAnnotationToolbar()
-                    } label: {
-                        Image(systemName: "trash")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.88))
-                            .frame(width: 30, height: 28)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(WebNotionToolbarButtonStyle())
-                    .help(String(localized: "Delete annotation", bundle: .module))
-                }
-                .padding(.horizontal, 5)
-                .padding(.vertical, 3)
-
-                Rectangle()
-                    .fill(Color.white.opacity(0.1))
-                    .frame(height: 0.5)
-                    .padding(.horizontal, 8)
-
-                // Note section: editor / placeholder
-                if isEditingNote {
-                    // WYSIWYG inline editor — auto-saves
-                    RichNoteEditorView(
-                        markdown: $editingMarkdown,
-                        placeholder: String(localized: "Add a note…", bundle: .module),
-                        autoFocus: true,
-                        onContentHeightChanged: { height in
-                            editorContentHeight = height
-                        }
-                    )
-                    .frame(height: min(max(editorContentHeight, 36), 160))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 6)
-                } else {
-                    // No note — placeholder to add
-                    Button {
-                        editingMarkdown = ""
-                        isEditingNote = true
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "note.text")
-                                .font(.system(size: 10))
-                            Text("Add a note…", bundle: .module)
-                                .font(.system(size: 11))
-                        }
-                        .foregroundStyle(.white.opacity(0.5))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .frame(width: 340)
-            .background(bgColor, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .strokeBorder(Color.white.opacity(colorScheme == .dark ? 0.12 : 0.06), lineWidth: 0.5)
-            )
-            .shadow(color: .black.opacity(0.28), radius: 16, y: 6)
-            .shadow(color: .black.opacity(0.12), radius: 3, y: 1)
-            .onAppear {
-                let noteText = annotation.noteText ?? ""
-                editingMarkdown = noteText
-                isEditingNote = !noteText.isEmpty
-            }
-            .onChange(of: annotation.id) { _, _ in
-                let noteText = annotation.noteText ?? ""
-                editingMarkdown = noteText
-                isEditingNote = !noteText.isEmpty
-            }
-            .onChange(of: editingMarkdown) { _, newValue in
-                autoSaveTask?.cancel()
-                autoSaveTask = Task {
-                    try? await Task.sleep(for: .milliseconds(500))
-                    guard !Task.isCancelled else { return }
-                    if let ann = viewModel.clickedAnnotationRecord {
-                        let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                        viewModel.updateAnnotationNote(ann, noteText: trimmed)
-                    }
-                }
-            }
-        }
-    }
-
-    private var separator: some View {
-        Rectangle()
-            .fill(Color.white.opacity(0.15))
-            .frame(width: 1, height: 16)
-            .padding(.horizontal, 2)
-    }
-}
+// Popover chrome lives in `AnnotationPopovers.swift` (shared with PDFReaderView).
+// Adapters are constructed inline at the overlay call sites
+// (`webSelectionToolbarOverlay`, `webAnnotationToolbarOverlay`).
 
 private struct WebReaderContentView: NSViewRepresentable {
     @ObservedObject var viewModel: WebReaderViewModel
@@ -2516,6 +2538,7 @@ private struct WebReaderContentView: NSViewRepresentable {
         controller.add(context.coordinator, name: "selectionChanged")
         controller.add(context.coordinator, name: "selectionCleared")
         controller.add(context.coordinator, name: "annotationActivated")
+        controller.add(context.coordinator, name: "articleClickEmpty")
         controller.add(context.coordinator, name: "summarySectionClicked")
         controller.add(context.coordinator, name: "youtubeSeek")
         controller.add(context.coordinator, name: "RubienClipperDebug")
@@ -2567,6 +2590,7 @@ private struct WebReaderContentView: NSViewRepresentable {
         if context.coordinator.lastLoadedHTML != viewModel.renderedHTML {
             context.coordinator.awaitingReadableExtraction = false
             context.coordinator.lastLoadedHTML = viewModel.renderedHTML
+            context.coordinator.invalidateAnnotationsPushCache()
             nsView.loadHTMLString(viewModel.renderedHTML, baseURL: URL(string: referenceBaseURL))
         } else {
             context.coordinator.pushAppearance()
@@ -2687,11 +2711,11 @@ private struct WebReaderContentView: NSViewRepresentable {
                 awaitingReadableExtraction = false
                 let vm = parent.viewModel
                 let pageURL = webView.url?.absoluteString ?? "(nil)"
-                onlineReadableLog.notice("WK didFinish url=\(pageURL, privacy: .public) — 即将注入 Defuddle 抽取（非 reader.ts Reader.apply）")
+                onlineReadableLog.notice("WK didFinish url=\(pageURL, privacy: .public) — about to inject Defuddle extraction")
                 let urlForYouTubeCheck = webView.url?.absoluteString ?? vm.reference.resolvedWebReaderURLString() ?? ""
                 if Reference.isLikelyYouTubeWatchURL(urlString: urlForYouTubeCheck) {
                     // YouTube 为 SPA：`didFinish` 时常早于标题/说明注入 DOM，立刻抽取易失败。
-                    onlineReadableLog.notice("YouTube：延迟 2.5s 再抽取（reader.ts 里的 embed/Referer 逻辑依赖扩展，此处不会执行）")
+                    onlineReadableLog.notice("YouTube: delaying 2.5s before extraction")
                     Task { @MainActor [weak self] in
                         try? await Task.sleep(nanoseconds: 2_500_000_000)
                         guard let self else { return }
@@ -2754,7 +2778,36 @@ private struct WebReaderContentView: NSViewRepresentable {
                 }
             case "selectionCleared":
                 Task { @MainActor in
-                    parent.viewModel.clearSelection(clearViewSelection: false)
+                    let vm = parent.viewModel
+                    // Stickiness: while a staged selection's popover is visible, ignore
+                    // transient "selection went away" events from the article webview
+                    // (focus shift into the embedded note-editor WKWebView, popover-
+                    // internal first-responder changes, etc.). The popover dismisses
+                    // only via explicit user action (buttons, ESC) or a real
+                    // *non-empty* selectionChanged that replaces the staged selection.
+                    if vm.selectionToolbarLayout?.visible == true, vm.pendingSelection != nil {
+                        return
+                    }
+                    // Only touch staged-selection state. Existing-annotation
+                    // popover dismissal is driven exclusively by the dedicated
+                    // `articleClickEmpty` case below, so a stray selectionCleared
+                    // (focus shift, popover-internal mouseup, etc.) cannot race
+                    // the existing-annotation popover off-screen.
+                    vm.pendingSelection = nil
+                    vm.selectionToolbarLayout = nil
+                }
+            case "articleClickEmpty":
+                Task { @MainActor in
+                    let vm = parent.viewModel
+                    // Click on article (not on an annotation, not on the popover
+                    // — popover clicks go to SwiftUI and never reach JS) dismisses
+                    // both popovers. clearSelection clears staged-selection state
+                    // AND calls dismissAnnotationToolbar internally, so a single
+                    // call handles both. clearViewSelection: true also asks JS
+                    // to drop the browser's native selection range.
+                    if vm.pendingSelection != nil || vm.clickedAnnotationRecord != nil {
+                        vm.clearSelection(clearViewSelection: true)
+                    }
                 }
             case "annotationActivated":
                 guard let body = message.body as? [String: Any],
@@ -2776,7 +2829,10 @@ private struct WebReaderContentView: NSViewRepresentable {
                 Task { @MainActor in
                     parent.viewModel.highlightSidebarSummary = false
                     parent.viewModel.selectedAnnotationId = annotation.id
-                    parent.viewModel.clearSelection(clearViewSelection: false)
+                    // Don't call clearSelection() here: its dismissAnnotationToolbar()
+                    // step would null the very clickedAnnotationRecord we set below.
+                    parent.viewModel.pendingSelection = nil
+                    parent.viewModel.selectionToolbarLayout = nil
                     parent.viewModel.clickedAnnotationRecord = annotation
                     parent.viewModel.annotationToolbarLayout = WebReaderViewModel.toolbarLayout(
                         viewportSelectionRect: clickRect,
@@ -2823,9 +2879,20 @@ private struct WebReaderContentView: NSViewRepresentable {
             pushAnnotations(annotations: parent.viewModel.annotations)
         }
 
+        private var lastPushedAnnotationsJSON: String?
+
+        func invalidateAnnotationsPushCache() {
+            lastPushedAnnotationsJSON = nil
+        }
+
         func pushAnnotations(annotations: [WebAnnotationRecord]) {
             guard let data = try? JSONEncoder().encode(annotations),
                   let json = String(data: data, encoding: .utf8) else { return }
+            // Suppress no-op pushes: didFinish, updateNSView, and the DB
+            // observer can all fire pushAnnotations with the same payload,
+            // each forcing a JS unwrap + walker + KaTeX scan over the article.
+            if json == lastPushedAnnotationsJSON { return }
+            lastPushedAnnotationsJSON = json
             evaluate("window.RubienReader && window.RubienReader.setAnnotations(\(json));")
         }
 

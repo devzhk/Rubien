@@ -29,12 +29,19 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
     private var hasRetriedAfterDelay = false
     private var defuddleResultHandled = false
 
+    /// Best-guess cover image URL captured from the live DOM before Defuddle prunes
+    /// the page. Used in `augmentContentWithCoverImageIfMissing` to inject a hero
+    /// image back into the extracted content when Defuddle's blocklist (which
+    /// strips `header`, `[class*="cover-"]`, etc.) has removed the original.
+    var capturedCoverImageURL: String?
+
     private static var readabilityScriptCache: String?
     private static var clipperDefuddleScriptCache: String?
 
     func resetForNewNavigation() {
         hasRetriedAfterDelay = false
         defuddleResultHandled = false
+        capturedCoverImageURL = nil
     }
 
     private func resetDefuddleOnly() {
@@ -73,9 +80,10 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
         let title = body["title"] as? String
         let excerpt = (body["description"] as? String) ?? (body["excerpt"] as? String)
         let byline = body["author"] as? String
-        readerExtractionLog.notice("readerResult Defuddle 成功 contentLength=\(content)")
+        let augmented = Self.augmentContentWithCoverImageIfMissing(content, coverImageURL: capturedCoverImageURL)
+        readerExtractionLog.notice("readerResult Defuddle succeeded contentLength=\(content)")
         DispatchQueue.main.async { [weak self] in
-            self?.onDefuddleSuccess?(title, content, excerpt, byline)
+            self?.onDefuddleSuccess?(title, augmented, excerpt, byline)
         }
     }
 
@@ -83,9 +91,22 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
 
     func runOnlineArticleExtraction(from webView: WKWebView) {
         hostWebView = webView
-        readerExtractionLog.notice("ReaderExtractionManager: 注入 ClipperDefuddle.js 并调用 RubienDefuddleExtract()")
+        // Capture a cover-image candidate from the LIVE DOM before Defuddle strips
+        // headers/cover containers. Best-effort: if the capture script fails or
+        // returns nothing, augmentation just no-ops. Adds one extra
+        // evaluateJavaScript round-trip (single-digit ms in practice).
+        webView.evaluateJavaScript(Self.coverImageCaptureJS) { [weak self] result, _ in
+            guard let self else { return }
+            let captured = (result as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            self.capturedCoverImageURL = (captured?.isEmpty ?? true) ? nil : captured
+            self.injectAndRunDefuddle(in: webView)
+        }
+    }
+
+    private func injectAndRunDefuddle(in webView: WKWebView) {
+        readerExtractionLog.notice("ReaderExtractionManager: injecting ClipperDefuddle.js and invoking RubienDefuddleExtract()")
         guard let defuddleSrc = Self.loadClipperDefuddleScript() else {
-            readerExtractionLog.error("未找到 ClipperDefuddle.js → Readability")
+            readerExtractionLog.error("ClipperDefuddle.js resource not found → falling back to Readability")
             runReadabilityForOnlineRead(in: webView, isYouTube: isYouTubeExtractionContext)
             return
         }
@@ -93,16 +114,16 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
         webView.evaluateJavaScript(defuddleSrc) { [weak self] _, error in
             guard let self else { return }
             if let error {
-                readerExtractionLog.error("注入 ClipperDefuddle.js 失败: \(error.localizedDescription) → Readability")
+                readerExtractionLog.error("Failed to inject ClipperDefuddle.js: \(error.localizedDescription) → falling back to Readability")
                 self.runReadabilityForOnlineRead(in: webView, isYouTube: self.isYouTubeExtractionContext)
                 return
             }
-            readerExtractionLog.notice("ClipperDefuddle.js 已执行，调用 RubienDefuddleExtract()…")
+            readerExtractionLog.notice("ClipperDefuddle.js loaded, invoking RubienDefuddleExtract()")
             self.defuddleResultHandled = false
             webView.evaluateJavaScript("RubienDefuddleExtract()") { [weak self] result, err2 in
                 guard let self else { return }
                 if let err2 {
-                    readerExtractionLog.error("RubienDefuddleExtract 异常: \(err2.localizedDescription) → Readability")
+                    readerExtractionLog.error("RubienDefuddleExtract threw: \(err2.localizedDescription) → falling back to Readability")
                     self.runReadabilityForOnlineRead(in: webView, isYouTube: self.isYouTubeExtractionContext)
                     return
                 }
@@ -125,15 +146,16 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
         else {
             let parsed = jsonStr.flatMap { $0.data(using: .utf8) }.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
             let err = parsed?["error"] as? String
-            readerExtractionLog.notice("Defuddle completion 回退解析失败 ok=\(parsed?["ok"] as? Bool ?? false) err=\(err ?? "nil") → Readability")
+            readerExtractionLog.notice("Defuddle completion fallback parse failed ok=\(parsed?["ok"] as? Bool ?? false) err=\(err ?? "nil") → falling back to Readability")
             runReadabilityForOnlineRead(in: webView, isYouTube: isYouTubeExtractionContext)
             return
         }
         let title = obj["title"] as? String
         let excerpt = (obj["description"] as? String) ?? (obj["excerpt"] as? String)
         let byline = obj["author"] as? String
-        readerExtractionLog.notice("Defuddle completion 回退成功 contentLength=\(content.count)")
-        onDefuddleSuccess?(title, content, excerpt, byline)
+        let augmented = Self.augmentContentWithCoverImageIfMissing(content, coverImageURL: capturedCoverImageURL)
+        readerExtractionLog.notice("Defuddle completion fallback succeeded contentLength=\(content.count)")
+        onDefuddleSuccess?(title, augmented, excerpt, byline)
     }
 
     func runReadabilityForOnlineRead(in webView: WKWebView, isYouTube: Bool) {
@@ -164,7 +186,7 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
             let ok = (obj["ok"] as? Bool) == true
             guard ok, let content = obj["content"] as? String else {
                 if isYouTube {
-                    readerExtractionLog.notice("Readability 失败 → YouTube 降级页")
+                    readerExtractionLog.notice("Readability failed → YouTube fallback page")
                     self.runYouTubeFallback(in: webView)
                     return
                 }
@@ -176,8 +198,9 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
             let title = obj["title"] as? String
             let excerpt = obj["excerpt"] as? String
             let byline = obj["byline"] as? String
-            readerExtractionLog.notice("Readability 成功 contentLength=\(content.count)")
-            self.onReadabilitySuccess?(title, content, excerpt, byline)
+            let augmented = Self.augmentContentWithCoverImageIfMissing(content, coverImageURL: self.capturedCoverImageURL)
+            readerExtractionLog.notice("Readability succeeded contentLength=\(content.count)")
+            self.onReadabilitySuccess?(title, augmented, excerpt, byline)
         }
     }
 
@@ -234,7 +257,7 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
                   let data = jsonStr.data(using: .utf8),
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else {
-                readerExtractionLog.notice("YouTube 页内 transcript fallback: 结果解析失败")
+                readerExtractionLog.notice("YouTube in-page transcript fallback: result parse failed")
                 return nil
             }
             if (obj["ok"] as? Bool) == true,
@@ -242,15 +265,15 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
                !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 let lang = obj["languageCode"] as? String ?? ""
                 let source = obj["source"] as? String ?? "unknown"
-                readerExtractionLog.notice("YouTube 页内 transcript fallback 成功 source=\(source, privacy: .public) lang=\(lang, privacy: .public) length=\(transcript.count, privacy: .public)")
+                readerExtractionLog.notice("YouTube in-page transcript fallback succeeded source=\(source, privacy: .public) lang=\(lang, privacy: .public) length=\(transcript.count, privacy: .public)")
                 return transcript
             }
             let err = obj["err"] as? String ?? "unknown"
             let source = obj["source"] as? String ?? "unknown"
-            readerExtractionLog.notice("YouTube 页内 transcript fallback 失败 source=\(source, privacy: .public) err=\(err, privacy: .public)")
+            readerExtractionLog.notice("YouTube in-page transcript fallback failed source=\(source, privacy: .public) err=\(err, privacy: .public)")
             return nil
         } catch {
-            readerExtractionLog.notice("YouTube 页内 transcript fallback 异常 \(error.localizedDescription, privacy: .public)")
+            readerExtractionLog.notice("YouTube in-page transcript fallback threw \(error.localizedDescription, privacy: .public)")
             return nil
         }
     }
@@ -273,7 +296,7 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
             guard self.isLiveReadableBusyContext?() == true else { return }
             if !self.hasRetriedAfterDelay {
                 self.hasRetriedAfterDelay = true
-                readerExtractionLog.notice("抽取全链失败，1.5s 后重试一轮：\(message)")
+                readerExtractionLog.notice("Full extraction chain failed, retrying once after 1.5s: \(message)")
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
                 guard self.isLiveReadableBusyContext?() == true else { return }
                 self.resetDefuddleOnly()
@@ -965,5 +988,104 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
             .replacingOccurrences(of: "\"", with: "&quot;")
             .replacingOccurrences(of: "'", with: "&#39;")
             .replacingOccurrences(of: "\n", with: "<br>")
+    }
+
+    // MARK: - Cover-image capture & injection (Fix 4)
+
+    /// Returns the best-guess cover image URL from the live DOM as an absolute string,
+    /// or empty string if none found. Priority: og:image / twitter:image (trusted page
+    /// metadata, no size gate), then a size-gated scan of header / cover / hero <img>
+    /// elements (rejects sub-200×150 candidates so site logos aren't picked).
+    static let coverImageCaptureJS = #"""
+    (function() {
+      function abs(u) { try { return new URL(u, document.URL).toString(); } catch(_) { return u || ''; } }
+      function pickFromSrcset(srcset) {
+        if (!srcset) return '';
+        var parts = srcset.split(',').map(function(s) { return s.trim(); });
+        var best = '', bestW = 0;
+        for (var i = 0; i < parts.length; i++) {
+          var m = parts[i].match(/^(\S+)\s+(\d+(?:\.\d+)?)w$/);
+          if (m && Number(m[2]) > bestW) { bestW = Number(m[2]); best = m[1]; }
+        }
+        if (best) return best;
+        var first = parts[0] ? parts[0].split(/\s+/)[0] : '';
+        return first || '';
+      }
+      function bigEnough(img) {
+        var w = img.naturalWidth || (img.getBoundingClientRect && img.getBoundingClientRect().width) || 0;
+        var h = img.naturalHeight || (img.getBoundingClientRect && img.getBoundingClientRect().height) || 0;
+        return w >= 200 && h >= 150;
+      }
+      var og = document.querySelector('meta[property="og:image"], meta[name="og:image"], meta[name="twitter:image"]');
+      if (og && og.content) return abs(og.content);
+      var candidates = document.querySelectorAll('header img, [class*="cover" i] img, [id*="cover" i] img, figure.cover img, .post-header img, .article-header img, article > figure:first-of-type img');
+      for (var j = 0; j < candidates.length; j++) {
+        var img = candidates[j];
+        if (!bigEnough(img)) continue;
+        var url = img.currentSrc || img.src || pickFromSrcset(img.getAttribute('srcset')) || img.getAttribute('data-src') || '';
+        if (url) return abs(url);
+      }
+      return '';
+    })()
+    """#
+
+    /// Injects a `<figure class="rubien-cover-image">` at the top of the extracted body
+    /// if `coverImageURL` is set AND the body doesn't already contain an equivalent
+    /// image (compared by host + last-path-component to absorb CDN canonicalization).
+    static func augmentContentWithCoverImageIfMissing(
+        _ html: String,
+        coverImageURL: String?
+    ) -> String {
+        guard let cover = coverImageURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !cover.isEmpty,
+              let coverURL = URL(string: cover) else { return html }
+
+        let coverKey = imageEquivalenceKey(for: coverURL)
+        // Match <img> src/srcset/data-src/data-srcset whether the value is double-
+        // quoted, single-quoted, or unquoted (HTML5 permits all three). The capture
+        // groups (2 / 3 / 4) reflect the three branches; we pick whichever non-empty.
+        let pattern = #"<img\b[^>]*?\b(?:src|srcset|data-src|data-srcset)\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))"#
+
+        if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
+            let ns = html as NSString
+            var matchFound = false
+            regex.enumerateMatches(in: html, options: [], range: NSRange(location: 0, length: ns.length)) { match, _, stop in
+                guard let m = match, m.numberOfRanges >= 4 else { return }
+                let attrValue: String = {
+                    for idx in 1...3 {
+                        let r = m.range(at: idx)
+                        if r.location != NSNotFound { return ns.substring(with: r) }
+                    }
+                    return ""
+                }()
+                guard !attrValue.isEmpty else { return }
+                // srcset values: "url 1x, url2 2x" or "url 300w, url2 600w". Take each leading URL.
+                for entry in attrValue.split(separator: ",") {
+                    let trimmedEntry = entry.trimmingCharacters(in: .whitespaces)
+                    let firstToken = trimmedEntry.split(separator: " ").first.map(String.init) ?? ""
+                    guard !firstToken.isEmpty,
+                          let candidateURL = URL(string: firstToken, relativeTo: coverURL)?.absoluteURL else { continue }
+                    if imageEquivalenceKey(for: candidateURL) == coverKey {
+                        matchFound = true
+                        stop.pointee = true
+                        return
+                    }
+                }
+            }
+            if matchFound { return html }
+        } else if html.contains(cover) {
+            return html
+        }
+
+        let escaped = cover
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+        return "<figure class=\"rubien-cover-image\"><img src=\"\(escaped)\" alt=\"\"></figure>\n" + html
+    }
+
+    private static func imageEquivalenceKey(for url: URL) -> String {
+        let host = url.host?.lowercased() ?? ""
+        let lastPath = url.lastPathComponent.lowercased()
+        return "\(host)|\(lastPath)"
     }
 }

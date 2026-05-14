@@ -116,7 +116,7 @@ final class ClipperWebMetadataExtractor: NSObject, ObservableObject {
 
             extractionManager.resetForNewNavigation()
             wv.stopLoading()
-            clipperImportLog.notice("开始 Clipper 抓取 url=\(trimmed, privacy: .public)")
+            clipperImportLog.notice("Starting Clipper fetch url=\(trimmed, privacy: .public)")
             wv.load(URLRequest(url: url))
         }
     }
@@ -142,7 +142,7 @@ final class ClipperWebMetadataExtractor: NSObject, ObservableObject {
             finalTitle = "Webpage"
         }
 
-        clipperImportLog.notice("Clipper 抓取成功 source=\(source, privacy: .public) titleLen=\(finalTitle.count) abstractLen=\(abstract?.count ?? 0) bodyLen=\(webContent?.count ?? 0)")
+        clipperImportLog.notice("Clipper fetch succeeded source=\(source, privacy: .public) titleLen=\(finalTitle.count) abstractLen=\(abstract?.count ?? 0) bodyLen=\(webContent?.count ?? 0)")
 
         let result = ExtractResult(
             title: finalTitle,
@@ -163,7 +163,7 @@ final class ClipperWebMetadataExtractor: NSObject, ObservableObject {
         timeoutTask = nil
         isExtracting = false
         webView?.stopLoading()
-        clipperImportLog.error("Clipper 抓取失败 \(error.localizedDescription, privacy: .public)")
+        clipperImportLog.error("Clipper fetch failed \(error.localizedDescription, privacy: .public)")
         cont.resume(throwing: error)
     }
 
@@ -180,10 +180,10 @@ extension ClipperWebMetadataExtractor: WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard isExtracting else { return }
         let pageURL = webView.url?.absoluteString ?? startedURLString
-        clipperImportLog.notice("WK didFinish 即将注入 Clipper url=\(pageURL, privacy: .public)")
+        clipperImportLog.notice("WK didFinish, about to inject Clipper url=\(pageURL, privacy: .public)")
 
         if Reference.isLikelyYouTubeWatchURL(urlString: pageURL) {
-            clipperImportLog.notice("YouTube：延迟 2.5s 再抽取（与在线阅读一致）")
+            clipperImportLog.notice("YouTube: delaying 2.5s before extraction (matches online reading path)")
             Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: 2_500_000_000)
                 guard let self, self.isExtracting, self.webView === webView else { return }

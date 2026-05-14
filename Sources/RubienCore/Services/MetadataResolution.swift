@@ -431,7 +431,7 @@ public enum MetadataResolution {
         text = text.replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression)
         let result = text.trimmingCharacters(in: CharacterSet(charactersIn: " _-—–"))
         if result != fileName {
-            metadataLog.debug("📥 [cleanFilename] 原始: \(fileName, privacy: .public) → 清洗后: \(result, privacy: .public)")
+            metadataLog.debug("[cleanFilename] before: \(fileName, privacy: .public) after: \(result, privacy: .public)")
         }
         return result
     }
@@ -450,10 +450,10 @@ public enum MetadataResolution {
             }
         }
         if looksLikeLikelyTitle(fileName) {
-            metadataLog.debug("📝 [parseFilename] 无分隔符降级: title=\(fileName, privacy: .public) author=nil")
+            metadataLog.debug("[parseFilename] no separator, falling back to title=\(fileName, privacy: .public) author=nil")
             return (fileName, nil)
         }
-        metadataLog.debug("📝 [parseFilename] 解析失败，无标题和作者")
+        metadataLog.debug("[parseFilename] parse failed, no title or author")
         return (nil, nil)
     }
 

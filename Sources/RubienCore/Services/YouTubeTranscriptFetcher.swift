@@ -213,7 +213,7 @@ public enum YouTubeTranscriptFetcher {
                 videoIdForLog: videoId
             )
         } catch {
-            ytTranscriptLog.notice("caption strategy=innertube_android failed vid=\(videoId, privacy: .public) error=\(error.localizedDescription, privacy: .public) -> 尝试 watch HTML fallback")
+            ytTranscriptLog.notice("caption strategy=innertube_android failed vid=\(videoId, privacy: .public) error=\(error.localizedDescription, privacy: .public) -> trying watch HTML fallback")
         }
 
         // fallback：从 watch 页 HTML 直接解析 ytInitialPlayerResponse 获取 captionTracks
@@ -265,7 +265,7 @@ public enum YouTubeTranscriptFetcher {
 
             guard let jsonText = extractYTInitialPlayerResponseJSON(from: html) else {
                 if attempt == 0 {
-                    ytTranscriptLog.notice("watch: 未解析到 ytInitialPlayerResponse，使用 Cookie 罐重试")
+                    ytTranscriptLog.notice("watch: could not parse ytInitialPlayerResponse, retrying with cookie jar")
                 }
                 continue
             }

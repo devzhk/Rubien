@@ -67,7 +67,7 @@ struct WebImportView: View {
                         TextField(String(localized: "Page URL", bundle: .module), text: $url, prompt: Text(verbatim: "https://…"))
                             .textContentType(.URL)
                             .disabled(isSaving)
-                        Text("Rubien will use the built-in Obsidian Clipper pipeline to extract the title, abstract, and article body. YouTube pages also try the transcript fallback.", bundle: .module)
+                        Text("Rubien extracts the title, abstract, and article body from the page. YouTube pages also try a transcript fallback.", bundle: .module)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

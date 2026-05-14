@@ -27,12 +27,12 @@ final class YouTubeTranscriptPageFetcher: NSObject, ObservableObject {
         }
 
         guard let webView = await requireWebView() else {
-            transcriptDOMLog.notice("隐藏 YouTube transcript WebView 未就绪")
+            transcriptDOMLog.notice("Hidden YouTube transcript WebView not ready")
             return nil
         }
 
         guard pendingContinuation == nil else {
-            transcriptDOMLog.notice("隐藏 YouTube transcript WebView 正忙，跳过新的抓取请求")
+            transcriptDOMLog.notice("Hidden YouTube transcript WebView busy, skipping new fetch request")
             return nil
         }
 
@@ -49,7 +49,7 @@ final class YouTubeTranscriptPageFetcher: NSObject, ObservableObject {
                 self.finishFetch(sequence: sequence, transcript: nil)
             }
 
-            transcriptDOMLog.notice("隐藏 YouTube transcript WebView 开始加载 \(url.absoluteString, privacy: .public)")
+            transcriptDOMLog.notice("Hidden YouTube transcript WebView starting load \(url.absoluteString, privacy: .public)")
             webView.stopLoading()
             webView.load(URLRequest(url: url))
         }
@@ -85,26 +85,26 @@ extension YouTubeTranscriptPageFetcher: WKNavigationDelegate {
 
             let transcript = await ReaderExtractionManager.fetchYouTubeTranscriptFromLoadedPage(in: webView)
             if let transcript, !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                transcriptDOMLog.notice("隐藏 YouTube transcript WebView DOM fallback 成功 length=\(transcript.count, privacy: .public)")
+                transcriptDOMLog.notice("Hidden YouTube transcript WebView DOM fallback succeeded length=\(transcript.count, privacy: .public)")
             } else {
-                transcriptDOMLog.notice("隐藏 YouTube transcript WebView DOM fallback 未返回内容")
+                transcriptDOMLog.notice("Hidden YouTube transcript WebView DOM fallback returned no content")
             }
             self.finishFetch(sequence: sequence, transcript: transcript)
         }
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        transcriptDOMLog.notice("隐藏 YouTube transcript WebView 导航失败 \(error.localizedDescription, privacy: .public)")
+        transcriptDOMLog.notice("Hidden YouTube transcript WebView navigation failed \(error.localizedDescription, privacy: .public)")
         finishFetch(sequence: fetchSequence, transcript: nil)
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        transcriptDOMLog.notice("隐藏 YouTube transcript WebView 预导航失败 \(error.localizedDescription, privacy: .public)")
+        transcriptDOMLog.notice("Hidden YouTube transcript WebView provisional navigation failed \(error.localizedDescription, privacy: .public)")
         finishFetch(sequence: fetchSequence, transcript: nil)
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
-        transcriptDOMLog.notice("隐藏 YouTube transcript WebView 进程终止")
+        transcriptDOMLog.notice("Hidden YouTube transcript WebView process terminated")
         finishFetch(sequence: fetchSequence, transcript: nil)
     }
 }

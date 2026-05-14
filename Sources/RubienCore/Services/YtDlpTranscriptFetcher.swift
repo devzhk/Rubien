@@ -124,7 +124,7 @@ actor YtDlpBinaryLocator {
         try? fileManager.removeItem(at: stagingURL)
         try? fileManager.removeItem(at: managedURL)
 
-        ytDlpTranscriptLog.notice("开始下载最新 yt-dlp macOS 二进制")
+        ytDlpTranscriptLog.notice("Starting download of latest yt-dlp macOS binary")
         try await downloader.download(from: latestDownloadURL, to: stagingURL)
         try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: stagingURL.path)
         try fileManager.moveItem(at: stagingURL, to: managedURL)
@@ -132,10 +132,10 @@ actor YtDlpBinaryLocator {
 
         guard await isUsable(managedURL, runner: runner) else {
             try? fileManager.removeItem(at: managedURL)
-            throw YtDlpTranscriptError.executableUnavailable("下载后的 yt-dlp 无法执行")
+            throw YtDlpTranscriptError.executableUnavailable("Downloaded yt-dlp is not executable")
         }
 
-        ytDlpTranscriptLog.notice("最新 yt-dlp 已准备完成 path=\(managedURL.path, privacy: .public)")
+        ytDlpTranscriptLog.notice("Latest yt-dlp ready path=\(managedURL.path, privacy: .public)")
         return managedURL
     }
 

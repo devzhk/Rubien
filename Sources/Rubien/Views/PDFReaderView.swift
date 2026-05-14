@@ -412,6 +412,11 @@ struct PDFReaderView: View {
     @State private var outlineSidebarTab: PDFSidebarTab = .outline
     @State private var isEditingPage = false
     @State private var pageInputText = ""
+    /// Note-draft text for the selection popover. Lifted from the deleted SelectionActionBar
+    /// so the shared AnnotationSelectionPopover can take a Binding into the same state across
+    /// rebuilds, and so `.onChange(of: viewModel.stagedSelectionText)` below can reset it on
+    /// external dismissal paths (selection cleared from PDFKit, etc.).
+    @State private var noteMarkdownForSelection: String = ""
     private let onClose: (() -> Void)?
 
     init(reference: Reference, pdfURL: URL, onClose: (() -> Void)? = nil) {
@@ -557,6 +562,13 @@ struct PDFReaderView: View {
                 viewModel.searchFocusRequest = UUID()
             }
         }
+        // Reset the lifted note draft whenever the staged-selection text changes
+        // (cleared, replaced, or transitioned to empty) so external dismissal paths
+        // — i.e. anything that clears selection without going through our onDismiss
+        // closure — don't leak stale note text into the next selection's popover.
+        .onChange(of: viewModel.stagedSelectionText) { _, _ in
+            noteMarkdownForSelection = ""
+        }
     }
 
     @ViewBuilder
@@ -564,26 +576,71 @@ struct PDFReaderView: View {
         let shouldShow = viewModel.hasStagedSelection
             && viewModel.selectionToolbarLayout?.visible == true
         if shouldShow, let layout = viewModel.selectionToolbarLayout {
-            SelectionActionBar(viewModel: viewModel)
-                .fixedSize()
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .offset(x: max(8, layout.center.x - 170), y: layout.center.y - 17)
-                .allowsHitTesting(true)
-                .transition(.scale(scale: 0.92, anchor: .top).combined(with: .opacity))
-                .animation(.spring(response: 0.25, dampingFraction: 0.82), value: layout.center)
+            AnnotationSelectionPopover(
+                currentColorHex: $viewModel.currentColorHex,
+                noteMarkdown: $noteMarkdownForSelection,
+                onHighlight: { viewModel.applySelectionAction(.highlight) },
+                onUnderline: { viewModel.applySelectionAction(.underline) },
+                onPickColor: { _ in viewModel.applySelectionAction(.highlight) },
+                onCopy: {
+                    guard !viewModel.stagedSelectionText.isEmpty else { return }
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(viewModel.stagedSelectionText, forType: .string)
+                },
+                onSaveNote: { md in
+                    viewModel.addAnnotations(
+                        type: .note,
+                        selectedText: viewModel.stagedSelectionText,
+                        noteText: md,
+                        pageRects: viewModel.stagedSelectionPageRects
+                    )
+                    viewModel.clearStagedSelection()
+                    noteMarkdownForSelection = ""
+                },
+                onDismiss: {
+                    viewModel.clearStagedSelection()
+                    noteMarkdownForSelection = ""
+                }
+            )
+            .fixedSize()
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .offset(x: max(8, layout.center.x - 170), y: layout.center.y - 17)
+            .allowsHitTesting(true)
+            .transition(.scale(scale: 0.92, anchor: .top).combined(with: .opacity))
+            .animation(.spring(response: 0.25, dampingFraction: 0.82), value: layout.center)
         }
     }
 
     @ViewBuilder
     private var annotationActionBarOverlay: some View {
-        if viewModel.clickedAnnotationRecord != nil,
+        if let annotation = viewModel.clickedAnnotationRecord,
            let layout = viewModel.annotationToolbarLayout, layout.visible {
-            AnnotationActionBar(viewModel: viewModel)
-                .fixedSize()
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                .offset(x: max(8, layout.center.x - 170), y: layout.center.y - 17)
-                .allowsHitTesting(true)
-                .transition(.opacity)
+            ExistingAnnotationPopover(
+                annotationId: AnyHashable(annotation.id ?? -1),
+                currentColor: annotation.color,
+                initialNoteText: annotation.noteText,
+                onPickColor: { hex in
+                    viewModel.updateAnnotationColor(annotation, color: hex)
+                    if let updated = viewModel.annotations.first(where: { $0.id == annotation.id }) {
+                        viewModel.clickedAnnotationRecord = updated
+                    }
+                },
+                onDelete: {
+                    viewModel.deleteAnnotation(annotation)
+                    viewModel.dismissAnnotationToolbar()
+                },
+                onNoteAutosave: { trimmed in
+                    if let ann = viewModel.clickedAnnotationRecord {
+                        viewModel.updateAnnotationNote(ann, noteText: trimmed)
+                    }
+                },
+                onDismiss: { viewModel.dismissAnnotationToolbar() }
+            )
+            .fixedSize()
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .offset(x: max(8, layout.center.x - 170), y: layout.center.y - 17)
+            .allowsHitTesting(true)
+            .transition(.opacity)
         }
     }
 
@@ -841,322 +898,9 @@ private struct FloatingGlassCapsuleButtonStyle: ButtonStyle {
     }
 }
 
-private struct SelectionActionBar: View {
-    @ObservedObject var viewModel: PDFReaderViewModel
-    @State private var noteMarkdown = ""
-    @State private var editorContentHeight: CGFloat = 36
-    private let bgColor: Color = Color(nsColor: NSColor(white: 0.97, alpha: 1))
-
-    var body: some View {
-        VStack(spacing: 0) {
-            // Top row: actions + color dots
-            HStack(spacing: 2) {
-                toolbarButton(icon: "highlighter", label: String(localized: "Highlight", bundle: .module)) {
-                    viewModel.applySelectionAction(.highlight)
-                }
-
-                toolbarButton(icon: "underline", label: String(localized: "Underline", bundle: .module)) {
-                    viewModel.applySelectionAction(.underline)
-                }
-
-                toolbarButton(icon: "doc.on.doc", label: String(localized: "Copy", bundle: .module)) {
-                    if !viewModel.stagedSelectionText.isEmpty {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(viewModel.stagedSelectionText, forType: .string)
-                    }
-                }
-
-                separator
-
-                ForEach(AnnotationColor.palette) { color in
-                    let isSelected = viewModel.currentColorHex == color.id
-                    Button {
-                        viewModel.currentColorHex = color.id
-                        viewModel.applySelectionAction(.highlight)
-                    } label: {
-                        Circle()
-                            .fill(Color(nsColor: color.nsColor.withAlphaComponent(1.0)))
-                            .frame(width: 16, height: 16)
-                            .overlay(
-                                Circle()
-                                    .strokeBorder(
-                                        // White stays readable on every saturated palette hue; black would vanish on purple/pink.
-                                        isSelected ? Color.white : Color.black.opacity(0.20),
-                                        lineWidth: isSelected ? 2 : 0.5
-                                    )
-                            )
-                            .scaleEffect(isSelected ? 1.12 : 1.0)
-                            .frame(width: 22, height: 28)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .help(color.name)
-                    .animation(.easeOut(duration: 0.12), value: isSelected)
-                }
-
-                separator
-
-                toolbarButton(icon: "trash", label: String(localized: "Clear selection", bundle: .module)) {
-                    viewModel.clearStagedSelection()
-                }
-            }
-            .padding(.horizontal, 5)
-            .padding(.vertical, 3)
-
-            // Divider
-            Rectangle()
-                .fill(Color.black.opacity(0.08))
-                .frame(height: 0.5)
-                .padding(.horizontal, 8)
-
-            // Note section: always-visible inline editor
-            VStack(spacing: 0) {
-                RichNoteEditorView(
-                    markdown: $noteMarkdown,
-                    placeholder: String(localized: "Add a note…", bundle: .module),
-                    autoFocus: false,
-                    onContentHeightChanged: { height in
-                        editorContentHeight = height
-                    }
-                )
-                .frame(height: min(max(editorContentHeight, 36), 180))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .padding(.horizontal, 8)
-                .padding(.top, 6)
-
-                HStack(spacing: 8) {
-                    Spacer()
-                    Button(String(localized: "common.cancel", bundle: .module)) {
-                        noteMarkdown = ""
-                        viewModel.clearStagedSelection()
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                    .font(.system(size: 11))
-
-                    Button(String(localized: "common.save", bundle: .module)) {
-                        let md = noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !md.isEmpty else { return }
-                        viewModel.addAnnotations(
-                            type: .note,
-                            selectedText: viewModel.stagedSelectionText,
-                            noteText: md,
-                            pageRects: viewModel.stagedSelectionPageRects
-                        )
-                        noteMarkdown = ""
-                        viewModel.clearStagedSelection()
-                    }
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 4)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill(noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                  ? Color.accentColor.opacity(0.50)
-                                  : Color.accentColor)
-                    )
-                    .buttonStyle(.plain)
-                    .disabled(noteMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-            }
-        }
-        .frame(width: 340)
-        .background(bgColor, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .strokeBorder(Color.black.opacity(0.14), lineWidth: 0.5)
-        )
-        .shadow(color: .black.opacity(0.28), radius: 16, y: 6)
-        .shadow(color: .black.opacity(0.12), radius: 3, y: 1)
-        .environment(\.colorScheme, .light)
-    }
-
-    private var separator: some View {
-        Rectangle()
-            .fill(Color.black.opacity(0.12))
-            .frame(width: 1, height: 16)
-            .padding(.horizontal, 2)
-    }
-
-    private func toolbarButton(icon: String, label: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(Color.primary.opacity(0.80))
-                .frame(width: 30, height: 28)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(NotionToolbarButtonStyle())
-        .help(label)
-        .accessibilityLabel(label)
-    }
-}
-
-private struct NotionToolbarButtonStyle: ButtonStyle {
-    @State private var isHovered = false
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(configuration.isPressed
-                          ? Color.black.opacity(0.10)
-                          : (isHovered ? Color.black.opacity(0.06) : Color.clear))
-            )
-            .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
-            .animation(.easeOut(duration: 0.12), value: isHovered)
-            .onHover { isHovered = $0 }
-    }
-}
-
-// MARK: - Annotation Action Bar (for clicked existing highlights)
-
-/// Toolbar shown when user clicks an existing highlight.
-/// Provides: change color, edit note, delete.
-private struct AnnotationActionBar: View {
-    @ObservedObject var viewModel: PDFReaderViewModel
-    @State private var isEditingNote = false
-    @State private var editingMarkdown = ""
-    @State private var autoSaveTask: Task<Void, Never>?
-    @State private var editorContentHeight: CGFloat = 36
-    private let bgColor: Color = Color(nsColor: NSColor(white: 0.97, alpha: 1))
-
-    var body: some View {
-        if let annotation = viewModel.clickedAnnotationRecord {
-            VStack(spacing: 0) {
-                // Top row: color dots + actions
-                HStack(spacing: 2) {
-                    ForEach(AnnotationColor.palette) { color in
-                        let isSelected = annotation.color == color.id
-                        Button {
-                            viewModel.updateAnnotationColor(annotation, color: color.id)
-                            if let updated = viewModel.annotations.first(where: { $0.id == annotation.id }) {
-                                viewModel.clickedAnnotationRecord = updated
-                            }
-                        } label: {
-                            Circle()
-                                .fill(Color(nsColor: color.nsColor.withAlphaComponent(1.0)))
-                                .frame(width: 16, height: 16)
-                                .overlay(
-                                    Circle()
-                                        .strokeBorder(
-                                            // White stays readable on every saturated palette hue; black would vanish on purple/pink.
-                                            isSelected ? Color.white : Color.black.opacity(0.20),
-                                            lineWidth: isSelected ? 2 : 0.5
-                                        )
-                                )
-                                .scaleEffect(isSelected ? 1.12 : 1.0)
-                                .frame(width: 22, height: 28)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .help(color.name)
-                        .animation(.easeOut(duration: 0.12), value: isSelected)
-                    }
-
-                    separator
-
-                    Button {
-                        viewModel.deleteAnnotation(annotation)
-                        viewModel.dismissAnnotationToolbar()
-                    } label: {
-                        Image(systemName: "trash")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(Color.primary.opacity(0.80))
-                            .frame(width: 30, height: 28)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(NotionToolbarButtonStyle())
-                    .help(String(localized: "Delete annotation", bundle: .module))
-                }
-                .padding(.horizontal, 5)
-                .padding(.vertical, 3)
-
-                // Divider
-                Rectangle()
-                    .fill(Color.black.opacity(0.08))
-                    .frame(height: 0.5)
-                    .padding(.horizontal, 8)
-
-                // Note section: editor / placeholder
-                if isEditingNote {
-                    // WYSIWYG inline editor — auto-saves
-                    RichNoteEditorView(
-                        markdown: $editingMarkdown,
-                        placeholder: String(localized: "Add a note…", bundle: .module),
-                        autoFocus: true,
-                        onContentHeightChanged: { height in
-                            editorContentHeight = height
-                        }
-                    )
-                    .frame(height: min(max(editorContentHeight, 36), 160))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 6)
-                } else {
-                    // No note — placeholder to add
-                    Button {
-                        editingMarkdown = ""
-                        isEditingNote = true
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "note.text")
-                                .font(.system(size: 10))
-                            Text("Add a note…", bundle: .module)
-                                .font(.system(size: 11))
-                        }
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .frame(width: 340)
-            .background(bgColor, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .strokeBorder(Color.black.opacity(0.14), lineWidth: 0.5)
-            )
-            .shadow(color: .black.opacity(0.28), radius: 16, y: 6)
-            .shadow(color: .black.opacity(0.12), radius: 3, y: 1)
-            .environment(\.colorScheme, .light)
-            .onAppear {
-                let noteText = annotation.noteText ?? ""
-                editingMarkdown = noteText
-                isEditingNote = !noteText.isEmpty
-            }
-            .onChange(of: annotation.id) { _, _ in
-                let noteText = annotation.noteText ?? ""
-                editingMarkdown = noteText
-                isEditingNote = !noteText.isEmpty
-            }
-            .onChange(of: editingMarkdown) { _, newValue in
-                autoSaveTask?.cancel()
-                autoSaveTask = Task {
-                    try? await Task.sleep(for: .milliseconds(500))
-                    guard !Task.isCancelled else { return }
-                    if let ann = viewModel.clickedAnnotationRecord {
-                        let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                        viewModel.updateAnnotationNote(ann, noteText: trimmed)
-                    }
-                }
-            }
-        }
-    }
-
-    private var separator: some View {
-        Rectangle()
-            .fill(Color.black.opacity(0.12))
-            .frame(width: 1, height: 16)
-            .padding(.horizontal, 2)
-    }
-}
+// Popover chrome lives in `AnnotationPopovers.swift` (shared with WebReaderView).
+// Adapters are constructed inline at the overlay call sites
+// (`selectionActionBarOverlay`, `annotationActionBarOverlay`).
 
 // MARK: - PDFKit Bridge
 
