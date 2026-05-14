@@ -136,15 +136,37 @@ final class RubienCLITests: XCTestCase {
         XCTAssertTrue(json is [Any], "Search output should be a JSON array")
     }
 
-    // MARK: - Tags
+    // MARK: - Tags (retired — tags now flow through `properties` against the built-in Tags property)
 
-    func testTagsListCommand() throws {
+    /// The standalone `tags` subcommand was removed when tag operations were
+    /// folded into `properties` against the built-in Tags property
+    /// (defaultFieldKey == "tags"). Invoking it must exit non-zero.
+    func testTagsSubcommandIsRetired() throws {
         try skipIfBinaryMissing()
         let result = try runCLI(["tags"])
-        XCTAssertEqual(result.exitCode, 0)
-        let data = Data(result.stdout.utf8)
-        let json = try JSONSerialization.jsonObject(with: data)
-        XCTAssertTrue(json is [Any], "Tags output should be a JSON array")
+        XCTAssertNotEqual(result.exitCode, 0,
+                          "`rubien-cli tags` should exit non-zero — operations moved to `properties` against the built-in Tags property")
+    }
+
+    /// The built-in Tags PropertyDefinition must surface in `properties` and
+    /// expose its options inline (one per Tag row, with stable id as `value`
+    /// and tag name as `label`).
+    func testTagsPropertyAppearsInPropertiesListWithInlineOptions() throws {
+        try skipIfBinaryMissing()
+        let result = try runCLI(["properties", "--name", "Tags"])
+        XCTAssertEqual(result.exitCode, 0, "stderr=\(result.stderr)")
+        let arr = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [[String: Any]] ?? []
+        XCTAssertEqual(arr.count, 1, "--name Tags should return exactly one definition")
+        guard let tagsDef = arr.first else { return }
+        XCTAssertEqual(tagsDef["defaultFieldKey"] as? String, "tags")
+        XCTAssertEqual(tagsDef["type"] as? String, "multiSelect")
+        // Options array must be an array of objects with value/label/color keys.
+        // (Empty is OK on a fresh library; the shape is what matters here.)
+        if let options = tagsDef["options"] as? [[String: Any]], let first = options.first {
+            XCTAssertNotNil(first["value"], "option must have value")
+            XCTAssertNotNil(first["label"], "option must have label")
+            XCTAssertNotNil(first["color"], "option must have color")
+        }
     }
 
     // MARK: - Export
@@ -623,11 +645,16 @@ final class RubienCLITests: XCTestCase {
         }
         defer { _ = try? runCLI(["delete", String(refId), "--force"]) }
 
-        // Find a default (built-in) property — e.g. the seeded DOI/year/etc.
+        // Pick a default property OTHER than Tags. Tags routes through
+        // setTags transparently and is intentionally writable via --set;
+        // the guard must still fire for column-backed defaults like DOI/Year.
         let all = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
-        guard let defaultProp = all.first(where: { ($0["isDefault"] as? Bool) == true }),
+        guard let defaultProp = all.first(where: {
+                  ($0["isDefault"] as? Bool) == true
+                      && ($0["defaultFieldKey"] as? String) != "tags"
+              }),
               let defaultIdStr = defaultProp["id"] as? String else {
-            XCTFail("No default property seeded")
+            XCTFail("No non-Tags default property seeded")
             return
         }
 
@@ -635,13 +662,181 @@ final class RubienCLITests: XCTestCase {
                                     "--reference", String(refId),
                                     "--id", defaultIdStr,
                                     "--value", "bogus"])
-        XCTAssertNotEqual(setResult.exitCode, 0, "--set on a built-in property should fail")
+        XCTAssertNotEqual(setResult.exitCode, 0, "--set on a column-backed built-in must fail")
 
-        // Double-check: value should not appear in the reference's custom properties
         let listed = try runCLI(["properties", "--reference", String(refId)])
         let arr = try JSONSerialization.jsonObject(with: Data(listed.stdout.utf8)) as? [[String: Any]] ?? []
         XCTAssertFalse(arr.contains { ($0["propertyId"] as? String) == defaultIdStr },
                        "built-in property must not be stored as a propertyValue row")
+    }
+
+    // MARK: - Properties: --id / --name selectors
+
+    /// Selectors filter the list to a subset, in sortOrder. Empty selectors
+    /// fall back to "return all".
+    func testPropertiesIdNameSelectorsReturnSubset() throws {
+        try skipIfBinaryMissing()
+        // Read a couple of known defaults to use as targets.
+        let all = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
+        guard let typeProp = all.first(where: { ($0["defaultFieldKey"] as? String) == "referenceType" }),
+              let typeIdStr = typeProp["id"] as? String,
+              let typeId = Int64(typeIdStr) else {
+            XCTFail("Type property not seeded")
+            return
+        }
+        let result = try runCLI(["properties", "--id", String(typeId), "--name", "Tags"])
+        XCTAssertEqual(result.exitCode, 0, "stderr=\(result.stderr)")
+        let arr = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [[String: Any]] ?? []
+        let names = Set(arr.compactMap { $0["name"] as? String })
+        XCTAssertEqual(names, ["Type", "Tags"])
+    }
+
+    /// Unresolved selectors must exit non-zero with an `unresolved-selectors`
+    /// error envelope so scripts notice missing inputs.
+    func testPropertiesUnresolvedSelectorErrorsLoudly() throws {
+        try skipIfBinaryMissing()
+        let result = try runCLI(["properties", "--name", "DefinitelyNotAProperty-\(UUID().uuidString.prefix(6))"])
+        XCTAssertNotEqual(result.exitCode, 0)
+        let env = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any]
+        XCTAssertEqual(env?["error"] as? String, "unresolved-selectors")
+        let names = env?["names"] as? [String] ?? []
+        XCTAssertFalse(names.isEmpty, "unresolved names must surface in the error envelope")
+    }
+
+    /// Explicit selectors win over `--visible` filtering — the caller asked
+    /// for the property by id/name, so the hidden state shouldn't drop it.
+    func testPropertiesIdSelectorOverridesVisibleFilter() throws {
+        try skipIfBinaryMissing()
+        // Create a hidden custom property.
+        let unique = "cli-vis-override-\(UUID().uuidString.prefix(8))"
+        let created = try runCLI(["properties", "--create", "--name", unique, "--type", "string"])
+        guard let propId = parseId(from: Data(created.stdout.utf8)) else {
+            XCTFail("create failed")
+            return
+        }
+        defer { _ = try? runCLI(["properties", "--delete", String(propId)]) }
+        _ = try runCLI(["properties", "--hide", "--id", String(propId)])
+
+        // --visible alone hides it.
+        let visibleOnly = try runCLI(["properties", "--visible"])
+        let visArr = try JSONSerialization.jsonObject(with: Data(visibleOnly.stdout.utf8)) as? [[String: Any]] ?? []
+        XCTAssertFalse(visArr.contains { ($0["id"] as? String) == String(propId) })
+
+        // --id <hidden> + --visible still returns it.
+        let withId = try runCLI(["properties", "--visible", "--id", String(propId)])
+        XCTAssertEqual(withId.exitCode, 0, "stderr=\(withId.stderr)")
+        let arr = try JSONSerialization.jsonObject(with: Data(withId.stdout.utf8)) as? [[String: Any]] ?? []
+        XCTAssertEqual(arr.count, 1)
+        XCTAssertEqual(arr.first?["id"] as? String, String(propId))
+    }
+
+    // MARK: - Properties: --add-value / --remove-value (Tags + custom multiSelect)
+
+    /// Tags-property additive/subtractive flow end-to-end against the binary.
+    /// Verifies idempotency (re-adding a tag is a no-op) and that the result
+    /// flows back into `properties --reference`'s value.
+    func testPropertiesAddRemoveValueOnTagsProperty() throws {
+        try skipIfBinaryMissing()
+
+        let addResult = try runCLI(["add", "--title", "CLI Tag-via-prop \(UUID().uuidString.prefix(8))"])
+        guard let refId = parseId(from: Data(addResult.stdout.utf8)) else {
+            XCTFail("add failed")
+            return
+        }
+
+        // Locate the seeded Tags PropertyDefinition.
+        let all = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
+        guard let tagsDef = all.first(where: { ($0["defaultFieldKey"] as? String) == "tags" }),
+              let tagsIdStr = tagsDef["id"] as? String else {
+            XCTFail("Tags PropertyDefinition not seeded")
+            return
+        }
+
+        // Create two fresh tags via --add-option (creates Tag rows, returns ids as `value`).
+        let nameA = "cli-tag-a-\(UUID().uuidString.prefix(6))"
+        let nameB = "cli-tag-b-\(UUID().uuidString.prefix(6))"
+        let addA = try runCLI(["properties", "--add-option", "--id", tagsIdStr, "--value", nameA])
+        XCTAssertEqual(addA.exitCode, 0, "stderr=\(addA.stderr)")
+        let addB = try runCLI(["properties", "--add-option", "--id", tagsIdStr, "--value", nameB])
+        XCTAssertEqual(addB.exitCode, 0, "stderr=\(addB.stderr)")
+
+        // Re-fetch to learn the new tag ids (they are returned as `value`).
+        let afterAdd = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties", "--name", "Tags"]).stdout.utf8)) as? [[String: Any]] ?? []
+        let optionsA = (afterAdd.first?["options"] as? [[String: Any]]) ?? []
+        guard let aId = optionsA.first(where: { ($0["label"] as? String) == nameA })?["value"] as? String,
+              let bId = optionsA.first(where: { ($0["label"] as? String) == nameB })?["value"] as? String else {
+            XCTFail("created tags not visible as inline options on the Tags property")
+            return
+        }
+        // Single combined cleanup with explicit ordering so we don't rely on
+        // defer LIFO semantics (which would otherwise try to delete the tags
+        // while the reference still pins them, fail with optionInUse, and
+        // leak the test tags into the developer's real library).
+        defer {
+            _ = try? runCLI(["delete", String(refId), "--force"])
+            _ = try? runCLI(["properties", "--delete-option", "--id", tagsIdStr, "--value", aId])
+            _ = try? runCLI(["properties", "--delete-option", "--id", tagsIdStr, "--value", bId])
+        }
+
+        // Helper: read the Tags-property value out of `properties --reference <ref>`.
+        // The CLI surface for "what tags does this ref have?" is the same for
+        // tags and any other multi-select property — that's the whole point
+        // of the unification.
+        func currentTagIds() throws -> Set<String> {
+            let listed = try runCLI(["properties", "--reference", String(refId)])
+            XCTAssertEqual(listed.exitCode, 0)
+            let arr = try JSONSerialization.jsonObject(with: Data(listed.stdout.utf8)) as? [[String: Any]] ?? []
+            guard let entry = arr.first(where: { ($0["propertyId"] as? String) == tagsIdStr }),
+                  let storedJSON = entry["value"] as? String,
+                  let decoded = try JSONSerialization.jsonObject(with: Data(storedJSON.utf8)) as? [String] else {
+                return []
+            }
+            return Set(decoded)
+        }
+
+        // --add-value: assign both tags to the reference (additive).
+        let assigned = try runCLI([
+            "properties", "--set", "--add-value",
+            "--reference", String(refId),
+            "--id", tagsIdStr,
+            "--value", "\(aId),\(bId)",
+        ])
+        XCTAssertEqual(assigned.exitCode, 0, "stderr=\(assigned.stderr)")
+        let after1 = try currentTagIds()
+        XCTAssertTrue(after1.contains(aId), "ref should carry tag A after --add-value")
+        XCTAssertTrue(after1.contains(bId), "ref should carry tag B after --add-value")
+
+        // Idempotent: re-adding aId is a no-op.
+        let again = try runCLI([
+            "properties", "--set", "--add-value",
+            "--reference", String(refId),
+            "--id", tagsIdStr,
+            "--value", aId,
+        ])
+        XCTAssertEqual(again.exitCode, 0)
+        let after2 = try currentTagIds()
+        XCTAssertEqual(after2, after1, "re-adding an existing tag must be idempotent")
+
+        // --remove-value: drop one tag, keep the other.
+        let removed = try runCLI([
+            "properties", "--set", "--remove-value",
+            "--reference", String(refId),
+            "--id", tagsIdStr,
+            "--value", aId,
+        ])
+        XCTAssertEqual(removed.exitCode, 0)
+        let after3 = try currentTagIds()
+        XCTAssertFalse(after3.contains(aId), "tag A must be gone after --remove-value")
+        XCTAssertTrue(after3.contains(bId), "tag B must remain")
+
+        // Idempotent: removing absent tag is a no-op.
+        let removeAgain = try runCLI([
+            "properties", "--set", "--remove-value",
+            "--reference", String(refId),
+            "--id", tagsIdStr,
+            "--value", aId,
+        ])
+        XCTAssertEqual(removeAgain.exitCode, 0)
     }
 
     func testPropertiesSetMultiSelectEncodesJSON() throws {

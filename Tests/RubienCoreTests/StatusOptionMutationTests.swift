@@ -210,10 +210,12 @@ final class StatusOptionMutationTests: XCTestCase {
         XCTAssertTrue(after.options.contains { $0.value == "Read" })
     }
 
-    /// Option mutations on a multiSelect property are intentionally
-    /// rejected — the value lives in JSON-encoded arrays so a scalar
-    /// equality bulk-update would silently miss in-use values.
-    func testRenameOnMultiSelectThrowsUnsupported() throws {
+    /// Custom multiSelect option rename rewrites the JSON arrays in every
+    /// affected propertyValue row so stored selections stay valid. Custom
+    /// multiSelect deletion follows the same in-use-protection contract as
+    /// singleSelect: throws `optionInUse` unless `replaceWith` is supplied.
+    /// (Tags are exercised separately in `TagsPropertyRoutingTests`.)
+    func testRenameAndDeleteOnCustomMultiSelectMutateInUseRows() throws {
         let db = try makeDB()
         var custom = PropertyDefinition(
             name: "Themes",
@@ -228,16 +230,54 @@ final class StatusOptionMutationTests: XCTestCase {
         )
         try db.savePropertyDefinition(&custom)
 
+        // Seed two references so we can assert the bulk JSON rewrite.
+        var refA = Reference(title: "A")
+        var refB = Reference(title: "B")
+        try db.saveReference(&refA)
+        try db.saveReference(&refB)
+        try db.setPropertyValue(
+            referenceId: refA.id!,
+            propertyId: custom.id!,
+            value: PropertyValue.encodeMultiSelect(["ML"])
+        )
+        try db.setPropertyValue(
+            referenceId: refB.id!,
+            propertyId: custom.id!,
+            value: PropertyValue.encodeMultiSelect(["ML", "Systems"])
+        )
+
+        // Rename "ML" → "MachineLearning". Both rows must rewrite their
+        // arrays in place; "Systems" stays put.
+        try db.renamePropertyOption(propertyId: custom.id!, from: "ML", to: "MachineLearning")
+
+        let updated = try db.fetchAllPropertyDefinitions().first { $0.id == custom.id }!
+        XCTAssertEqual(Set(updated.options.map(\.value)), ["MachineLearning", "Systems"])
+        let valueA = try db.fetchPropertyValues(forReference: refA.id!)
+            .first { $0.propertyId == custom.id }?.value
+        XCTAssertEqual(PropertyValue.decodeMultiSelect(valueA ?? ""), ["MachineLearning"])
+        let valueB = try db.fetchPropertyValues(forReference: refB.id!)
+            .first { $0.propertyId == custom.id }?.value
+        XCTAssertEqual(Set(PropertyValue.decodeMultiSelect(valueB ?? "")), ["MachineLearning", "Systems"])
+
+        // Delete with no replacement: refuse, surface in-use count for the
+        // 2 references that still hold the value.
         XCTAssertThrowsError(
-            try db.renamePropertyOption(propertyId: custom.id!, from: "ML", to: "MachineLearning")
+            try db.deletePropertyOption(propertyId: custom.id!, value: "MachineLearning", replaceWith: nil)
         ) { error in
-            XCTAssertEqual(error as? PropertyOptionError, .unsupportedPropertyType)
+            XCTAssertEqual(error as? PropertyOptionError, .optionInUse(count: 2))
         }
-        XCTAssertThrowsError(
-            try db.deletePropertyOption(propertyId: custom.id!, value: "ML", replaceWith: nil)
-        ) { error in
-            XCTAssertEqual(error as? PropertyOptionError, .unsupportedPropertyType)
-        }
+
+        // Delete with replacement: rewrite "MachineLearning" → "Systems"
+        // (deduping the duplicate on refB), then drop the option.
+        try db.deletePropertyOption(propertyId: custom.id!, value: "MachineLearning", replaceWith: "Systems")
+        let final = try db.fetchAllPropertyDefinitions().first { $0.id == custom.id }!
+        XCTAssertEqual(final.options.map(\.value), ["Systems"])
+        let finalA = try db.fetchPropertyValues(forReference: refA.id!)
+            .first { $0.propertyId == custom.id }?.value
+        XCTAssertEqual(PropertyValue.decodeMultiSelect(finalA ?? ""), ["Systems"])
+        let finalB = try db.fetchPropertyValues(forReference: refB.id!)
+            .first { $0.propertyId == custom.id }?.value
+        XCTAssertEqual(PropertyValue.decodeMultiSelect(finalB ?? ""), ["Systems"])
     }
 
     /// Supplying a replacement that isn't itself an existing option is a

@@ -53,8 +53,7 @@ For SPM dev builds, run `.build/debug/rubien-cli` directly or add `.build/debug`
 | `cite` | Generate formatted citations |
 | `import` | Import from BibTeX or RIS file |
 | `export` | Export references as JSON, BibTeX, or RIS |
-| `tags` | List or manage tags |
-| `properties` | List or manage custom property definitions and per-reference values |
+| `properties` | List or manage property definitions, options, and per-reference values (covers tags via the built-in `Tags` property) |
 | `annotations` | List PDF annotations for a reference |
 | `styles` | List available citation styles |
 | `views` | Manage database views |
@@ -308,112 +307,139 @@ rubien-cli export --format ris
 
 ---
 
-## tags
-
-List or manage tags, assign/remove tags from references.
-
-```bash
-rubien-cli tags                                  # List all
-rubien-cli tags --create --name "Important" --color "#FF0000"
-rubien-cli tags --assign --reference 42 --tags "1,3,5"
-rubien-cli tags --remove-tags --reference 42 --tags "3"
-rubien-cli tags --reference 42                   # List tags for reference
-rubien-cli tags --rename --id 1 --name "Critical"
-rubien-cli tags --delete 3
-```
-
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `--create` | Flag | false | Create a new tag |
-| `--name` | String | — | Tag name (with `--create` or `--rename`) |
-| `--color` | String | auto | Hex color (with `--create`); an unused palette color is auto-assigned if omitted |
-| `--delete` | Int64 | — | Delete tag by ID |
-| `--assign` | Flag | false | Append tags to a reference |
-| `--remove-tags` | Flag | false | Remove tags from a reference |
-| `--reference` | Int64 | — | Reference ID (with `--assign`, `--remove-tags`, or to list) |
-| `--tags` | String | — | Comma-separated tag IDs (with `--assign` or `--remove-tags`) |
-| `--rename` | Flag | false | Rename a tag |
-| `--id` | Int64 | — | Tag ID (with `--rename`) |
-
-**Output:** JSON array of `{id, name, color}`.
-
----
-
 ## properties
 
-List or manage **custom property definitions** (built-in "default" properties such as DOI/Year/Type are read-only via this command — use `update` for those) and per-reference **property values**.
+Manage **property definitions**, **options**, and **per-reference values**. The seeded built-in `Tags` PropertyDefinition (`defaultFieldKey: "tags"`) routes through the `Tag` + `ReferenceTag` tables transparently, so all tag operations live here too — there is no separate `tags` subcommand.
+
+> **Migrating from `rubien-cli tags`** (retired)
+>
+> | Old `tags` command | New `properties` equivalent |
+> |---|---|
+> | `tags` | `properties --name Tags` |
+> | `tags --reference 42` | `properties --reference 42` (Tags appears in the listed values) |
+> | `tags --create --name X --color #abc` | `properties --add-option --id <Tags id> --value X --color #abc` (returns the new tag's id as `value`) |
+> | `tags --rename --id 5 --name Y` | `properties --rename-option --id <Tags id> --from 5 --to Y` |
+> | `tags --delete 5` | `properties --delete-option --id <Tags id> --value 5 [--replace-with <other tag id>]` |
+> | `tags --assign --reference 42 --tags 1,3,5` | `properties --set --add-value --reference 42 --id <Tags id> --value "1,3,5"` |
+> | `tags --remove-tags --reference 42 --tags 3` | `properties --set --remove-value --reference 42 --id <Tags id> --value "3"` |
+>
+> Resolve `<Tags id>` once with `properties --name Tags` (or look it up by `defaultFieldKey == "tags"`).
 
 ```bash
 rubien-cli properties                                              # List all definitions
 rubien-cli properties --visible                                    # Only visible definitions
+rubien-cli properties --id 3 --id 7                                # Subset by id (repeatable)
+rubien-cli properties --name Tags --name modality                  # Subset by name (repeatable, exact)
 rubien-cli properties --create --name "Status" \
   --type singleSelect --options "todo,doing,done"
-rubien-cli properties --create --name "Tags2" \
+rubien-cli properties --create --name "Themes" \
   --type multiSelect --options "ml,nlp,vision"
 rubien-cli properties --rename --id 42 --name "Stage"
 rubien-cli properties --show --id 42                               # Mark visible
 rubien-cli properties --hide --id 42
-rubien-cli properties --add-option --id 42 --value "blocked"
+
+# Options
+rubien-cli properties --add-option --id 42 --value "blocked"       # Append option (creates a Tag for the Tags property)
+rubien-cli properties --rename-option --id 42 --from "blocked" --to "stalled"
+rubien-cli properties --delete-option --id 42 --value "stalled" --replace-with "doing"
+
+# Definition lifecycle
 rubien-cli properties --delete 42                                  # Deletes a custom definition; built-ins are refused
+
+# Per-reference values
 rubien-cli properties --set --reference 7 --id 42 --value "doing"
-rubien-cli properties --set --reference 7 --id 43 --value "ml,nlp" # multiSelect: CSV → stored as JSON [String]
+rubien-cli properties --set --reference 7 --id 43 --value "ml,nlp"           # multiSelect: replace
+rubien-cli properties --set --add-value --reference 7 --id 43 --value "rl"   # multiSelect: idempotent add
+rubien-cli properties --set --remove-value --reference 7 --id 43 --value "ml" # multiSelect: idempotent remove
 rubien-cli properties --clear --reference 7 --id 42
 rubien-cli properties --reference 7                                # List values set on reference 7
 ```
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `--visible` | Flag | false | Restrict the default list to visible definitions |
+| `--visible` | Flag | false | Restrict the default list to visible definitions. Ignored when `--id` / `--name` is supplied — explicit selectors always win. |
+| `--id` | Int64 (repeatable) | — | With operations: single property target. With list: repeatable filter selector. Errors with `unresolved-selectors` when any id doesn't exist. |
+| `--name` | String (repeatable) | — | With `--create` / `--rename`: target name (single value). With list: repeatable filter selector (exact, case-sensitive). Errors with `unresolved-selectors` when any name doesn't match. |
 | `--create` | Flag | false | Create a new definition (requires `--name` and `--type`) |
-| `--name` | String | — | Property name (with `--create` or `--rename`) |
 | `--type` | String | — | Property type (with `--create`): `string`, `url`, `number`, `singleSelect`, `multiSelect`, `date`, `checkbox` |
 | `--options` | String | — | Comma-separated option values for `singleSelect`/`multiSelect` (with `--create`); colors auto-assigned |
 | `--delete` | Int64 | — | Delete a definition by ID; built-in (`isDefault: true`) definitions are refused |
 | `--rename` | Flag | false | Rename a definition (requires `--id` and `--name`) |
 | `--show` | Flag | false | Mark a definition visible (requires `--id`) |
 | `--hide` | Flag | false | Mark a definition hidden (requires `--id`) |
-| `--add-option` | Flag | false | Append a select option (requires `--id` and `--value`; color auto-assigned if `--color` omitted) |
-| `--id` | Int64 | — | Property definition ID |
-| `--value` | String | — | Option value (with `--add-option` or `--set`); for `multiSelect` pass comma-separated values |
+| `--add-option` | Flag | false | Append a select option (requires `--id` and `--value`). For the Tags property, creates a new Tag; the response's option `value` is the new tag's id. |
+| `--rename-option` | Flag | false | Rename a select option (requires `--id`, `--from`, `--to`). Bulk-updates affected references. For Tags, `--from` is the stringified tag id; renames the underlying Tag without touching pivots. |
+| `--delete-option` | Flag | false | Remove a select option (requires `--id`, `--value`). Errors `optionInUse` for in-use options unless `--replace-with` is supplied. For Tags, `--value` is the stringified tag id; `--replace-with` re-tags affected references before removing the old tag. |
+| `--value` | String | — | Option value. For `multiSelect` (incl. Tags): comma-separated. With `--add-option` / `--rename-option` / `--delete-option` / `--set`. |
 | `--color` | String | auto | Hex color (with `--add-option`); unused palette color auto-assigned if omitted |
-| `--set` | Flag | false | Upsert a value on a reference (requires `--reference`, `--id`, `--value`); refused for built-in properties |
-| `--clear` | Flag | false | Delete a value on a reference (requires `--reference` and `--id`); refused for built-in properties |
+| `--from` | String | — | Existing option value to rename (with `--rename-option`). For Tags, the stringified tag id. |
+| `--to` | String | — | New option value (with `--rename-option`). For Tags, the new display name. |
+| `--replace-with` | String | — | Replacement option for in-use values when deleting (with `--delete-option`). For Tags, the stringified id of another tag. |
+| `--set` | Flag | false | Upsert a value on a reference (requires `--reference`, `--id`, `--value`). Replace semantics for `multiSelect`. Refused for column-backed built-ins (Status / Type / Year / DOI / URL); allowed for the Tags property (routes through `setTags`). |
+| `--add-value` | Flag | false | Sub-mode of `--set`: additive on `multiSelect` (idempotent). |
+| `--remove-value` | Flag | false | Sub-mode of `--set`: subtractive on `multiSelect` (idempotent). |
+| `--clear` | Flag | false | Delete a value on a reference (requires `--reference` and `--id`). Refused for column-backed built-ins; for Tags it removes all of the reference's tag assignments. |
 | `--reference` | Int64 | — | Reference ID (with `--set`, `--clear`, or alone to list that reference's values) |
 
 **Output shapes:**
 
-Listing (default): JSON array of `PropertyDefinition` objects:
+Listing (default): JSON array of `PropertyDefinition` objects. For the Tags property, `options` is one entry per Tag row:
 
 ```json
-{
-  "id": "1",
-  "name": "Status",
-  "type": "singleSelect",
-  "options": [
-    {"value": "todo",  "color": "#007AFF"},
-    {"value": "doing", "color": "#34C759"},
-    {"value": "done",  "color": "#FF9500"}
-  ],
-  "sortOrder": 5,
-  "isDefault": false,
-  "defaultFieldKey": null,
-  "isVisible": true
-}
+[
+  {
+    "id": "3",
+    "name": "Tags",
+    "type": "multiSelect",
+    "options": [
+      {"value": "1", "label": "Important", "color": "#FF0000"},
+      {"value": "2", "label": "Read-Later", "color": "#34C759"}
+    ],
+    "sortOrder": 2,
+    "isDefault": true,
+    "defaultFieldKey": "tags",
+    "isVisible": true
+  },
+  {
+    "id": "7",
+    "name": "modality",
+    "type": "multiSelect",
+    "options": [
+      {"value": "ml",     "label": "ml",     "color": "#007AFF"},
+      {"value": "nlp",    "label": "nlp",    "color": "#34C759"},
+      {"value": "vision", "label": "vision", "color": "#FF9500"}
+    ],
+    "sortOrder": 12,
+    "isDefault": false,
+    "defaultFieldKey": null,
+    "isVisible": true
+  }
+]
 ```
 
-Listing with `--reference <id>`: JSON array of values on that reference:
+For non-Tags select properties, `value` and `label` are equal — they're both the option string. Always render `label`; address mutations by `value`. The Tags property uses the **stable tag id as `value`** so renames don't break stored references.
+
+Listing with `--reference <id>`: JSON array of values on that reference (Tags appears here too when the reference has any tags, with `value` being the JSON-encoded array of stringified tag ids):
 
 ```json
-[{ "propertyId": "1", "name": "Status", "type": "singleSelect", "value": "doing" }]
+[
+  { "propertyId": "1", "name": "Status", "type": "singleSelect", "value": "doing" },
+  { "propertyId": "3", "name": "Tags",   "type": "multiSelect",  "value": "[\"1\",\"2\"]" }
+]
 ```
 
-For `--set` on a `multiSelect` property, `value` in the output echoes the JSON-encoded string array the CLI stored (e.g. `"[\"ml\",\"nlp\"]"`), matching what the app decodes.
+For `--set` on a `multiSelect` property, `value` in the output echoes the JSON-encoded string array the CLI stored (e.g. `"[\"ml\",\"nlp\"]"`), matching what the app decodes. For `--add-value` / `--remove-value`, the response is a confirmation dict naming the mode and the values applied.
 
-Create/rename/show/hide/add-option: single `PropertyDefinition` object (same shape as listing entries). `--delete`/`--set`/`--clear` return a short confirmation dict.
+Create/rename/show/hide/add-option/rename-option/delete-option: single `PropertyDefinition` object (same shape as listing entries). `--delete`/`--set`/`--clear` return a short confirmation dict.
+
+**Selector behavior:**
+- `--id` / `--name` are repeatable on the list operation. Operations that take a single target (`--rename`, `--set`, etc.) error if more than one is supplied.
+- Explicit selectors override `--visible` filtering — passing `--id <hidden>` returns the property regardless.
+- Any unresolved id or name aborts with a non-zero exit and `{"error": "unresolved-selectors", "ids": [...], "names": [...]}` on stdout.
 
 **Guards:**
-- `--delete` on a built-in definition (e.g. Type, Year) returns an error and leaves the row untouched. Use `update --clear-field <name>` on the reference instead for built-in values.
-- `--set` / `--clear` on a built-in property return an error — built-in properties live on the `Reference` fields, not the `propertyValue` table. Use `update` for those.
+- `--delete` on a built-in definition (Tags, Type, Year, etc.) returns an error and leaves the row untouched.
+- `--set` / `--clear` on a column-backed built-in (Status, Type, Year, DOI, URL) return an error — those properties live on the `Reference` fields. Use `update` for them. The Tags property is the exception: it routes through `setTags` transparently.
 
 ---
 

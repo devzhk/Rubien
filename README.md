@@ -15,7 +15,7 @@ The name means *the keeper of borrowed knowledge.*
 - **FTS5 search** — SQLite full-text search across title, authors, journal, abstract, notes, DOI.
 - **BibTeX / RIS import & export** — standard parsers, round-trip friendly.
 - **iCloud sync** — `CKSyncEngine`-backed two-way sync of references, tags, annotations, custom properties, and views across Macs signed into the same iCloud account. Toggle in Settings → iCloud Sync.
-- **CLI** — `rubien-cli` with 16 subcommands: `search`, `list`, `get`, `add`, `update`, `delete`, `cite`, `import`, `export`, `tags`, `properties`, `views`, `annotations`, `styles`, `pdf`, `sync`. JSON output for scripting.
+- **CLI** — `rubien-cli` with 15 subcommands: `search`, `list`, `get`, `add`, `update`, `delete`, `cite`, `import`, `export`, `properties`, `views`, `annotations`, `styles`, `pdf`, `sync`. JSON output for scripting. Tag operations live under `properties` against the built-in Tags property.
 
 ## Supported sources
 

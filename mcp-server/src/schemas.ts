@@ -56,17 +56,22 @@ export const ReferenceDTO = z.object({
 });
 export type ReferenceDTO = z.infer<typeof ReferenceDTO>;
 
-export const SelectOption = z.object({
-  id: z.string(),
+/// Mirror of `PropertyOptionDTO` in RubienCLI.swift. `value` is the canonical
+/// identity (option string for custom selects; stringified tag id for the
+/// built-in Tags property). `label` is the display text — equal to `value`
+/// for custom options, and the Tag's name for Tags-routed options.
+export const PropertyOptionDTO = z.object({
+  value: z.string(),
   label: z.string(),
   color: z.string(),
 });
+export type PropertyOptionDTO = z.infer<typeof PropertyOptionDTO>;
 
 export const PropertyDefinitionDTO = z.object({
   id: z.string(),
   name: z.string(),
   type: z.string(),
-  options: z.array(SelectOption),
+  options: z.array(PropertyOptionDTO),
   sortOrder: z.number().int(),
   isDefault: z.boolean(),
   defaultFieldKey: z.string().optional(),
@@ -98,12 +103,10 @@ export const AddStatusOutput = z.object({
 });
 export type AddStatusOutput = z.infer<typeof AddStatusOutput>;
 
-export const TagDTO = z.object({
-  id: z.number().int(),
-  name: z.string(),
-  color: z.string(),
-});
-export type TagDTO = z.infer<typeof TagDTO>;
+// TagDTO retired alongside the rubien_tags_* MCP tool family. Tag rows now
+// surface as inline options on the built-in Tags PropertyDefinition (see
+// PropertyOptionDTO above): `value` is the stringified tag id, `label` is
+// the tag name, `color` is the tag color.
 
 // Citation outputs (three formats: text, bibliography, docx-cc).
 export const CitationTextOutput = z.object({

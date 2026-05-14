@@ -2,7 +2,6 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerReferenceTools } from "./tools/references.js";
 import { registerCitationTools } from "./tools/citations.js";
 import { registerIOTools } from "./tools/io.js";
-import { registerTagTools } from "./tools/tags.js";
 import { registerPropertyTools } from "./tools/properties.js";
 import { registerViewTools } from "./tools/views.js";
 import { registerAnnotationTools } from "./tools/annotations.js";
@@ -22,7 +21,9 @@ export function buildServer(): McpServer {
   registerReferenceTools(server);
   registerCitationTools(server);
   registerIOTools(server);
-  registerTagTools(server);
+  // Tags are exposed through the `properties` family against the built-in
+  // Tags PropertyDefinition (defaultFieldKey == "tags"). The standalone
+  // rubien_tags_* tool family was retired — see properties.ts.
   registerPropertyTools(server);
   registerViewTools(server);
   registerAnnotationTools(server);

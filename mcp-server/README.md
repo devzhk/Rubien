@@ -43,7 +43,7 @@ Try it:
 > List my 5 most recently added references.
 > Cite reference 42 in Nature style.
 
-Claude Code's permission UI prompts for the destructive tools (`rubien_delete`, `rubien_update`, `rubien_import`, and the property/tag write tools) on first use.
+Claude Code's permission UI prompts for the destructive tools (`rubien_delete`, `rubien_update`, `rubien_import`, and the property write tools) on first use.
 
 ## Claude Desktop (stdio)
 
@@ -120,8 +120,7 @@ Roughly 36 tools covering every `rubien-cli` subcommand mode. Names are `rubien_
 | Citations | `rubien_cite`, `rubien_styles_list` |
 | Import/Export | `rubien_import`, `rubien_export` |
 | PDFs | `rubien_pdf_info`, `rubien_pdf_text`, `rubien_pdf_page_image`, `rubien_pdf_download` |
-| Tags | `rubien_tags_list`, `rubien_tags_create`, `rubien_tags_delete`, `rubien_tags_rename`, `rubien_tags_assign`, `rubien_tags_remove` |
-| Properties | `rubien_properties_list`, `rubien_properties_create`, `rubien_properties_delete`, `rubien_properties_rename`, `rubien_properties_show`, `rubien_properties_hide`, `rubien_properties_add_option`, `rubien_properties_set`, `rubien_properties_clear` |
+| Properties (incl. Tags) | `rubien_properties_list`, `rubien_properties_create`, `rubien_properties_delete`, `rubien_properties_rename`, `rubien_properties_show`, `rubien_properties_hide`, `rubien_properties_add_option`, `rubien_properties_rename_option`, `rubien_properties_delete_option`, `rubien_properties_set`, `rubien_properties_add_values`, `rubien_properties_remove_values`, `rubien_properties_clear` |
 | Saved views | `rubien_views_list`, `rubien_views_create`, `rubien_views_delete`, `rubien_views_rename`, `rubien_views_query` |
 | Annotations | `rubien_annotations_list` |
 | Sync | `rubien_sync_status` |

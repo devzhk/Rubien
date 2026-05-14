@@ -2803,6 +2803,12 @@ extension AppDatabase {
         }
     }
 
+    public func fetchPropertyDefinition(id: Int64) throws -> PropertyDefinition? {
+        try dbWriter.read { db in
+            try PropertyDefinition.fetchOne(db, id: id)
+        }
+    }
+
     public func fetchVisiblePropertyDefinitions() throws -> [PropertyDefinition] {
         try dbWriter.read { db in
             try PropertyDefinition
@@ -2852,38 +2858,69 @@ extension AppDatabase {
         }
     }
 
-    /// Rename a single-select option on a PropertyDefinition AND bulk-update
-    /// every reference row that points to the old value so the rename actually
+    /// Rename a select option on a PropertyDefinition AND bulk-update every
+    /// reference row that points to the old value so the rename actually
     /// takes effect across the library.
     ///
-    /// For default properties bound to a Reference column (e.g. Status →
-    /// `readingStatus`), the bulk-update writes to that column directly. For
-    /// user-created custom properties, it writes to `propertyValue.value`.
-    /// Both paths and the optionsJSON update happen in the same transaction
-    /// so observers either see the consistent post-rename state or nothing.
+    /// Routing by property kind:
+    /// - **Tags** (built-in multiSelect, `defaultFieldKey == "tags"`): `from`
+    ///   is the stringified tag id, `to` is the new display name. Renames
+    ///   the Tag row directly — `ReferenceTag` pivots are untouched
+    ///   (identity-stable: tag id is the canonical reference).
+    /// - **Built-in singleSelect bound to a Reference column** (e.g. Status →
+    ///   `readingStatus`): bulk-update the column directly using the fixed
+    ///   `builtInSingleSelectKeys` allow-list to avoid SQL injection.
+    /// - **Custom singleSelect**: rename in `optionsJSON`, bulk-update
+    ///   `propertyValue.value` rows that match the old scalar.
+    /// - **Custom multiSelect**: rename in `optionsJSON`, then for each
+    ///   `propertyValue` row containing `from` in its JSON-encoded array,
+    ///   substitute `to` and rewrite the row.
     ///
-    /// Throws `PropertyOptionError.optionNotFound` if the property exists but
-    /// has no option matching `from`. No-op if `from == to`.
+    /// Throws `PropertyOptionError.optionNotFound` if the option doesn't
+    /// exist on the property; `.duplicateValue(to)` if the rename would
+    /// collide with another existing option (collapsing two distinct options
+    /// would break picker identity). No-op if `from == to`.
     public func renamePropertyOption(propertyId: Int64, from: String, to: String) throws {
         guard from != to else { return }
         try dbWriter.write { db in
             guard var prop = try PropertyDefinition.fetchOne(db, id: propertyId) else {
                 throw PropertyOptionError.propertyNotFound
             }
-            // multiSelect option mutations are intentionally not supported:
-            // values are JSON-encoded arrays and a scalar equality bulk-update
-            // would miss every multi-value row. Surface this rather than
-            // silently leaving stored selections stale.
-            guard prop.type == .singleSelect else {
+
+            // Tags-property routing: `from` = tag id (string). Rename the Tag
+            // row by id; pivots are unchanged because tag id is the identity.
+            if prop.isTags {
+                guard let tagId = Int64(from) else {
+                    throw PropertyOptionError.optionNotFound
+                }
+                guard var tag = try Tag.fetchOne(db, id: tagId) else {
+                    throw PropertyOptionError.optionNotFound
+                }
+                // Exclude self from the duplicate check — otherwise renaming
+                // a tag to its current name (a no-op idempotent rename) would
+                // spuriously throw `.duplicateValue`. The early `from != to`
+                // guard above doesn't cover this because `from` is an id and
+                // `to` is a name (different domains).
+                if try Tag
+                    .filter(Tag.Columns.name == to)
+                    .filter(Tag.Columns.id != tagId)
+                    .fetchOne(db) != nil {
+                    throw PropertyOptionError.duplicateValue(to)
+                }
+                if tag.name == to { return }
+                tag.name = to
+                tag.dateModified = Date()
+                try tag.update(db)
+                return
+            }
+
+            guard prop.type == .singleSelect || prop.type == .multiSelect else {
                 throw PropertyOptionError.unsupportedPropertyType
             }
             var options = prop.options
             guard let idx = options.firstIndex(where: { $0.value == from }) else {
                 throw PropertyOptionError.optionNotFound
             }
-            // Renaming onto an existing option's value would collapse two
-            // distinct options into one — break the single-select identity
-            // assumption. Surface and let the caller decide.
             if options.contains(where: { $0.value == to }) {
                 throw PropertyOptionError.duplicateValue(to)
             }
@@ -2892,41 +2929,109 @@ extension AppDatabase {
             prop.dateModified = Date()
             try prop.update(db)
 
-            // Bulk-update affected rows. Type is locked from option mutations
-            // (see CLI gate), but Status (readingStatus) and any custom
-            // single-select property may be renamed.
-            if let key = prop.defaultFieldKey,
-               Self.builtInSingleSelectKeys.contains(key) {
-                // Reference column rename. Column name comes from a fixed
-                // allow-list to avoid SQL injection through `defaultFieldKey`.
-                try db.execute(
-                    sql: "UPDATE reference SET \(key) = ? WHERE \(key) = ?",
-                    arguments: [to, from]
-                )
+            if prop.type == .singleSelect {
+                if let key = prop.defaultFieldKey,
+                   Self.builtInSingleSelectKeys.contains(key) {
+                    try db.execute(
+                        sql: "UPDATE reference SET \(key) = ? WHERE \(key) = ?",
+                        arguments: [to, from]
+                    )
+                } else {
+                    try db.execute(
+                        sql: "UPDATE propertyValue SET value = ? WHERE propertyId = ? AND value = ?",
+                        arguments: [to, propertyId, from]
+                    )
+                }
             } else {
-                // Custom singleSelect: value lives in propertyValue rows.
-                try db.execute(
-                    sql: "UPDATE propertyValue SET value = ? WHERE propertyId = ? AND value = ?",
-                    arguments: [to, propertyId, from]
-                )
+                // Custom multiSelect: rewrite each affected row's JSON array.
+                // We only touch rows whose decoded array actually contains
+                // `from`, so unrelated values stay quiet (no dirty churn).
+                let rows = try PropertyValue
+                    .filter(PropertyValue.Columns.propertyId == propertyId)
+                    .fetchAll(db)
+                for var row in rows {
+                    guard let raw = row.value else { continue }
+                    let arr = PropertyValue.decodeMultiSelect(raw)
+                    guard arr.contains(from) else { continue }
+                    let next = arr.map { $0 == from ? to : $0 }
+                    row.value = PropertyValue.encodeMultiSelect(next)
+                    try row.update(db)
+                }
             }
         }
     }
 
-    /// Delete a single-select option from a PropertyDefinition. References
-    /// that currently point to the deleted option are reassigned to
-    /// `replaceWith` if non-nil; otherwise the operation throws
+    /// Delete a select option from a PropertyDefinition. References that
+    /// currently point to the deleted option are reassigned to `replaceWith`
+    /// if non-nil; otherwise the operation throws
     /// `PropertyOptionError.optionInUse` so the caller can prompt for a
     /// replacement instead of silently orphaning data.
+    ///
+    /// Routing by property kind:
+    /// - **Tags**: `value` is the stringified tag id. Tag rows are deleted
+    ///   directly; the `referenceTag` FK `ON DELETE CASCADE` removes pivots,
+    ///   and the per-row delete trigger emits a `CDReferenceTag` tombstone
+    ///   for each cascaded pivot (verified by `testDeleteTagCascadesTombstones`).
+    ///   `replaceWith`, if supplied, must be the stringified id of another
+    ///   existing tag — affected references are re-tagged to it before the
+    ///   old tag is removed.
+    /// - **singleSelect**: same behavior as before (column or
+    ///   propertyValue.value depending on built-in vs custom).
+    /// - **Custom multiSelect**: counts/affects rows whose JSON array
+    ///   contains the value; replacement substitutes within each array.
     public func deletePropertyOption(propertyId: Int64, value: String, replaceWith: String? = nil) throws {
+        // `replaceWith == value` is meaningless: it would either re-tag refs
+        // to the about-to-be-deleted tag (Tags) or rewrite custom multiSelect
+        // arrays back to the value we're about to remove from optionsJSON,
+        // leaving rows referencing a value that no longer exists. Reject up
+        // front so callers get a clean error instead of silent inconsistency.
+        if let r = replaceWith, r == value {
+            throw PropertyOptionError.replacementNotFound(r)
+        }
         try dbWriter.write { db in
             guard var prop = try PropertyDefinition.fetchOne(db, id: propertyId) else {
                 throw PropertyOptionError.propertyNotFound
             }
-            // multiSelect option deletion via this path would only match
-            // scalar `value` rows, missing the JSON-array case. See the
-            // matching guard in `renamePropertyOption`.
-            guard prop.type == .singleSelect else {
+
+            // Tags-property routing.
+            if prop.isTags {
+                guard let tagId = Int64(value) else {
+                    throw PropertyOptionError.optionNotFound
+                }
+                guard try Tag.fetchOne(db, id: tagId) != nil else {
+                    throw PropertyOptionError.optionNotFound
+                }
+                let affectedCount = try Int.fetchOne(
+                    db,
+                    sql: "SELECT COUNT(*) FROM referenceTag WHERE tagId = ?",
+                    arguments: [tagId]
+                ) ?? 0
+                if affectedCount > 0 {
+                    if let replacement = replaceWith {
+                        guard let replacementId = Int64(replacement),
+                              try Tag.fetchOne(db, id: replacementId) != nil else {
+                            throw PropertyOptionError.replacementNotFound(replacement)
+                        }
+                        // Re-tag affected references to the replacement, then
+                        // delete the old pivots. INSERT OR IGNORE handles
+                        // refs already carrying both tags so we don't trip
+                        // the composite PK.
+                        try db.execute(
+                            sql: """
+                                INSERT OR IGNORE INTO referenceTag(referenceId, tagId, dateModified)
+                                SELECT referenceId, ?, \(sqlNowISO8601) FROM referenceTag WHERE tagId = ?
+                                """,
+                            arguments: [replacementId, tagId]
+                        )
+                    } else {
+                        throw PropertyOptionError.optionInUse(count: affectedCount)
+                    }
+                }
+                _ = try Tag.deleteOne(db, id: tagId)
+                return
+            }
+
+            guard prop.type == .singleSelect || prop.type == .multiSelect else {
                 throw PropertyOptionError.unsupportedPropertyType
             }
             var options = prop.options
@@ -2934,44 +3039,77 @@ extension AppDatabase {
                 throw PropertyOptionError.optionNotFound
             }
 
-            // Count affected references first so we can decide whether to
-            // throw .optionInUse or proceed.
+            // For multiSelect we fetch candidate rows once and reuse the same
+            // list for both the in-use count and the replacement rewrite.
+            // singleSelect doesn't need pre-fetched rows — the bulk-update is
+            // a single UPDATE statement, so a separate COUNT(*) is cheaper.
+            var multiSelectAffected: [PropertyValue] = []
             let affectedCount: Int
-            if let key = prop.defaultFieldKey,
-               Self.builtInSingleSelectKeys.contains(key) {
-                affectedCount = try Int.fetchOne(
-                    db,
-                    sql: "SELECT COUNT(*) FROM reference WHERE \(key) = ?",
-                    arguments: [value]
-                ) ?? 0
+            if prop.type == .singleSelect {
+                if let key = prop.defaultFieldKey,
+                   Self.builtInSingleSelectKeys.contains(key) {
+                    affectedCount = try Int.fetchOne(
+                        db,
+                        sql: "SELECT COUNT(*) FROM reference WHERE \(key) = ?",
+                        arguments: [value]
+                    ) ?? 0
+                } else {
+                    affectedCount = try Int.fetchOne(
+                        db,
+                        sql: "SELECT COUNT(*) FROM propertyValue WHERE propertyId = ? AND value = ?",
+                        arguments: [propertyId, value]
+                    ) ?? 0
+                }
             } else {
-                affectedCount = try Int.fetchOne(
-                    db,
-                    sql: "SELECT COUNT(*) FROM propertyValue WHERE propertyId = ? AND value = ?",
-                    arguments: [propertyId, value]
-                ) ?? 0
+                // Custom multiSelect: scan candidate rows once. The cheap
+                // LIKE prefilter avoids decoding every row in the property;
+                // the post-decode `arr.contains(value)` is the source of truth.
+                let candidates = try PropertyValue
+                    .filter(PropertyValue.Columns.propertyId == propertyId)
+                    .filter(sql: "value LIKE ?", arguments: ["%\"\(value)\"%"])
+                    .fetchAll(db)
+                multiSelectAffected = candidates.filter { row in
+                    guard let raw = row.value else { return false }
+                    return PropertyValue.decodeMultiSelect(raw).contains(value)
+                }
+                affectedCount = multiSelectAffected.count
             }
 
             if affectedCount > 0 {
                 guard let replacement = replaceWith else {
                     throw PropertyOptionError.optionInUse(count: affectedCount)
                 }
-                guard options.contains(where: { $0.value == replacement }) || replacement == value else {
-                    // Replacement must already exist as another option (we're
-                    // about to delete `value`, so it can't be the replacement).
+                // The `replacement == value` self-replacement case is rejected
+                // up front (see top of function), so here we only need to
+                // verify the replacement is one of the OTHER existing options.
+                guard options.contains(where: { $0.value == replacement }) else {
                     throw PropertyOptionError.replacementNotFound(replacement)
                 }
-                if let key = prop.defaultFieldKey,
-                   Self.builtInSingleSelectKeys.contains(key) {
-                    try db.execute(
-                        sql: "UPDATE reference SET \(key) = ? WHERE \(key) = ?",
-                        arguments: [replacement, value]
-                    )
+                if prop.type == .singleSelect {
+                    if let key = prop.defaultFieldKey,
+                       Self.builtInSingleSelectKeys.contains(key) {
+                        try db.execute(
+                            sql: "UPDATE reference SET \(key) = ? WHERE \(key) = ?",
+                            arguments: [replacement, value]
+                        )
+                    } else {
+                        try db.execute(
+                            sql: "UPDATE propertyValue SET value = ? WHERE propertyId = ? AND value = ?",
+                            arguments: [replacement, propertyId, value]
+                        )
+                    }
                 } else {
-                    try db.execute(
-                        sql: "UPDATE propertyValue SET value = ? WHERE propertyId = ? AND value = ?",
-                        arguments: [replacement, propertyId, value]
-                    )
+                    for var row in multiSelectAffected {
+                        guard let raw = row.value else { continue }
+                        let arr = PropertyValue.decodeMultiSelect(raw)
+                        // Substitute, then dedupe — the replacement may
+                        // already be in the array on the same reference.
+                        var seen = Set<String>()
+                        let next = arr.map { $0 == value ? replacement : $0 }
+                            .filter { seen.insert($0).inserted }
+                        row.value = PropertyValue.encodeMultiSelect(next)
+                        try row.update(db)
+                    }
                 }
             }
 
@@ -2994,6 +3132,7 @@ extension AppDatabase {
         "referenceType",
     ]
 
+
     public func observePropertyDefinitions() -> AnyPublisher<[PropertyDefinition], Error> {
         observePublisher { db in
             try PropertyDefinition
@@ -3007,19 +3146,70 @@ extension AppDatabase {
 extension AppDatabase {
     public func fetchPropertyValues(forReference refId: Int64) throws -> [PropertyValue] {
         try dbWriter.read { db in
-            try PropertyValue
+            var rows = try PropertyValue
                 .filter(PropertyValue.Columns.referenceId == refId)
                 .fetchAll(db)
+            // Project the seeded Tags PropertyDefinition's "value" out of the
+            // ReferenceTag pivot so callers see one consistent shape across
+            // all multi-select properties — the Tags-as-property contract.
+            if let tagsProp = try PropertyDefinition
+                .filter(PropertyDefinition.Columns.defaultFieldKey == PropertyDefinition.tagsFieldKey)
+                .fetchOne(db),
+               let tagsPropId = tagsProp.id {
+                let tagIds = try Int64.fetchAll(
+                    db,
+                    sql: "SELECT tagId FROM referenceTag WHERE referenceId = ? ORDER BY tagId",
+                    arguments: [refId]
+                )
+                if !tagIds.isEmpty {
+                    let stringIds = tagIds.map(String.init)
+                    let encoded = PropertyValue.encodeMultiSelect(stringIds)
+                    rows.append(PropertyValue(
+                        referenceId: refId,
+                        propertyId: tagsPropId,
+                        value: encoded
+                    ))
+                }
+            }
+            return rows
         }
     }
 
     public func setPropertyValue(referenceId: Int64, propertyId: Int64, value: String?) throws {
+        // Tags-property writes route through ReferenceTag instead of writing
+        // a propertyValue row that the UI/sync would never read. The value is
+        // either a JSON-encoded `[String]` of tag ids (matches how the CLI
+        // encodes multiSelect) or a comma-separated list. Names are not
+        // accepted here — `addPropertyOption` is the only path that creates
+        // a Tag from a name.
+        if try isTagsPropertyId(propertyId) {
+            let tagIds = try parseTagIdsForRouting(value)
+            // Validate ids before calling setTags so unknown ones surface as
+            // `PropertyOptionError.optionNotFound` (matching addPropertyValue's
+            // contract) instead of a lower-level FK constraint failure.
+            if !tagIds.isEmpty {
+                let existing: Set<Int64> = try dbWriter.read { db in
+                    let placeholders = tagIds.map { _ in "?" }.joined(separator: ",")
+                    return Set(try Int64.fetchAll(
+                        db,
+                        sql: "SELECT id FROM tag WHERE id IN (\(placeholders))",
+                        arguments: StatementArguments(tagIds)
+                    ))
+                }
+                for id in tagIds where !existing.contains(id) {
+                    throw PropertyOptionError.optionNotFound
+                }
+            }
+            try setTags(forReference: referenceId, tagIds: tagIds)
+            return
+        }
         try dbWriter.write { db in
             if let existing = try PropertyValue
                 .filter(PropertyValue.Columns.referenceId == referenceId)
                 .filter(PropertyValue.Columns.propertyId == propertyId)
                 .fetchOne(db) {
                 if let value {
+                    if existing.value == value { return }
                     var updated = existing
                     updated.value = value
                     try updated.update(db)
@@ -3031,6 +3221,223 @@ extension AppDatabase {
                 try pv.insert(db)
             }
         }
+    }
+
+    /// Add one or more values to a multiSelect property without disturbing the
+    /// caller's existing selections. Idempotent: re-adding a present value is a
+    /// no-op (no dirty churn). For the Tags property, inserts ReferenceTag
+    /// pivots; for other multiSelect properties, unions into the JSON-encoded
+    /// `propertyValue.value` array.
+    public func addPropertyValue(referenceId: Int64, propertyId: Int64, values: [String]) throws {
+        try mutatePropertyValueSet(
+            referenceId: referenceId,
+            propertyId: propertyId,
+            values: values,
+            mode: .add
+        )
+    }
+
+    /// Remove one or more values from a multiSelect property without
+    /// disturbing the caller's other selections. Idempotent: removing an
+    /// absent value is a no-op.
+    public func removePropertyValue(referenceId: Int64, propertyId: Int64, values: [String]) throws {
+        try mutatePropertyValueSet(
+            referenceId: referenceId,
+            propertyId: propertyId,
+            values: values,
+            mode: .remove
+        )
+    }
+
+    private enum MultiSelectMutation { case add, remove }
+
+    private func mutatePropertyValueSet(
+        referenceId: Int64,
+        propertyId: Int64,
+        values: [String],
+        mode: MultiSelectMutation
+    ) throws {
+        let cleaned = values
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !cleaned.isEmpty else { return }
+        try dbWriter.write { db in
+            guard let prop = try PropertyDefinition.fetchOne(db, id: propertyId) else {
+                throw PropertyOptionError.propertyNotFound
+            }
+            // Tags-property routing — pivot table, not propertyValue rows.
+            if prop.isTags {
+                let tagIds = try cleaned.map { raw -> Int64 in
+                    guard let id = Int64(raw) else {
+                        throw PropertyOptionError.optionNotFound
+                    }
+                    return id
+                }
+                switch mode {
+                case .add:
+                    // Validate FK first so a typo surfaces a clean error
+                    // instead of a SQLite constraint failure mid-insert.
+                    let existingTagIds = try Set(Int64.fetchAll(
+                        db,
+                        sql: "SELECT id FROM tag WHERE id IN (\(tagIds.map { _ in "?" }.joined(separator: ",")))",
+                        arguments: StatementArguments(tagIds)
+                    ))
+                    for id in tagIds where !existingTagIds.contains(id) {
+                        throw PropertyOptionError.optionNotFound
+                    }
+                    for tagId in tagIds {
+                        // INSERT OR IGNORE keeps the operation idempotent —
+                        // the dirty-tracking trigger only fires when a row is
+                        // actually inserted, so re-adding skips sync churn.
+                        try db.execute(
+                            sql: "INSERT OR IGNORE INTO referenceTag(referenceId, tagId, dateModified) VALUES (?, ?, \(sqlNowISO8601))",
+                            arguments: [referenceId, tagId]
+                        )
+                    }
+                case .remove:
+                    let placeholders = tagIds.map { _ in "?" }.joined(separator: ",")
+                    var args: [DatabaseValueConvertible] = [referenceId]
+                    args.append(contentsOf: tagIds.map { $0 as DatabaseValueConvertible })
+                    try db.execute(
+                        sql: "DELETE FROM referenceTag WHERE referenceId = ? AND tagId IN (\(placeholders))",
+                        arguments: StatementArguments(args)
+                    )
+                }
+                return
+            }
+            // Other multiSelect properties — union/difference on the JSON
+            // array stored in propertyValue.value. Skip the write entirely
+            // when the result equals the current state to avoid dirtying the
+            // row for a no-op.
+            guard prop.type == .multiSelect else {
+                throw PropertyOptionError.unsupportedPropertyType
+            }
+            let existing = try PropertyValue
+                .filter(PropertyValue.Columns.referenceId == referenceId)
+                .filter(PropertyValue.Columns.propertyId == propertyId)
+                .fetchOne(db)
+            let currentArray = existing.flatMap { $0.value }.map(PropertyValue.decodeMultiSelect) ?? []
+            let updated: [String]
+            switch mode {
+            case .add:
+                var seen = Set(currentArray)
+                var next = currentArray
+                for v in cleaned where !seen.contains(v) {
+                    seen.insert(v)
+                    next.append(v)
+                }
+                updated = next
+            case .remove:
+                let drop = Set(cleaned)
+                updated = currentArray.filter { !drop.contains($0) }
+            }
+            if updated == currentArray { return }
+            let encoded = updated.isEmpty ? nil : PropertyValue.encodeMultiSelect(updated)
+            if let existing {
+                if let encoded {
+                    var u = existing
+                    u.value = encoded
+                    try u.update(db)
+                } else {
+                    _ = try existing.delete(db)
+                }
+            } else if let encoded {
+                var pv = PropertyValue(referenceId: referenceId, propertyId: propertyId, value: encoded)
+                try pv.insert(db)
+            }
+        }
+    }
+
+    /// Add a select option to a property. For the Tags property, this creates
+    /// a new Tag row (`saveTag`) and returns its rowid as the option `value`;
+    /// for other singleSelect/multiSelect properties, it appends to the
+    /// definition's `optionsJSON` and returns the value verbatim.
+    ///
+    /// `color` is auto-picked from `ColorPalette` if nil. Throws
+    /// `PropertyOptionError.duplicateValue` when the option (or, for Tags,
+    /// the tag name) already exists — duplicate appends would break the
+    /// single-select identity assumption and create ambiguous tag lookups.
+    @discardableResult
+    public func addPropertyOption(propertyId: Int64, value: String, color: String? = nil) throws -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw PropertyOptionError.optionNotFound
+        }
+        return try dbWriter.write { db -> String in
+            guard var prop = try PropertyDefinition.fetchOne(db, id: propertyId) else {
+                throw PropertyOptionError.propertyNotFound
+            }
+            if prop.isTags {
+                if try Tag.filter(Tag.Columns.name == trimmed).fetchOne(db) != nil {
+                    throw PropertyOptionError.duplicateValue(trimmed)
+                }
+                // Match the retired `tags --create` behavior: when the caller
+                // doesn't pin a color, exclude the colors already in use by
+                // existing tags so auto-picks stay diverse across the library.
+                let resolvedColor: String
+                if let c = color {
+                    resolvedColor = c
+                } else {
+                    let used = Set(try Tag.fetchAll(db).map(\.color))
+                    resolvedColor = ColorPalette.nextUnused(excluding: used)
+                }
+                var tag = Tag(name: trimmed, color: resolvedColor)
+                try tag.insert(db)
+                guard let newId = tag.id else {
+                    throw PropertyOptionError.optionNotFound
+                }
+                return String(newId)
+            }
+            guard prop.type == .singleSelect || prop.type == .multiSelect else {
+                throw PropertyOptionError.unsupportedPropertyType
+            }
+            var options = prop.options
+            if options.contains(where: { $0.value == trimmed }) {
+                throw PropertyOptionError.duplicateValue(trimmed)
+            }
+            let resolvedColor = color ?? ColorPalette.nextUnused(excluding: Set(options.map(\.color)))
+            options.append(SelectOption(value: trimmed, color: resolvedColor))
+            prop.options = options
+            prop.dateModified = Date()
+            try prop.update(db)
+            return trimmed
+        }
+    }
+
+    private func isTagsPropertyId(_ propertyId: Int64) throws -> Bool {
+        try dbWriter.read { db in
+            guard let prop = try PropertyDefinition.fetchOne(db, id: propertyId) else {
+                return false
+            }
+            return prop.isTags
+        }
+    }
+
+    /// Parse the value passed to `setPropertyValue` for the Tags property:
+    /// nil / empty / `"[]"` → clear all; JSON-encoded string array of ids →
+    /// decode; comma-separated bare ids → split. Names are rejected here.
+    private func parseTagIdsForRouting(_ value: String?) throws -> [Int64] {
+        guard let raw = value?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return []
+        }
+        let strings: [String]
+        if raw.hasPrefix("[") {
+            strings = PropertyValue.decodeMultiSelect(raw)
+        } else {
+            strings = raw.split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+        }
+        guard !strings.isEmpty else { return [] }
+        var ids: [Int64] = []
+        ids.reserveCapacity(strings.count)
+        for s in strings {
+            guard let id = Int64(s) else {
+                throw PropertyOptionError.optionNotFound
+            }
+            ids.append(id)
+        }
+        return ids
     }
 
     public func fetchAllPropertyValues() throws -> [Int64: [Int64: String]] {

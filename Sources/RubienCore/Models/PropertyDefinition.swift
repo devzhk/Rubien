@@ -125,6 +125,14 @@ public struct PropertyDefinition: Identifiable, Codable, Hashable, Sendable {
     /// Display name of the built-in Tags property.
     public static let tagsPropertyName = "Tags"
 
+    /// True if this is the seeded built-in Tags property — its value/option
+    /// mutations route through `Tag` + `ReferenceTag` instead of
+    /// `propertyValue` / `optionsJSON`. Single source of truth for the
+    /// "Tags is just a property" surface in the CLI / MCP / DTOs.
+    public var isTags: Bool {
+        defaultFieldKey == Self.tagsFieldKey
+    }
+
     /// Append `value` as a new option with an auto-picked color if it isn't already listed.
     /// Returns `true` when the definition was mutated (caller should persist), `false` otherwise.
     @discardableResult
