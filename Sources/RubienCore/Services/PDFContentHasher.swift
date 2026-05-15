@@ -5,6 +5,16 @@ import CryptoKit
 import Crypto
 #endif
 
+#if !canImport(Darwin)
+// Linux has no Objective-C autorelease pool — provide a no-op so the
+// `while autoreleasepool { … }` chunked read in `sha256(of:)` compiles
+// untouched on swift-corelibs-foundation.
+@inline(__always)
+private func autoreleasepool<T>(invoking body: () throws -> T) rethrows -> T {
+    try body()
+}
+#endif
+
 /// SHA-256 of a file's contents, returned as lowercase hex.
 ///
 /// Streams the file in 1MB chunks rather than `Data(contentsOf:)` so a 50MB

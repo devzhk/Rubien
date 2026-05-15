@@ -48,7 +48,7 @@ final class PDFAssetCacheTests: XCTestCase {
         )
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: result.localURL.path))
-        let row = try await db.dbWriter.read { db in
+        let row = try await db.dbWriter.read { db -> Row? in
             try Row.fetchOne(db, sql: "SELECT * FROM pdfCache WHERE referenceId=1")
         }
         XCTAssertNotNil(row)
@@ -107,7 +107,7 @@ final class PDFAssetCacheTests: XCTestCase {
         try await cache.dematerialize(referenceId: 1)
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: mat.localURL.path))
-        let row = try await db.dbWriter.read { db in
+        let row = try await db.dbWriter.read { db -> Row? in
             try Row.fetchOne(db, sql: "SELECT * FROM pdfCache WHERE referenceId=1")
         }
         XCTAssertNotNil(row, "row preserved so a future tap can re-fetch")
