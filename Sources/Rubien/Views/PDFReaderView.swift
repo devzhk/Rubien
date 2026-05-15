@@ -1017,10 +1017,6 @@ struct AnnotatablePDFView: NSViewRepresentable {
             sv.backgroundColor = canvasBackgroundColor
             sv.drawsBackground = true
             sv.contentView.backgroundColor = canvasBackgroundColor
-            if let documentView = pdfView?.documentView {
-                documentView.wantsLayer = true
-                documentView.layer?.backgroundColor = canvasBackgroundColor.cgColor
-            }
         }
 
         context.coordinator.pdfView = pdfView
@@ -1306,10 +1302,6 @@ struct AnnotatablePDFView: NSViewRepresentable {
             if let scrollView = pdfView.internalScrollView {
                 scrollView.backgroundColor = canvasBackgroundColor
                 scrollView.contentView.backgroundColor = canvasBackgroundColor
-            }
-            if let documentView = pdfView.documentView {
-                documentView.wantsLayer = true
-                documentView.layer?.backgroundColor = canvasBackgroundColor.cgColor
             }
             ensureObservers(for: pdfView)
             if let document,
