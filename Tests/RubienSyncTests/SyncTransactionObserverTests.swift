@@ -1,3 +1,4 @@
+#if canImport(RubienSync)
 import XCTest
 import GRDB
 @testable import RubienCore
@@ -60,3 +61,4 @@ final class SyncTransactionObserverRetentionTests: XCTestCase {
         XCTAssertFalse(hasObserver)
     }
 }
+#endif

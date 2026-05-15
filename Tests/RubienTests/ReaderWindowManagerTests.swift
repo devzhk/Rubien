@@ -1,3 +1,4 @@
+#if canImport(Rubien)
 import Foundation
 import GRDB
 import XCTest
@@ -179,3 +180,4 @@ final class ReaderWindowManagerTests: XCTestCase {
         }
     }
 }
+#endif

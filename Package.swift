@@ -58,7 +58,7 @@ let package = Package(
             name: "RubienCLI",
             dependencies: [
                 "RubienCore",
-                "RubienSync",
+                .target(name: "RubienSync", condition: .when(platforms: [.macOS])),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             exclude: [
@@ -72,17 +72,27 @@ let package = Package(
         ),
         .testTarget(
             name: "RubienSyncTests",
-            dependencies: ["RubienSync", "RubienCore", "RubienExceptionCatcher"],
+            dependencies: [
+                .target(name: "RubienSync", condition: .when(platforms: [.macOS])),
+                "RubienCore",
+                .target(name: "RubienExceptionCatcher", condition: .when(platforms: [.macOS])),
+            ],
             path: "Tests/RubienSyncTests"
         ),
         .testTarget(
             name: "RubienTests",
-            dependencies: ["Rubien", "RubienCore", "RubienSync"],
+            dependencies: [
+                .target(name: "Rubien", condition: .when(platforms: [.macOS])),
+                "RubienCore",
+                .target(name: "RubienSync", condition: .when(platforms: [.macOS])),
+            ],
             path: "Tests/RubienTests"
         ),
         .testTarget(
             name: "RubienCLITests",
-            dependencies: ["RubienSync"],
+            dependencies: [
+                .target(name: "RubienSync", condition: .when(platforms: [.macOS])),
+            ],
             path: "Tests/RubienCLITests"
         ),
     ]

@@ -1,3 +1,4 @@
+#if canImport(RubienSync)
 import XCTest
 import GRDB
 import CloudKit
@@ -192,3 +193,4 @@ final class PDFUploadDrainerTests: XCTestCase {
         XCTAssertEqual(dirtyCount, 1, "second drain on the now-empty queue must not insert a duplicate row")
     }
 }
+#endif

@@ -1,3 +1,4 @@
+#if canImport(Rubien)
 import XCTest
 @testable import Rubien
 @testable import RubienCore
@@ -83,3 +84,4 @@ final class MetadataResolverTests: XCTestCase {
         XCTAssertEqual(envelope.reason, .verificationRequired)
     }
 }
+#endif

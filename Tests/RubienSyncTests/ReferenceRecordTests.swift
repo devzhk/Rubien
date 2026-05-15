@@ -1,3 +1,4 @@
+#if canImport(RubienSync)
 import XCTest
 import CloudKit
 @testable import RubienCore
@@ -276,3 +277,4 @@ final class ReferenceRecordTests: XCTestCase {
         XCTAssertEqual(existing.recordID, id)
     }
 }
+#endif

@@ -1,3 +1,4 @@
+#if canImport(RubienSync)
 import XCTest
 import GRDB
 @testable import RubienCore
@@ -101,3 +102,4 @@ final class PDFUploadQueueTests: XCTestCase {
         XCTAssertEqual(total, 1, "still exactly one row per referenceId")
     }
 }
+#endif

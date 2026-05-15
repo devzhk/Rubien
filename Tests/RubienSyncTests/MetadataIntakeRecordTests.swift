@@ -1,3 +1,4 @@
+#if canImport(RubienSync)
 import XCTest
 import CloudKit
 @testable import RubienCore
@@ -88,3 +89,4 @@ final class MetadataIntakeRecordTests: XCTestCase {
         XCTAssertTrue(record[MetadataIntake.RecordField.linkedReferenceId] is Int64)
     }
 }
+#endif

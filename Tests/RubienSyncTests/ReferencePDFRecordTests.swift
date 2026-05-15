@@ -1,3 +1,4 @@
+#if canImport(RubienSync)
 import XCTest
 import CloudKit
 @testable import RubienCore
@@ -50,3 +51,4 @@ final class ReferencePDFRecordTests: XCTestCase {
         XCTAssertEqual(Set(ReferencePDFRecord.allFieldNames), expected)
     }
 }
+#endif

@@ -1,3 +1,4 @@
+#if canImport(RubienSync)
 import Foundation
 import ArgumentParser
 import RubienCore
@@ -137,3 +138,4 @@ struct StatusCommand: ParsableCommand {
         return try DatabasePool(path: url.path)
     }
 }
+#endif

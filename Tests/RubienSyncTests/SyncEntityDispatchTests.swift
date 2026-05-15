@@ -1,3 +1,4 @@
+#if canImport(RubienSync)
 import XCTest
 import GRDB
 import CloudKit
@@ -624,3 +625,4 @@ private extension Reference {
         self.id = id
     }
 }
+#endif

@@ -1,3 +1,4 @@
+#if canImport(Rubien)
 import Foundation
 import XCTest
 @testable import Rubien
@@ -233,3 +234,4 @@ final class CitationAndRenderingTests: XCTestCase {
         )
     }
 }
+#endif

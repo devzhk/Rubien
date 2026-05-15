@@ -1,3 +1,4 @@
+#if canImport(Rubien)
 import XCTest
 @testable import Rubien
 @testable import RubienCore
@@ -21,3 +22,4 @@ final class ReferenceWebContentTests: XCTestCase {
         XCTAssertEqual(decoded?.body, "# Title\n\nBody text")
     }
 }
+#endif

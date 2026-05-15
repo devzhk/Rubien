@@ -1,3 +1,4 @@
+#if canImport(RubienSync)
 import XCTest
 import CloudKit
 import GRDB
@@ -137,3 +138,4 @@ final class SyncedLibraryStartupTests: XCTestCase {
     }
 }
 
+#endif

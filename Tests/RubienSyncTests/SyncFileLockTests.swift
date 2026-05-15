@@ -1,3 +1,4 @@
+#if canImport(RubienSync)
 import XCTest
 @testable import RubienSync
 
@@ -77,3 +78,4 @@ final class SyncFileLockTests: XCTestCase {
         XCTAssertNil(result, "non-blocking variant must signal refusal via nil, not raise")
     }
 }
+#endif

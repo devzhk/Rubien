@@ -31,10 +31,12 @@ jobs:
         run: |
           apt-get update
           apt-get install -y libsqlite3-dev pkg-config
-      - name: Build RubienCore
-        run: swift build --target RubienCore
-      # Test step intentionally omitted in Phase 1: SwiftPM compiles ALL test
-      # targets up-front before applying --filter, and RubienSyncTests /
-      # RubienTests / RubienCLITests pull in CloudKit / AppKit / RubienSync.
-      # Phase 2 adds conditional `RubienSync` linkage in Package.swift, after
-      # which `swift test --filter RubienCoreTests` becomes viable on Linux.
+      - name: Build rubien-cli
+        # RubienCLITests shell out to .build/debug/rubien-cli via Process,
+        # but the test target doesn't declare the executable as an SPM dep
+        # (it's a runtime artifact, not a link-time one). Build it explicitly
+        # before tests run — otherwise skipIfBinaryMissing() silently skips
+        # every CLI test.
+        run: swift build --product rubien-cli
+      - name: Test
+        run: swift test --filter 'RubienCoreTests|RubienCLITests'

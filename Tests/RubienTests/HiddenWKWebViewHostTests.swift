@@ -1,3 +1,4 @@
+#if canImport(Rubien)
 import WebKit
 import XCTest
 @testable import Rubien
@@ -20,3 +21,4 @@ final class HiddenWKWebViewHostTests: XCTestCase {
         )
     }
 }
+#endif

@@ -1,3 +1,4 @@
+#if canImport(RubienSync)
 import XCTest
 import CloudKit
 @testable import RubienCore
@@ -104,3 +105,4 @@ final class PDFAnnotationCKRecordTests: XCTestCase {
         XCTAssertTrue(record[PDFAnnotationRecord.RecordField.referenceId] is Int64)
     }
 }
+#endif

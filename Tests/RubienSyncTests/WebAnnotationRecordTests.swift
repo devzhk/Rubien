@@ -1,3 +1,4 @@
+#if canImport(RubienSync)
 import XCTest
 import CloudKit
 @testable import RubienCore
@@ -110,3 +111,4 @@ final class WebAnnotationCKRecordTests: XCTestCase {
         XCTAssertEqual(WebAnnotationRecord(record: record)?.anchorText, "legacy anchor")
     }
 }
+#endif

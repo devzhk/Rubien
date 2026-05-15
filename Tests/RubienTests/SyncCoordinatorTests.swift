@@ -1,3 +1,4 @@
+#if canImport(Rubien)
 import XCTest
 import Foundation
 import GRDB
@@ -335,3 +336,4 @@ final class SyncCoordinatorTests: XCTestCase {
         XCTAssertEqual(syncingMapped, .syncing)
     }
 }
+#endif

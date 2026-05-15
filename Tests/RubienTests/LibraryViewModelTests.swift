@@ -1,3 +1,4 @@
+#if canImport(Rubien)
 import XCTest
 import GRDB
 @testable import Rubien
@@ -95,3 +96,4 @@ final class LibraryViewModelTests: XCTestCase {
         XCTAssertNil(vm.errorMessage)
     }
 }
+#endif

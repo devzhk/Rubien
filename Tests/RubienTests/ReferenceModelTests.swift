@@ -1,3 +1,4 @@
+#if canImport(Rubien)
 import Foundation
 import XCTest
 @testable import Rubien
@@ -139,3 +140,4 @@ final class ReferenceModelTests: XCTestCase {
         XCTAssertTrue(reference.cslJSONObject().isEmpty)
     }
 }
+#endif

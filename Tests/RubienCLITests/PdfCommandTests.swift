@@ -48,6 +48,7 @@ final class PdfCommandTests: XCTestCase {
 
     // MARK: - pdf parent help
 
+#if canImport(PDFKit)
     func testPdfHelpListsAllSubcommands() throws {
         try skipIfBinaryMissing()
         let r = try runCLI(["pdf", "--help"])
@@ -133,6 +134,7 @@ final class PdfCommandTests: XCTestCase {
             "Expected format error, got: \(r.stderr)"
         )
     }
+#endif // canImport(PDFKit)
 
     // MARK: - search --in / --op
 

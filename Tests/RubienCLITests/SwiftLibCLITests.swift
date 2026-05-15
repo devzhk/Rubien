@@ -298,6 +298,7 @@ final class RubienCLITests: XCTestCase {
                       "stderr error message did not name the constraint; got: \(message)")
     }
 
+#if canImport(PDFKit)
     func testPdfDownloadReferenceNotFound() throws {
         try skipIfBinaryMissing()
         let result = try runCLI(["pdf", "download", "999999999"])
@@ -331,6 +332,7 @@ final class RubienCLITests: XCTestCase {
         XCTAssertTrue(message.contains("No DOI or arXiv identifier"),
                       "stderr error message did not explain the cause; got: \(message)")
     }
+#endif // canImport(PDFKit)
 
     // MARK: - Web subcommand
     //

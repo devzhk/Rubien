@@ -1,3 +1,4 @@
+#if canImport(Rubien)
 import XCTest
 @testable import Rubien
 
@@ -49,3 +50,4 @@ final class RubienPreferencesTests: XCTestCase {
         XCTAssertFalse(RubienPreferences.pdfAssetSyncEnabled)
     }
 }
+#endif

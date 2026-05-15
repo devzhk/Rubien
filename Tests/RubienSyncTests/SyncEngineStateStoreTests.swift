@@ -1,3 +1,4 @@
+#if canImport(RubienSync)
 import XCTest
 import CloudKit
 @testable import RubienSync
@@ -49,3 +50,4 @@ final class SyncEngineStateStoreTests: XCTestCase {
         )
     }
 }
+#endif

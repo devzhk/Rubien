@@ -1,3 +1,4 @@
+#if canImport(RubienSync)
 import XCTest
 import GRDB
 @testable import RubienCore
@@ -116,3 +117,4 @@ final class SyncSchemaInvariantTests: XCTestCase {
         }
     }
 }
+#endif

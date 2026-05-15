@@ -1,3 +1,4 @@
+#if canImport(RubienSync)
 import XCTest
 @testable import RubienSync
 
@@ -18,3 +19,4 @@ final class SyncConstantsTests: XCTestCase {
         XCTAssertEqual(SyncConstants.containerIdentifier, "iCloud.test.override")
     }
 }
+#endif

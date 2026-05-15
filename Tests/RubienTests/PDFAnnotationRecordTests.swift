@@ -1,3 +1,4 @@
+#if canImport(Rubien)
 import CoreGraphics
 import Foundation
 import XCTest
@@ -52,3 +53,4 @@ final class PDFAnnotationRecordTests: XCTestCase {
         XCTAssertNotEqual(base.renderHash, changed.renderHash)
     }
 }
+#endif

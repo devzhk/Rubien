@@ -1,3 +1,4 @@
+#if canImport(Rubien)
 import Foundation
 import XCTest
 @testable import Rubien
@@ -239,3 +240,4 @@ final class ImporterAndMetadataTests: XCTestCase {
         }
     }
 }
+#endif

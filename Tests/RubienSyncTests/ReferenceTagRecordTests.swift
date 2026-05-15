@@ -1,3 +1,4 @@
+#if canImport(RubienSync)
 import XCTest
 import CloudKit
 @testable import RubienCore
@@ -61,3 +62,4 @@ final class ReferenceTagRecordTests: XCTestCase {
         XCTAssertTrue(record[ReferenceTag.RecordField.tagId] is Int64)
     }
 }
+#endif

@@ -1,3 +1,4 @@
+#if canImport(Rubien)
 import Foundation
 import GRDB
 import XCTest
@@ -120,3 +121,4 @@ final class DatabaseTests: XCTestCase {
         try AppDatabase(DatabaseQueue(path: ":memory:"))
     }
 }
+#endif

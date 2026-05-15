@@ -1,3 +1,4 @@
+#if canImport(RubienSync)
 import XCTest
 import CloudKit
 @testable import RubienCore
@@ -85,3 +86,4 @@ final class MetadataEvidenceRecordTests: XCTestCase {
         XCTAssertNil(decoded?.referenceId)
     }
 }
+#endif

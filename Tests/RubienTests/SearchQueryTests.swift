@@ -1,3 +1,4 @@
+#if canImport(Rubien)
 import XCTest
 @testable import Rubien
 @testable import RubienCore
@@ -131,3 +132,4 @@ final class SearchQueryTests: XCTestCase {
         XCTAssertEqual(q1.keyword, q2.keyword)
     }
 }
+#endif

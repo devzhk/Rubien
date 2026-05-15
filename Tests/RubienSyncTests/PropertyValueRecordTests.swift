@@ -1,3 +1,4 @@
+#if canImport(RubienSync)
 import XCTest
 import CloudKit
 @testable import RubienCore
@@ -55,3 +56,4 @@ final class PropertyValueRecordTests: XCTestCase {
         XCTAssertTrue(record[PropertyValue.RecordField.propertyId] is Int64)
     }
 }
+#endif

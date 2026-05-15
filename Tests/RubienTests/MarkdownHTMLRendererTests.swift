@@ -1,3 +1,4 @@
+#if canImport(Rubien)
 import Foundation
 import XCTest
 @testable import Rubien
@@ -58,3 +59,4 @@ final class MarkdownHTMLRendererTests: XCTestCase {
         XCTAssertTrue(html.contains("<p>Run <code>swift test</code></p>"))
     }
 }
+#endif

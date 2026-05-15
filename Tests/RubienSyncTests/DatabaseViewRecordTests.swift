@@ -1,3 +1,4 @@
+#if canImport(RubienSync)
 import XCTest
 import CloudKit
 @testable import RubienCore
@@ -84,3 +85,4 @@ final class DatabaseViewRecordTests: XCTestCase {
         XCTAssertEqual(decoded.dateModified, modified)
     }
 }
+#endif

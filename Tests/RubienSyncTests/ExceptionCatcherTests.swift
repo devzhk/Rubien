@@ -1,3 +1,4 @@
+#if canImport(RubienSync)
 import XCTest
 import RubienExceptionCatcher
 
@@ -16,3 +17,4 @@ final class ExceptionCatcherTests: XCTestCase {
         XCTAssertEqual(ex?.name, .genericException)
     }
 }
+#endif

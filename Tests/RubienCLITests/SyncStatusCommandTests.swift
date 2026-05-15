@@ -1,3 +1,4 @@
+#if canImport(RubienSync)
 import XCTest
 import Foundation
 import GRDB
@@ -105,3 +106,4 @@ final class SyncStatusCommandTests: XCTestCase {
         XCTAssertEqual(dirty?["referencePDF"], 1)
     }
 }
+#endif

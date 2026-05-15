@@ -1,3 +1,4 @@
+#if canImport(RubienSync)
 import CloudKit
 @testable import RubienSync
 
@@ -8,3 +9,4 @@ func makeTestRecord(recordType: String, recordName: String) -> CKRecord {
     let id = CKRecord.ID(recordName: recordName, zoneID: SyncConstants.libraryZoneID)
     return CKRecord(recordType: recordType, recordID: id)
 }
+#endif

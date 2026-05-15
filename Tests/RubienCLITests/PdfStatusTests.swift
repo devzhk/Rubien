@@ -1,3 +1,4 @@
+#if canImport(PDFKit)
 import XCTest
 import Foundation
 
@@ -85,3 +86,4 @@ final class PdfStatusTests: XCTestCase {
         XCTAssertNil(json["inUploadQueue"], "inUploadQueue must be omitted when no row")
     }
 }
+#endif

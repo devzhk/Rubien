@@ -1,3 +1,4 @@
+#if canImport(RubienSync)
 import XCTest
 import GRDB
 @testable import RubienCore
@@ -29,3 +30,4 @@ final class SyncStatusStreamTests: XCTestCase {
         XCTAssertEqual(second, .idle)
     }
 }
+#endif
