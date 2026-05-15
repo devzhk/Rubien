@@ -16,7 +16,9 @@ jobs:
   linux:
     name: Linux (x86_64)
     runs-on: ubuntu-22.04
-    container: swift:5.9-jammy
+    # Swift 6.1 is the floor: GRDB 7.10's Package.swift declares
+    # tools-version 6.1, so an older toolchain can't resolve it.
+    container: swift:6.1-jammy
     steps:
       - uses: actions/checkout@v4
       - name: Install system deps
