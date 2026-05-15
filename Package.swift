@@ -18,10 +18,15 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "RubienPDFKit",
+            path: "Sources/RubienPDFKit"
+        ),
+        .target(
             name: "RubienCore",
             dependencies: [
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "Crypto", package: "swift-crypto", condition: .when(platforms: [.linux])),
+                "RubienPDFKit",
             ],
             resources: [
                 .copy("Resources")

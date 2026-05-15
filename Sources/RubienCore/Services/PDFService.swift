@@ -1,6 +1,5 @@
 import Foundation
-#if canImport(PDFKit)
-import PDFKit
+import RubienPDFKit
 
 public enum PDFService {
     /// Import PDF file to app storage, returns relative path
@@ -9,12 +8,16 @@ public enum PDFService {
         let fileName = "\(UUID().uuidString)_\(sourceURL.lastPathComponent)"
         let destURL = storageDir.appendingPathComponent(fileName)
 
+#if canImport(Darwin)
         if sourceURL.startAccessingSecurityScopedResource() {
             defer { sourceURL.stopAccessingSecurityScopedResource() }
             try FileManager.default.copyItem(at: sourceURL, to: destURL)
         } else {
             try FileManager.default.copyItem(at: sourceURL, to: destURL)
         }
+#else
+        try FileManager.default.copyItem(at: sourceURL, to: destURL)
+#endif
 
         return fileName
     }
@@ -80,29 +83,26 @@ public enum PDFService {
 
     /// Extract literature metadata from a PDF file
     public static func extractMetadata(from url: URL) -> ExtractedMetadata {
-        guard let document = PDFDocument(url: url) else {
+        guard let document = try? PDFBackend.open(url: url) else {
             return ExtractedMetadata(authors: [])
         }
 
         var metadata = ExtractedMetadata(authors: [])
 
         // 1. Try PDF document attributes first
-        if let attrs = document.documentAttributes {
-            if let title = attrs[PDFDocumentAttribute.titleAttribute] as? String,
-               isUsefulDocumentTitle(title) {
-                metadata.title = cleanTitle(title)
-            }
-            if let author = attrs[PDFDocumentAttribute.authorAttribute] as? String,
-               isUsefulDocumentAuthor(author) {
-                metadata.authors = AuthorName.parseList(author)
-            }
+        let docMeta = document.metadata
+        if let title = docMeta.title, isUsefulDocumentTitle(title) {
+            metadata.title = cleanTitle(title)
+        }
+        if let author = docMeta.author, isUsefulDocumentAuthor(author) {
+            metadata.authors = AuthorName.parseList(author)
         }
 
         // 2. Extract text from first 3 pages for analysis (title page, copyright page, contents)
         let maxPages = min(document.pageCount, 3)
         var fullText = ""
         for i in 0..<maxPages {
-            if let page = document.page(at: i), let text = page.string {
+            if let page = document.page(at: i), let text = page.extractedText() {
                 fullText += text + "\n"
             }
         }
@@ -467,8 +467,10 @@ public enum PDFService {
     }
 
     public static func prepareImportedPDF(from sourceURL: URL) throws -> (pdfPath: String, extracted: ExtractedMetadata, reference: Reference) {
+#if canImport(Darwin)
         let accessing = sourceURL.startAccessingSecurityScopedResource()
         defer { if accessing { sourceURL.stopAccessingSecurityScopedResource() } }
+#endif
 
         let meta = extractMetadata(from: sourceURL)
 
@@ -495,4 +497,3 @@ public enum PDFService {
         return (fileName, meta, ref)
     }
 }
-#endif // canImport(PDFKit)

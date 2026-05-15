@@ -1,8 +1,7 @@
 import Foundation
+import RubienPDFKit
 #if canImport(PDFKit)
 import PDFKit
-#if canImport(AppKit)
-import AppKit
 #endif
 
 public enum PDFExtractor {
@@ -124,25 +123,21 @@ public enum PDFExtractor {
 
     public static func info(at url: URL) throws -> Info {
         let doc = try openDocument(at: url)
-        let pageCount = doc.pageCount
         let bytes = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
 
-        var docTitle: String?
-        if let t = doc.documentAttributes?[PDFDocumentAttribute.titleAttribute] as? String {
-            let trimmed = t.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty { docTitle = trimmed }
-        }
-
-        let sections = outline(from: doc)
-        let hasText = sampleHasTextLayer(doc: doc)
+        let docTitle: String? = {
+            guard let raw = doc.metadata.title?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !raw.isEmpty else { return nil }
+            return raw
+        }()
 
         return Info(
-            pageCount: pageCount,
-            hasTextLayer: hasText,
+            pageCount: doc.pageCount,
+            hasTextLayer: sampleHasTextLayer(doc: doc),
             fileBytes: bytes,
             isEncrypted: doc.isEncrypted,
             documentTitle: docTitle,
-            sections: sections
+            sections: sections(in: doc)
         )
     }
 
@@ -152,96 +147,38 @@ public enum PDFExtractor {
     /// `endPage` is computed as `(next entry at same-or-shallower level).startPage - 1`,
     /// falling back to `pageCount` for the last entry — so a parent section's range
     /// spans all of its descendants.
-    public static func outline(from doc: PDFDocument) -> [Section]? {
-        guard let flat = walkOutline(doc) else { return nil }
-        let ends = computeEndPages(for: flat, pageCount: doc.pageCount)
-        return zip(flat, ends).map { entry, endPage in
-            Section(
-                title: entry.title,
-                level: entry.level,
-                startPage: entry.startPage,
-                endPage: endPage
-            )
-        }
+    static func sections(in doc: any PDFDocumentProtocol) -> [Section]? {
+        guard let root = doc.outlineRoot() else { return nil }
+        return flattenOutline(root, pageCount: doc.pageCount)
     }
 
-    /// UI-flavored outline that retains `PDFDestination` for precise navigation.
-    /// Not `Sendable` because `PDFDestination` is a class. Use this from the
-    /// same thread that opened the document.
-    public struct OutlineNavNode {
-        public let title: String
-        public let level: Int
-        public let startPage: Int
-        public let endPage: Int
-        public let destination: PDFDestination?
-
-        public init(title: String, level: Int, startPage: Int, endPage: Int, destination: PDFDestination?) {
-            self.title = title
-            self.level = level
-            self.startPage = startPage
-            self.endPage = endPage
-            self.destination = destination
-        }
-    }
-
-    public static func outlineForUI(from doc: PDFDocument) -> [OutlineNavNode]? {
-        guard let flat = walkOutline(doc) else { return nil }
-        let ends = computeEndPages(for: flat, pageCount: doc.pageCount)
-        return zip(flat, ends).map { entry, endPage in
-            OutlineNavNode(
-                title: entry.title,
-                level: entry.level,
-                startPage: entry.startPage,
-                endPage: endPage,
-                destination: entry.destination
-            )
-        }
-    }
-
-    private struct OutlineRaw {
-        let title: String
-        let level: Int
-        let startPage: Int
-        let destination: PDFDestination?
-    }
-
-    private static func walkOutline(_ doc: PDFDocument) -> [OutlineRaw]? {
-        guard let root = doc.outlineRoot, root.numberOfChildren > 0 else { return nil }
-        var flat: [OutlineRaw] = []
-        collect(root, level: 1, doc: doc, into: &flat)
-        return flat.isEmpty ? nil : flat
-    }
-
-    private static func computeEndPages(for flat: [OutlineRaw], pageCount: Int) -> [Int] {
-        var ends: [Int] = []
-        ends.reserveCapacity(flat.count)
+    private static func flattenOutline(_ root: PDFOutlineNode, pageCount: Int) -> [Section]? {
+        var flat: [(title: String, level: Int, startPage: Int)] = []
+        collectNodes(root.children, level: 1, pageCount: pageCount, into: &flat)
+        guard !flat.isEmpty else { return nil }
+        var result: [Section] = []
+        result.reserveCapacity(flat.count)
         for (i, entry) in flat.enumerated() {
             var endPage = pageCount
             for j in (i + 1)..<flat.count where flat[j].level <= entry.level {
                 endPage = max(entry.startPage, flat[j].startPage - 1)
                 break
             }
-            ends.append(endPage)
+            result.append(Section(title: entry.title, level: entry.level, startPage: entry.startPage, endPage: endPage))
         }
-        return ends
+        return result
     }
 
-    private static func collect(
-        _ outline: PDFOutline,
+    private static func collectNodes(
+        _ children: [PDFOutlineNode],
         level: Int,
-        doc: PDFDocument,
-        into flat: inout [OutlineRaw]
+        pageCount: Int,
+        into flat: inout [(title: String, level: Int, startPage: Int)]
     ) {
-        for i in 0..<outline.numberOfChildren {
-            guard let child = outline.child(at: i) else { continue }
-            let title = (child.label ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            let dest = child.destination
-            let pageIndex0 = dest?.page.flatMap { doc.index(for: $0) }
-            let ownStartPage: Int?
-            if let p0 = pageIndex0, p0 >= 0, p0 < doc.pageCount {
-                ownStartPage = p0 + 1
-            } else {
-                ownStartPage = nil
+        for child in children {
+            let title = child.label
+            let ownStartPage: Int? = child.pageIndex.flatMap { idx in
+                (idx >= 0 && idx < pageCount) ? idx + 1 : nil
             }
 
             // Reserve the parent slot before recursing so we can backfill
@@ -252,31 +189,16 @@ public enum PDFExtractor {
             let placeholderIndex = flat.count
             let appendedPlaceholder = !title.isEmpty
             if appendedPlaceholder {
-                flat.append(OutlineRaw(
-                    title: title,
-                    level: level,
-                    startPage: ownStartPage ?? 0,
-                    destination: dest
-                ))
+                flat.append((title: title, level: level, startPage: ownStartPage ?? 0))
             }
             let firstChildIndex = flat.count
-            collect(child, level: level + 1, doc: doc, into: &flat)
+            collectNodes(child.children, level: level + 1, pageCount: pageCount, into: &flat)
             let descendantsAdded = flat.count - firstChildIndex
 
             if appendedPlaceholder, ownStartPage == nil {
                 if descendantsAdded > 0 {
-                    // Container without its own destination: borrow startPage
-                    // from the first descendant that survived the recursion.
-                    flat[placeholderIndex] = OutlineRaw(
-                        title: title,
-                        level: level,
-                        startPage: flat[firstChildIndex].startPage,
-                        destination: dest
-                    )
+                    flat[placeholderIndex] = (title: title, level: level, startPage: flat[firstChildIndex].startPage)
                 } else {
-                    // Truly empty container — no own destination and no
-                    // descendants with destinations. Drop the orphan so it
-                    // doesn't show up as a section pointing nowhere.
                     flat.remove(at: placeholderIndex)
                 }
             }
@@ -292,7 +214,7 @@ public enum PDFExtractor {
     ) throws -> TextResult {
         let doc = try openDocument(at: url)
         let pageCount = doc.pageCount
-        let sections = outline(from: doc)
+        let sections = sections(in: doc)
 
         let candidatePages: [Int]
         let echo: SelectionEcho
@@ -351,7 +273,7 @@ public enum PDFExtractor {
         var truncated = false
         for p in candidatePages {
             guard let page = doc.page(at: p - 1) else { continue }
-            let text = page.string ?? ""
+            let text = page.extractedText() ?? ""
             if !collected.isEmpty, total + text.count > maxChars {
                 truncated = true
                 break
@@ -429,79 +351,46 @@ public enum PDFExtractor {
         guard page >= 1, page <= doc.pageCount, let pdfPage = doc.page(at: page - 1) else {
             throw ExtractError.pageOutOfRange(page)
         }
-
-        let pageBounds = pdfPage.bounds(for: .mediaBox)
-        let widthPx = max(1, Int((pageBounds.width * scale).rounded()))
-        let heightPx = max(1, Int((pageBounds.height * scale).rounded()))
-
-        let cs = CGColorSpaceCreateDeviceRGB()
-        let bytesPerRow = widthPx * 4
-        guard let ctx = CGContext(
-            data: nil,
-            width: widthPx,
-            height: heightPx,
-            bitsPerComponent: 8,
-            bytesPerRow: bytesPerRow,
-            space: cs,
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { throw ExtractError.renderFailed }
-
-        ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
-        ctx.fill(CGRect(x: 0, y: 0, width: widthPx, height: heightPx))
-        ctx.scaleBy(x: scale, y: scale)
-        pdfPage.draw(with: .mediaBox, to: ctx)
-
-        guard let cgImage = ctx.makeImage() else { throw ExtractError.renderFailed }
-        let rep = NSBitmapImageRep(cgImage: cgImage)
-
-        switch format {
-        case .jpeg:
-            for q in [0.9, 0.75, 0.6, 0.45] {
-                let props: [NSBitmapImageRep.PropertyKey: Any] = [
-                    .compressionFactor: NSNumber(value: q)
-                ]
-                guard let data = rep.representation(using: .jpeg, properties: props) else {
-                    throw ExtractError.renderFailed
-                }
-                if data.count <= maxBytes {
-                    return PageImage(
-                        page: page,
-                        mimeType: "image/jpeg",
-                        data: data,
-                        widthPx: widthPx,
-                        heightPx: heightPx,
-                        qualityUsed: q
-                    )
-                }
-            }
-            throw ExtractError.maxBytesExceeded(maxBytes)
-
-        case .png:
-            guard let data = rep.representation(using: .png, properties: [:]) else {
-                throw ExtractError.renderFailed
-            }
-            if data.count > maxBytes { throw ExtractError.maxBytesExceeded(maxBytes) }
+        let backendFormat: PDFRenderFormat = (format == .jpeg) ? .jpeg : .png
+        do {
+            let result = try pdfPage.render(scale: Double(scale), format: backendFormat, maxBytes: maxBytes)
             return PageImage(
                 page: page,
-                mimeType: "image/png",
-                data: data,
-                widthPx: widthPx,
-                heightPx: heightPx,
-                qualityUsed: nil
+                mimeType: result.mimeType,
+                data: result.data,
+                widthPx: result.widthPx,
+                heightPx: result.heightPx,
+                qualityUsed: result.qualityUsed
             )
+        } catch PDFRenderError.pageOutOfRange(let p) {
+            throw ExtractError.pageOutOfRange(p)
+        } catch PDFRenderError.maxBytesExceeded(let n) {
+            throw ExtractError.maxBytesExceeded(n)
+        } catch PDFRenderError.formatUnsupportedOnPlatform {
+            throw ExtractError.renderFailed
+        } catch PDFRenderError.renderFailed {
+            throw ExtractError.renderFailed
         }
     }
 
     // MARK: - helpers
 
     /// Single entry point for opening a PDF for any of the public extractors.
-    /// `PDFDocument(url:)` returns nil for missing/unreadable/corrupt — we map
-    /// that to `cannotOpen` rather than pre-checking with `FileManager`, which
-    /// would race with concurrent deletes (TOCTOU).
-    private static func openDocument(at url: URL) throws -> PDFDocument {
-        guard let doc = PDFDocument(url: url) else { throw ExtractError.cannotOpen(url.path) }
-        if doc.isLocked { throw ExtractError.encrypted }
-        return doc
+    /// Maps the backend's open error surface to the local `ExtractError` cases
+    /// callers already handle. `.fileMissing` is collapsed into `.cannotOpen`
+    /// (matches the pre-facade behavior where `PDFDocument(url:)` returned nil
+    /// for both — avoided pre-checking with `FileManager` to dodge TOCTOU vs.
+    /// concurrent deletes).
+    private static func openDocument(at url: URL) throws -> any PDFDocumentProtocol {
+        do {
+            return try PDFBackend.open(url: url)
+        } catch PDFOpenError.fileMissing(let u) {
+            throw ExtractError.cannotOpen(u.path)
+        } catch PDFOpenError.cannotOpen(let u) {
+            throw ExtractError.cannotOpen(u.path)
+        } catch PDFOpenError.locked {
+            throw ExtractError.encrypted
+        }
     }
 
     private static func pagesInRanges(_ ranges: [ClosedRange<Int>], pageCount: Int) -> [Int] {
@@ -516,7 +405,7 @@ public enum PDFExtractor {
     }
 
     /// Samples first/middle/last page; returns true if any sample yields non-empty text.
-    private static func sampleHasTextLayer(doc: PDFDocument) -> Bool {
+    private static func sampleHasTextLayer(doc: any PDFDocumentProtocol) -> Bool {
         let count = doc.pageCount
         guard count > 0 else { return false }
         let indices: [Int]
@@ -529,7 +418,7 @@ public enum PDFExtractor {
         }
         for i in indices {
             if let p = doc.page(at: i),
-               let s = p.string,
+               let s = p.extractedText(),
                !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return true
             }
@@ -580,5 +469,118 @@ public enum PDFExtractor {
         ranges.map { r in r.lowerBound == r.upperBound ? "\(r.lowerBound)" : "\(r.lowerBound)-\(r.upperBound)" }
             .joined(separator: ",")
     }
+
+    // MARK: - UI outline (Mac-only)
+    //
+    // `OutlineNavNode` retains `PDFDestination` for precise navigation in the
+    // SwiftUI PDF reader sidebar. PDFDestination is a PDFKit class with no
+    // Linux equivalent, so this whole block is Darwin-only. The cross-platform
+    // path uses `flattenOutline` above on `PDFOutlineNode` from the facade.
+
+#if canImport(PDFKit)
+    public struct OutlineNavNode {
+        public let title: String
+        public let level: Int
+        public let startPage: Int
+        public let endPage: Int
+        public let destination: PDFDestination?
+
+        public init(title: String, level: Int, startPage: Int, endPage: Int, destination: PDFDestination?) {
+            self.title = title
+            self.level = level
+            self.startPage = startPage
+            self.endPage = endPage
+            self.destination = destination
+        }
+    }
+
+    public static func outlineForUI(from doc: PDFDocument) -> [OutlineNavNode]? {
+        guard let flat = walkOutline(doc) else { return nil }
+        let ends = computeEndPagesPDFKit(for: flat, pageCount: doc.pageCount)
+        return zip(flat, ends).map { entry, endPage in
+            OutlineNavNode(
+                title: entry.title,
+                level: entry.level,
+                startPage: entry.startPage,
+                endPage: endPage,
+                destination: entry.destination
+            )
+        }
+    }
+
+    private struct OutlineRaw {
+        let title: String
+        let level: Int
+        let startPage: Int
+        let destination: PDFDestination?
+    }
+
+    private static func walkOutline(_ doc: PDFDocument) -> [OutlineRaw]? {
+        guard let root = doc.outlineRoot, root.numberOfChildren > 0 else { return nil }
+        var flat: [OutlineRaw] = []
+        collectPDFKit(root, level: 1, doc: doc, into: &flat)
+        return flat.isEmpty ? nil : flat
+    }
+
+    private static func computeEndPagesPDFKit(for flat: [OutlineRaw], pageCount: Int) -> [Int] {
+        var ends: [Int] = []
+        ends.reserveCapacity(flat.count)
+        for (i, entry) in flat.enumerated() {
+            var endPage = pageCount
+            for j in (i + 1)..<flat.count where flat[j].level <= entry.level {
+                endPage = max(entry.startPage, flat[j].startPage - 1)
+                break
+            }
+            ends.append(endPage)
+        }
+        return ends
+    }
+
+    private static func collectPDFKit(
+        _ outline: PDFOutline,
+        level: Int,
+        doc: PDFDocument,
+        into flat: inout [OutlineRaw]
+    ) {
+        for i in 0..<outline.numberOfChildren {
+            guard let child = outline.child(at: i) else { continue }
+            let title = (child.label ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let dest = child.destination
+            let pageIndex0 = dest?.page.flatMap { doc.index(for: $0) }
+            let ownStartPage: Int?
+            if let p0 = pageIndex0, p0 >= 0, p0 < doc.pageCount {
+                ownStartPage = p0 + 1
+            } else {
+                ownStartPage = nil
+            }
+
+            let placeholderIndex = flat.count
+            let appendedPlaceholder = !title.isEmpty
+            if appendedPlaceholder {
+                flat.append(OutlineRaw(
+                    title: title,
+                    level: level,
+                    startPage: ownStartPage ?? 0,
+                    destination: dest
+                ))
+            }
+            let firstChildIndex = flat.count
+            collectPDFKit(child, level: level + 1, doc: doc, into: &flat)
+            let descendantsAdded = flat.count - firstChildIndex
+
+            if appendedPlaceholder, ownStartPage == nil {
+                if descendantsAdded > 0 {
+                    flat[placeholderIndex] = OutlineRaw(
+                        title: title,
+                        level: level,
+                        startPage: flat[firstChildIndex].startPage,
+                        destination: dest
+                    )
+                } else {
+                    flat.remove(at: placeholderIndex)
+                }
+            }
+        }
+    }
+#endif
 }
-#endif // canImport(PDFKit)
