@@ -52,22 +52,14 @@ final class WebReaderViewModel: ObservableObject {
     @Published var sidebarSummaryScrollToken: UInt64 = 0
     /// 侧栏摘要卡片是否处于「正文摘要已点击」高亮。
     @Published var highlightSidebarSummary: Bool = false
-    /// 非 nil 时由顶部原生 WKWebView 加载该 YouTube 观看页 URL（含可选 `t=` 跳转）。
-    @Published private(set) var youTubeInlineWatchURL: URL?
-
     var reference: Reference
     private let db: AppDatabase
     private var cancellables = Set<AnyCancellable>()
     /// 在线阅读整段流程（加载原文 + 注入脚本 + 抽取 + 组 HTML）防挂起超时。
     private var liveReadableSafetyTask: Task<Void, Never>?
-    private var transcriptLoadTasks: [Task<Void, Never>] = []
-    private var transcriptLoadState: TranscriptLoadState?
-    private var transcriptLoadSequence: UInt64 = 0
     private var currentArticleBodyHTML: String?
-    private var shouldPersistTranscriptIntoReference = false
     /// Debounce task for appearance changes (font size / content width).
     private var appearanceDebounceTask: Task<Void, Never>?
-    var fetchTranscriptFromOriginalPage: ((String) async -> String?)?
 
     var jumpToAnnotationInView: ((WebAnnotationRecord) -> Void)?
     var jumpToSummaryInWeb: (() -> Void)?
@@ -76,44 +68,6 @@ final class WebReaderViewModel: ObservableObject {
     var clearSelectionInView: (() -> Void)?
     var updateAppearanceInView: ((Double, CGFloat) -> Void)?
     var refreshAnnotationsInView: (([WebAnnotationRecord]) -> Void)?
-
-    /// 用户点击缩略图「播放」后加载整页 watch；字幕时间戳通过 `seekYouTubeTo` 更新 URL。
-    func activateYouTubeInlinePlayer() {
-        guard reference.youTubeVideoId != nil else { return }
-        youTubeInlineWatchURL = Self.makeYouTubeWatchURL(for: reference, atSeconds: nil)
-    }
-
-    func collapseYouTubeInlinePlayer() {
-        youTubeInlineWatchURL = nil
-    }
-
-    func seekYouTubeTo(seconds: Int) {
-        guard reference.youTubeVideoId != nil else { return }
-        youTubeInlineWatchURL = Self.makeYouTubeWatchURL(for: reference, atSeconds: max(0, seconds))
-    }
-
-    private static func makeYouTubeWatchURL(for reference: Reference, atSeconds seconds: Int?) -> URL? {
-        guard let vid = reference.youTubeVideoId else { return nil }
-        var components = URLComponents(string: "https://www.youtube.com/watch")
-        var items: [URLQueryItem] = [URLQueryItem(name: "v", value: vid)]
-        if let s = seconds, s > 0 {
-            items.append(URLQueryItem(name: "t", value: "\(s)s"))
-        }
-        components?.queryItems = items
-        return components?.url
-    }
-
-    private enum TranscriptLoadSource: Hashable {
-        case network
-        case dom
-    }
-
-    private struct TranscriptLoadState {
-        let sequence: UInt64
-        var pendingSources: Set<TranscriptLoadSource>
-        var failures: [TranscriptLoadSource: String]
-        var resolved: Bool
-    }
 
     init(reference: Reference, db: AppDatabase = .shared) {
         self.reference = reference
@@ -141,7 +95,7 @@ final class WebReaderViewModel: ObservableObject {
     }
 
     var allowsDisplayModeSwitching: Bool {
-        reference.referenceType == .webpage && !reference.isLikelyYouTubeWatchURL
+        reference.referenceType == .webpage
     }
 
     var hasSelection: Bool {
@@ -271,7 +225,6 @@ final class WebReaderViewModel: ObservableObject {
         displayMode = mode
         switch mode {
         case .clippedMarkdown:
-            cancelTranscriptLoad()
             cancelLiveReadableSafetyTimeout()
             shouldLoadOriginalURLForReadable = false
             isLiveReadableBusy = false
@@ -288,7 +241,7 @@ final class WebReaderViewModel: ObservableObject {
             isLiveReadableBusy = true
             scheduleLiveReadableSafetyTimeout()
             let host = URL(string: u)?.host ?? ""
-            onlineReadableLog.notice("Starting online reading host=\(host, privacy: .public) youtube=\(self.reference.isLikelyYouTubeWatchURL, privacy: .public) using bundled ClipperDefuddle.js")
+            onlineReadableLog.notice("Starting online reading host=\(host, privacy: .public) using bundled ClipperDefuddle.js")
         }
     }
 
@@ -315,7 +268,6 @@ final class WebReaderViewModel: ObservableObject {
     }
 
     func readableExtractionFailed(message: String) {
-        cancelTranscriptLoad()
         cancelLiveReadableSafetyTimeout()
         isLiveReadableBusy = false
         liveReadableUserMessage = message
@@ -332,8 +284,7 @@ final class WebReaderViewModel: ObservableObject {
         includeClipperTypography: Bool,
         eyebrowText: String = "Live reading"
     ) {
-        cancelTranscriptLoad()
-        var trimmed = contentHTML.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = contentHTML.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             readableExtractionFailed(message: String(localized: "Live reading failed: extraction returned no content.", bundle: .module))
             return
@@ -343,13 +294,6 @@ final class WebReaderViewModel: ObservableObject {
         let ref = reference
         let fs = fontSize
         let cw = contentWidth
-
-        let isYouTube = ref.youTubeVideoId != nil
-        // 对 YouTube 条目，清掉抽取结果里的旧播放器/封面/摘要块，只保留正文与字幕。
-        if isYouTube {
-            trimmed = Self.cleanedYouTubeArticleBodyHTML(trimmed)
-        }
-
         let finalBody = trimmed
 
         Task.detached(priority: .userInitiated) {
@@ -360,38 +304,28 @@ final class WebReaderViewModel: ObservableObject {
                 contentWidth: cw,
                 eyebrowText: eyebrowText,
                 headerTitle: title,
-                // YouTube：header 不用条目 abstract（正文已有描述），见 omitReferenceAbstract
-                summaryText: isYouTube ? nil : excerpt,
+                summaryText: excerpt,
                 authorOverride: byline,
                 includeClipperTypography: includeClipperTypography,
-                omitReferenceAbstract: isYouTube,
-                omitArticleHeader: isYouTube
+                omitReferenceAbstract: false,
+                omitArticleHeader: false
             )
             await MainActor.run {
                 self.currentArticleBodyHTML = finalBody
-                self.shouldPersistTranscriptIntoReference = ref.decodedWebContent?.format == .html
                 self.renderedHTML = html
                 self.isLiveReadableBusy = false
                 self.cancelLiveReadableSafetyTimeout()
-                if let vid = ref.youTubeVideoId {
-                    self.scheduleYouTubeTranscriptMerge(videoId: vid)
-                } else {
-                    // Cache the live-extracted body so subsequent reader opens
-                    // render from storage instead of re-fetching + re-extracting
-                    // online every time. YouTube takes a separate path because
-                    // its body needs the transcript merge first (see
-                    // persistTranscriptIntoStoredReferenceIfNeeded).
-                    self.persistLiveBodyToReference(finalBody)
-                }
+                // Cache the live-extracted body so subsequent reader opens
+                // render from storage instead of re-fetching + re-extracting
+                // online every time.
+                self.persistLiveBodyToReference(finalBody)
             }
         }
     }
 
     /// Save a freshly live-extracted article body back to `reference.webContent`
     /// so the next reader open displays the clipped copy immediately rather than
-    /// kicking off another network fetch + Defuddle/Readability pass. Caller
-    /// should already have a non-YouTube reference (YouTube uses the transcript-
-    /// merge-aware `persistTranscriptIntoStoredReferenceIfNeeded` instead).
+    /// kicking off another network fetch + Defuddle/Readability pass.
     private func persistLiveBodyToReference(_ articleBodyHTML: String) {
         guard let referenceID = reference.id,
               let encoded = Reference.encodeWebContent(articleBodyHTML, format: .html) else {
@@ -412,328 +346,6 @@ final class WebReaderViewModel: ObservableObject {
             } catch {
                 onlineReadableLog.error("Failed to persist live-extracted body refId=\(referenceID, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
             }
-        }
-    }
-
-    /// 异步拉取 YouTube 字幕并插入到已渲染的 HTML 中。
-    private func scheduleYouTubeTranscriptMerge(videoId: String) {
-        cancelTranscriptLoad()
-        if Self.htmlContainsRenderedTranscriptBlock(renderedHTML) {
-            onlineReadableLog.notice("YouTube transcript already present from in-page fallback, skipping network fetch vid=\(videoId)")
-            return
-        }
-        // 先插入"正在加载字幕"占位符
-        if let placeholder = Self.htmlInsertingYouTubeTranscriptPlaceholder(renderedHTML) {
-            renderedHTML = placeholder
-        }
-
-        transcriptLoadSequence &+= 1
-        let sequence = transcriptLoadSequence
-        var pendingSources: Set<TranscriptLoadSource> = [.network]
-        if canAttemptTranscriptDOMFallback {
-            pendingSources.insert(.dom)
-        }
-        transcriptLoadState = TranscriptLoadState(
-            sequence: sequence,
-            pendingSources: pendingSources,
-            failures: [:],
-            resolved: false
-        )
-
-        let networkTask = Task(priority: .utility) { [weak self] in
-            let result = await YouTubeTranscriptFetcher.fetchPlainText(videoId: videoId)
-            guard let self else { return }
-            self.handleNetworkTranscriptResult(result, videoId: videoId, sequence: sequence)
-        }
-        transcriptLoadTasks.append(networkTask)
-
-        if canAttemptTranscriptDOMFallback {
-            let domTask = Task(priority: .utility) { [weak self] in
-                guard let self else { return }
-                let transcript = await self.fetchTranscriptDOMFallbackText(videoId: videoId)
-                self.handleDOMTranscriptResult(transcript, videoId: videoId, sequence: sequence)
-            }
-            transcriptLoadTasks.append(domTask)
-        }
-
-        let timeoutTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: Self.transcriptLoadTimeoutNanoseconds)
-            self?.handleTranscriptLoadTimeout(videoId: videoId, sequence: sequence)
-        }
-        transcriptLoadTasks.append(timeoutTask)
-    }
-
-    private var canAttemptTranscriptDOMFallback: Bool {
-        reference.isLikelyYouTubeWatchURL
-            && reference.resolvedWebReaderURLString() != nil
-            && fetchTranscriptFromOriginalPage != nil
-    }
-
-    private func fetchTranscriptDOMFallbackText(videoId: String) async -> String? {
-        guard reference.isLikelyYouTubeWatchURL,
-              let urlString = reference.resolvedWebReaderURLString(),
-              let fetcher = fetchTranscriptFromOriginalPage else {
-            return nil
-        }
-
-        onlineReadableLog.notice("Starting hidden WKWebView transcript DOM fallback in parallel vid=\(videoId, privacy: .public)")
-        guard let transcript = await fetcher(urlString) else {
-            return nil
-        }
-
-        let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            return nil
-        }
-        return trimmed
-    }
-
-    private func handleNetworkTranscriptResult(
-        _ result: Result<String, Error>,
-        videoId: String,
-        sequence: UInt64
-    ) {
-        guard let state = transcriptLoadState,
-              state.sequence == sequence,
-              !state.resolved else {
-            return
-        }
-
-        switch result {
-        case .success(let text):
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else {
-                onlineReadableLog.notice("YouTube network transcript returned empty vid=\(videoId, privacy: .public)")
-                recordTranscriptFailure(
-                    source: .network,
-                    message: String(localized: "This video has no caption content.", bundle: .module),
-                    sequence: sequence
-                )
-                return
-            }
-            onlineReadableLog.notice("YouTube network transcript succeeded vid=\(videoId, privacy: .public) length=\(trimmed.count, privacy: .public)")
-            completeTranscriptLoad(with: trimmed, source: .network, videoId: videoId, sequence: sequence)
-        case .failure(let error):
-            let msg = (error as? YouTubeTranscriptFetcher.FetchError)?.errorDescription ?? error.localizedDescription
-            onlineReadableLog.error("YouTube network transcript failed vid=\(videoId, privacy: .public) error=\(msg, privacy: .public)")
-            recordTranscriptFailure(source: .network, message: msg, sequence: sequence)
-        }
-    }
-
-    private func handleDOMTranscriptResult(_ transcript: String?, videoId: String, sequence: UInt64) {
-        guard let state = transcriptLoadState,
-              state.sequence == sequence,
-              !state.resolved else {
-            return
-        }
-
-        guard let transcript else {
-            onlineReadableLog.notice("YouTube transcript DOM fallback returned no content vid=\(videoId, privacy: .public)")
-            recordTranscriptFailure(
-                source: .dom,
-                message: String(localized: "The page's transcript panel returned no content.", bundle: .module),
-                sequence: sequence
-            )
-            return
-        }
-
-        let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            onlineReadableLog.notice("YouTube transcript DOM fallback returned empty transcript vid=\(videoId, privacy: .public)")
-            recordTranscriptFailure(
-                source: .dom,
-                message: String(localized: "The page's transcript panel returned no content.", bundle: .module),
-                sequence: sequence
-            )
-            return
-        }
-
-        onlineReadableLog.notice("YouTube transcript DOM fallback succeeded vid=\(videoId, privacy: .public) length=\(trimmed.count, privacy: .public)")
-        completeTranscriptLoad(with: trimmed, source: .dom, videoId: videoId, sequence: sequence)
-    }
-
-    private func completeTranscriptLoad(
-        with transcript: String,
-        source: TranscriptLoadSource,
-        videoId: String,
-        sequence: UInt64
-    ) {
-        guard var state = transcriptLoadState,
-              state.sequence == sequence,
-              !state.resolved else {
-            return
-        }
-
-        state.resolved = true
-        state.pendingSources.removeAll()
-        transcriptLoadState = state
-        cancelTranscriptLoadTasks()
-
-        let lines = transcript.components(separatedBy: "\n")
-        var htmlLines: [String] = []
-        for line in lines {
-            let escaped = line
-                .replacingOccurrences(of: "&", with: "&amp;")
-                .replacingOccurrences(of: "<", with: "&lt;")
-                .replacingOccurrences(of: ">", with: "&gt;")
-            if let range = escaped.range(of: #"^\[(\d{2}):(\d{2})\]"#, options: .regularExpression) {
-                let timestamp = String(escaped[range])
-                let rest = String(escaped[range.upperBound...])
-                let digits = timestamp.filter { $0.isNumber }
-                if digits.count == 4 {
-                    let mm = Int(digits.prefix(2)) ?? 0
-                    let ss = Int(digits.suffix(2)) ?? 0
-                    let totalSeconds = mm * 60 + ss
-                    let link = "<a href=\"javascript:void(0)\" class=\"rubien-yt-ts\" data-time=\"\(totalSeconds)\" onclick=\"window.RubienReader && window.RubienReader.seekYouTube(\(totalSeconds))\">\(timestamp)</a>"
-                    htmlLines.append("<span class=\"rubien-yt-line\">\(link)\(rest)</span>")
-                    continue
-                }
-            }
-            htmlLines.append("<span class=\"rubien-yt-line\">\(escaped)</span>")
-        }
-        let transcriptHTML = htmlLines.joined(separator: "\n")
-        let block = "<details class=\"rubien-yt-transcript\" open><summary>Transcript</summary><div class=\"rubien-yt-transcript-body\">\(transcriptHTML)</div></details>"
-        replaceTranscriptPlaceholder(with: block, isHTML: true)
-        if let bodyHTML = currentArticleBodyHTML,
-           !Self.htmlContainsRenderedTranscriptBlock(bodyHTML) {
-            let mergedBodyHTML = Self.htmlByAppendingHTMLBlockToArticle(bodyHTML, blockHTML: block)
-            currentArticleBodyHTML = mergedBodyHTML
-            persistTranscriptIntoStoredReferenceIfNeeded(mergedBodyHTML)
-        }
-        onlineReadableLog.notice("YouTube transcript complete source=\(String(describing: source), privacy: .public) vid=\(videoId, privacy: .public)")
-    }
-
-    private func recordTranscriptFailure(
-        source: TranscriptLoadSource,
-        message: String,
-        sequence: UInt64
-    ) {
-        guard var state = transcriptLoadState,
-              state.sequence == sequence,
-              !state.resolved else {
-            return
-        }
-
-        state.pendingSources.remove(source)
-        state.failures[source] = message
-
-        if state.pendingSources.isEmpty {
-            state.resolved = true
-            transcriptLoadState = state
-            cancelTranscriptLoadTasks()
-            replaceTranscriptPlaceholder(with: Self.transcriptFailureMessage(failures: state.failures))
-            return
-        }
-
-        transcriptLoadState = state
-    }
-
-    private func handleTranscriptLoadTimeout(videoId: String, sequence: UInt64) {
-        guard var state = transcriptLoadState,
-              state.sequence == sequence,
-              !state.resolved else {
-            return
-        }
-
-        state.resolved = true
-        transcriptLoadState = state
-        cancelTranscriptLoadTasks()
-        let message = Self.transcriptTimeoutMessage(failures: state.failures)
-        onlineReadableLog.error("YouTube transcript load timed out vid=\(videoId, privacy: .public) message=\(message, privacy: .public)")
-        replaceTranscriptPlaceholder(with: message)
-    }
-
-    private func cancelTranscriptLoad() {
-        cancelTranscriptLoadTasks()
-        transcriptLoadState = nil
-    }
-
-    private func cancelTranscriptLoadTasks() {
-        transcriptLoadTasks.forEach { $0.cancel() }
-        transcriptLoadTasks.removeAll()
-    }
-
-    nonisolated private static let transcriptPlaceholderId = "rubien-yt-transcript-loading"
-    nonisolated private static let transcriptLoadTimeoutNanoseconds: UInt64 = 15_000_000_000
-
-    nonisolated static func htmlContainsRenderedTranscriptBlock(_ html: String) -> Bool {
-        html.contains("<details class=\"rubien-yt-transcript\"")
-            || html.contains("<div id=\"\(transcriptPlaceholderId)\"")
-    }
-
-    private func persistTranscriptIntoStoredReferenceIfNeeded(_ articleBodyHTML: String) {
-        guard shouldPersistTranscriptIntoReference,
-              reference.youTubeVideoId != nil,
-              let referenceID = reference.id,
-              let encoded = Reference.encodeWebContent(articleBodyHTML, format: .html) else {
-            return
-        }
-
-        let db = self.db
-        Task.detached(priority: .utility) {
-            do {
-                try db.updateReferenceWebContent(id: referenceID, webContent: encoded)
-            } catch {
-                onlineReadableLog.error("Failed to cache YouTube body refId=\(referenceID, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
-            }
-        }
-    }
-
-    private static func htmlInsertingYouTubeTranscriptPlaceholder(_ html: String) -> String? {
-        let block = "<div id=\"\(transcriptPlaceholderId)\" class=\"rubien-yt-transcript\"><summary style=\"list-style:none;padding:10px 14px;font-size:14px;color:#6b7280;\">Loading transcript…</summary></div>"
-        guard let range = html.range(of: "</article>", options: .backwards) else { return nil }
-        return String(html[..<range.lowerBound]) + block + String(html[range.lowerBound...])
-    }
-
-    private static func htmlByAppendingHTMLBlockToArticle(_ html: String, blockHTML: String) -> String {
-        if let range = html.range(of: "</article>", options: .backwards) {
-            return String(html[..<range.lowerBound]) + blockHTML + String(html[range.lowerBound...])
-        }
-        return html + blockHTML
-    }
-
-    nonisolated private static func transcriptFailureMessage(failures: [TranscriptLoadSource: String]) -> String {
-        if let network = failures[.network]?.trimmingCharacters(in: .whitespacesAndNewlines), !network.isEmpty {
-            return network
-        }
-        if let dom = failures[.dom]?.trimmingCharacters(in: .whitespacesAndNewlines), !dom.isEmpty {
-            return dom
-        }
-        return "Transcript unavailable."
-    }
-
-    nonisolated private static func transcriptTimeoutMessage(failures: [TranscriptLoadSource: String]) -> String {
-        let base = "Transcript loading timed out. Please try again later."
-        if let network = failures[.network]?.trimmingCharacters(in: .whitespacesAndNewlines), !network.isEmpty {
-            return "\(base) Current result: \(network)"
-        }
-        return base
-    }
-
-    private func replaceTranscriptPlaceholder(with content: String, isHTML: Bool = false) {
-        let placeholderId = Self.transcriptPlaceholderId
-        guard let startRange = renderedHTML.range(of: "<div id=\"\(placeholderId)\"") else {
-            // 占位符不在，直接在 </article> 前插入
-            if isHTML {
-                if let range = renderedHTML.range(of: "</article>", options: .backwards) {
-                    renderedHTML = String(renderedHTML[..<range.lowerBound]) + content + String(renderedHTML[range.lowerBound...])
-                }
-            }
-            return
-        }
-        // 找到占位符的结束 </div>
-        let afterStart = renderedHTML[startRange.lowerBound...]
-        guard let endRange = afterStart.range(of: "</div>") else { return }
-        let fullRange = startRange.lowerBound..<endRange.upperBound
-
-        if isHTML {
-            renderedHTML.replaceSubrange(fullRange, with: content)
-        } else {
-            let escaped = content
-                .replacingOccurrences(of: "&", with: "&amp;")
-                .replacingOccurrences(of: "<", with: "&lt;")
-            let errorBlock = "<div class=\"rubien-yt-transcript\"><summary style=\"list-style:none;padding:10px 14px;font-size:14px;color:#6b7280;\">Transcript unavailable: \(escaped)</summary></div>"
-            renderedHTML.replaceSubrange(fullRange, with: errorBlock)
         }
     }
 
@@ -853,7 +465,6 @@ final class WebReaderViewModel: ObservableObject {
     }
 
     private func renderContent() {
-        cancelTranscriptLoad()
         guard let storedContent = reference.decodedWebContent else {
             renderedHTML = Self.emptyDocument(title: reference.title)
             return
@@ -865,44 +476,32 @@ final class WebReaderViewModel: ObservableObject {
         let contentWidth = self.contentWidth
 
         Task.detached(priority: .userInitiated) {
-            let isYouTube = reference.youTubeVideoId != nil
             let includeClipperTypography = storedContent.format == .html
-            let rawBodyHTML: String
+            let bodyHTML: String
             switch storedContent.format {
             case .markdown:
-                rawBodyHTML = Self.renderedMarkdownHTML(
+                bodyHTML = Self.renderedMarkdownHTML(
                     from: storedContent.body,
                     baseURL: reference.resolvedWebReaderURLString().flatMap(URL.init(string:))
                 )
             case .html:
-                rawBodyHTML = storedContent.body
-            }
-
-            let finalBodyHTML: String
-            if reference.youTubeVideoId != nil {
-                finalBodyHTML = Self.cleanedYouTubeArticleBodyHTML(rawBodyHTML)
-            } else {
-                finalBodyHTML = rawBodyHTML
+                bodyHTML = storedContent.body
             }
 
             let html = Self.buildHTMLDocument(
                 reference: reference,
-                articleBodyHTML: finalBodyHTML,
+                articleBodyHTML: bodyHTML,
                 fontSize: fontSize,
                 contentWidth: contentWidth,
-                eyebrowText: isYouTube ? "YouTube clip" : "Clipped",
+                eyebrowText: "Clipped",
                 includeClipperTypography: includeClipperTypography,
-                omitReferenceAbstract: isYouTube,
-                omitArticleHeader: isYouTube
+                omitReferenceAbstract: false,
+                omitArticleHeader: false
             )
             await MainActor.run {
-                self.currentArticleBodyHTML = finalBodyHTML
-                self.shouldPersistTranscriptIntoReference = storedContent.format == .html
+                self.currentArticleBodyHTML = bodyHTML
                 self.renderedHTML = html
                 self.isRendering = false
-                if let vid = reference.youTubeVideoId {
-                    self.scheduleYouTubeTranscriptMerge(videoId: vid)
-                }
             }
         }
     }
@@ -974,7 +573,7 @@ final class WebReaderViewModel: ObservableObject {
     /// - Parameters:
     ///   - articleBodyHTML: 已生成的 HTML 片段（Markdown 渲染结果或 Readability 的 `content`），不做 HTML 转义。
     ///   - headerTitle/summaryText/authorOverride: 在线阅读时可用抽取结果覆盖条目元数据展示。
-    ///   - omitReferenceAbstract: 为 true 时头部摘要仅使用 `summaryText`（可为空），不回退到 `reference.abstract`（YouTube 正文已含描述）。
+    ///   - omitReferenceAbstract: 为 true 时头部摘要仅使用 `summaryText`（可为空），不回退到 `reference.abstract`。
     ///   - includeClipperTypography: 为 true 时注入 Obsidian Clipper 的 `reader.css` / `highlighter.css` 及主题 class（与 Defuddle 在线阅读配套）。
     nonisolated private static func buildHTMLDocument(
         reference: Reference,
@@ -1274,58 +873,6 @@ final class WebReaderViewModel: ObservableObject {
               box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.35);
             }
 
-            /* YouTube transcript (播放器在 SwiftUI 内联 WKWebView) */
-            .rubien-yt-desc {
-              color: #4b5563;
-              font-size: 15px;
-              line-height: 1.7;
-            }
-            .rubien-yt-transcript {
-              margin-top: 1.5em;
-              border: none;
-              border-radius: 0;
-              overflow: visible;
-            }
-            .rubien-yt-transcript summary {
-              cursor: pointer;
-              padding: 8px 0;
-              font-weight: 600;
-              font-size: 13px;
-              color: #9ca3af;
-              letter-spacing: 0.02em;
-              text-transform: uppercase;
-              background: none;
-              user-select: none;
-              border-top: 1px solid rgba(15, 23, 42, 0.06);
-            }
-            .rubien-yt-transcript-body {
-              font-size: 0.88em;
-              line-height: 1.75;
-              padding: 8px 0;
-              margin: 0;
-              max-height: none;
-              overflow-y: visible;
-            }
-            .rubien-yt-line {
-              display: block;
-            }
-            .rubien-yt-ts {
-              display: inline-block;
-              font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-              font-size: 0.92em;
-              color: #6366f1;
-              text-decoration: none;
-              cursor: pointer;
-              margin-right: 0.4em;
-              padding: 1px 4px;
-              border-radius: 4px;
-              transition: background 0.15s;
-            }
-            .rubien-yt-ts:hover {
-              background: rgba(99, 102, 241, 0.12);
-              text-decoration: none;
-            }
-
             @media (prefers-color-scheme: dark) {
               html {
                 scrollbar-color: rgba(148, 163, 184, 0.28) transparent;
@@ -1388,18 +935,6 @@ final class WebReaderViewModel: ObservableObject {
 
               #article-content a {
                 color: #7fb3ff;
-              }
-
-              .rubien-yt-desc {
-                color: #aeb6c2;
-              }
-              .rubien-yt-transcript {
-                border-color: transparent;
-              }
-              .rubien-yt-transcript summary {
-                color: #6b7280;
-                background: none;
-                border-top-color: rgba(255, 255, 255, 0.08);
               }
             }
           </style>
@@ -1842,11 +1377,6 @@ final class WebReaderViewModel: ObservableObject {
 
               window.RubienReader = {
                 setAnnotations,
-                seekYouTube(seconds) {
-                  const n = Number(seconds);
-                  if (!Number.isFinite(n) || n < 0) return;
-                  send('youtubeSeek', { seconds: Math.floor(n) });
-                },
                 clearSelection() {
                   const selection = window.getSelection();
                   if (selection) selection.removeAllRanges();
@@ -1905,148 +1435,6 @@ final class WebReaderViewModel: ObservableObject {
         """
     }
 
-    /// 去掉正文中的 YouTube 内嵌播放器（Readability 会保留 video iframe；WKWebView 会报 152-4）。
-    nonisolated private static func htmlByStrippingYouTubePlayerEmbeds(_ html: String) -> String {
-        var result = html
-        // 使用普通字符串，避免 raw string 内 \" 与字符类 [\"'] 冲突。
-        let patterns: [(String, NSRegularExpression.Options)] = [
-            (
-                "<iframe\\b[^>]*\\bsrc\\s*=\\s*[\"'][^\"']*(?:youtube\\.com|youtu\\.be|youtube-nocookie)[^\"']*[\"'][^>]*>[\\s\\S]*?</iframe>",
-                [.caseInsensitive, .dotMatchesLineSeparators]
-            ),
-            (
-                "<iframe\\b[^>]*\\bsrc\\s*=\\s*[^\\s>]*(?:youtube\\.com|youtu\\.be|youtube-nocookie)[^>]*>[\\s\\S]*?</iframe>",
-                [.caseInsensitive, .dotMatchesLineSeparators]
-            ),
-            (
-                "<embed\\b[^>]*(?:youtube\\.com|youtu\\.be|youtube-nocookie)[^>]*\\/?>",
-                [.caseInsensitive]
-            ),
-            (
-                "<object\\b[^>]*(?:youtube\\.com|youtu\\.be|youtube-nocookie)[^>]*>[\\s\\S]*?</object>",
-                [.caseInsensitive, .dotMatchesLineSeparators]
-            )
-        ]
-        for (pattern, opts) in patterns {
-            guard let re = try? NSRegularExpression(pattern: pattern, options: opts) else { continue }
-            for _ in 0 ..< 48 {
-                let range = NSRange(result.startIndex..., in: result)
-                guard let m = re.firstMatch(in: result, options: [], range: range),
-                      let r = Range(m.range, in: result) else { break }
-                result.replaceSubrange(r, with: "")
-            }
-        }
-        return result
-    }
-
-    nonisolated static func cleanedYouTubeArticleBodyHTML(_ html: String) -> String {
-        var result = htmlByStrippingYouTubePlayerEmbeds(html)
-        result = htmlByRemovingLegacyYouTubeFallbackChrome(result)
-        result = htmlByRemovingLeadingYouTubeCoverMedia(result)
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    /// 兼容清理旧版 YouTube fallback 存量 HTML，避免正文里重复出现封面卡、外链按钮和摘要。
-    nonisolated static func htmlByRemovingLegacyYouTubeFallbackChrome(_ html: String) -> String {
-        var result = html
-        result = htmlByRemovingElement(tagName: "div", containingClass: "rubien-yt-player-shell", from: result)
-        result = htmlByRemovingElement(tagName: "div", containingClass: "rubien-yt-player-actions", from: result)
-        result = htmlByRemovingElement(tagName: "p", containingClass: "rubien-yt-desc", from: result)
-
-        let patterns: [(String, NSRegularExpression.Options)] = [
-            (#"<p>\s*<a\b[^>]*class\s*=\s*["'][^"']*rubien-yt-open-link[^"']*["'][^>]*>[\s\S]*?</a>\s*</p>\s*"#, [.caseInsensitive, .dotMatchesLineSeparators]),
-            (#"^\s*<p>\s*<a\b[^>]*href\s*=\s*["']https?://(?:www\.)?youtube\.com/watch[^"']*["'][^>]*>\s*(?:在浏览器中打开|Open(?:\s+in)?\s+browser)\s*</a>\s*</p>\s*"#, [.caseInsensitive, .dotMatchesLineSeparators]),
-        ]
-        for (pattern, opts) in patterns {
-            guard let re = try? NSRegularExpression(pattern: pattern, options: opts) else { continue }
-            for _ in 0 ..< 12 {
-                let range = NSRange(result.startIndex..., in: result)
-                guard let match = re.firstMatch(in: result, options: [], range: range),
-                      let swiftRange = Range(match.range, in: result) else { break }
-                result.removeSubrange(swiftRange)
-            }
-        }
-
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    nonisolated private static func htmlByRemovingElement(
-        tagName: String,
-        containingClass className: String,
-        from html: String
-    ) -> String {
-        let escapedClass = NSRegularExpression.escapedPattern(for: className)
-        let pattern = "<\(tagName)\\b[^>]*class\\s*=\\s*[\"'][^\"']*\\b\(escapedClass)\\b[^\"']*[\"'][^>]*>"
-        guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-            return html
-        }
-
-        var result = html
-        for _ in 0 ..< 12 {
-            let range = NSRange(result.startIndex..., in: result)
-            guard let match = re.firstMatch(in: result, options: [], range: range),
-                  let openingTagRange = Range(match.range, in: result),
-                  let elementRange = htmlElementRange(in: result, tagName: tagName, openingTagRange: openingTagRange) else {
-                break
-            }
-            result.removeSubrange(elementRange)
-        }
-
-        return result
-    }
-
-    nonisolated private static func htmlElementRange(
-        in html: String,
-        tagName: String,
-        openingTagRange: Range<String.Index>
-    ) -> Range<String.Index>? {
-        var searchStart = openingTagRange.upperBound
-        var depth = 1
-        let openPattern = "<\(tagName)\\b"
-        let closePattern = "</\(tagName)>"
-
-        while searchStart < html.endIndex {
-            let searchRange = searchStart..<html.endIndex
-            let nextOpen = html.range(of: openPattern, options: [.regularExpression, .caseInsensitive], range: searchRange)
-            let nextClose = html.range(of: closePattern, options: [.caseInsensitive], range: searchRange)
-            guard let closeRange = nextClose else { return nil }
-
-            if let openRange = nextOpen, openRange.lowerBound < closeRange.lowerBound {
-                depth += 1
-                searchStart = openRange.upperBound
-            } else {
-                depth -= 1
-                searchStart = closeRange.upperBound
-                if depth == 0 {
-                    return openingTagRange.lowerBound..<closeRange.upperBound
-                }
-            }
-        }
-
-        return nil
-    }
-
-    /// YouTube 剪藏正文常会把封面图再保存一份，和顶部视频卡重复；仅移除首屏独立媒体块，保留正文其它图片。
-    nonisolated static func htmlByRemovingLeadingYouTubeCoverMedia(_ html: String) -> String {
-        var result = html
-        let patterns: [(String, NSRegularExpression.Options)] = [
-            (#"^\s*<div\b[^>]*class\s*=\s*["'][^"']*rubien-md-media-block[^"']*["'][^>]*>\s*[\s\S]*?</div>\s*"#, [.caseInsensitive, .dotMatchesLineSeparators]),
-            (#"^\s*<p>\s*(?:<a\b[^>]*>\s*)?<img\b[^>]*>(?:\s*</a>)?\s*</p>\s*"#, [.caseInsensitive, .dotMatchesLineSeparators]),
-            (#"^\s*<figure\b[^>]*>\s*[\s\S]*?</figure>\s*"#, [.caseInsensitive, .dotMatchesLineSeparators]),
-            (#"^\s*(?:<a\b[^>]*>\s*)?<img\b[^>]*>(?:\s*</a>)?\s*"#, [.caseInsensitive, .dotMatchesLineSeparators]),
-        ]
-
-        for (pattern, opts) in patterns {
-            guard let re = try? NSRegularExpression(pattern: pattern, options: opts) else { continue }
-            let range = NSRange(result.startIndex..., in: result)
-            guard let match = re.firstMatch(in: result, options: [], range: range),
-                  let swiftRange = Range(match.range, in: result) else { continue }
-            result.removeSubrange(swiftRange)
-            break
-        }
-
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
 
     /// `site` 与 `url` 是否指向同一 http(s) 资源，避免元信息区重复展示同一链接。
     nonisolated private static func metaSiteAndURLAreRedundant(site: String, url: String) -> Bool {
@@ -2084,7 +1472,6 @@ final class WebReaderViewModel: ObservableObject {
 
 struct WebReaderView: View {
     @StateObject private var viewModel: WebReaderViewModel
-    @StateObject private var transcriptPageFetcher = YouTubeTranscriptPageFetcher()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @State private var showAnnotationSidebar = true
@@ -2105,10 +1492,6 @@ struct WebReaderView: View {
         HSplitView {
             ZStack(alignment: .top) {
                 VStack(spacing: 0) {
-                    if usesPinnedYouTubeHeader {
-                        pinnedYouTubeHeader
-                    }
-                    youTubeInlineHeader
                     WebReaderContentView(viewModel: viewModel)
                         .overlay {
                             webSelectionToolbarOverlay
@@ -2143,21 +1526,6 @@ struct WebReaderView: View {
             }
         }
         .frame(minWidth: 900, minHeight: 620)
-        .onDisappear {
-            viewModel.collapseYouTubeInlinePlayer()
-        }
-        .background {
-            if viewModel.reference.isLikelyYouTubeWatchURL {
-                HiddenWKWebViewHost(
-                    onCreate: { webView in
-                        transcriptPageFetcher.registerWebView(webView)
-                    }
-                )
-                .frame(width: 4, height: 4)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-            }
-        }
         .animation(
             .spring(response: 0.3, dampingFraction: 0.82),
             value: viewModel.hasSelection && viewModel.selectionToolbarLayout?.visible == true
@@ -2184,10 +1552,8 @@ struct WebReaderView: View {
                     .frame(maxWidth: 260)
                 }
 
-                if !usesPinnedYouTubeHeader {
-                    fontControls
-                    widthControls
-                }
+                fontControls
+                widthControls
             }
 
             ToolbarItemGroup(placement: .primaryAction) {
@@ -2206,11 +1572,6 @@ struct WebReaderView: View {
                 showAnnotationSidebar = true
             }
         }
-        .task {
-            viewModel.fetchTranscriptFromOriginalPage = { [transcriptPageFetcher] urlString in
-                await transcriptPageFetcher.fetchTranscript(urlString: urlString)
-            }
-        }
         .navigationTitle(viewModel.reference.title)
         .alert(String(localized: "Live reading", bundle: .module), isPresented: Binding(
             get: { viewModel.liveReadableUserMessage != nil },
@@ -2219,83 +1580,6 @@ struct WebReaderView: View {
             Button(String(localized: "common.ok", bundle: .module), role: .cancel) {}
         } message: {
             Text(viewModel.liveReadableUserMessage ?? "")
-        }
-    }
-
-    private var usesPinnedYouTubeHeader: Bool {
-        viewModel.reference.youTubeVideoId != nil
-    }
-
-    private var pinnedYouTubeHeader: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center, spacing: 10) {
-                Label("YouTube", systemImage: "play.rectangle.fill")
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(.tertiary)
-
-                Spacer()
-
-                if let urlString = viewModel.reference.resolvedWebReaderURLString(),
-                   let url = URL(string: urlString) {
-                    Link(destination: url) {
-                        Label(String(localized: "Source video", bundle: .module), systemImage: "arrow.up.right")
-                            .font(.caption)
-                    }
-                    .foregroundStyle(.secondary)
-                    .buttonStyle(.plain)
-                }
-            }
-
-            Text(viewModel.reference.title)
-                .font(.system(size: 24, weight: .bold))
-                .lineLimit(3)
-                .fixedSize(horizontal: false, vertical: true)
-
-            if let site = viewModel.reference.siteName ?? viewModel.reference.journal,
-               !site.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text(site)
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-            }
-        }
-        .padding(.horizontal, 20)
-        .padding(.top, 14)
-        .padding(.bottom, 12)
-        .overlay(alignment: .bottom) {
-            Divider().opacity(0.5)
-        }
-    }
-
-    @ViewBuilder
-    private var youTubeInlineHeader: some View {
-        if let vid = viewModel.reference.youTubeVideoId {
-            let externalURL = viewModel.reference.resolvedWebReaderURLString().flatMap { URL(string: $0) }
-                ?? URL(string: "https://www.youtube.com/watch?v=\(vid)")
-            Group {
-                if viewModel.youTubeInlineWatchURL != nil {
-                    ZStack(alignment: .topTrailing) {
-                        YouTubeWatchInlineWebView(viewModel: viewModel)
-                        Button {
-                            viewModel.collapseYouTubeInlinePlayer()
-                        } label: {
-                            Label(String(localized: "Collapse video", bundle: .module), systemImage: "xmark")
-                                .labelStyle(.iconOnly)
-                                .padding(9)
-                                .liquidGlassSurface(in: Circle(), fallback: .ultraThinMaterial)
-                        }
-                        .buttonStyle(.plain)
-                        .padding(12)
-                    }
-                } else {
-                    YouTubeWatchPlayPlaceholder(videoId: vid, externalWatchURL: externalURL) {
-                        viewModel.activateYouTubeInlinePlayer()
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity)
-            .aspectRatio(16.0 / 9.0, contentMode: .fit)
-            .clipped()
         }
     }
 
@@ -2408,118 +1692,6 @@ struct WebReaderView: View {
     }
 }
 
-private struct YouTubeWatchInlineWebView: NSViewRepresentable {
-    @ObservedObject var viewModel: WebReaderViewModel
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
-    }
-
-    func makeNSView(context: Context) -> WKWebView {
-        let configuration = WKWebViewConfiguration()
-        configuration.mediaTypesRequiringUserActionForPlayback = []
-        let webView = WKWebView(frame: .zero, configuration: configuration)
-        webView.customUserAgent = ReaderExtractionManager.safariLikeUserAgent
-        webView.setValue(false, forKey: "drawsBackground")
-        return webView
-    }
-
-    func updateNSView(_ webView: WKWebView, context: Context) {
-        guard let url = viewModel.youTubeInlineWatchURL else { return }
-        if context.coordinator.lastLoadedURL != url {
-            context.coordinator.lastLoadedURL = url
-            webView.load(URLRequest(url: url))
-        }
-    }
-
-    static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
-        webView.stopLoading()
-        webView.loadHTMLString("", baseURL: nil)
-    }
-
-    final class Coordinator {
-        var lastLoadedURL: URL?
-    }
-}
-
-private struct YouTubeWatchPlayPlaceholder: View {
-    let videoId: String
-    let externalWatchURL: URL?
-    let onPlay: () -> Void
-
-    var body: some View {
-        ZStack(alignment: .bottomLeading) {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color.black)
-
-            AsyncImage(url: URL(string: "https://img.youtube.com/vi/\(videoId)/mqdefault.jpg")) { phase in
-                switch phase {
-                case .success(let image):
-                    image
-                        .resizable()
-                        .aspectRatio(contentMode: .fill)
-                        .overlay {
-                            LinearGradient(
-                                colors: [
-                                    .black.opacity(0.08),
-                                    .black.opacity(0.18),
-                                    .black.opacity(0.52)
-                                ],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        }
-                case .failure:
-                    LinearGradient(
-                        colors: [Color.black.opacity(0.86), Color.gray.opacity(0.56)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                case .empty:
-                    ZStack {
-                        LinearGradient(
-                            colors: [Color.black.opacity(0.86), Color.gray.opacity(0.56)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                        ProgressView()
-                            .controlSize(.regular)
-                    }
-                @unknown default:
-                    EmptyView()
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Tap to play this video", bundle: .module)
-                    .font(.headline.weight(.semibold))
-                    .foregroundStyle(.white)
-                Text("The cover is shown by default to avoid loading the player alongside the reading view.", bundle: .module)
-                    .font(.subheadline)
-                    .foregroundStyle(.white.opacity(0.82))
-            }
-            .padding(18)
-
-            VStack {
-                Button(action: onPlay) {
-                    HStack(spacing: 10) {
-                        Image(systemName: "play.fill")
-                            .font(.system(size: 15, weight: .bold))
-                        Text("Play video", bundle: .module)
-                            .font(.headline.weight(.semibold))
-                    }
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 12)
-                    .background(.black.opacity(0.58), in: Capsule())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(String(localized: "Play YouTube video", bundle: .module))
-            }
-        }
-
-    }
-}
 
 // Popover chrome lives in `AnnotationPopovers.swift` (shared with PDFReaderView).
 // Adapters are constructed inline at the overlay call sites
@@ -2539,7 +1711,6 @@ private struct WebReaderContentView: NSViewRepresentable {
         controller.add(context.coordinator, name: "annotationActivated")
         controller.add(context.coordinator, name: "articleClickEmpty")
         controller.add(context.coordinator, name: "summarySectionClicked")
-        controller.add(context.coordinator, name: "youtubeSeek")
         controller.add(context.coordinator, name: "RubienClipperDebug")
         controller.add(context.coordinator.extractionManager, name: ReaderExtractionManager.readerResultHandlerName)
 
@@ -2661,20 +1832,6 @@ private struct WebReaderContentView: NSViewRepresentable {
                     )
                 }
             }
-            extractionManager.onYouTubeFallbackSuccess = { [weak self] title, content, excerpt, byline in
-                guard let self else { return }
-                let vm = self.parent.viewModel
-                Task { @MainActor in
-                    vm.applyReadableExtractionResult(
-                        title: title,
-                        contentHTML: content,
-                        excerpt: excerpt,
-                        byline: byline,
-                        includeClipperTypography: false,
-                        eyebrowText: "Live · YouTube"
-                    )
-                }
-            }
             extractionManager.onTerminalFailure = { [weak self] message in
                 guard let self else { return }
                 let vm = self.parent.viewModel
@@ -2708,25 +1865,9 @@ private struct WebReaderContentView: NSViewRepresentable {
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             if awaitingReadableExtraction {
                 awaitingReadableExtraction = false
-                let vm = parent.viewModel
                 let pageURL = webView.url?.absoluteString ?? "(nil)"
                 onlineReadableLog.notice("WK didFinish url=\(pageURL, privacy: .public) — about to inject Defuddle extraction")
-                let urlForYouTubeCheck = webView.url?.absoluteString ?? vm.reference.resolvedWebReaderURLString() ?? ""
-                if Reference.isLikelyYouTubeWatchURL(urlString: urlForYouTubeCheck) {
-                    // YouTube 为 SPA：`didFinish` 时常早于标题/说明注入 DOM，立刻抽取易失败。
-                    onlineReadableLog.notice("YouTube: delaying 2.5s before extraction")
-                    Task { @MainActor [weak self] in
-                        try? await Task.sleep(nanoseconds: 2_500_000_000)
-                        guard let self else { return }
-                        guard self.parent.viewModel.displayMode == .liveReadable,
-                              self.parent.viewModel.isLiveReadableBusy else { return }
-                        self.extractionManager.isYouTubeExtractionContext = true
-                        self.extractionManager.runOnlineArticleExtraction(from: webView)
-                    }
-                } else {
-                    extractionManager.isYouTubeExtractionContext = false
-                    extractionManager.runOnlineArticleExtraction(from: webView)
-                }
+                extractionManager.runOnlineArticleExtraction(from: webView)
                 return
             }
             pushAppearance()
@@ -2841,16 +1982,6 @@ private struct WebReaderContentView: NSViewRepresentable {
             case "summarySectionClicked":
                 Task { @MainActor in
                     parent.viewModel.onArticleSummaryTapped()
-                }
-            case "youtubeSeek":
-                let body = message.body as? [String: Any]
-                let sec: Int = {
-                    if let i = body?["seconds"] as? Int { return i }
-                    if let n = body?["seconds"] as? NSNumber { return n.intValue }
-                    return 0
-                }()
-                Task { @MainActor in
-                    parent.viewModel.seekYouTubeTo(seconds: max(0, sec))
                 }
             case "RubienClipperDebug":
                 if let dict = message.body as? [String: Any] {

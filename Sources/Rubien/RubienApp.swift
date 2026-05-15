@@ -9,7 +9,6 @@ struct RubienApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var syncCoordinator = SyncCoordinator(appDatabase: AppDatabase.shared)
     @State private var addinToast: AddinToastPayload?
-    @AppStorage(RubienPreferences.appendYouTubeTranscriptOnClipKey) private var appendYouTubeTranscriptOnClip = false
     private static let defaultWindowSize = preferredDefaultWindowSize()
 
     var body: some Scene {
@@ -46,14 +45,6 @@ struct RubienApp: App {
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified(showsTitle: true))
         .defaultSize(width: Self.defaultWindowSize.width, height: Self.defaultWindowSize.height)
-        .commands {
-            CommandGroup(after: .appSettings) {
-                Toggle(
-                    String(localized: "Append YouTube transcript to note on clip", bundle: .module),
-                    isOn: $appendYouTubeTranscriptOnClip
-                )
-            }
-        }
         Settings {
             RubienSettingsView()
                 .environmentObject(syncCoordinator)

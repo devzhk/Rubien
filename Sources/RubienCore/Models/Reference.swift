@@ -659,55 +659,6 @@ extension Reference {
         return !urlStr.isEmpty && URL(string: urlStr) != nil
     }
 
-    /// 与 `isLikelyYouTubeWatchURL` 一致，供仅有 URL 字符串的场景使用（如从网页导入、Clipper 抓取调度）。
-    public static func isLikelyYouTubeWatchURL(urlString: String) -> Bool {
-        var r = Reference(title: "x", referenceType: .webpage)
-        r.url = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
-        return r.isLikelyYouTubeWatchURL
-    }
-
-    /// YouTube 观看类 URL。应用内 WKWebView 无浏览器扩展的 Referer/DNR 修复，嵌入播放器常被拦；需延迟抽取或专用降级页。
-    public var isLikelyYouTubeWatchURL: Bool {
-        guard let s = resolvedWebReaderURLString(),
-              let u = URL(string: s),
-              let host = u.host?.lowercased() else { return false }
-        if host == "youtu.be" || host.hasSuffix(".youtu.be") { return true }
-        guard host.contains("youtube.com") else { return false }
-        let path = u.path.lowercased()
-        if path.hasPrefix("/watch") { return true }
-        if path.hasPrefix("/shorts/") { return true }
-        if path.hasPrefix("/live/") { return true }
-        if path.hasPrefix("/embed/") { return true }
-        return u.query?.contains("v=") == true
-    }
-
-    /// 从当前条目的可解析原文链接中提取 YouTube 视频 ID（用于 timedtext / 字幕拉取）。
-    public var youTubeVideoId: String? {
-        guard let s = resolvedWebReaderURLString() else { return nil }
-        return Self.parseYouTubeVideoId(from: s)
-    }
-
-    public static func parseYouTubeVideoId(from urlString: String) -> String? {
-        guard let url = URL(string: urlString), let host = url.host?.lowercased() else { return nil }
-        if host == "youtu.be" || host.hasSuffix(".youtu.be") {
-            let raw = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            let id = raw.split(separator: "?").first.map(String.init) ?? raw
-            return id.isEmpty ? nil : id
-        }
-        guard host.contains("youtube.com") else { return nil }
-        if let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
-           let v = items.first(where: { $0.name == "v" })?.value, !v.isEmpty {
-            return v
-        }
-        let path = url.path.lowercased()
-        for prefix in ["/shorts/", "/live/", "/embed/"] {
-            if path.hasPrefix(prefix) {
-                let rest = String(path.dropFirst(prefix.count)).split(separator: "/").first.map(String.init) ?? ""
-                return rest.isEmpty ? nil : rest
-            }
-        }
-        return nil
-    }
 }
 
 // MARK: - GRDB Record

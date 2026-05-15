@@ -9,13 +9,10 @@ Files in this directory:
 
 Important (diffs from obsidian-clipper upstream):
 - Rubien does NOT load dist/reader-script.js, and does NOT invoke reader.ts `Reader.apply()`.
-- reader.ts YouTube paths depend on `browser.runtime.sendMessage(enableYouTubeEmbedRule)` which is a browser-extension API. WKWebView has no equivalent backend, so we bypass it.
-- The Swift side strips `youtube.com` / `youtu.be` / `youtube-nocookie` iframes / embeds / objects: Readability's `allowedVideoRegex` would preserve those iframes, which trips WKWebView error 152-4. We only keep an outbound thumbnail card (`rubien-yt-player-wrap`).
-- For YouTube entries, the header abstract does NOT fall back to the reference abstract (it would duplicate the og:description paragraph already in the body). If `siteName`/`journal` equals `url`, only one is shown.
+- If `siteName`/`journal` equals `url`, only one is shown in the header.
 - Debugging the online-read pipeline: open Console.app → filter subsystem `Rubien`, category `OnlineReadable`. The injection script posts phase names via `RubienClipperDebug` (e.g. `rubien_defuddle_extract_start`).
 - `readerResult` is the WKScriptMessageHandler name. `ClipperDefuddle.js` `RubienDefuddleExtract` both `postMessage`s and returns JSON from `evaluateJavaScript` (dual channel). `ReaderExtractionManager` receives them and removes the handler on `deinit`.
-- `ReaderExtractionManager` (Sources/Rubien/ReaderExtraction) handles Defuddle → Readability → YouTube fallback, 1.5s delayed retry once, and a Safari-like `customUserAgent`.
-- YouTube transcripts: `YouTubeTranscriptFetcher` uses a dedicated ephemeral URLSession, requests watch first then the caption endpoint (cookies + initial CONSENT header), sets Referer/Origin to the watch URL, and tries `fmt=xml3` / `fmt=json3` variants. Parse path: `ytInitialPlayerResponse` → `captionTracks` → `baseUrl` → timedtext (XML or JSON3). Debug via Console.app, subsystem `Rubien`, category `YouTubeTranscript`. The online YouTube reader inserts a `<details>` transcript block asynchronously after page load. The menu toggle "Append YouTube transcript to note on clip" maps to UserDefaults key `Rubien.appendYouTubeTranscriptOnClip` (default off).
+- `ReaderExtractionManager` (Sources/Rubien/ReaderExtraction) handles Defuddle → Readability, 1.5s delayed retry once, and a Safari-like `customUserAgent`.
 
 To update Defuddle or the reader stylesheet:
   cd obsidian-clipper/

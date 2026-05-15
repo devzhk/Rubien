@@ -57,11 +57,6 @@ final class ClipperWebMetadataExtractor: NSObject, ObservableObject {
                 self?.completeWithClipperResult(title: title, content: content, excerpt: excerpt, byline: byline, source: "Readability")
             }
         }
-        extractionManager.onYouTubeFallbackSuccess = { [weak self] title, content, excerpt, byline in
-            Task { @MainActor in
-                self?.completeWithClipperResult(title: title, content: content, excerpt: excerpt, byline: byline, source: "YouTubeFallback")
-            }
-        }
         extractionManager.onTerminalFailure = { [weak self] message in
             Task { @MainActor in
                 self?.failExtraction(.extractionFailed(message))
@@ -182,18 +177,7 @@ extension ClipperWebMetadataExtractor: WKNavigationDelegate {
         let pageURL = webView.url?.absoluteString ?? startedURLString
         clipperImportLog.notice("WK didFinish, about to inject Clipper url=\(pageURL, privacy: .public)")
 
-        if Reference.isLikelyYouTubeWatchURL(urlString: pageURL) {
-            clipperImportLog.notice("YouTube: delaying 2.5s before extraction (matches online reading path)")
-            Task { @MainActor [weak self] in
-                try? await Task.sleep(nanoseconds: 2_500_000_000)
-                guard let self, self.isExtracting, self.webView === webView else { return }
-                self.extractionManager.isYouTubeExtractionContext = true
-                self.extractionManager.runOnlineArticleExtraction(from: webView)
-            }
-        } else {
-            extractionManager.isYouTubeExtractionContext = false
-            extractionManager.runOnlineArticleExtraction(from: webView)
-        }
+        extractionManager.runOnlineArticleExtraction(from: webView)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {

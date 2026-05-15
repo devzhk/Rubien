@@ -67,18 +67,6 @@ final class ReferenceModelTests: XCTestCase {
         XCTAssertTrue(clipped.canOpenWebReader)
     }
 
-    func testYouTubeDetectionAndVideoIDParsingHandleCommonURLShapes() {
-        XCTAssertTrue(Reference.isLikelyYouTubeWatchURL(urlString: "https://www.youtube.com/watch?v=abc123"))
-        XCTAssertTrue(Reference.isLikelyYouTubeWatchURL(urlString: "https://youtu.be/xyz789?t=12"))
-        XCTAssertTrue(Reference.isLikelyYouTubeWatchURL(urlString: "https://www.youtube.com/shorts/short42"))
-        XCTAssertFalse(Reference.isLikelyYouTubeWatchURL(urlString: "https://example.com/watch?v=abc123"))
-
-        XCTAssertEqual(Reference.parseYouTubeVideoId(from: "https://www.youtube.com/watch?v=abc123"), "abc123")
-        XCTAssertEqual(Reference.parseYouTubeVideoId(from: "https://youtu.be/xyz789?t=12"), "xyz789")
-        XCTAssertEqual(Reference.parseYouTubeVideoId(from: "https://www.youtube.com/shorts/short42"), "short42")
-        XCTAssertEqual(Reference.parseYouTubeVideoId(from: "https://www.youtube.com/embed/embed77"), "embed77")
-    }
-
     func testCSLJSONObjectExportsExpectedFields() throws {
         let reference = Reference(
             id: 42,

@@ -67,7 +67,7 @@ struct WebImportView: View {
                         TextField(String(localized: "Page URL", bundle: .module), text: $url, prompt: Text(verbatim: "https://…"))
                             .textContentType(.URL)
                             .disabled(isSaving)
-                        Text("Rubien extracts the title, abstract, and article body from the page. YouTube pages also try a transcript fallback.", bundle: .module)
+                        Text("Rubien extracts the title, abstract, and article body from the page.", bundle: .module)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
