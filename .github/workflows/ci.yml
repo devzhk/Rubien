@@ -16,9 +16,11 @@ jobs:
   linux:
     name: Linux (x86_64)
     runs-on: ubuntu-22.04
-    # Swift 6.1 is the floor: GRDB 7.10's Package.swift declares
-    # tools-version 6.1, so an older toolchain can't resolve it.
-    container: swift:6.1-jammy
+    # Pinned to the latest stable Swift line as of 2026-05. The
+    # major.minor tag (no patch) picks up 6.3.x bugfixes automatically,
+    # so this only needs a manual bump when 6.4 ships. Floor for this
+    # repo is Swift 6.1 — GRDB 7.10 declares tools-version 6.1.
+    container: swift:6.3-jammy
     steps:
       - uses: actions/checkout@v4
       - name: Install system deps
