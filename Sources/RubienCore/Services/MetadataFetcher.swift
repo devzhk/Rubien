@@ -2,6 +2,9 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
+#if canImport(FoundationXML)
+import FoundationXML
+#endif
 
 /// Automatic metadata fetching from DOI, PMID, arXiv identifiers
 /// Uses free public APIs — no API keys required
