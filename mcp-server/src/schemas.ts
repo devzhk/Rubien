@@ -34,6 +34,7 @@ export const ReferenceDTO = z.object({
   pages: z.string().optional(),
   doi: z.string().optional(),
   url: z.string().optional(),
+  siteName: z.string().optional(),
   abstract: z.string().optional(),
   referenceType: z.string(),
   dateAdded: isoDateString,

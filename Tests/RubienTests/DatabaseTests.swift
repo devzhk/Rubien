@@ -97,7 +97,6 @@ final class DatabaseTests: XCTestCase {
         var webAnnotation = WebAnnotationRecord(
             referenceId: referenceID,
             type: .note,
-            selectedText: "Selected",
             noteText: "Remember this",
             anchorText: "Selected"
         )

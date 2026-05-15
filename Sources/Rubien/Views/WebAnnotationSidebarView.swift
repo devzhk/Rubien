@@ -157,7 +157,7 @@ struct WebAnnotationSidebarView: View {
                     .keyboardShortcut(.cancelAction)
             }
 
-            Text(annotation.selectedText)
+            Text(annotation.anchorText)
                 .font(.callout)
                 .lineLimit(4)
                 .padding(10)
@@ -273,7 +273,7 @@ private struct WebAnnotationCard: View {
                     .foregroundStyle(.tertiary)
             }
 
-            Text(annotation.selectedText)
+            Text(annotation.anchorText)
                 .font(.callout)
                 .lineLimit(4)
                 .foregroundStyle(.primary)

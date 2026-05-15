@@ -830,7 +830,6 @@ final class WebReaderViewModel: ObservableObject {
         var annotation = WebAnnotationRecord(
             referenceId: refId,
             type: type,
-            selectedText: selection.text,
             noteText: noteText,
             color: currentColorHex,
             anchorText: selection.text,

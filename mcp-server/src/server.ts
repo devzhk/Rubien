@@ -7,6 +7,7 @@ import { registerViewTools } from "./tools/views.js";
 import { registerAnnotationTools } from "./tools/annotations.js";
 import { registerSyncTools } from "./tools/sync.js";
 import { registerPdfTools } from "./tools/pdf.js";
+import { registerWebTools } from "./tools/web.js";
 
 export const SERVER_INFO = {
   name: "rubien-mcp-server",
@@ -28,6 +29,7 @@ export function buildServer(): McpServer {
   registerViewTools(server);
   registerAnnotationTools(server);
   registerPdfTools(server);
+  registerWebTools(server);
   registerSyncTools(server);
 
   return server;

@@ -62,6 +62,8 @@ For SPM dev builds, run `.build/debug/rubien-cli` directly or add `.build/debug`
 | `pdf page-image` | Render a PDF page as a base64-encoded JPEG/PNG |
 | `pdf status` | Show PDF cache + upload-queue state for a reference (JSON only) |
 | `pdf download` | Fetch the open-access PDF for a reference and attach it (skip-if-attached; `--force` to replace) |
+| `web get` | Read the extracted body of a clipped web reference |
+| `web annotations` | List web-page annotations for a reference |
 | `sync status` | Inspect iCloud sync state (JSON only) |
 
 ---
@@ -445,7 +447,7 @@ Create/rename/show/hide/add-option/rename-option/delete-option: single `Property
 
 ## annotations
 
-List PDF annotations for a reference.
+List PDF annotations for a reference. PDF references only — for web-page annotations, use `web annotations`.
 
 ```bash
 rubien-cli annotations 42
@@ -868,6 +870,102 @@ for the next app launch.
 
 ---
 
+## web
+
+Read the extracted text and annotations of a clipped web reference.
+Mirrors the `pdf` family for PDF references. Read-only — neither
+subcommand fetches anything from the network; both surface what the
+in-app WebReader has already extracted into the library.
+
+```bash
+rubien-cli web get 42
+rubien-cli web get 42 --max-chars 5000 --start 0
+rubien-cli web annotations 42
+```
+
+### web get
+
+Returns the decoded body of `reference.webContent` along with `url`,
+`siteName`, and an `annotationCount` so an agent can decide whether to
+follow up with `web annotations`. The body is paginated by character
+offset.
+
+| Argument / Option | Type | Default | Description |
+|---|---|---|---|
+| `id` | Int64 (required) | — | Reference ID |
+| `--max-chars` | Int | 50000 | Cap returned characters (must be > 0) |
+| `--start` | Int | 0 | Character offset into the decoded body (must be >= 0) |
+
+**Output:**
+
+```json
+{
+  "id": 599,
+  "url": "https://thinkingmachines.ai/blog/on-policy-distillation/",
+  "siteName": "thinkingmachines.ai",
+  "contentFormat": "html",
+  "content": "<figure>...</figure><div>...</div>",
+  "contentLength": 61273,
+  "start": 0,
+  "returnedChars": 50000,
+  "truncated": true,
+  "annotationCount": 3
+}
+```
+
+- `contentFormat` is `"markdown"` (most pages — Defuddle/Readability
+  output) or `"html"` (a small subset where the clipper preserved
+  markup; the leading `<!-- rubien:web-content:html -->` sentinel that
+  marks these in storage is stripped before output). Treat HTML output
+  as a fragment, not a complete document.
+- `contentLength` is the total decoded body length. Loop with `--start`
+  bumped by `returnedChars` to read past the cap.
+- `--start` past end-of-content returns `{ "content": "",
+  "returnedChars": 0, "truncated": false }` (success, not error) so
+  pagination loops terminate cleanly.
+
+**Errors (stderr `{"error": "..."}`, exit 1):**
+- Reference not found.
+- Reference exists but has no web content (e.g. a PDF-only reference).
+- Invalid `--max-chars` (<= 0) or `--start` (< 0).
+
+### web annotations
+
+Returns highlights, underlines, and anchored notes the user has made on
+a clipped web reference.
+
+| Argument | Type | Description |
+|---|---|---|
+| `referenceId` | Int64 (required) | Reference ID |
+
+**Output:** JSON array of
+
+```json
+{
+  "id": 7,
+  "type": "highlight",
+  "color": "#FFDE59",
+  "noteText": "user's attached note, if any",
+  "anchorText": "...",
+  "prefixText": "... (text immediately before the anchor) ...",
+  "suffixText": "... (text immediately after the anchor) ...",
+  "dateCreated": "2026-04-22T10:14:00.000Z",
+  "dateModified": "2026-04-22T10:14:00.000Z"
+}
+```
+
+- `anchorText` is the highlighted string itself — what the in-app
+  sidebar displays — and also the locator used to find the highlight
+  inside the body returned by `web get`.
+- `prefixText` / `anchorText` / `suffixText` form a W3C
+  TextQuoteSelector: `prefixText` and `suffixText` disambiguate when
+  `anchorText` appears more than once on the page.
+- Empty array (not error) when the reference has no web annotations or
+  the reference ID doesn't exist — same convention as the PDF
+  `annotations` subcommand.
+
+---
+
 ## sync status
 
 Prints iCloud sync state as JSON. Never instantiates the CloudKit sync
@@ -931,6 +1029,7 @@ All commands that return references use this structure:
   "pages": null,
   "doi": "10.48550/arXiv.1706.03762",
   "url": "https://arxiv.org/abs/1706.03762",
+  "siteName": "arxiv.org",
   "abstract": "The dominant sequence transduction models...",
   "referenceType": "Conference Paper",
   "dateAdded": "2024-01-15T10:30:00Z",
@@ -959,6 +1058,8 @@ All commands that return references use this structure:
 `lastReadAt` is the most-recent reader-open timestamp (ISO-8601), stamped automatically whenever the PDF or web reader opens the reference. The field is **omitted entirely** (not `null`) when the reference has never been opened in a reader post-v4 — Swift `Date?` semantics. Sort or filter by it via the standard sort/filter DSL (key: `"lastReadAt"`).
 
 `readCount` is the count of distinct reading sessions. Each reader open bumps the counter at most once per ~10-minute window (so quick-toggle flows don't inflate it). Always present in JSON; `0` for references that haven't been opened. Sort or filter by it via `"readCount"`.
+
+`siteName` is the source-site name for a clipped web reference (e.g. `"arxiv.org"`, `"thinkingmachines.ai"`). Omitted entirely (not `null`) for references that aren't web clips. `webContent` (the extracted body) is **not** included in this DTO — fetch it via `rubien-cli web get <id>` to keep `list`/`search`/`export` payloads predictable in size.
 
 ---
 

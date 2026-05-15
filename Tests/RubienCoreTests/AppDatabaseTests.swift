@@ -568,7 +568,6 @@ final class AppDatabaseTests: XCTestCase {
         var annotation = WebAnnotationRecord(
             referenceId: ref.id!,
             type: .highlight,
-            selectedText: "Important web content",
             anchorText: "Important"
         )
         try db.saveWebAnnotation(&annotation)
@@ -576,7 +575,7 @@ final class AppDatabaseTests: XCTestCase {
 
         let annotations = try db.fetchWebAnnotations(referenceId: ref.id!)
         XCTAssertEqual(annotations.count, 1)
-        XCTAssertEqual(annotations[0].selectedText, "Important web content")
+        XCTAssertEqual(annotations[0].anchorText, "Important")
     }
 
     func testDeleteWebAnnotation() throws {
@@ -587,7 +586,6 @@ final class AppDatabaseTests: XCTestCase {
         var annotation = WebAnnotationRecord(
             referenceId: ref.id!,
             type: .note,
-            selectedText: "Selected",
             noteText: "My note",
             anchorText: "Selected"
         )
@@ -608,7 +606,6 @@ final class AppDatabaseTests: XCTestCase {
             var a = WebAnnotationRecord(
                 referenceId: ref.id!,
                 type: .highlight,
-                selectedText: "Text \(i)",
                 anchorText: "Text \(i)"
             )
             try db.saveWebAnnotation(&a)
@@ -616,6 +613,36 @@ final class AppDatabaseTests: XCTestCase {
 
         let count = try db.webAnnotationCount(referenceId: ref.id!)
         XCTAssertEqual(count, 2)
+    }
+
+    // MARK: - fetchWebContent
+    //
+    // The CLI's `web get` subcommand currently uses `fetchReferences(ids:)`
+    // (not `fetchWebContent`) so it can disambiguate "row missing" from
+    // "row exists but webContent NULL". These tests pin the lower-level
+    // helper's behavior so callers can rely on it: nil for both missing-row
+    // and NULL-content, populated string when set.
+
+    func testFetchWebContentReturnsNilForMissingReference() throws {
+        let db = try makeDatabase()
+        XCTAssertNil(try db.fetchWebContent(id: 999_999))
+    }
+
+    func testFetchWebContentReturnsNilWhenColumnIsNull() throws {
+        let db = try makeDatabase()
+        var ref = Reference(title: "PDF-only ref")
+        try db.saveReference(&ref)
+        XCTAssertNil(try db.fetchWebContent(id: ref.id!))
+    }
+
+    func testFetchWebContentReturnsStoredBody() throws {
+        let db = try makeDatabase()
+        var ref = Reference(title: "Web-clipped ref")
+        try db.saveReference(&ref)
+        let body = "# Hello\n\nSome extracted body."
+        try db.updateReferenceWebContent(id: ref.id!, webContent: body)
+
+        XCTAssertEqual(try db.fetchWebContent(id: ref.id!), body)
     }
 
     // MARK: - referencePDF tombstone propagation on Reference delete

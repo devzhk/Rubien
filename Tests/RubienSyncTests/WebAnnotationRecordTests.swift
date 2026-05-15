@@ -11,7 +11,6 @@ final class WebAnnotationCKRecordTests: XCTestCase {
         let original = WebAnnotationRecord(
             referenceId: 42,
             type: .underline,
-            selectedText: "Hello world",
             noteText: "note",
             color: "#FFDE59",
             anchorText: "Hello world",
@@ -26,12 +25,14 @@ final class WebAnnotationCKRecordTests: XCTestCase {
         XCTAssertEqual(record.recordType, SyncConstants.RecordType.webAnnotation)
         XCTAssertEqual(record.recordID.recordName, recordName)
         XCTAssertEqual(record.recordID.zoneID, SyncConstants.libraryZoneID)
+        // anchorText mirrored into the legacy selectedText CK field for older
+        // peers that haven't dropped the field yet.
+        XCTAssertEqual(record[WebAnnotationRecord.RecordField.selectedText] as? String, "Hello world")
 
         let decoded = WebAnnotationRecord(record: record)
         XCTAssertNotNil(decoded)
         XCTAssertEqual(decoded?.referenceId, 42)
         XCTAssertEqual(decoded?.type, .underline)
-        XCTAssertEqual(decoded?.selectedText, "Hello world")
         XCTAssertEqual(decoded?.anchorText, "Hello world")
         XCTAssertEqual(decoded?.prefixText, "Before ")
         XCTAssertEqual(decoded?.suffixText, " after")
@@ -42,7 +43,6 @@ final class WebAnnotationCKRecordTests: XCTestCase {
             id: 99,
             referenceId: 1,
             type: .note,
-            selectedText: "x",
             anchorText: "x"
         )
         let record = WebAnnotationRecord.makeRecord(recordName: recordName, annotation: ann)
@@ -90,10 +90,23 @@ final class WebAnnotationCKRecordTests: XCTestCase {
         let ann = WebAnnotationRecord(
             referenceId: 42,
             type: .highlight,
-            selectedText: "x",
             anchorText: "x"
         )
         let record = WebAnnotationRecord.makeRecord(recordName: recordName, annotation: ann)
         XCTAssertTrue(record[WebAnnotationRecord.RecordField.referenceId] is Int64)
+    }
+
+    func testDecodeFallsBackToLegacySelectedTextFieldWhenAnchorTextMissing() {
+        // Records written by older peers used only `selectedText`. After model
+        // unification we still accept those, treating selectedText as the
+        // anchor.
+        let record = makeTestRecord(
+            recordType: SyncConstants.RecordType.webAnnotation,
+            recordName: recordName
+        )
+        record[WebAnnotationRecord.RecordField.referenceId] = Int64(7)
+        record[WebAnnotationRecord.RecordField.selectedText] = "legacy anchor"
+
+        XCTAssertEqual(WebAnnotationRecord(record: record)?.anchorText, "legacy anchor")
     }
 }

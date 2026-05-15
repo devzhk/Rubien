@@ -93,6 +93,40 @@ describe("zod schemas", () => {
     expect(() => ReferenceDTO.parse(missingReadCount)).toThrow();
   });
 
+  it("accepts ReferenceDTO with siteName set", () => {
+    // Web-clipped references emit siteName; PDF-only references omit the key.
+    const clipped = {
+      title: "On-Policy Distillation",
+      authors: "Anonymous",
+      url: "https://thinkingmachines.ai/blog/on-policy-distillation/",
+      siteName: "thinkingmachines.ai",
+      referenceType: "Web Page",
+      dateAdded: "2026-04-24T10:00:00.000Z",
+      dateModified: "2026-04-24T10:00:00.000Z",
+      readingStatus: "unread",
+      readCount: 0,
+      customProperties: [],
+    };
+    expect(() => ReferenceDTO.parse(clipped)).not.toThrow();
+  });
+
+  it("rejects ReferenceDTO with explicit null siteName", () => {
+    // Same Swift-Optional contract as the other nullable-looking fields: nil
+    // → absent key, not "siteName": null.
+    const withNullSite = {
+      title: "A paper",
+      authors: "Alice",
+      referenceType: "Journal Article",
+      dateAdded: "2026-04-24T10:00:00.000Z",
+      dateModified: "2026-04-24T10:00:00.000Z",
+      readingStatus: "unread",
+      siteName: null,
+      readCount: 0,
+      customProperties: [],
+    };
+    expect(() => ReferenceDTO.parse(withNullSite)).toThrow();
+  });
+
   it("accepts DatabaseViewDTO with groupBy explicitly null", () => {
     // AlwaysEncodedOptional forces null emission — schema must accept it.
     const view = {

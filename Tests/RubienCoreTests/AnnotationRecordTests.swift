@@ -138,7 +138,6 @@ final class WebAnnotationRecordModelTests: XCTestCase {
         let annotation = WebAnnotationRecord(
             referenceId: 1,
             type: .highlight,
-            selectedText: "Important text",
             color: "#FFDE59",
             anchorText: "Important",
             prefixText: "This is ",
@@ -146,7 +145,6 @@ final class WebAnnotationRecordModelTests: XCTestCase {
         )
         XCTAssertEqual(annotation.referenceId, 1)
         XCTAssertEqual(annotation.type, .highlight)
-        XCTAssertEqual(annotation.selectedText, "Important text")
         XCTAssertEqual(annotation.color, "#FFDE59")
         XCTAssertEqual(annotation.anchorText, "Important")
         XCTAssertEqual(annotation.prefixText, "This is ")
@@ -158,7 +156,6 @@ final class WebAnnotationRecordModelTests: XCTestCase {
         let annotation = WebAnnotationRecord(
             referenceId: 1,
             type: .note,
-            selectedText: "Selected",
             noteText: "My note about this",
             anchorText: "Selected"
         )
@@ -169,7 +166,6 @@ final class WebAnnotationRecordModelTests: XCTestCase {
         let annotation = WebAnnotationRecord(
             referenceId: 1,
             type: .highlight,
-            selectedText: "Text",
             anchorText: "Text"
         )
         XCTAssertEqual(annotation.color, "#FFDE59")
@@ -179,7 +175,6 @@ final class WebAnnotationRecordModelTests: XCTestCase {
         let annotation = WebAnnotationRecord(
             referenceId: 1,
             type: .highlight,
-            selectedText: "Text",
             anchorText: "Text"
         )
         XCTAssertNil(annotation.noteText)
@@ -192,7 +187,6 @@ final class WebAnnotationRecordModelTests: XCTestCase {
         let annotation = WebAnnotationRecord(
             referenceId: 1,
             type: .highlight,
-            selectedText: "Text",
             anchorText: "Text"
         )
         XCTAssertGreaterThanOrEqual(annotation.dateCreated, before)

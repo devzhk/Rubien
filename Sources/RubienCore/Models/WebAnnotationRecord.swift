@@ -5,7 +5,6 @@ public struct WebAnnotationRecord: Identifiable, Codable, Hashable {
     public var id: Int64?
     public var referenceId: Int64
     public var type: AnnotationType
-    public var selectedText: String
     public var noteText: String?
     public var color: String
     public var anchorText: String
@@ -18,7 +17,6 @@ public struct WebAnnotationRecord: Identifiable, Codable, Hashable {
         id: Int64? = nil,
         referenceId: Int64,
         type: AnnotationType,
-        selectedText: String,
         noteText: String? = nil,
         color: String = "#FFDE59",
         anchorText: String,
@@ -30,7 +28,6 @@ public struct WebAnnotationRecord: Identifiable, Codable, Hashable {
         self.id = id
         self.referenceId = referenceId
         self.type = type
-        self.selectedText = selectedText
         self.noteText = noteText
         self.color = color
         self.anchorText = anchorText
@@ -51,5 +48,21 @@ extension WebAnnotationRecord: FetchableRecord, MutablePersistableRecord {
     public enum Columns: String, ColumnExpression {
         case id, referenceId, type, selectedText, noteText, color
         case anchorText, prefixText, suffixText, dateCreated, dateModified
+    }
+
+    // v1's `selectedText TEXT NOT NULL` column predates the model unification.
+    // Writes mirror `anchorText` so the constraint holds; reads ignore it.
+    public func encode(to container: inout PersistenceContainer) {
+        container[Columns.id] = id
+        container[Columns.referenceId] = referenceId
+        container[Columns.type] = type.rawValue
+        container[Columns.selectedText] = anchorText
+        container[Columns.noteText] = noteText
+        container[Columns.color] = color
+        container[Columns.anchorText] = anchorText
+        container[Columns.prefixText] = prefixText
+        container[Columns.suffixText] = suffixText
+        container[Columns.dateCreated] = dateCreated
+        container[Columns.dateModified] = dateModified
     }
 }

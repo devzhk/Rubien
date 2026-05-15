@@ -40,7 +40,9 @@ extension WebAnnotationRecord {
     public func populate(record: CKRecord) {
         record[RecordField.referenceId]  = referenceId
         record[RecordField.type]         = type.rawValue
-        record[RecordField.selectedText] = selectedText
+        // Older peers still read selectedText; write it as a mirror of anchorText
+        // so they keep rendering until they upgrade.
+        record[RecordField.selectedText] = anchorText
         record[RecordField.noteText]     = noteText
         record[RecordField.color]        = color
         record[RecordField.anchorText]   = anchorText
@@ -63,19 +65,18 @@ extension WebAnnotationRecord {
         return record
     }
 
-    /// Failable decode. `referenceId` and `anchorText` are both required —
-    /// without them the row can't be anchored to a page or inserted
-    /// (schema has both NOT NULL). Unknown `type` rawValues fall back to
-    /// `.highlight` per forward-compat guidance. Missing `dateModified` falls
-    /// back to `Date()` for forward compat with peers that wrote the record
-    /// before this field was added.
+    /// Failable decode. `referenceId` is required; `anchorText` is required
+    /// but for forward-compat we fall back to `selectedText` when peers wrote
+    /// records before the model unified the two. Unknown `type` rawValues
+    /// fall back to `.highlight`. Missing `dateModified` falls back to
+    /// `Date()` for forward compat with peers that predate the field.
     public init?(record: CKRecord) {
-        guard
-            let referenceId = record[RecordField.referenceId] as? Int64,
-            let anchorText  = record[RecordField.anchorText]  as? String
-        else {
+        guard let referenceId = record[RecordField.referenceId] as? Int64 else {
             return nil
         }
+        let anchor = (record[RecordField.anchorText] as? String)
+            ?? (record[RecordField.selectedText] as? String)
+        guard let anchorText = anchor else { return nil }
 
         let type = (record[RecordField.type] as? String)
             .flatMap(AnnotationType.init(rawValue:)) ?? .highlight
@@ -83,7 +84,6 @@ extension WebAnnotationRecord {
         self.init(
             referenceId: referenceId,
             type: type,
-            selectedText: (record[RecordField.selectedText] as? String) ?? "",
             noteText: record[RecordField.noteText] as? String,
             color: (record[RecordField.color] as? String) ?? "#FFDE59",
             anchorText: anchorText,
