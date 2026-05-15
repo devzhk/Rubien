@@ -1,4 +1,4 @@
-#if canImport(RubienSync)
+#if os(macOS)
 import Foundation
 import ArgumentParser
 import RubienCore

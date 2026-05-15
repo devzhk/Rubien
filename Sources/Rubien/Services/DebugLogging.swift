@@ -1,3 +1,4 @@
+#if os(macOS)
 import Foundation
 
 enum RubienDebugLogging {
@@ -6,3 +7,4 @@ enum RubienDebugLogging {
     static let metadataVerbose = environment["SWIFTLIB_DEBUG_METADATA"] == "1"
     static let runtimeVerbose = metadataVerbose || environment["SWIFTLIB_DEBUG_RUNTIME"] == "1"
 }
+#endif

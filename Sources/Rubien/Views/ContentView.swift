@@ -1,3 +1,4 @@
+#if os(macOS)
 import SwiftUI
 import Combine
 import os
@@ -1527,3 +1528,4 @@ private struct FloatingProgressToast: View {
     }
 }
 
+#endif

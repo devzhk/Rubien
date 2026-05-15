@@ -1,3 +1,4 @@
+#if os(macOS)
 import SwiftUI
 import RubienCore
 
@@ -932,3 +933,4 @@ struct TagsCellView: View, Equatable {
 
 // TagPickerPopover is in TagPickerPopover.swift
 
+#endif

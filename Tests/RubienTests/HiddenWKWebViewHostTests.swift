@@ -1,4 +1,4 @@
-#if canImport(Rubien)
+#if os(macOS)
 import WebKit
 import XCTest
 @testable import Rubien

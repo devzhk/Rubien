@@ -1,3 +1,4 @@
+#if canImport(CloudKit)
 import Foundation
 import CloudKit
 import RubienCore
@@ -105,3 +106,4 @@ extension DatabaseView {
         return false
     }
 }
+#endif

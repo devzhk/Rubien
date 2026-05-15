@@ -1,3 +1,4 @@
+#if canImport(CloudKit)
 import Foundation
 import GRDB
 import CloudKit
@@ -793,3 +794,4 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         )
     }
 }
+#endif

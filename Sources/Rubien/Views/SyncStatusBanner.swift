@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 import SwiftUI
 import CloudKit
@@ -163,3 +164,4 @@ private func openSystemSettingsAppleID() {
         NSWorkspace.shared.open(url)
     }
 }
+#endif

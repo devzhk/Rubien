@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 import PDFKit
 
@@ -47,3 +48,4 @@ extension PDFView {
         return result
     }
 }
+#endif

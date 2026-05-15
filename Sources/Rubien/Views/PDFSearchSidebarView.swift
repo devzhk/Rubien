@@ -1,3 +1,4 @@
+#if os(macOS)
 import SwiftUI
 import PDFKit
 import RubienCore
@@ -201,3 +202,4 @@ struct PDFSearchSidebarView: View {
         .contentShape(Rectangle())
     }
 }
+#endif

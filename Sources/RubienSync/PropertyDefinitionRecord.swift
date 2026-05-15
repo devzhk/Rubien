@@ -1,3 +1,4 @@
+#if canImport(CloudKit)
 import Foundation
 import CloudKit
 import RubienCore
@@ -95,3 +96,4 @@ extension PropertyDefinition {
         return defaultValue
     }
 }
+#endif

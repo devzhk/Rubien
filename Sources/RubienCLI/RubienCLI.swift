@@ -37,7 +37,7 @@ struct RubienCLI: AsyncParsableCommand {
         cmds.append(Pdf.self)
 #endif
         cmds.append(Web.self)
-#if canImport(RubienSync)
+#if os(macOS)
         cmds.append(SyncCommand.self)
 #endif
         return cmds

@@ -1,3 +1,4 @@
+#if os(macOS)
 import SwiftUI
 
 /// Wrapping layout for chip-like children: packs subviews left-to-right and
@@ -57,3 +58,4 @@ struct FlowLayout: Layout {
         return (rows, indicesByRow)
     }
 }
+#endif

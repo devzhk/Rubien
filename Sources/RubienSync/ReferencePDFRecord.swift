@@ -1,3 +1,4 @@
+#if canImport(CloudKit)
 import Foundation
 import CloudKit
 import RubienCore
@@ -84,3 +85,4 @@ extension ReferencePDFRecord {
         self.dateModified = (record[RecordField.dateModified] as? Date) ?? Date()
     }
 }
+#endif

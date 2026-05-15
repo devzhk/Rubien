@@ -1,3 +1,4 @@
+#if canImport(CloudKit)
 import Foundation
 import RubienCore
 #if canImport(Darwin)
@@ -131,3 +132,4 @@ public extension SyncFileLock {
     }
 }
 
+#endif

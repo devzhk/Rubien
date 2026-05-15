@@ -43,8 +43,8 @@ let package = Package(
             name: "Rubien",
             dependencies: [
                 "RubienCore",
-                "RubienSync",
-                "RubienExceptionCatcher",
+                .target(name: "RubienSync", condition: .when(platforms: [.macOS])),
+                .target(name: "RubienExceptionCatcher", condition: .when(platforms: [.macOS])),
             ],
             exclude: [
                 "Rubien.entitlements"

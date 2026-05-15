@@ -1,4 +1,4 @@
-#if canImport(Rubien)
+#if os(macOS)
 import XCTest
 import GRDB
 @testable import Rubien

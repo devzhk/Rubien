@@ -1,3 +1,4 @@
+#if os(macOS)
 import SwiftUI
 
 // MARK: - Selection popover (shown while user has unsaved text selection)
@@ -306,3 +307,4 @@ struct NotionToolbarButtonStyle: ButtonStyle {
             .onHover { isHovered = $0 }
     }
 }
+#endif

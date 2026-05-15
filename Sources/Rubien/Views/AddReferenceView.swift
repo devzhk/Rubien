@@ -1,3 +1,4 @@
+#if os(macOS)
 import AppKit
 import SwiftUI
 import RubienCore
@@ -185,3 +186,4 @@ struct AddReferenceView: View {
         pdfPath = try? PDFService.importPDF(from: fileURL)
     }
 }
+#endif

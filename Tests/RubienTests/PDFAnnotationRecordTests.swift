@@ -1,4 +1,4 @@
-#if canImport(Rubien)
+#if os(macOS)
 import CoreGraphics
 import Foundation
 import XCTest
