@@ -96,6 +96,7 @@ final class PDFReaderViewModel: ObservableObject {
     @Published var currentPageIndex: Int = 0
     @Published var totalPages: Int = 0
     @Published var scaleFactor: CGFloat = 1.0
+    @Published var isDocumentLoading: Bool = false
     /// When set, shows a note-edit popover for an existing annotation (e.g. after clicking a highlight).
     @Published var editingAnnotationInPlace: PDFAnnotationRecord?
     /// When set, shows an annotation action toolbar near the clicked highlight.
@@ -477,6 +478,16 @@ struct PDFReaderView: View {
                         .overlay {
                             annotationActionBarOverlay
                         }
+
+                    if viewModel.isDocumentLoading {
+                        ProgressView(String(localized: "Loading PDF…", bundle: .module))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                            .liquidGlassSurface(in: Capsule(), fallback: .regularMaterial)
+                            .padding(.top, 14)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                            .allowsHitTesting(false)
+                    }
 
                     floatingReaderTab
                         .padding(.horizontal, 18)
@@ -1276,12 +1287,20 @@ struct AnnotatablePDFView: NSViewRepresentable {
             }
         }
 
+        @MainActor
         func loadDocument(from url: URL, into pdfView: PDFView) {
-            guard loadedPDFURL != url || pdfView.document == nil else { return }
+            // Same URL: skip if doc already loaded OR a load task is already in flight.
+            // The in-flight check prevents re-entrancy: setting `isDocumentLoading = true`
+            // below fires objectWillChange, which re-renders body → updateNSView → here.
+            // Without this guard we'd cancel and restart the task on every re-render.
+            if loadedPDFURL == url, pdfView.document != nil || documentLoadTask != nil {
+                return
+            }
 
             cancelDocumentLoad()
             loadedPDFURL = url
             self.pdfView = pdfView
+            viewModel.isDocumentLoading = true
 
             documentLoadTask = Task.detached(priority: .userInitiated) { [weak self] in
                 let document = PDFDocument(url: url)
@@ -1294,6 +1313,7 @@ struct AnnotatablePDFView: NSViewRepresentable {
         private func finishLoadingDocument(_ document: PDFDocument?, for url: URL) {
             guard loadedPDFURL == url, let pdfView else { return }
             pdfView.document = document
+            viewModel.isDocumentLoading = false
             let canvasBackgroundColor = NSColor(name: nil) { trait in
                 trait.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
                     ? NSColor(calibratedWhite: 0.18, alpha: 1.0)
