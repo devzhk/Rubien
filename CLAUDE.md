@@ -50,9 +50,10 @@ This nukes the per-package local checkouts and the SwiftPM state, then refetches
 
 ## Architecture
 
-Four Swift targets sit on top of one shared core (`Package.swift`):
+Five Swift targets sit on top of one shared core (`Package.swift`):
 
-- **`RubienCore`** (library) — everything usable without AppKit: GRDB models, migrations, metadata resolvers (CrossRef/arXiv/PubMed/ISBN/OpenAlex/Semantic Scholar), BibTeX/RIS importers, CSL/citeproc-js citation engines. This is the only target the CLI and tests depend on, so any logic that needs to be reused by `rubien-cli` must live here, not in `Rubien`.
+- **`RubienPDFKit`** (library) — cross-platform PDF facade (`PDFDocumentProtocol`, `PDFPageProtocol`, `PDFBackend.open(url:)`) with two backends. Darwin wraps PDFKit; Linux wraps poppler-glib + cairo + gdk-pixbuf via the `CPoppler` and `CGdkPixbuf` `.systemLibrary` targets. RubienCore depends on this unconditionally; the Mac SwiftUI app's PDF reader still uses PDFKit directly (the facade is for the headless extract/render path). See `Docs/Linux-PDF-Backend.md` for the load-bearing facts about the Linux backend — read it before touching `Sources/RubienPDFKit/Linux/`.
+- **`RubienCore`** (library) — everything usable without AppKit: GRDB models, migrations, metadata resolvers (CrossRef/arXiv/PubMed/ISBN/OpenAlex/Semantic Scholar), BibTeX/RIS importers, CSL/citeproc-js citation engines. Depends on `RubienPDFKit`. This is the only target the CLI and tests depend on, so any logic that needs to be reused by `rubien-cli` must live here, not in `Rubien`.
 - **`RubienSync`** (library) — CloudKit mapping layer, `CKSyncEngine`-based push/pull. Depends on `RubienCore` and the system `CloudKit` framework. The CLI does **not** link it.
 - **`Rubien`** (app executable) — SwiftUI views, window management, readers (PDFKit + WKWebView). Depends on `RubienCore`.
 - **`RubienCLI`** (executable, binary name `rubien-cli`) — built with swift-argument-parser. Links `RubienCore` and `RubienSync` (the latter for the `sync status` subcommand, which reads sync bookkeeping tables + the engine-state sidecar file).

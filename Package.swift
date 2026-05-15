@@ -17,8 +17,24 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
     ],
     targets: [
+        .systemLibrary(
+            name: "CPoppler",
+            path: "Sources/CPoppler",
+            pkgConfig: "poppler-glib",
+            providers: [.apt(["libpoppler-glib-dev", "libcairo2-dev"])]
+        ),
+        .systemLibrary(
+            name: "CGdkPixbuf",
+            path: "Sources/CGdkPixbuf",
+            pkgConfig: "gdk-pixbuf-2.0",
+            providers: [.apt(["libgdk-pixbuf-2.0-dev"])]
+        ),
         .target(
             name: "RubienPDFKit",
+            dependencies: [
+                .target(name: "CPoppler", condition: .when(platforms: [.linux])),
+                .target(name: "CGdkPixbuf", condition: .when(platforms: [.linux])),
+            ],
             path: "Sources/RubienPDFKit"
         ),
         .target(
