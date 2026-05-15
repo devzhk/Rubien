@@ -119,13 +119,15 @@ Roughly 36 tools covering every `rubien-cli` subcommand mode. Names are `rubien_
 | References | `rubien_search`, `rubien_list`, `rubien_get`, `rubien_add`, `rubien_update`, `rubien_delete` |
 | Citations | `rubien_cite`, `rubien_styles_list` |
 | Import/Export | `rubien_import`, `rubien_export` |
-| PDFs | `rubien_pdf_info`, `rubien_pdf_text`, `rubien_pdf_page_image`, `rubien_pdf_download` |
+| PDFs | `rubien_pdf_info`, `rubien_pdf_text`, `rubien_pdf_page_image`, `rubien_pdf_download`, `rubien_annotations_list` |
+| Web clips | `rubien_web_get`, `rubien_web_annotations` |
 | Properties (incl. Tags) | `rubien_properties_list`, `rubien_properties_create`, `rubien_properties_delete`, `rubien_properties_rename`, `rubien_properties_show`, `rubien_properties_hide`, `rubien_properties_add_option`, `rubien_properties_rename_option`, `rubien_properties_delete_option`, `rubien_properties_set`, `rubien_properties_add_values`, `rubien_properties_remove_values`, `rubien_properties_clear` |
 | Saved views | `rubien_views_list`, `rubien_views_create`, `rubien_views_delete`, `rubien_views_rename`, `rubien_views_query` |
-| Annotations | `rubien_annotations_list` |
 | Sync | `rubien_sync_status` |
 
-The PDF tools cover inspection and acquisition — `rubien_pdf_info` returns page count plus a flattened outline, `rubien_pdf_text` extracts text by page range or section title, `rubien_pdf_page_image` renders a page to PNG for figure inspection, and `rubien_pdf_download` fetches an open-access PDF for an existing reference and attaches it to the library.
+The PDF tools cover inspection and acquisition — `rubien_pdf_info` returns page count plus a flattened outline, `rubien_pdf_text` extracts text by page range or section title, `rubien_pdf_page_image` renders a page to PNG for figure inspection, and `rubien_pdf_download` fetches an open-access PDF for an existing reference and attaches it to the library. `rubien_annotations_list` returns the user's highlights/underlines/anchored-notes on the attached PDF.
+
+The web-clip tools are the counterpart for clipped web pages — `rubien_web_get` returns the extracted body (markdown or HTML, paginated by character offset) along with `siteName` and `annotationCount`, and `rubien_web_annotations` returns highlights with a W3C TextQuoteSelector triple (`prefixText` / `anchorText` / `suffixText`) so the highlight can be located inside the body. Library-only — neither tool fetches from the network.
 
 Destructive tools are tagged with `destructiveHint: true` so Claude Code's permission UI flags them. `rubien_delete` always passes `--force` — the confirmation happens in the MCP client permission UI, not in the CLI's TTY prompt. See the comment in `src/tools/references.ts` for rationale.
 
