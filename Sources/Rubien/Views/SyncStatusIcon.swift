@@ -1,3 +1,4 @@
+#if os(macOS)
 import SwiftUI
 import RubienSync
 
@@ -51,3 +52,4 @@ struct SyncStatusIcon: View {
         }
     }
 }
+#endif

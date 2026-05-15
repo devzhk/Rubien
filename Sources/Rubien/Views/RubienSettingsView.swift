@@ -1,3 +1,4 @@
+#if os(macOS)
 import SwiftUI
 import RubienCore
 import RubienSync
@@ -147,3 +148,4 @@ struct RubienSettingsView: View {
         }
     }
 }
+#endif

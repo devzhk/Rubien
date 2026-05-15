@@ -1,3 +1,4 @@
+#if canImport(CloudKit)
 import Foundation
 import GRDB
 import CloudKit
@@ -456,3 +457,4 @@ extension SyncEntityType {
         }
     }
 }
+#endif

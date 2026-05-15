@@ -1,3 +1,4 @@
+#if os(macOS)
 import SwiftUI
 import RubienCore
 
@@ -145,3 +146,4 @@ struct SortEditorPopover: View {
         sorts.append(ViewSort(target: available, ascending: false))
     }
 }
+#endif

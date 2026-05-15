@@ -1,3 +1,4 @@
+#if os(macOS)
 import SwiftUI
 import WebKit
 import Combine
@@ -2049,3 +2050,4 @@ private extension String {
         return trimmed.isEmpty ? nil : trimmed
     }
 }
+#endif

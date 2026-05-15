@@ -1,3 +1,4 @@
+#if __APPLE__
 #import "ExceptionCatcher.h"
 
 @implementation ExceptionCatcher
@@ -6,3 +7,4 @@
     @catch (NSException *e) { return e; }
 }
 @end
+#endif

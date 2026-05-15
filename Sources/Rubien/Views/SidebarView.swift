@@ -1,3 +1,4 @@
+#if os(macOS)
 import SwiftUI
 import RubienCore
 
@@ -299,3 +300,4 @@ private struct NewViewSheet: View {
         .padding(20)
     }
 }
+#endif

@@ -1,3 +1,4 @@
+#if os(macOS)
 import SwiftUI
 import RubienCore
 
@@ -152,3 +153,4 @@ struct TagPickerPopover: View {
         // which is the lag pattern this refactor eliminates.
     }
 }
+#endif

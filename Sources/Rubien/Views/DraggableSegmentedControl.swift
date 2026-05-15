@@ -1,3 +1,4 @@
+#if os(macOS)
 import SwiftUI
 
 struct DraggableSegmentedControl<T: Hashable>: View {
@@ -56,3 +57,4 @@ struct DraggableSegmentedControl<T: Hashable>: View {
         .frame(height: 28)
     }
 }
+#endif

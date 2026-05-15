@@ -1,3 +1,4 @@
+#if os(macOS)
 import SwiftUI
 import WebKit
 
@@ -207,3 +208,4 @@ struct RichNoteEditorView: NSViewRepresentable {
         }
     }
 }
+#endif

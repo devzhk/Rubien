@@ -1,3 +1,4 @@
+#if canImport(CloudKit)
 import Foundation
 import CloudKit
 
@@ -34,3 +35,4 @@ extension SyncStatus: Equatable {
         }
     }
 }
+#endif

@@ -1,3 +1,4 @@
+#if os(macOS)
 import SwiftUI
 import RubienCore
 
@@ -116,3 +117,4 @@ struct ZoteroImportSheet: View {
         }
     }
 }
+#endif

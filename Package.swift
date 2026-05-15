@@ -1,27 +1,16 @@
 // swift-tools-version: 5.9
 import PackageDescription
 
-// Mac-only products (`Rubien` SwiftUI app + `RubienSync` CloudKit library)
-// are gated out of the manifest on non-Darwin. The targets themselves stay
-// declared (so `Sources/Rubien` and `Sources/RubienSync` aren't orphan
-// source directories), but with nothing in the Linux build graph reaching
-// them — no product, no test-target dep — SwiftPM skips compiling them.
-// This is cleaner than per-source-file `#if os(macOS)` gates: the dep
-// graph itself does the exclusion.
-var products: [Product] = [
-    .library(name: "RubienCore", targets: ["RubienCore"]),
-    .executable(name: "rubien-cli", targets: ["RubienCLI"]),
-]
-#if os(macOS)
-products.append(.library(name: "RubienSync", targets: ["RubienSync"]))
-products.append(.executable(name: "Rubien", targets: ["Rubien"]))
-#endif
-
 let package = Package(
     name: "Rubien",
     defaultLocalization: "en",
     platforms: [.macOS("14.4")],
-    products: products,
+    products: [
+        .library(name: "RubienCore", targets: ["RubienCore"]),
+        .library(name: "RubienSync", targets: ["RubienSync"]),
+        .executable(name: "Rubien", targets: ["Rubien"]),
+        .executable(name: "rubien-cli", targets: ["RubienCLI"]),
+    ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
@@ -54,8 +43,8 @@ let package = Package(
             name: "Rubien",
             dependencies: [
                 "RubienCore",
-                "RubienSync",
-                "RubienExceptionCatcher",
+                .target(name: "RubienSync", condition: .when(platforms: [.macOS])),
+                .target(name: "RubienExceptionCatcher", condition: .when(platforms: [.macOS])),
             ],
             exclude: [
                 "Rubien.entitlements"

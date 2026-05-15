@@ -1,3 +1,4 @@
+#if os(macOS)
 import SwiftUI
 import RubienCore
 
@@ -105,3 +106,4 @@ struct ArticleReaderView: View {
         }
     }
 }
+#endif

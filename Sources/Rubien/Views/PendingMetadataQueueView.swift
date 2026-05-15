@@ -1,3 +1,4 @@
+#if os(macOS)
 import SwiftUI
 import RubienCore
 
@@ -153,3 +154,4 @@ struct PendingMetadataQueueView: View {
         }
     }
 }
+#endif

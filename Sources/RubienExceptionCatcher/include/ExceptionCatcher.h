@@ -1,3 +1,7 @@
+// CloudKit-only Objective-C shim. Compiles to empty on non-Apple platforms
+// so SwiftPM can still walk this target in the manifest without dragging
+// `Foundation/Foundation.h` into the Linux build.
+#if __APPLE__
 #import <Foundation/Foundation.h>
 
 NS_ASSUME_NONNULL_BEGIN
@@ -12,3 +16,4 @@ NS_ASSUME_NONNULL_BEGIN
 @end
 
 NS_ASSUME_NONNULL_END
+#endif

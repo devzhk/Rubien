@@ -1,3 +1,4 @@
+#if os(macOS)
 import Foundation
 import OSLog
 import WebKit
@@ -358,3 +359,4 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
         return "\(host)|\(lastPath)"
     }
 }
+#endif
