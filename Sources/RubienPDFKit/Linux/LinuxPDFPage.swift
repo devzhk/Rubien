@@ -137,9 +137,18 @@ final class LinuxPDFPage: PDFPageProtocol, @unchecked Sendable {
             }
         }
 
-        let destroyFn: GdkPixbufDestroyNotify = { pixels, _ in
-            pixels?.deallocate()
-        }
+        // No destroy callback — we manage `dstBuf` lifetime ourselves. Passing
+        // a Swift closure as GdkPixbufDestroyNotify caused inter-test hangs on
+        // Linux corelibs-xctest (reproduced via `RepeatRenderProbe`): the
+        // closure's bridged C function pointer apparently holds a Swift
+        // runtime resource that doesn't release cleanly across test method
+        // boundaries.
+        //
+        // `gdk_pixbuf_save_to_bufferv` reads from the pixbuf synchronously
+        // and returns before any caller-visible release, so `dstBuf` is safe
+        // to deallocate after both `save_to_bufferv` and `g_object_unref`
+        // have returned.
+        defer { dstBuf.deallocate() }
 
         guard let pixbufRaw = gdk_pixbuf_new_from_data(
             dstBuf,
@@ -149,13 +158,11 @@ final class LinuxPDFPage: PDFPageProtocol, @unchecked Sendable {
             Int32(widthPx),
             Int32(heightPx),
             Int32(dstStride),
-            destroyFn,
-            nil
+            nil,   // destroy_fn: NULL → we own dstBuf
+            nil    // destroy_fn_data
         ) else {
-            dstBuf.deallocate()
             throw PDFRenderError.renderFailed
         }
-        // pixbuf now owns dstBuf via destroyFn; do NOT deallocate dstBuf below.
         let pixbuf = pixbufRaw
         defer { g_object_unref(UnsafeMutableRawPointer(pixbuf)) }
 
@@ -201,13 +208,16 @@ final class LinuxPDFPage: PDFPageProtocol, @unchecked Sendable {
             throw PDFRenderError.renderFailed
         }
 
-        return Data(
-            bytesNoCopy: UnsafeMutableRawPointer(buf),
-            count: Int(size),
-            deallocator: .custom { ptr, _ in
-                g_free(ptr)
-            }
-        )
+        // Copy the gdk-pixbuf buffer into a Swift-owned `Data`, then free
+        // the gdk-pixbuf buffer immediately. The closure-based custom
+        // `.deallocator` is intentionally avoided — its captured-closure
+        // lifecycle across XCTest method boundaries on Linux corelibs-xctest
+        // hangs the next test method (reproduced via `RepeatRenderProbe`).
+        // The extra memcpy is bounded by the JPEG/PNG output size (~100-500
+        // KB for typical pages) and negligible vs. the encode itself.
+        let copy = Data(UnsafeRawBufferPointer(start: buf, count: Int(size)))
+        g_free(UnsafeMutableRawPointer(buf))
+        return copy
     }
 }
 #endif

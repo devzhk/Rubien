@@ -92,6 +92,14 @@ let package = Package(
             path: "Tests/RubienCoreTests"
         ),
         .testTarget(
+            name: "RubienPDFKitTests",
+            dependencies: ["RubienPDFKit"],
+            path: "Tests/RubienPDFKitTests",
+            resources: [
+                .copy("Fixtures")
+            ]
+        ),
+        .testTarget(
             name: "RubienSyncTests",
             dependencies: [
                 .target(name: "RubienSync", condition: .when(platforms: [.macOS])),

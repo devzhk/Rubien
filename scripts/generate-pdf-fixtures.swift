@@ -6,7 +6,7 @@
 // Run once on macOS (requires full Xcode for PDFKit):
 //     swift scripts/generate-pdf-fixtures.swift
 //
-// Output: Tests/RubienCoreTests/Fixtures/PDFs/{
+// Output: Tests/RubienPDFKitTests/Fixtures/PDFs/{
 //   linear-3pages-text.pdf,
 //   outline-2level-5sections.pdf,
 //   scan-only-1page.pdf,
@@ -23,7 +23,7 @@ import PDFKit
 import AppKit
 import CoreText
 
-let outputDir = URL(fileURLWithPath: "Tests/RubienCoreTests/Fixtures/PDFs", isDirectory: true)
+let outputDir = URL(fileURLWithPath: "Tests/RubienPDFKitTests/Fixtures/PDFs", isDirectory: true)
 try? FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
 
 // MARK: - Helpers

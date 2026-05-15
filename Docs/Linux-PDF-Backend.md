@@ -133,6 +133,26 @@ Caller owns the output buffer — free with `g_free`. Wrap in Swift `Data` via `
 
 `g_object_unref` takes `gpointer` (= `UnsafeMutableRawPointer?` in Swift). Convert from `OpaquePointer` with `UnsafeMutableRawPointer(opaquePtr)`. The reverse conversion does not exist (`OpaquePointer(opaquePtr)` is the compile error described in §3).
 
+## Tests: per-test isolation on Linux
+
+`Tests/RubienPDFKitTests/BackendParityTests.swift` runs cleanly in one process on macOS — Xcode's XCTest handles 12 tests in ~0.1s.
+
+On Linux, swift-corelibs-xctest runs the whole bundle in a single process and uses libdispatch (GCD) to sequence test methods. After any test touches the threaded C libraries we link (poppler-glib, cairo, gdk-pixbuf each spin up internal worker threads), GCD's worker pool occasionally gets into a state where the next test method never gets dispatched — the xctest process sits forever on `do_sys_poll` + `do_epoll_wait`. Repro rate is ~40% with `swift test --filter RubienPDFKitTests` on `swift:6.3-jammy` (both arm64 and amd64); individual `swift test --filter RubienPDFKitTests.BackendParityTests/testFoo` invocations show 0 flakes across hundreds of runs. The hang is in swift-corelibs-xctest's inter-test sequencing, not in the backend itself.
+
+Workaround: `scripts/run-linux-parity-tests.sh` invokes each parity test in its own `swift test --filter` process. CI uses this script on the Linux job. The cost is ~5-10s per test instead of ~0.01s per test, total ~90s vs ~0.1s — fine for CI, awkward for tight local iteration.
+
+If you find the hang reproducing for you locally:
+
+```bash
+# This will sometimes hang:
+swift test --filter RubienPDFKitTests
+
+# This always passes:
+./scripts/run-linux-parity-tests.sh
+```
+
+When swift-corelibs-xctest fixes the GCD scheduling (or when we move parity tests off XCTest), the wrapper script can go.
+
 ## What's stubbed (follow-up work)
 
 - **`PDFDocumentProtocol.isEncrypted`** returns `false` on Linux. Poppler doesn't expose the "file is encrypted but you have read access" attribute the way PDFKit does — by the time we hold a successfully-opened document, the readable bit is set and the encrypted attribute is hidden. Acceptable mismatch for v1: the locked-PDF parity path is exercised via the `init` failure throwing `.locked`.
