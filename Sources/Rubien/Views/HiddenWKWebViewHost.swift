@@ -1,4 +1,3 @@
-#if os(macOS)
 import SwiftUI
 import WebKit
 
@@ -86,4 +85,3 @@ struct HiddenWKWebViewHost: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSView, context: Context) {}
 }
-#endif

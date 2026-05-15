@@ -1,4 +1,3 @@
-#if os(macOS)
 import SwiftUI
 import RubienCore
 
@@ -194,4 +193,3 @@ struct GroupEditorPopover: View {
         groupBy = updated
     }
 }
-#endif

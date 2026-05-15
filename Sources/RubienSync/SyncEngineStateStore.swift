@@ -1,4 +1,3 @@
-#if canImport(CloudKit)
 import Foundation
 import CloudKit
 import os.log
@@ -54,4 +53,3 @@ public struct SyncEngineStateStore: Sendable {
         try? FileManager.default.removeItem(at: fileURL)
     }
 }
-#endif

@@ -1,4 +1,3 @@
-#if os(macOS)
 import AppKit
 import UniformTypeIdentifiers
 
@@ -81,4 +80,3 @@ enum OpenPanelPicker {
         UTType(filenameExtension: pathExtension) ?? fallback
     }
 }
-#endif

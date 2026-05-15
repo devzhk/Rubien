@@ -1,4 +1,3 @@
-#if os(macOS)
 import SwiftUI
 import AppKit
 
@@ -61,4 +60,3 @@ private struct LegacyOverlayScrollView<Content: View>: NSViewRepresentable {
         }
     }
 }
-#endif

@@ -1,4 +1,3 @@
-#if os(macOS)
 import WebKit
 
 /// A pre-warming pool for WKWebView instances that host the TipTap note editor.
@@ -108,4 +107,3 @@ final class NoteEditorPool {
         }
     }
 }
-#endif

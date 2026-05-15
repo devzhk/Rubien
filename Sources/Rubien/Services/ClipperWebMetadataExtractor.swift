@@ -1,4 +1,3 @@
-#if os(macOS)
 import Combine
 import Foundation
 import OSLog
@@ -196,4 +195,3 @@ extension ClipperWebMetadataExtractor: WKNavigationDelegate {
         failExtraction(.extractionFailed("The web rendering process terminated."))
     }
 }
-#endif

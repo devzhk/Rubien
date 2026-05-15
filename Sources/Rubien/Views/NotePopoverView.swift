@@ -1,4 +1,3 @@
-#if os(macOS)
 import SwiftUI
 
 /// A popover panel for adding/editing annotation notes with a WYSIWYG Markdown editor.
@@ -109,4 +108,3 @@ private struct NotePopoverDecoration: ViewModifier {
         }
     }
 }
-#endif

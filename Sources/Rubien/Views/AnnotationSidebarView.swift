@@ -1,4 +1,3 @@
-#if os(macOS)
 import SwiftUI
 import RubienCore
 
@@ -365,4 +364,3 @@ struct AnnotationCard: View {
         .buttonStyle(.plain)
     }
 }
-#endif

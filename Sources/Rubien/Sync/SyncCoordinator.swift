@@ -1,4 +1,3 @@
-#if os(macOS)
 import Combine
 import Foundation
 import SwiftUI
@@ -454,4 +453,3 @@ extension SyncCoordinator.Probes {
         )
     }
 }
-#endif

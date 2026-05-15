@@ -1,4 +1,3 @@
-#if os(macOS)
 import AppKit
 import SwiftUI
 import RubienCore
@@ -302,4 +301,3 @@ struct BatchImportView: View {
         }
     }
 }
-#endif

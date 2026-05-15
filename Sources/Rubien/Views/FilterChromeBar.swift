@@ -1,4 +1,3 @@
-#if os(macOS)
 import SwiftUI
 import RubienCore
 
@@ -95,4 +94,3 @@ struct FilterChromeBar: View {
     }
 
 }
-#endif

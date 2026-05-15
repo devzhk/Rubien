@@ -1,4 +1,3 @@
-#if canImport(CloudKit)
 import Foundation
 import CloudKit
 import RubienCore
@@ -113,4 +112,3 @@ extension PDFAnnotationRecord {
         self.boundsHeight = (record[RecordField.boundsHeight] as? Double) ?? 0
     }
 }
-#endif

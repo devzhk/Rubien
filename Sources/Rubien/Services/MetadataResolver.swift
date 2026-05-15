@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 import OSLog
 import RubienCore
@@ -667,4 +666,3 @@ final class MetadataResolver {
         return trimmed.isEmpty ? nil : trimmed
     }
 }
-#endif

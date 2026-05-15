@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 
 extension Notification.Name {
@@ -9,4 +8,3 @@ enum RubienClipImportedKeys {
     static let id = "id"
     static let title = "title"
 }
-#endif

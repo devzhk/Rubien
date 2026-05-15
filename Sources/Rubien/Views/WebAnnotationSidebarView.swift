@@ -1,4 +1,3 @@
-#if os(macOS)
 import SwiftUI
 import RubienCore
 
@@ -353,4 +352,3 @@ private struct WebAnnotationCard: View {
         .animation(.easeInOut(duration: 0.15), value: isSelected)
     }
 }
-#endif

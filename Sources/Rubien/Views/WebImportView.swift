@@ -1,4 +1,3 @@
-#if os(macOS)
 import SwiftUI
 import WebKit
 import RubienCore
@@ -133,4 +132,3 @@ struct WebImportView: View {
         dismiss()
     }
 }
-#endif

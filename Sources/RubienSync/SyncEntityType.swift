@@ -1,4 +1,3 @@
-#if canImport(CloudKit)
 import Foundation
 
 /// One case per synced entity. The rawValue matches the SQLite table name
@@ -72,4 +71,3 @@ public enum SyncEntityType: String, CaseIterable, Sendable {
         SyncEntityType.allCases.first { $0.recordType == recordType }
     }
 }
-#endif

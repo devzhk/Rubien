@@ -1,4 +1,3 @@
-#if os(macOS)
 import SwiftUI
 import RubienCore
 
@@ -321,4 +320,3 @@ struct FilterEditorPopover: View {
     }
 }
 
-#endif

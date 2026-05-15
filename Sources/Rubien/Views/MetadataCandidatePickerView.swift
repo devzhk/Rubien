@@ -1,4 +1,3 @@
-#if os(macOS)
 import SwiftUI
 import RubienCore
 
@@ -156,4 +155,3 @@ struct MetadataCandidatePickerView: View {
         }
     }
 }
-#endif

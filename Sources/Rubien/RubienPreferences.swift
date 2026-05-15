@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 import SwiftUI
 
@@ -49,4 +48,3 @@ enum RubienPreferences {
         UserDefaults.standard.set(data, forKey: tableColumnCustomizationKey)
     }
 }
-#endif

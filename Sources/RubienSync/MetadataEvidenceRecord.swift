@@ -1,4 +1,3 @@
-#if canImport(CloudKit)
 import Foundation
 import CloudKit
 import RubienCore
@@ -93,4 +92,3 @@ extension MetadataEvidence {
         )
     }
 }
-#endif

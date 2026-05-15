@@ -1,4 +1,3 @@
-#if os(macOS)
 import AppKit
 import Combine
 import SwiftUI
@@ -160,4 +159,3 @@ private struct AddinToast: View {
         }
     }
 }
-#endif

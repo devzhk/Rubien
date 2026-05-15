@@ -1,4 +1,3 @@
-#if os(macOS)
 import SwiftUI
 import PDFKit
 import RubienCore
@@ -1354,4 +1353,3 @@ private struct InlineAuthorsEditor: View {
             }
     }
 }
-#endif

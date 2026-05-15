@@ -1,4 +1,3 @@
-#if os(macOS)
 import AppKit
 import os.log
 import SwiftUI
@@ -230,4 +229,3 @@ final class ReaderWindowManager {
         return NSSize(width: width, height: height)
     }
 }
-#endif

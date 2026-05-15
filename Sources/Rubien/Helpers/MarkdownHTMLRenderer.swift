@@ -1,4 +1,3 @@
-#if os(macOS)
 import Foundation
 
 enum MarkdownHTMLRenderer {
@@ -402,4 +401,3 @@ enum MarkdownHTMLRenderer {
         escapeHTML(text)
     }
 }
-#endif

@@ -1,4 +1,3 @@
-#if canImport(CloudKit)
 import Foundation
 import GRDB
 import CloudKit
@@ -312,4 +311,3 @@ public struct SyncStateStore: Sendable {
         return CKRecord(coder: unarchiver)
     }
 }
-#endif

@@ -1,4 +1,3 @@
-#if os(macOS)
 import SwiftUI
 import RubienCore
 
@@ -616,4 +615,3 @@ private struct SelectOptionPickerRow: View {
         .onHover { isHovering = $0 }
     }
 }
-#endif

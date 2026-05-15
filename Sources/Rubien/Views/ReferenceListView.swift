@@ -1,4 +1,3 @@
-#if os(macOS)
 import SwiftUI
 import RubienCore
 
@@ -374,4 +373,3 @@ struct ReferenceRow: View, Equatable {
         }
     }
 }
-#endif

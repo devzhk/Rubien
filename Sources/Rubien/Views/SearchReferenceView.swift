@@ -1,4 +1,3 @@
-#if os(macOS)
 import SwiftUI
 import RubienCore
 
@@ -794,4 +793,3 @@ private struct KeyboardHint: View {
         }
     }
 }
-#endif

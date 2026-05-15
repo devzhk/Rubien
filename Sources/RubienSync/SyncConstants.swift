@@ -1,4 +1,3 @@
-#if canImport(CloudKit)
 import Foundation
 import CloudKit
 
@@ -61,4 +60,3 @@ public enum SyncConstants {
     /// before a lingering push hits `.unknownItem`.
     public static let tombstoneRetention: TimeInterval = 30 * 24 * 60 * 60
 }
-#endif

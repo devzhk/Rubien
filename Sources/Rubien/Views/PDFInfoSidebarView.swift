@@ -1,4 +1,3 @@
-#if os(macOS)
 import SwiftUI
 import RubienCore
 
@@ -93,4 +92,3 @@ struct PDFInfoSidebarView: View {
         }
     }
 }
-#endif

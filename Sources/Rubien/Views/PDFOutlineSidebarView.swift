@@ -1,4 +1,3 @@
-#if os(macOS)
 import SwiftUI
 import PDFKit
 import RubienCore
@@ -188,4 +187,3 @@ struct OutlineItem: Identifiable {
     let pageIndex: Int?
     let destination: PDFDestination?
 }
-#endif

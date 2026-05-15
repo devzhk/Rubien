@@ -1,4 +1,3 @@
-#if os(macOS)
 import SwiftUI
 import RubienCore
 
@@ -297,4 +296,3 @@ struct AddByIdentifierView: View {
         }
     }
 }
-#endif

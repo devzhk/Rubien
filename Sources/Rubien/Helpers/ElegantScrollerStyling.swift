@@ -1,4 +1,3 @@
-#if os(macOS)
 import AppKit
 
 extension NSScrollView {
@@ -19,4 +18,3 @@ extension NSScroller {
         alphaValue = 0.42
     }
 }
-#endif

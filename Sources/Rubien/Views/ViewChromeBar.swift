@@ -1,4 +1,3 @@
-#if os(macOS)
 import SwiftUI
 import RubienCore
 
@@ -230,4 +229,3 @@ struct ChromeBarPill: View {
         )
     }
 }
-#endif

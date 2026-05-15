@@ -1,4 +1,3 @@
-#if os(macOS)
 import SwiftUI
 import PDFKit
 import Combine
@@ -1603,4 +1602,3 @@ private struct FloatingReaderTabSurface: ViewModifier {
         }
     }
 }
-#endif

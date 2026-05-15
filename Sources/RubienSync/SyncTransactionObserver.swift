@@ -1,4 +1,3 @@
-#if canImport(CloudKit)
 import Foundation
 import GRDB
 
@@ -49,4 +48,3 @@ final class SyncTransactionObserver: TransactionObserver, @unchecked Sendable {
         // writes too, so the engine shouldn't see the pending changes.
     }
 }
-#endif

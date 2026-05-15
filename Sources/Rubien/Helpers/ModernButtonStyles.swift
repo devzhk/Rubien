@@ -1,4 +1,3 @@
-#if os(macOS)
 import SwiftUI
 
 // MARK: - SLPrimaryButtonStyle
@@ -114,4 +113,3 @@ private struct SLDestructiveButtonBody: View {
             .onHover { isHovered = $0 }
     }
 }
-#endif
