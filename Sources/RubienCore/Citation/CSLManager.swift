@@ -65,8 +65,10 @@ public final class CSLManager {
     /// Import a .csl file, returns the style title
     @discardableResult
     public func importCSL(from url: URL) throws -> String {
+        #if canImport(Darwin)
         let accessing = url.startAccessingSecurityScopedResource()
         defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+        #endif
 
         let data = try Data(contentsOf: url)
         let parser = CSLXMLParser()
