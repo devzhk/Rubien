@@ -1,9 +1,10 @@
-import Combine
 import Foundation
 import GRDB
-import os.log
+#if canImport(Combine) && canImport(Darwin)
+import Combine
+#endif
 
-private let appDatabaseLog = Logger(subsystem: "Rubien", category: "AppDatabase")
+private let appDatabaseLog = RubienLogger(subsystem: "Rubien", category: "AppDatabase")
 
 /// SQL expression that produces the current time as an ISO-8601 string with
 /// millisecond precision. Used both as a column default on `dateModified` /
@@ -784,6 +785,15 @@ extension AppDatabase {
             return ensureDirectory(override, fallbackLeaf: leaf)
         }
 
+        #if !os(macOS)
+        // Linux: XDG_DATA_HOME (or ~/.local/share) per the freedesktop spec.
+        // No App Group concept here; the Mac branches below are gated out.
+        let xdg = ProcessInfo.processInfo.environment["XDG_DATA_HOME"]
+            .flatMap { $0.isEmpty ? nil : $0 } ?? "\(NSHomeDirectory())/.local/share"
+        let root = URL(fileURLWithPath: xdg, isDirectory: true)
+            .appendingPathComponent("rubien", isDirectory: true)
+        return ensureDirectory(root, fallbackLeaf: leaf)
+        #else
         // 1) App Group container (signed builds with the entitlement).
         if let group = fm.containerURL(forSecurityApplicationGroupIdentifier: appGroupID),
            canAccessGroupContainer(group) {
@@ -806,8 +816,10 @@ extension AppDatabase {
 
         // 3) Temp dir — last-resort so the app doesn't crash with no DB path.
         return fm.temporaryDirectory.appendingPathComponent(leaf, isDirectory: true)
+        #endif
     }
 
+    #if os(macOS)
     /// On macOS, `containerURL(forSecurityApplicationGroupIdentifier:)` can
     /// return a non-nil URL even when the container is not actually accessible
     /// (entitlement invalidated, profile mismatch, cert revoked). Guard with an
@@ -822,17 +834,18 @@ extension AppDatabase {
             try? fm.removeItem(at: sentinel)
             return true
         } catch {
-            appDatabaseLog.info("App Group container not writable: \(error.localizedDescription, privacy: .public) — falling back to Application Support")
+            appDatabaseLog.info("App Group container not writable: \(error.localizedDescription) — falling back to Application Support")
             return false
         }
     }
+    #endif
 
     private static func ensureDirectory(_ url: URL, fallbackLeaf: String) -> URL {
         do {
             try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
             return url
         } catch {
-            appDatabaseLog.error("Failed to create directory at \(url.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            appDatabaseLog.error("Failed to create directory at \(url.path): \(error.localizedDescription)")
             return FileManager.default.temporaryDirectory.appendingPathComponent(fallbackLeaf, isDirectory: true)
         }
     }
@@ -841,9 +854,12 @@ extension AppDatabase {
         let dirURL = baseRoot
         // Skip legacy migration when the caller pointed us at an explicit dir;
         // they want isolation, not "and then we copied your old library in too."
+        // Linux has no legacy install, so the scan is pure noise — gate it off.
+        #if os(macOS)
         if explicitStorageRoot == nil {
             migrateLegacyLibraryIfNeeded(destination: dirURL)
         }
+        #endif
 
         do {
             let dbURL = dirURL.appendingPathComponent(libraryFilename)
@@ -859,7 +875,7 @@ extension AppDatabase {
 
             return try AppDatabase(dbPool)
         } catch {
-            appDatabaseLog.error("Primary database setup failed at \(dirURL.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            appDatabaseLog.error("Primary database setup failed at \(dirURL.path): \(error.localizedDescription)")
             do {
                 return try AppDatabase(DatabaseQueue(path: ":memory:"))
             } catch {
@@ -947,10 +963,10 @@ extension AppDatabase {
                 verifyIntegrity(at: dstLibrary)
                 deleteSourceEntries(from: root)
 
-                appDatabaseLog.info("Migrated Rubien library from \(root.path, privacy: .public) to \(destination.path, privacy: .public)")
+                appDatabaseLog.info("Migrated Rubien library from \(root.path) to \(destination.path)")
                 return
             } catch {
-                appDatabaseLog.error("Migration from \(root.path, privacy: .public) failed: \(error.localizedDescription, privacy: .public) — source left untouched, will retry next launch")
+                appDatabaseLog.error("Migration from \(root.path) failed: \(error.localizedDescription) — source left untouched, will retry next launch")
                 // Try the next legacy root.
             }
         }
@@ -1028,11 +1044,11 @@ extension AppDatabase {
             try pool.read { db in
                 let result = try String.fetchOne(db, sql: "PRAGMA integrity_check") ?? ""
                 if result != "ok" {
-                    appDatabaseLog.error("Integrity check on migrated library reported: \(result, privacy: .public)")
+                    appDatabaseLog.error("Integrity check on migrated library reported: \(result)")
                 }
             }
         } catch {
-            appDatabaseLog.error("Integrity check on migrated library failed to run: \(error.localizedDescription, privacy: .public)")
+            appDatabaseLog.error("Integrity check on migrated library failed to run: \(error.localizedDescription)")
         }
     }
 
@@ -1044,7 +1060,7 @@ extension AppDatabase {
                 do {
                     try fm.removeItem(at: path)
                 } catch {
-                    appDatabaseLog.info("Leftover source entry \(path.path, privacy: .public) could not be deleted: \(error.localizedDescription, privacy: .public)")
+                    appDatabaseLog.info("Leftover source entry \(path.path) could not be deleted: \(error.localizedDescription)")
                 }
             }
         }
@@ -2343,11 +2359,13 @@ extension AppDatabase {
         }
     }
 
+    #if canImport(Combine) && canImport(Darwin)
     public func observeDatabaseViews() -> AnyPublisher<[DatabaseView], Error> {
         observePublisher { db in
             try DatabaseView.order(DatabaseView.Columns.displayOrder).fetchAll(db)
         }
     }
+    #endif
 }
 
 // MARK: - PDF Annotation CRUD
@@ -2383,6 +2401,7 @@ extension AppDatabase {
         }
     }
 
+    #if canImport(Combine) && canImport(Darwin)
     public func observeAnnotations(referenceId: Int64) -> AnyPublisher<[PDFAnnotationRecord], Error> {
         observePublisher { db in
             try PDFAnnotationRecord
@@ -2392,6 +2411,7 @@ extension AppDatabase {
                 .fetchAll(db)
         }
     }
+    #endif
 
     public func annotationCount(referenceId: Int64) throws -> Int {
         try dbWriter.read { db in
@@ -2425,6 +2445,7 @@ extension AppDatabase {
         }
     }
 
+    #if canImport(Combine) && canImport(Darwin)
     public func observeWebAnnotations(referenceId: Int64) -> AnyPublisher<[WebAnnotationRecord], Error> {
         observePublisher { db in
             try WebAnnotationRecord
@@ -2433,6 +2454,7 @@ extension AppDatabase {
                 .fetchAll(db)
         }
     }
+    #endif
 
     public func webAnnotationCount(referenceId: Int64) throws -> Int {
         try dbWriter.read { db in
@@ -2586,6 +2608,7 @@ extension AppDatabase {
     /// `import` writing many rows in one transaction notifies once, but a
     /// shell loop calling `rubien-cli` repeatedly is dampened to one re-fetch
     /// per burst window).
+    #if canImport(Combine) && canImport(Darwin)
     fileprivate func observePublisher<T: Sendable>(
         scheduling: some ValueObservationScheduler = .immediate,
         fetch: @escaping @Sendable (Database) throws -> T
@@ -2636,6 +2659,7 @@ extension AppDatabase {
         .receive(on: DispatchQueue.main)
         .eraseToAnyPublisher()
     }
+    #endif
 
     // Internal helper used by both the publisher and direct fetch paths.
     private func fetchReferences(
@@ -2743,6 +2767,7 @@ extension AppDatabase {
         return try request.fetchAll(db)
     }
 
+    #if canImport(Combine) && canImport(Darwin)
     public func observePendingMetadataIntakes() -> AnyPublisher<[MetadataIntake], Error> {
         observePublisher { db in
             try MetadataIntake
@@ -2769,6 +2794,7 @@ extension AppDatabase {
             try Self.loadReferenceTagMappings(db)
         }
     }
+    #endif
 
     public func fetchReferenceTagMappings() throws -> [Int64: [Tag]] {
         try dbWriter.read { db in
@@ -3133,6 +3159,7 @@ extension AppDatabase {
     ]
 
 
+    #if canImport(Combine) && canImport(Darwin)
     public func observePropertyDefinitions() -> AnyPublisher<[PropertyDefinition], Error> {
         observePublisher { db in
             try PropertyDefinition
@@ -3140,6 +3167,7 @@ extension AppDatabase {
                 .fetchAll(db)
         }
     }
+    #endif
 }
 
 // MARK: - Property Value CRUD
@@ -3476,6 +3504,7 @@ extension AppDatabase {
         }
     }
 
+    #if canImport(Combine) && canImport(Darwin)
     public func observeAllPropertyValues() -> AnyPublisher<[Int64: [Int64: String]], Error> {
         observePublisher { db in
             let rows = try PropertyValue.fetchAll(db)
@@ -3488,4 +3517,5 @@ extension AppDatabase {
             return map
         }
     }
+    #endif
 }

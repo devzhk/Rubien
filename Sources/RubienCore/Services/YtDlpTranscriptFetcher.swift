@@ -1,7 +1,9 @@
 import Foundation
-import OSLog
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
-private let ytDlpTranscriptLog = Logger(subsystem: "Rubien", category: "YtDlpTranscript")
+private let ytDlpTranscriptLog = RubienLogger(subsystem: "Rubien", category: "YtDlpTranscript")
 
 protocol YtDlpCommandRunning {
     func run(
@@ -135,7 +137,7 @@ actor YtDlpBinaryLocator {
             throw YtDlpTranscriptError.executableUnavailable("Downloaded yt-dlp is not executable")
         }
 
-        ytDlpTranscriptLog.notice("Latest yt-dlp ready path=\(managedURL.path, privacy: .public)")
+        ytDlpTranscriptLog.notice("Latest yt-dlp ready path=\(managedURL.path)")
         return managedURL
     }
 
@@ -210,14 +212,14 @@ actor YtDlpBinaryLocator {
         if let version = await quickProbeVersion(executableURL) {
             rejectedExecutablePaths.remove(path)
             ytDlpTranscriptLog.notice(
-                "发现可用 yt-dlp path=\(path, privacy: .public) version=\(version, privacy: .public)"
+                "发现可用 yt-dlp path=\(path) version=\(version)"
             )
             return true
         }
 
         rejectedExecutablePaths.insert(path)
         ytDlpTranscriptLog.notice(
-            "yt-dlp 快速探测失败 path=\(path, privacy: .public)"
+            "yt-dlp 快速探测失败 path=\(path)"
         )
         return false
     }
@@ -435,7 +437,7 @@ final class YtDlpTranscriptFetcher: YouTubeTranscriptExternalFetcher {
         }
 
         ytDlpTranscriptLog.notice(
-            "调用 yt-dlp 抓取字幕 vid=\(trimmed, privacy: .public) lang=\(selection.languageCode, privacy: .public) source=\(String(describing: selection.source), privacy: .public)"
+            "调用 yt-dlp 抓取字幕 vid=\(trimmed) lang=\(selection.languageCode) source=\(String(describing: selection.source))"
         )
         let commandResult = try await runner.run(
             executableURL: executableURL,
@@ -448,7 +450,7 @@ final class YtDlpTranscriptFetcher: YouTubeTranscriptExternalFetcher {
             let transcript = try Self.parseTranscriptFile(at: subtitleFile)
             if !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 ytDlpTranscriptLog.notice(
-                    "yt-dlp 字幕抓取成功 vid=\(trimmed, privacy: .public) file=\(subtitleFile.lastPathComponent, privacy: .public) length=\(transcript.count, privacy: .public)"
+                    "yt-dlp 字幕抓取成功 vid=\(trimmed) file=\(subtitleFile.lastPathComponent) length=\(transcript.count)"
                 )
                 return transcript
             }

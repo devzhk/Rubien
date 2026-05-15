@@ -1,4 +1,5 @@
 import Foundation
+#if canImport(JavaScriptCore)
 import JavaScriptCore
 
 // ---------------------------------------------------------------------------
@@ -641,3 +642,4 @@ public final class CiteprocJSCorePool {
         return nil
     }
 }
+#endif

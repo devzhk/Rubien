@@ -1,4 +1,5 @@
 import Foundation
+#if canImport(PDFKit)
 import PDFKit
 
 public enum PDFService {
@@ -494,3 +495,4 @@ public enum PDFService {
         return (fileName, meta, ref)
     }
 }
+#endif // canImport(PDFKit)

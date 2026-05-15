@@ -1,10 +1,9 @@
 import Foundation
 import GRDB
-import OSLog
 
 // MARK: - Debug Logger
 // In Console.app filter subsystem="com.rubien.metadata" to see resolver traces.
-private let metadataLog = Logger(subsystem: "com.rubien.metadata", category: "resolution")
+private let metadataLog = RubienLogger(subsystem: "com.rubien.metadata", category: "resolution")
 
 public enum MetadataSource: String, Codable, CaseIterable, DatabaseValueConvertible, Sendable {
     case translationServer
@@ -180,6 +179,7 @@ public struct MetadataResolutionSeed: Hashable, Codable, Sendable {
         title.map(MetadataResolution.normalizedComparableText(_:)).rubien_nilIfBlank
     }
 
+    #if canImport(PDFKit)
     public static func fromImportedPDF(url: URL, extracted: PDFService.ExtractedMetadata) -> MetadataResolutionSeed {
         let originalFileName = url.deletingPathExtension().lastPathComponent
         let cleanedFileName = MetadataResolution.cleanPDFSeedFilename(originalFileName)
@@ -214,14 +214,15 @@ public struct MetadataResolutionSeed: Hashable, Codable, Sendable {
         )
         metadataLog.debug("""
             🌱 [seed] PDF seed built
-              fileName: \(cleanedFileName, privacy: .public)
-              title: \(title ?? "nil", privacy: .public)
-              author: \(firstAuthor ?? "nil", privacy: .public)
-              year: \(extracted.year.map(String.init) ?? "nil", privacy: .public)
-              DOI: \(extracted.doi ?? "nil", privacy: .public)
+              fileName: \(cleanedFileName)
+              title: \(title ?? "nil")
+              author: \(firstAuthor ?? "nil")
+              year: \(extracted.year.map(String.init) ?? "nil")
+              DOI: \(extracted.doi ?? "nil")
             """)
         return seed
     }
+    #endif
 
     public static func fromReference(_ reference: Reference) -> MetadataResolutionSeed {
         // Post-B8: Reference no longer carries a PDF filename. The seed-from-
@@ -355,6 +356,7 @@ public enum MetadataResolution {
         return comparableOriginal != comparableRefreshed
     }
 
+    #if canImport(PDFKit)
     public static func fallbackReference(from extracted: PDFService.ExtractedMetadata, url: URL) -> Reference {
         let seed = MetadataResolutionSeed.fromImportedPDF(url: url, extracted: extracted)
         return Reference(
@@ -372,6 +374,7 @@ public enum MetadataResolution {
             language: extracted.language
         )
     }
+    #endif
 
     public static func workKind(for referenceType: ReferenceType) -> MetadataWorkKind {
         switch referenceType {
@@ -431,7 +434,7 @@ public enum MetadataResolution {
         text = text.replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression)
         let result = text.trimmingCharacters(in: CharacterSet(charactersIn: " _-—–"))
         if result != fileName {
-            metadataLog.debug("[cleanFilename] before: \(fileName, privacy: .public) after: \(result, privacy: .public)")
+            metadataLog.debug("[cleanFilename] before: \(fileName) after: \(result)")
         }
         return result
     }
@@ -450,7 +453,7 @@ public enum MetadataResolution {
             }
         }
         if looksLikeLikelyTitle(fileName) {
-            metadataLog.debug("[parseFilename] no separator, falling back to title=\(fileName, privacy: .public) author=nil")
+            metadataLog.debug("[parseFilename] no separator, falling back to title=\(fileName) author=nil")
             return (fileName, nil)
         }
         metadataLog.debug("[parseFilename] parse failed, no title or author")

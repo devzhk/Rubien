@@ -1,7 +1,9 @@
 import Foundation
-import OSLog
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
-private let ytTranscriptLog = Logger(subsystem: "Rubien", category: "YouTubeTranscript")
+private let ytTranscriptLog = RubienLogger(subsystem: "Rubien", category: "YouTubeTranscript")
 
 public protocol YouTubeTranscriptTransport {
     func data(for request: URLRequest) async throws -> (Data, URLResponse)
@@ -162,17 +164,17 @@ public enum YouTubeTranscriptFetcher {
         externalFetcher: any YouTubeTranscriptExternalFetcher
     ) async throws -> String {
         ytTranscriptLog.notice(
-            "network subtitle path failed vid=\(videoId, privacy: .public) -> 尝试 yt-dlp fallback error=\(primaryError.localizedDescription, privacy: .public)"
+            "network subtitle path failed vid=\(videoId) -> 尝试 yt-dlp fallback error=\(primaryError.localizedDescription)"
         )
         do {
             let plain = try await externalFetcher.fetchPlainText(videoId: videoId)
             ytTranscriptLog.notice(
-                "yt-dlp fallback success vid=\(videoId, privacy: .public) length=\(plain.count, privacy: .public)"
+                "yt-dlp fallback success vid=\(videoId) length=\(plain.count)"
             )
             return plain
         } catch {
             ytTranscriptLog.notice(
-                "yt-dlp fallback failed vid=\(videoId, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                "yt-dlp fallback failed vid=\(videoId) error=\(error.localizedDescription)"
             )
             throw combineFailure(primary: primaryError, ytDlpError: error)
         }
@@ -213,7 +215,7 @@ public enum YouTubeTranscriptFetcher {
                 videoIdForLog: videoId
             )
         } catch {
-            ytTranscriptLog.notice("caption strategy=innertube_android failed vid=\(videoId, privacy: .public) error=\(error.localizedDescription, privacy: .public) -> trying watch HTML fallback")
+            ytTranscriptLog.notice("caption strategy=innertube_android failed vid=\(videoId) error=\(error.localizedDescription) -> trying watch HTML fallback")
         }
 
         // fallback：从 watch 页 HTML 直接解析 ytInitialPlayerResponse 获取 captionTracks
@@ -232,7 +234,7 @@ public enum YouTubeTranscriptFetcher {
                 videoIdForLog: videoId
             )
         } catch {
-            ytTranscriptLog.notice("caption strategy=watch_html fallback failed vid=\(videoId, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+            ytTranscriptLog.notice("caption strategy=watch_html fallback failed vid=\(videoId) error=\(error.localizedDescription)")
             throw FetchError.captionBlockedOrEmptyAfterFallback
         }
     }
@@ -255,7 +257,7 @@ public enum YouTubeTranscriptFetcher {
             let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
             let contentType = (resp as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type") ?? "-"
             ytTranscriptLog.notice(
-                "watch attempt=\(attempt) status=\(status) type=\(contentType, privacy: .public) bytes=\(data.count, privacy: .public)"
+                "watch attempt=\(attempt) status=\(status) type=\(contentType) bytes=\(data.count)"
             )
 
             guard let html = String(data: data, encoding: .utf8) else {
@@ -330,7 +332,7 @@ public enum YouTubeTranscriptFetcher {
             let (data, resp) = try await transport.data(for: req)
             let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
             ytTranscriptLog.notice(
-                "watch(api_key) attempt=\(attempt) status=\(status) bytes=\(data.count, privacy: .public)"
+                "watch(api_key) attempt=\(attempt) status=\(status) bytes=\(data.count)"
             )
 
             guard let html = String(data: data, encoding: .utf8) else { continue }
@@ -382,7 +384,7 @@ public enum YouTubeTranscriptFetcher {
         let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
         let contentType = (resp as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type") ?? "-"
         ytTranscriptLog.notice(
-            "bootstrap strategy=innertube_android client=\(androidClientName, privacy: .public) status=\(status) type=\(contentType, privacy: .public) bytes=\(data.count, privacy: .public) vid=\(videoId, privacy: .public)"
+            "bootstrap strategy=innertube_android client=\(androidClientName) status=\(status) type=\(contentType) bytes=\(data.count) vid=\(videoId)"
         )
 
         guard status < 400 else {
@@ -450,7 +452,7 @@ public enum YouTubeTranscriptFetcher {
                 (capData, capResp) = try await transport.data(for: req)
             } catch {
                 ytTranscriptLog.notice(
-                    "caption strategy=\(bootstrap.strategy.rawValue, privacy: .public) client=\(bootstrap.clientLabel, privacy: .public) try=\(idx) transport_error vid=\(videoIdForLog, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                    "caption strategy=\(bootstrap.strategy.rawValue) client=\(bootstrap.clientLabel) try=\(idx) transport_error vid=\(videoIdForLog) error=\(error.localizedDescription)"
                 )
                 lastFailure = .transport(error)
                 continue
@@ -462,7 +464,7 @@ public enum YouTubeTranscriptFetcher {
 
             if code >= 400 {
                 ytTranscriptLog.notice(
-                    "caption strategy=\(bootstrap.strategy.rawValue, privacy: .public) client=\(bootstrap.clientLabel, privacy: .public) try=\(idx) status=\(code) type=\(contentType, privacy: .public) bytes=\(bodyLen, privacy: .public) vid=\(videoIdForLog, privacy: .public)"
+                    "caption strategy=\(bootstrap.strategy.rawValue) client=\(bootstrap.clientLabel) try=\(idx) status=\(code) type=\(contentType) bytes=\(bodyLen) vid=\(videoIdForLog)"
                 )
                 lastFailure = .http(code)
                 continue
@@ -470,7 +472,7 @@ public enum YouTubeTranscriptFetcher {
 
             guard let capStr = String(data: capData, encoding: .utf8) else {
                 ytTranscriptLog.notice(
-                    "caption strategy=\(bootstrap.strategy.rawValue, privacy: .public) client=\(bootstrap.clientLabel, privacy: .public) try=\(idx) encoding_error type=\(contentType, privacy: .public) bytes=\(bodyLen, privacy: .public) vid=\(videoIdForLog, privacy: .public)"
+                    "caption strategy=\(bootstrap.strategy.rawValue) client=\(bootstrap.clientLabel) try=\(idx) encoding_error type=\(contentType) bytes=\(bodyLen) vid=\(videoIdForLog)"
                 )
                 lastFailure = .encoding
                 continue
@@ -479,7 +481,7 @@ public enum YouTubeTranscriptFetcher {
             let trimmedBody = capStr.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmedBody.isEmpty {
                 ytTranscriptLog.notice(
-                    "caption strategy=\(bootstrap.strategy.rawValue, privacy: .public) client=\(bootstrap.clientLabel, privacy: .public) try=\(idx) empty_body status=\(code) type=\(contentType, privacy: .public) bytes=\(bodyLen, privacy: .public) vid=\(videoIdForLog, privacy: .public)"
+                    "caption strategy=\(bootstrap.strategy.rawValue) client=\(bootstrap.clientLabel) try=\(idx) empty_body status=\(code) type=\(contentType) bytes=\(bodyLen) vid=\(videoIdForLog)"
                 )
                 sawGatedOrEmpty = true
                 lastFailure = .gatedOrEmpty
@@ -492,7 +494,7 @@ public enum YouTubeTranscriptFetcher {
                       !p.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 else {
                     ytTranscriptLog.notice(
-                        "caption strategy=\(bootstrap.strategy.rawValue, privacy: .public) client=\(bootstrap.clientLabel, privacy: .public) try=\(idx) json3_empty type=\(contentType, privacy: .public) bytes=\(bodyLen, privacy: .public) vid=\(videoIdForLog, privacy: .public)"
+                        "caption strategy=\(bootstrap.strategy.rawValue) client=\(bootstrap.clientLabel) try=\(idx) json3_empty type=\(contentType) bytes=\(bodyLen) vid=\(videoIdForLog)"
                     )
                     lastFailure = .transcriptEmpty
                     continue
@@ -502,7 +504,7 @@ public enum YouTubeTranscriptFetcher {
                 plain = parseTimedTextXMLToPlain(capStr)
                 if plain.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     ytTranscriptLog.notice(
-                        "caption strategy=\(bootstrap.strategy.rawValue, privacy: .public) client=\(bootstrap.clientLabel, privacy: .public) try=\(idx) xml_empty type=\(contentType, privacy: .public) bytes=\(bodyLen, privacy: .public) vid=\(videoIdForLog, privacy: .public)"
+                        "caption strategy=\(bootstrap.strategy.rawValue) client=\(bootstrap.clientLabel) try=\(idx) xml_empty type=\(contentType) bytes=\(bodyLen) vid=\(videoIdForLog)"
                     )
                     lastFailure = .transcriptEmpty
                     continue
@@ -510,7 +512,7 @@ public enum YouTubeTranscriptFetcher {
             }
 
             ytTranscriptLog.notice(
-                "caption strategy=\(bootstrap.strategy.rawValue, privacy: .public) client=\(bootstrap.clientLabel, privacy: .public) try=\(idx) success type=\(contentType, privacy: .public) len=\(plain.count, privacy: .public) vid=\(videoIdForLog, privacy: .public)"
+                "caption strategy=\(bootstrap.strategy.rawValue) client=\(bootstrap.clientLabel) try=\(idx) success type=\(contentType) len=\(plain.count) vid=\(videoIdForLog)"
             )
             return plain
         }

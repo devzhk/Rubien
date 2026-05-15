@@ -1,10 +1,10 @@
-import Combine
 import Foundation
+#if canImport(Combine) && canImport(Darwin)
+import Combine
 import notify
-import os.log
 
-private let pdfQueueBroadcasterLog = Logger(subsystem: "Rubien",
-                                            category: "PDFUploadQueueBroadcaster")
+private let pdfQueueBroadcasterLog = RubienLogger(subsystem: "Rubien",
+                                                  category: "PDFUploadQueueBroadcaster")
 
 /// Cross-process kick channel for the PDF upload queue. The one-shot
 /// CLI can't drive `CKSyncEngine`; posting here signals the running app
@@ -16,6 +16,9 @@ public final class PDFUploadQueueBroadcaster: @unchecked Sendable {
 
     static let notifyName = "\(AppDatabase.appGroupID).pdfUploadQueue.changed"
 
+    /// **Linux invariant.** This member is intentionally absent from the
+    /// Linux stub. Any new consumer of `.events` must live inside
+    /// `#if canImport(Combine) && canImport(Darwin)`.
     public var events: AnyPublisher<Void, Never> { subject.eraseToAnyPublisher() }
 
     private let subject = PassthroughSubject<Void, Never>()
@@ -26,7 +29,7 @@ public final class PDFUploadQueueBroadcaster: @unchecked Sendable {
             self?.subject.send(())
         }
         if status != NOTIFY_STATUS_OK {
-            pdfQueueBroadcasterLog.error("notify_register_dispatch failed with status \(status, privacy: .public)")
+            pdfQueueBroadcasterLog.error("notify_register_dispatch failed with status \(status)")
         }
     }
 
@@ -36,3 +39,11 @@ public final class PDFUploadQueueBroadcaster: @unchecked Sendable {
         notify_post(Self.notifyName)
     }
 }
+#else
+/// Linux stub. See `LibraryChangeBroadcaster` for the invariant.
+public final class PDFUploadQueueBroadcaster: Sendable {
+    public static let shared = PDFUploadQueueBroadcaster()
+    private init() {}
+    public static func postChangeNotification() {}
+}
+#endif

@@ -1,3 +1,4 @@
+#if canImport(PDFKit)
 import XCTest
 import GRDB
 @testable import RubienCore
@@ -488,3 +489,4 @@ final class ZoteroFolderImporterTests: XCTestCase {
         }
     }
 }
+#endif // canImport(PDFKit)

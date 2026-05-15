@@ -1,4 +1,5 @@
 import Foundation
+#if canImport(PDFKit)
 
 /// Imports a Zotero "Export Collection… with files" folder into Rubien:
 /// parses the bundled `.bib`, copies referenced PDFs into the PDF store,
@@ -157,3 +158,4 @@ public enum ZoteroFolderImporter {
         }
     }
 }
+#endif // canImport(PDFKit)

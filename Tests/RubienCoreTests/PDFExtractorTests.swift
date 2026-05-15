@@ -1,3 +1,4 @@
+#if canImport(PDFKit)
 import XCTest
 import PDFKit
 import CoreText
@@ -492,3 +493,4 @@ final class PDFExtractorTests: XCTestCase {
         )
     }
 }
+#endif // canImport(PDFKit)

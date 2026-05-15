@@ -1,6 +1,7 @@
 import XCTest
 @testable import RubienCore
 
+#if canImport(JavaScriptCore)
 final class CiteprocJSCoreEngineTests: XCTestCase {
     private let numericStyleXML = """
     <?xml version="1.0" encoding="utf-8"?>
@@ -128,3 +129,4 @@ final class CiteprocJSCoreEngineTests: XCTestCase {
         }
     }
 }
+#endif

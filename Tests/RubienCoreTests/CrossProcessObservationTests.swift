@@ -1,3 +1,4 @@
+#if canImport(Combine) && canImport(Darwin)
 import Combine
 import GRDB
 import XCTest
@@ -146,3 +147,4 @@ final class CrossProcessObservationTests: XCTestCase {
             "Expected at most one debounced re-emission on top of the initial snapshot, got \(emissions)")
     }
 }
+#endif

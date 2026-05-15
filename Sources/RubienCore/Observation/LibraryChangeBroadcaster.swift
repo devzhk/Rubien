@@ -1,9 +1,9 @@
-import Combine
 import Foundation
+#if canImport(Combine) && canImport(Darwin)
+import Combine
 import notify
-import os.log
 
-private let broadcasterLog = Logger(subsystem: "Rubien", category: "LibraryChangeBroadcaster")
+private let broadcasterLog = RubienLogger(subsystem: "Rubien", category: "LibraryChangeBroadcaster")
 
 /// Cross-process invalidation channel for the shared SQLite library.
 ///
@@ -32,6 +32,10 @@ public final class LibraryChangeBroadcaster: @unchecked Sendable {
 
     /// `Void` events fire whenever an external process posts the notification
     /// or `triggerLocalRefresh()` is invoked.
+    ///
+    /// **Linux invariant.** This member is intentionally absent from the Linux
+    /// stub below — `AnyPublisher` doesn't exist there. Any new consumer of
+    /// `.events` must live inside `#if canImport(Combine) && canImport(Darwin)`.
     public var events: AnyPublisher<Void, Never> { subject.eraseToAnyPublisher() }
 
     private let subject = PassthroughSubject<Void, Never>()
@@ -42,7 +46,7 @@ public final class LibraryChangeBroadcaster: @unchecked Sendable {
             self?.subject.send(())
         }
         if status != NOTIFY_STATUS_OK {
-            broadcasterLog.error("notify_register_dispatch failed with status \(status, privacy: .public)")
+            broadcasterLog.error("notify_register_dispatch failed with status \(status)")
         }
     }
 
@@ -60,3 +64,15 @@ public final class LibraryChangeBroadcaster: @unchecked Sendable {
         subject.send(())
     }
 }
+#else
+/// Linux stub: keeps CLI write paths compiling and no-op on platforms without
+/// Darwin notify / Combine. `events` is **deliberately omitted** — see note on
+/// the Mac variant above. Any future Combine-returning consumer must be
+/// guarded the same way the production class is.
+public final class LibraryChangeBroadcaster: Sendable {
+    public static let shared = LibraryChangeBroadcaster()
+    private init() {}
+    public static func postChangeNotification() {}
+    public func triggerLocalRefresh() {}
+}
+#endif

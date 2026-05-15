@@ -1,3 +1,4 @@
+#if canImport(PDFKit)
 import XCTest
 @testable import RubienCore
 
@@ -152,3 +153,4 @@ final class MetadataResolutionTests: XCTestCase {
         XCTAssertTrue(MetadataResolution.hasMeaningfulRefreshChanges(original: existing, refreshed: merged))
     }
 }
+#endif // canImport(PDFKit)

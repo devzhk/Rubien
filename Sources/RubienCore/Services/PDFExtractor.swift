@@ -1,4 +1,5 @@
 import Foundation
+#if canImport(PDFKit)
 import PDFKit
 #if canImport(AppKit)
 import AppKit
@@ -580,3 +581,4 @@ public enum PDFExtractor {
             .joined(separator: ",")
     }
 }
+#endif // canImport(PDFKit)

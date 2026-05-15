@@ -1,0 +1,32 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  macos:
+    name: macOS
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: swift build
+      - name: Test
+        run: swift test
+
+  linux:
+    name: Linux (x86_64)
+    runs-on: ubuntu-22.04
+    container: swift:5.9-jammy
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system deps
+        run: |
+          apt-get update
+          apt-get install -y libsqlite3-dev pkg-config
+      - name: Build RubienCore
+        run: swift build --target RubienCore
+      # Test step intentionally omitted in Phase 1: SwiftPM compiles ALL test
+      # targets up-front before applying --filter, and RubienSyncTests /
+      # RubienTests / RubienCLITests pull in CloudKit / AppKit / RubienSync.
+      # Phase 2 adds conditional `RubienSync` linkage in Package.swift, after
+      # which `swift test --filter RubienCoreTests` becomes viable on Linux.

@@ -1,6 +1,10 @@
-import CryptoKit
 import Foundation
 import GRDB
+#if canImport(CryptoKit)
+import CryptoKit
+#else
+import Crypto
+#endif
 
 public enum VerificationStatus: String, Codable, CaseIterable, DatabaseValueConvertible, Sendable {
     case legacy
