@@ -1,6 +1,6 @@
 # Paper landing-page URL resolver Implementation Plan
 
-**Version:** v4 — incorporates third-pass Codex plan-review feedback
+**Version:** v4 — execution-ready 2026-05-16 (after 4 rounds of Codex plan review)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
