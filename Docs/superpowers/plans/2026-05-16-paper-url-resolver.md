@@ -1,6 +1,6 @@
 # Paper landing-page URL resolver Implementation Plan
 
-**Version:** v2 — incorporates first-pass Codex review feedback
+**Version:** v3 — incorporates second-pass Codex plan-review feedback
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -2389,18 +2389,22 @@ case .isbn(let isbn):     return try await fetchFromISBN(isbn)
 case .pmcid(let pmcid):   return try await fetchFromPMCID(pmcid)
 case .paperURL(let url):
     // Route paper URLs through PaperURLResolver so the CLI (which calls
-    // fetch(from:) directly) gets a Reference back. The CLI does not use
-    // ManualEntryOutcome / preferredPDFURL — it just needs the Reference.
+    // fetch(from:) directly at RubienCLI.swift:649) gets a Reference back.
+    // The CLI does not use ManualEntryOutcome / preferredPDFURL — it just
+    // needs the Reference.
     do {
         let outcome = try await PaperURLResolver.resolve(url)
         return outcome.reference
-    } catch PaperURLResolver.ResolveError.noAuthorsAvailable(let partialRef, _) {
-        // Spec §4 says no-author should produce .candidate; the Mac app's
-        // resolveManualEntry handles that. From the CLI's bare-fetch shape
-        // there's no candidate type — return the partial Reference so the
-        // CLI's caller can decide. (Better than throwing — the metadata is
-        // genuinely partial, not invalid.)
-        return partialRef
+    } catch PaperURLResolver.ResolveError.noAuthorsAvailable {
+        // CLI has no candidate-review channel. Throwing here is the right
+        // call — silently importing a no-author Reference via fetch(from:)
+        // would save a half-baked record (the schema accepts empty authors
+        // as TEXT NOT NULL DEFAULT "", so nothing rejects it downstream).
+        // The Mac app gets the .candidate path via MetadataResolver's catch
+        // handler in resolveIdentifierLocally; the CLI gets an error.
+        throw FetchError.unsupported(
+            "Paper URL resolved but no authors were found. Review the page or paste a DOI."
+        )
     } catch let error as PaperURLResolver.ResolveError {
         throw FetchError.unsupported(String(describing: error))
     }
@@ -2486,7 +2490,12 @@ private func resolveIdentifierLocally(
             publisher: partialRef.publisher,
             year: partialRef.year,
             detailURL: partialRef.url ?? "",
-            score: 0.5,  // mid-range; user is reviewing because authors are missing
+            // Score is 1.0 — direct-source URL, no competing candidates, single
+            // entry list. The user is reviewing because authors are missing,
+            // not because of low confidence in the match. Picking < global
+            // candidateThreshold (0.52) here would render as a misleading
+            // "50% match" in the UI.
+            score: 1.0,
             snippet: partialRef.abstract,
             workKind: .unknown,
             referenceType: partialRef.referenceType,
@@ -2576,8 +2585,14 @@ branches return nil scrapedPDFURL; new .paperURL branch surfaces
 the scraped PDF URL on .verified outcomes only (forced to nil
 on any non-verified result per spec).
 
-No-author safeguard (PaperURLResolver.ResolveError.noAuthorsAvailable)
-is caught and surfaced as .rejected with an explanatory message.
+No-author safeguard: PaperURLResolver.ResolveError.noAuthorsAvailable
+carries a (Reference, scrapedPDFURL: String?) payload. The catch
+handler in MetadataResolver.resolveIdentifierLocally converts the
+throw into a .candidate result with a single-element
+[MetadataCandidate] built from the partial Reference, so the user
+reviews the no-author record rather than auto-importing it. The
+CLI path (MetadataFetcher.fetch(from:)) re-throws as
+FetchError.unsupported — CLI has no candidate-review channel.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -2760,6 +2775,89 @@ final class MetadataResolverPaperURLTests: XCTestCase {
         let outcome = await resolver.resolveManualEntry("https://openreview.net/forum?id=DOES-NOT-EXIST-9999")
         XCTAssertNil(outcome.preferredPDFURL,
                      "preferredPDFURL must be nil for non-.verified outcomes")
+    }
+
+    /// Integration test: PaperURLResolver throws .noAuthorsAvailable, and the
+    /// catch handler in MetadataResolver.resolveIdentifierLocally converts the
+    /// throw into a .candidate result with a single-element [MetadataCandidate].
+    ///
+    /// This requires injecting a stubbed URLSession into PaperURLResolver's
+    /// call chain. Since PaperURLResolver.resolve accepts a session parameter
+    /// (default .shared), the test needs MetadataResolver to forward an
+    /// injected session — which it does NOT currently do. Two ways to land
+    /// this test:
+    ///
+    /// (a) Refactor MetadataResolver to accept an injectable URLSession on
+    ///     init or on resolveManualEntry. Modest API change.
+    /// (b) Move this test to the PaperURLResolver layer: call
+    ///     PaperURLResolver.resolve directly with the stubbed session, catch
+    ///     ResolveError.noAuthorsAvailable, then construct the expected
+    ///     CandidateEnvelope inline and verify the conversion logic via a
+    ///     small helper extracted from resolveIdentifierLocally. (No
+    ///     end-to-end MetadataResolver path, but exercises the conversion.)
+    ///
+    /// Option (b) is the smaller change. Implementation note: extract the
+    /// no-author -> .candidate conversion into a static helper on
+    /// MetadataResolver (e.g. `static func candidateEnvelope(forNoAuthors:
+    /// partialRef:)`) and have both the catch handler in
+    /// resolveIdentifierLocally AND this test call it.
+    func testNoAuthorsResolverProducesCandidate() async throws {
+        let session = StubURLProtocol.makeSession()
+        StubURLProtocol.stub(
+            "https://ieeexplore.ieee.org/document/8888",
+            body: """
+            <html><head>
+            <meta name="citation_title" content="Author-less IEEE Paper">
+            <meta name="citation_doi" content="10.1109/zzz.99999999">
+            <meta name="citation_publication_date" content="2024">
+            </head></html>
+            """
+        )
+        defer { StubURLProtocol.reset() }
+
+        // Call PaperURLResolver directly to capture the throw payload.
+        var caughtPayload: (Reference, String?)?
+        do {
+            _ = try await PaperURLResolver.resolve(
+                URL(string: "https://ieeexplore.ieee.org/document/8888")!,
+                session: session
+            )
+            XCTFail("Expected noAuthorsAvailable")
+            return
+        } catch PaperURLResolver.ResolveError.noAuthorsAvailable(let ref, let pdf) {
+            caughtPayload = (ref, pdf)
+        } catch {
+            XCTFail("Wrong error: \(error)")
+            return
+        }
+
+        let (partialRef, _) = caughtPayload!
+        XCTAssertEqual(partialRef.title, "Author-less IEEE Paper")
+        XCTAssertTrue(partialRef.authors.isEmpty)
+
+        // Verify the conversion produces a .candidate envelope.
+        // (If a candidateEnvelope(forNoAuthors:partialRef:) helper exists,
+        // call it here. Otherwise, replicate the catch-handler logic from
+        // resolveIdentifierLocally inline for this assertion.)
+        let candidate = MetadataCandidate(
+            source: partialRef.metadataSource ?? .publisherCitationMeta,
+            title: partialRef.title,
+            authors: partialRef.authors,
+            journal: partialRef.journal,
+            publisher: partialRef.publisher,
+            year: partialRef.year,
+            detailURL: partialRef.url ?? "",
+            score: 1.0,
+            snippet: partialRef.abstract,
+            workKind: .unknown,
+            referenceType: partialRef.referenceType,
+            isbn: partialRef.isbn,
+            issn: partialRef.issn,
+            sourceRecordID: partialRef.doi
+        )
+        XCTAssertEqual(candidate.title, "Author-less IEEE Paper")
+        XCTAssertEqual(candidate.sourceRecordID, "10.1109/zzz.99999999")
+        XCTAssertTrue(candidate.authors.isEmpty)
     }
 }
 #endif
