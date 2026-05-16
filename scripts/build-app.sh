@@ -2,11 +2,28 @@
 set -euo pipefail
 
 MODE="${1:-debug}"
+FLAVOR="${2:-dmg}"
+
 if [ "$MODE" = "release" ]; then
     CONFIGURATION="Release"
 else
     CONFIGURATION="Debug"
 fi
+
+case "$FLAVOR" in
+    dmg)
+        : # default; nothing extra
+        ;;
+    mas)
+        echo "✗ MAS flavor not yet implemented (reserved for future App Store builds)" >&2
+        echo "  When implemented: --disable-default-traits + Mac App Distribution cert + Transporter upload." >&2
+        exit 64
+        ;;
+    *)
+        echo "✗ Unknown flavor '$FLAVOR'. Expected 'dmg' or 'mas'." >&2
+        exit 64
+        ;;
+esac
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
