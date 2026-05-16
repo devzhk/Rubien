@@ -1,6 +1,6 @@
 # Paper landing-page URL resolver Implementation Plan
 
-**Version:** v3 — incorporates second-pass Codex plan-review feedback
+**Version:** v4 — incorporates third-pass Codex plan-review feedback
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -2477,42 +2477,16 @@ private func resolveIdentifierLocally(
         return (result, effectiveScrapedPDFURL)
     } catch PaperURLResolver.ResolveError.noAuthorsAvailable(let partialRef, _) {
         // Spec §4: empty Reference.authors produces .candidate (NOT .rejected),
-        // so the user reviews the partial metadata before importing. Build a
-        // single-element MetadataCandidate from the scraped Reference.
+        // so the user reviews the partial metadata before importing.
         // scrapedPDFURL is intentionally discarded — preferredPDFURL is
         // .verified-only.
         resolverTrace("resolveIdentifierLocally noAuthorsAvailable: title=\(partialRef.title)")
-        let candidate = MetadataCandidate(
-            source: partialRef.metadataSource ?? .publisherCitationMeta,
-            title: partialRef.title,
-            authors: partialRef.authors,
-            journal: partialRef.journal,
-            publisher: partialRef.publisher,
-            year: partialRef.year,
-            detailURL: partialRef.url ?? "",
-            // Score is 1.0 — direct-source URL, no competing candidates, single
-            // entry list. The user is reviewing because authors are missing,
-            // not because of low confidence in the match. Picking < global
-            // candidateThreshold (0.52) here would render as a misleading
-            // "50% match" in the UI.
-            score: 1.0,
-            snippet: partialRef.abstract,
-            workKind: .unknown,
-            referenceType: partialRef.referenceType,
-            isbn: partialRef.isbn,
-            issn: partialRef.issn,
-            sourceRecordID: partialRef.doi
+        let envelope = MetadataResolver.candidateEnvelopeForNoAuthors(
+            partialRef: partialRef,
+            seed: seed,
+            fallback: fallback
         )
-        return (.candidate(
-            CandidateEnvelope(
-                seed: seed,
-                fallbackReference: fallback,
-                currentReference: partialRef,
-                candidates: [candidate],
-                message: "Found a paper, but no authors are listed on the page or in CrossRef. Review before importing.",
-                evidence: nil
-            )
-        ), nil)
+        return (.candidate(envelope), nil)
     } catch {
         resolverTrace("resolveIdentifierLocally failed error=\"\(error.localizedDescription)\"")
         return (.rejected(
@@ -2530,6 +2504,55 @@ private func resolveIdentifierLocally(
 
 **Important — verify `CandidateEnvelope` initializer signature.** The plan above uses the labels `(seed:fallbackReference:currentReference:candidates:message:evidence:)`. If the actual initializer at `Sources/RubienCore/Models/MetadataVerification.swift` (around line 262) differs, adjust the call. Run `grep -n "public init" Sources/RubienCore/Models/MetadataVerification.swift` and inspect the `CandidateEnvelope` initializer.
 
+- [ ] **Step 7a: Extract `candidateEnvelopeForNoAuthors(...)` static helper**
+
+The catch handler delegates `MetadataCandidate` + `CandidateEnvelope` construction to a shared helper so the integration test in Task 5 can call the same production logic (otherwise the test would re-implement the construction inline and silently drift from production — flagged in Codex's third-pass plan review).
+
+Add inside `MetadataResolver` (above the `private extension PaperURLResolver.ResolveError` or in the appropriate section):
+
+```swift
+extension MetadataResolver {
+    /// Builds a CandidateEnvelope for the no-author safeguard path. Called
+    /// from resolveIdentifierLocally's catch handler when PaperURLResolver
+    /// throws .noAuthorsAvailable, and from MetadataResolverPaperURLTests
+    /// so the test exercises the real conversion logic.
+    nonisolated static func candidateEnvelopeForNoAuthors(
+        partialRef: Reference,
+        seed: MetadataResolutionSeed?,
+        fallback: Reference?
+    ) -> CandidateEnvelope {
+        let candidate = MetadataCandidate(
+            source: partialRef.metadataSource ?? .publisherCitationMeta,
+            title: partialRef.title,
+            authors: partialRef.authors,
+            journal: partialRef.journal,
+            publisher: partialRef.publisher,
+            year: partialRef.year,
+            detailURL: partialRef.url ?? "",
+            // Score 1.0 — direct-source URL, no competing candidates, single
+            // entry list. The user is reviewing because authors are missing,
+            // not because of low confidence in the match. < candidateThreshold
+            // (0.52) would render as a misleading "50% match" in the UI.
+            score: 1.0,
+            snippet: partialRef.abstract,
+            workKind: .unknown,
+            referenceType: partialRef.referenceType,
+            isbn: partialRef.isbn,
+            issn: partialRef.issn,
+            sourceRecordID: partialRef.doi
+        )
+        return CandidateEnvelope(
+            seed: seed,
+            fallbackReference: fallback,
+            currentReference: partialRef,
+            candidates: [candidate],
+            message: "Found a paper, but no authors are listed on the page or in CrossRef. Review before importing.",
+            evidence: nil
+        )
+    }
+}
+```
+
 - [ ] **Step 8: Update callers of `resolveIdentifierLocally` inside `MetadataResolver.swift`**
 
 Find all calls to `resolveIdentifierLocally(` in `MetadataResolver.swift` (use `grep -n "resolveIdentifierLocally(" Sources/Rubien/Services/MetadataResolver.swift`). At each call site, change:
@@ -2545,6 +2568,50 @@ let (result, _) = await resolveIdentifierLocally(...)
 ```
 
 — **EXCEPT** the call from inside `resolveManualEntry`, which will be updated in Task 5 to use the URL. Leave that call's `(result, _)` form as a placeholder for now; Task 5 changes it.
+
+- [ ] **Step 8a: Wrap CLI's `Add.run` identifier path with structured error reporting**
+
+Today `RubienCLI.swift:648-655` lets thrown errors from `MetadataFetcher.fetch(from:)` propagate as unhandled Swift errors. After Task 4 lands, `FetchError.unsupported` for the no-author path would print as a raw error rather than the structured JSON envelope (`printJSONError`) the rest of the CLI uses. Wrap the call:
+
+Edit `/Users/hzzheng/CodeHub/Rubien/Sources/RubienCLI/RubienCLI.swift`. Find the `Add.run` identifier branch (around line 648-655):
+
+```swift
+if let id = identifier {
+    var ref = try await MetadataFetcher.fetch(from: id)
+    ref = MetadataVerifier.manuallyVerified(ref, reviewedBy: "cli-identifier")
+    let result = try AppDatabase.shared.saveReference(&ref)
+    notifyLibraryChanged()
+    let pdfStatus = downloadPdf ? await attemptPDFDownload(for: ref) : nil
+    let dto = try referenceDTO(for: ref)
+    printJSON(AddStatusOutput(reference: dto, status: result, pdfDownload: pdfStatus))
+}
+```
+
+Change to:
+
+```swift
+if let id = identifier {
+    let ref: Reference
+    do {
+        var fetched = try await MetadataFetcher.fetch(from: id)
+        fetched = MetadataVerifier.manuallyVerified(fetched, reviewedBy: "cli-identifier")
+        ref = fetched
+    } catch let error as MetadataFetcher.FetchError {
+        printJSONError(error.errorDescription ?? String(describing: error))
+        throw ExitCode.failure
+    }
+    var mutableRef = ref
+    let result = try AppDatabase.shared.saveReference(&mutableRef)
+    notifyLibraryChanged()
+    let pdfStatus = downloadPdf ? await attemptPDFDownload(for: mutableRef) : nil
+    let dto = try referenceDTO(for: mutableRef)
+    printJSON(AddStatusOutput(reference: dto, status: result, pdfDownload: pdfStatus))
+}
+```
+
+(Adjust the `MetadataVerifier.manuallyVerified` invocation if the existing code passes additional arguments — match the existing call shape, just wrap the throwing call.)
+
+Add a CLI test for the no-author error path in the existing `RubienCLITests` (or extend a similar test that exercises a failing fetch). Verify the failure produces a JSON error object on stderr, not a raw Swift error message.
 
 - [ ] **Step 9: Build the entire project**
 
@@ -2835,29 +2902,22 @@ final class MetadataResolverPaperURLTests: XCTestCase {
         XCTAssertEqual(partialRef.title, "Author-less IEEE Paper")
         XCTAssertTrue(partialRef.authors.isEmpty)
 
-        // Verify the conversion produces a .candidate envelope.
-        // (If a candidateEnvelope(forNoAuthors:partialRef:) helper exists,
-        // call it here. Otherwise, replicate the catch-handler logic from
-        // resolveIdentifierLocally inline for this assertion.)
-        let candidate = MetadataCandidate(
-            source: partialRef.metadataSource ?? .publisherCitationMeta,
-            title: partialRef.title,
-            authors: partialRef.authors,
-            journal: partialRef.journal,
-            publisher: partialRef.publisher,
-            year: partialRef.year,
-            detailURL: partialRef.url ?? "",
-            score: 1.0,
-            snippet: partialRef.abstract,
-            workKind: .unknown,
-            referenceType: partialRef.referenceType,
-            isbn: partialRef.isbn,
-            issn: partialRef.issn,
-            sourceRecordID: partialRef.doi
+        // Exercise the REAL production conversion path. Task 4 step 7a
+        // extracts candidateEnvelopeForNoAuthors as a static helper that
+        // resolveIdentifierLocally's catch handler also calls — so this
+        // test cannot silently drift from production.
+        let envelope = MetadataResolver.candidateEnvelopeForNoAuthors(
+            partialRef: partialRef,
+            seed: nil,
+            fallback: nil
         )
+        XCTAssertEqual(envelope.candidates.count, 1)
+        let candidate = envelope.candidates[0]
         XCTAssertEqual(candidate.title, "Author-less IEEE Paper")
         XCTAssertEqual(candidate.sourceRecordID, "10.1109/zzz.99999999")
         XCTAssertTrue(candidate.authors.isEmpty)
+        XCTAssertEqual(candidate.score, 1.0)
+        XCTAssertEqual(envelope.currentReference?.title, "Author-less IEEE Paper")
     }
 }
 #endif
