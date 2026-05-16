@@ -1,5 +1,7 @@
 # Paper landing-page URL resolver Implementation Plan
 
+**Version:** v2 — incorporates first-pass Codex review feedback
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Extend the Add-by-Identifier paste box in Rubien to recognize paper landing-page URLs from OpenReview, ACL Anthology, CVF Open Access, NeurIPS, PMLR, IEEE Xplore, ACM DL, Nature, Springer, and ScienceDirect, producing authoritative `Reference` records with optional PDF auto-download.
@@ -44,7 +46,7 @@ If `swift build` fails on a stale `.build/checkouts`, run `rm -rf .build .swiftp
 **Modified files:**
 
 - `Sources/RubienCore/Services/MetadataResolution.swift` — add `MetadataSource.cvfOpenAccess` and `.publisherCitationMeta` cases.
-- `Sources/RubienCore/Services/MetadataFetcher.swift` — add `Identifier.paperURL(URL)` case; update `extractIdentifier`, `fetch(identifier:)` switch.
+- `Sources/RubienCore/Services/MetadataFetcher.swift` — add `Identifier.paperURL(URL)` case; update `extractIdentifier`, `fetch(from:)` switch (the unified per-identifier dispatcher; verify via `grep -n "public static func fetch(from" Sources/RubienCore/Services/MetadataFetcher.swift`).
 - `Sources/Rubien/Services/MetadataResolver.swift` — change `resolveIdentifierLocally` return type to tuple; add `ManualEntryOutcome` wrapper on `resolveManualEntry`; route `.paperURL` to `PaperURLResolver.resolve`.
 - `Sources/Rubien/Views/AddByIdentifierView.swift` — update `onSave` signature; toggle gating logic; placeholder caption.
 - `Sources/Rubien/Views/ContentView.swift` — `downloadPDFInBackground` signature; update calling code to consume `ManualEntryOutcome.result` and forward `preferredPDFURL`.
@@ -371,7 +373,12 @@ public enum PaperURLResolver {
         case insufficientMetadata
         case bibtexNotFound
         case bibtexEmpty
-        case noAuthorsAvailable
+        /// Empty `Reference.authors` after merge. Payload includes the
+        /// partially-scraped Reference so the caller can construct a
+        /// CandidateEnvelope for user review per spec §4. scrapedPDFURL
+        /// is included for completeness but the caller will discard it
+        /// (preferredPDFURL is .verified-only).
+        case noAuthorsAvailable(reference: Reference, scrapedPDFURL: String?)
         case timedOut
         case networkUnavailable
     }
@@ -545,9 +552,17 @@ final class URLCanonicalizationTests: XCTestCase {
                        "https://openreview.net/forum?id=ABCD")
     }
 
-    func testStripDefaultPort80() {
+    func testUpgradeHTTPToHTTPS() {
+        // Spec §2.4: "If both work for a publisher, store as https." All 10
+        // target hosts support https; canonicalize unconditionally upgrades.
+        XCTAssertEqual(canonicalize("http://openreview.net/forum?id=ABCD"),
+                       "https://openreview.net/forum?id=ABCD")
+    }
+
+    func testStripDefaultPort80AndUpgrade() {
+        // http://...:80 becomes https://... (no port).
         XCTAssertEqual(canonicalize("http://openreview.net:80/forum?id=ABCD"),
-                       "http://openreview.net/forum?id=ABCD")
+                       "https://openreview.net/forum?id=ABCD")
     }
 
     func testStripDefaultPort443() {
@@ -601,10 +616,9 @@ internal extension PaperURLResolver {
     static func canonicalize(_ url: URL) -> URL? {
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
 
-        // Lowercase + validate scheme.
+        // Validate scheme. Reject if not http or https.
         guard let rawScheme = components.scheme?.lowercased(),
               rawScheme == "http" || rawScheme == "https" else { return nil }
-        components.scheme = rawScheme
 
         // Reject embedded credentials.
         if components.user != nil || components.password != nil { return nil }
@@ -614,9 +628,13 @@ internal extension PaperURLResolver {
         let strippedHost = rawHost.hasPrefix("www.") ? String(rawHost.dropFirst(4)) : rawHost
         components.host = strippedHost
 
-        // Strip default ports.
-        if (rawScheme == "http" && components.port == 80)
-            || (rawScheme == "https" && components.port == 443) {
+        // Upgrade http -> https. Per spec §2.4: "If both work for a publisher,
+        // store as https." All 10 target hosts support https; this also covers
+        // default-port stripping in one move (an http://...:80 becomes https://...).
+        components.scheme = "https"
+
+        // Strip default ports (80 and 443).
+        if components.port == 80 || components.port == 443 {
             components.port = nil
         }
 
@@ -1691,9 +1709,13 @@ Create `/Users/hzzheng/CodeHub/Rubien/Tests/RubienCoreTests/PaperURLResolverTest
 
 ```swift
 import XCTest
+#if canImport(FoundationNetworking)
+import FoundationNetworking   // Linux: URLProtocol, URLSessionConfiguration, HTTPURLResponse
+#endif
 @testable import RubienCore
 
 /// URLProtocol-based stub for injecting fake HTTP responses.
+/// Static state is reset in setUp + tearDown to prevent cross-test leakage.
 final class StubURLProtocol: URLProtocol {
     nonisolated(unsafe) static var stubs: [URL: (data: Data, response: HTTPURLResponse)] = [:]
     nonisolated(unsafe) static var failures: [URL: Error] = [:]
@@ -1749,6 +1771,11 @@ final class PaperURLResolverTests: XCTestCase {
     override func setUp() {
         super.setUp()
         StubURLProtocol.reset()
+    }
+
+    override func tearDown() {
+        StubURLProtocol.reset()
+        super.tearDown()
     }
 
     private func loadFixture(_ name: String) -> String {
@@ -1885,8 +1912,12 @@ final class PaperURLResolverTests: XCTestCase {
                 session: StubURLProtocol.makeSession()
             )
             XCTFail("Expected noAuthorsAvailable")
-        } catch PaperURLResolver.ResolveError.noAuthorsAvailable {
-            // expected
+        } catch PaperURLResolver.ResolveError.noAuthorsAvailable(let partialRef, _) {
+            // Verify the payload carries the partial Reference so the caller
+            // can build a CandidateEnvelope from it.
+            XCTAssertEqual(partialRef.title, "IEEE Doc Without Authors")
+            XCTAssertEqual(partialRef.doi, "10.1109/foo.bar.99999999")
+            XCTAssertTrue(partialRef.authors.isEmpty)
         } catch {
             XCTFail("Wrong error type: \(error)")
         }
@@ -2021,9 +2052,14 @@ public enum PaperURLResolver {
             }
         }
 
-        // 6. No-author safeguard.
+        // 6. No-author safeguard. Throw with payload so the caller can build
+        // a CandidateEnvelope from the partial Reference (spec §4 requires
+        // .candidate, not .rejected).
         if finalReference.authors.isEmpty {
-            throw ResolveError.noAuthorsAvailable
+            throw ResolveError.noAuthorsAvailable(
+                reference: finalReference,
+                scrapedPDFURL: scrapedPDFURL
+            )
         }
 
         return Outcome(reference: finalReference, scrapedPDFURL: scrapedPDFURL)
@@ -2205,11 +2241,13 @@ EOF
 ## Task 4: MetadataFetcher.Identifier.paperURL + extractIdentifier + resolveIdentifierLocally tuple
 
 **Files:**
-- Modify: `Sources/RubienCore/Services/MetadataFetcher.swift` (Identifier enum, extractIdentifier, fetch switch)
-- Modify: `Sources/Rubien/Services/MetadataResolver.swift` (resolveIdentifierLocally return type + .paperURL branch)
+- Modify: `Sources/RubienCore/Services/MetadataFetcher.swift` (Identifier enum, extractIdentifier, fetch(from:) switch — note function name is `fetch(from:)`, not `fetch(identifier:)`).
+- Modify: `Sources/Rubien/Services/MetadataResolver.swift` (Mac-only file at `Sources/Rubien/Services/`, NOT under RubienCore). Changes: `resolveIdentifierLocally` return type to tuple + `.paperURL` branch + no-author catch that builds a CandidateEnvelope.
 - Create: `Tests/RubienCoreTests/PaperURLExtractionTests.swift`
 
 **Why bundled:** Adding `.paperURL` to the enum without updating switch consumers breaks the build. Atomic commit.
+
+**Important — CLI integration.** The CLI (`Sources/RubienCLI/RubienCLI.swift:649`) calls `MetadataFetcher.fetch(from:)` directly, not `MetadataResolver`. To preserve CLI behavior for paper URLs, the `.paperURL` arm of `fetch(from:)` must call `PaperURLResolver.resolve(url)` and return `outcome.reference`. The CLI does not need `preferredPDFURL` (it never auto-downloads from a URL); it just needs the `Reference`. The richer `.candidate` / `ManualEntryOutcome` plumbing lives in `MetadataResolver.resolveManualEntry` (Task 5), which is the Mac app's path.
 
 - [ ] **Step 1: Write the failing extraction tests**
 
@@ -2338,9 +2376,9 @@ if let url = URL(string: trimmed),
 }
 ```
 
-- [ ] **Step 5: Update the `MetadataFetcher.fetch(identifier:)` switch (around line 1093) for exhaustiveness**
+- [ ] **Step 5: Update the `MetadataFetcher.fetch(from:)` switch (around line 1093) for exhaustiveness AND CLI routing**
 
-Find the switch in `fetch(identifier:)`. It currently has 5 arms; add a 6th:
+Find the switch in `fetch(from:)`. It currently has 5 arms; add a 6th that routes through `PaperURLResolver.resolve` so the CLI (which calls `fetch(from:)` directly at `RubienCLI.swift:649`) keeps working for paper URLs:
 
 ```swift
 switch identifier {
@@ -2349,11 +2387,23 @@ case .pmid(let pmid):     return try await fetchFromPMID(pmid)
 case .arxiv(let id):      return try await fetchFromArXiv(id)
 case .isbn(let isbn):     return try await fetchFromISBN(isbn)
 case .pmcid(let pmcid):   return try await fetchFromPMCID(pmcid)
-case .paperURL:
-    // Paper URLs are handled directly by MetadataResolver.resolveIdentifierLocally
-    // via PaperURLResolver.resolve; they do not flow through MetadataFetcher.fetch.
-    // This case exists for switch exhaustiveness only.
-    throw FetchError.invalidURL
+case .paperURL(let url):
+    // Route paper URLs through PaperURLResolver so the CLI (which calls
+    // fetch(from:) directly) gets a Reference back. The CLI does not use
+    // ManualEntryOutcome / preferredPDFURL — it just needs the Reference.
+    do {
+        let outcome = try await PaperURLResolver.resolve(url)
+        return outcome.reference
+    } catch PaperURLResolver.ResolveError.noAuthorsAvailable(let partialRef, _) {
+        // Spec §4 says no-author should produce .candidate; the Mac app's
+        // resolveManualEntry handles that. From the CLI's bare-fetch shape
+        // there's no candidate type — return the partial Reference so the
+        // CLI's caller can decide. (Better than throwing — the metadata is
+        // genuinely partial, not invalid.)
+        return partialRef
+    } catch let error as PaperURLResolver.ResolveError {
+        throw FetchError.unsupported(String(describing: error))
+    }
 }
 ```
 
@@ -2421,21 +2471,37 @@ private func resolveIdentifierLocally(
             return nil
         }()
         return (result, effectiveScrapedPDFURL)
-    } catch let error as PaperURLResolver.ResolveError where error.isNoAuthors {
-        // No-author safeguard: surface as candidate, not rejected.
-        // (We need to convert ResolveError.noAuthorsAvailable into a CandidateEnvelope
-        // populated from whatever evidence we did capture. Since the resolver threw
-        // before returning a Reference, we have no Reference to candidate-ify here.
-        // Return rejected — the no-author path is exceedingly rare; if real-world
-        // usage shows otherwise, a future commit can capture pre-throw state.)
-        resolverTrace("resolveIdentifierLocally noAuthors: \(error)")
-        return (.rejected(
-            RejectedEnvelope(
+    } catch PaperURLResolver.ResolveError.noAuthorsAvailable(let partialRef, _) {
+        // Spec §4: empty Reference.authors produces .candidate (NOT .rejected),
+        // so the user reviews the partial metadata before importing. Build a
+        // single-element MetadataCandidate from the scraped Reference.
+        // scrapedPDFURL is intentionally discarded — preferredPDFURL is
+        // .verified-only.
+        resolverTrace("resolveIdentifierLocally noAuthorsAvailable: title=\(partialRef.title)")
+        let candidate = MetadataCandidate(
+            source: partialRef.metadataSource ?? .publisherCitationMeta,
+            title: partialRef.title,
+            authors: partialRef.authors,
+            journal: partialRef.journal,
+            publisher: partialRef.publisher,
+            year: partialRef.year,
+            detailURL: partialRef.url ?? "",
+            score: 0.5,  // mid-range; user is reviewing because authors are missing
+            snippet: partialRef.abstract,
+            workKind: .unknown,
+            referenceType: partialRef.referenceType,
+            isbn: partialRef.isbn,
+            issn: partialRef.issn,
+            sourceRecordID: partialRef.doi
+        )
+        return (.candidate(
+            CandidateEnvelope(
                 seed: seed,
                 fallbackReference: fallback,
-                currentReference: fallback,
-                reason: .insufficientEvidence,
-                message: "Found a paper, but no authors are listed on the page or in CrossRef."
+                currentReference: partialRef,
+                candidates: [candidate],
+                message: "Found a paper, but no authors are listed on the page or in CrossRef. Review before importing.",
+                evidence: nil
             )
         ), nil)
     } catch {
@@ -2451,15 +2517,9 @@ private func resolveIdentifierLocally(
         ), nil)
     }
 }
-
-// Tiny extension to keep the catch arm readable.
-private extension PaperURLResolver.ResolveError {
-    var isNoAuthors: Bool {
-        if case .noAuthorsAvailable = self { return true }
-        return false
-    }
-}
 ```
+
+**Important — verify `CandidateEnvelope` initializer signature.** The plan above uses the labels `(seed:fallbackReference:currentReference:candidates:message:evidence:)`. If the actual initializer at `Sources/RubienCore/Models/MetadataVerification.swift` (around line 262) differs, adjust the call. Run `grep -n "public init" Sources/RubienCore/Models/MetadataVerification.swift` and inspect the `CandidateEnvelope` initializer.
 
 - [ ] **Step 8: Update callers of `resolveIdentifierLocally` inside `MetadataResolver.swift`**
 
@@ -3011,39 +3071,57 @@ Create `/Users/hzzheng/CodeHub/Rubien/Tests/RubienCoreTests/ReferenceDuplicateCa
 
 ```swift
 import XCTest
+import GRDB
 @testable import RubienCore
 
 final class ReferenceDuplicateCanonicalURLTests: XCTestCase {
 
-    func testCanonicalFormDeduplicatesEquivalentURLs() throws {
-        let db = try AppDatabase.makeInMemory()
+    // Setup pattern verified by `grep -n "AppDatabase(DatabaseQueue" Tests/RubienCoreTests/`:
+    // existing tests like `StatusOptionMutationTests` and `MigrationV4Tests` use
+    // `try AppDatabase(DatabaseQueue())` for in-memory databases.
 
-        // Insert a paper-URL-derived reference with a canonical URL.
+    func testCanonicalFormDeduplicatesEquivalentURLs() throws {
+        let appDB = try AppDatabase(DatabaseQueue())
+
+        // Insert a paper-URL-derived reference with a canonical URL via the
+        // same insert pattern existing tests use. (Look at how
+        // StatusOptionMutationTests / MigrationV4Tests insert records — most
+        // use `try appDB.dbWriter.write { db in try ref.insert(db) }`.)
+        //
+        // AuthorName.init signature is `(given: String, family: String)` —
+        // verified at Sources/RubienCore/Models/Reference.swift:33. The plan
+        // previously had the labels reversed.
         var first = Reference(
             title: "Sample Paper",
-            authors: [AuthorName(family: "Smith", given: "J.")],
+            authors: [AuthorName(given: "J.", family: "Smith")],
             referenceType: .conferencePaper,
             url: "https://openreview.net/forum?id=ABCD",
             metadataSource: .publisherCitationMeta
         )
-        let firstID = try db.insertReference(&first)
+        let firstID = try appDB.dbWriter.write { db -> Int64 in
+            try first.insert(db)
+            return first.id ?? db.lastInsertedRowID
+        }
 
         // Simulate a second paste with a non-canonical form. After Task 3's
-        // canonicalization, this would also store as the canonical form, so
-        // duplicate detection should find the existing row.
+        // canonicalization, both should produce the same canonical URL.
         let inputURL = URL(string: "HTTPS://WWW.OPENREVIEW.NET/forum?id=ABCD#fragment")!
         let canonical = PaperURLResolver.canonicalize(inputURL)?.absoluteString
         XCTAssertEqual(canonical, "https://openreview.net/forum?id=ABCD")
 
         let probe = Reference(
             title: "Sample Paper (re-paste)",
-            authors: [AuthorName(family: "Smith", given: "J.")],
+            authors: [AuthorName(given: "J.", family: "Smith")],
             referenceType: .conferencePaper,
             url: canonical,
             metadataSource: .publisherCitationMeta
         )
-        let match = try db.read { db in
-            try AppDatabase.findDuplicateReferenceID(for: probe, db: db)
+
+        // findDuplicateReferenceID is an instance method on AppDatabase
+        // (Sources/RubienCore/Database/AppDatabase.swift:1958), NOT a static.
+        // Call through dbWriter.read.
+        let match = try appDB.dbWriter.read { db in
+            try appDB.findDuplicateReferenceID(for: probe, db: db)
         }
         XCTAssertEqual(match?.id, firstID,
                        "Canonical URL should match the existing row's URL")
@@ -3051,7 +3129,10 @@ final class ReferenceDuplicateCanonicalURLTests: XCTestCase {
 }
 ```
 
-*(Note: this assumes `AppDatabase.makeInMemory()`, `insertReference(&:)`, and `findDuplicateReferenceID(for:db:)` are accessible from test code. If their access levels are too restricted, either expose internal helpers or move this test into the appropriate target. The intent is regression coverage: verify the canonical form chosen in §2.4 actually deduplicates.)*
+**Important — verify these assumptions before running:**
+- `Reference.insert(_ db:)` (GRDB persistence) actually exists. If references go through `AppDatabase.insertReference(_:)` or a similar wrapper, use that instead.
+- `findDuplicateReferenceID(for:db:)` is `internal` and callable from `@testable import RubienCore` — if not, expose it as `internal` or move the test to the `RubienCore` target itself.
+- `appDB.dbWriter` is the GRDB writer handle. If `AppDatabase` exposes a different property name (`writer`, `database`, etc.), substitute accordingly. Cross-reference with how `StatusOptionMutationTests.swift` writes test data.
 
 - [ ] **Step 2: Write the gated live smoke tests**
 
