@@ -11,7 +11,6 @@ import RubienSync
 /// - `.signedOut` / `.unavailable` / most user-actionable errors → top
 ///   overlay banner, auto-dismissable
 /// - `.idle` / `.syncing` / transient errors → nothing
-@available(macOS 14.0, *)
 struct SyncStatusBanner: ViewModifier {
     let status: SyncStatus
     let onRetry: () -> Void
@@ -145,20 +144,15 @@ struct SyncStatusBanner: ViewModifier {
     }
 }
 
-@available(macOS 14.0, *)
 extension View {
     func syncStatusBanner(status: SyncStatus, onRetry: @escaping () -> Void) -> some View {
         modifier(SyncStatusBanner(status: status, onRetry: onRetry))
     }
 }
 
-/// Opens System Settings' Apple ID pane. macOS 14+ uses the
-/// `com.apple.systempreferences.AppleIDSettings` bundle id; older URL
-/// schemes targeting `com.apple.preferences.AppleIDPrefPane` stopped
-/// working when the Settings app was rewritten in macOS 13. Apple does
-/// not ship a `CKContainer.openSettingsURLString` constant on macOS —
-/// that's an iOS-only UIApplication API.
-@available(macOS 14.0, *)
+/// Opens System Settings' Apple ID pane. Apple does not ship a
+/// `CKContainer.openSettingsURLString` constant on macOS — that's an
+/// iOS-only UIApplication API.
 private func openSystemSettingsAppleID() {
     if let url = URL(string: "x-apple.systempreferences:com.apple.systempreferences.AppleIDSettings") {
         NSWorkspace.shared.open(url)

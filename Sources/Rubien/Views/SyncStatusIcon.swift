@@ -4,7 +4,6 @@ import RubienSync
 
 /// Small toolbar glyph reflecting the coordinator's current sync status.
 /// Eight visual states keyed off the SyncStatus cases, using SF Symbols.
-@available(macOS 14.0, *)
 struct SyncStatusIcon: View {
     let status: SyncStatus
 

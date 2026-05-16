@@ -37,9 +37,9 @@ PDF auto-download works for arXiv, bioRxiv, medRxiv, and any open-access paper. 
 ## Requirements
 
 **For the app (Mac):**
-- macOS 14 (Sonoma) or later
+- macOS 15 (Sequoia) or later to run
 - Apple Silicon or Intel
-- Xcode 15+ for building from source
+- Xcode 16.3+ to build from source (GRDB 7.10 declares `swift-tools-version: 6.1`)
 
 **For the CLI on Linux:** Swift 6.3+ toolchain and a few system libraries — see [Linux CLI](#linux-cli) below.
 
@@ -170,10 +170,10 @@ scripts/
 
 | Component | License | Use |
 |---|---|---|
-| [citeproc-js](https://github.com/Juris-M/citeproc-js) | AGPL-3.0 | CSL citation formatting engine, embedded in JavaScriptCore |
 | [GRDB.swift](https://github.com/groue/GRDB.swift) | MIT | SQLite ORM and reactive queries |
 | [Readability.js](https://github.com/mozilla/readability) | Apache-2.0 | Web article extraction |
 | [Defuddle](https://github.com/kepano/defuddle) | MIT | Web content cleaning |
+| [citeproc-js](https://github.com/Juris-M/citeproc-js) | AGPL-3.0 | CSL renderer — bundled but currently unused |
 
 **Linked dynamically against system packages on Linux** (not bundled, not redistributed):
 
@@ -183,6 +183,8 @@ scripts/
 | [cairo](https://www.cairographics.org) | LGPL-2.1 / MPL-1.1 | Image surface for `poppler_page_render` |
 | [gdk-pixbuf](https://gitlab.gnome.org/GNOME/gdk-pixbuf) | LGPL-2.1+ | JPEG/PNG encoding of rendered page images |
 
-citeproc-js is AGPL-3.0 and remains bundled at runtime. If you redistribute Rubien, you must comply with the AGPL's attribution and source-availability requirements for the citeproc-js component. The Linux libraries are dynamically linked against the user's system packages — Rubien does not vendor or redistribute them, so the LGPL/GPL relinking provisions don't apply to Rubien's source tree.
+citeproc-js (AGPL-3.0) ships in the resources tree but isn't called by any live code path; pure-Swift `CitationFormatter` and `CSLEngine` handle every citation today. AGPL would still apply to the bundled file on redistribution — revisit if you re-activate it.
+
+Linux system libraries are linked dynamically against the user's distro packages — Rubien doesn't vendor or redistribute them.
 
 Upstream: the original SwiftLib by [NickHood](https://github.com/NickHood1984/SwiftLib) included additional AGPL components (Zotero translation-server, translators_CN) which are not part of Rubien.

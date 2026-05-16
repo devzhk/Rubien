@@ -15,7 +15,6 @@ import RubienExceptionCatcher
 ///
 /// Single-user app → one instance, constructed at app startup,
 /// injected via `.environmentObject`.
-@available(macOS 14.0, *)
 @MainActor
 public final class SyncCoordinator: ObservableObject {
 
@@ -404,7 +403,6 @@ public final class SyncCoordinator: ObservableObject {
     }
 }
 
-@available(macOS 14.0, *)
 extension SyncCoordinator.Probes {
     public static var live: SyncCoordinator.Probes {
         SyncCoordinator.Probes(

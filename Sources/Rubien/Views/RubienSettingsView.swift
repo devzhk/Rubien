@@ -3,7 +3,6 @@ import SwiftUI
 import RubienCore
 import RubienSync
 
-@available(macOS 14.0, *)
 struct RubienSettingsView: View {
     @EnvironmentObject private var coordinator: SyncCoordinator
     @State private var cacheBytes: Int64 = 0
