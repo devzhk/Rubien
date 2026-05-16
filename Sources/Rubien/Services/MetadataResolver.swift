@@ -2,6 +2,7 @@
 import Foundation
 import OSLog
 import RubienCore
+import RubienPDFKit
 
 private let resolverLog = Logger(subsystem: "Rubien", category: "MetadataResolver")
 
@@ -36,7 +37,7 @@ final class MetadataResolver {
 
     func resolveImportedPDF(url: URL, extracted: PDFService.ExtractedMetadata) async -> MetadataResolutionResult {
         let seed = MetadataResolutionSeed.fromImportedPDF(url: url, extracted: extracted)
-        let fallback = MetadataResolution.fallbackReference(from: extracted, url: url)
+        let fallback = MetadataResolutionSeed.fallbackReference(from: extracted, url: url)
 
         if let doi = seed.doi?.rubien_nilIfBlank {
             let result = await resolveIdentifierLocally(.doi(doi), seed: seed, fallback: fallback)

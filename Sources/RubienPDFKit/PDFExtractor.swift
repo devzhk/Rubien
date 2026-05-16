@@ -1,5 +1,5 @@
 import Foundation
-import RubienPDFKit
+import RubienCore
 #if canImport(PDFKit)
 import PDFKit
 #endif

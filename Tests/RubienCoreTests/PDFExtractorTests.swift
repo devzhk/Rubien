@@ -3,6 +3,7 @@ import XCTest
 import PDFKit
 import CoreText
 @testable import RubienCore
+@testable import RubienPDFKit
 
 final class PDFExtractorTests: XCTestCase {
 

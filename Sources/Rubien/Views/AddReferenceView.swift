@@ -2,6 +2,7 @@
 import AppKit
 import SwiftUI
 import RubienCore
+import RubienPDFKit
 
 struct AddReferenceView: View {
     /// Closure receives both the new `Reference` and the optional PDF filename

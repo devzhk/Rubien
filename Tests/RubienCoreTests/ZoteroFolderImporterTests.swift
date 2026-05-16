@@ -2,6 +2,7 @@
 import XCTest
 import GRDB
 @testable import RubienCore
+@testable import RubienPDFKit
 
 final class ZoteroFolderImporterTests: XCTestCase {
 

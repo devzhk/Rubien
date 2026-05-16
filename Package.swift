@@ -30,23 +30,23 @@ let package = Package(
             providers: [.apt(["libgdk-pixbuf-2.0-dev"])]
         ),
         .target(
-            name: "RubienPDFKit",
-            dependencies: [
-                .target(name: "CPoppler", condition: .when(platforms: [.linux])),
-                .target(name: "CGdkPixbuf", condition: .when(platforms: [.linux])),
-            ],
-            path: "Sources/RubienPDFKit"
-        ),
-        .target(
             name: "RubienCore",
             dependencies: [
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "Crypto", package: "swift-crypto", condition: .when(platforms: [.linux])),
-                "RubienPDFKit",
             ],
             resources: [
                 .copy("Resources")
             ]
+        ),
+        .target(
+            name: "RubienPDFKit",
+            dependencies: [
+                "RubienCore",
+                .target(name: "CPoppler", condition: .when(platforms: [.linux])),
+                .target(name: "CGdkPixbuf", condition: .when(platforms: [.linux])),
+            ],
+            path: "Sources/RubienPDFKit"
         ),
         .target(
             name: "RubienExceptionCatcher",
@@ -64,6 +64,7 @@ let package = Package(
             name: "Rubien",
             dependencies: [
                 "RubienCore",
+                "RubienPDFKit",
                 .target(name: "RubienSync", condition: .when(platforms: [.macOS])),
                 .target(name: "RubienExceptionCatcher", condition: .when(platforms: [.macOS])),
             ],
@@ -79,6 +80,7 @@ let package = Package(
             name: "RubienCLI",
             dependencies: [
                 "RubienCore",
+                "RubienPDFKit",
                 .target(name: "RubienSync", condition: .when(platforms: [.macOS])),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
@@ -88,12 +90,31 @@ let package = Package(
         ),
         .testTarget(
             name: "RubienCoreTests",
-            dependencies: ["RubienCore"],
+            dependencies: [
+                "RubienCore",
+                // Mac-only — the PDF-touching test files in this target are
+                // file-level `#if canImport(PDFKit)`-gated, so Linux skips
+                // them. Keeping the RubienPDFKit dep off the Linux dep graph
+                // is load-bearing: linking poppler into the RubienCoreTests
+                // bundle on Linux triggers an XCTest+GCD hang between test
+                // methods. See Docs/Linux-PDF-Backend.md.
+                .target(name: "RubienPDFKit", condition: .when(platforms: [.macOS])),
+            ],
             path: "Tests/RubienCoreTests"
         ),
         .testTarget(
             name: "RubienPDFKitTests",
-            dependencies: ["RubienPDFKit"],
+            dependencies: [
+                // Mac-only target. SPM bundles all test targets into one
+                // `RubienPackageTests.xctest` whose link graph is the union
+                // of every test target's deps; linking poppler into that
+                // bundle on Linux causes XCTest+libdispatch to hang between
+                // test methods (see Docs/Linux-PDF-Backend.md). Keeping the
+                // dep Mac-only keeps libpoppler off the Linux umbrella
+                // bundle. Linux parity verification: build green + a
+                // `rubien-cli pdf info` smoke test (Phase 3 step 6).
+                .target(name: "RubienPDFKit", condition: .when(platforms: [.macOS])),
+            ],
             path: "Tests/RubienPDFKitTests",
             resources: [
                 .copy("Fixtures")

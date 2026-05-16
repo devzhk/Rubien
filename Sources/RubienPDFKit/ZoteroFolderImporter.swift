@@ -1,5 +1,5 @@
 import Foundation
-#if canImport(PDFKit)
+import RubienCore
 
 /// Imports a Zotero "Export Collection… with files" folder into Rubien:
 /// parses the bundled `.bib`, copies referenced PDFs into the PDF store,
@@ -35,8 +35,10 @@ public enum ZoteroFolderImporter {
         db: AppDatabase,
         propertyTarget: ZoteroImportPropertyTarget?
     ) throws -> Result {
+#if canImport(Darwin)
         let accessing = folderURL.startAccessingSecurityScopedResource()
         defer { if accessing { folderURL.stopAccessingSecurityScopedResource() } }
+#endif
 
         let bibURL = try locateBibFile(in: folderURL)
         let content: String
@@ -158,4 +160,3 @@ public enum ZoteroFolderImporter {
         }
     }
 }
-#endif // canImport(PDFKit)

@@ -3,6 +3,7 @@ import SwiftUI
 import Combine
 import os
 import RubienCore
+import RubienPDFKit
 
 private let pdfDownloadLog = Logger(subsystem: "Rubien", category: "pdf-download")
 

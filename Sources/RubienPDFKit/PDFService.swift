@@ -1,5 +1,5 @@
 import Foundation
-import RubienPDFKit
+import RubienCore
 
 public enum PDFService {
     /// Import PDF file to app storage, returns relative path

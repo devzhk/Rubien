@@ -1,6 +1,7 @@
 #if canImport(PDFKit)
 import XCTest
 @testable import RubienCore
+@testable import RubienPDFKit
 
 final class MetadataResolutionTests: XCTestCase {
     func testSeedExtractionFromImportedPDF() {

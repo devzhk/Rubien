@@ -1,6 +1,7 @@
 import ArgumentParser
 import Foundation
 import RubienCore
+import RubienPDFKit
 #if canImport(Glibc)
 import Glibc
 #elseif canImport(Darwin)
@@ -16,7 +17,7 @@ struct RubienCLI: AsyncParsableCommand {
         subcommands: Self.allSubcommands
     )
 
-    // #if can't appear in array literals; assemble imperatively to gate Pdf (PDFKit) / SyncCommand (RubienSync).
+    // #if can't appear in array literals; assemble imperatively to gate SyncCommand (RubienSync, Mac-only).
     private static let allSubcommands: [ParsableCommand.Type] = {
         var cmds: [ParsableCommand.Type] = [
             Search.self,
@@ -32,11 +33,9 @@ struct RubienCLI: AsyncParsableCommand {
             Styles.self,
             Export.self,
             Views.self,
+            Pdf.self,
+            Web.self,
         ]
-#if canImport(PDFKit)
-        cmds.append(Pdf.self)
-#endif
-        cmds.append(Web.self)
 #if os(macOS)
         cmds.append(SyncCommand.self)
 #endif
@@ -835,11 +834,7 @@ struct Delete: ParsableCommand {
                 }
             }
             let pdfPaths = try AppDatabase.shared.deleteReferencesReturningPDFPaths(ids: ids)
-#if canImport(PDFKit)
             for path in pdfPaths { PDFService.deletePDF(at: path) }
-#else
-            _ = pdfPaths
-#endif
             notifyLibraryChanged()
             printJSON(["deleted": ids.map(String.init).joined(separator: ",")])
         } else {
@@ -933,13 +928,8 @@ struct Import: ParsableCommand {
         if file != "-" {
             var isDir: ObjCBool = false
             if FileManager.default.fileExists(atPath: file, isDirectory: &isDir), isDir.boolValue {
-#if canImport(PDFKit)
                 try runZoteroFolderImport(folderPath: file)
                 return
-#else
-                printJSONError("Zotero folder import requires PDF support, which is unavailable on this platform")
-                throw ExitCode.failure
-#endif
             }
         }
 
@@ -986,7 +976,6 @@ struct Import: ParsableCommand {
         printJSON(["imported": "\(count)", "file": file])
     }
 
-#if canImport(PDFKit)
     private func runZoteroFolderImport(folderPath: String) throws {
         let folderURL = URL(fileURLWithPath: folderPath)
         let db = AppDatabase.shared
@@ -1028,7 +1017,6 @@ struct Import: ParsableCommand {
             throw ExitCode.failure
         }
     }
-#endif // canImport(PDFKit)
 }
 
 struct Properties: ParsableCommand {
@@ -1824,7 +1812,6 @@ struct DatabaseViewDTO: Encodable {
 
 // MARK: - PDF Subcommands
 
-#if canImport(PDFKit)
 extension PDFExtractor.Format: ExpressibleByArgument {
     public init?(argument: String) {
         switch argument.lowercased() {
@@ -2221,7 +2208,6 @@ struct PdfDownload: AsyncParsableCommand {
             filename: filename))
     }
 }
-#endif // canImport(PDFKit)
 
 // MARK: - Web
 

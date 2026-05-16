@@ -179,50 +179,12 @@ public struct MetadataResolutionSeed: Hashable, Codable, Sendable {
         title.map(MetadataResolution.normalizedComparableText(_:)).rubien_nilIfBlank
     }
 
-    #if canImport(PDFKit)
-    public static func fromImportedPDF(url: URL, extracted: PDFService.ExtractedMetadata) -> MetadataResolutionSeed {
-        let originalFileName = url.deletingPathExtension().lastPathComponent
-        let cleanedFileName = MetadataResolution.cleanPDFSeedFilename(originalFileName)
-        let parsed = MetadataResolution.parsePDFFileNameSeed(cleanedFileName)
-
-        let extractedTitle = extracted.title?.rubien_nilIfBlank
-        let title: String?
-        if let extractedTitle, !MetadataResolution.isSuspiciousExtractedTitle(extractedTitle) {
-            title = extractedTitle
-        } else {
-            title = parsed.title ?? extractedTitle ?? cleanedFileName.rubien_nilIfBlank
-        }
-
-        let firstAuthor = extracted.authors.first?.displayName.rubien_nilIfBlank
-            ?? parsed.firstAuthor
-            ?? MetadataResolution.extractLikelyAuthorName(from: cleanedFileName)
-
-        let seed = MetadataResolutionSeed(
-            fileName: cleanedFileName,
-            title: title,
-            firstAuthor: firstAuthor,
-            year: extracted.year,
-            doi: extracted.doi,
-            journal: extracted.journal,
-            isbn: extracted.isbn,
-            issn: extracted.issn,
-            publisher: extracted.publisher,
-            edition: extracted.edition,
-            workKindHint: extracted.workKindHint,
-            textSnippet: extracted.textSnippet,
-            sourceURL: url.absoluteString
-        )
-        metadataLog.debug("""
-            🌱 [seed] PDF seed built
-              fileName: \(cleanedFileName)
-              title: \(title ?? "nil")
-              author: \(firstAuthor ?? "nil")
-              year: \(extracted.year.map(String.init) ?? "nil")
-              DOI: \(extracted.doi ?? "nil")
-            """)
-        return seed
-    }
-    #endif
+    // `fromImportedPDF(url:extracted:)` lives in
+    // `Sources/RubienPDFKit/MetadataResolutionSeed+PDF.swift` because it
+    // takes a `PDFService.ExtractedMetadata` (defined in RubienPDFKit) and
+    // building that into RubienCore would force every RubienCore consumer to
+    // link the PDF backend. See `Docs/Linux-PDF-Backend.md` for why that
+    // link isolation matters on Linux.
 
     public static func fromReference(_ reference: Reference) -> MetadataResolutionSeed {
         // Post-B8: Reference no longer carries a PDF filename. The seed-from-
@@ -356,25 +318,9 @@ public enum MetadataResolution {
         return comparableOriginal != comparableRefreshed
     }
 
-    #if canImport(PDFKit)
-    public static func fallbackReference(from extracted: PDFService.ExtractedMetadata, url: URL) -> Reference {
-        let seed = MetadataResolutionSeed.fromImportedPDF(url: url, extracted: extracted)
-        return Reference(
-            title: extracted.title?.rubien_nilIfBlank ?? seed.title ?? cleanPDFSeedFilename(url.deletingPathExtension().lastPathComponent),
-            authors: extracted.authors,
-            year: extracted.year,
-            journal: extracted.journal,
-            doi: extracted.doi,
-            abstract: extracted.abstract,
-            referenceType: extracted.workKindHint.referenceType,
-            publisher: extracted.publisher,
-            edition: extracted.edition,
-            isbn: extracted.isbn,
-            issn: extracted.issn,
-            language: extracted.language
-        )
-    }
-    #endif
+    // `fallbackReference(from:url:)` lives in
+    // `Sources/RubienPDFKit/MetadataResolutionSeed+PDF.swift` for the same
+    // reason as `fromImportedPDF` above.
 
     public static func workKind(for referenceType: ReferenceType) -> MetadataWorkKind {
         switch referenceType {

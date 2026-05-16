@@ -2,6 +2,7 @@
 import SwiftUI
 import PDFKit
 import RubienCore
+import RubienPDFKit
 
 struct ReferenceDetailView: View {
     let reference: Reference

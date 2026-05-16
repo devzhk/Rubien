@@ -1,3 +1,4 @@
+#if canImport(PDFKit)
 import XCTest
 @testable import RubienPDFKit
 
@@ -193,3 +194,4 @@ final class BackendParityTests: XCTestCase {
         }
     }
 }
+#endif
