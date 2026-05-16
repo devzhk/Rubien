@@ -14,11 +14,19 @@ final class UpdateUserDriverDelegate: NSObject, SPUStandardUserDriverDelegate {
     /// observes this to flip its `updateReadyToInstall` flag.
     var onUpdateReady: ((String) -> Void)?
 
-    func standardUserDriverShouldHandleShowingScheduledUpdate(
+    nonisolated func standardUserDriverShouldHandleShowingScheduledUpdate(
         _ update: SUAppcastItem,
         andInImmediateFocus immediateFocus: Bool
     ) -> Bool {
-        onUpdateReady?(update.displayVersionString)
+        // Sparkle invokes this on the main thread per its docs but the
+        // protocol is declared nonisolated, so we hop explicitly. We need
+        // the boolean answer synchronously, so capture the displayVersion
+        // up-front (it's an immutable Objective-C property) and dispatch
+        // the callback delivery.
+        let version = update.displayVersionString
+        MainActor.assumeIsolated {
+            self.onUpdateReady?(version)
+        }
         return false  // Suppress Sparkle's default UI; our SwiftUI surfaces handle it.
     }
 }
