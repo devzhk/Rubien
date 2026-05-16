@@ -44,3 +44,6 @@ test_pdfview_margins
 
 # === Claude / AI ===
 .claude/
+
+# === Sparkle ===
+.sparkle-public-key

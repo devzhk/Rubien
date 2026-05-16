@@ -105,6 +105,7 @@ assemble_app_bundle() {
     fi
 
     stamp_info_plist_version
+    stamp_sparkle_info_plist
 }
 
 write_info_plist() {
@@ -157,6 +158,29 @@ stamp_info_plist_version() {
     /usr/bin/plutil -replace CFBundleShortVersionString -string "$VERSION" "$plist"
     /usr/bin/plutil -replace CFBundleVersion -string "$BUILD_NUMBER" "$plist"
     echo "   ✓ Stamped Info.plist: $VERSION ($BUILD_NUMBER)"
+}
+
+stamp_sparkle_info_plist() {
+    [ "$FLAVOR" = "dmg" ] || return 0   # MAS flavor: no Sparkle, no keys
+
+    local plist="$APP_BUNDLE/Contents/Info.plist"
+    local pubkey_file="$PROJECT_DIR/.sparkle-public-key"
+
+    if [ ! -f "$pubkey_file" ]; then
+        echo "✗ Missing .sparkle-public-key — generate with Sparkle's generate_keys tool" >&2
+        exit 1
+    fi
+    local pubkey
+    pubkey="$(cat "$pubkey_file" | tr -d '[:space:]')"
+
+    /usr/bin/plutil -replace SUFeedURL -string                       "https://devzhk.github.io/Rubien/appcast.xml" "$plist"
+    /usr/bin/plutil -replace SUPublicEDKey -string                   "$pubkey"                                     "$plist"
+    /usr/bin/plutil -replace SUEnableAutomaticChecks -bool           YES                                           "$plist"
+    /usr/bin/plutil -replace SUAutomaticallyUpdate -bool             YES                                           "$plist"
+    /usr/bin/plutil -replace SUScheduledCheckInterval -integer       86400                                         "$plist"
+    /usr/bin/plutil -replace SUEnableInstallerLauncherService -bool  YES                                           "$plist"
+
+    echo "   ✓ Stamped Sparkle Info.plist keys (feed: production)"
 }
 
 embed_helpers() {
