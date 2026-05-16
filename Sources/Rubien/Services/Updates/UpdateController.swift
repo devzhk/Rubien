@@ -110,10 +110,14 @@ final class UpdateController {
     }
 
     func installAndRelaunch() {
-        // Triggering checkForUpdates() while an update is downloaded causes
-        // Sparkle to present its install path; for v1 we use this single
-        // entry point. A dedicated installNow() can replace it later if
-        // needed.
+        // TODO(post-v0.1.0): replace with a dedicated install entry point.
+        // Sparkle's SPUUpdater doesn't expose a public "install now" method
+        // separate from checkForUpdates(); the install flow is triggered as
+        // part of the standard check pipeline. For v1 this single entry
+        // point is sufficient — both the "Check Now" button and the
+        // "Install and Relaunch" button drive the same SPUUpdater pipeline.
+        // When Sparkle exposes installPendingUpdate() (or we adopt a custom
+        // user driver), call that here instead.
         updater.checkForUpdates()
     }
 

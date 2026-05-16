@@ -14,15 +14,25 @@ final class UpdateUserDriverDelegate: NSObject, SPUStandardUserDriverDelegate {
     /// observes this to flip its `updateReadyToInstall` flag.
     var onUpdateReady: ((String) -> Void)?
 
+    // Sparkle invokes this delegate method on the main thread. The guarantee
+    // is in Sparkle's user-driver documentation, not the header annotations
+    // (which don't carry a main-thread attribute):
+    //   https://sparkle-project.org/documentation/customization/
+    // "The Standard User Driver invokes its delegate on the main run loop"
+    //
+    // Because the guarantee lives in docs rather than the type system,
+    // MainActor.assumeIsolated is the right tool: it preserves our
+    // MainActor isolation guarantees without spawning an extra hop, but will
+    // crash with a clear backtrace if Sparkle ever violates the contract —
+    // surfacing a regression at the source rather than racing silently.
+    //
+    // We need the boolean answer synchronously, so capture the displayVersion
+    // up-front (it's an immutable Objective-C property) before the
+    // assumeIsolated block delivers the callback.
     nonisolated func standardUserDriverShouldHandleShowingScheduledUpdate(
         _ update: SUAppcastItem,
         andInImmediateFocus immediateFocus: Bool
     ) -> Bool {
-        // Sparkle invokes this on the main thread per its docs but the
-        // protocol is declared nonisolated, so we hop explicitly. We need
-        // the boolean answer synchronously, so capture the displayVersion
-        // up-front (it's an immutable Objective-C property) and dispatch
-        // the callback delivery.
         let version = update.displayVersionString
         MainActor.assumeIsolated {
             self.onUpdateReady?(version)
