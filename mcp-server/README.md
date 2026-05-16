@@ -14,14 +14,20 @@ Pick the section below that matches your client. Most users want one of the two 
 - Node.js ≥ 20
 - `rubien-cli` reachable on the host. The server looks for it in this order:
   1. `$RUBIEN_CLI` env var (explicit path)
-  2. `/Applications/Rubien.app/Contents/Helpers/rubien-cli` (installed app bundle)
-  3. `~/Applications/Rubien.app/Contents/Helpers/rubien-cli`
-  4. `./build/Rubien.app/Contents/Helpers/rubien-cli` (dev build output from `scripts/build-app.sh`)
-  5. `rubien-cli` on `PATH` (last resort)
+  2. `/Applications/Rubien.app/Contents/Helpers/rubien-cli` (installed app bundle, Mac)
+  3. `~/Applications/Rubien.app/Contents/Helpers/rubien-cli` (Mac)
+  4. `./build/Rubien.app/Contents/Helpers/rubien-cli` (dev build output, Mac)
+  5. `rubien-cli` on `PATH` (Linux installs land here — see [Linux CLI](../README.md#linux-cli))
 
-**Prefer the bundled helper**, because it's signed with the App Group entitlement and reads the same `library.sqlite` the Rubien app uses. A bare `rubien-cli` on PATH is typically an SPM dev build without the entitlement, which hits a *different* database — see the "Database location" note in `Docs/CLI-Reference.md`.
+**On Mac, prefer the bundled helper.** It's signed with the App Group entitlement and reads the same `library.sqlite` the Rubien app uses. A bare `rubien-cli` on PATH is typically an SPM dev build without the entitlement, which hits a *different* database — see "Database location" in `Docs/CLI-Reference.md`.
 
-To pin the spawned CLI to a specific library directory regardless of which binary resolves, set `RUBIEN_LIBRARY_ROOT` in the MCP server's `env` block (Claude Code: `claude mcp add rubien --env RUBIEN_LIBRARY_ROOT=...`; Claude Desktop: under `mcpServers.rubien.env` in `claude_desktop_config.json`). The path is used verbatim — point it at the directory that contains `library.sqlite` (e.g. `~/Library/Group Containers/9TXK4V3SS8.com.rubien.shared/Rubien` for the sandboxed library, or `~/Library/Application Support/Rubien` for the unsandboxed one).
+**On Linux**, the server runs against a `rubien-cli` built per the README's Linux CLI section. Everything works except `rubien_sync_status`, which always errors (`sync` subcommand isn't registered on Linux builds — CloudKit doesn't exist there).
+
+To pin the spawned CLI to a specific library directory regardless of which binary resolves, set `RUBIEN_LIBRARY_ROOT` in the MCP server's `env` block (Claude Code: `claude mcp add rubien --env RUBIEN_LIBRARY_ROOT=...`; Claude Desktop: under `mcpServers.rubien.env` in `claude_desktop_config.json`). The path is used verbatim — point it at the directory that contains `library.sqlite`:
+
+- Mac sandboxed: `~/Library/Group Containers/9TXK4V3SS8.com.rubien.shared/Rubien`
+- Mac unsandboxed: `~/Library/Application Support/Rubien`
+- Linux: `~/.local/share/rubien` (or wherever `$XDG_DATA_HOME/rubien` resolved to)
 
 ## Install & build
 
@@ -123,7 +129,7 @@ Roughly 36 tools covering every `rubien-cli` subcommand mode. Names are `rubien_
 | Web clips | `rubien_web_get`, `rubien_web_annotations` |
 | Properties (incl. Tags) | `rubien_properties_list`, `rubien_properties_create`, `rubien_properties_delete`, `rubien_properties_rename`, `rubien_properties_show`, `rubien_properties_hide`, `rubien_properties_add_option`, `rubien_properties_rename_option`, `rubien_properties_delete_option`, `rubien_properties_set`, `rubien_properties_add_values`, `rubien_properties_remove_values`, `rubien_properties_clear` |
 | Saved views | `rubien_views_list`, `rubien_views_create`, `rubien_views_delete`, `rubien_views_rename`, `rubien_views_query` |
-| Sync | `rubien_sync_status` |
+| Sync | `rubien_sync_status` (Mac-only — errors on Linux hosts) |
 
 The PDF tools cover inspection and acquisition — `rubien_pdf_info` returns page count plus a flattened outline, `rubien_pdf_text` extracts text by page range or section title, `rubien_pdf_page_image` renders a page to PNG for figure inspection, and `rubien_pdf_download` fetches an open-access PDF for an existing reference and attaches it to the library. `rubien_annotations_list` returns the user's highlights/underlines/anchored-notes on the attached PDF.
 

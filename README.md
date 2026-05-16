@@ -6,16 +6,18 @@
 
 Rubien is a native macOS reference manager built on one principle: **one library, two front doors.** A single local SQLite database holds every reference, tag, annotation, custom property, and view — and you reach it through either a Notion-style SwiftUI app for humans, or a scriptable `rubien-cli` for agents and automation. Both speak to the same store; neither is a second-class citizen. The icon — a cube whose faces are a Notion-style UI on one side and a terminal on the other — is the architecture in one image.
 
+The SwiftUI app is Mac-only. `rubien-cli` also runs on Linux — see [Linux CLI](#linux-cli).
+
 The name means *the keeper of borrowed knowledge.*
 
 ## Features
 
-- **PDF reader + annotations** — native PDFKit rendering with highlight / underline / anchored notes. Thumbnails, outline, full-text search.
+- **PDF reader + annotations** — native rendering with highlight / underline / anchored notes. Thumbnails, outline, full-text search. The Mac app reader uses PDFKit; CLI PDF tooling works on Mac (PDFKit) and Linux (poppler-glib).
 - **Metadata fetching** — paste a DOI, arXiv ID, PMID, PMCID, ISBN, URL, or paper title. See [Supported sources](#supported-sources). No API keys.
 - **FTS5 search** — SQLite full-text search across title, authors, journal, abstract, notes, DOI.
 - **BibTeX / RIS import & export** — standard parsers, round-trip friendly.
-- **iCloud sync** — `CKSyncEngine`-backed two-way sync of references, tags, annotations, custom properties, and views across Macs signed into the same iCloud account. Toggle in Settings → iCloud Sync.
-- **CLI** — `rubien-cli` with 16 subcommands: `search`, `list`, `get`, `add`, `update`, `delete`, `cite`, `import`, `export`, `properties`, `views`, `annotations`, `styles`, `pdf`, `web`, `sync`. JSON output for scripting. Tag operations live under `properties` against the built-in Tags property.
+- **iCloud sync** *(Mac only)* — `CKSyncEngine`-backed two-way sync of references, tags, annotations, custom properties, and views across Macs signed into the same iCloud account. Toggle in Settings → iCloud Sync.
+- **CLI** — `rubien-cli` exposes everything as scriptable JSON. 16 subcommands on Mac, 15 on Linux (no `sync`). Tag operations live under `properties` against the built-in Tags property. Full reference in [`Docs/CLI-Reference.md`](Docs/CLI-Reference.md).
 
 ## Supported sources
 
@@ -34,11 +36,14 @@ PDF auto-download works for arXiv, bioRxiv, medRxiv, and any open-access paper. 
 
 ## Requirements
 
+**For the app (Mac):**
 - macOS 14 (Sonoma) or later
 - Apple Silicon or Intel
 - Xcode 15+ for building from source
 
-## Building
+**For the CLI on Linux:** Swift 6.3+ toolchain and a few system libraries — see [Linux CLI](#linux-cli) below.
+
+## Building (Mac)
 
 ```bash
 # Run directly via SPM
@@ -67,7 +72,38 @@ swift run Rubien
 
 This nukes the local package checkouts and SwiftPM state, then re-fetches cleanly.
 
-## Data storage
+## Linux CLI
+
+`rubien-cli` builds and runs on Linux (x86_64 + arm64). The SwiftUI app and `RubienSync` (CloudKit) stay Mac-only — Linux gets 15 of the 16 CLI subcommands, everything except `sync`. PDF support (read text, render page images, extract metadata) comes via `RubienPDFKit`'s poppler-glib backend.
+
+Build on Ubuntu 22.04 (or any distro with the Swift 6.3 toolchain):
+
+```bash
+# System deps
+sudo apt-get install -y libsqlite3-dev libpoppler-glib-dev libcairo2-dev libgdk-pixbuf-2.0-dev pkg-config
+
+# Release build (use for installation)
+swift build --product rubien-cli -c release
+
+# Install to /usr/local/bin so `rubien-cli` is on $PATH
+sudo install -m 755 .build/release/rubien-cli /usr/local/bin/rubien-cli
+
+# Or, if you prefer not to use sudo and have ~/bin on $PATH
+install -m 755 .build/release/rubien-cli ~/bin/rubien-cli
+
+# Verify
+rubien-cli --help     # 15 subcommands; no `sync`
+```
+
+For local development iterate against the debug build at `.build/debug/rubien-cli` (rebuilt by `swift build --product rubien-cli` without `-c release`).
+
+Library location on Linux: `$XDG_DATA_HOME/rubien/` (typically `~/.local/share/rubien/`). Override with `RUBIEN_LIBRARY_ROOT=...`.
+
+See `Docs/Linux-PDF-Backend.md` if you're touching the Linux PDF backend.
+
+## Data storage (Mac)
+
+> Linux CLI library location is covered in the [Linux CLI](#linux-cli) section above — `~/.local/share/rubien/` by default, overridable with `RUBIEN_LIBRARY_ROOT`. The rest of this section is Mac-specific.
 
 The signed Rubien.app stores all user data in its **App Group container** so the app and the bundled `rubien-cli` share a single library:
 
@@ -108,23 +144,29 @@ Window layout and other app preferences are stored in `~/Library/Preferences/com
 
 ```
 Sources/
-├── Rubien/                # App target (SwiftUI views, reader windows, resolver, SyncCoordinator)
-├── RubienCore/            # Shared library (models, GRDB, citation engine, metadata fetchers)
-├── RubienSync/            # CloudKit mapping layer + CKSyncEngine actor
-└── RubienCLI/             # rubien-cli command-line interface
+├── Rubien/                # App target (SwiftUI views, reader windows, resolver, SyncCoordinator) — Mac only
+├── RubienCore/            # Shared library (models, GRDB, citation engine, metadata fetchers) — cross-platform
+├── RubienPDFKit/          # PDF facade + Darwin (PDFKit) and Linux (poppler-glib) backends — cross-platform
+├── RubienSync/            # CloudKit mapping layer + CKSyncEngine actor — Mac only
+├── RubienCLI/             # rubien-cli command-line interface — cross-platform (sync subcommand Mac-only)
+├── CPoppler/              # systemLibrary shim for libpoppler-glib + cairo (Linux only)
+└── CGdkPixbuf/            # systemLibrary shim for libgdk-pixbuf-2.0 (Linux only)
 Tests/
 ├── RubienCoreTests/
 ├── RubienSyncTests/
 ├── RubienTests/
-└── RubienCLITests/
+├── RubienCLITests/
+└── RubienPDFKitTests/      # Cross-backend parity (runs on Mac CI; Linux skips due to corelibs-xctest quirk)
 scripts/
-├── build-app.sh           # Builds .app + DMG
-└── dev-launch.sh          # Signs + launches with CloudKit entitlements (sync dev loop)
+├── build-app.sh                    # Builds .app + DMG (Mac)
+├── dev-launch.sh                   # Signs + launches with CloudKit entitlements (sync dev loop, Mac)
+├── generate-pdf-fixtures.swift     # Regenerates Tests/RubienPDFKitTests/Fixtures (run-once on Mac)
+└── run-linux-parity-tests.sh       # Per-test isolation wrapper for the Linux parity test path
 ```
 
 ## Attributions
 
-This project bundles or derives from:
+**Bundled at runtime:**
 
 | Component | License | Use |
 |---|---|---|
@@ -133,6 +175,14 @@ This project bundles or derives from:
 | [Readability.js](https://github.com/mozilla/readability) | Apache-2.0 | Web article extraction |
 | [Defuddle](https://github.com/kepano/defuddle) | MIT | Web content cleaning |
 
-citeproc-js is AGPL-3.0 and remains bundled at runtime. If you redistribute Rubien, you must comply with the AGPL's attribution and source-availability requirements for the citeproc-js component.
+**Linked dynamically against system packages on Linux** (not bundled, not redistributed):
+
+| Component | License | Use |
+|---|---|---|
+| [poppler-glib](https://poppler.freedesktop.org) | GPL-2.0+ | PDF parsing + rendering in the Linux backend of `RubienPDFKit` |
+| [cairo](https://www.cairographics.org) | LGPL-2.1 / MPL-1.1 | Image surface for `poppler_page_render` |
+| [gdk-pixbuf](https://gitlab.gnome.org/GNOME/gdk-pixbuf) | LGPL-2.1+ | JPEG/PNG encoding of rendered page images |
+
+citeproc-js is AGPL-3.0 and remains bundled at runtime. If you redistribute Rubien, you must comply with the AGPL's attribution and source-availability requirements for the citeproc-js component. The Linux libraries are dynamically linked against the user's system packages — Rubien does not vendor or redistribute them, so the LGPL/GPL relinking provisions don't apply to Rubien's source tree.
 
 Upstream: the original SwiftLib by [NickHood](https://github.com/NickHood1984/SwiftLib) included additional AGPL components (Zotero translation-server, translators_CN) which are not part of Rubien.

@@ -2,41 +2,38 @@
 
 `rubien-cli` is the companion CLI for the Rubien reference manager. It operates on the same GRDB database as the app, so changes made via CLI are immediately visible in the GUI and vice versa.
 
-## Database location
-
-Which `library.sqlite` the CLI hits depends on how the running CLI binary was signed:
-
-| CLI invoked as | Resolved DB path |
-|---|---|
-| Embedded helper (`/Applications/Rubien.app/Contents/Helpers/rubien-cli`, signed with App Group entitlement) | `~/Library/Group Containers/9TXK4V3SS8.com.rubien.shared/Rubien/library.sqlite` |
-| SPM dev build (`.build/debug/rubien-cli` or `swift run rubien-cli`) | `~/Library/Application Support/Rubien/library.sqlite` |
-
-The signed app (`Rubien.app`) also resolves to the App Group path, so its data and the embedded helper's data are the same file. Dev builds intentionally hit a separate path so experiments don't scribble on your real library. A one-shot startup migration moves an existing library forward when you switch between these modes — see the "Data layer" section of `CLAUDE.md` for the mechanics.
-
 All commands output JSON to stdout (pretty-printed, sorted keys, ISO 8601 dates). Errors go to stderr as `{"error": "..."}`.
 
 ```
 rubien-cli <subcommand> [options]
 ```
 
----
+## Database location
 
-## Putting `rubien-cli` on your `$PATH`
+| CLI binary | Resolved `library.sqlite` |
+|---|---|
+| Mac, embedded helper (`/Applications/Rubien.app/Contents/Helpers/rubien-cli`) | `~/Library/Group Containers/9TXK4V3SS8.com.rubien.shared/Rubien/library.sqlite` |
+| Mac, SPM build | `~/Library/Application Support/Rubien/library.sqlite` |
+| Linux | `$XDG_DATA_HOME/rubien/library.sqlite` (default: `~/.local/share/rubien/`) |
 
-The CLI binary ships inside the app bundle at `/Applications/Rubien.app/Contents/Helpers/rubien-cli` and is fully runnable from that path. Because Rubien is a sandboxed app, it can't install the CLI for you — drop a symlink yourself when you want to type `rubien-cli` from anywhere:
+The signed app and its embedded helper share the App Group path; SPM dev builds use a separate path so experiments don't touch the real library. The first run between those modes performs a one-shot migration — see CLAUDE.md "Data layer" for the mechanics. Override anywhere with `RUBIEN_LIBRARY_ROOT=/path/to/dir`.
+
+## Installing on `$PATH`
+
+**Mac (signed app installed):** symlink the bundled helper. Updates pick up the new binary automatically.
 
 ```sh
-# Option 1: symlink into /usr/local/bin (already on $PATH for most setups).
 sudo ln -sf /Applications/Rubien.app/Contents/Helpers/rubien-cli /usr/local/bin/rubien-cli
-
-# Option 2: symlink into ~/bin if you keep one on $PATH.
-mkdir -p ~/bin
-ln -sf /Applications/Rubien.app/Contents/Helpers/rubien-cli ~/bin/rubien-cli
 ```
 
-A symlink is preferable to a copy: app updates automatically pick up the new binary. To remove it later: `rm /usr/local/bin/rubien-cli` (or `~/bin/rubien-cli`).
+**Linux (or Mac SPM build):** install a release build.
 
-For SPM dev builds, run `.build/debug/rubien-cli` directly or add `.build/debug` to `$PATH` for the duration of the dev loop.
+```sh
+swift build --product rubien-cli -c release
+sudo install -m 755 .build/release/rubien-cli /usr/local/bin/rubien-cli
+```
+
+Linux needs system deps first — see [Linux CLI](../README.md#linux-cli). For dev iteration, `.build/debug/rubien-cli` (or `swift run rubien-cli`) is the canonical path on both platforms.
 
 ---
 
@@ -64,7 +61,7 @@ For SPM dev builds, run `.build/debug/rubien-cli` directly or add `.build/debug`
 | `pdf download` | Fetch the open-access PDF for a reference and attach it (skip-if-attached; `--force` to replace) |
 | `web get` | Read the extracted body of a clipped web reference |
 | `web annotations` | List web-page annotations for a reference |
-| `sync status` | Inspect iCloud sync state (JSON only) |
+| `sync status` | Inspect iCloud sync state (JSON only). **Mac-only** — Linux builds omit this subcommand entirely. |
 
 ---
 
@@ -967,6 +964,8 @@ a clipped web reference.
 ---
 
 ## sync status
+
+**Mac-only.** The subcommand is not registered on Linux builds (CloudKit doesn't exist there); `rubien-cli sync --help` returns "unknown subcommand".
 
 Prints iCloud sync state as JSON. Never instantiates the CloudKit sync
 engine — reads `syncState` / `tombstone` / `syncSession` tables directly
