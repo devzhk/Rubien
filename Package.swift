@@ -1,4 +1,4 @@
-// swift-tools-version: 5.9
+// swift-tools-version: 6.1
 import PackageDescription
 
 let package = Package(
@@ -145,5 +145,10 @@ let package = Package(
             ],
             path: "Tests/RubienCLITests"
         ),
-    ]
+    ],
+    // Tools-version 6.1 unlocks package traits (used below for Sparkle),
+    // but we keep the Swift language mode at 5 so the existing codebase
+    // doesn't have to absorb a strict-concurrency migration as part of
+    // the auto-updater work.
+    swiftLanguageModes: [.v5]
 )
