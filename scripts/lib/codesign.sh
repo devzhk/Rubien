@@ -18,9 +18,12 @@ rubien_codesign_binary() {
     if [ -n "$entitlements" ] && [ -f "$entitlements" ]; then
         codesign --force --sign "$CODESIGN_IDENTITY" \
             --entitlements "$entitlements" \
-            --timestamp=none "$target"
+            --options runtime \
+            --timestamp "$target"
     else
-        codesign --force --sign "$CODESIGN_IDENTITY" --timestamp=none "$target"
+        codesign --force --sign "$CODESIGN_IDENTITY" \
+            --options runtime \
+            --timestamp "$target"
     fi
 }
 

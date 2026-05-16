@@ -209,9 +209,12 @@ sign_bundle() {
     if [ -n "$CODESIGN_ENTITLEMENTS" ]; then
         codesign --force --sign "$CODESIGN_IDENTITY" \
             --entitlements "$CODESIGN_ENTITLEMENTS" \
-            --timestamp=none --options runtime "$APP_BUNDLE"
+            --options runtime \
+            --timestamp "$APP_BUNDLE"
     else
-        codesign --force --sign "$CODESIGN_IDENTITY" --timestamp=none "$APP_BUNDLE"
+        codesign --force --sign "$CODESIGN_IDENTITY" \
+            --options runtime \
+            --timestamp "$APP_BUNDLE"
     fi
 }
 
