@@ -1,6 +1,7 @@
 #if os(macOS)
 import SwiftUI
 import RubienCore
+import RubienSync
 
 struct ViewChromeBar: View {
     let viewName: String?
@@ -19,6 +20,8 @@ struct ViewChromeBar: View {
     let onSave: () -> Void
     let onDiscard: () -> Void
 
+    @EnvironmentObject private var syncCoordinator: SyncCoordinator
+
     @State private var showSortEditor = false
     @State private var showGroupEditor = false
     @State private var showDisplayMenu = false
@@ -35,6 +38,9 @@ struct ViewChromeBar: View {
 
     private var row1: some View {
         HStack(spacing: 8) {
+            SyncStatusIcon(status: syncCoordinator.status)
+                .font(.system(size: 11))
+
             if let viewName {
                 Text(viewName)
                     .font(.system(size: 12, weight: .medium))

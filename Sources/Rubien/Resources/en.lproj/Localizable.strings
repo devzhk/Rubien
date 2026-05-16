@@ -21,13 +21,13 @@
 // MARK: - Add by Identifier sheet
 
 "addByIdentifier.title" = "Add by Identifier";
-"addByIdentifier.field.placeholder" = "Paste a DOI, arXiv ID, PMID, ISBN, or paper title";
+"addByIdentifier.field.placeholder" = "Paste a paper URL, DOI, or paper title";
 "addByIdentifier.button.fetch" = "Fetch metadata";
 "addByIdentifier.status.validating" = "Validating input…";
 "addByIdentifier.status.resolvingIdentifier" = "Resolving identifier…";
 "addByIdentifier.status.queryingMetadata" = "Querying metadata…";
-"addByIdentifier.error.empty" = "Enter a DOI, arXiv ID, PMID, ISBN, or paper title.";
-"addByIdentifier.error.notFound" = "No matching record found. Try a DOI, arXiv ID, PMID, or ISBN instead.";
+"addByIdentifier.error.empty" = "Enter a paper URL, DOI, or paper title.";
+"addByIdentifier.error.notFound" = "No matching record found. Try a paper URL or DOI instead.";
 "addByIdentifier.downloadPDFOnImport" = "Download PDF when importing";
 "addByIdentifier.lookupFailed.cardTitle" = "Lookup failed:";
 "addByIdentifier.lookupFailed.placeholder" = "Lookup failed";

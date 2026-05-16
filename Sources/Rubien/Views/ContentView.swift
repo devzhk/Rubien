@@ -868,11 +868,7 @@ struct ContentView: View {
         }
         .toolbar(content: {
             ToolbarItem(placement: .principal) {
-                HStack(spacing: 6) {
-                    Text("References", bundle: .module)
-                        .font(.headline)
-                    SyncStatusIcon(status: syncCoordinator.status)
-                }
+                Color.clear.frame(width: 1, height: 1)
             }
             ToolbarItemGroup(placement: .primaryAction) {
                 Group {
@@ -888,12 +884,12 @@ struct ContentView: View {
                     Button(action: { showAddByIdentifier = true }) {
                         Label(String(localized: "content.toolbar.addByIdentifier", bundle: .module), systemImage: "text.magnifyingglass")
                     }
-                    .help(String(localized: "Paste a DOI, arXiv ID, PMID, or ISBN and fetch metadata automatically", bundle: .module))
+                    .help(String(localized: "Paste a paper URL, DOI, or paper title and fetch metadata automatically", bundle: .module))
 
                     Button(action: {
                         showWebImport = true
                     }) {
-                        Label(String(localized: "Web clip", bundle: .module), systemImage: "globe")
+                        Label(String(localized: "Add web clip", bundle: .module), systemImage: "globe")
                     }
                     .help(String(localized: "Paste a URL and let Rubien clip the title, abstract, and article body", bundle: .module))
                 }

@@ -39,7 +39,7 @@ struct RubienApp: App {
                 }
         }
         .windowStyle(.titleBar)
-        .windowToolbarStyle(.unified(showsTitle: true))
+        .windowToolbarStyle(.unified(showsTitle: false))
         .defaultSize(width: Self.defaultWindowSize.width, height: Self.defaultWindowSize.height)
         Settings {
             RubienSettingsView()
