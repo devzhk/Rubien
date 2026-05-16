@@ -56,6 +56,9 @@ struct RubienApp: App {
         Settings {
             RubienSettingsView()
                 .environmentObject(syncCoordinator)
+                #if Sparkle
+                .environment(updateController)
+                #endif
         }
     }
 

@@ -27,6 +27,12 @@ struct RubienSettingsView: View {
                         systemImage: "icloud"
                     )
                 }
+            #if Sparkle
+            UpdateSettingsView()
+                .tabItem {
+                    Label("Updates", systemImage: "arrow.down.circle")
+                }
+            #endif
         }
         .frame(width: 480, height: 320)
     }
