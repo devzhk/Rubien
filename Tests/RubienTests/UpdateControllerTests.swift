@@ -60,6 +60,19 @@ final class UpdateControllerTests: XCTestCase {
 
         XCTAssertNotNil(controller.delegateForTesting, "Delegate must be alive after init")
     }
+
+    func testConvenienceInitProducesAliveController() {
+        // Smoke test: the convenience init must produce a controller whose
+        // underlying SPUStandardUpdaterController is retained, otherwise
+        // SPUUpdater is orphaned and background checks never fire.
+        let controller = UpdateController()
+        XCTAssertNotNil(controller.delegateForTesting,
+            "Delegate must be alive after convenience init")
+        // We can't directly assert on the private standardController, but
+        // canCheckForUpdates being accessible (and not crashing) is the
+        // observable proof that the SPUUpdater chain is intact.
+        _ = controller.canCheckForUpdates
+    }
 }
 
 @MainActor

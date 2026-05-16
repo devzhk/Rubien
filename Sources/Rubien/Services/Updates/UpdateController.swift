@@ -83,6 +83,28 @@ final class UpdateController {
         )
     }
 
+    /// Production init. Constructs an SPUStandardUpdaterController and
+    /// threads both it and its delegate through the designated init in a
+    /// single call, so:
+    ///   - the delegate is owned strongly by self.userDriverDelegate
+    ///     (SPUStandardUpdaterController only holds it weakly)
+    ///   - the controller is owned strongly by self.standardController
+    ///     (without this, the SPUUpdater we delegate to would lose its
+    ///     parent controller as soon as this init returned)
+    convenience init() {
+        let delegate = UpdateUserDriverDelegate()
+        let standard = SPUStandardUpdaterController(
+            startingUpdater: true,
+            updaterDelegate: nil,
+            userDriverDelegate: delegate
+        )
+        self.init(
+            updater: standard.updater,
+            userDriverDelegate: delegate,
+            standardController: standard
+        )
+    }
+
     func checkNow() {
         updater.checkForUpdates()
     }
