@@ -9,6 +9,9 @@ import RubienSync
 struct RubienApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var syncCoordinator = SyncCoordinator(appDatabase: AppDatabase.shared)
+    #if Sparkle
+    @State private var updateController = UpdateController()
+    #endif
     @State private var addinToast: AddinToastPayload?
     private static let defaultWindowSize = preferredDefaultWindowSize()
 
@@ -16,6 +19,9 @@ struct RubienApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(syncCoordinator)
+                #if Sparkle
+                .environment(updateController)
+                #endif
                 .overlay(alignment: .top) {
                     if let toast = addinToast {
                         AddinToast(message: toast.message, tone: toast.tone)
