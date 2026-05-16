@@ -121,6 +121,15 @@ Five test targets:
 
 `swift test` needs the full Xcode toolchain (not just CommandLineTools). Verify with `xcode-select -p` and switch with `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer` if needed.
 
+## Releases
+
+Rubien ships as a signed + notarized DMG via GitHub Releases, with Sparkle 2 auto-update from `Docs/appcast.xml` (served by GitHub Pages).
+
+- **Cut a release:** see `Docs/Release-Runbook.md`. Short version: bump `VERSION` (e.g. `0.1.0` → `0.1.1`), bump `BUILD.txt`, run `./scripts/release.sh` from a clean `main`.
+- **Sparkle is gated by a package trait** (`Sparkle`, enabled by default in `Package.swift`). DMG builds get it; a future Mac App Store flavor opts out via `swift build --disable-default-traits` so `Sparkle.framework` is absent from the bundle. Don't `import Sparkle` outside `#if Sparkle` blocks.
+- **codesign rule:** never `--deep`. Sign Sparkle components individually in the order written in `scripts/lib/codesign.sh` (`Installer.xpc → Downloader.xpc → Autoupdate → Updater.app → Sparkle.framework`). `Downloader.xpc` specifically needs `--preserve-metadata=entitlements`. Get this wrong and the failure surfaces as opaque "Failed to gain authorization" XPC errors at runtime.
+- **Versioning:** `CFBundleShortVersionString` is the `VERSION` file (SemVer 0.x while in alpha, advancing to 1.0.0 at first stable). `CFBundleVersion` is the `BUILD.txt` file (monotonic integer; Sparkle's "is this newer" check uses this, not the marketing version). The `.txt` suffix avoids APFS aliasing `BUILD` with the `build/` output directory.
+
 ## Development workflow for non-trivial changes
 
 For multi-file features or refactors:
