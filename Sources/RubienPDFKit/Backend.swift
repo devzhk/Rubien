@@ -1,7 +1,7 @@
 import Foundation
 
-public enum PDFBackend {
-    public static func open(url: URL) throws -> any PDFDocumentProtocol {
+enum PDFBackend {
+    static func open(url: URL) throws -> any PDFDocumentProtocol {
         #if canImport(PDFKit)
         return try DarwinPDFDocument(url: url)
         #elseif os(Linux)

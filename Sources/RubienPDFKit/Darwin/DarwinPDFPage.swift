@@ -6,8 +6,6 @@ import AppKit
 #endif
 
 final class DarwinPDFPage: PDFPageProtocol, @unchecked Sendable {
-    // @unchecked Sendable: see DarwinPDFDocument; the page is owned by the
-    // document and shares its single-owner discipline.
     private let page: PDFPage
 
     init(page: PDFPage) {

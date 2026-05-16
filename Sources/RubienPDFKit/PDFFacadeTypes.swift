@@ -1,100 +1,66 @@
 import Foundation
 
-public struct PDFMetadata: Sendable, Equatable {
-    public var title: String?
-    public var author: String?
-    public var subject: String?
-    public var keywords: [String]
-    public var creator: String?
-    public var producer: String?
-    public var creationDate: Date?
-    public var modificationDate: Date?
+// All types in this file are `internal` — they describe the contract
+// between RubienPDFKit's facade and its backends (Darwin/Linux). External
+// consumers (`RubienCLI`, the SwiftUI app) interact with the higher-level
+// `PDFExtractor` / `PDFService` API, which translates between these
+// internal types and its own public surface. Tests reach in via
+// `@testable import RubienPDFKit`.
 
-    public init(
-        title: String? = nil,
-        author: String? = nil,
-        subject: String? = nil,
-        keywords: [String] = [],
-        creator: String? = nil,
-        producer: String? = nil,
-        creationDate: Date? = nil,
-        modificationDate: Date? = nil
-    ) {
-        self.title = title
-        self.author = author
-        self.subject = subject
-        self.keywords = keywords
-        self.creator = creator
-        self.producer = producer
-        self.creationDate = creationDate
-        self.modificationDate = modificationDate
-    }
+struct PDFMetadata: Sendable, Equatable {
+    var title: String?
+    var author: String?
+    var subject: String?
+    var keywords: [String] = []
+    var creator: String?
+    var producer: String?
+    var creationDate: Date?
+    var modificationDate: Date?
 }
 
-public struct PDFPageBox: Sendable, Equatable {
-    public var width: Double
-    public var height: Double
-    public var originX: Double
-    public var originY: Double
-
-    public init(width: Double, height: Double, originX: Double = 0, originY: Double = 0) {
-        self.width = width
-        self.height = height
-        self.originX = originX
-        self.originY = originY
-    }
+struct PDFPageBox: Sendable, Equatable {
+    var width: Double
+    var height: Double
+    var originX: Double = 0
+    var originY: Double = 0
 }
 
-/// Recursive outline tree. `pageIndex` is 0-based; nil for container-only
-/// bookmarks (whose effective start page is the first descendant with a
-/// destination — `PDFExtractor.flattenOutline` does that backfill).
-public struct PDFOutlineNode: Sendable {
-    public var label: String
-    public var pageIndex: Int?
-    public var children: [PDFOutlineNode]
-
-    public init(label: String, pageIndex: Int?, children: [PDFOutlineNode] = []) {
-        self.label = label
-        self.pageIndex = pageIndex
-        self.children = children
-    }
+/// `pageIndex` is 0-based; nil for container-only bookmarks whose start
+/// page is borrowed from the first descendant with a destination — the
+/// cross-platform flattener does that backfill.
+struct PDFOutlineNode: Sendable {
+    var label: String
+    var pageIndex: Int?
+    var children: [PDFOutlineNode] = []
 }
 
-public struct PDFRenderResult: Sendable, Equatable {
-    public var data: Data
-    public var widthPx: Int
-    public var heightPx: Int
-    public var mimeType: String
-    public var qualityUsed: Double?
-
-    public init(data: Data, widthPx: Int, heightPx: Int, mimeType: String, qualityUsed: Double? = nil) {
-        self.data = data
-        self.widthPx = widthPx
-        self.heightPx = heightPx
-        self.mimeType = mimeType
-        self.qualityUsed = qualityUsed
-    }
+struct PDFRenderResult: Sendable, Equatable {
+    var data: Data
+    var widthPx: Int
+    var heightPx: Int
+    var mimeType: String
+    var qualityUsed: Double?
 }
 
-public enum PDFRenderFormat: String, Sendable, Equatable {
+enum PDFRenderFormat: String, Sendable, Equatable {
     case jpeg
     case png
 }
 
-public enum PDFOpenError: Error, Equatable, Sendable {
+enum PDFOpenError: Error, Equatable, Sendable {
     case fileMissing(URL)
     case cannotOpen(URL)
     case locked
 }
 
-public enum PDFRenderError: Error, Equatable, Sendable {
+enum PDFRenderError: Error, Equatable, Sendable {
     case pageOutOfRange(Int)
     case renderFailed
     case maxBytesExceeded(Int)
     case formatUnsupportedOnPlatform
 }
 
-public protocol PDFDocumentProtocol: AnyObject, Sendable {
+protocol PDFDocumentProtocol: AnyObject, Sendable {
     var pageCount: Int { get }
     var metadata: PDFMetadata { get }
     var isEncrypted: Bool { get }
@@ -103,7 +69,7 @@ public protocol PDFDocumentProtocol: AnyObject, Sendable {
     func outlineRoot() -> PDFOutlineNode?
 }
 
-public protocol PDFPageProtocol: AnyObject, Sendable {
+protocol PDFPageProtocol: AnyObject, Sendable {
     var label: String? { get }
     var mediaBox: PDFPageBox { get }
     func extractedText() -> String?

@@ -16,7 +16,7 @@ private let sqlNowISO8601 = "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))"
 /// this to decide whether to copy each attachment:
 /// - `.fresh`, `.dbDuplicateWithoutPDF` → copy (merge will attach in the latter case);
 /// - `.dbDuplicateWithPDF`, `.intraBatchDuplicate` → skip copy to avoid orphaning.
-public enum ImportClassification: Equatable {
+package enum ImportClassification: Equatable {
     case fresh
     case dbDuplicateWithPDF
     case dbDuplicateWithoutPDF
@@ -2056,7 +2056,7 @@ extension AppDatabase {
     ///
     /// Read-only and advisory; `batchImportReferences` re-runs dedup in its write
     /// transaction and remains the authoritative source of truth.
-    public func classifyImportEntries(_ references: [Reference]) throws -> [ImportClassification] {
+    package func classifyImportEntries(_ references: [Reference]) throws -> [ImportClassification] {
         guard !references.isEmpty else { return [] }
         return try dbWriter.read { db in
             var doiKeys = Set<String>()

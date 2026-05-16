@@ -2,18 +2,17 @@
 import Foundation
 import PDFKit
 
+/// PDFKit-backed `PDFDocumentProtocol`. `@unchecked Sendable` holds because
+/// the codebase keeps each instance single-owner (CLI open-extract-close, or
+/// the SwiftUI reader's exclusive reference); same discipline applies to
+/// `LinuxPDFDocument`.
 final class DarwinPDFDocument: PDFDocumentProtocol, @unchecked Sendable {
-    // @unchecked Sendable: PDFKit's PDFDocument is NSObject-derived and not
-    // formally Sendable. Each instance is single-owner in this codebase (CLI
-    // open-extract-close, or the SwiftUI reader holding the only reference);
-    // we never share an open document across threads. The wrapper enforces
-    // that by being class-bound and reference-counted normally.
     private let document: PDFDocument
 
     init(url: URL) throws {
-        // No pre-check with FileManager.fileExists — TOCTOU race vs. concurrent
-        // deletes. PDFDocument(url:) returns nil for missing / unreadable /
-        // corrupt; we collapse those into .cannotOpen and let callers decide.
+        // No FileManager pre-check — TOCTOU race vs. concurrent deletes.
+        // PDFDocument(url:) returns nil for missing/unreadable/corrupt;
+        // collapsing those into .cannotOpen matches Linux's behavior.
         guard let doc = PDFDocument(url: url) else {
             throw PDFOpenError.cannotOpen(url)
         }

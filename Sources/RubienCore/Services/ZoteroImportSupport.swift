@@ -212,7 +212,7 @@ extension AppDatabase {
     ///
     /// Call this before any filesystem side effects (PDF copies) so a bad target fails
     /// fast and we don't leak copied files.
-    public func validatePropertyTarget(_ target: ZoteroImportPropertyTarget) throws {
+    package func validatePropertyTarget(_ target: ZoteroImportPropertyTarget) throws {
         try dbWriter.read { db in
             guard let prop = try PropertyDefinition
                 .filter(PropertyDefinition.Columns.id == target.propertyId)

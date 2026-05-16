@@ -1,31 +1,21 @@
 #if os(Linux)
 import CPoppler
 
-/// RAII wrapper around a GObject reference. The closure-based borrow API
-/// prevents callers from storing the raw pointer past the wrapper's lifetime
-/// without re-`ref`'ing — see `GObjectBox.withPointer` below.
-///
-/// Stores `OpaquePointer` rather than a typed pointer because poppler-glib's
-/// public types (`PopplerDocument`, `PopplerPage`, …) are opaque struct
-/// typedefs in C and Swift's C importer surfaces them as `OpaquePointer`.
-/// A typed `UnsafeMutablePointer<T>` wrapper would force a cast at every
-/// poppler call site, which is the opposite of the readability win.
+/// RAII wrapper around a GObject reference. Closure-scoped borrow prevents
+/// the pointer from outliving the wrapper without an explicit re-ref.
+/// See `Docs/Linux-PDF-Backend.md` for the Swift opaque-pointer rule and
+/// why this is `OpaquePointer` rather than a typed generic.
 final class GObjectBox: @unchecked Sendable {
     private let pointer: OpaquePointer
 
-    /// Takes ownership of an already-`ref`'d pointer. Most poppler factories
-    /// (`poppler_document_new_from_file`, `poppler_document_get_page`) return
-    /// a `+1` ref, so the caller does NOT pre-`g_object_ref`.
+    /// Takes a `+1` ref from the caller (no pre-`g_object_ref`).
     init(takingOwnershipOf pointer: OpaquePointer) {
         self.pointer = pointer
     }
 
-    /// Borrow the pointer for the closure's lifetime only. Do NOT store the
-    /// raw pointer, pass it to another thread without re-`ref`'ing, or let it
-    /// escape this call — `deinit` may run as soon as the closure returns.
-    /// Synchronous C callbacks (poppler iter callbacks, `poppler_page_render`)
-    /// are safe escapes because the C function returns before `withPointer`'s
-    /// scope ends.
+    /// Borrow the pointer for the closure's lifetime only. Synchronous C
+    /// callbacks invoked from inside the closure are safe escapes; storing
+    /// the pointer for later use is not.
     func withPointer<R>(_ body: (OpaquePointer) throws -> R) rethrows -> R {
         try body(pointer)
     }
@@ -33,5 +23,16 @@ final class GObjectBox: @unchecked Sendable {
     deinit {
         g_object_unref(UnsafeMutableRawPointer(pointer))
     }
+}
+
+/// Consume a `g_malloc`'d UTF-8 string from poppler: copy into a Swift
+/// `String`, free the C buffer. `collapseEmpty` returns `nil` for ""; pass
+/// false when the empty string is semantically meaningful (e.g.
+/// `poppler_page_get_text` on a page with no text layer).
+func takeOwnedString(_ ptr: UnsafeMutablePointer<gchar>?, collapseEmpty: Bool = true) -> String? {
+    guard let p = ptr else { return nil }
+    let s = String(cString: p)
+    g_free(UnsafeMutableRawPointer(p))
+    return collapseEmpty && s.isEmpty ? nil : s
 }
 #endif
