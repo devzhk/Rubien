@@ -1,6 +1,6 @@
 # Paper landing-page URL resolver
 
-**Status:** revised 2026-05-16 after Codex third-pass review — awaiting fourth-pass Codex review
+**Status:** v5 — implementation-ready 2026-05-16 (after 4 rounds of Codex review)
 **Scope:** Extend `MetadataResolver.resolveManualEntry` to recognize paper landing-page URLs (OpenReview, ACL Anthology, CVF Open Access, NeurIPS, PMLR, IEEE Xplore, ACM DL, Nature, Springer, ScienceDirect) and resolve them to authoritative `Reference` records, with optional PDF auto-download. Two new files in `RubienCore/Services/`, one new `MetadataFetcher.Identifier` case, two new `MetadataSource` cases, one new wrapper struct (`ManualEntryOutcome`) returned by `MetadataResolver.resolveManualEntry`, callback signature changes on the Add-by-Identifier UI path. No persistent `Reference` field changes, no `CKRecord` field changes, no `MetadataResolutionResult` enum shape changes, no migrations.
 **Out of scope:** Web Import flow (`ClipperWebMetadataExtractor` / `WebImportView`), bulk URL import, browser extension / share sheet, JavaScript-rendered pages requiring WebKit, generic non-paper webpage scraping, shared HTTP client refactor of `MetadataFetcher` (two new HTTP callers do not warrant a refactor — see §1 rationale), the two pre-existing BibTeX-importer bugs called out at the bottom of this spec.
 
@@ -369,7 +369,17 @@ private func resolveIdentifierLocally(
             scrapedPDFURL = outcome.scrapedPDFURL
         }
         // ... existing evidence + verification logic unchanged ...
-        return (verifyFetchedRecord(...), scrapedPDFURL)
+        let result = verifyFetchedRecord(...)
+        // Force scrapedPDFURL to nil for any non-verified outcome — preferredPDFURL
+        // is defined as "populated only on .verified" (§1, ManualEntryOutcome doc
+        // comment). Candidate (no-author safeguard), blocked, rejected, and seedOnly
+        // outcomes do not carry a URL forward; queued-review paths drop it
+        // explicitly (§4 "queued path drops scrapedPDFURL").
+        let effectiveScrapedPDFURL: String? = {
+            if case .verified = result { return scrapedPDFURL }
+            return nil
+        }()
+        return (result, effectiveScrapedPDFURL)
     } catch {
         return (.rejected(...), nil)
     }
@@ -525,7 +535,7 @@ Same `MetadataResolutionResult` machinery; no new envelope types.
 | Allowlisted citation_*-based host + path, GET succeeds, scraper extracts no `citation_title` OR no other `citation_*` tag | `.rejected(insufficientEvidence)` | "Page did not expose paper metadata. Try pasting the DOI or paper title." |
 | Scraper produces DOI, CrossRef call fails (network / 5xx / parse) | **fall through** — return scraper-only Reference; log via `resolverTrace`. Not an error. | (no error surfaced) |
 | Scraper produces DOI, CrossRef succeeds, but `titleSimilarity(scraped, crossref) < 0.80` | **fall through** — return scraper-only Reference; log warning. DOI preserved on Reference. | (no error surfaced; protects against chapter-vs-book mismatch) |
-| Final merged `Reference.authors` is empty (scraper had no `citation_author` and CrossRef either failed or also returned no authors) | `.candidate(insufficientEvidence)` — returns a candidate envelope for user review rather than auto-verifying | "Found a paper, but no authors are listed on the page or in CrossRef. Review before importing." |
+| Final merged `Reference.authors` is empty (scraper had no `citation_author` and CrossRef either failed or also returned no authors) | `.candidate` — `CandidateEnvelope` with `candidates = [MetadataCandidate(from: scrapedReference)]` (single-element list built from the scraped data), `message = "Found a paper, but no authors are listed…"`. User reviews via existing candidate-confirmation UI before the result becomes `.verified`. | "Found a paper, but no authors are listed on the page or in CrossRef. Review before importing." |
 | Network timeout (15s, matches existing `MetadataFetcher` timeout) | `.rejected(insufficientEvidence)` | `error.localizedDescription` |
 | CVF page returns 200 but no `<pre>` BibTeX block matches | `.rejected(insufficientEvidence)` | "Could not find BibTeX on this CVF page. The page format may have changed." |
 | BibTeX block found, `BibTeXImporter.parse` returns empty array or first Reference has blank title | `.rejected(insufficientEvidence)` | "Found BibTeX but it did not contain usable fields." |
@@ -591,6 +601,7 @@ All new tests live in `RubienCoreTests` (fastest target; no SwiftUI dep). No new
    - Redirect-to-unrelated-host → expect `.rejected`.
    - **Strong evidence gate:** fixture with only `citation_title` (no other citation_* tags) → expect `.rejected` (paywall-style).
    - **Canonical URL on Reference.url:** input `HTTP://WWW.NATURE.COM/articles/Foo` → resulting Reference.url == `https://nature.com/articles/Foo`.
+   - **Retry behavior (§2.1 contract):** stub URLSession returns HTTP 503 on first attempt, 200 (with valid HTML) on second → expect success after retry. HTTP 429 → retry with 3-second base backoff (assert ≥3s delay via clock injection or sleep mock). `URLError.timedOut` → retry. HTTP 404 → no retry, fail immediately. HTTP 500-599 with maxAttempts exhausted → `.rejected`.
 
 **Extraction-level tests**
 
@@ -644,21 +655,23 @@ All new tests live in `RubienCoreTests` (fastest target; no SwiftUI dep). No new
 
 ## Implementation order
 
-Each step is a self-contained commit that builds and passes its own tests. v4 reorders v3 to fix two compile-break dependencies:
+Each step is a self-contained commit that builds and passes its own tests. v5 bundles v4's steps 3 + 4 to resolve a real ordering dependency: `CitationMetaScraper.fetch`'s redirect-host check references `KnownPaperHost` (defined in `PaperURLResolver.swift`), and both adapters share the internal `fetchHTML(url:session:)` helper also defined in `PaperURLResolver.swift`. Shipping `CitationMetaScraper.swift` alone in a prior step would not compile.
 
-1. **Add `MetadataSource.cvfOpenAccess`** and **`.publisherCitationMeta`** (was step 6 in v3). Two enum case additions, zero behavior change. Lands first because step 4 below references them. Verified forward-compatible decode behavior at `ReferenceRecord.swift:232`.
+1. **Add `MetadataSource.cvfOpenAccess`** and **`.publisherCitationMeta`**. Two enum case additions, zero behavior change. Lands first because subsequent steps reference them. Verified forward-compatible decode behavior at `ReferenceRecord.swift:232`. No exhaustive switches over `MetadataSource` exist in the current codebase (verified by `rg "switch.*MetadataSource|case \.translationServer"`), so adding cases doesn't break any caller.
 2. **`BibTeXImporterCVFTests.swift`** — direct unit tests on existing importer with CVF fixtures. Locks in BibTeX behavior before we depend on it.
-3. **`CitationMetaScraper.swift`** + `CitationMetaScraperParseTests.swift` + fixtures + relative-URL resolution + content-type rule. Inline ~30 lines of retry helper with the explicit contract documented in §2.1 — retry `URLError.timedOut`, `URLError.networkConnectionLost`, HTTP 5xx, HTTP 429.
-4. **`PaperURLResolver.swift`** — `KnownPaperHost.classify` (host + path), URL canonicalization, PDF→landing rewrite (incl. NeurIPS regex; no Springer PDF rewrite), dispatch, strong evidence gate, 0.80 title-similarity threshold, **no-author safeguard returning `.candidate`**. Includes the small internal `fetchHTML(url:session:)` helper shared between `CitationMetaScraper` and the CVF adapter (content-type + redirect-host checks). With `KnownPaperHostClassifyTests.swift`, `PaperURLRewriteTests.swift`, `PaperURLResolverTests.swift`.
-5. **Extend `MetadataFetcher.Identifier` + `extractIdentifier` + `MetadataResolver.resolveIdentifierLocally` in one commit** (was steps 4+5 in v3; bundled because the enum case addition alone breaks switch exhaustiveness at `MetadataFetcher.fetch:1093` and `resolveIdentifierLocally`). This step:
+3. **`CitationMetaScraper.swift` + `PaperURLResolver.swift` together, in one commit.** This is the largest step; both files ship together because of the cross-dependency described above (`KnownPaperHost`, `fetchHTML`). Includes:
+   - `CitationMetaScraper.swift` with `fetch(url:session:)` (calling shared `fetchHTML`), `parse(html:baseURL:)`, the inlined ~30-line retry helper matching §2.1's explicit contract (`URLError.timedOut`, `URLError.networkConnectionLost`, HTTP 5xx, HTTP 429).
+   - `PaperURLResolver.swift` with `KnownPaperHost.classify` (host + path), URL canonicalization, PDF→landing rewrite (incl. NeurIPS regex; no Springer PDF rewrite), dispatch, strong evidence gate, 0.80 title-similarity threshold, **no-author safeguard returning `.candidate`**, and the small internal `fetchHTML(url:session:)` helper used by both adapters (content-type + redirect-host checks; CVF adapter inherits the same retry helper as `CitationMetaScraper.fetch` by calling `fetchHTML` through the same retry wrapper).
+   - Tests: `CitationMetaScraperParseTests.swift`, `KnownPaperHostClassifyTests.swift`, `PaperURLRewriteTests.swift`, `PaperURLResolverTests.swift`, plus the fixtures directory.
+4. **Extend `MetadataFetcher.Identifier` + `extractIdentifier` + `MetadataResolver.resolveIdentifierLocally` in one commit** (was steps 4+5 in v3; bundled because the enum case addition alone breaks switch exhaustiveness at `MetadataFetcher.fetch:1093` and `resolveIdentifierLocally`). This step:
    - Adds `case paperURL(URL)` to `Identifier`.
    - Adds the `.paperURL` arm to `MetadataFetcher.fetch(identifier:)` — throws `.invalidURL` (the function isn't called for paper URLs since `resolveIdentifierLocally` handles them directly, but the switch arm exists for exhaustiveness).
-   - Changes `resolveIdentifierLocally`'s signature from `async -> MetadataResolutionResult` to `async -> (MetadataResolutionResult, scrapedPDFURL: String?)`. Five existing branches return `(result, nil)`; new `.paperURL` branch returns `(result, outcome.scrapedPDFURL)`.
+   - Changes `resolveIdentifierLocally`'s signature from `async -> MetadataResolutionResult` to `async -> (MetadataResolutionResult, scrapedPDFURL: String?)`. Five existing branches return `(result, nil)`; new `.paperURL` branch returns `(result, outcome.scrapedPDFURL)`. Non-verified outcomes force `scrapedPDFURL = nil` per §2.6.
    - Updates callers of `resolveIdentifierLocally` inside `MetadataResolver` (a single file) to consume the tuple and discard `scrapedPDFURL` if they don't use it.
    - Includes `PaperURLExtractionTests.swift`.
-6. **Introduce `ManualEntryOutcome` wrapper** on `MetadataResolver.resolveManualEntry` (signature change at one public entry point). Update the 4 call sites (`AddByIdentifierView`, `BatchImportView` ×2, `MetadataResolver.retryIntake`) to read `.result`. `MetadataResolutionResult` enum shape unchanged. With `MetadataResolverPaperURLTests.swift`.
-7. **UI/background plumbing for PDF override:** `AddByIdentifierView.onSave` signature change, `ContentView.downloadPDFInBackground` signature change, `PDFDownloadService.downloadPDF(overrideURL:)`. Placeholder caption updated to "Supports DOI · arXiv · PMID · PMCID · ISBN · paper URL · title". With `AddByIdentifierPaperURLUITests.swift`.
-8. **`ReferenceDuplicateCanonicalURLTests.swift`** + **gated live smoke tests + fixture refresh script.**
+5. **Introduce `ManualEntryOutcome` wrapper** on `MetadataResolver.resolveManualEntry` (signature change at one public entry point). Update the 4 call sites (`AddByIdentifierView`, `BatchImportView` ×2, `MetadataResolver.retryIntake`) to read `.result`. `MetadataResolutionResult` enum shape unchanged. With `MetadataResolverPaperURLTests.swift`.
+6. **UI/background plumbing for PDF override:** `AddByIdentifierView.onSave` signature change, `ContentView.downloadPDFInBackground` signature change, `PDFDownloadService.downloadPDF(overrideURL:)`. Placeholder caption updated to "Supports DOI · arXiv · PMID · PMCID · ISBN · paper URL · title". With `AddByIdentifierPaperURLUITests.swift`.
+7. **`ReferenceDuplicateCanonicalURLTests.swift`** + **gated live smoke tests + fixture refresh script.**
 
 ## Out-of-scope follow-ups (file separately)
 
