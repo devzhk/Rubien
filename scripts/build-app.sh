@@ -27,6 +27,16 @@ APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
 DMG_NAME="$APP_NAME-${CONFIGURATION}.dmg"
 DMG_PATH="$OUTPUT_DIR/$DMG_NAME"
 
+VERSION="$(cat "$PROJECT_DIR/VERSION" | tr -d '[:space:]')"
+BUILD_NUMBER="$(cat "$PROJECT_DIR/BUILD.txt" | tr -d '[:space:]')"
+
+if [ -z "$VERSION" ] || [ -z "$BUILD_NUMBER" ]; then
+    echo "✗ VERSION or BUILD.txt file missing or empty" >&2
+    exit 1
+fi
+
+echo "▸ Building Rubien $VERSION (build $BUILD_NUMBER)"
+
 HELPERS_DIR="$APP_BUNDLE/Contents/Helpers"
 
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
@@ -65,18 +75,19 @@ assemble_app_bundle() {
     if [ -d "$PRODUCTS_DIR/$APP_NAME.app" ]; then
         cp -R "$PRODUCTS_DIR/$APP_NAME.app" "$APP_BUNDLE"
         update_info_plist_bundle_id
-        return
+    else
+        mkdir -p "$APP_BUNDLE/Contents/MacOS"
+        mkdir -p "$APP_BUNDLE/Contents/Resources"
+        cp "$PRODUCTS_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+
+        for bundle in "$PRODUCTS_DIR"/*.bundle; do
+            [ -d "$bundle" ] && cp -R "$bundle" "$APP_BUNDLE/Contents/Resources/"
+        done
+
+        write_info_plist
     fi
 
-    mkdir -p "$APP_BUNDLE/Contents/MacOS"
-    mkdir -p "$APP_BUNDLE/Contents/Resources"
-    cp "$PRODUCTS_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
-
-    for bundle in "$PRODUCTS_DIR"/*.bundle; do
-        [ -d "$bundle" ] && cp -R "$bundle" "$APP_BUNDLE/Contents/Resources/"
-    done
-
-    write_info_plist
+    stamp_info_plist_version
 }
 
 write_info_plist() {
@@ -95,9 +106,9 @@ write_info_plist() {
     <key>CFBundleDisplayName</key>
     <string>${APP_NAME}</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>${BUILD_NUMBER}</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.0</string>
+    <string>${VERSION}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleInfoDictionaryVersion</key>
@@ -122,6 +133,13 @@ update_info_plist_bundle_id() {
     [ -f "$plist" ] || return 0
     /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$plist" 2>/dev/null \
         || /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string $BUNDLE_ID" "$plist"
+}
+
+stamp_info_plist_version() {
+    local plist="$APP_BUNDLE/Contents/Info.plist"
+    /usr/bin/plutil -replace CFBundleShortVersionString -string "$VERSION" "$plist"
+    /usr/bin/plutil -replace CFBundleVersion -string "$BUILD_NUMBER" "$plist"
+    echo "   ✓ Stamped Info.plist: $VERSION ($BUILD_NUMBER)"
 }
 
 embed_helpers() {
