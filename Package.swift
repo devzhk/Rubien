@@ -11,10 +11,18 @@ let package = Package(
         .executable(name: "Rubien", targets: ["Rubien"]),
         .executable(name: "rubien-cli", targets: ["RubienCLI"]),
     ],
+    traits: [
+        .default(enabledTraits: ["Sparkle"]),
+        .init(
+            name: "Sparkle",
+            description: "Enable Sparkle auto-updater (DMG distribution). Disable for Mac App Store builds via --disable-default-traits."
+        ),
+    ],
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "3.0.0"),
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.7.0"),
     ],
     targets: [
         .systemLibrary(
@@ -67,6 +75,11 @@ let package = Package(
                 "RubienPDFKit",
                 .target(name: "RubienSync", condition: .when(platforms: [.macOS])),
                 .target(name: "RubienExceptionCatcher", condition: .when(platforms: [.macOS])),
+                .product(
+                    name: "Sparkle",
+                    package: "Sparkle",
+                    condition: .when(traits: ["Sparkle"])
+                ),
             ],
             exclude: [
                 "Rubien.entitlements"
@@ -74,6 +87,9 @@ let package = Package(
             resources: [
                 .process("Assets.xcassets"),
                 .process("Resources")
+            ],
+            swiftSettings: [
+                .define("Sparkle", .when(traits: ["Sparkle"])),
             ]
         ),
         .executableTarget(
