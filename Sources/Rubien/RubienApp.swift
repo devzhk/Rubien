@@ -21,6 +21,7 @@ struct RubienApp: App {
                 .environmentObject(syncCoordinator)
                 #if Sparkle
                 .environment(updateController)
+                .focusedSceneValue(\.updateController, updateController)
                 #endif
                 .overlay(alignment: .top) {
                     if let toast = addinToast {
@@ -47,6 +48,11 @@ struct RubienApp: App {
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified(showsTitle: false))
         .defaultSize(width: Self.defaultWindowSize.width, height: Self.defaultWindowSize.height)
+        #if Sparkle
+        .commands {
+            UpdateMenuCommands()
+        }
+        #endif
         Settings {
             RubienSettingsView()
                 .environmentObject(syncCoordinator)
