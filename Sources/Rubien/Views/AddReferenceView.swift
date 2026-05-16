@@ -59,7 +59,7 @@ struct AddReferenceView: View {
                 Button(String(localized: "common.cancel", bundle: .module)) { dismiss() }
                     .keyboardShortcut(.cancelAction)
                 Spacer()
-                Text("New reference", bundle: .module)
+                Text("addReference.sheet.title", bundle: .module)
                     .font(.headline)
                 Spacer()
                 Button(String(localized: "common.save", bundle: .module)) {

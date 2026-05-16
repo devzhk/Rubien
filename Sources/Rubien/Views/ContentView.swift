@@ -885,13 +885,10 @@ struct ContentView: View {
                 .keyboardShortcut("f", modifiers: .command)
 
                 ControlGroup {
-                    Button(action: {
-                        addReferenceInitialType = .journalArticle
-                        showAddReference = true
-                    }) {
-                        Label(String(localized: "New entry", bundle: .module), systemImage: "square.and.pencil")
+                    Button(action: { showAddByIdentifier = true }) {
+                        Label(String(localized: "content.toolbar.addByIdentifier", bundle: .module), systemImage: "text.magnifyingglass")
                     }
-                    .help(String(localized: "Create a blank reference and fill in its fields", bundle: .module))
+                    .help(String(localized: "Paste a DOI, arXiv ID, PMID, or ISBN and fetch metadata automatically", bundle: .module))
 
                     Button(action: {
                         showWebImport = true
@@ -902,46 +899,48 @@ struct ContentView: View {
                 }
 
                 ControlGroup {
+                    Button(action: {
+                        addReferenceInitialType = .journalArticle
+                        showAddReference = true
+                    }) {
+                        Label(String(localized: "content.toolbar.addManually", bundle: .module), systemImage: "square.and.pencil")
+                    }
+                    .help(String(localized: "Create a blank reference and fill in its fields", bundle: .module))
+
+                    Button(action: { importPDFWithMetadata() }) {
+                        Label(String(localized: "content.toolbar.importPDFAuto", bundle: .module), systemImage: "doc.badge.plus")
+                    }
+                    .help(String(localized: "Import a PDF and auto-fill its metadata when possible", bundle: .module))
+                }
+
+                if !viewModel.pendingMetadataIntakes.isEmpty {
                     Button(action: { showPendingMetadataQueue = true }) {
                         HStack(spacing: 6) {
                             Label(String(localized: "content.toolbar.pendingQueue", bundle: .module), systemImage: "clock.badge.exclamationmark")
-                            if !viewModel.pendingMetadataIntakes.isEmpty {
-                                Text("\(viewModel.pendingMetadataIntakes.count)")
-                                    .font(.caption2.weight(.semibold))
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Color.orange.opacity(0.18), in: Capsule())
-                                    .foregroundStyle(.orange)
-                            }
+                            Text("\(viewModel.pendingMetadataIntakes.count)")
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.orange.opacity(0.18), in: Capsule())
+                                .foregroundStyle(.orange)
                         }
                     }
                     .help(String(localized: "Open the pending metadata queue to review candidates or confirm manually", bundle: .module))
-                    .disabled(viewModel.pendingMetadataIntakes.isEmpty)
-
-                    Button(action: { showAddByIdentifier = true }) {
-                        Label(String(localized: "content.toolbar.addByIdentifier", bundle: .module), systemImage: "text.magnifyingglass")
-                    }
-                    .help(String(localized: "Paste a DOI, arXiv ID, PMID, or ISBN and fetch metadata automatically", bundle: .module))
-
-                    Button(action: { importPDFWithMetadata() }) {
-                        Label(String(localized: "content.toolbar.importPDF", bundle: .module), systemImage: "doc.badge.plus")
-                    }
-                    .help(String(localized: "Import a PDF and auto-fill its metadata when possible", bundle: .module))
-
-                    Menu {
-                        Button(String(localized: "content.toolbar.batchImport", bundle: .module) + "…") { showBatchImport = true }
-                        Divider()
-                        Button(String(localized: "content.toolbar.importBibTeX", bundle: .module)) { importBibTeX() }
-                        Button(String(localized: "content.toolbar.importRIS", bundle: .module)) { importRIS() }
-                        Button(String(localized: "content.toolbar.importZoteroFolder", bundle: .module)) { pickZoteroFolder() }
-                        Divider()
-                        Button(String(localized: "Import citation styles (.csl)…", bundle: .module)) { importCitationStyles() }
-                    } label: {
-                        Label(String(localized: "More import options", bundle: .module), systemImage: "tray.and.arrow.down")
-                    }
-                    .help(String(localized: "More import options", bundle: .module))
-                    .disabled(viewModel.isImporting)
                 }
+
+                Menu {
+                    Button(String(localized: "content.toolbar.batchImport", bundle: .module) + "…") { showBatchImport = true }
+                    Divider()
+                    Button(String(localized: "content.toolbar.importBibTeX", bundle: .module)) { importBibTeX() }
+                    Button(String(localized: "content.toolbar.importRIS", bundle: .module)) { importRIS() }
+                    Button(String(localized: "content.toolbar.importZoteroFolder", bundle: .module)) { pickZoteroFolder() }
+                    Divider()
+                    Button(String(localized: "Import citation styles (.csl)…", bundle: .module)) { importCitationStyles() }
+                } label: {
+                    Label(String(localized: "More import options", bundle: .module), systemImage: "tray.and.arrow.down")
+                }
+                .help(String(localized: "More import options", bundle: .module))
+                .disabled(viewModel.isImporting)
                 }
                 .labelStyle(.titleAndIcon)
             }
