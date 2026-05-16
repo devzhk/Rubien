@@ -72,6 +72,7 @@ struct ReferenceTableView: View {
                 onSave: onSaveView,
                 onDiscard: onDiscardView
             )
+            subtitleRow
             if references.isEmpty {
                 emptyState
             } else if processed.isEmpty {
@@ -83,8 +84,6 @@ struct ReferenceTableView: View {
                 }
             }
         }
-        .navigationTitle(String(localized: "References", bundle: .module))
-        .navigationSubtitle(subtitleText)
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Button {
@@ -378,6 +377,18 @@ struct ReferenceTableView: View {
     }
 
     // MARK: - Helpers
+
+    private var subtitleRow: some View {
+        HStack(spacing: 0) {
+            Text(subtitleText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 6)
+        .padding(.bottom, 4)
+    }
 
     private var subtitleText: String {
         if !selection.isEmpty {

@@ -867,6 +867,13 @@ struct ContentView: View {
             .navigationSplitViewColumnWidth(min: 180, ideal: 350, max: 350)
         }
         .toolbar(content: {
+            ToolbarItem(placement: .principal) {
+                HStack(spacing: 6) {
+                    Text("References", bundle: .module)
+                        .font(.headline)
+                    SyncStatusIcon(status: syncCoordinator.status)
+                }
+            }
             ToolbarItemGroup(placement: .primaryAction) {
                 Group {
                 Button {

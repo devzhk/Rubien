@@ -37,11 +37,6 @@ struct RubienApp: App {
                     let message = title.flatMap { !$0.isEmpty ? String(format: fmt, $0) : nil } ?? fallback
                     showToast(message, tone: .success)
                 }
-                .toolbar {
-                    ToolbarItem(placement: .primaryAction) {
-                        SyncStatusIcon(status: syncCoordinator.status)
-                    }
-                }
         }
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified(showsTitle: true))
