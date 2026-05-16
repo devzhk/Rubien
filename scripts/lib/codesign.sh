@@ -45,3 +45,44 @@ rubien_require_entitlement() {
         exit 1
     fi
 }
+
+# Sign the five components inside Sparkle.framework, in the order Sparkle's
+# official sandboxing guide mandates. Downloader.xpc needs the special
+# --preserve-metadata=entitlements flag — a generic re-sign would strip
+# Sparkle's pre-signed entitlements on that XPC service. Never use --deep
+# anywhere in this function; it corrupts XPC service signatures and is
+# the #1 cause of "Failed to gain authorization" errors at runtime.
+#
+#   $1  Path to the bundled Sparkle.framework (e.g. .../Rubien.app/Contents/Frameworks/Sparkle.framework)
+rubien_codesign_sparkle_framework() {
+    local fw="$1"
+
+    if [ ! -d "$fw" ]; then
+        echo "✗ Sparkle.framework not found at $fw" >&2
+        exit 1
+    fi
+
+    echo "   ▸ Signing Sparkle.framework components in order…"
+
+    # Versions/B is the canonical version directory in Sparkle 2.7+.
+    # If this stops resolving, double-check the framework structure.
+    local versions_dir="$fw/Versions/B"
+    if [ ! -d "$versions_dir" ]; then
+        # Fall back to whichever version directory exists.
+        versions_dir="$(find "$fw/Versions" -maxdepth 1 -mindepth 1 -type d ! -name "Current" | head -1)"
+    fi
+
+    codesign --force --sign "$CODESIGN_IDENTITY" --options runtime --timestamp \
+        "$versions_dir/XPCServices/Installer.xpc"
+    codesign --force --sign "$CODESIGN_IDENTITY" --options runtime --timestamp \
+        --preserve-metadata=entitlements \
+        "$versions_dir/XPCServices/Downloader.xpc"
+    codesign --force --sign "$CODESIGN_IDENTITY" --options runtime --timestamp \
+        "$versions_dir/Autoupdate"
+    codesign --force --sign "$CODESIGN_IDENTITY" --options runtime --timestamp \
+        "$versions_dir/Updater.app"
+    codesign --force --sign "$CODESIGN_IDENTITY" --options runtime --timestamp \
+        "$fw"
+
+    echo "   ✓ Sparkle.framework signed (5 components)"
+}

@@ -190,6 +190,22 @@ embed_helpers() {
     chmod 755 "$HELPERS_DIR/$CLI_NAME"
 }
 
+embed_sparkle_framework() {
+    [ "$FLAVOR" = "dmg" ] || return 0   # MAS flavor: no Sparkle
+
+    local src="$PRODUCTS_DIR/Sparkle.framework"
+    if [ ! -d "$src" ]; then
+        echo "✗ Sparkle.framework not found at $src — was the Sparkle trait disabled?" >&2
+        exit 1
+    fi
+    echo "▸ Embedding Sparkle.framework..."
+    local frameworks_dir="$APP_BUNDLE/Contents/Frameworks"
+    mkdir -p "$frameworks_dir"
+    # Preserve symlinks (-R follows them on macOS by default would NOT preserve
+    # them; -R *does* preserve them on BSD cp — but be explicit with -P).
+    cp -R "$src" "$frameworks_dir/Sparkle.framework"
+}
+
 sign_bundle() {
     if [ "$CODESIGN_ENABLED" = "0" ]; then
         return
@@ -202,6 +218,14 @@ sign_bundle() {
     dot_clean -m "$APP_BUNDLE" 2>/dev/null || true
     xattr -cr "$APP_BUNDLE" 2>/dev/null || true
     rubien_codesign_binary "$HELPERS_DIR/$CLI_NAME" "$CLI_ENTITLEMENTS"
+
+    # Sign Sparkle.framework components in the order Sparkle's sandboxing
+    # docs require, BEFORE the outer app-bundle sign below. Order matters —
+    # inner components first, framework wrapper last, outer bundle last of
+    # all (handled by the existing if/else below).
+    if [ "$FLAVOR" = "dmg" ]; then
+        rubien_codesign_sparkle_framework "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
+    fi
 
     # No --deep on the outer call: the embedded CLI is already signed above
     # and --deep just re-walks the signed tree, which historically chokes on
@@ -260,6 +284,7 @@ build_cli
 assemble_app_bundle
 embed_app_icon
 embed_helpers
+embed_sparkle_framework
 sign_bundle
 create_dmg
 
