@@ -28,11 +28,11 @@ struct ManualCandidateImportAssessment {
     let missingFields: [String]
 }
 
-public struct ManualEntryOutcome: Sendable {
-    public let result: MetadataResolutionResult
-    public let preferredPDFURL: String?    // populated only on .verified from paper-URL path
+struct ManualEntryOutcome: Sendable {
+    let result: MetadataResolutionResult
+    let preferredPDFURL: String?    // populated only on .verified from paper-URL path
 
-    public init(result: MetadataResolutionResult, preferredPDFURL: String? = nil) {
+    init(result: MetadataResolutionResult, preferredPDFURL: String? = nil) {
         self.result = result
         self.preferredPDFURL = preferredPDFURL
     }
@@ -384,28 +384,18 @@ final class MetadataResolver {
         fallback: Reference?
     ) async -> (MetadataResolutionResult, scrapedPDFURL: String?) {
         do {
-            let reference: Reference
-            let scrapedPDFURL: String?
+            // All non-paperURL identifiers fetch a Reference with no scrapedPDFURL;
+            // only .paperURL ever yields a non-nil URL via PaperURLResolver.
+            let (reference, scrapedPDFURL): (Reference, String?)
             switch identifier {
-            case .doi(let value):
-                reference = try await MetadataFetcher.fetchFromDOI(value)
-                scrapedPDFURL = nil
-            case .pmid(let value):
-                reference = try await MetadataFetcher.fetchFromPMID(value)
-                scrapedPDFURL = nil
-            case .arxiv(let value):
-                reference = try await MetadataFetcher.fetchFromArXiv(value)
-                scrapedPDFURL = nil
-            case .isbn(let value):
-                reference = try await MetadataFetcher.fetchFromISBN(value)
-                scrapedPDFURL = nil
-            case .pmcid(let value):
-                reference = try await MetadataFetcher.fetchFromPMCID(value)
-                scrapedPDFURL = nil
+            case .doi(let value):    (reference, scrapedPDFURL) = (try await MetadataFetcher.fetchFromDOI(value), nil)
+            case .pmid(let value):   (reference, scrapedPDFURL) = (try await MetadataFetcher.fetchFromPMID(value), nil)
+            case .arxiv(let value):  (reference, scrapedPDFURL) = (try await MetadataFetcher.fetchFromArXiv(value), nil)
+            case .isbn(let value):   (reference, scrapedPDFURL) = (try await MetadataFetcher.fetchFromISBN(value), nil)
+            case .pmcid(let value):  (reference, scrapedPDFURL) = (try await MetadataFetcher.fetchFromPMCID(value), nil)
             case .paperURL(let url):
                 let outcome = try await PaperURLResolver.resolve(url)
-                reference = outcome.reference
-                scrapedPDFURL = outcome.scrapedPDFURL
+                (reference, scrapedPDFURL) = (outcome.reference, outcome.scrapedPDFURL)
             }
 
             let evidence = buildGenericEvidence(
@@ -714,8 +704,7 @@ final class MetadataResolver {
 extension MetadataResolver {
     /// Builds a CandidateEnvelope for the no-author safeguard path. Called
     /// from resolveIdentifierLocally's catch handler when PaperURLResolver
-    /// throws .noAuthorsAvailable. Task 5's MetadataResolverPaperURLTests
-    /// will exercise the conversion logic by calling this helper directly.
+    /// throws .noAuthorsAvailable.
     nonisolated static func candidateEnvelopeForNoAuthors(
         partialRef: Reference,
         seed: MetadataResolutionSeed?,

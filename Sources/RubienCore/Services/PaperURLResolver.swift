@@ -163,6 +163,11 @@ public enum PaperURLResolver {
 
     // MARK: - CVF BibTeX dispatch
 
+    private static let cvfPreTagRegex = try! NSRegularExpression(
+        pattern: #"(?s)<pre[^>]*>(.+?)</pre>"#,
+        options: [.caseInsensitive]
+    )
+
     private static func resolveCVF(
         landingURL: URL,
         session: URLSession
@@ -171,10 +176,7 @@ public enum PaperURLResolver {
         let html = String(data: response.data, encoding: .utf8) ?? ""
 
         // Extract <pre>...</pre> contents.
-        let pattern = #"(?s)<pre[^>]*>(.+?)</pre>"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-            throw ResolveError.bibtexNotFound
-        }
+        let regex = cvfPreTagRegex
         let range = NSRange(html.startIndex..., in: html)
         guard let match = regex.firstMatch(in: html, options: [], range: range),
               let bibRange = Range(match.range(at: 1), in: html) else {
@@ -272,8 +274,21 @@ internal enum KnownPaperHost: CaseIterable {
         }
     }
 
+    private static let regexCache: NSCache<NSString, NSRegularExpression> = {
+        let cache = NSCache<NSString, NSRegularExpression>()
+        cache.countLimit = 64
+        return cache
+    }()
+
     private static func matches(_ string: String, pattern: String) -> Bool {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return false }
+        let regex: NSRegularExpression
+        if let cached = regexCache.object(forKey: pattern as NSString) {
+            regex = cached
+        } else {
+            guard let compiled = try? NSRegularExpression(pattern: pattern) else { return false }
+            regexCache.setObject(compiled, forKey: pattern as NSString)
+            regex = compiled
+        }
         let range = NSRange(string.startIndex..., in: string)
         return regex.firstMatch(in: string, options: [], range: range) != nil
     }
@@ -317,6 +332,10 @@ internal extension PaperURLResolver {
 // MARK: - PDF → landing rewrite
 
 internal extension PaperURLResolver {
+    static let neurIPSRewriteRegex = try! NSRegularExpression(
+        pattern: #"(/paper_files/paper/\d+/)file/(.+)-Paper(.*)\.pdf$"#
+    )
+
     static func rewritePDFURLToLanding(_ url: URL, host: KnownPaperHost) -> URL {
         guard let canonical = canonicalize(url),
               var components = URLComponents(url: canonical, resolvingAgainstBaseURL: false) else {
@@ -357,11 +376,9 @@ internal extension PaperURLResolver {
             // /paper_files/paper/<year>/file/<hash>-Paper<rest>.pdf
             //   → /paper_files/paper/<year>/hash/<hash>-Abstract<rest>.html
             if path.contains("/file/") && path.hasSuffix(".pdf") {
-                let regex = try? NSRegularExpression(
-                    pattern: #"(/paper_files/paper/\d+/)file/(.+)-Paper(.*)\.pdf$"#
-                )
+                let regex = neurIPSRewriteRegex
                 let range = NSRange(path.startIndex..., in: path)
-                if let match = regex?.firstMatch(in: path, options: [], range: range),
+                if let match = regex.firstMatch(in: path, options: [], range: range),
                    let r1 = Range(match.range(at: 1), in: path),
                    let r2 = Range(match.range(at: 2), in: path),
                    let r3 = Range(match.range(at: 3), in: path) {
@@ -441,7 +458,7 @@ internal extension PaperURLResolver {
     ) async throws -> PaperURLHTTPResponse {
         try await withRetry(maxAttempts: maxAttempts) {
             var request = URLRequest(url: url)
-            request.setValue(userAgent(), forHTTPHeaderField: "User-Agent")
+            request.setValue(MetadataFetcher.userAgent, forHTTPHeaderField: "User-Agent")
             request.setValue("text/html,application/xhtml+xml", forHTTPHeaderField: "Accept")
             request.timeoutInterval = timeout
 
@@ -473,14 +490,6 @@ internal extension PaperURLResolver {
 
             return PaperURLHTTPResponse(data: data, finalURL: finalURL, contentType: contentType.isEmpty ? nil : contentType)
         }
-    }
-
-    private static func userAgent() -> String {
-        let email = MetadataFetcher.contactEmail.trimmingCharacters(in: .whitespacesAndNewlines)
-        if email.isEmpty || !email.contains("@") {
-            return "Rubien/1.0"
-        }
-        return "Rubien/1.0 (mailto:\(email))"
     }
 
     /// Retry contract (matches CitationMetaScraper §2.1):

@@ -223,8 +223,8 @@ struct AddByIdentifierView: View {
     }
 
     private func statusMessage(for text: String) -> String {
-        if let url = URL(string: text), ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
-            _ = url
+        if let scheme = URL(string: text)?.scheme?.lowercased(),
+           scheme == "http" || scheme == "https" {
             return String(localized: "addByIdentifier.status.validating", bundle: .module)
         }
         if MetadataFetcher.extractIdentifier(from: text) != nil {

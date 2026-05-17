@@ -46,7 +46,7 @@ public enum MetadataFetcher {
     }
 
     /// User-Agent header value. Includes mailto when a contact email is configured.
-    private static var userAgent: String {
+    internal static var userAgent: String {
         let email = contactEmail.trimmingCharacters(in: .whitespacesAndNewlines)
         if email.isEmpty || !email.contains("@") {
             return "Rubien/1.0"
@@ -1212,11 +1212,15 @@ public enum MetadataFetcher {
                     return 1_000_000_000 // 1s base for server errors
                 }()
                 let delay = baseDelay * UInt64(1 << attempt) // exponential: 1s, 2s, 4s or 3s, 6s, 12s
-                try await Task.sleep(nanoseconds: delay)
+                if attempt + 1 < maxAttempts {
+                    try await Task.sleep(nanoseconds: delay)
+                }
             } catch let error as URLError where error.code == .timedOut || error.code == .networkConnectionLost {
                 lastError = error
                 let delay: UInt64 = 1_000_000_000 * UInt64(1 << attempt)
-                try await Task.sleep(nanoseconds: delay)
+                if attempt + 1 < maxAttempts {
+                    try await Task.sleep(nanoseconds: delay)
+                }
             }
         }
         throw lastError!

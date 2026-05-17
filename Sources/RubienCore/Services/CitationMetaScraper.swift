@@ -42,6 +42,8 @@ public enum CitationMetaScraper {
 
         // Multi-value tags
         let authorValues = tags.filter { $0.name == "citation_author" }.map(\.content)
+        // citation_author is typically one name per tag, but some sites concatenate
+        // multiple authors with "and" in a single tag — parseList handles both shapes.
         result.authors = authorValues.flatMap { AuthorName.parseList($0) }
 
         // Single-value tags
@@ -60,9 +62,9 @@ public enum CitationMetaScraper {
             case "citation_publisher":         result.publisher = content
             case "citation_abstract":          result.abstract = content
             case "citation_publication_date":
-                if result.year == nil { result.year = parseYear(content) }
+                if result.year == nil { result.year = MetadataResolution.extractYear(fromMetadataText: content) }
             case "citation_year":
-                result.year = parseYear(content) ?? result.year
+                result.year = MetadataResolution.extractYear(fromMetadataText: content) ?? result.year
             case "citation_pdf_url":
                 result.pdfURL = resolveAbsolute(content, baseURL: baseURL)
             case "og:description":
@@ -82,6 +84,18 @@ public enum CitationMetaScraper {
         let content: String
     }
 
+    /// Patterns for <meta name="..." content="..."> in name-first and content-first attribute order.
+    private static let metaTagRegexes: [NSRegularExpression] = [
+        try! NSRegularExpression(
+            pattern: #"<meta\s+[^>]*name\s*=\s*["']([^"']+)["'][^>]*content\s*=\s*["']([^"']*)["'][^>]*/?>"#,
+            options: [.caseInsensitive]
+        ),
+        try! NSRegularExpression(
+            pattern: #"<meta\s+[^>]*content\s*=\s*["']([^"']*)["'][^>]*name\s*=\s*["']([^"']+)["'][^>]*/?>"#,
+            options: [.caseInsensitive]
+        ),
+    ]
+
     /// Scans the <head> section for <meta name="..." content="..."> tags.
     /// Pattern is generous about attribute order and quoting style.
     private static func extractMetaTags(from html: String) -> [MetaTag] {
@@ -94,15 +108,8 @@ public enum CitationMetaScraper {
             return html
         }()
 
-        // Match <meta ... name="X" ... content="Y"> and the reversed attribute order.
-        let patterns = [
-            #"<meta\s+[^>]*name\s*=\s*["']([^"']+)["'][^>]*content\s*=\s*["']([^"']*)["'][^>]*/?>"#,
-            #"<meta\s+[^>]*content\s*=\s*["']([^"']*)["'][^>]*name\s*=\s*["']([^"']+)["'][^>]*/?>"#,
-        ]
-
         var tags: [MetaTag] = []
-        for (idx, pattern) in patterns.enumerated() {
-            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
+        for (idx, regex) in metaTagRegexes.enumerated() {
             let range = NSRange(scope.startIndex..., in: scope)
             regex.enumerateMatches(in: scope, options: [], range: range) { match, _, _ in
                 guard let match = match,
@@ -123,21 +130,6 @@ public enum CitationMetaScraper {
          .replacingOccurrences(of: "&gt;", with: ">")
          .replacingOccurrences(of: "&quot;", with: "\"")
          .replacingOccurrences(of: "&#39;", with: "'")
-    }
-
-    private static func parseYear(_ s: String) -> Int? {
-        let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Try bare 4-digit year first.
-        if trimmed.count == 4, let n = Int(trimmed), (1500...2200).contains(n) { return n }
-        // Else extract the first 4-digit substring.
-        let pattern = #"(\d{4})"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
-        let range = NSRange(trimmed.startIndex..., in: trimmed)
-        guard let match = regex.firstMatch(in: trimmed, options: [], range: range),
-              let yearRange = Range(match.range(at: 1), in: trimmed),
-              let year = Int(trimmed[yearRange]),
-              (1500...2200).contains(year) else { return nil }
-        return year
     }
 
     private static func resolveAbsolute(_ rawURL: String, baseURL: URL) -> String? {
