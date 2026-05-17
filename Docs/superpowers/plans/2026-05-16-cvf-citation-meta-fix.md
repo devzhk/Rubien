@@ -33,8 +33,8 @@ Trace:
 5. `resolveCVF` fetched the page successfully (HTTP 200, ~6 KB HTML, text/html).
 6. `resolveCVF` ran the regex `(?s)<pre[^>]*>(.+?)</pre>` to extract the BibTeX block. **No match** — CVF 2025 pages have no `<pre>` tags.
 7. Threw `ResolveError.bibtexNotFound`.
-8. `MetadataResolver.resolveIdentifierLocally`'s catch handler converted to `.rejected(insufficientEvidence, "Could not find BibTeX on this CVF page. The page format may have changed.")`.
-9. User saw the rejection message.
+8. `MetadataResolver.resolveIdentifierLocally`'s catch handler caught the throw and wrapped `error.localizedDescription` into a `.rejected(insufficientEvidence, ...)` envelope.
+9. **User-visible message:** because `PaperURLResolver.ResolveError` has no `LocalizedError` conformance, `error.localizedDescription` falls back to a Foundation default form (the raw case name, e.g. `"bibtexNotFound"`). The friendly "Could not find BibTeX on this CVF page" string from the spec §4 error table is only documentation — it isn't actually emitted by the running code today. This narrative issue is **out of scope for this fix** (see Out of scope section) but acknowledges that the user's reported "it failed" came with a less-than-helpful error string.
 
 ## Root cause
 
@@ -273,3 +273,8 @@ Single commit. Steps:
 - A CVF live smoke test. Add later via `Scripts/refresh-citation-fixtures.sh` + a new `testCVFLive` in `PaperURLLiveSmokeTests.swift`.
 - Pruning the `.bibtexNotFound` and `.bibtexEmpty` `ResolveError` cases (unreachable after this fix). Defensive enum cases — keep until a future cleanup commit.
 - Removing the `BibTeXImporter` import from `PaperURLResolver.swift` if no other call site remains. Negligible.
+- **`LocalizedError` conformance for `PaperURLResolver.ResolveError`.** Currently `error.localizedDescription` on these cases falls back to Foundation's default (raw case name), so user-facing rejection strings show "bibtexNotFound" / "insufficientMetadata" / etc. rather than the friendly spec-§4 wording. A follow-up commit could add the conformance with mappings to friendly text. Not blocking this CVF fix — after the fix, the success path is exercised and users won't see these errors on CVF URLs anyway.
+
+## Post-fix failure mode (note for future maintainers)
+
+After this fix, a CVF page that somehow lacks citation_* meta tags (workshop pages, supplementary pages, future CVF site redesign, or anti-bot interstitials) will fail the strong evidence gate and the resolver throws `ResolveError.insufficientMetadata`. There is no BibTeX-as-fallback because the inline `resolveCVF` adapter is gone. This is the intended failure mode: users see a clear "Page did not expose paper metadata" rejection (once `LocalizedError` is wired up — see follow-up above) instead of a confusing BibTeX-format error from a page that never had `<pre>` to begin with.
