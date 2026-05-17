@@ -1,0 +1,277 @@
+import XCTest
+#if canImport(FoundationNetworking)
+import FoundationNetworking   // Linux: URLProtocol, URLSessionConfiguration, HTTPURLResponse
+#endif
+@testable import RubienCore
+
+/// URLProtocol-based stub for injecting fake HTTP responses.
+/// Static state is reset in setUp + tearDown to prevent cross-test leakage.
+final class StubURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var stubs: [URL: (data: Data, response: HTTPURLResponse)] = [:]
+    nonisolated(unsafe) static var failures: [URL: Error] = [:]
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
+            return
+        }
+        if let err = StubURLProtocol.failures[url] {
+            client?.urlProtocol(self, didFailWithError: err)
+            return
+        }
+        if let stub = StubURLProtocol.stubs[url] {
+            client?.urlProtocol(self, didReceive: stub.response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: stub.data)
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
+        client?.urlProtocol(self, didFailWithError: URLError(.fileDoesNotExist))
+    }
+
+    override func stopLoading() {}
+
+    static func reset() {
+        stubs = [:]
+        failures = [:]
+    }
+
+    static func makeSession() -> URLSession {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [StubURLProtocol.self]
+        return URLSession(configuration: config)
+    }
+
+    static func stub(_ urlString: String, status: Int = 200, contentType: String = "text/html", body: String) {
+        let url = URL(string: urlString)!
+        let response = HTTPURLResponse(
+            url: url,
+            statusCode: status,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": contentType]
+        )!
+        stubs[url] = (body.data(using: .utf8)!, response)
+    }
+}
+
+final class PaperURLResolverTests: XCTestCase {
+
+    override func setUp() {
+        super.setUp()
+        StubURLProtocol.reset()
+    }
+
+    override func tearDown() {
+        StubURLProtocol.reset()
+        super.tearDown()
+    }
+
+    private func loadFixture(_ name: String) -> String {
+        let url = Bundle.module.url(forResource: "CitationMeta/\(name)", withExtension: "html")!
+        return try! String(contentsOf: url, encoding: .utf8)
+    }
+
+    // MARK: - OpenReview success path (no DOI)
+
+    func testOpenReviewLandingProducesConferencePaper() async throws {
+        StubURLProtocol.stub(
+            "https://openreview.net/forum?id=EXAMPLE",
+            body: loadFixture("openreview-forum")
+        )
+
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: "https://openreview.net/forum?id=EXAMPLE")!,
+            session: StubURLProtocol.makeSession()
+        )
+
+        XCTAssertEqual(outcome.reference.title, "Attention Is All You Need")
+        XCTAssertEqual(outcome.reference.referenceType, .conferencePaper)
+        XCTAssertEqual(outcome.reference.metadataSource, .publisherCitationMeta)
+        XCTAssertEqual(outcome.reference.url, "https://openreview.net/forum?id=EXAMPLE")
+        XCTAssertEqual(outcome.scrapedPDFURL, "https://openreview.net/pdf?id=EXAMPLE")
+    }
+
+    // MARK: - Content-Type rejection
+
+    func testNonHTMLContentTypeRejected() async {
+        StubURLProtocol.stub(
+            "https://openreview.net/forum?id=EXAMPLE",
+            contentType: "application/pdf",
+            body: ""
+        )
+
+        do {
+            _ = try await PaperURLResolver.resolve(
+                URL(string: "https://openreview.net/forum?id=EXAMPLE")!,
+                session: StubURLProtocol.makeSession()
+            )
+            XCTFail("Expected unexpectedContentType")
+        } catch PaperURLResolver.ResolveError.unexpectedContentType {
+            // expected
+        } catch {
+            XCTFail("Wrong error type: \(error)")
+        }
+    }
+
+    // MARK: - Strong evidence gate (paywall)
+
+    func testInsufficientCitationMetaRejected() async {
+        // Stub at the canonical URL (no www.) since the resolver fetches the
+        // canonicalized form, not the original input.
+        StubURLProtocol.stub(
+            "https://sciencedirect.com/science/article/pii/SXXXX",
+            body: loadFixture("paywall-login-page")
+        )
+
+        do {
+            _ = try await PaperURLResolver.resolve(
+                URL(string: "https://www.sciencedirect.com/science/article/pii/SXXXX")!,
+                session: StubURLProtocol.makeSession()
+            )
+            XCTFail("Expected insufficientMetadata")
+        } catch PaperURLResolver.ResolveError.insufficientMetadata {
+            // expected
+        } catch {
+            XCTFail("Wrong error type: \(error)")
+        }
+    }
+
+    // MARK: - CVF BibTeX path
+
+    func testCVFLandingExtractsFromBibTeX() async throws {
+        StubURLProtocol.stub(
+            "https://openaccess.thecvf.com/content/CVPR2024/html/Foo_paper.html",
+            body: loadFixture("cvf-paper")
+        )
+
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: "https://openaccess.thecvf.com/content/CVPR2024/html/Foo_paper.html")!,
+            session: StubURLProtocol.makeSession()
+        )
+
+        XCTAssertEqual(outcome.reference.title, "A Sample CVPR Paper")
+        XCTAssertEqual(outcome.reference.referenceType, .conferencePaper)
+        XCTAssertEqual(outcome.reference.metadataSource, .cvfOpenAccess)
+        XCTAssertEqual(outcome.reference.authors.count, 2)
+        XCTAssertEqual(outcome.scrapedPDFURL, "https://openaccess.thecvf.com/content/CVPR2024/papers/Foo_paper.pdf")
+    }
+
+    // MARK: - Canonical Reference.url after canonicalization
+
+    func testCanonicalURLOnReference() async throws {
+        StubURLProtocol.stub(
+            "https://nature.com/articles/foo",
+            body: """
+            <html><head>
+            <meta name="citation_title" content="Nature Paper">
+            <meta name="citation_author" content="Smith, J.">
+            <meta name="citation_journal_title" content="Nature">
+            <meta name="citation_publication_date" content="2024">
+            </head></html>
+            """
+        )
+
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: "HTTPS://WWW.NATURE.COM/articles/foo")!,
+            session: StubURLProtocol.makeSession()
+        )
+
+        // Canonical: lowercase scheme + host, no www.
+        XCTAssertEqual(outcome.reference.url, "https://nature.com/articles/foo")
+    }
+
+    // MARK: - No-author safeguard
+
+    func testNoAuthorsReturnsCandidate() async {
+        // Hypothetical: citation_title + citation_doi only, no citation_author.
+        // CrossRef stub will also fail (no stub registered for crossref endpoint).
+        StubURLProtocol.stub(
+            "https://ieeexplore.ieee.org/document/1234",
+            body: """
+            <html><head>
+            <meta name="citation_title" content="IEEE Doc Without Authors">
+            <meta name="citation_doi" content="10.1109/foo.bar.99999999">
+            <meta name="citation_publication_date" content="2024">
+            </head></html>
+            """
+        )
+
+        do {
+            _ = try await PaperURLResolver.resolve(
+                URL(string: "https://ieeexplore.ieee.org/document/1234")!,
+                session: StubURLProtocol.makeSession(),
+                crossrefFetcher: { _ in throw URLError(.notConnectedToInternet) }
+            )
+            XCTFail("Expected noAuthorsAvailable")
+        } catch PaperURLResolver.ResolveError.noAuthorsAvailable(let partialRef, _) {
+            // Verify the payload carries the partial Reference so the caller
+            // can build a CandidateEnvelope from it.
+            XCTAssertEqual(partialRef.title, "IEEE Doc Without Authors")
+            XCTAssertEqual(partialRef.doi, "10.1109/foo.bar.99999999")
+            XCTAssertTrue(partialRef.authors.isEmpty)
+        } catch {
+            XCTFail("Wrong error type: \(error)")
+        }
+    }
+
+    // MARK: - HTTP 503 retried
+
+    func testHTTPServerErrorRetries() async throws {
+        // First request 503, second 200 — needs a counter-based stub.
+        // Use a custom URLProtocol subclass for this test:
+        final class CountingStub: URLProtocol {
+            nonisolated(unsafe) static var attemptCount = 0
+            nonisolated(unsafe) static var html = ""
+            override class func canInit(with request: URLRequest) -> Bool { true }
+            override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+            override func startLoading() {
+                Self.attemptCount += 1
+                let url = request.url!
+                if Self.attemptCount == 1 {
+                    let r = HTTPURLResponse(url: url, statusCode: 503, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "text/html"])!
+                    client?.urlProtocol(self, didReceive: r, cacheStoragePolicy: .notAllowed)
+                    client?.urlProtocolDidFinishLoading(self)
+                } else {
+                    let r = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "text/html"])!
+                    client?.urlProtocol(self, didReceive: r, cacheStoragePolicy: .notAllowed)
+                    client?.urlProtocol(self, didLoad: Self.html.data(using: .utf8)!)
+                    client?.urlProtocolDidFinishLoading(self)
+                }
+            }
+            override func stopLoading() {}
+        }
+
+        CountingStub.attemptCount = 0
+        CountingStub.html = loadFixture("openreview-forum")
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CountingStub.self]
+        let session = URLSession(configuration: config)
+
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: "https://openreview.net/forum?id=EXAMPLE")!,
+            session: session
+        )
+        XCTAssertEqual(CountingStub.attemptCount, 2)
+        XCTAssertEqual(outcome.reference.title, "Attention Is All You Need")
+    }
+
+    // MARK: - HTTP 404 does not retry
+
+    func testHTTP404DoesNotRetry() async {
+        StubURLProtocol.stub("https://openreview.net/forum?id=DEAD", status: 404, body: "")
+
+        do {
+            _ = try await PaperURLResolver.resolve(
+                URL(string: "https://openreview.net/forum?id=DEAD")!,
+                session: StubURLProtocol.makeSession()
+            )
+            XCTFail("Expected fetchFailed")
+        } catch PaperURLResolver.ResolveError.fetchFailed(let status, _) {
+            XCTAssertEqual(status, 404)
+        } catch {
+            XCTFail("Wrong error: \(error)")
+        }
+    }
+}
