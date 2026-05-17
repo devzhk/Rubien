@@ -94,8 +94,20 @@ public enum PDFDownloadService {
         return fileName
     }
 
-    public static func downloadPDF(for reference: Reference) async throws -> String {
+    public static func downloadPDF(
+        for reference: Reference,
+        overrideURL: String? = nil
+    ) async throws -> String {
         let suggestedName = suggestedFilename(for: reference)
+
+        // 0. Caller-supplied override (e.g., scraped paper-URL PDF for a
+        // venue page with no DOI). Skip preprint and arXiv/OpenAlex resolution
+        // entirely so we honor exactly the URL the resolver chose.
+        if let override = overrideURL?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !override.isEmpty,
+           let url = URL(string: override) {
+            return try await download(from: url, suggestedFilename: suggestedName)
+        }
 
         // 1. Try preprint-server direct (bioRxiv / medRxiv). On any error other
         // than local-write failure or cancellation, fall through so OpenAlex can

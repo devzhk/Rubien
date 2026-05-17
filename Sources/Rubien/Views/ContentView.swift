@@ -347,12 +347,24 @@ final class LibraryViewModel: ObservableObject {
     /// that channel drives a modal alert and would interrupt the user after the import
     /// sheet has already dismissed. The work runs detached so the GRDB writer queue
     /// never blocks the main actor.
-    func downloadPDFInBackground(for reference: Reference, id: Int64) {
+    ///
+    /// `pdfURLOverride` lets the caller (currently Add-by-Identifier) bypass the
+    /// arXiv/OpenAlex resolver when the manual-entry resolver already scraped a
+    /// PDF URL from the venue page — e.g. OpenReview / CVF / PMLR papers that
+    /// have no DOI to feed OpenAlex.
+    func downloadPDFInBackground(
+        for reference: Reference,
+        id: Int64,
+        pdfURLOverride: String? = nil
+    ) {
         let db = self.db
         let coordinator = self.syncCoordinator
         Task.detached(priority: .userInitiated) {
             do {
-                let newPath = try await PDFDownloadService.downloadPDF(for: reference)
+                let newPath = try await PDFDownloadService.downloadPDF(
+                    for: reference,
+                    overrideURL: pdfURLOverride
+                )
                 try db.attachImportedPDFs(rowIds: [id], filenames: [newPath])
                 Task { await coordinator?.kickPDFUploadDrainer() }
             } catch {
@@ -1016,11 +1028,15 @@ struct ContentView: View {
         .sheet(isPresented: $showAddByIdentifier) {
             AddByIdentifierView(
                 resolver: metadataResolver,
-                onSave: { ref, downloadPDF in
+                onSave: { ref, downloadPDF, pdfURLOverride in
                     var r = ref
                     viewModel.saveReference(&r)
                     if downloadPDF, let id = r.id {
-                        viewModel.downloadPDFInBackground(for: r, id: id)
+                        viewModel.downloadPDFInBackground(
+                            for: r,
+                            id: id,
+                            pdfURLOverride: pdfURLOverride
+                        )
                     }
                 },
                 onQueueResult: { result, input in

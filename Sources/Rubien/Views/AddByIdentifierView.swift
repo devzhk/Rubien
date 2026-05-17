@@ -4,7 +4,7 @@ import RubienCore
 
 struct AddByIdentifierView: View {
     let resolver: MetadataResolver
-    let onSave: (Reference, _ downloadPDF: Bool) -> Void
+    let onSave: (Reference, _ downloadPDF: Bool, _ pdfURLOverride: String?) -> Void
     let onQueueResult: (MetadataResolutionResult, String) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -15,9 +15,10 @@ struct AddByIdentifierView: View {
     @State private var errorMessage: String?
     @State private var statusMessage: String?
     @State private var downloadPDFOnImport: Bool = true
-    // Captured from ManualEntryOutcome.preferredPDFURL on resolve. Wired but not
-    // yet forwarded to onSave — Task 6 extends the onSave signature to
-    // (Reference, Bool, String?) and gates the toggle on this value.
+    // Captured from ManualEntryOutcome.preferredPDFURL on resolve. Threaded
+    // into onSave so a venue-page URL (OpenReview / CVF / PMLR) without a DOI
+    // can still download a PDF; also gates the Toggle so the checkbox is
+    // enabled whenever we have any usable PDF source (DOI or scraped URL).
     @State private var preferredPDFURL: String?
 
     var body: some View {
@@ -44,7 +45,7 @@ struct AddByIdentifierView: View {
                 .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isFetching)
             }
 
-            Text("Supports DOI · arXiv · PMID · PMCID · ISBN · paper title")
+            Text("Supports DOI · arXiv · PMID · PMCID · ISBN · paper URL · title")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -80,7 +81,10 @@ struct AddByIdentifierView: View {
                     isOn: $downloadPDFOnImport
                 )
                 .toggleStyle(.checkbox)
-                .disabled(!ref.canDownloadPDF)
+                .disabled(Self.toggleDisabled(
+                    canDownloadPDF: ref.canDownloadPDF,
+                    preferredPDFURL: preferredPDFURL
+                ))
                 .frame(maxWidth: .infinity, alignment: .leading)
             } else if let pendingResolution {
                 pendingCard(
@@ -107,8 +111,12 @@ struct AddByIdentifierView: View {
                 }
                 Button(String(localized: "Import to library", bundle: .module)) {
                     if let ref = fetchedReference {
-                        let shouldDownload = downloadPDFOnImport && ref.canDownloadPDF
-                        onSave(ref, shouldDownload)
+                        let shouldDownload = Self.shouldDownload(
+                            toggleChecked: downloadPDFOnImport,
+                            canDownloadPDF: ref.canDownloadPDF,
+                            preferredPDFURL: preferredPDFURL
+                        )
+                        onSave(ref, shouldDownload, preferredPDFURL)
                         dismiss()
                     }
                 }
@@ -285,6 +293,28 @@ struct AddByIdentifierView: View {
         envelope.currentReference == nil
             && envelope.fallbackReference == nil
             && envelope.seed == nil
+    }
+
+    // MARK: - Testable gating predicates
+
+    /// Toggle is disabled when there's no PDF source — neither a DOI/arXiv-style
+    /// identifier the existing PDF pipeline can act on, nor a scraped paper-URL
+    /// override from the resolver. Extracted as `static` so
+    /// `AddByIdentifierGatingTests` can exercise the exact predicate the view
+    /// renders.
+    static func toggleDisabled(canDownloadPDF: Bool, preferredPDFURL: String?) -> Bool {
+        !(canDownloadPDF || preferredPDFURL != nil)
+    }
+
+    /// Mirrors the onSave-time computation for the `downloadPDF` argument: the
+    /// user's checkbox state AND availability of a PDF source. Same testability
+    /// motivation as `toggleDisabled`.
+    static func shouldDownload(
+        toggleChecked: Bool,
+        canDownloadPDF: Bool,
+        preferredPDFURL: String?
+    ) -> Bool {
+        toggleChecked && (canDownloadPDF || preferredPDFURL != nil)
     }
 
     private func pendingResolutionMessage(_ result: MetadataResolutionResult) -> String {
