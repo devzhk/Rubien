@@ -20,8 +20,6 @@ public enum PaperURLResolver {
         case redirectedAwayFromAllowlist(finalHost: String)
         case unexpectedContentType(String)
         case insufficientMetadata
-        case bibtexNotFound
-        case bibtexEmpty
         /// Empty `Reference.authors` after merge. Payload includes the
         /// partially-scraped Reference so the caller can construct a
         /// CandidateEnvelope for user review per spec §4. scrapedPDFURL
@@ -55,10 +53,7 @@ public enum PaperURLResolver {
         // 3. Rewrite PDF URL → landing URL if applicable.
         let landingURL = rewritePDFURLToLanding(canonical, host: host)
 
-        // 4. Dispatch to the citation_* meta-tag scraper. All hosts in the
-        //    allowlist — CVF included — expose citation_* tags on their paper
-        //    landing pages; CVF's metadataSource is set inside resolveCitationMeta
-        //    based on the host bucket.
+        // 4. Dispatch to the citation_* meta-tag scraper.
         let (scrapedReference, scrapedPDFURL) = try await resolveCitationMeta(landingURL: landingURL, host: host, session: session)
 
         // 5. If DOI present, re-fetch via CrossRef.
@@ -411,8 +406,8 @@ internal struct PaperURLHTTPResponse: Sendable {
 
 internal extension PaperURLResolver {
     /// Performs an HTTP GET with retry, content-type filtering, and a redirect-host
-    /// check against the KnownPaperHost allowlist. Used by both CitationMetaScraper
-    /// and the CVF BibTeX adapter.
+    /// check against the KnownPaperHost allowlist. Used by CitationMetaScraper
+    /// for every allowlisted host (CVF included).
     ///
     /// Retry contract (matches CitationMetaScraper §2.1):
     /// - URLError.timedOut: retry, 1s base, exponential

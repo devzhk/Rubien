@@ -7,8 +7,8 @@ private let metadataLog = RubienLogger(subsystem: "com.rubien.metadata", categor
 
 public enum MetadataSource: String, Codable, CaseIterable, DatabaseValueConvertible, Sendable {
     case translationServer
-    case cvfOpenAccess          // paper-URL flow, CVF BibTeX adapter
-    case publisherCitationMeta  // paper-URL flow, citation_* scraper
+    case cvfOpenAccess          // paper-URL flow, CVF Open Access citation_* scraper
+    case publisherCitationMeta  // paper-URL flow, generic publisher citation_* scraper
 
     public var displayName: String {
         switch self {

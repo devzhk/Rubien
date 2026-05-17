@@ -88,6 +88,12 @@ public enum CitationMetaScraper {
     /// Each match's group 1 is everything between `<meta ` and `>` (or `/>`),
     /// which is then parsed by `parseAttributes` to handle all three HTML5
     /// attribute-value quoting styles (double-quoted, single-quoted, unquoted).
+    ///
+    /// Known limitation: attribute values containing a literal `>` (e.g.
+    /// `content="A > B"`) will be truncated by the `[^>]` capture. This does
+    /// not arise in practice for `citation_*` tag content (paper titles,
+    /// author names, DOIs, URLs), and the previous two-regex approach had
+    /// the same limitation.
     private static let metaTagRegex = try! NSRegularExpression(
         pattern: #"<meta\s+([^>]+?)\s*/?>"#,
         options: [.caseInsensitive]
@@ -132,45 +138,45 @@ public enum CitationMetaScraper {
     ///   `content="X" name=citation_title`  -> ["content": "X", "name": "citation_title"]
     private static func parseAttributes(_ attrs: String) -> [String: String] {
         var result: [String: String] = [:]
-        let scalars = Array(attrs)
+        let chars = Array(attrs)
         var i = 0
-        while i < scalars.count {
+        while i < chars.count {
             // Skip whitespace
-            while i < scalars.count, scalars[i].isWhitespace { i += 1 }
-            if i >= scalars.count { break }
+            while i < chars.count, chars[i].isWhitespace { i += 1 }
+            if i >= chars.count { break }
 
             // Read attribute name (until '=' or whitespace)
             let nameStart = i
-            while i < scalars.count, !scalars[i].isWhitespace, scalars[i] != "=" { i += 1 }
-            let name = String(scalars[nameStart..<i]).lowercased()
+            while i < chars.count, !chars[i].isWhitespace, chars[i] != "=" { i += 1 }
+            let name = String(chars[nameStart..<i]).lowercased()
             if name.isEmpty { i += 1; continue }
 
             // Skip whitespace before '='
-            while i < scalars.count, scalars[i].isWhitespace { i += 1 }
+            while i < chars.count, chars[i].isWhitespace { i += 1 }
 
             // Attribute with no value (e.g., `disabled`).
-            guard i < scalars.count, scalars[i] == "=" else {
+            guard i < chars.count, chars[i] == "=" else {
                 result[name] = ""
                 continue
             }
             i += 1
 
             // Skip whitespace after '='
-            while i < scalars.count, scalars[i].isWhitespace { i += 1 }
-            if i >= scalars.count { result[name] = ""; break }
+            while i < chars.count, chars[i].isWhitespace { i += 1 }
+            if i >= chars.count { result[name] = ""; break }
 
             // Read value (quoted or unquoted)
-            if scalars[i] == "\"" || scalars[i] == "'" {
-                let quote = scalars[i]
+            if chars[i] == "\"" || chars[i] == "'" {
+                let quote = chars[i]
                 i += 1
                 let valueStart = i
-                while i < scalars.count, scalars[i] != quote { i += 1 }
-                result[name] = String(scalars[valueStart..<i])
-                if i < scalars.count { i += 1 } // consume closing quote
+                while i < chars.count, chars[i] != quote { i += 1 }
+                result[name] = String(chars[valueStart..<i])
+                if i < chars.count { i += 1 } // consume closing quote
             } else {
                 let valueStart = i
-                while i < scalars.count, !scalars[i].isWhitespace { i += 1 }
-                result[name] = String(scalars[valueStart..<i])
+                while i < chars.count, !chars[i].isWhitespace { i += 1 }
+                result[name] = String(chars[valueStart..<i])
             }
         }
         return result
