@@ -646,12 +646,20 @@ struct Add: AsyncParsableCommand {
             throw ExitCode.failure
         }
         if let id = identifier {
-            var ref = try await MetadataFetcher.fetch(from: id)
-            ref = MetadataVerifier.manuallyVerified(ref, reviewedBy: "cli-identifier")
-            let result = try AppDatabase.shared.saveReference(&ref)
+            let ref: Reference
+            do {
+                var fetched = try await MetadataFetcher.fetch(from: id)
+                fetched = MetadataVerifier.manuallyVerified(fetched, reviewedBy: "cli-identifier")
+                ref = fetched
+            } catch let error as MetadataFetcher.FetchError {
+                printJSONError(error.errorDescription ?? String(describing: error))
+                throw ExitCode.failure
+            }
+            var mutableRef = ref
+            let result = try AppDatabase.shared.saveReference(&mutableRef)
             notifyLibraryChanged()
-            let pdfStatus = downloadPdf ? await attemptPDFDownload(for: ref) : nil
-            let dto = try referenceDTO(for: ref)
+            let pdfStatus = downloadPdf ? await attemptPDFDownload(for: mutableRef) : nil
+            let dto = try referenceDTO(for: mutableRef)
             printJSON(AddStatusOutput(reference: dto, status: result, pdfDownload: pdfStatus))
         } else if let bib = bibtex {
             let parsed = BibTeXImporter.parse(bib)

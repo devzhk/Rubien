@@ -62,6 +62,8 @@ public enum MetadataFetcher {
         case arxiv(String)
         case isbn(String)
         case pmcid(String)
+        /// Paper landing-page URL on a known host (resolved via `PaperURLResolver`).
+        case paperURL(URL)
     }
 
     /// Parse raw text input and detect identifier type (priority: DOI > arXiv > ISBN > PMCID > PMID)
@@ -73,6 +75,19 @@ public enum MetadataFetcher {
         // (rare but possible) doesn't accidentally route through DOI extraction.
         if let pmcid = extractPMCIDFromURL(trimmed) {
             return .pmcid(pmcid)
+        }
+
+        // Paper landing-page URL on a known host with a known path shape.
+        // Placed before DOI extraction so URLs like
+        //   https://link.springer.com/article/10.1007/s11042-024-12345-6
+        // route through PaperURLResolver (preserves landing URL on Reference.url)
+        // rather than the bare DOI extractor (which would route to CrossRef and
+        // lose publisher-page context).
+        if let url = URL(string: trimmed),
+           let scheme = url.scheme?.lowercased(),
+           (scheme == "http" || scheme == "https"),
+           KnownPaperHost.classify(url) != nil {
+            return .paperURL(url)
         }
 
         // DOI: 10.XXXX/... (most specific)
@@ -1101,6 +1116,29 @@ public enum MetadataFetcher {
             return try await fetchFromISBN(isbn)
         case .pmcid(let pmcid):
             return try await fetchFromPMCID(pmcid)
+        case .paperURL(let url):
+            // Route paper URLs through PaperURLResolver so the CLI (which calls
+            // fetch(from:) directly at RubienCLI.swift:649) gets a Reference back.
+            // The CLI does not use ManualEntryOutcome / preferredPDFURL — it just
+            // needs the Reference.
+            do {
+                let outcome = try await PaperURLResolver.resolve(url)
+                return outcome.reference
+            } catch PaperURLResolver.ResolveError.noAuthorsAvailable {
+                // CLI has no candidate-review channel. Throwing here is the right
+                // call — silently importing a no-author Reference via fetch(from:)
+                // would save a half-baked record (the schema accepts empty authors
+                // as TEXT NOT NULL DEFAULT "", so nothing rejects it downstream).
+                // The Mac app gets the .candidate path via MetadataResolver's catch
+                // handler in resolveIdentifierLocally; the CLI gets an error.
+                throw FetchError.unsupported(
+                    "Paper URL resolved but no authors were found. Review the page or paste a DOI."
+                )
+            } catch let error as PaperURLResolver.ResolveError {
+                throw FetchError.unsupported(String(describing: error))
+            } catch {
+                throw FetchError.unsupported(error.localizedDescription)
+            }
         }
     }
 
