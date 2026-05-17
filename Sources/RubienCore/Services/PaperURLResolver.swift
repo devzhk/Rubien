@@ -35,7 +35,12 @@ public enum PaperURLResolver {
     public static func resolve(
         _ url: URL,
         session: URLSession = .shared,
-        crossrefFetcher: @Sendable (String) async throws -> Reference = MetadataFetcher.fetchFromDOI
+        // Wrapped in an explicit @Sendable closure rather than passing
+        // `MetadataFetcher.fetchFromDOI` directly: Swift 6 can't auto-infer
+        // Sendable for static funcs on a type with mutable static state
+        // (MetadataFetcher.contactEmail). The closure captures nothing and
+        // is trivially Sendable.
+        crossrefFetcher: @Sendable (String) async throws -> Reference = { try await MetadataFetcher.fetchFromDOI($0) }
     ) async throws -> Outcome {
         // 1. Canonicalize.
         guard let canonical = canonicalize(url) else {
@@ -50,13 +55,11 @@ public enum PaperURLResolver {
         // 3. Rewrite PDF URL → landing URL if applicable.
         let landingURL = rewritePDFURLToLanding(canonical, host: host)
 
-        // 4. Dispatch to host-specific adapter.
-        let (scrapedReference, scrapedPDFURL): (Reference, String?)
-        if host == .cvfOpenAccess {
-            (scrapedReference, scrapedPDFURL) = try await resolveCVF(landingURL: landingURL, session: session)
-        } else {
-            (scrapedReference, scrapedPDFURL) = try await resolveCitationMeta(landingURL: landingURL, host: host, session: session)
-        }
+        // 4. Dispatch to the citation_* meta-tag scraper. All hosts in the
+        //    allowlist — CVF included — expose citation_* tags on their paper
+        //    landing pages; CVF's metadataSource is set inside resolveCitationMeta
+        //    based on the host bucket.
+        let (scrapedReference, scrapedPDFURL) = try await resolveCitationMeta(landingURL: landingURL, host: host, session: session)
 
         // 5. If DOI present, re-fetch via CrossRef.
         var finalReference = scrapedReference
@@ -71,8 +74,10 @@ public enum PaperURLResolver {
                     finalReference = MetadataResolution.mergeReference(primary: crossref, fallback: scrapedReference)
                     // Force canonical landing URL — CrossRef may have populated url with doi.org redirect.
                     finalReference.url = landingURL.absoluteString
-                    // Keep metadataSource as publisherCitationMeta (the user pasted a publisher URL,
-                    // not just a DOI; provenance should reflect that path).
+                    // Preserve the per-host metadataSource the scraper assigned
+                    // (.cvfOpenAccess for CVF, .publisherCitationMeta otherwise):
+                    // the user pasted a publisher URL, so provenance reflects
+                    // that path rather than CrossRef.
                     finalReference.metadataSource = scrapedReference.metadataSource
                 } else {
                     // Title mismatch (chapter-vs-book scenario) — keep scraper-only.
@@ -140,6 +145,13 @@ public enum PaperURLResolver {
             return meta.firstPage
         }()
 
+        // CVF Open Access papers are labeled with their own source so the UI
+        // can distinguish them from generic publisher pages. Every other host
+        // labels as .publisherCitationMeta.
+        let metadataSource: MetadataSource = (host == .cvfOpenAccess)
+            ? .cvfOpenAccess
+            : .publisherCitationMeta
+
         let ref = Reference(
             title: title,
             authors: meta.authors,
@@ -152,55 +164,13 @@ public enum PaperURLResolver {
             url: landingURL.absoluteString,
             abstract: meta.abstract,
             referenceType: referenceType,
-            metadataSource: .publisherCitationMeta,
+            metadataSource: metadataSource,
             publisher: meta.publisher,
             isbn: meta.isbn,
             issn: meta.issn,
             eventTitle: (referenceType == .conferencePaper) ? meta.conferenceTitle : nil
         )
         return (ref, meta.pdfURL)
-    }
-
-    // MARK: - CVF BibTeX dispatch
-
-    private static let cvfPreTagRegex = try! NSRegularExpression(
-        pattern: #"(?s)<pre[^>]*>(.+?)</pre>"#,
-        options: [.caseInsensitive]
-    )
-
-    private static func resolveCVF(
-        landingURL: URL,
-        session: URLSession
-    ) async throws -> (Reference, String?) {
-        let response = try await fetchHTML(url: landingURL, session: session)
-        let html = String(data: response.data, encoding: .utf8) ?? ""
-
-        // Extract <pre>...</pre> contents.
-        let regex = cvfPreTagRegex
-        let range = NSRange(html.startIndex..., in: html)
-        guard let match = regex.firstMatch(in: html, options: [], range: range),
-              let bibRange = Range(match.range(at: 1), in: html) else {
-            throw ResolveError.bibtexNotFound
-        }
-        let bibtex = String(html[bibRange])
-
-        let refs = BibTeXImporter.parse(bibtex)
-        guard let first = refs.first,
-              !first.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw ResolveError.bibtexEmpty
-        }
-
-        // Synthesize PDF URL from landing URL.
-        let pdfURL = landingURL.absoluteString
-            .replacingOccurrences(of: "/html/", with: "/papers/")
-            .replacingOccurrences(of: ".html", with: ".pdf")
-
-        var ref = first
-        ref.url = landingURL.absoluteString
-        ref.metadataSource = .cvfOpenAccess
-        ref.referenceType = .conferencePaper
-
-        return (ref, pdfURL)
     }
 }
 

@@ -138,24 +138,25 @@ final class PaperURLResolverTests: XCTestCase {
         }
     }
 
-    // MARK: - CVF BibTeX path
+    // MARK: - CVF citation_* path
 
-    func testCVFLandingExtractsFromBibTeX() async throws {
-        StubURLProtocol.stub(
-            "https://openaccess.thecvf.com/content/CVPR2024/html/Foo_paper.html",
-            body: loadFixture("cvf-paper")
-        )
+    func testCVFLandingExtractsFromCitationMeta() async throws {
+        let url = "https://openaccess.thecvf.com/content/CVPR2025/html/Wang_VGGT_Visual_Geometry_Grounded_Transformer_CVPR_2025_paper.html"
+        StubURLProtocol.stub(url, body: loadFixture("cvf-paper"))
 
         let outcome = try await PaperURLResolver.resolve(
-            URL(string: "https://openaccess.thecvf.com/content/CVPR2024/html/Foo_paper.html")!,
+            URL(string: url)!,
             session: StubURLProtocol.makeSession()
         )
 
-        XCTAssertEqual(outcome.reference.title, "A Sample CVPR Paper")
+        XCTAssertEqual(outcome.reference.title, "VGGT: Visual Geometry Grounded Transformer")
         XCTAssertEqual(outcome.reference.referenceType, .conferencePaper)
         XCTAssertEqual(outcome.reference.metadataSource, .cvfOpenAccess)
-        XCTAssertEqual(outcome.reference.authors.count, 2)
-        XCTAssertEqual(outcome.scrapedPDFURL, "https://openaccess.thecvf.com/content/CVPR2024/papers/Foo_paper.pdf")
+        XCTAssertEqual(outcome.reference.authors.count, 6)
+        XCTAssertEqual(outcome.reference.authors.first?.family, "Wang")
+        XCTAssertEqual(outcome.reference.year, 2025)
+        XCTAssertEqual(outcome.reference.pages, "5294-5306")
+        XCTAssertEqual(outcome.scrapedPDFURL, "https://openaccess.thecvf.com/content/CVPR2025/papers/Wang_VGGT_Visual_Geometry_Grounded_Transformer_CVPR_2025_paper.pdf")
     }
 
     // MARK: - Canonical Reference.url after canonicalization
