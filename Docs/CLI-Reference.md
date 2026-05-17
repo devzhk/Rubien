@@ -134,23 +134,26 @@ rubien-cli get 42
 
 ## add
 
-Add a reference via DOI/arXiv/PMID/PMCID/ISBN, BibTeX string, or manual title.
+Add a reference via DOI / arXiv / PMID / PMCID / ISBN / paper-landing URL, BibTeX string, or manual title.
 
 ```bash
 rubien-cli add --identifier "10.1038/s41586-021-03819-2"
 rubien-cli add --identifier "2106.04561" --download-pdf
 rubien-cli add --identifier "PMC4587766"
 rubien-cli add --identifier "https://pmc.ncbi.nlm.nih.gov/articles/PMC4587766/"
+rubien-cli add --identifier "https://openreview.net/forum?id=YicbFdNTTy" --download-pdf
+rubien-cli add --identifier "https://aclanthology.org/2025.acl-long.1141.pdf" --download-pdf
+rubien-cli add --identifier "https://openaccess.thecvf.com/content/CVPR2025/html/Wang_VGGT_Visual_Geometry_Grounded_Transformer_CVPR_2025_paper.html" --download-pdf
 rubien-cli add --bibtex '@article{..., title={...}, ...}'
 rubien-cli add --title "My Paper"
 ```
 
 | Option | Type | Description |
 |---|---|---|
-| `--identifier` | String | DOI, arXiv ID, PMID, PMCID, or ISBN — metadata is fetched automatically. PMCIDs (`PMC1234567` or `pmc.ncbi.nlm.nih.gov/articles/PMC.../`) resolve via NCBI's ID converter then delegate to PubMed/CrossRef. |
+| `--identifier` | String | DOI, arXiv ID, PMID, PMCID, ISBN, or a paper landing-page URL — metadata is fetched automatically. Supported URL hosts: `openreview.net`, `aclanthology.org`, `openaccess.thecvf.com`, `papers.nips.cc`, `proceedings.neurips.cc`, `proceedings.mlr.press`, `ieeexplore.ieee.org`, `dl.acm.org`, `nature.com`, `link.springer.com`, `sciencedirect.com`. Paper URLs are scraped via `<meta name="citation_*">` tags; if the page includes a `citation_doi`, the resolver re-fetches via CrossRef for canonical fields. Direct PDF URLs (e.g. `aclanthology.org/<id>.pdf`) are rewritten to their landing pages before scraping. PMCIDs (`PMC1234567` or `pmc.ncbi.nlm.nih.gov/articles/PMC.../`) resolve via NCBI's ID converter then delegate to PubMed/CrossRef. |
 | `--bibtex` | String | BibTeX source string (can contain multiple entries) |
 | `--title` | String | Title for manual entry (creates a minimal reference) |
-| `--download-pdf` | Flag | Only valid with `--identifier`. After metadata lookup, fetch the open-access PDF. The reference is saved either way; PDF failures are reported in the envelope rather than aborting. |
+| `--download-pdf` | Flag | Only valid with `--identifier`. After metadata lookup, fetch the open-access PDF. For DOI / arXiv / PMID / PMCID inputs, the open-access PDF is resolved via arXiv (preprints) or OpenAlex's best-OA-location (any DOI). For paper-URL inputs, the PDF URL is taken from `citation_pdf_url` on the scraped page — this makes `--download-pdf` work on OpenReview / CVF / PMLR papers that have no DOI. The reference is saved either way; PDF failures are reported in the envelope rather than aborting. |
 
 Exactly one of `--identifier`, `--bibtex`, or `--title` is required.
 
@@ -161,7 +164,7 @@ Exactly one of `--identifier`, `--bibtex`, or `--title` is required.
   - `"existing"` — the input matched an existing reference (deduped by normalized DOI / PMID / PMCID / ISBN / URL / ISSN+title+year); `mergedReference` folded any non-empty incoming fields into the existing row. `reference.id` is the existing row's id.
 - `pdfDownload` is always present (explicit `null`, not omitted):
   - `null` when `--download-pdf` was not set.
-  - `{ "ok": Bool, "action": String?, "filename": String?, "error": String? }` when `--download-pdf` was set. `action` values: `"downloaded"`, `"already-attached"`, `"already-pending"` (cache row exists but the file hasn't been materialized yet — sync will deliver it), `"skipped"` (the reference has no DOI/arXiv to fetch from). The command exits 0 regardless of `pdfDownload.ok`.
+  - `{ "ok": Bool, "action": String?, "filename": String?, "error": String? }` when `--download-pdf` was set. `action` values: `"downloaded"`, `"already-attached"`, `"already-pending"` (cache row exists but the file hasn't been materialized yet — sync will deliver it), `"skipped"` (no DOI/arXiv identifier AND no scraped `citation_pdf_url` — happens for raw title-only entries or DOI-less paper URLs whose landing page omitted the PDF link). The command exits 0 regardless of `pdfDownload.ok`.
 
 ---
 

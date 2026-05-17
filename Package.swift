@@ -116,7 +116,10 @@ let package = Package(
                 // methods. See Docs/Linux-PDF-Backend.md.
                 .target(name: "RubienPDFKit", condition: .when(platforms: [.macOS])),
             ],
-            path: "Tests/RubienCoreTests"
+            path: "Tests/RubienCoreTests",
+            resources: [
+                .copy("Fixtures/CitationMeta")
+            ]
         ),
         .testTarget(
             name: "RubienPDFKitTests",

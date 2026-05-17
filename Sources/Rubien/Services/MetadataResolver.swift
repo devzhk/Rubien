@@ -28,6 +28,16 @@ struct ManualCandidateImportAssessment {
     let missingFields: [String]
 }
 
+struct ManualEntryOutcome: Sendable {
+    let result: MetadataResolutionResult
+    let preferredPDFURL: String?    // populated only on .verified from paper-URL path
+
+    init(result: MetadataResolutionResult, preferredPDFURL: String? = nil) {
+        self.result = result
+        self.preferredPDFURL = preferredPDFURL
+    }
+}
+
 @MainActor
 final class MetadataResolver {
 
@@ -40,14 +50,14 @@ final class MetadataResolver {
         let fallback = MetadataResolutionSeed.fallbackReference(from: extracted, url: url)
 
         if let doi = seed.doi?.rubien_nilIfBlank {
-            let result = await resolveIdentifierLocally(.doi(doi), seed: seed, fallback: fallback)
+            let (result, _) = await resolveIdentifierLocally(.doi(doi), seed: seed, fallback: fallback)
             if case .verified = result { return result }
             if case .candidate = result { return result }
             if case .blocked = result { return result }
         }
 
         if let isbn = seed.isbn?.rubien_nilIfBlank {
-            let result = await resolveIdentifierLocally(.isbn(isbn), seed: seed, fallback: fallback)
+            let (result, _) = await resolveIdentifierLocally(.isbn(isbn), seed: seed, fallback: fallback)
             if case .verified = result { return result }
             if case .candidate = result { return result }
             if case .blocked = result { return result }
@@ -91,21 +101,22 @@ final class MetadataResolver {
 
     // MARK: - Manual entry (paste DOI / arXiv / PMID / ISBN / title)
 
-    func resolveManualEntry(_ text: String) async -> MetadataResolutionResult {
+    func resolveManualEntry(_ text: String) async -> ManualEntryOutcome {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            return .rejected(
+            return ManualEntryOutcome(result: .rejected(
                 RejectedEnvelope(
                     seed: nil,
                     fallbackReference: nil,
                     reason: .unsupportedRoute,
-                    message: "Enter a DOI, arXiv ID, PMID, PMCID, ISBN, or paper title."
+                    message: "Enter a DOI, arXiv ID, PMID, PMCID, ISBN, paper URL, or paper title."
                 )
-            )
+            ))
         }
 
         if let identifier = MetadataFetcher.extractIdentifier(from: trimmed) {
-            return await resolveIdentifierLocally(identifier, seed: nil, fallback: nil)
+            let (result, scrapedPDFURL) = await resolveIdentifierLocally(identifier, seed: nil, fallback: nil)
+            return ManualEntryOutcome(result: result, preferredPDFURL: scrapedPDFURL)
         }
 
         // Treat any remaining input as a title search (OpenAlex -> Semantic Scholar)
@@ -115,30 +126,30 @@ final class MetadataResolver {
             workKindHint: .unknown
         )
         if let titleResult = await resolveByTitle(trimmed, seed: seed, fallback: nil) {
-            return titleResult
+            return ManualEntryOutcome(result: titleResult)
         }
-        return .rejected(
+        return ManualEntryOutcome(result: .rejected(
             RejectedEnvelope(
                 seed: seed,
                 fallbackReference: nil,
                 currentReference: nil,
                 reason: .insufficientEvidence,
-                message: "No matching record found. Try a DOI, arXiv ID, PMID, PMCID, or ISBN instead."
+                message: "No matching record found. Try a DOI, arXiv ID, PMID, PMCID, paper URL, or ISBN instead."
             )
-        )
+        ))
     }
 
     // MARK: - Seed-based resolution (used by retry path)
 
     func resolveSeed(_ seed: MetadataResolutionSeed, fallback: Reference?) async -> MetadataResolutionResult {
         if let doi = seed.doi?.rubien_nilIfBlank {
-            let result = await resolveIdentifierLocally(.doi(doi), seed: seed, fallback: fallback)
+            let (result, _) = await resolveIdentifierLocally(.doi(doi), seed: seed, fallback: fallback)
             if case .verified = result { return result }
             if case .candidate = result { return result }
             if case .blocked = result { return result }
         }
         if let isbn = seed.isbn?.rubien_nilIfBlank {
-            let result = await resolveIdentifierLocally(.isbn(isbn), seed: seed, fallback: fallback)
+            let (result, _) = await resolveIdentifierLocally(.isbn(isbn), seed: seed, fallback: fallback)
             if case .verified = result { return result }
             if case .candidate = result { return result }
             if case .blocked = result { return result }
@@ -185,7 +196,8 @@ final class MetadataResolver {
 
     func retryIntake(_ intake: MetadataIntake) async -> MetadataResolutionResult {
         if let originalInput = intake.originalInput?.rubien_nilIfBlank {
-            return await resolveManualEntry(originalInput)
+            let outcome = await resolveManualEntry(originalInput)
+            return outcome.result
         }
         if let seed = intake.decodedSeed {
             return await resolveSeed(
@@ -282,7 +294,7 @@ final class MetadataResolver {
         }
         guard let identifier else { return nil }
 
-        let localResult = await resolveIdentifierLocally(identifier, seed: seed, fallback: reference)
+        let (localResult, _) = await resolveIdentifierLocally(identifier, seed: seed, fallback: reference)
         let outcome = await refreshOutcome(from: localResult, original: reference)
         switch outcome {
         case .refreshed, .skipped:
@@ -370,20 +382,20 @@ final class MetadataResolver {
         _ identifier: MetadataFetcher.Identifier,
         seed: MetadataResolutionSeed?,
         fallback: Reference?
-    ) async -> MetadataResolutionResult {
+    ) async -> (MetadataResolutionResult, scrapedPDFURL: String?) {
         do {
-            let reference: Reference
+            // All non-paperURL identifiers fetch a Reference with no scrapedPDFURL;
+            // only .paperURL ever yields a non-nil URL via PaperURLResolver.
+            let (reference, scrapedPDFURL): (Reference, String?)
             switch identifier {
-            case .doi(let value):
-                reference = try await MetadataFetcher.fetchFromDOI(value)
-            case .pmid(let value):
-                reference = try await MetadataFetcher.fetchFromPMID(value)
-            case .arxiv(let value):
-                reference = try await MetadataFetcher.fetchFromArXiv(value)
-            case .isbn(let value):
-                reference = try await MetadataFetcher.fetchFromISBN(value)
-            case .pmcid(let value):
-                reference = try await MetadataFetcher.fetchFromPMCID(value)
+            case .doi(let value):    (reference, scrapedPDFURL) = (try await MetadataFetcher.fetchFromDOI(value), nil)
+            case .pmid(let value):   (reference, scrapedPDFURL) = (try await MetadataFetcher.fetchFromPMID(value), nil)
+            case .arxiv(let value):  (reference, scrapedPDFURL) = (try await MetadataFetcher.fetchFromArXiv(value), nil)
+            case .isbn(let value):   (reference, scrapedPDFURL) = (try await MetadataFetcher.fetchFromISBN(value), nil)
+            case .pmcid(let value):  (reference, scrapedPDFURL) = (try await MetadataFetcher.fetchFromPMCID(value), nil)
+            case .paperURL(let url):
+                let outcome = try await PaperURLResolver.resolve(url)
+                (reference, scrapedPDFURL) = (outcome.reference, outcome.scrapedPDFURL)
             }
 
             let evidence = buildGenericEvidence(
@@ -395,15 +407,35 @@ final class MetadataResolver {
                     ?? normalizedIdentifier(reference.isbn),
                 exactIdentifierMatch: true
             )
-            return verifyFetchedRecord(
+            let result = verifyFetchedRecord(
                 AuthoritativeMetadataRecord(reference: reference, evidence: evidence),
                 seed: seed,
                 fallback: fallback,
                 defaultRejectMessage: "Identifier matched, but auto-verification rules were not met."
             )
+
+            // Force scrapedPDFURL to nil on any non-verified outcome — preferredPDFURL
+            // is defined as "populated only on .verified". See ManualEntryOutcome.
+            let effectiveScrapedPDFURL: String? = {
+                if case .verified = result { return scrapedPDFURL }
+                return nil
+            }()
+            return (result, effectiveScrapedPDFURL)
+        } catch PaperURLResolver.ResolveError.noAuthorsAvailable(let partialRef, _) {
+            // Spec §4: empty Reference.authors produces .candidate (NOT .rejected),
+            // so the user reviews the partial metadata before importing.
+            // scrapedPDFURL is intentionally discarded — preferredPDFURL is
+            // .verified-only.
+            resolverTrace("resolveIdentifierLocally noAuthorsAvailable: title=\(partialRef.title)")
+            let envelope = MetadataResolver.candidateEnvelopeForNoAuthors(
+                partialRef: partialRef,
+                seed: seed,
+                fallback: fallback
+            )
+            return (.candidate(envelope), nil)
         } catch {
             resolverTrace("resolveIdentifierLocally failed error=\"\(error.localizedDescription)\"")
-            return .rejected(
+            return (.rejected(
                 RejectedEnvelope(
                     seed: seed,
                     fallbackReference: fallback,
@@ -411,7 +443,7 @@ final class MetadataResolver {
                     reason: .insufficientEvidence,
                     message: error.localizedDescription
                 )
-            )
+            ), nil)
         }
     }
 
@@ -666,6 +698,46 @@ final class MetadataResolver {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+extension MetadataResolver {
+    /// Builds a CandidateEnvelope for the no-author safeguard path. Called
+    /// from resolveIdentifierLocally's catch handler when PaperURLResolver
+    /// throws .noAuthorsAvailable.
+    nonisolated static func candidateEnvelopeForNoAuthors(
+        partialRef: Reference,
+        seed: MetadataResolutionSeed?,
+        fallback: Reference?
+    ) -> CandidateEnvelope {
+        let candidate = MetadataCandidate(
+            source: partialRef.metadataSource ?? .publisherCitationMeta,
+            title: partialRef.title,
+            authors: partialRef.authors,
+            journal: partialRef.journal,
+            publisher: partialRef.publisher,
+            year: partialRef.year,
+            detailURL: partialRef.url ?? "",
+            // Score 1.0 — direct-source URL, no competing candidates, single
+            // entry list. The user is reviewing because authors are missing,
+            // not because of low confidence in the match. < candidateThreshold
+            // (0.52) would render as a misleading "50% match" in the UI.
+            score: 1.0,
+            snippet: partialRef.abstract,
+            workKind: .unknown,
+            referenceType: partialRef.referenceType,
+            isbn: partialRef.isbn,
+            issn: partialRef.issn,
+            sourceRecordID: partialRef.doi
+        )
+        return CandidateEnvelope(
+            seed: seed,
+            fallbackReference: fallback,
+            currentReference: partialRef,
+            candidates: [candidate],
+            message: "Found a paper, but no authors are listed on the page or in CrossRef. Review before importing.",
+            evidence: nil
+        )
     }
 }
 #endif

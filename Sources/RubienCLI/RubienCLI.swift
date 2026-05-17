@@ -345,9 +345,14 @@ struct AddStatusOutput: Encodable {
 /// Download via `PDFDownloadService`, attach via `attachImportedPDFs`,
 /// and clean up the on-disk file if the attach throws. Returns the local
 /// filename on success. Callers handle verification-after-attach and
-/// the success notifications.
-private func downloadAndAttachPDF(for ref: Reference, refId: Int64) async throws -> String {
-    let filename = try await PDFDownloadService.downloadPDF(for: ref)
+/// the success notifications. When `pdfURLOverride` is provided, the
+/// download service uses it directly and skips arXiv/OpenAlex resolution.
+private func downloadAndAttachPDF(
+    for ref: Reference,
+    refId: Int64,
+    pdfURLOverride: String? = nil
+) async throws -> String {
+    let filename = try await PDFDownloadService.downloadPDF(for: ref, overrideURL: pdfURLOverride)
     do {
         try AppDatabase.shared.attachImportedPDFs(rowIds: [refId], filenames: [filename])
     } catch {
@@ -360,8 +365,15 @@ private func downloadAndAttachPDF(for ref: Reference, refId: Int64) async throws
 
 /// Best-effort PDF download for `add --identifier --download-pdf`. The
 /// reference is already saved by the caller, so all error paths must
-/// soft-fail into the DTO so the command still exits 0.
-func attemptPDFDownload(for ref: Reference) async -> PDFDownloadStatusDTO {
+/// soft-fail into the DTO so the command still exits 0. When
+/// `pdfURLOverride` is provided (e.g. from `citation_pdf_url` on a
+/// paper-landing-page scrape), the download path uses it directly —
+/// supporting papers that have no DOI / arXiv identifier (OpenReview,
+/// CVF, PMLR) but do expose a publisher PDF URL.
+func attemptPDFDownload(
+    for ref: Reference,
+    pdfURLOverride: String? = nil
+) async -> PDFDownloadStatusDTO {
     guard let refId = ref.id else {
         return PDFDownloadStatusDTO(ok: false, action: nil, filename: nil,
                                     error: "Reference has no id")
@@ -381,13 +393,14 @@ func attemptPDFDownload(for ref: Reference) async -> PDFDownloadStatusDTO {
             filename: materialized ? existing.localFilename : nil,
             error: nil)
     }
-    guard ref.canDownloadPDF else {
+    let hasOverride = pdfURLOverride?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    guard ref.canDownloadPDF || hasOverride else {
         return PDFDownloadStatusDTO(ok: false, action: .skipped, filename: nil,
                                     error: "No DOI or arXiv identifier available")
     }
     let filename: String
     do {
-        filename = try await downloadAndAttachPDF(for: ref, refId: refId)
+        filename = try await downloadAndAttachPDF(for: ref, refId: refId, pdfURLOverride: pdfURLOverride)
     } catch let err as PDFDownloadService.DownloadError {
         return PDFDownloadStatusDTO(ok: false, action: nil, filename: nil,
                                     error: err.localizedDescription)
@@ -646,12 +659,27 @@ struct Add: AsyncParsableCommand {
             throw ExitCode.failure
         }
         if let id = identifier {
-            var ref = try await MetadataFetcher.fetch(from: id)
-            ref = MetadataVerifier.manuallyVerified(ref, reviewedBy: "cli-identifier")
-            let result = try AppDatabase.shared.saveReference(&ref)
+            let ref: Reference
+            // Scraped PDF URL from a paper-landing-page resolve (OpenReview /
+            // CVF / PMLR / etc. — papers without DOIs that the
+            // arXiv/OpenAlex resolution path can't find).
+            let scrapedPDFURL: String?
+            do {
+                var fetched: Reference
+                (fetched, scrapedPDFURL) = try await MetadataFetcher.fetchWithScrapedPDFURL(from: id)
+                fetched = MetadataVerifier.manuallyVerified(fetched, reviewedBy: "cli-identifier")
+                ref = fetched
+            } catch let error as MetadataFetcher.FetchError {
+                printJSONError(error.errorDescription ?? String(describing: error))
+                throw ExitCode.failure
+            }
+            var mutableRef = ref
+            let result = try AppDatabase.shared.saveReference(&mutableRef)
             notifyLibraryChanged()
-            let pdfStatus = downloadPdf ? await attemptPDFDownload(for: ref) : nil
-            let dto = try referenceDTO(for: ref)
+            let pdfStatus = downloadPdf
+                ? await attemptPDFDownload(for: mutableRef, pdfURLOverride: scrapedPDFURL)
+                : nil
+            let dto = try referenceDTO(for: mutableRef)
             printJSON(AddStatusOutput(reference: dto, status: result, pdfDownload: pdfStatus))
         } else if let bib = bibtex {
             let parsed = BibTeXImporter.parse(bib)

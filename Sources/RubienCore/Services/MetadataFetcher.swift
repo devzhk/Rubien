@@ -46,7 +46,7 @@ public enum MetadataFetcher {
     }
 
     /// User-Agent header value. Includes mailto when a contact email is configured.
-    private static var userAgent: String {
+    internal static var userAgent: String {
         let email = contactEmail.trimmingCharacters(in: .whitespacesAndNewlines)
         if email.isEmpty || !email.contains("@") {
             return "Rubien/1.0"
@@ -62,6 +62,8 @@ public enum MetadataFetcher {
         case arxiv(String)
         case isbn(String)
         case pmcid(String)
+        /// Paper landing-page URL on a known host (resolved via `PaperURLResolver`).
+        case paperURL(URL)
     }
 
     /// Parse raw text input and detect identifier type (priority: DOI > arXiv > ISBN > PMCID > PMID)
@@ -73,6 +75,19 @@ public enum MetadataFetcher {
         // (rare but possible) doesn't accidentally route through DOI extraction.
         if let pmcid = extractPMCIDFromURL(trimmed) {
             return .pmcid(pmcid)
+        }
+
+        // Paper landing-page URL on a known host with a known path shape.
+        // Placed before DOI extraction so URLs like
+        //   https://link.springer.com/article/10.1007/s11042-024-12345-6
+        // route through PaperURLResolver (preserves landing URL on Reference.url)
+        // rather than the bare DOI extractor (which would route to CrossRef and
+        // lose publisher-page context).
+        if let url = URL(string: trimmed),
+           let scheme = url.scheme?.lowercased(),
+           (scheme == "http" || scheme == "https"),
+           KnownPaperHost.classify(url) != nil {
+            return .paperURL(url)
         }
 
         // DOI: 10.XXXX/... (most specific)
@@ -1084,23 +1099,56 @@ public enum MetadataFetcher {
 
     // MARK: - Unified Fetch
 
-    /// Auto-detect identifier and fetch metadata
+    /// Auto-detect identifier and fetch metadata.
     public static func fetch(from text: String) async throws -> Reference {
+        let (ref, _) = try await fetchWithScrapedPDFURL(from: text)
+        return ref
+    }
+
+    /// Auto-detect identifier and fetch metadata; also surfaces a scraped PDF URL
+    /// when the identifier was a `.paperURL` and the host's landing page exposed
+    /// `citation_pdf_url` (e.g. OpenReview, CVF, PMLR — papers without DOIs that
+    /// would otherwise be unreachable for auto-download).
+    ///
+    /// Existing callers of `fetch(from:)` see no change; the CLI's `add --download-pdf`
+    /// path uses this entry point so it can forward the URL to
+    /// `PDFDownloadService.downloadPDF(overrideURL:)`.
+    public static func fetchWithScrapedPDFURL(
+        from text: String
+    ) async throws -> (Reference, scrapedPDFURL: String?) {
         guard let identifier = extractIdentifier(from: text) else {
             throw FetchError.unrecognizedIdentifier
         }
 
         switch identifier {
         case .doi(let doi):
-            return try await fetchFromDOI(doi)
+            return (try await fetchFromDOI(doi), nil)
         case .pmid(let pmid):
-            return try await fetchFromPMID(pmid)
+            return (try await fetchFromPMID(pmid), nil)
         case .arxiv(let id):
-            return try await fetchFromArXiv(id)
+            return (try await fetchFromArXiv(id), nil)
         case .isbn(let isbn):
-            return try await fetchFromISBN(isbn)
+            return (try await fetchFromISBN(isbn), nil)
         case .pmcid(let pmcid):
-            return try await fetchFromPMCID(pmcid)
+            return (try await fetchFromPMCID(pmcid), nil)
+        case .paperURL(let url):
+            do {
+                let outcome = try await PaperURLResolver.resolve(url)
+                return (outcome.reference, outcome.scrapedPDFURL)
+            } catch PaperURLResolver.ResolveError.noAuthorsAvailable {
+                // The Mac app routes no-author through MetadataResolver's catch handler
+                // which produces a .candidate envelope for user review. CLI / direct
+                // callers of fetch() have no candidate channel — throw a typed error
+                // so they don't silently save a no-author Reference (the schema accepts
+                // empty authors as TEXT NOT NULL DEFAULT "", so nothing rejects it).
+                throw FetchError.unsupported(
+                    "Paper URL resolved but no authors were found. Review the page or paste a DOI."
+                )
+            } catch let error as PaperURLResolver.ResolveError {
+                throw FetchError.unsupported(String(describing: error))
+            } catch {
+                throw FetchError.unsupported(error.localizedDescription)
+            }
         }
     }
 
@@ -1174,11 +1222,15 @@ public enum MetadataFetcher {
                     return 1_000_000_000 // 1s base for server errors
                 }()
                 let delay = baseDelay * UInt64(1 << attempt) // exponential: 1s, 2s, 4s or 3s, 6s, 12s
-                try await Task.sleep(nanoseconds: delay)
+                if attempt + 1 < maxAttempts {
+                    try await Task.sleep(nanoseconds: delay)
+                }
             } catch let error as URLError where error.code == .timedOut || error.code == .networkConnectionLost {
                 lastError = error
                 let delay: UInt64 = 1_000_000_000 * UInt64(1 << attempt)
-                try await Task.sleep(nanoseconds: delay)
+                if attempt + 1 < maxAttempts {
+                    try await Task.sleep(nanoseconds: delay)
+                }
             }
         }
         throw lastError!

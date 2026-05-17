@@ -28,11 +28,12 @@ Rubien adds references from:
 - bioRxiv and medRxiv
 - PubMed and PubMed Central (PMC)
 - Books (by ISBN)
+- Paper landing-page URLs from OpenReview, ACL Anthology, CVF Open Access, NeurIPS, PMLR, IEEE Xplore, ACM DL, Nature, Springer, and ScienceDirect (scraped via `citation_*` meta tags)
 - Title search when you don't have an identifier
 
 Paste a URL, an identifier, or a title — Rubien figures out the rest.
 
-PDF auto-download works for arXiv, bioRxiv, medRxiv, and any open-access paper. Paywalled PDFs aren't fetched, but metadata and abstract still come through.
+PDF auto-download works for arXiv, bioRxiv, medRxiv, any open-access paper with a DOI, and venue pages that expose `citation_pdf_url` (covers OpenReview, ACL, CVF, NeurIPS, PMLR — even when the paper has no DOI). Paywalled PDFs aren't fetched, but metadata and abstract still come through.
 
 ## Requirements
 

@@ -227,7 +227,10 @@ struct BatchImportView: View {
                     let identifier = inputs[nextIndex]
                     nextIndex += 1
                     group.addTask {
-                        let result = await resolver.resolveManualEntry(identifier)
+                        let outcome = await resolver.resolveManualEntry(identifier)
+                        let result = outcome.result
+                        // Note: outcome.preferredPDFURL is intentionally discarded — batch import
+                        // doesn't auto-download URL-derived PDFs.
                         return (identifier, result)
                     }
                 }
@@ -249,7 +252,10 @@ struct BatchImportView: View {
                         let nextIdentifier = inputs[nextIndex]
                         nextIndex += 1
                         group.addTask {
-                            let result = await resolver.resolveManualEntry(nextIdentifier)
+                            let outcome = await resolver.resolveManualEntry(nextIdentifier)
+                            let result = outcome.result
+                            // Note: outcome.preferredPDFURL is intentionally discarded — batch import
+                            // doesn't auto-download URL-derived PDFs.
                             return (nextIdentifier, result)
                         }
                     }
