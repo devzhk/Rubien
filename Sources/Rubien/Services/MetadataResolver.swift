@@ -28,6 +28,16 @@ struct ManualCandidateImportAssessment {
     let missingFields: [String]
 }
 
+public struct ManualEntryOutcome: Sendable {
+    public let result: MetadataResolutionResult
+    public let preferredPDFURL: String?    // populated only on .verified from paper-URL path
+
+    public init(result: MetadataResolutionResult, preferredPDFURL: String? = nil) {
+        self.result = result
+        self.preferredPDFURL = preferredPDFURL
+    }
+}
+
 @MainActor
 final class MetadataResolver {
 
@@ -91,22 +101,22 @@ final class MetadataResolver {
 
     // MARK: - Manual entry (paste DOI / arXiv / PMID / ISBN / title)
 
-    func resolveManualEntry(_ text: String) async -> MetadataResolutionResult {
+    func resolveManualEntry(_ text: String) async -> ManualEntryOutcome {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            return .rejected(
+            return ManualEntryOutcome(result: .rejected(
                 RejectedEnvelope(
                     seed: nil,
                     fallbackReference: nil,
                     reason: .unsupportedRoute,
-                    message: "Enter a DOI, arXiv ID, PMID, PMCID, ISBN, or paper title."
+                    message: "Enter a DOI, arXiv ID, PMID, PMCID, ISBN, paper URL, or paper title."
                 )
-            )
+            ))
         }
 
         if let identifier = MetadataFetcher.extractIdentifier(from: trimmed) {
-            let (result, _) = await resolveIdentifierLocally(identifier, seed: nil, fallback: nil)
-            return result
+            let (result, scrapedPDFURL) = await resolveIdentifierLocally(identifier, seed: nil, fallback: nil)
+            return ManualEntryOutcome(result: result, preferredPDFURL: scrapedPDFURL)
         }
 
         // Treat any remaining input as a title search (OpenAlex -> Semantic Scholar)
@@ -116,17 +126,17 @@ final class MetadataResolver {
             workKindHint: .unknown
         )
         if let titleResult = await resolveByTitle(trimmed, seed: seed, fallback: nil) {
-            return titleResult
+            return ManualEntryOutcome(result: titleResult)
         }
-        return .rejected(
+        return ManualEntryOutcome(result: .rejected(
             RejectedEnvelope(
                 seed: seed,
                 fallbackReference: nil,
                 currentReference: nil,
                 reason: .insufficientEvidence,
-                message: "No matching record found. Try a DOI, arXiv ID, PMID, PMCID, or ISBN instead."
+                message: "No matching record found. Try a DOI, arXiv ID, PMID, PMCID, paper URL, or ISBN instead."
             )
-        )
+        ))
     }
 
     // MARK: - Seed-based resolution (used by retry path)
@@ -186,7 +196,8 @@ final class MetadataResolver {
 
     func retryIntake(_ intake: MetadataIntake) async -> MetadataResolutionResult {
         if let originalInput = intake.originalInput?.rubien_nilIfBlank {
-            return await resolveManualEntry(originalInput)
+            let outcome = await resolveManualEntry(originalInput)
+            return outcome.result
         }
         if let seed = intake.decodedSeed {
             return await resolveSeed(

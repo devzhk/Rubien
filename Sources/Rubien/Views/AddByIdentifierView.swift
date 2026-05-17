@@ -15,6 +15,10 @@ struct AddByIdentifierView: View {
     @State private var errorMessage: String?
     @State private var statusMessage: String?
     @State private var downloadPDFOnImport: Bool = true
+    // Captured from ManualEntryOutcome.preferredPDFURL on resolve. Wired but not
+    // yet forwarded to onSave — Task 6 extends the onSave signature to
+    // (Reference, Bool, String?) and gates the toggle on this value.
+    @State private var preferredPDFURL: String?
 
     var body: some View {
         VStack(spacing: 16) {
@@ -197,12 +201,13 @@ struct AddByIdentifierView: View {
         statusMessage = statusMessage(for: text)
 
         Task { @MainActor in
-            let result = await resolver.resolveManualEntry(text)
-            switch result {
+            let outcome = await resolver.resolveManualEntry(text)
+            preferredPDFURL = outcome.preferredPDFURL
+            switch outcome.result {
             case .verified(let envelope):
                 fetchedReference = envelope.reference
             case .candidate, .blocked, .seedOnly, .rejected:
-                pendingResolution = result
+                pendingResolution = outcome.result
             }
             isFetching = false
             statusMessage = nil
