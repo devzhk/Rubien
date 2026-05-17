@@ -201,9 +201,20 @@ embed_sparkle_framework() {
     echo "▸ Embedding Sparkle.framework..."
     local frameworks_dir="$APP_BUNDLE/Contents/Frameworks"
     mkdir -p "$frameworks_dir"
-    # Preserve symlinks (-R follows them on macOS by default would NOT preserve
-    # them; -R *does* preserve them on BSD cp — but be explicit with -P).
+    # Preserve symlinks: BSD cp -R preserves them by default.
     cp -R "$src" "$frameworks_dir/Sparkle.framework"
+
+    # SwiftPM's executable target ships rpaths for the build tree only
+    # (the absolute .xcodebuild/.../PackageFrameworks path and
+    # @executable_path/../lib). Once the framework is embedded in
+    # Contents/Frameworks, dyld at launch can't find it without the
+    # canonical Mac-app rpath. Add it via install_name_tool, idempotently —
+    # repeated -add_rpath errors with "file already has rpath" on rebuilds.
+    local exe="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+    if ! /usr/bin/otool -l "$exe" | grep -q "path @executable_path/../Frameworks "; then
+        /usr/bin/install_name_tool -add_rpath "@executable_path/../Frameworks" "$exe"
+        echo "   ✓ Added @executable_path/../Frameworks rpath to $APP_NAME"
+    fi
 }
 
 sign_bundle() {
