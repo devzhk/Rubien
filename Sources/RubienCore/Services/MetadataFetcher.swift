@@ -1099,38 +1099,48 @@ public enum MetadataFetcher {
 
     // MARK: - Unified Fetch
 
-    /// Auto-detect identifier and fetch metadata
+    /// Auto-detect identifier and fetch metadata.
     public static func fetch(from text: String) async throws -> Reference {
+        let (ref, _) = try await fetchWithScrapedPDFURL(from: text)
+        return ref
+    }
+
+    /// Auto-detect identifier and fetch metadata; also surfaces a scraped PDF URL
+    /// when the identifier was a `.paperURL` and the host's landing page exposed
+    /// `citation_pdf_url` (e.g. OpenReview, CVF, PMLR — papers without DOIs that
+    /// would otherwise be unreachable for auto-download).
+    ///
+    /// Existing callers of `fetch(from:)` see no change; the CLI's `add --download-pdf`
+    /// path uses this entry point so it can forward the URL to
+    /// `PDFDownloadService.downloadPDF(overrideURL:)`.
+    public static func fetchWithScrapedPDFURL(
+        from text: String
+    ) async throws -> (Reference, scrapedPDFURL: String?) {
         guard let identifier = extractIdentifier(from: text) else {
             throw FetchError.unrecognizedIdentifier
         }
 
         switch identifier {
         case .doi(let doi):
-            return try await fetchFromDOI(doi)
+            return (try await fetchFromDOI(doi), nil)
         case .pmid(let pmid):
-            return try await fetchFromPMID(pmid)
+            return (try await fetchFromPMID(pmid), nil)
         case .arxiv(let id):
-            return try await fetchFromArXiv(id)
+            return (try await fetchFromArXiv(id), nil)
         case .isbn(let isbn):
-            return try await fetchFromISBN(isbn)
+            return (try await fetchFromISBN(isbn), nil)
         case .pmcid(let pmcid):
-            return try await fetchFromPMCID(pmcid)
+            return (try await fetchFromPMCID(pmcid), nil)
         case .paperURL(let url):
-            // Route paper URLs through PaperURLResolver so the CLI (which calls
-            // fetch(from:) directly at RubienCLI.swift:649) gets a Reference back.
-            // The CLI does not use ManualEntryOutcome / preferredPDFURL — it just
-            // needs the Reference.
             do {
                 let outcome = try await PaperURLResolver.resolve(url)
-                return outcome.reference
+                return (outcome.reference, outcome.scrapedPDFURL)
             } catch PaperURLResolver.ResolveError.noAuthorsAvailable {
-                // CLI has no candidate-review channel. Throwing here is the right
-                // call — silently importing a no-author Reference via fetch(from:)
-                // would save a half-baked record (the schema accepts empty authors
-                // as TEXT NOT NULL DEFAULT "", so nothing rejects it downstream).
-                // The Mac app gets the .candidate path via MetadataResolver's catch
-                // handler in resolveIdentifierLocally; the CLI gets an error.
+                // The Mac app routes no-author through MetadataResolver's catch handler
+                // which produces a .candidate envelope for user review. CLI / direct
+                // callers of fetch() have no candidate channel — throw a typed error
+                // so they don't silently save a no-author Reference (the schema accepts
+                // empty authors as TEXT NOT NULL DEFAULT "", so nothing rejects it).
                 throw FetchError.unsupported(
                     "Paper URL resolved but no authors were found. Review the page or paste a DOI."
                 )
