@@ -84,20 +84,20 @@ public enum CitationMetaScraper {
         let content: String
     }
 
-    /// Patterns for <meta name="..." content="..."> in name-first and content-first attribute order.
-    private static let metaTagRegexes: [NSRegularExpression] = [
-        try! NSRegularExpression(
-            pattern: #"<meta\s+[^>]*name\s*=\s*["']([^"']+)["'][^>]*content\s*=\s*["']([^"']*)["'][^>]*/?>"#,
-            options: [.caseInsensitive]
-        ),
-        try! NSRegularExpression(
-            pattern: #"<meta\s+[^>]*content\s*=\s*["']([^"']*)["'][^>]*name\s*=\s*["']([^"']+)["'][^>]*/?>"#,
-            options: [.caseInsensitive]
-        ),
-    ]
+    /// Captures the attribute string inside each <meta ...> tag.
+    /// Each match's group 1 is everything between `<meta ` and `>` (or `/>`),
+    /// which is then parsed by `parseAttributes` to handle all three HTML5
+    /// attribute-value quoting styles (double-quoted, single-quoted, unquoted).
+    private static let metaTagRegex = try! NSRegularExpression(
+        pattern: #"<meta\s+([^>]+?)\s*/?>"#,
+        options: [.caseInsensitive]
+    )
 
-    /// Scans the <head> section for <meta name="..." content="..."> tags.
-    /// Pattern is generous about attribute order and quoting style.
+    /// Scans the <head> section for `<meta name="…" content="…">` tags.
+    /// Accepts attribute order in either direction (`name`-first or
+    /// `content`-first) and any HTML5 attribute-value form: `name="X"`,
+    /// `name='X'`, or unquoted `name=X` (used by ACL Anthology and other
+    /// Hugo-generated sites).
     private static func extractMetaTags(from html: String) -> [MetaTag] {
         // Restrict to <head>...</head> if present; fall back to whole document.
         let scope: String = {
@@ -109,19 +109,71 @@ public enum CitationMetaScraper {
         }()
 
         var tags: [MetaTag] = []
-        for (idx, regex) in metaTagRegexes.enumerated() {
-            let range = NSRange(scope.startIndex..., in: scope)
-            regex.enumerateMatches(in: scope, options: [], range: range) { match, _, _ in
-                guard let match = match,
-                      let r1 = Range(match.range(at: 1), in: scope),
-                      let r2 = Range(match.range(at: 2), in: scope) else { return }
-                let (name, content) = idx == 0
-                    ? (String(scope[r1]).lowercased(), String(scope[r2]))
-                    : (String(scope[r2]).lowercased(), String(scope[r1]))
-                tags.append(MetaTag(name: name, content: decodeHTMLEntities(content)))
-            }
+        let range = NSRange(scope.startIndex..., in: scope)
+        metaTagRegex.enumerateMatches(in: scope, options: [], range: range) { match, _, _ in
+            guard let match = match,
+                  let attrsRange = Range(match.range(at: 1), in: scope) else { return }
+            let attrs = parseAttributes(String(scope[attrsRange]))
+            guard let name = attrs["name"]?.lowercased(),
+                  let content = attrs["content"] else { return }
+            tags.append(MetaTag(name: name, content: decodeHTMLEntities(content)))
         }
         return tags
+    }
+
+    /// Parse an HTML tag attribute string into a `[key: value]` map. Handles
+    /// the three HTML5 attribute-value forms — double-quoted, single-quoted,
+    /// and unquoted. Keys are lowercased; values preserve case.
+    ///
+    /// Examples:
+    ///   `name="foo" content="bar baz"`     -> ["name": "foo", "content": "bar baz"]
+    ///   `name='foo' content='bar'`         -> ["name": "foo", "content": "bar"]
+    ///   `name=foo content=bar`             -> ["name": "foo", "content": "bar"]
+    ///   `content="X" name=citation_title`  -> ["content": "X", "name": "citation_title"]
+    private static func parseAttributes(_ attrs: String) -> [String: String] {
+        var result: [String: String] = [:]
+        let scalars = Array(attrs)
+        var i = 0
+        while i < scalars.count {
+            // Skip whitespace
+            while i < scalars.count, scalars[i].isWhitespace { i += 1 }
+            if i >= scalars.count { break }
+
+            // Read attribute name (until '=' or whitespace)
+            let nameStart = i
+            while i < scalars.count, !scalars[i].isWhitespace, scalars[i] != "=" { i += 1 }
+            let name = String(scalars[nameStart..<i]).lowercased()
+            if name.isEmpty { i += 1; continue }
+
+            // Skip whitespace before '='
+            while i < scalars.count, scalars[i].isWhitespace { i += 1 }
+
+            // Attribute with no value (e.g., `disabled`).
+            guard i < scalars.count, scalars[i] == "=" else {
+                result[name] = ""
+                continue
+            }
+            i += 1
+
+            // Skip whitespace after '='
+            while i < scalars.count, scalars[i].isWhitespace { i += 1 }
+            if i >= scalars.count { result[name] = ""; break }
+
+            // Read value (quoted or unquoted)
+            if scalars[i] == "\"" || scalars[i] == "'" {
+                let quote = scalars[i]
+                i += 1
+                let valueStart = i
+                while i < scalars.count, scalars[i] != quote { i += 1 }
+                result[name] = String(scalars[valueStart..<i])
+                if i < scalars.count { i += 1 } // consume closing quote
+            } else {
+                let valueStart = i
+                while i < scalars.count, !scalars[i].isWhitespace { i += 1 }
+                result[name] = String(scalars[valueStart..<i])
+            }
+        }
+        return result
     }
 
     private static func decodeHTMLEntities(_ s: String) -> String {

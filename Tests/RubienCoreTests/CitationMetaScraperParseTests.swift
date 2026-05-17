@@ -34,14 +34,54 @@ final class CitationMetaScraperParseTests: XCTestCase {
         let html = loadFixture("aclanthology-paper")
         let result = CitationMetaScraper.parse(
             html: html,
-            baseURL: baseURL("https://aclanthology.org/2024.acl-long.123/")
+            baseURL: baseURL("https://aclanthology.org/2025.acl-long.1141/")
         )
-        XCTAssertEqual(result.title, "A Sample ACL Paper")
-        XCTAssertEqual(result.authors.count, 2)
-        XCTAssertEqual(result.doi, "10.18653/v1/2024.acl-long.123")
-        XCTAssertEqual(result.firstPage, "100")
-        XCTAssertEqual(result.lastPage, "115")
-        XCTAssertEqual(result.conferenceTitle, "ACL 2024")
+        // ACL Anthology serves HTML5-style unquoted attribute values with
+        // content-before-name order — the parser must handle both directions
+        // and all three HTML5 quoting forms (double, single, unquoted).
+        XCTAssertEqual(result.title, "Language Models Resist Alignment: Evidence From Data Compression")
+        XCTAssertEqual(result.authors.count, 10)
+        XCTAssertEqual(result.authors.first?.family, "Ji")
+        XCTAssertEqual(result.doi, "10.18653/v1/2025.acl-long.1141")
+        XCTAssertEqual(result.year, 2025)
+        XCTAssertEqual(result.firstPage, "23411")
+        XCTAssertEqual(result.lastPage, "23432")
+        XCTAssertTrue(result.conferenceTitle?.contains("Annual Meeting of the Association for Computational Linguistics") == true)
+        XCTAssertEqual(result.pdfURL, "https://aclanthology.org/2025.acl-long.1141.pdf")
+    }
+
+    // MARK: - HTML5 unquoted attribute values (regression for ACL Anthology shape)
+
+    func testUnquotedAttributeValues() {
+        // Bare HTML5: `name=foo` and `content=bar` with no quotes. Plus
+        // content-first attribute order. Both are valid HTML5.
+        let html = """
+        <html><head>
+        <meta content=Hello name=citation_title>
+        <meta content=Smith name=citation_author>
+        <meta content=2024 name=citation_year>
+        </head></html>
+        """
+        let result = CitationMetaScraper.parse(html: html, baseURL: baseURL("https://example.com/"))
+        XCTAssertEqual(result.title, "Hello")
+        XCTAssertEqual(result.authors.count, 1)
+        XCTAssertEqual(result.year, 2024)
+    }
+
+    func testMixedQuotingStyles() {
+        // Some attrs quoted, some not, mixed in one document.
+        let html = """
+        <html><head>
+        <meta name="citation_title" content="Quoted Title">
+        <meta name='citation_author' content='Single, Q.'>
+        <meta name=citation_publication_date content=2023>
+        </head></html>
+        """
+        let result = CitationMetaScraper.parse(html: html, baseURL: baseURL("https://example.com/"))
+        XCTAssertEqual(result.title, "Quoted Title")
+        XCTAssertEqual(result.authors.count, 1)
+        XCTAssertEqual(result.authors.first?.family, "Single")
+        XCTAssertEqual(result.year, 2023)
     }
 
     // MARK: - Relative citation_pdf_url
