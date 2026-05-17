@@ -1,0 +1,55 @@
+name: Deploy Pages
+
+# Publishes ONLY the Sparkle appcast feeds and a placeholder landing page
+# to https://devzhk.github.io/Rubien/. Internal Docs/*.md files (runbooks,
+# design notes) are deliberately NOT uploaded — they stay browsable in the
+# GitHub repo but are not part of the public Pages surface.
+#
+# Triggers only when the three published files (or this workflow) change,
+# so Linux-port commits, code refactors, and other Docs/* edits don't
+# rebuild the site unnecessarily.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Docs/appcast.xml'
+      - 'Docs/staging-appcast.xml'
+      - 'Docs/index.md'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble published payload
+        run: |
+          mkdir _site
+          cp Docs/appcast.xml          _site/appcast.xml
+          cp Docs/staging-appcast.xml  _site/staging-appcast.xml
+          cp Docs/index.md             _site/index.md
+          ls -la _site/
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
