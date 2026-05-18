@@ -58,7 +58,12 @@ HELPERS_DIR="$APP_BUNDLE/Contents/Helpers"
 
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 CODESIGN_ENABLED="${CODESIGN_ENABLED:-1}"
-CODESIGN_ENTITLEMENTS="${CODESIGN_ENTITLEMENTS:-}"
+# Outer app entitlements: sandbox + App Group + Sparkle XPC mach-lookup +
+# iCloud/CloudKit + file access. Default points at the in-repo plist; override
+# via env var for custom builds. Without this, the outer codesign step
+# silently signs with no entitlements, producing a DMG whose installed app
+# can't open its library or auto-update.
+CODESIGN_ENTITLEMENTS="${CODESIGN_ENTITLEMENTS:-$PROJECT_DIR/Sources/Rubien/Rubien.entitlements}"
 # Embedded rubien-cli gets its own entitlements so it can claim the shared
 # App Group and read the same library.sqlite the app uses. Default points at
 # the in-repo plist; override via env var for custom builds.
