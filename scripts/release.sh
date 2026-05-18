@@ -21,11 +21,11 @@ source "$SCRIPT_DIR/lib/appcast.sh"
 NOTARY_PROFILE="${NOTARY_PROFILE:-RubienNotary}"
 APPCAST_TARGET="${APPCAST_TARGET:-production}"
 case "$APPCAST_TARGET" in
-    production) APPCAST_PATH="$PROJECT_DIR/docs/appcast.xml" ;;
-    staging)    APPCAST_PATH="$PROJECT_DIR/docs/staging-appcast.xml" ;;
+    production) APPCAST_PATH="$PROJECT_DIR/Docs/appcast.xml" ;;
+    staging)    APPCAST_PATH="$PROJECT_DIR/Docs/staging-appcast.xml" ;;
     *) echo "✗ APPCAST_TARGET must be production or staging" >&2; exit 64 ;;
 esac
-export APPCAST_PATH
+export APPCAST_PATH APPCAST_TARGET
 
 # 1. Clean working tree check
 if ! git diff --quiet || ! git diff --cached --quiet; then

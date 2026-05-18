@@ -173,14 +173,22 @@ stamp_sparkle_info_plist() {
     local pubkey
     pubkey="$(cat "$pubkey_file" | tr -d '[:space:]')"
 
-    /usr/bin/plutil -replace SUFeedURL -string                       "https://devzhk.github.io/Rubien/appcast.xml" "$plist"
+    local target="${APPCAST_TARGET:-production}"
+    local feed_url
+    case "$target" in
+        production) feed_url="https://devzhk.github.io/Rubien/appcast.xml" ;;
+        staging)    feed_url="https://devzhk.github.io/Rubien/staging-appcast.xml" ;;
+        *) echo "✗ APPCAST_TARGET must be production or staging (got: $target)" >&2; exit 64 ;;
+    esac
+
+    /usr/bin/plutil -replace SUFeedURL -string                       "$feed_url"                                   "$plist"
     /usr/bin/plutil -replace SUPublicEDKey -string                   "$pubkey"                                     "$plist"
     /usr/bin/plutil -replace SUEnableAutomaticChecks -bool           YES                                           "$plist"
     /usr/bin/plutil -replace SUAutomaticallyUpdate -bool             YES                                           "$plist"
     /usr/bin/plutil -replace SUScheduledCheckInterval -integer       86400                                         "$plist"
     /usr/bin/plutil -replace SUEnableInstallerLauncherService -bool  YES                                           "$plist"
 
-    echo "   ✓ Stamped Sparkle Info.plist keys (feed: production)"
+    echo "   ✓ Stamped Sparkle Info.plist keys (feed: $target)"
 }
 
 embed_helpers() {

@@ -1,6 +1,6 @@
 #!/bin/bash
 # scripts/lib/appcast.sh — render a Sparkle <item> block and prepend to
-# docs/appcast.xml. Sourced by scripts/release.sh.
+# Docs/appcast.xml. Sourced by scripts/release.sh.
 #
 # Required environment variables:
 #   VERSION                 — marketing version (e.g. 0.1.1)
@@ -11,7 +11,7 @@
 #   DMG_SIZE_BYTES          — file size in bytes
 #   MIN_SYSTEM_VERSION      — sparkle:minimumSystemVersion (e.g. 15.0)
 #   RELEASE_NOTES_TEXT      — plain text release notes (escaped for CDATA)
-#   APPCAST_PATH            — path to docs/appcast.xml (or staging-appcast.xml)
+#   APPCAST_PATH            — path to Docs/appcast.xml (or staging-appcast.xml)
 
 rubien_appcast_render_item() {
     local pubdate
