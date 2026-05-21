@@ -5,5 +5,19 @@
         <link>https://devzhk.github.io/Rubien/appcast.xml</link>
         <description>Rubien — releases.</description>
         <language>en</language>
+        <item>
+            <title>Rubien 0.1.0</title>
+            <description><![CDATA[Rubien 0.1.0 (Alpha). First public release. See GitHub release notes for details.]]></description>
+            <pubDate>Thu, 21 May 2026 18:39:00 +0000</pubDate>
+            <sparkle:version>1</sparkle:version>
+            <sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien/releases/download/v0.1.0/Rubien-0.1.0.dmg"
+                sparkle:edSignature="jDvf54SQB7reLXXhflPQfAKocGLVfkex3JUw8GBmoqSmQlpIn9uVn1aw4pR5M6JjrwyGzTOtIUusBk78OdGPAA=="
+                length="17066217"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
