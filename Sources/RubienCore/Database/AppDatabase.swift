@@ -903,15 +903,18 @@ extension AppDatabase {
     static func defaultLegacyRoots() -> [URL] {
         let home = URL(fileURLWithPath: NSHomeDirectory())
         return [
-            // Old App Group identifier (before Apple's portal began enforcing
-            // a "group." prefix on new App Group registrations in 2026). The
-            // first signed launch under the new App Group ID migrates from
-            // here, then deletes the legacy directory.
-            home.appendingPathComponent("Library/Group Containers/9TXK4V3SS8.com.rubien.shared/Rubien"),
             // Old sandbox per-app container (before App Group adoption).
             home.appendingPathComponent("Library/Containers/com.rubien.app/Data/Library/Application Support/Rubien"),
             // Old unsandboxed path (SPM dev builds, ad-hoc signed builds).
             home.appendingPathComponent("Library/Application Support/Rubien"),
+            // NOTE: cross-App-Group migration (e.g., from an old
+            // 9TXK4V3SS8.com.rubien.shared container to a renamed
+            // 9TXK4V3SS8.group.com.rubien.shared one) cannot be done from
+            // inside the new app's sandbox — macOS denies reads of any Group
+            // Container the entitlement doesn't claim, and the copyItem
+            // throws silently. If we ever need this transition again, the
+            // recovery is a one-time `cp -R` from Terminal (no sandbox), not
+            // an entry in this list.
         ]
     }
 

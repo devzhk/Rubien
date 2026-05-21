@@ -325,6 +325,10 @@ create_dmg() {
     rm -rf "$STAGING_DIR" "$DMG_PATH"
     mkdir -p "$STAGING_DIR"
     cp -R "$APP_BUNDLE" "$STAGING_DIR/"
+    # Symlink to /Applications so a mounted DMG shows the standard
+    # drag-the-app-onto-Applications layout without requiring users to find
+    # /Applications in Finder's sidebar.
+    ln -s /Applications "$STAGING_DIR/Applications"
     hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING_DIR" -ov -format UDZO "$DMG_PATH" >/dev/null
 }
 
