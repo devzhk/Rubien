@@ -325,11 +325,56 @@ create_dmg() {
     rm -rf "$STAGING_DIR" "$DMG_PATH"
     mkdir -p "$STAGING_DIR"
     cp -R "$APP_BUNDLE" "$STAGING_DIR/"
-    # Symlink to /Applications so a mounted DMG shows the standard
-    # drag-the-app-onto-Applications layout without requiring users to find
-    # /Applications in Finder's sidebar.
-    ln -s /Applications "$STAGING_DIR/Applications"
-    hdiutil create -volname "$APP_NAME" -srcfolder "$STAGING_DIR" -ov -format UDZO "$DMG_PATH" >/dev/null
+
+    local bg="$PROJECT_DIR/Resources/dmg-background.png"
+    if [ ! -f "$bg" ]; then
+        echo "✗ DMG background not found at $bg" >&2
+        echo "  Regenerate via: swift scripts/render-dmg-background.swift" >&2
+        exit 1
+    fi
+    if ! command -v create-dmg >/dev/null 2>&1; then
+        echo "✗ create-dmg not on PATH. Install via: brew install create-dmg" >&2
+        exit 1
+    fi
+
+    # Reuse the icns embed_app_icon already produced for the volume icon
+    # (.VolumeIcon.icns inside the DMG — shown when mounted on the desktop).
+    local icns="$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+    local volicon_arg=()
+    if [ -f "$icns" ]; then
+        volicon_arg=(--volicon "$icns")
+    fi
+
+    # create-dmg adds the Applications symlink via --app-drop-link, runs
+    # AppleScript to position icons + apply the background, then converts
+    # the resulting image to UDZO. Coordinates match render-dmg-background.swift's
+    # layout assumptions (Rubien at x=165, Applications at x=495, both at y=200).
+    create-dmg \
+        --volname "$APP_NAME" \
+        --background "$bg" \
+        "${volicon_arg[@]}" \
+        --window-pos 200 120 \
+        --window-size 660 400 \
+        --icon-size 100 \
+        --icon "$APP_NAME.app" 165 200 \
+        --hide-extension "$APP_NAME.app" \
+        --app-drop-link 495 200 \
+        --no-internet-enable \
+        --hdiutil-quiet \
+        "$DMG_PATH" \
+        "$STAGING_DIR/" >/dev/null
+
+    # Set the .dmg file's own Finder icon (what users see in Safari/Finder
+    # downloads BEFORE mounting). create-dmg's --volicon only covers the
+    # mounted-volume icon. NSWorkspace.setIcon writes the file's
+    # com.apple.ResourceFork + FinderInfo, which Finder honors.
+    if [ -f "$icns" ]; then
+        /usr/bin/env swift -e "
+        import Cocoa
+        let img = NSImage(contentsOfFile: \"$icns\")!
+        NSWorkspace.shared.setIcon(img, forFile: \"$DMG_PATH\", options: [])
+        " 2>/dev/null || echo "   ⚠ failed to stamp .dmg file icon (cosmetic only)"
+    fi
 }
 
 build_app
