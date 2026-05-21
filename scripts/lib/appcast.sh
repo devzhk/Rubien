@@ -46,15 +46,24 @@ rubien_appcast_prepend_item() {
         exit 1
     fi
 
-    local item
-    item="$(rubien_appcast_render_item)"
+    # Write the rendered <item> to a temp file rather than passing it via
+    # awk -v. macOS Tahoe's BSD awk rejects newlines in -v variable
+    # assignments ("awk: newline in string" at source line 1), and the
+    # <item> block is intentionally multi-line. Reading the item content
+    # from a file inside the awk script sidesteps the limitation.
+    local item_file="$appcast.item.tmp"
+    rubien_appcast_render_item > "$item_file"
 
     # Insert the rendered <item> on the line before </channel>.
-    /usr/bin/awk -v insert="$item" '
-        /<\/channel>/ { print insert }
+    /usr/bin/awk -v item_file="$item_file" '
+        /<\/channel>/ {
+            while ((getline line < item_file) > 0) print line
+            close(item_file)
+        }
         { print }
     ' "$appcast" > "$appcast.new"
 
+    rm -f "$item_file"
     mv "$appcast.new" "$appcast"
     /usr/bin/xmllint --noout "$appcast" || { echo "✗ Resulting appcast is not valid XML" >&2; exit 1; }
 
