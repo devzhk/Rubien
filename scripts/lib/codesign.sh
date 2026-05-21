@@ -7,7 +7,7 @@
 # Canonical App Group identifier used by both the app and the CLI helper.
 # Defined here so grep targets in verification blocks stay in sync with the
 # identifier claimed in the entitlements plists.
-RUBIEN_APP_GROUP_ID="9TXK4V3SS8.com.rubien.shared"
+RUBIEN_APP_GROUP_ID="9TXK4V3SS8.group.com.rubien.shared"
 
 # Sign a single binary, optionally with entitlements.
 #   $1  path to binary

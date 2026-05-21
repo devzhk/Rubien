@@ -12,7 +12,7 @@ rubien-cli <subcommand> [options]
 
 | CLI binary | Resolved `library.sqlite` |
 |---|---|
-| Mac, embedded helper (`/Applications/Rubien.app/Contents/Helpers/rubien-cli`) | `~/Library/Group Containers/9TXK4V3SS8.com.rubien.shared/Rubien/library.sqlite` |
+| Mac, embedded helper (`/Applications/Rubien.app/Contents/Helpers/rubien-cli`) | `~/Library/Group Containers/9TXK4V3SS8.group.com.rubien.shared/Rubien/library.sqlite` |
 | Mac, SPM build | `~/Library/Application Support/Rubien/library.sqlite` |
 | Linux | `$XDG_DATA_HOME/rubien/library.sqlite` (default: `~/.local/share/rubien/`) |
 

@@ -68,6 +68,11 @@ CODESIGN_ENTITLEMENTS="${CODESIGN_ENTITLEMENTS:-$PROJECT_DIR/Sources/Rubien/Rubi
 # App Group and read the same library.sqlite the app uses. Default points at
 # the in-repo plist; override via env var for custom builds.
 CLI_ENTITLEMENTS="${CLI_ENTITLEMENTS:-$PROJECT_DIR/Sources/RubienCLI/RubienCLI.entitlements}"
+# Developer ID Distribution provisioning profile required for the dmg flavor
+# when CODESIGN_ENABLED=1. AMFI rejects launch with error -413
+# "No matching profile found" otherwise. Generate at developer.apple.com
+# under team 9TXK4V3SS8 for App ID com.rubien.app.
+PROVISION_PROFILE="${PROVISION_PROFILE:-$HOME/Downloads/Rubien_Developer_ID_Distribution.provisionprofile}"
 
 build_app() {
     echo "▸ Building $APP_NAME app ($CONFIGURATION)..."
@@ -230,6 +235,26 @@ embed_sparkle_framework() {
     fi
 }
 
+embed_provisioning_profile() {
+    [ "$FLAVOR" = "dmg" ] || return 0
+    # dev-launch.sh sets CODESIGN_ENABLED=0 because it does its own signing
+    # with the dev provisioning profile. Don't gate dev builds on the
+    # Developer ID Distribution profile.
+    [ "$CODESIGN_ENABLED" = "0" ] && return 0
+
+    if [ ! -f "$PROVISION_PROFILE" ]; then
+        echo "✗ Provisioning profile not found: $PROVISION_PROFILE" >&2
+        echo "  Generate at https://developer.apple.com/account/resources/profiles/list" >&2
+        echo "  (Profile Type: Developer ID, App ID: com.rubien.app, team 9TXK4V3SS8)" >&2
+        echo "  Then set PROVISION_PROFILE=/path/to/file.provisionprofile" >&2
+        exit 1
+    fi
+
+    echo "▸ Embedding provisioning profile..."
+    cp "$PROVISION_PROFILE" "$APP_BUNDLE/Contents/embedded.provisionprofile"
+    echo "   ✓ Embedded $(basename "$PROVISION_PROFILE")"
+}
+
 sign_bundle() {
     if [ "$CODESIGN_ENABLED" = "0" ]; then
         return
@@ -309,6 +334,7 @@ assemble_app_bundle
 embed_app_icon
 embed_helpers
 embed_sparkle_framework
+embed_provisioning_profile
 sign_bundle
 create_dmg
 

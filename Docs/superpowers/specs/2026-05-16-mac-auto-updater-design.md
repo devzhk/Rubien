@@ -126,7 +126,7 @@ DMG builds: trait enabled by default → `swift build` / `xcodebuild` link Spark
 Same bundle ID for Mac DMG, future Mac App Store, and future iOS App Store. Consequences:
 - Only one of {DMG-Mac, MAS-Mac} can be installed at a time on a given machine — Mac's bundle-ID uniqueness enforces this. Users switching channels effectively upgrade or downgrade in place, with the same library on disk.
 - Shared `iCloud.com.rubien.app` CloudKit container — papers added on iPhone show up on Mac DMG-installed and Mac MAS-installed identically.
-- Shared `9TXK4V3SS8.com.rubien.shared` App Group — library, PDF storage, sync state sidecar all colocated regardless of channel.
+- Shared `9TXK4V3SS8.group.com.rubien.shared` App Group — library, PDF storage, sync state sidecar all colocated regardless of channel.
 
 ### Appcast on GitHub Pages, binaries on GitHub Releases
 

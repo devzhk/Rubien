@@ -11,6 +11,12 @@ set -euo pipefail
 # Optional env:
 #   NOTARY_PROFILE      — keychain profile name (default: "RubienNotary")
 #   APPCAST_TARGET      — "production" (default) or "staging"
+#   PROVISION_PROFILE   — Developer ID Distribution provisioning profile
+#                         (default: ~/Downloads/Rubien_Developer_ID_Distribution.provisionprofile).
+#                         Required for the DMG flavor. Must authorize App
+#                         Groups + iCloud capabilities for App ID
+#                         com.rubien.app under team 9TXK4V3SS8. AMFI rejects
+#                         launch with error -413 without it.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"

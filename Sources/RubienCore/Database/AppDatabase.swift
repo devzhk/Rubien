@@ -751,7 +751,7 @@ extension AppDatabase {
     /// bundled `rubien-cli` helper claim this entitlement so they read/write
     /// the same `library.sqlite` under `~/Library/Group Containers/`. SPM
     /// dev builds (no entitlement) fall through to `.applicationSupportDirectory`.
-    static let appGroupID = "9TXK4V3SS8.com.rubien.shared"
+    static let appGroupID = "9TXK4V3SS8.group.com.rubien.shared"
 
     private static let storageRootLeaf = "Rubien"
     private static let libraryFilename = "library.sqlite"
@@ -903,6 +903,11 @@ extension AppDatabase {
     static func defaultLegacyRoots() -> [URL] {
         let home = URL(fileURLWithPath: NSHomeDirectory())
         return [
+            // Old App Group identifier (before Apple's portal began enforcing
+            // a "group." prefix on new App Group registrations in 2026). The
+            // first signed launch under the new App Group ID migrates from
+            // here, then deletes the legacy directory.
+            home.appendingPathComponent("Library/Group Containers/9TXK4V3SS8.com.rubien.shared/Rubien"),
             // Old sandbox per-app container (before App Group adoption).
             home.appendingPathComponent("Library/Containers/com.rubien.app/Data/Library/Application Support/Rubien"),
             // Old unsandboxed path (SPM dev builds, ad-hoc signed builds).
