@@ -26,11 +26,18 @@ let projectRoot = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
 let resourcesDir = projectRoot.appendingPathComponent("Resources", isDirectory: true)
 try? FileManager.default.createDirectory(at: resourcesDir, withIntermediateDirectories: true)
 
-func render(scale: CGFloat, to file: URL) throws {
-    let width = 660
-    let height = 400
-    let pixelsWide = Int(CGFloat(width) * scale)
-    let pixelsHigh = Int(CGFloat(height) * scale)
+// Render at @2x pixel density and tag the PNG as 144 DPI so macOS Finder
+// treats the single file as a 660x400 logical-point image at @2x — sharp
+// on Retina, cleanly downsampled on non-Retina. create-dmg only copies one
+// background file into the DMG's .background/ folder, so a sibling @2x.png
+// would be ignored; embedding the density metadata in the @1x file is the
+// only way to get both fidelities from a single artifact.
+func render(to file: URL) throws {
+    let pointWidth: CGFloat = 660
+    let pointHeight: CGFloat = 400
+    let scale: CGFloat = 2
+    let pixelsWide = Int(pointWidth * scale)
+    let pixelsHigh = Int(pointHeight * scale)
 
     guard let rep = NSBitmapImageRep(
         bitmapDataPlanes: nil,
@@ -47,7 +54,11 @@ func render(scale: CGFloat, to file: URL) throws {
     ) else {
         fatalError("Failed to allocate NSBitmapImageRep")
     }
-    rep.size = NSSize(width: width, height: height)
+    // size is in POINTS; the pixels/points ratio is what the PNG's pHYs
+    // chunk encodes, which is how macOS knows this is a 144 DPI image.
+    rep.size = NSSize(width: pointWidth, height: pointHeight)
+    let width = Int(pointWidth)
+    let height = Int(pointHeight)
 
     NSGraphicsContext.saveGraphicsState()
     defer { NSGraphicsContext.restoreGraphicsState() }
@@ -130,5 +141,4 @@ func render(scale: CGFloat, to file: URL) throws {
     print("   ✓ wrote \(file.path) (\(pixelsWide) x \(pixelsHigh))")
 }
 
-try render(scale: 1, to: resourcesDir.appendingPathComponent("dmg-background.png"))
-try render(scale: 2, to: resourcesDir.appendingPathComponent("dmg-background@2x.png"))
+try render(to: resourcesDir.appendingPathComponent("dmg-background.png"))
