@@ -78,7 +78,7 @@ let package = Package(
                 .product(
                     name: "Sparkle",
                     package: "Sparkle",
-                    condition: .when(traits: ["Sparkle"])
+                    condition: .when(platforms: [.macOS], traits: ["Sparkle"])
                 ),
             ],
             exclude: [
@@ -89,7 +89,7 @@ let package = Package(
                 .process("Resources")
             ],
             swiftSettings: [
-                .define("Sparkle", .when(traits: ["Sparkle"])),
+                .define("Sparkle", .when(platforms: [.macOS], traits: ["Sparkle"])),
             ]
         ),
         .executableTarget(
