@@ -24,10 +24,31 @@ final class RubienCLITests: XCTestCase {
         return debugPath
     }
 
+    /// Per-test temp directory used as `RUBIEN_LIBRARY_ROOT` so every test
+    /// method gets a fresh, isolated library. Without this, parallel CLI
+    /// tests collide on the default storage path (Application Support or
+    /// the App Group container) and intermittently fail.
+    /// `lazy` evaluates once per test instance, and XCTest creates a fresh
+    /// instance per test method.
+    private lazy var testLibraryRoot: URL = {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("rubien-cli-test-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+
+    override func tearDown() {
+        super.tearDown()
+        try? FileManager.default.removeItem(at: testLibraryRoot)
+    }
+
     private func runCLI(_ arguments: [String]) throws -> (stdout: String, stderr: String, exitCode: Int32) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: cliBinaryPath)
         process.arguments = arguments
+        var env = ProcessInfo.processInfo.environment
+        env["RUBIEN_LIBRARY_ROOT"] = testLibraryRoot.path
+        process.environment = env
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()

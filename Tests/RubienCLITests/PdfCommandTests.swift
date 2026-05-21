@@ -20,10 +20,27 @@ final class PdfCommandTests: XCTestCase {
         return debugPath
     }
 
+    /// Per-test temp dir used as `RUBIEN_LIBRARY_ROOT` for CLI isolation.
+    /// See identical pattern in SwiftLibCLITests.swift.
+    private lazy var testLibraryRoot: URL = {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("rubien-cli-test-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+
+    override func tearDown() {
+        super.tearDown()
+        try? FileManager.default.removeItem(at: testLibraryRoot)
+    }
+
     private func runCLI(_ args: [String]) throws -> (stdout: String, stderr: String, exitCode: Int32) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: cliBinaryPath)
         process.arguments = args
+        var env = ProcessInfo.processInfo.environment
+        env["RUBIEN_LIBRARY_ROOT"] = testLibraryRoot.path
+        process.environment = env
 
         let outPipe = Pipe()
         let errPipe = Pipe()
