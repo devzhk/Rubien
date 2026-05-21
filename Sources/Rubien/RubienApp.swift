@@ -9,7 +9,7 @@ import RubienSync
 struct RubienApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var syncCoordinator = SyncCoordinator(appDatabase: AppDatabase.shared)
-    #if Sparkle
+    #if canImport(Sparkle)
     @State private var updateController = UpdateController()
     #endif
     @State private var addinToast: AddinToastPayload?
@@ -19,7 +19,7 @@ struct RubienApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(syncCoordinator)
-                #if Sparkle
+                #if canImport(Sparkle)
                 .environment(updateController)
                 .focusedSceneValue(\.updateController, updateController)
                 #endif
@@ -48,7 +48,7 @@ struct RubienApp: App {
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified(showsTitle: false))
         .defaultSize(width: Self.defaultWindowSize.width, height: Self.defaultWindowSize.height)
-        #if Sparkle
+        #if canImport(Sparkle)
         .commands {
             UpdateMenuCommands()
         }
@@ -56,7 +56,7 @@ struct RubienApp: App {
         Settings {
             RubienSettingsView()
                 .environmentObject(syncCoordinator)
-                #if Sparkle
+                #if canImport(Sparkle)
                 .environment(updateController)
                 #endif
         }

@@ -1,4 +1,4 @@
-#if Sparkle
+#if canImport(Sparkle)
 import SwiftUI
 
 /// Adds a "Restart to Install Update" menu item to the Rubien app menu,

@@ -27,7 +27,7 @@ struct RubienSettingsView: View {
                         systemImage: "icloud"
                     )
                 }
-            #if Sparkle
+            #if canImport(Sparkle)
             UpdateSettingsView()
                 .tabItem {
                     Label("Updates", systemImage: "arrow.down.circle")

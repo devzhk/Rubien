@@ -1,4 +1,4 @@
-#if Sparkle
+#if canImport(Sparkle)
 import SwiftUI
 
 /// Toolbar badge that becomes visible once `UpdateController` flips

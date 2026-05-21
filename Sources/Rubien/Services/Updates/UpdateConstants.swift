@@ -1,4 +1,4 @@
-#if Sparkle
+#if canImport(Sparkle)
 import Foundation
 
 enum UpdateConstants {

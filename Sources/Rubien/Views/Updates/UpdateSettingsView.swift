@@ -1,4 +1,4 @@
-#if Sparkle
+#if canImport(Sparkle)
 import SwiftUI
 
 /// Settings pane that surfaces every user-facing update control:
