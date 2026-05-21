@@ -118,11 +118,21 @@ if [ -z "$ED_SIGNATURE" ] || [ -z "$DMG_SIZE_BYTES" ]; then
     exit 1
 fi
 
-# 10. Verify the EdDSA signature round-trips against the public key.
-#     sign_update --verify takes <file> <signature> <publickey>.
-PUBKEY="$(cat "$PROJECT_DIR/.sparkle-public-key" | tr -d '[:space:]')"
-if ! "$SIGN_UPDATE" --verify "$DMG_PATH" "$ED_SIGNATURE" "$PUBKEY" >/dev/null; then
-    echo "✗ EdDSA signature verification failed — public key in .sparkle-public-key does not match the private key that signed this DMG" >&2
+# 10. Verify the EdDSA signature round-trips against the keychain key
+#     that produced it. Sparkle 2.9+ `sign_update --verify` only takes
+#     <file> <signature> (no public-key arg); it derives the public key
+#     from the keychain's stored private key.
+#
+#     This catches signature corruption but NOT a mismatch between the
+#     keychain's private key and the public key baked into the app's
+#     Info.plist via .sparkle-public-key. That mismatch would surface as
+#     Sparkle rejecting the update on the user's machine. We protect
+#     against it by stamping SUPublicEDKey from .sparkle-public-key at
+#     build time (see build-app.sh:stamp_sparkle_info_plist) — that file
+#     is generated together with the private key by generate_keys, so
+#     drift requires deliberate manual edits.
+if ! "$SIGN_UPDATE" --verify "$DMG_PATH" "$ED_SIGNATURE" >/dev/null; then
+    echo "✗ EdDSA signature verification failed" >&2
     exit 1
 fi
 
