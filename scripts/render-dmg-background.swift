@@ -63,8 +63,11 @@ func render(to file: URL) throws {
     NSGraphicsContext.saveGraphicsState()
     defer { NSGraphicsContext.restoreGraphicsState() }
     NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-    let ctx = NSGraphicsContext.current!.cgContext
-    ctx.scaleBy(x: scale, y: scale)
+    // No ctx.scaleBy here: NSGraphicsContext for a bitmap rep whose
+    // pixelsWide is bigger than size.width already maps logical points
+    // (the `width`/`height` constants below) onto the 2x pixel canvas.
+    // Calling scaleBy(2, 2) on top of that would double-scale, pushing
+    // everything except the top-left logical quadrant off-canvas.
 
     // 1. Light gradient backdrop (top: warm cream, bottom: cool gray-blue)
     //    — borrows the Dia.app reference palette feel without copying it.
