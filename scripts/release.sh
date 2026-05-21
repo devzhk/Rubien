@@ -99,9 +99,11 @@ codesign --verify --deep --strict --verbose=2 "$APP"
 
 # 9. EdDSA-sign the DMG
 echo "▸ Computing Sparkle EdDSA signature…"
-# -perm /111 is portable on macOS BSD find and modern GNU find; -perm +111
-# is deprecated on BSD.
-SIGN_UPDATE="$(find .build -name 'sign_update' -type f -perm /111 2>/dev/null | head -1)"
+# -perm -111 requires every execute bit (u+g+o) set — matches the SPM
+# artifact bundle's installed permissions. Earlier the script used the
+# slash form (-perm /111) which is documented portable but does NOT work
+# on macOS Tahoe (BSD find regression — returns empty result silently).
+SIGN_UPDATE="$(find .build -name 'sign_update' -type f -perm -111 2>/dev/null | head -1)"
 if [ -z "$SIGN_UPDATE" ]; then
     echo "✗ sign_update tool not found in .build/. Run swift build first." >&2
     exit 1
