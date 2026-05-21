@@ -89,8 +89,13 @@ done
 # 7. Belt-and-suspenders deep verification of the assembled app bundle
 codesign --verify --deep --strict --verbose=2 "$APP"
 
-# 8. Gatekeeper sanity check on the DMG
-spctl -a -t open --context context:primary-signature -vv "$DMG_PATH"
+# 8. Gatekeeper sanity check happens inside step 11 (mount DMG, spctl the
+#    .app). DMGs themselves are not code-signed by Apple's notarization
+#    flow — they get a stapled ticket but no code signature — so any spctl
+#    check directly on the .dmg file rejects with "no usable signature".
+#    The stapler validate at step 5 already proved the ticket is attached;
+#    step 11 below validates what Gatekeeper actually sees when the user
+#    opens the .app from the mounted volume.
 
 # 9. EdDSA-sign the DMG
 echo "▸ Computing Sparkle EdDSA signature…"
@@ -121,11 +126,16 @@ fi
 
 # 11. Verify the bundled app inside the DMG passes Gatekeeper from inside
 #     the mounted image (catches problems that disappear once the user
-#     drags-to-Applications). Read-only mount via hdiutil.
+#     drags-to-Applications). Read-only mount via hdiutil. We run both
+#     codesign --verify (structural integrity) and spctl --assess (the
+#     "what Gatekeeper says" check, which must return Notarized Developer
+#     ID — anything else means notarization didn't take or the staple is
+#     misapplied).
 MOUNT_POINT="$(mktemp -d -t RubienDmgVerify)"
 hdiutil attach -nobrowse -readonly -mountpoint "$MOUNT_POINT" "$DMG_PATH" >/dev/null
 trap 'hdiutil detach "$MOUNT_POINT" -force >/dev/null 2>&1 || true' EXIT
 codesign --verify --deep --strict --verbose=2 "$MOUNT_POINT/Rubien.app"
+spctl --assess --verbose=2 "$MOUNT_POINT/Rubien.app"
 hdiutil detach "$MOUNT_POINT" -force >/dev/null
 trap - EXIT
 
