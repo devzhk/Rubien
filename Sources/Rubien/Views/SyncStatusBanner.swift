@@ -150,6 +150,30 @@ extension View {
     }
 }
 
+/// Variant of `.syncStatusBanner` that reads the status from the ambient
+/// `SyncCoordinator` instead of taking it as a parameter. Use **only at the
+/// root scene** so `RubienApp.body` does not have to read
+/// `syncCoordinator.status` itself — otherwise the whole scene-body
+/// view-expression tree re-evaluates on every status flip (multiple times
+/// per sync batch). Applying this modifier deeper in the view tree
+/// reintroduces a `SyncCoordinator` `@EnvironmentObject` subscription at
+/// that point and undoes the benefit.
+private struct SyncStatusBannerFromCoordinator: ViewModifier {
+    @EnvironmentObject private var coordinator: SyncCoordinator
+
+    func body(content: Content) -> some View {
+        content.syncStatusBanner(status: coordinator.status) {
+            Task { await coordinator.retryStartSync() }
+        }
+    }
+}
+
+extension View {
+    func syncStatusBannerFromCoordinator() -> some View {
+        modifier(SyncStatusBannerFromCoordinator())
+    }
+}
+
 /// Opens System Settings' Apple ID pane. Apple does not ship a
 /// `CKContainer.openSettingsURLString` constant on macOS — that's an
 /// iOS-only UIApplication API.

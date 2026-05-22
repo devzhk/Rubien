@@ -196,8 +196,11 @@ final class LibraryViewModel: ObservableObject {
             .store(in: &cancellables)
 
         // Observe all reference titles for smart keyword extraction.
+        // Throttle: a sync batch commits many `reference` rows back-to-back,
+        // and we don't want each commit to retrigger the full sidebar
+        // keyword recompute on main. 150 ms / latest coalesces the burst.
         db.observeReferences()
-            .receive(on: DispatchQueue.main)
+            .throttle(for: .milliseconds(150), scheduler: DispatchQueue.main, latest: true)
             .sink(
                 receiveCompletion: { _ in },
                 receiveValue: { [weak self] refs in
@@ -225,6 +228,14 @@ final class LibraryViewModel: ObservableObject {
 
         referenceObserverCancellable = db
             .observeReferences(scope: scope, filter: filter, limit: 0)
+            // Coalesce bursty commits. Sync apply batches commit reference
+            // rows back-to-back; each commit re-fires `fetchReferences` (a
+            // SQLite query — joins under `.tag` scope, FTS only when a
+            // keyword filter is active) and emits to main. Without this,
+            // the burst saturates the main thread and starves any PDF
+            // reader window currently rendering. `latest: true` keeps the
+            // freshest snapshot per window.
+            .throttle(for: .milliseconds(150), scheduler: DispatchQueue.main, latest: true)
             .sink(
                 receiveCompletion: { [weak self] completion in
                     if case .failure(let error) = completion {
@@ -732,7 +743,7 @@ final class LibraryViewModel: ObservableObject {
 
 struct ContentView: View {
     @StateObject private var viewModel = LibraryViewModel()
-    @EnvironmentObject private var syncCoordinator: SyncCoordinator
+    @Environment(\.syncCoordinator) private var syncCoordinator: SyncCoordinator?
     @State private var showSearch = false
     @State private var showAddReference = false
     @State private var addReferenceInitialType: ReferenceType = .journalArticle
@@ -1254,7 +1265,8 @@ struct ContentView: View {
         if let pdfFilename, let id = mutable.id {
             do {
                 try viewModel.db.attachImportedPDFs(rowIds: [id], filenames: [pdfFilename])
-                Task { await syncCoordinator.kickPDFUploadDrainer() }
+                let coordinator = syncCoordinator
+                Task { await coordinator?.kickPDFUploadDrainer() }
             } catch {
                 viewModel.errorMessage = "Attach PDF failed: \(error.localizedDescription)"
             }

@@ -8,13 +8,17 @@ struct SyncStatusIcon: View {
     let status: SyncStatus
 
     var body: some View {
+        // No `.symbolEffect(.pulse, options: .repeating, ...)`: while sync
+        // was active, the icon ran a continuous CoreAnimation pulse on the
+        // process-wide render-server pipeline. A `sample` of the lagging
+        // process showed ~58% of main-thread time blocked in
+        // `[CAContext waitForCommitId:timeout:]`, and a discriminator that
+        // forced `isActive: false` eliminated the user-visible PDF reader
+        // scroll lag — so the repeating pulse is at minimum the dominant
+        // contributor to that back-pressure. Icon + color change still
+        // convey sync state.
         Image(systemName: symbolName)
             .foregroundStyle(symbolColor)
-            .symbolEffect(
-                .pulse,
-                options: .repeating,
-                isActive: status == .syncing
-            )
             .accessibilityLabel(accessibilityLabel)
             .help(accessibilityLabel)
     }

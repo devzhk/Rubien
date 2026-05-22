@@ -17,8 +17,13 @@ struct RubienApp: App {
 
     var body: some Scene {
         WindowGroup {
+            // `.environmentObject(…)` is outermost so it's visible to the
+            // `.syncStatusBannerFromCoordinator()` modifier wrapping
+            // ContentView — not just to ContentView's children. Reordering
+            // crashes with "No ObservableObject of type SyncCoordinator
+            // found" during state restoration.
             ContentView()
-                .environmentObject(syncCoordinator)
+                .environment(\.syncCoordinator, syncCoordinator)
                 #if canImport(Sparkle)
                 .environment(updateController)
                 .focusedSceneValue(\.updateController, updateController)
@@ -30,9 +35,7 @@ struct RubienApp: App {
                             .transition(.move(edge: .top).combined(with: .opacity))
                     }
                 }
-                .syncStatusBanner(status: syncCoordinator.status) {
-                    Task { await syncCoordinator.retryStartSync() }
-                }
+                .syncStatusBannerFromCoordinator()
                 .task {
                     await syncCoordinator.startIfEnabled()
                 }
@@ -44,6 +47,7 @@ struct RubienApp: App {
                     let message = title.flatMap { !$0.isEmpty ? String(format: fmt, $0) : nil } ?? fallback
                     showToast(message, tone: .success)
                 }
+                .environmentObject(syncCoordinator)
         }
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified(showsTitle: false))
@@ -54,11 +58,13 @@ struct RubienApp: App {
         }
         #endif
         Settings {
+            // Same outermost-environmentObject ordering as the WindowGroup.
             RubienSettingsView()
-                .environmentObject(syncCoordinator)
+                .environment(\.syncCoordinator, syncCoordinator)
                 #if canImport(Sparkle)
                 .environment(updateController)
                 #endif
+                .environmentObject(syncCoordinator)
         }
     }
 
