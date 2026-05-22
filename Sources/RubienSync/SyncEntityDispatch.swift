@@ -15,6 +15,101 @@ import RubienCore
 ///   and resolve both halves.
 extension SyncEntityType {
 
+    /// Output of `prepareReferencePDFMaterialization`. Carries the bytes
+    /// already on disk and the canonical `entityId` (`Int64`) parsed from
+    /// `CKRecord.ID.recordName`. The wire payload's own `referenceId` is
+    /// kept for scalar columns only — `entityId` is the DB key.
+    struct PreparedReferencePDFMaterialization: Sendable {
+        let entityId: Int64
+        let payload: ReferencePDFRecord
+        let stagedURL: URL
+        let stagedFilename: String
+    }
+
+    /// Stage the CKAsset bytes onto disk under `PDFs/<UUID>_<originalFilename>`
+    /// and return the metadata the apply step needs to upsert `pdfCache`.
+    /// **No DB access.** Caller invokes this *before* opening the
+    /// `dbWriter.write` transaction.
+    ///
+    /// Returns nil for:
+    /// - records without an asset (`payload.assetURL == nil`)
+    /// - records whose `recordName` doesn't parse as `referencePDF:<Int64>`
+    ///
+    /// On `copyItem` failure the partial staged file is removed before
+    /// rethrowing so the PDFs/ dir doesn't accumulate orphans.
+    static func prepareReferencePDFMaterialization(
+        record: CKRecord
+    ) throws -> PreparedReferencePDFMaterialization? {
+        guard let (_, entityIdStr) = SyncEntityType.parseRecordName(record.recordID.recordName),
+              let entityId = Int64(entityIdStr) else {
+            return nil
+        }
+        guard let payload = ReferencePDFRecord(record: record),
+              let srcURL = payload.assetURL else {
+            return nil
+        }
+        let stagedFilename = "\(UUID().uuidString)_\(payload.originalFilename)"
+        let stagedURL = AppDatabase.pdfStorageURL.appendingPathComponent(stagedFilename)
+        try FileManager.default.createDirectory(
+            at: AppDatabase.pdfStorageURL,
+            withIntermediateDirectories: true
+        )
+        do {
+            try FileManager.default.copyItem(at: srcURL, to: stagedURL)
+        } catch {
+            try? FileManager.default.removeItem(at: stagedURL)
+            throw error
+        }
+        return PreparedReferencePDFMaterialization(
+            entityId: entityId,
+            payload: payload,
+            stagedURL: stagedURL,
+            stagedFilename: stagedFilename
+        )
+    }
+
+    /// Run the small `pdfCache` upsert for a previously-prepared
+    /// materialization. **No file I/O.** Returns the *previous*
+    /// `localFilename` for this reference (if any), so the caller can unlink
+    /// it post-commit — keeping that unlink off the writer queue too.
+    ///
+    /// Caller must have set `setApplyingRemote` in `syncSession` if other
+    /// rows in the same transaction are synced tables; `pdfCache` itself is
+    /// local-only (not in `syncedTables`) so its writes never fire dirty-
+    /// tracking triggers, but the surrounding transaction often touches
+    /// `reference` etc. which do.
+    static func applyPreparedReferencePDF(
+        _ prepared: PreparedReferencePDFMaterialization,
+        db: Database
+    ) throws -> String? {
+        let id = prepared.entityId
+        let previousFilename = try String.fetchOne(
+            db,
+            sql: "SELECT localFilename FROM pdfCache WHERE referenceId = ?",
+            arguments: [id]
+        )
+        try db.execute(sql: """
+            INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
+            VALUES(?, ?, ?, ?, ?, ?)
+            ON CONFLICT(referenceId) DO UPDATE SET
+                localFilename = excluded.localFilename,
+                contentHash = excluded.contentHash,
+                assetVersion = excluded.assetVersion,
+                materializedAt = excluded.materializedAt
+        """, arguments: [
+            id,
+            prepared.stagedFilename,
+            prepared.payload.contentHash,
+            prepared.payload.assetVersion,
+            Date(),
+            Date(),
+        ])
+        if let previousFilename, previousFilename != prepared.stagedFilename {
+            return previousFilename
+        }
+        return nil
+    }
+
     /// Compose the `"<type>:<entityId>"` CKRecord.recordName for a local row.
     /// Inverse of `parseRecordName`.
     public func qualifiedRecordName(entityId: String) -> String {
@@ -168,13 +263,24 @@ extension SyncEntityType {
             let filename: String = row["localFilename"]
             let assetURL = AppDatabase.pdfStorageURL.appendingPathComponent(filename)
             guard FileManager.default.fileExists(atPath: assetURL.path) else { return nil }
-            // Resolve "pending" placeholders. The v2 migration backfilled
-            // existing pdfPaths with contentHash='pending' (skipping the
-            // hash to keep launch fast). Recompute on first push so peers
-            // receive a real SHA-256 they can verify against, and persist
-            // the result so subsequent pushes don't re-hash.
-            // PDFContentHasher streams in 1 MB chunks — safe inside the
-            // push transaction.
+            // SAFETY NET — defense-in-depth only.
+            //
+            // Normal-path coverage:
+            //   - migration backfill 'pending' rows: resolved at start()
+            //     by SyncedLibrary.resolvePendingPDFContentHashes, BEFORE
+            //     the engine is constructed;
+            //   - freshly-imported 'pending' rows: resolved per-row by
+            //     SyncedLibrary.drainPDFUploadQueueIntoSyncState, BEFORE
+            //     the syncState dirty marker is written.
+            //
+            // Note: the early `guard FileManager.default.fileExists(...)
+            // else { return nil }` above this block means this branch is
+            // ALSO not reachable for rows whose local file has vanished —
+            // the missing-file case returns nil before reaching the
+            // 'pending' check. The only remaining reachability path is a
+            // future code change that bypasses both resolver layers and
+            // marks a 'pending' row dirty in syncState directly. Kept for
+            // that defense-in-depth scenario only.
             var contentHash: String = row["contentHash"]
             if contentHash == "pending" {
                 contentHash = try PDFContentHasher.sha256(of: assetURL)
@@ -285,44 +391,16 @@ extension SyncEntityType {
             try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
 
         case .referencePDF:
-            guard let id = Int64(entityId), let payload = ReferencePDFRecord(record: record) else { return }
-            // Mac always materializes. Copy CKAsset's downloaded file into our
-            // PDFs/ dir under a UUID-prefixed name (mirrors PDFService.importPDF).
-            // The CKAsset's fileURL is in CloudKit's caches and may be cleaned
-            // up; copy promotes the bytes to permanent storage.
-            guard let srcURL = payload.assetURL else { return }
-            // Capture the previous localFilename so we can unlink it after the
-            // upsert succeeds. Without this, an asset re-pull (assetVersion bump)
-            // overwrites the row's filename pointer but leaves the old file
-            // orphaned in PDFs/ forever.
-            let previousFilename = try String.fetchOne(db,
-                sql: "SELECT localFilename FROM pdfCache WHERE referenceId = ?",
-                arguments: [id])
-            let localFilename = "\(UUID().uuidString)_\(payload.originalFilename)"
-            let dest = AppDatabase.pdfStorageURL.appendingPathComponent(localFilename)
-            try FileManager.default.createDirectory(at: AppDatabase.pdfStorageURL, withIntermediateDirectories: true)
-            if FileManager.default.fileExists(atPath: dest.path) {
-                try FileManager.default.removeItem(at: dest)
+            // Backwards-compat wrapper around the two-step pipeline.
+            // Production hot paths drive prepare/apply directly so the file
+            // copy stays out of the write transaction; this wrapper exists
+            // only for the SyncEntityDispatchTests call sites that still
+            // exercise the single-shot signature.
+            guard let prepared = try Self.prepareReferencePDFMaterialization(record: record) else {
+                return
             }
-            try FileManager.default.copyItem(at: srcURL, to: dest)
-            // ON CONFLICT deliberately omits `lastOpenedAt = excluded.lastOpenedAt`
-            // (differs from PDFAssetCache.materialize which DOES bump it).
-            // Rationale: a remote pull is the cloud telling us new bytes exist,
-            // not the user opening the file. Bumping lastOpenedAt here would
-            // distort the LRU signal that drives eviction (deferred to iOS-port
-            // plan but the column semantics need to stay clean now).
-            try db.execute(sql: """
-                INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
-                VALUES(?, ?, ?, ?, ?, ?)
-                ON CONFLICT(referenceId) DO UPDATE SET
-                    localFilename = excluded.localFilename,
-                    contentHash = excluded.contentHash,
-                    assetVersion = excluded.assetVersion,
-                    materializedAt = excluded.materializedAt
-            """, arguments: [id, localFilename, payload.contentHash, payload.assetVersion, Date(), Date()])
-            // Best-effort unlink of the prior file. Skip if same name (shouldn't
-            // happen — new name is always UUID-prefixed) or already gone.
-            if let previousFilename, previousFilename != localFilename {
+            let previousFilename = try Self.applyPreparedReferencePDF(prepared, db: db)
+            if let previousFilename {
                 let oldURL = AppDatabase.pdfStorageURL.appendingPathComponent(previousFilename)
                 try? FileManager.default.removeItem(at: oldURL)
             }

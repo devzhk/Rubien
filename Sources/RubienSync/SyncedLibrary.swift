@@ -37,6 +37,15 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     /// in `SyncCoordinator`; tests inject `{ true }` or `{ false }` directly.
     private let pdfAssetSyncEnabledProvider: @Sendable () -> Bool
 
+    /// Internal shape for deletions threaded into `applyFetchedRecordsInternal`.
+    /// `CKSyncEngine.Event.FetchedRecordZoneChanges.Deletion` is not publicly
+    /// constructible, so the production adapter unpacks it into this struct
+    /// before handing off — and tests can synthesize values directly.
+    struct FetchedDeletionInput: Sendable {
+        let recordID: CKRecord.ID
+        let recordType: String
+    }
+
     /// Lazy container factory. Deferring construction means unit tests can
     /// exercise the actor's DB-touching side effects (baseline, tombstone
     /// compaction, startup reconciliation) without triggering the CloudKit
@@ -99,6 +108,17 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     /// compaction → startup reconciliation → PDF-upload-queue drain. Each
     /// step short-circuits if nothing to do.
     public func start() async {
+        // Step 1 — resolve any 'pending' contentHash rows BEFORE the engine
+        // is constructed. Auto-scheduling means the engine can request a
+        // push batch immediately after `_ = engine`; doing the resolver
+        // first guarantees no in-flight push ever sees a pending row at
+        // start. Self-gated on the feature flag — when PDF asset sync is
+        // disabled, leaving rows 'pending' is harmless since no push code
+        // reads them.
+        if pdfAssetSyncEnabledProvider() {
+            await resolvePendingPDFContentHashes()
+        }
+
         _ = engine
         await performInitialBaselineIfNeeded()
         await compactStaleTombstones()
@@ -178,6 +198,15 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         }
         guard !pendingIds.isEmpty else { return [] }
 
+        // Resolve each row's pending hash *outside* the upcoming mark-dirty
+        // transaction. By the time the engine is told the row is dirty, its
+        // pdfCache.contentHash is a real SHA-256 — the inline hash branch
+        // in buildPushRecord(.referencePDF) is no longer the routine path
+        // for fresh imports.
+        for id in pendingIds {
+            await resolvePendingHashForReference(id)
+        }
+
         // Mark each pending ID as dirty in syncState AND clear the queue
         // row in one transaction. Atomicity here matters: if mark-dirty
         // succeeded but queue-remove failed, the next drain pass would
@@ -205,6 +234,88 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             return []
         }
         return pendingIds
+    }
+
+    // MARK: - Pending PDF content-hash resolver
+
+    /// Walk `pdfCache` for rows still tagged with the migration sentinel
+    /// `contentHash = 'pending'` and replace each with the real SHA-256 of
+    /// the on-disk file. Runs as the FIRST step of `start()` so the engine
+    /// is never constructed (and thus never auto-scheduled) while pending
+    /// rows still exist.
+    ///
+    /// **No transaction wraps the SHA-256 compute.** Each row gets two tiny
+    /// `dbWriter.read` / `dbWriter.write` hops: one to read the filename, one
+    /// to write the resolved hash. Between them, `PDFContentHasher.sha256`
+    /// streams the file with the writer queue free.
+    ///
+    /// Missing files are tolerated (logged + skipped). Leaving such a row
+    /// at `contentHash='pending'` is safe: `buildPushRecord(.referencePDF)`
+    /// returns nil for missing-file rows via an earlier `fileExists` guard,
+    /// so no inline-hash branch is ever reached for them.
+    func resolvePendingPDFContentHashes() async {
+        let pending: [(id: Int64, filename: String)]
+        do {
+            pending = try await appDatabase.dbWriter.read { db in
+                try Row.fetchAll(db, sql: """
+                    SELECT referenceId, localFilename FROM pdfCache
+                    WHERE contentHash = 'pending' AND materializedAt IS NOT NULL
+                """).map { (id: $0["referenceId"], filename: $0["localFilename"]) }
+            }
+        } catch {
+            log.error("resolvePendingPDFContentHashes: failed to read pending list: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        for row in pending {
+            await resolvePendingHashFor(referenceId: row.id, filename: row.filename)
+        }
+    }
+
+    /// Resolve a single pdfCache row's pending hash. The drainer's per-
+    /// import path passes its own filename; the startup walker batches the
+    /// lookup. Idempotent for non-pending rows (WHERE contentHash =
+    /// 'pending' guard on the UPDATE).
+    func resolvePendingHashForReference(_ referenceId: Int64) async {
+        let filename: String?
+        do {
+            filename = try await appDatabase.dbWriter.read { db in
+                try String.fetchOne(
+                    db,
+                    sql: "SELECT localFilename FROM pdfCache WHERE referenceId = ? AND contentHash = 'pending'",
+                    arguments: [referenceId]
+                )
+            }
+        } catch {
+            log.error("resolvePendingHashForReference: read failed for \(referenceId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        guard let filename else { return }
+        await resolvePendingHashFor(referenceId: referenceId, filename: filename)
+    }
+
+    private func resolvePendingHashFor(referenceId: Int64, filename: String) async {
+        let url = AppDatabase.pdfStorageURL.appendingPathComponent(filename)
+        let hash: String
+        do {
+            hash = try PDFContentHasher.sha256(of: url)
+        } catch {
+            // Missing-file or unreadable-file case lands here. Leave the
+            // row at 'pending'; safe because buildPushRecord(.referencePDF)
+            // also short-circuits for missing files via its own fileExists
+            // guard, so no inline-hash branch can fire for them.
+            log.info("resolvePendingHashFor: hash skipped for \(referenceId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        do {
+            try await appDatabase.dbWriter.write { db in
+                try db.execute(
+                    sql: "UPDATE pdfCache SET contentHash = ? WHERE referenceId = ? AND contentHash = 'pending'",
+                    arguments: [hash, referenceId]
+                )
+            }
+        } catch {
+            log.error("resolvePendingHashFor: write failed for \(referenceId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     // MARK: - Status publishing
@@ -548,41 +659,109 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     private func applyFetchedZoneChanges(
         _ event: CKSyncEngine.Event.FetchedRecordZoneChanges
     ) async {
-        // Sort modifications into FK-dependency order so intermediate reads
-        // inside the transaction see consistent parent rows even while
-        // defer_foreign_keys lets constraint enforcement slide until commit.
-        let sortedMods = event.modifications.sorted { lhs, rhs in
+        let mods = event.modifications.map(\.record)
+        let dels: [FetchedDeletionInput] = event.deletions.map {
+            FetchedDeletionInput(recordID: $0.recordID, recordType: $0.recordType)
+        }
+        await applyFetchedRecordsInternal(modifications: mods, deletions: dels)
+    }
+
+    /// Shared implementation used by `applyFetchedZoneChanges` and tests.
+    /// Pre-stages every `referencePDF` modification *outside* the write
+    /// transaction (file I/O off the writer queue). The transaction body
+    /// then runs only the small `pdfCache` upsert plus the existing
+    /// non-PDF apply paths. Old filenames returned by `applyPreparedReferencePDF`
+    /// and staged files for skipped-or-rolled-back records are unlinked
+    /// post-transaction so PDFs/ never accumulates orphans.
+    private func applyFetchedRecordsInternal(
+        modifications: [CKRecord],
+        deletions: [FetchedDeletionInput]
+    ) async {
+        // FK-dependency-ordered modifications. PDFs are FK-children of
+        // Reference and have rank Int.max in practice — they sort last.
+        let sortedMods = modifications.sorted { lhs, rhs in
             let lhsRank = SyncEntityType
-                .forRecordType(lhs.record.recordType)?.fkDependencyRank ?? Int.max
+                .forRecordType(lhs.recordType)?.fkDependencyRank ?? Int.max
             let rhsRank = SyncEntityType
-                .forRecordType(rhs.record.recordType)?.fkDependencyRank ?? Int.max
+                .forRecordType(rhs.recordType)?.fkDependencyRank ?? Int.max
             return lhsRank < rhsRank
         }
 
+        // Phase 1 — pre-stage referencePDF assets outside any DB transaction.
+        // `prepare` validates recordName and Int64 entityId internally, so a
+        // malformed name simply returns nil with no staged file. Frozen into
+        // a `let` for safe capture by the @Sendable write closure below.
+        var preparedBuilder: [CKRecord.ID: SyncEntityType.PreparedReferencePDFMaterialization] = [:]
+        for record in sortedMods where record.recordType == SyncConstants.RecordType.referencePDF {
+            do {
+                if let prepared = try SyncEntityType.prepareReferencePDFMaterialization(record: record) {
+                    preparedBuilder[record.recordID] = prepared
+                }
+            } catch {
+                log.error("prepareReferencePDFMaterialization failed for \(record.recordID.recordName, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        let preparedPDFs = preparedBuilder
+
+        // Phase 2 — write transaction. The closure RETURNS its outcome
+        // rather than mutating captured `var` locals — GRDB 7's async
+        // `write` closure is `@Sendable`, so mutating outer state across
+        // the boundary is a Swift-6 strict-concurrency compile error.
+        struct BatchOutcome: Sendable {
+            var displacedFilenames: [String]
+            var appliedPDFRecordIDs: Set<CKRecord.ID>
+        }
+
+        var rollbackTriggered = false
+        var outcome = BatchOutcome(displacedFilenames: [], appliedPDFRecordIDs: [])
+
         do {
-            try await appDatabase.dbWriter.write { [stateStore] db in
+            outcome = try await appDatabase.dbWriter.write { [stateStore] db -> BatchOutcome in
+                var local = BatchOutcome(displacedFilenames: [], appliedPDFRecordIDs: [])
                 try db.execute(sql: "PRAGMA defer_foreign_keys = ON")
                 try stateStore.setApplyingRemote(db)
 
-                for mod in sortedMods {
-                    guard let type = SyncEntityType.forRecordType(mod.record.recordType) else {
-                        log.error("unknown recordType \(mod.record.recordType, privacy: .public); skipping")
+                for record in sortedMods {
+                    guard let type = SyncEntityType.forRecordType(record.recordType) else {
+                        log.error("unknown recordType \(record.recordType, privacy: .public); skipping")
                         continue
                     }
-                    guard let entityId = SyncEntityType.parseRecordName(mod.record.recordID.recordName)?.1 else {
-                        log.error("skipping malformed recordName \(mod.record.recordID.recordName, privacy: .public)")
+                    guard let entityId = SyncEntityType.parseRecordName(record.recordID.recordName)?.1 else {
+                        log.error("skipping malformed recordName \(record.recordID.recordName, privacy: .public)")
                         continue
                     }
-                    try type.applyRemoteRecord(mod.record, entityId: entityId, db: db)
+
+                    if type == .referencePDF {
+                        guard let prepared = preparedPDFs[record.recordID] else {
+                            // Prepare returned nil (malformed name, no asset,
+                            // or copyItem failed). Skip apply so we don't
+                            // write a pdfCache row pointing at a missing file.
+                            // Dirty flag untouched; a later refetch retries.
+                            continue
+                        }
+                        if let prior = try SyncEntityType.applyPreparedReferencePDF(prepared, db: db) {
+                            local.displacedFilenames.append(prior)
+                        }
+                        local.appliedPDFRecordIDs.insert(record.recordID)
+                        try stateStore.markPulled(
+                            db,
+                            entityType: type,
+                            entityId: entityId,
+                            record: record
+                        )
+                        continue
+                    }
+
+                    try type.applyRemoteRecord(record, entityId: entityId, db: db)
                     try stateStore.markPulled(
                         db,
                         entityType: type,
                         entityId: entityId,
-                        record: mod.record
+                        record: record
                     )
                 }
 
-                for deletion in event.deletions {
+                for deletion in deletions {
                     guard let type = SyncEntityType.forRecordType(deletion.recordType) else { continue }
                     guard let entityId = SyncEntityType.parseRecordName(deletion.recordID.recordName)?.1 else {
                         log.error("skipping malformed delete recordName \(deletion.recordID.recordName, privacy: .public)")
@@ -590,10 +769,6 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                     }
                     try type.applyRemoteDelete(entityId: entityId, db: db)
                     try stateStore.removeState(db, entityType: type, entityId: entityId)
-                    // Server-driven delete: the cloud already decided. Marking
-                    // confirmed prevents this row from being re-pushed in the
-                    // next push cycle (and matches upsertTombstone's own
-                    // documented contract for pull-side calls).
                     try stateStore.upsertTombstone(
                         db,
                         entityType: type,
@@ -612,10 +787,47 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                 }
 
                 try stateStore.clearApplyingRemote(db)
+                return local
             }
         } catch {
             log.error("applyFetchedZoneChanges failed: \(error.localizedDescription, privacy: .public)")
+            rollbackTriggered = true
         }
+
+        // Phase 3 — post-commit file I/O. Off the writer queue. Three buckets:
+        //
+        //   a) Commit succeeded → unlink prior files we displaced.
+        //   b) Commit succeeded but some prepared rows were skipped inside
+        //      the transaction (prepared but no apply call — defensive,
+        //      should not occur given the pre-stage validates Int64(entityId)).
+        //      → unlink the staged file we never used.
+        //   c) Commit failed → unlink every freshly-staged file so PDFs/
+        //      doesn't reference rows that don't exist.
+        if rollbackTriggered {
+            for prepared in preparedPDFs.values {
+                try? FileManager.default.removeItem(at: prepared.stagedURL)
+            }
+        } else {
+            for filename in outcome.displacedFilenames {
+                let url = AppDatabase.pdfStorageURL.appendingPathComponent(filename)
+                try? FileManager.default.removeItem(at: url)
+            }
+            for (recordID, prepared) in preparedPDFs where !outcome.appliedPDFRecordIDs.contains(recordID) {
+                try? FileManager.default.removeItem(at: prepared.stagedURL)
+            }
+        }
+    }
+
+    /// Test-only entry point. Drives the production
+    /// `applyFetchedRecordsInternal` pipeline directly so PDF-materialization
+    /// tests can verify the end-to-end actor behavior without standing up a
+    /// CKContainer (which would raise CKException in an unentitled XCTest
+    /// process).
+    func applyFetchedRecordsForTest(
+        modifications: [CKRecord],
+        deletions: [FetchedDeletionInput]
+    ) async {
+        await applyFetchedRecordsInternal(modifications: modifications, deletions: deletions)
     }
 
     private func handleSentZoneChanges(
@@ -765,10 +977,38 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             return
         }
 
+        // referencePDF: pre-stage bytes outside the transaction so the writer
+        // queue isn't held by a large copyItem during conflict resolution.
+        // `prepare` returns nil for malformed names; we drop the merge then.
+        let preparedPDF: SyncEntityType.PreparedReferencePDFMaterialization?
+        if type == .referencePDF {
+            do {
+                preparedPDF = try SyncEntityType.prepareReferencePDFMaterialization(record: serverRecord)
+            } catch {
+                log.error("serverRecordChanged prepare failed: \(error.localizedDescription, privacy: .public)")
+                return
+            }
+            guard preparedPDF != nil else { return }
+        } else {
+            preparedPDF = nil
+        }
+
+        // Closure returns `displacedFilename` to avoid mutating captures
+        // across the @Sendable boundary. `commitFailed` is only set in the
+        // catch block, outside the closure, so it can stay a `var`.
+        var commitFailed = false
+        var displacedFilename: String? = nil
+
         do {
-            try await appDatabase.dbWriter.write { [stateStore] db in
+            displacedFilename = try await appDatabase.dbWriter.write { [stateStore] db -> String? in
                 try stateStore.setApplyingRemote(db)
-                try type.applyRemoteRecord(serverRecord, entityId: entityId, db: db)
+                let displaced: String?
+                if type == .referencePDF, let prepared = preparedPDF {
+                    displaced = try SyncEntityType.applyPreparedReferencePDF(prepared, db: db)
+                } else {
+                    try type.applyRemoteRecord(serverRecord, entityId: entityId, db: db)
+                    displaced = nil
+                }
                 try stateStore.markPulled(
                     db,
                     entityType: type,
@@ -776,9 +1016,25 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                     record: serverRecord
                 )
                 try stateStore.clearApplyingRemote(db)
+                return displaced
             }
         } catch {
             log.error("serverRecordChanged merge failed: \(error.localizedDescription, privacy: .public)")
+            commitFailed = true
+        }
+
+        // Post-commit file I/O (off the writer queue). On commit success
+        // the staged file is now owned by `pdfCache` (the apply call
+        // succeeded because pre-stage validated the entityId), so we
+        // only need to unlink the displaced prior file (if any). On commit
+        // failure we unlink the staged file we never promoted.
+        if commitFailed {
+            if let staged = preparedPDF?.stagedURL {
+                try? FileManager.default.removeItem(at: staged)
+            }
+        } else if let displaced = displacedFilename {
+            let url = AppDatabase.pdfStorageURL.appendingPathComponent(displaced)
+            try? FileManager.default.removeItem(at: url)
         }
     }
 

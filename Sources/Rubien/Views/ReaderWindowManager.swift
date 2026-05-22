@@ -123,16 +123,18 @@ final class ReaderWindowManager {
     /// (timestamp bump + os.Logger trace on failure) and so tests can verify
     /// the wiring without spinning up an NSWindow.
     func recordReaderOpen(referenceId: Int64, db: AppDatabase) {
-        do {
-            try db.markReferenceRead(id: referenceId)
-        } catch {
-            // Fire-and-forget by design — a transient DB failure must not
-            // block the user from opening their PDF. Log so persistent
-            // failures still surface in Console.app under the "reader-window"
-            // category.
-            readerWindowLog.error(
-                "markReferenceRead failed for reference \(referenceId, privacy: .public): \(error.localizedDescription, privacy: .public)"
-            )
+        // Fire-and-forget. markReferenceRead is a dbWriter.write; if a sync
+        // commit briefly holds the writer queue, a synchronous call from
+        // the main actor would freeze "tap to open." The stamp is a usage
+        // metric — strict ordering isn't required.
+        Task.detached(priority: .utility) {
+            do {
+                try db.markReferenceRead(id: referenceId)
+            } catch {
+                readerWindowLog.error(
+                    "markReferenceRead failed for reference \(referenceId, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
+            }
         }
     }
 

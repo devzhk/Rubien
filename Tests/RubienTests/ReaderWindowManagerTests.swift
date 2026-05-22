@@ -26,7 +26,7 @@ final class ReaderWindowManagerTests: XCTestCase {
 
         ReaderWindowManager.shared.recordReaderOpen(referenceId: refId, db: db)
 
-        let state = try readState(refId: refId, in: db)
+        let state = try waitForState(refId: refId, in: db) { $0.readCount == 1 }
         XCTAssertNotNil(state.lastReadAt, "recordReaderOpen must stamp lastReadAt")
         XCTAssertEqual(state.readCount, 1, "first stamp must bump readCount to 1")
     }
@@ -49,7 +49,7 @@ final class ReaderWindowManagerTests: XCTestCase {
         let reference = try XCTUnwrap(try db.fetchReferences(ids: [refId]).first)
         ReaderWindowManager.shared.openPDFReader(for: reference, db: db)
 
-        let state = try readState(refId: refId, in: db)
+        let state = try waitForState(refId: refId, in: db) { $0.readCount == 1 }
         XCTAssertNotNil(state.lastReadAt, "openPDFReader must call recordReaderOpen on a fresh open")
         XCTAssertEqual(state.readCount, 1)
     }
@@ -62,6 +62,9 @@ final class ReaderWindowManagerTests: XCTestCase {
         let reference = try XCTUnwrap(try db.fetchReferences(ids: [refId]).first)
         ReaderWindowManager.shared.openPDFReader(for: reference, db: db)
 
+        // Non-occurrence assertion: give the detached Task a moment to NOT
+        // fire (the early-return path), then verify nothing was stamped.
+        Thread.sleep(forTimeInterval: 0.1)
         let state = try readState(refId: refId, in: db)
         XCTAssertNil(state.lastReadAt, "no PDF → early return → no stamping")
         XCTAssertEqual(state.readCount, 0)
@@ -74,9 +77,12 @@ final class ReaderWindowManagerTests: XCTestCase {
 
         let reference = try XCTUnwrap(try db.fetchReferences(ids: [refId]).first)
         ReaderWindowManager.shared.openPDFReader(for: reference, db: db)
-        let firstState = try readState(refId: refId, in: db)
+        let firstState = try waitForState(refId: refId, in: db) { $0.readCount == 1 }
 
         ReaderWindowManager.shared.openPDFReader(for: reference, db: db)
+        // Second open is a no-op; give the detached Task a moment to NOT
+        // fire, then assert idempotency.
+        Thread.sleep(forTimeInterval: 0.1)
         let secondState = try readState(refId: refId, in: db)
 
         XCTAssertEqual(secondState.readCount, firstState.readCount,
@@ -94,7 +100,7 @@ final class ReaderWindowManagerTests: XCTestCase {
         let reference = try XCTUnwrap(try db.fetchReferences(ids: [refId]).first)
         ReaderWindowManager.shared.openWebReader(for: reference, db: db)
 
-        let state = try readState(refId: refId, in: db)
+        let state = try waitForState(refId: refId, in: db) { $0.readCount == 1 }
         XCTAssertNotNil(state.lastReadAt, "openWebReader must call recordReaderOpen on a fresh open")
         XCTAssertEqual(state.readCount, 1)
     }
@@ -107,6 +113,7 @@ final class ReaderWindowManagerTests: XCTestCase {
         let reference = try XCTUnwrap(try db.fetchReferences(ids: [refId]).first)
         ReaderWindowManager.shared.openWebReader(for: reference, db: db)
 
+        Thread.sleep(forTimeInterval: 0.1)
         let state = try readState(refId: refId, in: db)
         XCTAssertNil(state.lastReadAt, "non-webpage references → early return → no stamping")
         XCTAssertEqual(state.readCount, 0)
@@ -118,15 +125,40 @@ final class ReaderWindowManagerTests: XCTestCase {
 
         let reference = try XCTUnwrap(try db.fetchReferences(ids: [refId]).first)
         ReaderWindowManager.shared.openWebReader(for: reference, db: db)
-        let firstState = try readState(refId: refId, in: db)
+        let firstState = try waitForState(refId: refId, in: db) { $0.readCount == 1 }
 
         ReaderWindowManager.shared.openWebReader(for: reference, db: db)
+        Thread.sleep(forTimeInterval: 0.1)
         let secondState = try readState(refId: refId, in: db)
 
         XCTAssertEqual(secondState.readCount, firstState.readCount,
                        "refocusing an open web reader must not bump readCount")
         XCTAssertEqual(secondState.lastReadAt, firstState.lastReadAt,
                        "refocusing an open web reader must not re-advance lastReadAt")
+    }
+
+    // MARK: - Polling helper
+
+    /// Polls `readState` until `predicate` returns true or `timeout` elapses.
+    /// Phase 3 dispatches `markReferenceRead` onto a detached Task, so reads
+    /// immediately after `recordReaderOpen` race the write. Tests that
+    /// observe the post-stamp state need to wait for it.
+    private func waitForState(
+        refId: Int64,
+        in db: AppDatabase,
+        timeout: TimeInterval = 1.0,
+        until predicate: ((lastReadAt: Date?, readCount: Int)) -> Bool,
+        line: UInt = #line
+    ) throws -> (lastReadAt: Date?, readCount: Int) {
+        let deadline = Date().addingTimeInterval(timeout)
+        var last: (lastReadAt: Date?, readCount: Int) = (nil, 0)
+        while Date() < deadline {
+            last = try readState(refId: refId, in: db)
+            if predicate(last) { return last }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        XCTFail("waitForState timed out; last observed state = \(last)", line: line)
+        return last
     }
 
     // MARK: - Helpers
