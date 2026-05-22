@@ -1,6 +1,27 @@
 #if os(macOS)
 import SwiftUI
 
+/// Horizontal placement helper for the two annotation popovers below
+/// (`AnnotationSelectionPopover` and `ExistingAnnotationPopover`). Centers
+/// the popover on `center`, but clamps inside
+/// `[edgePadding, containerWidth - popoverWidth - edgePadding]` so the
+/// popover never extends past the surrounding reader container — which
+/// would otherwise be partially covered by the container's
+/// `RoundedRectangle.stroke` border drawn over its contents. The
+/// `popoverWidth` default matches both popovers' `.frame(width: 340)`
+/// below; bump it if those frames ever change.
+func clampedPopoverX(
+    center: CGFloat,
+    containerWidth: CGFloat,
+    popoverWidth: CGFloat = 340,
+    edgePadding: CGFloat = 8
+) -> CGFloat {
+    let desired = center - popoverWidth / 2
+    let minX = edgePadding
+    let maxX = max(minX, containerWidth - popoverWidth - edgePadding)
+    return min(max(desired, minX), maxX)
+}
+
 // MARK: - Selection popover (shown while user has unsaved text selection)
 
 struct AnnotationSelectionPopover: View {

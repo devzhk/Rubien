@@ -27,6 +27,18 @@ cd "$PROJECT_DIR"
 # shellcheck source=lib/codesign.sh
 source "$SCRIPT_DIR/lib/codesign.sh"
 
+# Foot-gun guard: release.sh requires `export CODESIGN_IDENTITY="Developer
+# ID Application: …"`. If that's still set in the shell when dev-launch
+# runs, the bundle gets signed with the release identity, and AMFI
+# rejects launch with POSIX 163 — the dev provisioning profile we embed
+# below can't pair with a Developer ID signature. Override locally
+# without touching the caller's shell, so a subsequent release.sh in the
+# same session still sees the original value.
+if [[ "${CODESIGN_IDENTITY:-}" == Developer\ ID* ]]; then
+    echo "⚠️  CODESIGN_IDENTITY=\"$CODESIGN_IDENTITY\" is a release identity;"
+    echo "    overriding with 'Apple Development' for this dev-launch."
+    CODESIGN_IDENTITY="Apple Development"
+fi
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-Apple Development}"
 PROVISION_PROFILE="${PROVISION_PROFILE:-$HOME/Downloads/Rubien_Mac_Dev.provisionprofile}"
 ENTITLEMENTS="${ENTITLEMENTS:-$PROJECT_DIR/Sources/Rubien/Rubien.entitlements}"

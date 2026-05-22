@@ -1589,33 +1589,38 @@ struct WebReaderView: View {
         let shouldShow = viewModel.hasSelection
             && viewModel.selectionToolbarLayout?.visible == true
         if shouldShow, let layout = viewModel.selectionToolbarLayout {
-            AnnotationSelectionPopover(
-                currentColorHex: $viewModel.currentColorHex,
-                noteMarkdown: $noteMarkdownForSelection,
-                onHighlight: { viewModel.applySelectionAction(.highlight) },
-                onUnderline: { viewModel.applySelectionAction(.underline) },
-                onPickColor: { _ in viewModel.applySelectionAction(.highlight) },
-                onCopy: {
-                    guard let text = viewModel.pendingSelection?.text, !text.isEmpty else { return }
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(text, forType: .string)
-                },
-                onSaveNote: { md in
-                    if let sel = viewModel.pendingSelection {
-                        viewModel.addAnnotation(type: .note, selection: sel, noteText: md)
+            GeometryReader { geo in
+                AnnotationSelectionPopover(
+                    currentColorHex: $viewModel.currentColorHex,
+                    noteMarkdown: $noteMarkdownForSelection,
+                    onHighlight: { viewModel.applySelectionAction(.highlight) },
+                    onUnderline: { viewModel.applySelectionAction(.underline) },
+                    onPickColor: { _ in viewModel.applySelectionAction(.highlight) },
+                    onCopy: {
+                        guard let text = viewModel.pendingSelection?.text, !text.isEmpty else { return }
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(text, forType: .string)
+                    },
+                    onSaveNote: { md in
+                        if let sel = viewModel.pendingSelection {
+                            viewModel.addAnnotation(type: .note, selection: sel, noteText: md)
+                        }
+                        viewModel.clearSelection()
+                        noteMarkdownForSelection = ""
+                    },
+                    onDismiss: {
+                        viewModel.clearSelection()
+                        noteMarkdownForSelection = ""
                     }
-                    viewModel.clearSelection()
-                    noteMarkdownForSelection = ""
-                },
-                onDismiss: {
-                    viewModel.clearSelection()
-                    noteMarkdownForSelection = ""
-                }
-            )
-            .fixedSize()
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .offset(x: max(8, layout.center.x - 170), y: layout.center.y - 17)
-            .allowsHitTesting(true)
+                )
+                .fixedSize()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .offset(
+                    x: clampedPopoverX(center: layout.center.x, containerWidth: geo.size.width),
+                    y: layout.center.y - 17
+                )
+                .allowsHitTesting(true)
+            }
             .transition(.scale(scale: 0.92, anchor: .top).combined(with: .opacity))
             .animation(.spring(response: 0.25, dampingFraction: 0.82), value: layout.center)
         }
@@ -1625,31 +1630,36 @@ struct WebReaderView: View {
     private var webAnnotationToolbarOverlay: some View {
         if let annotation = viewModel.clickedAnnotationRecord,
            let layout = viewModel.annotationToolbarLayout, layout.visible {
-            ExistingAnnotationPopover(
-                annotationId: AnyHashable(annotation.id ?? -1),
-                currentColor: annotation.color,
-                initialNoteText: annotation.noteText,
-                onPickColor: { hex in
-                    viewModel.updateAnnotationColor(annotation, color: hex)
-                    if let updated = viewModel.annotations.first(where: { $0.id == annotation.id }) {
-                        viewModel.clickedAnnotationRecord = updated
-                    }
-                },
-                onDelete: {
-                    viewModel.deleteAnnotation(annotation)
-                    viewModel.dismissAnnotationToolbar()
-                },
-                onNoteAutosave: { trimmed in
-                    if let ann = viewModel.clickedAnnotationRecord {
-                        viewModel.updateAnnotationNote(ann, noteText: trimmed)
-                    }
-                },
-                onDismiss: { viewModel.dismissAnnotationToolbar() }
-            )
-            .fixedSize()
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .offset(x: max(8, layout.center.x - 170), y: layout.center.y - 17)
-            .allowsHitTesting(true)
+            GeometryReader { geo in
+                ExistingAnnotationPopover(
+                    annotationId: AnyHashable(annotation.id ?? -1),
+                    currentColor: annotation.color,
+                    initialNoteText: annotation.noteText,
+                    onPickColor: { hex in
+                        viewModel.updateAnnotationColor(annotation, color: hex)
+                        if let updated = viewModel.annotations.first(where: { $0.id == annotation.id }) {
+                            viewModel.clickedAnnotationRecord = updated
+                        }
+                    },
+                    onDelete: {
+                        viewModel.deleteAnnotation(annotation)
+                        viewModel.dismissAnnotationToolbar()
+                    },
+                    onNoteAutosave: { trimmed in
+                        if let ann = viewModel.clickedAnnotationRecord {
+                            viewModel.updateAnnotationNote(ann, noteText: trimmed)
+                        }
+                    },
+                    onDismiss: { viewModel.dismissAnnotationToolbar() }
+                )
+                .fixedSize()
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .offset(
+                    x: clampedPopoverX(center: layout.center.x, containerWidth: geo.size.width),
+                    y: layout.center.y - 17
+                )
+                .allowsHitTesting(true)
+            }
             .transition(.opacity)
         }
     }
