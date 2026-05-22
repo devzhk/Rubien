@@ -19,5 +19,19 @@
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.1.1</title>
+            <description><![CDATA[Rubien 0.1.1 (Alpha). See GitHub release notes for details.]]></description>
+            <pubDate>Fri, 22 May 2026 03:43:37 +0000</pubDate>
+            <sparkle:version>2</sparkle:version>
+            <sparkle:shortVersionString>0.1.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien/releases/download/v0.1.1/Rubien-0.1.1.dmg"
+                sparkle:edSignature="r6N/QX9hR7/vH+Vt34GbL3OMeQ3LpqZTXGe4hrQhtoKbnI3rUBxWP1QT3CMMCOqKqx4lsYA9C7mYRQr/my/YBg=="
+                length="16370237"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
