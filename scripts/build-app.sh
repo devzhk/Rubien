@@ -194,7 +194,14 @@ stamp_sparkle_info_plist() {
     /usr/bin/plutil -replace SUFeedURL -string                       "$feed_url"                                   "$plist"
     /usr/bin/plutil -replace SUPublicEDKey -string                   "$pubkey"                                     "$plist"
     /usr/bin/plutil -replace SUEnableAutomaticChecks -bool           YES                                           "$plist"
-    /usr/bin/plutil -replace SUAutomaticallyUpdate -bool             YES                                           "$plist"
+    # Sparkle still auto-checks on the SUScheduledCheckInterval cadence
+    # above, but does NOT silently download + install. When an update is
+    # found the user sees the standard "Update Available" dialog (release
+    # notes + Install / Skip / Remind) and nothing lands without their
+    # click. Easier to bail on a bad release during alpha; users who want
+    # silent updates can flip this in UserDefaults or via a future
+    # Settings toggle.
+    /usr/bin/plutil -replace SUAutomaticallyUpdate -bool             NO                                            "$plist"
     /usr/bin/plutil -replace SUScheduledCheckInterval -integer       86400                                         "$plist"
     /usr/bin/plutil -replace SUEnableInstallerLauncherService -bool  YES                                           "$plist"
 
