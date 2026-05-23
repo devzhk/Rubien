@@ -1165,6 +1165,42 @@ final class WebReaderViewModel: ObservableObject {
                 if (mathRendered) return;
                 if (typeof renderMathInElement !== 'function') return;
                 try {
+                  // Pass 1: re-render <math data-latex="..."> elements via katex.render().
+                  // Defuddle/full converts page LaTeX into MathML at extraction time,
+                  // but temml drops LaTeX styling commands (\\textcolor, \\color, etc.)
+                  // during the conversion. KaTeX's own renderer handles them, so we
+                  // re-render from the preserved data-latex attribute. Per-element
+                  // try/catch: a single bad expression falls back to native MathML
+                  // rendering of the surviving <math>, doesn't break siblings.
+                  //
+                  // Annotation safety: skip any <math> that contains a wrapped
+                  // annotation span (data-annotation-id). wrapRange (above) does
+                  // not refuse math-internal text nodes, so an annotation CAN
+                  // land inside a <math> element; replaceWith would silently
+                  // drop it. Leaving such math as native MathML (colorless) is
+                  // the lesser harm vs. destroying user annotations.
+                  if (typeof katex !== 'undefined' && typeof katex.render === 'function') {
+                    const mathNodes = article.querySelectorAll('math[data-latex]');
+                    for (let i = 0; i < mathNodes.length; i++) {
+                      const mathEl = mathNodes[i];
+                      if (mathEl.querySelector('[data-annotation-id]')) continue;
+                      const latex = mathEl.getAttribute('data-latex');
+                      if (!latex) continue;
+                      const displayMode = mathEl.getAttribute('display') === 'block';
+                      const span = document.createElement('span');
+                      try {
+                        katex.render(latex, span, { displayMode: displayMode, throwOnError: false });
+                        mathEl.replaceWith(span);
+                      } catch (_) { /* leave <math> intact; browser falls back */ }
+                    }
+                  }
+                  // Pass 2: legacy delimited-text path for clips whose source HTML
+                  // contained `$..$` / `\\(..\\)` / etc. without going through Defuddle's
+                  // LaTeX→MathML conversion. `ignoredClasses: ['katex']` is critical:
+                  // KaTeX's output includes a hidden <annotation encoding="application/x-tex">
+                  // node carrying the ORIGINAL LaTeX source for accessibility. If that
+                  // source contains $, \\[, \\(, auto-render would recurse into it and
+                  // double-render. Excluding the .katex subtree prevents that.
                   // Delimiter escaping: this JS lives inside a Swift triple-quoted
                   // string. Swift collapses two backslashes to one before the JS
                   // engine sees the source, and JS then collapses two backslashes
@@ -1178,7 +1214,8 @@ final class WebReaderViewModel: ObservableObject {
                       { left: '\\\\(',  right: '\\\\)',  display: false }
                     ],
                     throwOnError: false,
-                    ignoredTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
+                    ignoredTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],
+                    ignoredClasses: ['katex']
                   });
                   mathRendered = true;
                 } catch (_) {}
