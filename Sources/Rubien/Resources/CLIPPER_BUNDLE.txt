@@ -1,24 +1,53 @@
-Rubien — Obsidian Web Clipper same-origin reading assets
-========================================================
+Rubien — bundled web-clipper extraction assets
+==============================================
 
 Files in this directory:
-- ClipperDefuddle.js     — webpack output (Defuddle full + RubienDefuddleExtract)
-- ClipperReader.css      — copied from obsidian-clipper/dist/reader.css
-- ClipperHighlighter.css — copied from obsidian-clipper/dist/highlighter.css
-- Readability.js         — Mozilla Readability (Apache-2.0), fallback extractor
+- ClipperDefuddle.js     — esbuild bundle of `defuddle/full` + RubienDefuddleExtract wrapper.
+                           Built by scripts/clipper/ in this repo (NOT from obsidian-clipper anymore).
+                           Uses `/full` (not core) because Notion and similar SPAs emit math as
+                           raw LaTeX strings in the DOM and rely on runtime KaTeX rendering. Core
+                           `defuddle` extracts those strings as plain text and stops; `/full`
+                           ships `temml` + `mathml-to-latex` which convert the LaTeX into
+                           `<math>` elements at extraction time so the reader can render them.
+                           This costs ~400 KB vs core; smoke-tested necessary.
+- ClipperReader.css      — copied from obsidian-clipper/dist/reader.css (still vendored from upstream).
+- ClipperHighlighter.css — copied from obsidian-clipper/dist/highlighter.css (still vendored from upstream).
+- Readability.js         — Mozilla Readability (Apache-2.0), fallback extractor.
 
-Important (diffs from obsidian-clipper upstream):
-- Rubien does NOT load dist/reader-script.js, and does NOT invoke reader.ts `Reader.apply()`.
-- If `siteName`/`journal` equals `url`, only one is shown in the header.
-- Debugging the online-read pipeline: open Console.app → filter subsystem `Rubien`, category `OnlineReadable`. The injection script posts phase names via `RubienClipperDebug` (e.g. `rubien_defuddle_extract_start`).
-- `readerResult` is the WKScriptMessageHandler name. `ClipperDefuddle.js` `RubienDefuddleExtract` both `postMessage`s and returns JSON from `evaluateJavaScript` (dual channel). `ReaderExtractionManager` receives them and removes the handler on `deinit`.
-- `ReaderExtractionManager` (Sources/Rubien/ReaderExtraction) handles Defuddle → Readability, 1.5s delayed retry once, and a Safari-like `customUserAgent`.
+Contract (ClipperDefuddle.js ↔ ReaderExtractionManager.swift, WebReaderView.swift):
+- Defines `window.RubienDefuddleExtract()`.
+- Called via `evaluateJavaScript("RubienDefuddleExtract()")` from
+  ReaderExtractionManager.injectAndRunDefuddle().
+- Dual-channel result delivery:
+    1. webkit.messageHandlers.readerResult.postMessage(payload)   — canonical, always used.
+    2. return JSON.stringify(payload)                              — sync-path fallback only;
+       async (parseAsync) path returns undefined.
+  Payload shape: `{ source: "defuddle", ok, content, title, description, excerpt, author }`.
+  The Swift side de-duplicates with `defuddleResultHandled`.
+  `source` MUST be the literal string `"defuddle"` — userContentController filters on it.
+- Diagnostic channel: webkit.messageHandlers.RubienClipperDebug carries
+  `{ phase, url, detail }` for the online-read pipeline. Phases emitted:
+  `rubien_defuddle_extract_start`, `rubien_defuddle_parse_async_begin`,
+  `rubien_defuddle_parse_async_end`, `rubien_defuddle_exit`.
+  Registered on the WKWebView in WebReaderView.swift (look for
+  `RubienClipperDebug` in that file); consumed by the same Coordinator's
+  userContentController switch. Logs to subsystem `Rubien`, category
+  `OnlineReadable`.
 
-To update Defuddle or the reader stylesheet:
-  cd obsidian-clipper/
-  npm install
-  npm run build:rubien-defuddle
+To update Defuddle:
+  cd scripts/clipper/
+  npm update defuddle    # or: npm install defuddle@<version>
+  npm run build
+  # commit scripts/clipper/package.json, package-lock.json,
+  # and the regenerated Sources/Rubien/Resources/ClipperDefuddle.js together.
 
-Then copy `dist/reader.css` / `dist/highlighter.css` over the files in this directory (if the styles changed).
+To update the reader stylesheets (separate concern — still upstream obsidian-clipper):
+  Copy obsidian-clipper/dist/reader.css → ClipperReader.css
+  Copy obsidian-clipper/dist/highlighter.css → ClipperHighlighter.css
 
-Licenses: Defuddle is whatever the npm package declares. Readability.js is Apache-2.0. Clipper stylesheets retain their Obsidian/upstream copyright.
+Debugging the online-read pipeline: open Console.app → filter subsystem `Rubien`,
+category `OnlineReadable`. You should see entries like
+`[JS] rubien_defuddle_extract_start url=https://… ` etc.
+
+Licenses: Defuddle is MIT (see scripts/clipper/node_modules/defuddle/LICENSE).
+Readability.js is Apache-2.0. Clipper stylesheets retain their Obsidian/upstream copyright.
