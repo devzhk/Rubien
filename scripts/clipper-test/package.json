@@ -1,0 +1,13 @@
+{
+  "name": "rubien-clipper-test",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "diagnose-notion": "node diagnose-notion.mjs",
+    "verify-extraction": "node verify-extraction.mjs",
+    "install-browsers": "playwright install webkit"
+  },
+  "devDependencies": {
+    "playwright": "^1.60.0"
+  }
+}

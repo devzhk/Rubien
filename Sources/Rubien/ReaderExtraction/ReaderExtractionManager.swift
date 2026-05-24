@@ -33,7 +33,6 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
     var capturedCoverImageURL: String?
 
     private static var readabilityScriptCache: String?
-    private static var clipperDefuddleScriptCache: String?
 
     func resetForNewNavigation() {
         hasRetriedAfterDelay = false
@@ -88,15 +87,30 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
 
     func runOnlineArticleExtraction(from webView: WKWebView) {
         hostWebView = webView
-        // Capture a cover-image candidate from the LIVE DOM before Defuddle strips
-        // headers/cover containers. Best-effort: if the capture script fails or
-        // returns nothing, augmentation just no-ops. Adds one extra
-        // evaluateJavaScript round-trip (single-digit ms in practice).
-        webView.evaluateJavaScript(Self.coverImageCaptureJS) { [weak self] result, _ in
-            guard let self else { return }
-            let captured = (result as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            self.capturedCoverImageURL = (captured?.isEmpty ?? true) ? nil : captured
-            self.injectAndRunDefuddle(in: webView)
+
+        // TEMPORARY DISCRIMINATOR (2026-05-23, Notion-only): 5s upfront wait
+        // to give Notion's SPA time to hydrate the [data-block-id] tree.
+        // Hypothesis: without it, Notion clips capture the marketing fallback
+        // shell instead of the real post. Gated to Notion hosts only —
+        // non-Notion sites should not pay this 5s tax. Revert when the
+        // proper fix lands (substantive-content guard + retry chain).
+        let hostname = (webView.url?.host ?? "").lowercased()
+        let isNotion = hostname == "notion.site" || hostname.hasSuffix(".notion.site") ||
+                       hostname == "notion.so" || hostname.hasSuffix(".notion.so")
+        let delay: TimeInterval = isNotion ? 5.0 : 0.0
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak webView] in
+            guard let self, let webView else { return }
+            // Capture a cover-image candidate from the LIVE DOM before Defuddle strips
+            // headers/cover containers. Best-effort: if the capture script fails or
+            // returns nothing, augmentation just no-ops. Adds one extra
+            // evaluateJavaScript round-trip (single-digit ms in practice).
+            webView.evaluateJavaScript(Self.coverImageCaptureJS) { [weak self] result, _ in
+                guard let self else { return }
+                let captured = (result as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                self.capturedCoverImageURL = (captured?.isEmpty ?? true) ? nil : captured
+                self.injectAndRunDefuddle(in: webView)
+            }
         }
     }
 
@@ -124,7 +138,16 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
                     self.runReadabilityForOnlineRead(in: webView)
                     return
                 }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                // Safety-net timeout: if postMessage hasn't delivered the
+                // result by this point, parse the JS return value (sync
+                // fallback) or fall back to Readability. Sized to cover the
+                // worst-case async pipeline: toggle pre-expansion (~5s on
+                // pathologically nested Notion pages) + Defuddle parseAsync
+                // (~1-2s for math-heavy pages with temml MathML conversion).
+                // Was 0.2s historically; that was tight when the only async
+                // work was Defuddle parseAsync, and broke after adding the
+                // Notion pre-expansion lifecycle.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { [weak self] in
                     guard let self else { return }
                     if self.defuddleResultHandled { return }
                     self.processDefuddleJSONFallback(result as? String, webView: webView)
@@ -215,16 +238,19 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
     // MARK: - Scripts
 
     private static func loadClipperDefuddleScript() -> String? {
-        if let cached = Self.clipperDefuddleScriptCache { return cached }
+        // Re-read the bundle on every clip — npm-rebuild iterations
+        // need to land immediately. Cost is ~5ms per clip on a 700KB
+        // bundle, which is in the noise compared to extraction time.
         guard let url = Bundle.module.url(forResource: "ClipperDefuddle", withExtension: "js"),
               let s = try? String(contentsOf: url, encoding: .utf8) else {
             return nil
         }
-        Self.clipperDefuddleScriptCache = s
         return s
     }
 
     private static func loadReadabilityScript() -> String? {
+        // Cached for the process lifetime — Readability.js is vendored
+        // upstream and not iterated on during development.
         if let cached = Self.readabilityScriptCache { return cached }
         guard let url = Bundle.module.url(forResource: "Readability", withExtension: "js"),
               let s = try? String(contentsOf: url, encoding: .utf8) else {

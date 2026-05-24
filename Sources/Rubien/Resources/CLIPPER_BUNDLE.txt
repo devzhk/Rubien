@@ -27,8 +27,14 @@ Contract (ClipperDefuddle.js ↔ ReaderExtractionManager.swift, WebReaderView.sw
   `source` MUST be the literal string `"defuddle"` — userContentController filters on it.
 - Diagnostic channel: webkit.messageHandlers.RubienClipperDebug carries
   `{ phase, url, detail }` for the online-read pipeline. Phases emitted:
-  `rubien_defuddle_extract_start`, `rubien_defuddle_parse_async_begin`,
-  `rubien_defuddle_parse_async_end`, `rubien_defuddle_exit`.
+  `rubien_defuddle_extract_start`,
+  `rubien_defuddle_notion_toggles_expanded` (Notion-only, when pre-expand
+  found at least one collapsed toggle),
+  `rubien_defuddle_notion_extracted` (Notion-only, when the unified
+  per-host extractor produced content) or `rubien_defuddle_notion_failed`
+  (Notion-only, on extractor exception),
+  `rubien_defuddle_parse_async_begin`, `rubien_defuddle_parse_async_end`,
+  `rubien_defuddle_exit`.
   Registered on the WKWebView in WebReaderView.swift (look for
   `RubienClipperDebug` in that file); consumed by the same Coordinator's
   userContentController switch. Logs to subsystem `Rubien`, category
