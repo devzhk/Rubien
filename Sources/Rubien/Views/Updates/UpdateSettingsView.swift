@@ -53,7 +53,7 @@ struct UpdateSettingsView: View {
     private var versionLabel: String {
         let info = Bundle.main.infoDictionary
         let short = info?["CFBundleShortVersionString"] as? String ?? "—"
-        return "Rubien \(short) (Alpha)"
+        return "Rubien \(short) (Beta)"
     }
 
     private var lastCheckedLabel: String {

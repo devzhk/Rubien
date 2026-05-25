@@ -158,7 +158,7 @@ DMG_PATH="$PROJECT_DIR/build/$VERSIONED_DMG"
 DMG_URL="https://github.com/devzhk/Rubien/releases/download/v${VERSION}/${VERSIONED_DMG}"
 export VERSION BUILD_NUMBER DMG_PATH DMG_URL ED_SIGNATURE DMG_SIZE_BYTES
 export MIN_SYSTEM_VERSION="15.0"
-export RELEASE_NOTES_TEXT="${RELEASE_NOTES_TEXT:-Rubien ${VERSION} (Alpha). See GitHub release notes for details.}"
+export RELEASE_NOTES_TEXT="${RELEASE_NOTES_TEXT:-Rubien ${VERSION} (Beta). See GitHub release notes for details.}"
 
 # 13. Update appcast
 rubien_appcast_prepend_item
@@ -173,7 +173,7 @@ fi
 # 15. Create GitHub release with the DMG
 if [ "$APPCAST_TARGET" = "production" ]; then
     gh release create "v${VERSION}" "$DMG_PATH" \
-        --title "Rubien ${VERSION} — Alpha" \
+        --title "Rubien ${VERSION} — Beta" \
         --notes "$RELEASE_NOTES_TEXT" \
         --latest
 fi
