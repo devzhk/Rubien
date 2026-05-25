@@ -12,10 +12,10 @@ private let onlineReadableLog = Logger(subsystem: "Rubien", category: "OnlineRea
 // MARK: - Reading mode (clipped markdown / live Defuddle+Readability fallback)
 
 enum WebReaderDisplayMode: String, CaseIterable {
-    /// Show the reference's clipped markdown (default).
-    case clippedMarkdown = "Clipped"
-    /// Load the source URL and run Defuddle → Readability extraction.
-    case liveReadable = "Live"
+    /// Show the reference's clipped, extracted content (refreshable via toolbar button).
+    case clip = "Clip"
+    /// Load the source URL in WKWebView with no extraction (read-only browser view).
+    case original = "Original"
 }
 
 struct WebSelectionSnapshot: Equatable {
@@ -44,11 +44,11 @@ final class WebReaderViewModel: ObservableObject {
     @Published var isRendering = false
     @Published var fontSize: Double = 18
     @Published var contentWidth: CGFloat = 860
-    @Published var displayMode: WebReaderDisplayMode = .clippedMarkdown
-    @Published var isLiveReadableBusy = false
-    @Published var liveReadableUserMessage: String?
+    @Published var displayMode: WebReaderDisplayMode = .clip
+    @Published var isExtracting = false
+    @Published var extractionUserMessage: String?
     /// 为 true 时 `WebReaderContentView` 下一次更新会发起对原文 URL 的导航以便抽取正文。
-    private(set) var shouldLoadOriginalURLForReadable = false
+    private(set) var shouldLoadOriginalURLForExtraction = false
     /// 递增以触发侧栏滚动到「摘要」卡片（正文内摘要被点击时）。
     @Published var sidebarSummaryScrollToken: UInt64 = 0
     /// 侧栏摘要卡片是否处于「正文摘要已点击」高亮。
@@ -57,7 +57,7 @@ final class WebReaderViewModel: ObservableObject {
     private let db: AppDatabase
     private var cancellables = Set<AnyCancellable>()
     /// 在线阅读整段流程（加载原文 + 注入脚本 + 抽取 + 组 HTML）防挂起超时。
-    private var liveReadableSafetyTask: Task<Void, Never>?
+    private var extractionSafetyTask: Task<Void, Never>?
     private var currentArticleBodyHTML: String?
     /// Debounce task for appearance changes (font size / content width).
     private var appearanceDebounceTask: Task<Void, Never>?
@@ -65,7 +65,7 @@ final class WebReaderViewModel: ObservableObject {
     var jumpToAnnotationInView: ((WebAnnotationRecord) -> Void)?
     var jumpToSummaryInWeb: (() -> Void)?
     /// 停止正在进行的原文加载 / Readability 流程（切回「剪藏正文」时调用）。
-    var resetLiveReadableNavigation: (() -> Void)?
+    var resetExtractionNavigation: (() -> Void)?
     var clearSelectionInView: (() -> Void)?
     var updateAppearanceInView: ((Double, CGFloat) -> Void)?
     var refreshAnnotationsInView: (([WebAnnotationRecord]) -> Void)?
@@ -83,16 +83,37 @@ final class WebReaderViewModel: ObservableObject {
         }
         let clipEmpty = self.reference.decodedWebContent == nil
         let urlStr = self.reference.resolvedWebReaderURLString()?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let canLiveRead = self.reference.referenceType == .webpage && clipEmpty && !urlStr.isEmpty && URL(string: urlStr) != nil
-        if canLiveRead {
-            displayMode = .liveReadable
-            shouldLoadOriginalURLForReadable = true
-            isLiveReadableBusy = true
-            scheduleLiveReadableSafetyTimeout()
+        let canAutoExtract = self.reference.referenceType == .webpage && clipEmpty && !urlStr.isEmpty && URL(string: urlStr) != nil
+        if canAutoExtract {
+            // Fresh add (no webContent yet): show an empty document and
+            // auto-trigger a refresh. Stays in .clip mode — the refresh
+            // populates webContent and re-renders.
             renderedHTML = Self.emptyDocument(title: self.reference.title)
+            Task { @MainActor [weak self] in
+                self?.refreshClipContent()
+            }
         } else {
             renderContent()
         }
+    }
+
+    /// Trigger a fresh extraction of the source URL. Stays in `.clip` mode;
+    /// the Coordinator's `updateNSView` will load the URL, didFinish will
+    /// inject Defuddle, and `applyReadableExtractionResult` will swap
+    /// in the new content + persist it to `reference.webContent`.
+    func refreshClipContent() {
+        guard displayMode == .clip else { return }
+        guard !isExtracting else { return }
+        let urlStr = reference.resolvedWebReaderURLString() ?? ""
+        guard !urlStr.isEmpty, URL(string: urlStr) != nil else {
+            extractionUserMessage = String(localized: "No valid URL available to refresh from.", bundle: .module)
+            return
+        }
+        shouldLoadOriginalURLForExtraction = true
+        isExtracting = true
+        scheduleExtractionSafetyTimeout()
+        let host = URL(string: urlStr)?.host ?? ""
+        onlineReadableLog.notice("Refreshing clip content host=\(host, privacy: .public) using bundled ClipperDefuddle.js")
     }
 
     var allowsDisplayModeSwitching: Bool {
@@ -222,58 +243,63 @@ final class WebReaderViewModel: ObservableObject {
 
     func setDisplayMode(_ mode: WebReaderDisplayMode) {
         guard mode != displayMode else { return }
-        liveReadableUserMessage = nil
+        extractionUserMessage = nil
         displayMode = mode
         switch mode {
-        case .clippedMarkdown:
-            cancelLiveReadableSafetyTimeout()
-            shouldLoadOriginalURLForReadable = false
-            isLiveReadableBusy = false
-            resetLiveReadableNavigation?()
+        case .clip:
+            // Cancel any in-flight Original-page load; updateNSView will
+            // re-render the clipped HTML.
+            cancelExtractionSafetyTimeout()
+            shouldLoadOriginalURLForExtraction = false
+            isExtracting = false
+            resetExtractionNavigation?()
             renderContent()
-        case .liveReadable:
+        case .original:
             let u = reference.resolvedWebReaderURLString() ?? ""
             guard !u.isEmpty, URL(string: u) != nil else {
-                liveReadableUserMessage = String(localized: "No valid URL available for live reading.", bundle: .module)
-                displayMode = .clippedMarkdown
+                extractionUserMessage = String(localized: "No valid URL available for the original page.", bundle: .module)
+                displayMode = .clip
                 return
             }
-            shouldLoadOriginalURLForReadable = true
-            isLiveReadableBusy = true
-            scheduleLiveReadableSafetyTimeout()
-            let host = URL(string: u)?.host ?? ""
-            onlineReadableLog.notice("Starting online reading host=\(host, privacy: .public) using bundled ClipperDefuddle.js")
+            // Cancel any in-flight refresh extraction. resetExtractionNavigation
+            // clears awaitingReadableExtraction AND stops the WKWebView load —
+            // otherwise didFinish would inject Defuddle into the Original-page
+            // navigation when it finishes.
+            cancelExtractionSafetyTimeout()
+            shouldLoadOriginalURLForExtraction = false
+            isExtracting = false
+            resetExtractionNavigation?()
         }
     }
 
-    private func scheduleLiveReadableSafetyTimeout() {
-        liveReadableSafetyTask?.cancel()
+    private func scheduleExtractionSafetyTimeout() {
+        extractionSafetyTask?.cancel()
         let seconds: UInt64 = 90
-        liveReadableSafetyTask = Task { @MainActor in
+        extractionSafetyTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
             guard !Task.isCancelled else { return }
-            guard displayMode == .liveReadable, isLiveReadableBusy else { return }
-            let fmt = String(localized: "Loading or extracting the article timed out (~%d seconds). Check your network or switch back to Clipped.", bundle: .module)
+            guard displayMode == .clip, isExtracting else { return }
+            let fmt = String(localized: "Refreshing the article timed out (~%d seconds). Check your network and try again.", bundle: .module)
             readableExtractionFailed(message: String(format: fmt, seconds))
         }
     }
 
-    private func cancelLiveReadableSafetyTimeout() {
-        liveReadableSafetyTask?.cancel()
-        liveReadableSafetyTask = nil
+    private func cancelExtractionSafetyTimeout() {
+        extractionSafetyTask?.cancel()
+        extractionSafetyTask = nil
     }
 
     /// 由 Coordinator 在开始加载原文 URL 后调用，避免重复触发导航。
     func acknowledgeOriginalURLLoadStarted() {
-        shouldLoadOriginalURLForReadable = false
+        shouldLoadOriginalURLForExtraction = false
     }
 
     func readableExtractionFailed(message: String) {
-        cancelLiveReadableSafetyTimeout()
-        isLiveReadableBusy = false
-        liveReadableUserMessage = message
+        cancelExtractionSafetyTimeout()
+        isExtracting = false
+        extractionUserMessage = message
         onlineReadableLog.error("Online reading failed: \(message, privacy: .public)")
-        displayMode = .clippedMarkdown
+        displayMode = .clip
         renderContent()
     }
 
@@ -283,15 +309,15 @@ final class WebReaderViewModel: ObservableObject {
         excerpt: String?,
         byline: String?,
         includeClipperTypography: Bool,
-        eyebrowText: String = "Live reading"
+        eyebrowText: String = ""
     ) {
         let trimmed = contentHTML.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            readableExtractionFailed(message: String(localized: "Live reading failed: extraction returned no content.", bundle: .module))
+            readableExtractionFailed(message: String(localized: "Refresh failed: extraction returned no content.", bundle: .module))
             return
         }
 
-        isLiveReadableBusy = true
+        isExtracting = true
         let ref = reference
         let fs = fontSize
         let cw = contentWidth
@@ -314,8 +340,8 @@ final class WebReaderViewModel: ObservableObject {
             await MainActor.run {
                 self.currentArticleBodyHTML = finalBody
                 self.renderedHTML = html
-                self.isLiveReadableBusy = false
-                self.cancelLiveReadableSafetyTimeout()
+                self.isExtracting = false
+                self.cancelExtractionSafetyTimeout()
                 // Cache the live-extracted body so subsequent reader opens
                 // render from storage instead of re-fetching + re-extracting
                 // online every time.
@@ -1539,8 +1565,8 @@ struct WebReaderView: View {
                         }
                 }
 
-                if viewModel.isRendering || viewModel.isLiveReadableBusy {
-                    ProgressView(viewModel.isLiveReadableBusy ? String(localized: "Loading and extracting…", bundle: .module) : String(localized: "Rendering markdown…", bundle: .module))
+                if viewModel.isRendering || viewModel.isExtracting {
+                    ProgressView(viewModel.isExtracting ? String(localized: "Loading and extracting…", bundle: .module) : String(localized: "Rendering markdown…", bundle: .module))
                         .padding(.horizontal, 14)
                         .padding(.vertical, 10)
                         .liquidGlassSurface(in: Capsule(), fallback: .regularMaterial)
@@ -1587,7 +1613,22 @@ struct WebReaderView: View {
                         }
                     }
                     .pickerStyle(.segmented)
-                    .frame(maxWidth: 260)
+                    .frame(maxWidth: 200)
+                }
+
+                // Refresh button — only visible in Clip mode.
+                if viewModel.allowsDisplayModeSwitching, viewModel.displayMode == .clip {
+                    Button {
+                        viewModel.refreshClipContent()
+                    } label: {
+                        if viewModel.isExtracting {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Label(String(localized: "Refresh", bundle: .module), systemImage: "arrow.clockwise")
+                        }
+                    }
+                    .disabled(viewModel.isExtracting || viewModel.reference.resolvedWebReaderURLString() == nil)
+                    .help(String(localized: "Re-extract from the source URL", bundle: .module))
                 }
 
                 fontControls
@@ -1611,13 +1652,13 @@ struct WebReaderView: View {
             }
         }
         .navigationTitle(viewModel.reference.title)
-        .alert(String(localized: "Live reading", bundle: .module), isPresented: Binding(
-            get: { viewModel.liveReadableUserMessage != nil },
-            set: { if !$0 { viewModel.liveReadableUserMessage = nil } }
+        .alert(String(localized: "Refresh", bundle: .module), isPresented: Binding(
+            get: { viewModel.extractionUserMessage != nil },
+            set: { if !$0 { viewModel.extractionUserMessage = nil } }
         )) {
             Button(String(localized: "common.ok", bundle: .module), role: .cancel) {}
         } message: {
-            Text(viewModel.liveReadableUserMessage ?? "")
+            Text(viewModel.extractionUserMessage ?? "")
         }
     }
 
@@ -1786,28 +1827,61 @@ private struct WebReaderContentView: NSViewRepresentable {
         context.coordinator.parent = self
         context.coordinator.bind(to: viewModel)
 
-        if viewModel.shouldLoadOriginalURLForReadable,
-           viewModel.displayMode == .liveReadable,
+        // Case 1: Refresh-triggered URL load while in Clip mode. didFinish
+        // injects Defuddle; result delivered via postMessage updates webContent.
+        // currentlyLoadedMode stays nil until the extraction completes and
+        // Case 4 swaps in the clipped HTML.
+        if viewModel.shouldLoadOriginalURLForExtraction,
+           viewModel.displayMode == .clip,
            let urlString = viewModel.reference.resolvedWebReaderURLString(),
            let pageURL = URL(string: urlString) {
             viewModel.acknowledgeOriginalURLLoadStarted()
             context.coordinator.extractionManager.resetForNewNavigation()
             context.coordinator.awaitingReadableExtraction = true
             context.coordinator.lastLoadedHTML = ""
+            context.coordinator.currentlyLoadedMode = nil
             nsView.stopLoading()
             nsView.load(URLRequest(url: pageURL))
             return
         }
 
-        // 在线阅读抽取进行中，不要用 loadHTMLString 覆盖正在加载原文的 WKWebView
-        if viewModel.displayMode == .liveReadable,
-           viewModel.isLiveReadableBusy || context.coordinator.awaitingReadableExtraction {
+        // Case 2: Original-tab URL load. NO extraction. Clear any stale
+        // awaiting flag first — a prior refresh's flag would otherwise cause
+        // didFinish to inject Defuddle into the Original page load.
+        if viewModel.displayMode == .original,
+           let urlString = viewModel.reference.resolvedWebReaderURLString(),
+           let pageURL = URL(string: urlString) {
+            context.coordinator.awaitingReadableExtraction = false
+            // Skip only if the SAME mode is already shown for the SAME URL.
+            // URL-equality alone is unreliable because clipped HTML uses
+            // sourceURL as baseURL, so nsView.url == sourceURL for both
+            // clipped and original renders.
+            if context.coordinator.currentlyLoadedMode == .original,
+               nsView.url?.absoluteString == urlString {
+                return
+            }
+            context.coordinator.extractionManager.resetForNewNavigation()
+            context.coordinator.lastLoadedHTML = ""
+            context.coordinator.currentlyLoadedMode = .original
+            nsView.stopLoading()
+            nsView.load(URLRequest(url: pageURL))
             return
         }
 
-        if context.coordinator.lastLoadedHTML != viewModel.renderedHTML {
+        // Case 3: Extraction in flight (Clip mode refresh). Don't overwrite
+        // the loading WKWebView with cached HTML.
+        if viewModel.displayMode == .clip,
+           viewModel.isExtracting || context.coordinator.awaitingReadableExtraction {
+            return
+        }
+
+        // Case 4: Render cached clipped HTML. Re-render when HTML changes
+        // OR when we just switched back from Original mode.
+        if context.coordinator.currentlyLoadedMode != .clip ||
+           context.coordinator.lastLoadedHTML != viewModel.renderedHTML {
             context.coordinator.awaitingReadableExtraction = false
             context.coordinator.lastLoadedHTML = viewModel.renderedHTML
+            context.coordinator.currentlyLoadedMode = .clip
             context.coordinator.invalidateAnnotationsPushCache()
             nsView.loadHTMLString(viewModel.renderedHTML, baseURL: URL(string: referenceBaseURL))
         } else {
@@ -1839,6 +1913,11 @@ private struct WebReaderContentView: NSViewRepresentable {
         var lastLoadedHTML = ""
         /// 刚通过 `load(URLRequest)` 打开原文，等待 `didFinish` 后跑 Defuddle / Readability 抽取。
         var awaitingReadableExtraction = false
+        /// Which display mode the WKWebView is currently rendering. `nil` until
+        /// the first load completes. Used to distinguish "clipped HTML loaded
+        /// with sourceURL as baseURL" from "raw Original page loaded from
+        /// sourceURL" — `nsView.url` is the same in both cases.
+        var currentlyLoadedMode: WebReaderDisplayMode? = nil
 
         let extractionManager = ReaderExtractionManager()
 
@@ -1847,10 +1926,10 @@ private struct WebReaderContentView: NSViewRepresentable {
         }
 
         func bind(to viewModel: WebReaderViewModel) {
-            extractionManager.isLiveReadableBusyContext = { [weak self] in
+            extractionManager.isExtractionBusyContext = { [weak self] in
                 guard let self else { return false }
                 let vm = self.parent.viewModel
-                return vm.displayMode == .liveReadable && vm.isLiveReadableBusy
+                return vm.displayMode == .clip && vm.isExtracting
             }
             extractionManager.onDefuddleSuccess = { [weak self] title, content, excerpt, byline in
                 guard let self else { return }
@@ -1862,7 +1941,7 @@ private struct WebReaderContentView: NSViewRepresentable {
                         excerpt: excerpt,
                         byline: byline,
                         includeClipperTypography: true,
-                        eyebrowText: "Live · Defuddle"
+                        eyebrowText: "Clipped"
                     )
                 }
             }
@@ -1876,7 +1955,7 @@ private struct WebReaderContentView: NSViewRepresentable {
                         excerpt: excerpt,
                         byline: byline,
                         includeClipperTypography: false,
-                        eyebrowText: "Live"
+                        eyebrowText: "Clipped"
                     )
                 }
             }
@@ -1888,7 +1967,7 @@ private struct WebReaderContentView: NSViewRepresentable {
                 }
             }
 
-            viewModel.resetLiveReadableNavigation = { [weak self] in
+            viewModel.resetExtractionNavigation = { [weak self] in
                 self?.awaitingReadableExtraction = false
                 self?.webView?.stopLoading()
             }
@@ -1923,6 +2002,41 @@ private struct WebReaderContentView: NSViewRepresentable {
             WebReaderContentView.applyElegantScrollers(to: webView)
         }
 
+        func webView(_ webView: WKWebView,
+                     decidePolicyFor navigationAction: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            let vm = parent.viewModel
+            // In Clip mode, user-clicked http(s) links open externally — the
+            // reader view shows an extracted document; in-WebView navigation
+            // would replace the rendered HTML. Allow non-link navigation
+            // (initial loadHTMLString, programmatic loads) to proceed.
+            guard vm.displayMode == .clip,
+                  navigationAction.navigationType == .linkActivated,
+                  let url = navigationAction.request.url,
+                  url.scheme == "http" || url.scheme == "https" else {
+                decisionHandler(.allow)
+                return
+            }
+            // Detect same-document fragment navigation (anchor links).
+            // baseURL on loadHTMLString is the source URL, so anchor `#x`
+            // resolves to fully-qualified https://host/path#x — we must NOT
+            // open these in the system browser. Compare scheme/host/port/
+            // path/query explicitly; URL.path is percent-decoded so %20-vs-
+            // space differences normalize away.
+            if url.fragment != nil,
+               let currentURL = webView.url,
+               url.scheme == currentURL.scheme,
+               url.host?.lowercased() == currentURL.host?.lowercased(),
+               url.port == currentURL.port,
+               url.path == currentURL.path,
+               url.query == currentURL.query {
+                decisionHandler(.allow)
+                return
+            }
+            NSWorkspace.shared.open(url)
+            decisionHandler(.cancel)
+        }
+
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             finishLiveReadableWithFailureIfNeeded(error.localizedDescription)
         }
@@ -1934,9 +2048,9 @@ private struct WebReaderContentView: NSViewRepresentable {
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
             Task { @MainActor in
                 let vm = parent.viewModel
-                guard vm.displayMode == .liveReadable, vm.isLiveReadableBusy else { return }
+                guard vm.displayMode == .clip, vm.isExtracting else { return }
                 awaitingReadableExtraction = false
-                vm.readableExtractionFailed(message: String(localized: "The web process terminated. Try again or switch back to Clipped.", bundle: .module))
+                vm.readableExtractionFailed(message: String(localized: "The web process terminated. Try refreshing again.", bundle: .module))
             }
         }
 
@@ -1944,7 +2058,7 @@ private struct WebReaderContentView: NSViewRepresentable {
             awaitingReadableExtraction = false
             Task { @MainActor in
                 let vm = self.parent.viewModel
-                guard vm.displayMode == .liveReadable, vm.isLiveReadableBusy else { return }
+                guard vm.displayMode == .clip, vm.isExtracting else { return }
                 vm.readableExtractionFailed(message: String(format: String(localized: "Page load failed: %@", bundle: .module), message))
             }
         }
@@ -2050,6 +2164,8 @@ private struct WebReaderContentView: NSViewRepresentable {
         }
 
         func pushAppearance(fontSize: Double, contentWidth: CGFloat) {
+            // Original mode shows a raw web page that has no window.RubienReader.
+            guard parent.viewModel.displayMode == .clip else { return }
             evaluate("window.RubienReader && window.RubienReader.updateAppearance(\(fontSize), \(Int(contentWidth)));")
         }
 
@@ -2064,6 +2180,11 @@ private struct WebReaderContentView: NSViewRepresentable {
         }
 
         func pushAnnotations(annotations: [WebAnnotationRecord]) {
+            // Guard at source: didFinish, updateNSView, AND the annotation
+            // observer callback can all reach here. Original mode shows a raw
+            // page with no window.RubienReader — the JS would no-op anyway,
+            // but skip the evaluateJavaScript bridge call to be cleaner.
+            guard parent.viewModel.displayMode == .clip else { return }
             guard let data = try? JSONEncoder().encode(annotations),
                   let json = String(data: data, encoding: .utf8) else { return }
             // Suppress no-op pushes: didFinish, updateNSView, and the DB

@@ -17,7 +17,7 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
     weak var hostWebView: WKWebView?
 
     /// 仍为「在线阅读」且处于 busy（未最终失败）时返回 true。
-    var isLiveReadableBusyContext: (() -> Bool)?
+    var isExtractionBusyContext: (() -> Bool)?
 
     var onDefuddleSuccess: ((String?, String, String?, String?) -> Void)?
     var onReadabilitySuccess: ((String?, String, String?, String?) -> Void)?
@@ -221,12 +221,12 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
 
     private func failOrRetry(webView: WKWebView, message: String) {
         Task { @MainActor in
-            guard self.isLiveReadableBusyContext?() == true else { return }
+            guard self.isExtractionBusyContext?() == true else { return }
             if !self.hasRetriedAfterDelay {
                 self.hasRetriedAfterDelay = true
                 readerExtractionLog.notice("Full extraction chain failed, retrying once after 1.5s: \(message)")
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
-                guard self.isLiveReadableBusyContext?() == true else { return }
+                guard self.isExtractionBusyContext?() == true else { return }
                 self.resetDefuddleOnly()
                 self.runOnlineArticleExtraction(from: webView)
                 return

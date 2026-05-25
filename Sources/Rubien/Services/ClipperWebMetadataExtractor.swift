@@ -69,7 +69,7 @@ final class ClipperWebMetadataExtractor: NSObject, ObservableObject {
         self.webView = webView
         webView.navigationDelegate = self
         extractionManager.hostWebView = webView
-        extractionManager.isLiveReadableBusyContext = { [weak self] in
+        extractionManager.isExtractionBusyContext = { [weak self] in
             self?.isExtracting ?? false
         }
     }
