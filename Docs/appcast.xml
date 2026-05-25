@@ -33,5 +33,22 @@
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.1.2</title>
+            <description><![CDATA[Reader: the Clipped and Live tabs are now a single Clip tab with a
+  Refresh button, plus a new Original tab that shows the live web page. Notion pages now clip with
+   code blocks, math, images, toggles, and callouts preserved. Math in clipped articles keeps its
+  color. Annotation popovers no longer clip at the right edge of the window.]]></description>
+            <pubDate>Mon, 25 May 2026 05:55:24 +0000</pubDate>
+            <sparkle:version>3</sparkle:version>
+            <sparkle:shortVersionString>0.1.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien/releases/download/v0.1.2/Rubien-0.1.2.dmg"
+                sparkle:edSignature="bTg9Bl8ovuXYAqvpNGAfnyRE8mpug9buqd8br4F5dyQN9JMglThqn19M59/fkixhEXJdiXjRXh5f2LBedMExCQ=="
+                length="16437702"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
