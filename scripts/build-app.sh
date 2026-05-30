@@ -283,12 +283,35 @@ sign_bundle() {
         rubien_codesign_sparkle_framework "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
     fi
 
+    # CloudKit environment is selected by the SIGNED entitlement, not the
+    # provisioning profile, for Developer-ID (non-App-Store) macOS builds.
+    # Rubien.entitlements omits the key (so dev-launch.sh stays on Development),
+    # so the release DMG must inject Production here or the installed app
+    # silently syncs against the empty Development environment. Gate on
+    # MODE=release too: FLAVOR defaults to dmg even for debug builds.
+    local sign_entitlements="$CODESIGN_ENTITLEMENTS"
+    local prod_ent_dir=""
+    if [ "$MODE" = "release" ] && [ "$FLAVOR" = "dmg" ] \
+       && [ "$CODESIGN_ENABLED" = "1" ] && [ -n "$CODESIGN_ENTITLEMENTS" ]; then
+        prod_ent_dir="$(mktemp -d -t rubien-release-ent)"
+        sign_entitlements="$prod_ent_dir/Rubien.release.entitlements"
+        cp "$CODESIGN_ENTITLEMENTS" "$sign_entitlements"
+        # Add-or-set: idempotent if the base file ever gains the key.
+        /usr/libexec/PlistBuddy -c \
+            "Add :com.apple.developer.icloud-container-environment string Production" \
+            "$sign_entitlements" 2>/dev/null \
+          || /usr/libexec/PlistBuddy -c \
+            "Set :com.apple.developer.icloud-container-environment Production" \
+            "$sign_entitlements"
+        echo "   ✓ Pinned CloudKit Production environment into release entitlements"
+    fi
+
     # No --deep on the outer call: the embedded CLI is already signed above
     # and --deep just re-walks the signed tree, which historically chokes on
     # xattrs that get re-added between the inner and outer sign steps.
-    if [ -n "$CODESIGN_ENTITLEMENTS" ]; then
+    if [ -n "$sign_entitlements" ]; then
         codesign --force --sign "$CODESIGN_IDENTITY" \
-            --entitlements "$CODESIGN_ENTITLEMENTS" \
+            --entitlements "$sign_entitlements" \
             --options runtime \
             --timestamp "$APP_BUNDLE"
     else
@@ -296,6 +319,10 @@ sign_bundle() {
             --options runtime \
             --timestamp "$APP_BUNDLE"
     fi
+
+    # Clean up temp release entitlements (no EXIT trap: would clobber any
+    # script-level trap; sign_bundle returns right after this).
+    [ -n "$prod_ent_dir" ] && rm -rf "$prod_ent_dir"
 }
 
 embed_app_icon() {

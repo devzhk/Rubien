@@ -2,6 +2,27 @@
 
 Post-enrollment steps to take Rubien's sync from `.unavailable` to actually syncing.
 
+> **⚠️ The #1 gotcha: two isolated CloudKit environments.** CloudKit has separate
+> **Development** and **Production** environments, and data never crosses between them.
+> The environment is selected by the **signed** `com.apple.developer.icloud-container-environment`
+> entitlement — **not** the provisioning profile (the profile's value alone is NOT honored at
+> runtime for Developer-ID / non-App-Store macOS builds). The base
+> `Sources/Rubien/Rubien.entitlements` deliberately **omits** the key so dev builds stay on
+> Development; `scripts/build-app.sh` **injects `…=Production` into release (DMG) builds only**
+> at sign time. Omitting the injection makes a Developer-ID build silently use **Development**
+> (the bug that shipped in v0.1.2 — data landed in Development while Production stayed empty).
+>
+> | Build | How signed | CloudKit env |
+> |---|---|---|
+> | `scripts/dev-launch.sh`, Xcode debug | base entitlements (keyless) + Development profile | **Development** |
+> | `scripts/build-app.sh release` DMG | base **+ injected `…=Production`** (in the signature) | **Production** |
+>
+> Verify a built app's environment:
+> `codesign -d --entitlements :- <App>.app | grep icloud-container-environment`.
+> You must also deploy the schema to Production (§2.5) before any release build can sync, and
+> Production starts empty even when Development is full. Symptom of a build on the wrong env: an
+> empty library + 0 KB PDF cache while another build on the same iCloud account syncs fine.
+
 ## Prerequisites
 
 - Active paid Apple Developer Program membership
@@ -33,6 +54,32 @@ If building via `scripts/build-app.sh` (which calls `xcodebuild`):
 - A signing identity with the CloudKit capability on the `com.rubien.app` bundle ID must be present in your keychain
 - Without it, the build produces an unsigned app whose entitlements are stripped and sync stays in `.unavailable`
 - xcconfig-driven signing is a separate follow-up; for first smoke test, use the Xcode GUI path
+
+### 2.5 Deploy the schema to Production (before shipping a release build)
+
+Development auto-creates record types the first time a dev build saves a record.
+**Production never auto-creates them** — you deploy explicitly. Skip this and every
+release-build user syncs against an empty Production container (no `Library` zone, no
+record types), so a fresh install shows an empty library and 0 KB PDF cache.
+
+1. CloudKit Dashboard → `iCloud.com.rubien.app` → **Development** → **Schema → Record Types**.
+   Confirm the full set from `SyncConstants.RecordType` is present (`CDReference`,
+   `CDReferencePDF`, `CDTag`, `CDReferenceTag`, `CDPDFAnnotation`, `CDWebAnnotation`,
+   `CDMetadataIntake`, `CDMetadataEvidence`, `CDPropertyDefinition`, `CDPropertyValue`,
+   `CDDatabaseView`).
+2. **Deploy Schema Changes…** → review the diff → **Deploy to Production**. This copies
+   record types + indexes only — **never data**.
+3. Production schema is effectively append-only (you can add types/fields later, not remove
+   them), so deploy from a Development schema you're willing to ship.
+
+**Seeding Production with an existing library.** Schema deploy moves no records. To populate
+Production, a Production (release) build must push the data: quit the app, delete
+`sync-engine-state.bin` from the library folder (see §7) so the engine re-pushes a full
+baseline, then launch the release build with sync on. Other release devices then pull it.
+
+**Don't mix flavors on one machine.** Dev and release builds share one `sync-engine-state.bin`
+per library; alternating them makes the two environments fight over the same state tokens.
+For multi-Mac testing, run the same flavor on every machine.
 
 ### 3. Smoke test
 
