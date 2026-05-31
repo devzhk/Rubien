@@ -13,7 +13,7 @@
             <sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
             <enclosure
-                url="https://github.com/devzhk/Rubien/releases/download/v0.1.0/Rubien-0.1.0.dmg"
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.1.0/Rubien-0.1.0.dmg"
                 sparkle:edSignature="jDvf54SQB7reLXXhflPQfAKocGLVfkex3JUw8GBmoqSmQlpIn9uVn1aw4pR5M6JjrwyGzTOtIUusBk78OdGPAA=="
                 length="17066217"
                 type="application/octet-stream"
@@ -27,7 +27,7 @@
             <sparkle:shortVersionString>0.1.1</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
             <enclosure
-                url="https://github.com/devzhk/Rubien/releases/download/v0.1.1/Rubien-0.1.1.dmg"
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.1.1/Rubien-0.1.1.dmg"
                 sparkle:edSignature="r6N/QX9hR7/vH+Vt34GbL3OMeQ3LpqZTXGe4hrQhtoKbnI3rUBxWP1QT3CMMCOqKqx4lsYA9C7mYRQr/my/YBg=="
                 length="16370237"
                 type="application/octet-stream"
@@ -44,7 +44,7 @@
             <sparkle:shortVersionString>0.1.2</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
             <enclosure
-                url="https://github.com/devzhk/Rubien/releases/download/v0.1.2/Rubien-0.1.2.dmg"
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.1.2/Rubien-0.1.2.dmg"
                 sparkle:edSignature="bTg9Bl8ovuXYAqvpNGAfnyRE8mpug9buqd8br4F5dyQN9JMglThqn19M59/fkixhEXJdiXjRXh5f2LBedMExCQ=="
                 length="16437702"
                 type="application/octet-stream"
@@ -58,7 +58,7 @@
             <sparkle:shortVersionString>0.1.3</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
             <enclosure
-                url="https://github.com/devzhk/Rubien/releases/download/v0.1.3/Rubien-0.1.3.dmg"
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.1.3/Rubien-0.1.3.dmg"
                 sparkle:edSignature="kQUTZutxQblCDj6p+K3X9foKjvxZrvqW4TuDChuE9CIwj2+PCgd6YPNnEfauAk9THpW1P+Xd5uVdriFEmFXoBw=="
                 length="16864967"
                 type="application/octet-stream"
