@@ -64,5 +64,20 @@
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.1.4</title>
+            <description><![CDATA[iCloud Sync fix: a fresh Mac now pulls your full library and PDFs instead of
+  stalling partway through the first sync.]]></description>
+            <pubDate>Sun, 31 May 2026 18:25:44 +0000</pubDate>
+            <sparkle:version>5</sparkle:version>
+            <sparkle:shortVersionString>0.1.4</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.1.4/Rubien-0.1.4.dmg"
+                sparkle:edSignature="iiDUqEEUhZJ3GqH1MN+J3s4aSTgGRb93/Q9B4u6r/RPPrla3lDX6GpoPW66fIqaGhTlnTCeMad7ng/SqMjedAQ=="
+                length="16872742"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
