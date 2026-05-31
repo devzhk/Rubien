@@ -25,6 +25,7 @@ cd "$PROJECT_DIR"
 source "$SCRIPT_DIR/lib/appcast.sh"
 
 NOTARY_PROFILE="${NOTARY_PROFILE:-RubienNotary}"
+RELEASES_REPO="${RELEASES_REPO:-devzhk/Rubien-releases}"   # public DMG host (Sparkle downloads anonymously; private-repo assets 404)
 APPCAST_TARGET="${APPCAST_TARGET:-production}"
 case "$APPCAST_TARGET" in
     production) APPCAST_PATH="$PROJECT_DIR/Docs/appcast.xml" ;;
@@ -155,7 +156,11 @@ trap - EXIT
 VERSIONED_DMG="Rubien-${VERSION}.dmg"
 mv "$DMG_PATH" "$PROJECT_DIR/build/$VERSIONED_DMG"
 DMG_PATH="$PROJECT_DIR/build/$VERSIONED_DMG"
-DMG_URL="https://github.com/devzhk/Rubien/releases/download/v${VERSION}/${VERSIONED_DMG}"
+# Production publishes this DMG to $RELEASES_REPO (step 16 below). For
+# APPCAST_TARGET=staging no asset is uploaded (the gh release is production-
+# gated), so for staging this is a placeholder URL — same as before the
+# public-repo move, when it pointed at an equally-absent private-repo asset.
+DMG_URL="https://github.com/${RELEASES_REPO}/releases/download/v${VERSION}/${VERSIONED_DMG}"
 export VERSION BUILD_NUMBER DMG_PATH DMG_URL ED_SIGNATURE DMG_SIZE_BYTES
 export MIN_SYSTEM_VERSION="15.0"
 export RELEASE_NOTES_TEXT="${RELEASE_NOTES_TEXT:-Rubien ${VERSION} (Beta). See GitHub release notes for details.}"
@@ -170,9 +175,21 @@ if [ "$APPCAST_TARGET" = "production" ]; then
     git push origin main
 fi
 
-# 15. Create GitHub release with the DMG
+# 15. Tag the source commit on the PRIVATE repo. The gh release below now
+#     targets the public releases repo, so without this explicit tag the
+#     source would be left untagged for this version (gh release create was
+#     previously the only step creating the v$VERSION tag).
+if [ "$APPCAST_TARGET" = "production" ]; then
+    git tag -a "v${VERSION}" -m "Rubien ${VERSION} (build ${BUILD_NUMBER})"
+    git push origin "v${VERSION}"
+fi
+
+# 16. Create the GitHub release with the DMG on the PUBLIC releases repo so
+#     Sparkle (anonymous) can download it. The appcast itself stays on the
+#     private repo's Pages (Docs/appcast.xml -> devzhk.github.io/Rubien/appcast.xml).
 if [ "$APPCAST_TARGET" = "production" ]; then
     gh release create "v${VERSION}" "$DMG_PATH" \
+        --repo "$RELEASES_REPO" \
         --title "Rubien ${VERSION} — Beta" \
         --notes "$RELEASE_NOTES_TEXT" \
         --latest
