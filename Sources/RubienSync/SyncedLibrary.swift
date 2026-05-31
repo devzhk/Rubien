@@ -666,6 +666,15 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         await applyFetchedRecordsInternal(modifications: mods, deletions: dels)
     }
 
+    /// Outcome of applying one fetched-changes batch. The write closure is
+    /// `@Sendable`, so it RETURNS this value rather than mutating captured
+    /// `var`s; the returned filenames drive the Phase-3 post-commit PDF
+    /// cleanup. Type-scope so the `static` `applyRemoteRows` can name it.
+    private struct BatchOutcome: Sendable {
+        var displacedFilenames: [String]
+        var appliedPDFRecordIDs: Set<CKRecord.ID>
+    }
+
     /// Shared implementation used by `applyFetchedZoneChanges` and tests.
     /// Pre-stages every `referencePDF` modification *outside* the write
     /// transaction (file I/O off the writer queue). The transaction body
@@ -705,89 +714,61 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
 
         // Phase 2 — write transaction. The closure RETURNS its outcome
         // rather than mutating captured `var` locals — GRDB 7's async
-        // `write` closure is `@Sendable`, so mutating outer state across
-        // the boundary is a Swift-6 strict-concurrency compile error.
-        struct BatchOutcome: Sendable {
-            var displacedFilenames: [String]
-            var appliedPDFRecordIDs: Set<CKRecord.ID>
-        }
-
+        // `write`/`writeWithoutTransaction` closures are `@Sendable`, so
+        // mutating outer state across the boundary is a Swift-6
+        // strict-concurrency compile error. The apply body lives in the
+        // `static` `applyRemoteRows` so the FK-on (with-deletions) and the
+        // FK-off (delete-free) call paths share one implementation.
         var rollbackTriggered = false
         var outcome = BatchOutcome(displacedFilenames: [], appliedPDFRecordIDs: [])
 
         do {
-            outcome = try await appDatabase.dbWriter.write { [stateStore] db -> BatchOutcome in
-                var local = BatchOutcome(displacedFilenames: [], appliedPDFRecordIDs: [])
-                try db.execute(sql: "PRAGMA defer_foreign_keys = ON")
-                try stateStore.setApplyingRemote(db)
-
-                for record in sortedMods {
-                    guard let type = SyncEntityType.forRecordType(record.recordType) else {
-                        log.error("unknown recordType \(record.recordType, privacy: .public); skipping")
-                        continue
-                    }
-                    guard let entityId = SyncEntityType.parseRecordName(record.recordID.recordName)?.1 else {
-                        log.error("skipping malformed recordName \(record.recordID.recordName, privacy: .public)")
-                        continue
-                    }
-
-                    if type == .referencePDF {
-                        guard let prepared = preparedPDFs[record.recordID] else {
-                            // Prepare returned nil (malformed name, no asset,
-                            // or copyItem failed). Skip apply so we don't
-                            // write a pdfCache row pointing at a missing file.
-                            // Dirty flag untouched; a later refetch retries.
-                            continue
+            if deletions.isEmpty {
+                // Delete-free batch (every initial-pull batch, most incremental
+                // "added rows" batches): tolerate transient cross-batch FK
+                // orphans — a child can commit before its parent and becomes
+                // valid once the parent arrives in a later batch. `foreign_keys`
+                // can't be toggled inside a transaction, so flip it on the
+                // serialized writer connection around an explicit transaction
+                // and restore it IN-BAND (before the closure returns) so no
+                // other write ever sees FK=OFF.
+                outcome = try await appDatabase.dbWriter.writeWithoutTransaction { [stateStore] db -> BatchOutcome in
+                    try db.execute(sql: "PRAGMA foreign_keys = OFF")
+                    var local = BatchOutcome(displacedFilenames: [], appliedPDFRecordIDs: [])
+                    do {
+                        try db.inTransaction {
+                            local = try Self.applyRemoteRows(
+                                sortedMods: sortedMods,
+                                deletions: [],
+                                preparedPDFs: preparedPDFs,
+                                stateStore: stateStore,
+                                tolerateOrphans: true,
+                                db: db
+                            )
+                            return .commit
                         }
-                        if let prior = try SyncEntityType.applyPreparedReferencePDF(prepared, db: db) {
-                            local.displacedFilenames.append(prior)
-                        }
-                        local.appliedPDFRecordIDs.insert(record.recordID)
-                        try stateStore.markPulled(
-                            db,
-                            entityType: type,
-                            entityId: entityId,
-                            record: record
-                        )
-                        continue
+                    } catch {
+                        Self.restoreForeignKeysOrAbort(db)   // restore, THEN surface the apply failure
+                        throw error
                     }
-
-                    try type.applyRemoteRecord(record, entityId: entityId, db: db)
-                    try stateStore.markPulled(
-                        db,
-                        entityType: type,
-                        entityId: entityId,
-                        record: record
+                    Self.restoreForeignKeysOrAbort(db)        // success: restore before returning
+                    return local
+                }
+            } else {
+                // Batch carries deletions → keep FK ON so ON DELETE CASCADE
+                // drops children locally (unchanged from before this fix;
+                // strict foreign_key_check rolls back genuine violations).
+                outcome = try await appDatabase.dbWriter.write { [stateStore] db -> BatchOutcome in
+                    try db.execute(sql: "PRAGMA defer_foreign_keys = ON")
+                    return try Self.applyRemoteRows(
+                        sortedMods: sortedMods,
+                        deletions: deletions,
+                        preparedPDFs: preparedPDFs,
+                        stateStore: stateStore,
+                        tolerateOrphans: false,
+                        db: db
                     )
                 }
-
-                for deletion in deletions {
-                    guard let type = SyncEntityType.forRecordType(deletion.recordType) else { continue }
-                    guard let entityId = SyncEntityType.parseRecordName(deletion.recordID.recordName)?.1 else {
-                        log.error("skipping malformed delete recordName \(deletion.recordID.recordName, privacy: .public)")
-                        continue
-                    }
-                    try type.applyRemoteDelete(entityId: entityId, db: db)
-                    try stateStore.removeState(db, entityType: type, entityId: entityId)
-                    try stateStore.upsertTombstone(
-                        db,
-                        entityType: type,
-                        entityId: entityId,
-                        confirmedByServer: true
-                    )
-                    try stateStore.clearDirty(db, entityType: type, entityId: entityId)
-                }
-
-                // Surface any lingering FK violations explicitly so they
-                // end up in the log, not as an opaque commit failure.
-                let violations = try Row.fetchAll(db, sql: "PRAGMA foreign_key_check")
-                if !violations.isEmpty {
-                    log.error("FK violations after remote apply: \(violations.count, privacy: .public) rows — rolling back")
-                    throw CancellationError()  // trigger rollback
-                }
-
-                try stateStore.clearApplyingRemote(db)
-                return local
             }
         } catch {
             log.error("applyFetchedZoneChanges failed: \(error.localizedDescription, privacy: .public)")
@@ -815,6 +796,130 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             for (recordID, prepared) in preparedPDFs where !outcome.appliedPDFRecordIDs.contains(recordID) {
                 try? FileManager.default.removeItem(at: prepared.stagedURL)
             }
+        }
+    }
+
+    /// Apply one fetched-changes batch's modifications + deletions inside the
+    /// caller-opened transaction. Extracted as a `static` (captures no `self`;
+    /// the file-scope `log` is usable here) so both the FK-on `write` path
+    /// (batches with deletions → `ON DELETE CASCADE` must fire) and the FK-off
+    /// `writeWithoutTransaction` path (delete-free batches → tolerate transient
+    /// cross-batch orphans) share one implementation.
+    ///
+    /// `tolerateOrphans`: when true, a non-empty `PRAGMA foreign_key_check`
+    /// (a child whose parent is in a not-yet-applied batch) is logged and
+    /// allowed to commit — it resolves when the parent arrives in a later
+    /// batch. When false, it throws `CancellationError` to roll the batch back
+    /// (today's strict behavior, kept for any batch carrying deletions).
+    private static func applyRemoteRows(
+        sortedMods: [CKRecord],
+        deletions: [FetchedDeletionInput],
+        preparedPDFs: [CKRecord.ID: SyncEntityType.PreparedReferencePDFMaterialization],
+        stateStore: SyncStateStore,
+        tolerateOrphans: Bool,
+        db: Database
+    ) throws -> BatchOutcome {
+        var local = BatchOutcome(displacedFilenames: [], appliedPDFRecordIDs: [])
+        try stateStore.setApplyingRemote(db)
+
+        for record in sortedMods {
+            guard let type = SyncEntityType.forRecordType(record.recordType) else {
+                log.error("unknown recordType \(record.recordType, privacy: .public); skipping")
+                continue
+            }
+            guard let entityId = SyncEntityType.parseRecordName(record.recordID.recordName)?.1 else {
+                log.error("skipping malformed recordName \(record.recordID.recordName, privacy: .public)")
+                continue
+            }
+
+            if type == .referencePDF {
+                guard let prepared = preparedPDFs[record.recordID] else {
+                    // Prepare returned nil (malformed name, no asset,
+                    // or copyItem failed). Skip apply so we don't
+                    // write a pdfCache row pointing at a missing file.
+                    // Dirty flag untouched; a later refetch retries.
+                    continue
+                }
+                if let prior = try SyncEntityType.applyPreparedReferencePDF(prepared, db: db) {
+                    local.displacedFilenames.append(prior)
+                }
+                local.appliedPDFRecordIDs.insert(record.recordID)
+                try stateStore.markPulled(
+                    db,
+                    entityType: type,
+                    entityId: entityId,
+                    record: record
+                )
+                continue
+            }
+
+            try type.applyRemoteRecord(record, entityId: entityId, db: db)
+            try stateStore.markPulled(
+                db,
+                entityType: type,
+                entityId: entityId,
+                record: record
+            )
+        }
+
+        for deletion in deletions {
+            guard let type = SyncEntityType.forRecordType(deletion.recordType) else { continue }
+            guard let entityId = SyncEntityType.parseRecordName(deletion.recordID.recordName)?.1 else {
+                log.error("skipping malformed delete recordName \(deletion.recordID.recordName, privacy: .public)")
+                continue
+            }
+            try type.applyRemoteDelete(entityId: entityId, db: db)
+            try stateStore.removeState(db, entityType: type, entityId: entityId)
+            try stateStore.upsertTombstone(
+                db,
+                entityType: type,
+                entityId: entityId,
+                confirmedByServer: true
+            )
+            try stateStore.clearDirty(db, entityType: type, entityId: entityId)
+        }
+
+        // Surface FK state explicitly so it lands in the log rather than as an
+        // opaque commit failure. Delete-free batches tolerate transient
+        // cross-batch orphans (they resolve when the parent arrives); batches
+        // with deletions keep the strict rollback so ON DELETE CASCADE
+        // integrity is never silently bypassed.
+        let violations = try Row.fetchAll(db, sql: "PRAGMA foreign_key_check")
+        if !violations.isEmpty {
+            if tolerateOrphans {
+                log.info("remote apply: \(violations.count, privacy: .public) transient FK orphans tolerated (resolve when parents arrive)")
+            } else {
+                log.error("FK violations after remote apply: \(violations.count, privacy: .public) rows — rolling back")
+                throw CancellationError()  // trigger rollback
+            }
+        }
+
+        try stateStore.clearApplyingRemote(db)
+        return local
+    }
+
+    /// Restore FK enforcement on the writer connection IN-BAND. The serialized
+    /// writer (`DatabasePool` in production, `DatabaseQueue` for the in-memory
+    /// fallback + tests) runs writes one at a time on one connection, so
+    /// restoring before the `writeWithoutTransaction` closure returns
+    /// guarantees the next write sees `foreign_keys = ON` — there is no
+    /// interleaving window. A restore that
+    /// won't take means a corrupt connection; abort rather than (a) throwing,
+    /// which would flow to the outer catch and make Phase 3 unlink committed
+    /// PDFs, or (b) swallowing it, which would leave the pooled writer FK-off
+    /// for every subsequent local write. Unreachable in practice —
+    /// `PRAGMA foreign_keys = ON` is an in-memory flag toggle on a healthy
+    /// connection.
+    private static func restoreForeignKeysOrAbort(_ db: Database) {
+        do {
+            try db.execute(sql: "PRAGMA foreign_keys = ON")
+            guard try Int.fetchOne(db, sql: "PRAGMA foreign_keys") == 1 else {
+                log.fault("foreign_keys would not re-enable on the sync writer — aborting")
+                fatalError("Rubien: failed to restore foreign_keys on the database writer")
+            }
+        } catch {
+            log.fault("foreign_keys restore threw: \(error.localizedDescription, privacy: .public)")
+            fatalError("Rubien: failed to restore foreign_keys on the database writer")
         }
     }
 
