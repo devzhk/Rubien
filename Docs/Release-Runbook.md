@@ -2,6 +2,18 @@
 
 Operator runbook for cutting a Rubien release. The design rationale lives in `Docs/superpowers/specs/2026-05-16-mac-auto-updater-design.md`; this document is the recipe.
 
+## Where releases are hosted (two repos)
+
+The source repo `devzhk/Rubien` is **private**, but Sparkle downloads update DMGs **anonymously** — and GitHub release assets on a private repo return **HTTP 404** without auth. So hosting is split:
+
+| Artifact | Repo | Why |
+|---|---|---|
+| Source, `Docs/appcast.xml`, Pages workflow | private `devzhk/Rubien` | code stays private; Pages is public even for a private repo |
+| Sparkle appcast (served) | private `devzhk/Rubien` Pages → `https://devzhk.github.io/Rubien/appcast.xml` | one stable feed URL; never changes |
+| DMG assets (`<enclosure url>`) | **public `devzhk/Rubien-releases`** | Sparkle can download anonymously |
+
+**The appcast URL and the app's `SUFeedURL` never change** — only the `<enclosure>` URLs point at the public repo. That is what lets already-installed clients self-heal: repointing the enclosures in `Docs/appcast.xml` fixes every shipped install on its next check, with no new build. `release.sh` targets `$RELEASES_REPO` (default `devzhk/Rubien-releases`) for the DMG and separately runs `git tag` on the private repo for source traceability. Override `RELEASES_REPO` to host under a different account/repo.
+
 ## One-time setup
 
 1. **Apple Developer Program enrollment.** ($99/yr.)
@@ -54,12 +66,12 @@ export CODESIGN_IDENTITY="Developer ID Application: <Your Name> (9TXK4V3SS8)"
 # 5. Wait for notarization (5-15 minutes). The script blocks.
 
 # 6. Confirm
-# - https://github.com/devzhk/Rubien/releases/latest shows the new DMG
+# - https://github.com/devzhk/Rubien-releases/releases/latest shows the new DMG (public host)
 # - https://devzhk.github.io/Rubien/appcast.xml has the new <item>
 # - Within ~24 hours, existing installs see the "Update ready" indicator
 ```
 
-`release.sh` is the single entry point: it bumps `BUILD.txt` if you forgot, calls `scripts/build-app.sh` (which assembles + signs + embeds Sparkle, then builds the DMG), notarizes, signs the appcast item with `sign_update`, prepends the item to `Docs/appcast.xml`, commits + pushes the appcast change, and creates the GitHub release via `gh release create`.
+`release.sh` is the single entry point: it bumps `BUILD.txt` if you forgot, calls `scripts/build-app.sh` (which assembles + signs + embeds Sparkle, then builds the DMG), notarizes, signs the appcast item with `sign_update`, prepends the item to `Docs/appcast.xml`, commits + pushes the appcast change, tags the source commit on the private repo, and creates the GitHub release with the DMG on the public `devzhk/Rubien-releases` repo via `gh release create --repo`.
 
 ## Staging end-to-end test (before significant updater changes)
 
@@ -121,10 +133,10 @@ Avoid losing both anchors simultaneously by storing them in independent failure 
 - `VERSION` — marketing version string, becomes `CFBundleShortVersionString`.
 - `BUILD.txt` — monotonic build counter, becomes `CFBundleVersion`. Named with the `.txt` extension because APFS is case-insensitive by default and a bare `BUILD` file would alias the `build/` output directory.
 - `.sparkle-public-key` — gitignored; base64 EdDSA public key (private key in Keychain + backups).
-- `Docs/appcast.xml` — production Sparkle feed (served by GitHub Pages).
+- `Docs/appcast.xml` — production Sparkle feed (served by GitHub Pages from the private repo; its `<enclosure>` DMG URLs point at the public `devzhk/Rubien-releases` repo).
 - `Docs/staging-appcast.xml` — staging feed for end-to-end tests.
 - `Docs/index.md` — GitHub Pages landing page.
-- `scripts/release.sh` — orchestrator. Bumps `BUILD.txt`, calls `build-app.sh`, notarizes, signs the appcast item, commits + pushes, calls `gh release create`.
+- `scripts/release.sh` — orchestrator. Bumps `BUILD.txt`, calls `build-app.sh`, notarizes, signs the appcast item, commits + pushes the appcast, tags the source on the private repo, and calls `gh release create --repo "$RELEASES_REPO"` to upload the DMG to the public releases repo.
 - `scripts/build-app.sh` — assembles + signs the `.app` bundle and the DMG. Also usable standalone for dev builds.
   - The `embed_sparkle_framework` step inside this script manually copies `Sparkle.framework` into the bundle's `Contents/Frameworks/`. SwiftPM-via-`xcodebuild` does not auto-embed framework dependencies into the assembled bundle, so the script handles it explicitly before code-signing runs.
 - `scripts/lib/codesign.sh` — ordered Sparkle component signing. The order matters: `Installer.xpc → Downloader.xpc → Autoupdate → Updater.app → Sparkle.framework`. Never use `--deep`. `Downloader.xpc` needs `--preserve-metadata=entitlements`.
