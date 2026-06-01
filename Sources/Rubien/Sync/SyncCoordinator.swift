@@ -137,7 +137,11 @@ public final class SyncCoordinator: ObservableObject {
         }
         self.fetchLibrary = fetchLibrary ?? { await $0.fetchRemoteChanges() }
         self.idleFetchInterval = idleFetchInterval
-        self.isAppActive = isAppActive ?? { NSApp.isActive }
+        // `NSApp?` (not `NSApp`): the global is an implicitly-unwrapped
+        // optional that's nil until `NSApplication` is instantiated, so a
+        // headless process (XCTest) reading the production default would
+        // otherwise crash on the force-unwrap.
+        self.isAppActive = isAppActive ?? { NSApp?.isActive ?? false }
         self.userEnabled = defaults.bool(forKey: DefaultsKey.enabled)
     }
 
@@ -325,6 +329,16 @@ public final class SyncCoordinator: ObservableObject {
         library = newLibrary
         status = .idle
         startStatusConsumer(for: newLibrary)
+
+        // Layer A: subscribe to activation events and, if we're already
+        // frontmost, fetch remote changes now + begin the idle poll. The
+        // launch-time `didBecomeActive` fires before this subscription exists
+        // (AppDelegate activates the app at finishLaunching), so the explicit
+        // `isAppActive()` check covers that race.
+        subscribeActivationNotifications()
+        if isAppActive() {
+            await handleDidBecomeActive()
+        }
 
         // Catch-up drain in case a kick fired between coordinator init
         // and the subscription assignment. `drainPDFUploadQueue` is

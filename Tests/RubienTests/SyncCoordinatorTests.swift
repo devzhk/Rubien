@@ -470,5 +470,25 @@ final class SyncCoordinatorTests: XCTestCase {
 
         await coordinator.performStopSyncForTest()
     }
+
+    func testLaunchWhileActiveFiresInitialFetch() async {
+        let spy = FetchSpy()
+        let coordinator = makeTriggerCoordinator(spy: spy, interval: 1, appActive: { true })
+        await coordinator.performStartSyncForTest()       // launch fetch is awaited inside
+        let count = await spy.count
+        XCTAssertEqual(count, 1, "starting sync while frontmost fires exactly one launch fetch")
+        XCTAssertEqual(coordinator.idleTimerStartCountForTest, 1, "launch while active starts one idle timer")
+        await coordinator.performStopSyncForTest()
+    }
+
+    func testLaunchWhileInactiveDoesNotFetchOrPoll() async {
+        let spy = FetchSpy()
+        let coordinator = makeTriggerCoordinator(spy: spy, interval: 1, appActive: { false })
+        await coordinator.performStartSyncForTest()
+        let count = await spy.count
+        XCTAssertEqual(count, 0, "no launch fetch when app isn't frontmost")
+        XCTAssertEqual(coordinator.idleTimerStartCountForTest, 0, "no timer when inactive")
+        await coordinator.performStopSyncForTest()
+    }
 }
 #endif
