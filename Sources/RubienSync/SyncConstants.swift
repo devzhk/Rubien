@@ -60,5 +60,16 @@ public enum SyncConstants {
     /// in-flight push window; anything shorter risks evicting a marker
     /// before a lingering push hits `.unknownItem`.
     public static let tombstoneRetention: TimeInterval = 30 * 24 * 60 * 60
+
+    /// Steady-state idle poll interval (seconds) while the app is frontmost
+    /// and sync is active. Bounds worst-case idle-window staleness: a remote
+    /// change made while you stare at an idle window appears within ~this long.
+    /// Tunable — lower is snappier but spends more no-op fetch round-trips;
+    /// mostly moot once push (Layer B) lands. Foreground/launch fetches are
+    /// always immediate regardless of this value.
+    public static let idleFetchInterval: TimeInterval = 90
+
+    /// Backoff cap (seconds) for the idle poll after repeated fetch failures.
+    public static let maxIdleFetchInterval: TimeInterval = 900
 }
 #endif

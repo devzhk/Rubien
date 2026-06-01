@@ -392,6 +392,15 @@ public final class SyncCoordinator: ObservableObject {
         await library?.drainPDFUploadQueue()
     }
 
+    // MARK: - Idle-fetch backoff
+
+    /// Pure backoff step for the idle poll: reset to `base` on success, double
+    /// toward `SyncConstants.maxIdleFetchInterval` on failure. Pure + static so
+    /// it's unit-tested without wall-clock dependence.
+    static func nextBackoff(current: TimeInterval, failed: Bool, base: TimeInterval) -> TimeInterval {
+        failed ? min(current * 2, SyncConstants.maxIdleFetchInterval) : base
+    }
+
     // MARK: - Test hooks
 
     func performStartSyncForTest() async {

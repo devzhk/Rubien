@@ -335,5 +335,22 @@ final class SyncCoordinatorTests: XCTestCase {
         let syncingMapped = await coordinator.mapStatusForTest(.syncing)
         XCTAssertEqual(syncingMapped, .syncing)
     }
+
+    // MARK: - Idle-fetch backoff
+
+    func testNextBackoffResetsToBaseOnSuccess() {
+        XCTAssertEqual(SyncCoordinator.nextBackoff(current: 360, failed: false, base: 90), 90)
+    }
+
+    func testNextBackoffDoublesOnFailure() {
+        XCTAssertEqual(SyncCoordinator.nextBackoff(current: 90, failed: true, base: 90), 180)
+    }
+
+    func testNextBackoffCapsAtMaxIdleInterval() {
+        // 600 * 2 = 1200, capped to maxIdleFetchInterval (900).
+        XCTAssertEqual(SyncCoordinator.nextBackoff(current: 600, failed: true, base: 90), 900)
+        // Already at cap stays at cap.
+        XCTAssertEqual(SyncCoordinator.nextBackoff(current: 900, failed: true, base: 90), 900)
+    }
 }
 #endif
