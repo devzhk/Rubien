@@ -97,9 +97,9 @@ On the Mac you use for development:
 2. Build + install Rubien
 3. Cmd+, → iCloud Sync → toggle on + confirm
 4. Library should populate from the cloud within ~30s
-5. Create a reference on Mac A; verify it appears on Mac B within ~10s
-6. Edit the same reference on both within a few seconds; observe "server wins" behavior (whichever pushed first, other side overwrites — documented quirk of v1 merge policy)
-7. Delete on Mac A; verify removal on Mac B within ~10s
+5. Create a reference on Mac A. Mac B pulls it on its **next fetch trigger**, not instantly: bring Mac B to the foreground (or wait up to one idle-poll interval, `SyncConstants.idleFetchInterval`, ~90s, while it's frontmost). Incremental remote changes are fetched on app launch, on app foreground, and on the idle timer — there is **no push-driven live fetch yet** (that's Layer B / the iCloud push entitlement, deferred to the iOS port).
+6. Edit the same reference on both within a few seconds; on the next fetch each side observes "server wins" behavior (whichever pushed first, other side overwrites — documented quirk of v1 merge policy)
+7. Delete on Mac A; bring Mac B to the foreground (or wait one idle-poll interval) and verify the removal
 
 ### 5. PDF asset sync smoke test (post-B8)
 
@@ -160,6 +160,7 @@ To wipe the iCloud copy (can't be undone): use the CloudKit Dashboard "Delete Zo
 
 ## Known follow-ups
 
+- **Push-driven live fetch (Layer B).** Today incremental remote changes arrive only on launch / foreground / a ~90s idle poll (`SyncConstants.idleFetchInterval`). True push-driven sync needs the `aps-environment` entitlement (dev/release split like `icloud-container-environment`), Push enabled on the `com.rubien.app` App ID, and on-device verification that a Developer-ID DMG build actually receives CloudKit silent pushes. Planned with the iOS port. See `Docs/superpowers/specs/2026-06-01-sync-incremental-fetch-design.md`.
 - A-pks migration (UUID primary keys) — currently using stringified Int64 rowIDs; two devices inserting independently offline can collide on rowID. Sync one device first before inserting on the second until A-pks ships.
 - Field-level LWW merge — current policy is server-wins on conflict; planned refinement uses `dateModified` for finer-grained merges.
 - `rubien-cli sync push / pull / reset` subcommands — deferred; only `sync status` ships in v1.
