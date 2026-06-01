@@ -79,5 +79,19 @@
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.1.5</title>
+            <description><![CDATA[iCloud Sync fix: custom properties (e.g. Method, Modality)]]></description>
+            <pubDate>Mon, 01 Jun 2026 05:37:52 +0000</pubDate>
+            <sparkle:version>6</sparkle:version>
+            <sparkle:shortVersionString>0.1.5</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.1.5/Rubien-0.1.5.dmg"
+                sparkle:edSignature="FeTWJE6iCyRK6bnvepeV6HQspWMhToYLIVo2SarExTUks4JtlCWUg6lXNmHmxXBPZDQakQ5pzFyvEVqvWy5vAA=="
+                length="16875474"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
