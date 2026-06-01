@@ -376,8 +376,35 @@ extension SyncEntityType {
         case .propertyDefinition:
             guard let id = Int64(entityId) else { return }
             var row = PropertyDefinition(record: record)
-            row.id = id
-            try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
+            // Built-in PropertyDefinitions (defaultFieldKey != nil) are seeded
+            // independently on every device, so their rowIDs diverge ("Last
+            // Read" is id 29 on a fresh library, 339 on an older one). Syncing
+            // them by rowID makes this INSERT collide on UNIQUE(name) and the
+            // whole fetched batch rolls back. Reconcile by the stable
+            // defaultFieldKey instead: update the local seeded row in place,
+            // keeping its rowID. Safe because the only divergent built-ins
+            // (Last Read/Read Count, date/number) carry no propertyValues; the
+            // rest (ids 1-28) have matching rowIDs across devices. Custom defs
+            // (nil defaultFieldKey, e.g. Method/Modality) keep the rowID upsert
+            // below. Targeted stand-in until the A-pks migration gives seeded
+            // rows deterministic UUIDs (see PropertyDefinitionRecord.swift).
+            if let fieldKey = row.defaultFieldKey,
+               let localId = try Int64.fetchOne(
+                   db,
+                   sql: "SELECT id FROM propertyDefinition WHERE defaultFieldKey = ? LIMIT 1",
+                   arguments: [fieldKey]
+               ) {
+                row.id = localId
+                // A defaultFieldKey-bearing row IS a built-in. `isDefault` is a
+                // synced/mutable field, so never write the peer's value verbatim:
+                // a stray isDefault=0 would make the built-in deletable and break
+                // the next reconcile. Force it true.
+                row.isDefault = true
+                try row.update(db)
+            } else {
+                row.id = id
+                try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
+            }
 
         case .propertyValue:
             guard let id = Int64(entityId), var row = PropertyValue(record: record) else { return }
@@ -451,7 +478,21 @@ extension SyncEntityType {
         case .metadataEvidence:
             if let id = Int64(entityId) { _ = try MetadataEvidence.deleteOne(db, key: id) }
         case .propertyDefinition:
-            if let id = Int64(entityId) { _ = try PropertyDefinition.deleteOne(db, key: id) }
+            if let id = Int64(entityId) {
+                // Never honor a remote delete against a local built-in. Built-ins
+                // are seeded + delete-protected on every device
+                // (deletePropertyDefinition guards isDefault), and reconcile keeps
+                // them at divergent local rowIDs, so a delete keyed on a peer's
+                // built-in rowID must not drop whatever sits at that id locally.
+                // Custom props (isDefault=0) delete normally.
+                let isLocalDefault = try Bool.fetchOne(
+                    db,
+                    sql: "SELECT isDefault FROM propertyDefinition WHERE id = ? LIMIT 1",
+                    arguments: [id]
+                ) ?? false
+                guard !isLocalDefault else { return }
+                _ = try PropertyDefinition.deleteOne(db, key: id)
+            }
         case .propertyValue:
             if let id = Int64(entityId) { _ = try PropertyValue.deleteOne(db, key: id) }
         case .databaseView:
