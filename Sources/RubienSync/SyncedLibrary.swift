@@ -369,6 +369,11 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     private var isFetchInFlight = false
     private var isSendInFlight  = false
 
+    /// Overlap guard for explicit fetches. `SyncedLibrary` is an actor, so the
+    /// read-then-set below has no suspension point and is race-free across
+    /// concurrent callers (launch / foreground / idle timer / error recovery).
+    private var isExplicitFetchRunning = false
+
     /// Install a GRDB `TransactionObserver` that forwards post-commit
     /// activity into the engine automatically. One call at app startup,
     /// after `start()`, is enough — app code doesn't have to manually
@@ -432,6 +437,26 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             }
         } catch {
             log.error("ingestPendingChanges failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Drive an explicit incremental fetch. The single funnel for every
+    /// fetch trigger (launch, foreground, idle timer) and the two reactive
+    /// error-recovery paths, so the overlap guard is the one concurrency
+    /// policy. Returns `true` on success or a no-op skip (another fetch is
+    /// already in flight); `false` on error, which the idle timer uses to back
+    /// off. Only called once the library is live, so `engine` already exists.
+    @discardableResult
+    public func fetchRemoteChanges() async -> Bool {
+        guard !isExplicitFetchRunning else { return true }
+        isExplicitFetchRunning = true
+        defer { isExplicitFetchRunning = false }
+        do {
+            try await engine.fetchChanges()
+            return true
+        } catch {
+            log.error("fetchRemoteChanges failed: \(error.localizedDescription, privacy: .public)")
+            return false
         }
     }
 
@@ -1050,9 +1075,9 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                     }
                     // Schedule outside the delegate callback (Apple's docs:
                     // don't call fetchChanges synchronously from handleEvent).
-                    Task { [engine] in
-                        _ = try? await engine.fetchChanges()
-                    }
+                    // Route through fetchRemoteChanges so every fetch shares
+                    // one overlap-guard policy.
+                    Task { await self.fetchRemoteChanges() }
                 } catch {
                     log.error("unknownItem recovery failed: \(error.localizedDescription, privacy: .public)")
                 }
@@ -1104,9 +1129,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     ) async {
         guard let serverRecord = error.serverRecord else {
             log.error("serverRecordChanged without serverRecord — re-fetch to recover")
-            Task { [engine] in
-                _ = try? await engine.fetchChanges()
-            }
+            Task { await self.fetchRemoteChanges() }
             return
         }
 
