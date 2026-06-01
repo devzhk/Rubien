@@ -352,5 +352,123 @@ final class SyncCoordinatorTests: XCTestCase {
         // Already at cap stays at cap.
         XCTAssertEqual(SyncCoordinator.nextBackoff(current: 900, failed: true, base: 90), 900)
     }
+
+    // MARK: - Incremental-fetch triggers
+
+    /// Thread-safe call counter for the injected fetch seam. Always reports
+    /// success — failure backoff is covered deterministically by the pure
+    /// `nextBackoff` tests, not by driving a failing fetch through the timer.
+    private actor FetchSpy {
+        private(set) var count = 0
+        func record() -> Bool { count += 1; return true }
+    }
+
+    private func allPassProbes() -> SyncCoordinator.Probes {
+        SyncCoordinator.Probes(
+            bundleHasEntitlement: { true },
+            ubiquityIdentityToken: { "token" as NSCoding },
+            tryCKContainerInit: { _ in nil },
+            accountStatus: { _ in .available }
+        )
+    }
+
+    private func makeTriggerCoordinator(
+        spy: FetchSpy,
+        interval: TimeInterval,
+        appActive: @escaping @MainActor () -> Bool
+    ) -> SyncCoordinator {
+        SyncCoordinator(
+            appDatabase: db,
+            defaults: defaults,
+            probes: allPassProbes(),
+            makeLibrary: stubLibraryFactory(),
+            startLibrary: { _ in },
+            fetchLibrary: { _ in await spy.record() },
+            idleFetchInterval: interval,
+            isAppActive: appActive,
+            lockURL: tmpLockURL
+        )
+    }
+
+    // All trigger tests start with `appActive: { false }` so `performStartSync`
+    // (after Task 5 wires the launch hook) does NOT auto-fire — each test drives
+    // the handler/tick directly, staying independently verifiable. No assertion
+    // depends on `Task.sleep` elapsing: per-tick behaviour is exercised through
+    // the deterministic `runIdlePollTickForTest` seam.
+
+    func testDidBecomeActiveFiresImmediateFetchAndStartsTimer() async {
+        let spy = FetchSpy()
+        let coordinator = makeTriggerCoordinator(spy: spy, interval: 1, appActive: { false })
+        await coordinator.performStartSyncForTest()
+        let beforeActivate = await spy.count
+        XCTAssertEqual(beforeActivate, 0, "inactive start fires nothing")
+
+        await coordinator.handleDidBecomeActive()
+        let afterActivate = await spy.count
+        XCTAssertEqual(afterActivate, 1, "activate fires exactly one immediate fetch")
+        XCTAssertEqual(coordinator.idleTimerStartCountForTest, 1, "activate starts one idle timer")
+
+        await coordinator.performStopSyncForTest()
+    }
+
+    func testIdlePollTickFetchesWhenActive() async {
+        let spy = FetchSpy()
+        let coordinator = makeTriggerCoordinator(spy: spy, interval: 1, appActive: { false })
+        await coordinator.performStartSyncForTest()
+
+        let outcome = await coordinator.runIdlePollTickForTest()
+        XCTAssertEqual(outcome, .completed(ok: true), "an active tick fetches")
+        let count = await spy.count
+        XCTAssertEqual(count, 1, "the tick drove exactly one fetch")
+
+        await coordinator.performStopSyncForTest()
+    }
+
+    func testIdlePollTickIsNoOpForStaleGeneration() async {
+        let spy = FetchSpy()
+        let coordinator = makeTriggerCoordinator(spy: spy, interval: 1, appActive: { false })
+        await coordinator.performStartSyncForTest()
+        let staleGeneration = coordinator.lifecycleGenerationForTest
+
+        await coordinator.performStopSyncForTest()   // bumps the generation
+
+        let outcome = await coordinator.runIdlePollTickForTest(generation: staleGeneration)
+        XCTAssertEqual(outcome, .stopped, "a tick from a prior lifecycle must stop, not fetch")
+        let count = await spy.count
+        XCTAssertEqual(count, 0, "no fetch after teardown")
+    }
+
+    func testResignCancelsTimerSoReactivateStartsAFreshOne() async {
+        let spy = FetchSpy()
+        let coordinator = makeTriggerCoordinator(spy: spy, interval: 1, appActive: { false })
+        await coordinator.performStartSyncForTest()
+
+        await coordinator.handleDidBecomeActive()
+        XCTAssertEqual(coordinator.idleTimerStartCountForTest, 1)
+
+        coordinator.handleWillResignActive()           // cancels + nils the task
+        await coordinator.handleDidBecomeActive()       // guard sees nil → starts a NEW timer
+        XCTAssertEqual(
+            coordinator.idleTimerStartCountForTest, 2,
+            "resign must cancel the timer so the next activate starts a fresh one"
+        )
+
+        await coordinator.performStopSyncForTest()
+    }
+
+    func testDoubleActivateDoesNotStackTimers() async {
+        let spy = FetchSpy()
+        let coordinator = makeTriggerCoordinator(spy: spy, interval: 1, appActive: { false })
+        await coordinator.performStartSyncForTest()
+
+        await coordinator.handleDidBecomeActive()
+        await coordinator.handleDidBecomeActive()          // no intervening resign → guard blocks
+        XCTAssertEqual(
+            coordinator.idleTimerStartCountForTest, 1,
+            "a second activate without a resign must not start a second timer"
+        )
+
+        await coordinator.performStopSyncForTest()
+    }
 }
 #endif

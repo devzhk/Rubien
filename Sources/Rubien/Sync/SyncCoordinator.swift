@@ -1,5 +1,6 @@
 #if os(macOS)
 import Combine
+import AppKit
 import Foundation
 import SwiftUI
 import CloudKit
@@ -82,6 +83,18 @@ public final class SyncCoordinator: ObservableObject {
     /// is installed. Tests inject a no-op to skip `CKSyncEngine` init.
     private let startLibrary: @Sendable (SyncedLibrary) async -> Void
 
+    /// Fetch seam, mirroring `startLibrary`. Production binds to the library's
+    /// `fetchRemoteChanges()`; tests inject a counting spy so the timer /
+    /// foreground logic is verifiable without touching the real engine.
+    private let fetchLibrary: @Sendable (SyncedLibrary) async -> Bool
+
+    /// Idle-poll cadence (seconds). Injected so timer tests use a tiny value.
+    private let idleFetchInterval: TimeInterval
+
+    /// Whether the app is frontmost. Injected for deterministic tests; prod
+    /// reads `NSApp.isActive`.
+    private let isAppActive: @MainActor () -> Bool
+
     /// Path to the single-writer flock file. Production uses
     /// `SyncFileLock.defaultURL` (one global lock per device); tests
     /// inject a temp URL so they don't collide with a real running app
@@ -96,6 +109,9 @@ public final class SyncCoordinator: ObservableObject {
         probes: Probes = .live,
         makeLibrary: (@Sendable (AppDatabase) async -> SyncedLibrary)? = nil,
         startLibrary: (@Sendable (SyncedLibrary) async -> Void)? = nil,
+        fetchLibrary: (@Sendable (SyncedLibrary) async -> Bool)? = nil,
+        idleFetchInterval: TimeInterval = SyncConstants.idleFetchInterval,
+        isAppActive: (@MainActor () -> Bool)? = nil,
         lockURL: URL = SyncFileLock.defaultURL
     ) {
         self.appDatabase = appDatabase
@@ -119,6 +135,9 @@ public final class SyncCoordinator: ObservableObject {
         } else {
             self.startLibrary = { await $0.start() }
         }
+        self.fetchLibrary = fetchLibrary ?? { await $0.fetchRemoteChanges() }
+        self.idleFetchInterval = idleFetchInterval
+        self.isAppActive = isAppActive ?? { NSApp.isActive }
         self.userEnabled = defaults.bool(forKey: DefaultsKey.enabled)
     }
 
@@ -218,6 +237,18 @@ public final class SyncCoordinator: ObservableObject {
     /// so kicks fired during `performStartSync` can't hit a nil library.
     private var pdfQueueKickCancellable: AnyCancellable?
 
+    /// The idle-poll task. Owned here so `performStopSync` can cancel it; the
+    /// loop also re-checks `lifecycleGeneration` each tick so a stale timer
+    /// can never write to the DB after the single-writer flock is released.
+    private var idleFetchTask: Task<Void, Never>?
+
+    /// Activation-notification observer tokens, removed on stop.
+    private var activationObservers: [NSObjectProtocol] = []
+
+    /// Test-only: counts how many times a NEW idle-poll task was actually
+    /// created (guard-passes), proving start-idempotency.
+    private(set) var idleTimerStartCountForTest = 0
+
     /// Test-only accessor; production callers never read the library
     /// directly (status is the observable surface).
     var librarySnapshotForTest: SyncedLibrary? { library }
@@ -307,6 +338,9 @@ public final class SyncCoordinator: ObservableObject {
         statusTask?.cancel()
         statusTask = nil
         pdfQueueKickCancellable = nil
+        idleFetchTask?.cancel()
+        idleFetchTask = nil
+        unsubscribeActivationNotifications()
 
         if let existing = library {
             await existing.removeTransactionObserver()
@@ -390,6 +424,106 @@ public final class SyncCoordinator: ObservableObject {
     /// isn't running (the queue rows persist; next start() will drain them).
     public func kickPDFUploadDrainer() async {
         await library?.drainPDFUploadQueue()
+    }
+
+    // MARK: - Incremental remote fetch (Layer A)
+
+    /// App became frontmost (or sync just started while active): fetch now and
+    /// ensure the idle poll is running. Idempotent — safe to call repeatedly.
+    func handleDidBecomeActive() async {
+        guard library != nil else { return }
+        await fetchRemoteChangesNow()
+        startIdleTimerIfNeeded()
+    }
+
+    /// App resigned frontmost: stop polling. Foreground/launch fetches on the
+    /// next activation pick the work back up; pushes (Layer B) would cover the
+    /// background gap later.
+    func handleWillResignActive() {
+        idleFetchTask?.cancel()
+        idleFetchTask = nil
+    }
+
+    private func fetchRemoteChangesNow() async {
+        guard let library else { return }
+        _ = await fetchLibrary(library)
+    }
+
+    /// Start the idle poll iff one isn't already running (prevents stacking on
+    /// back-to-back activations / multiple WindowGroup `.task` calls). Each tick
+    /// delegates to `runIdlePollTick`, which is also the deterministic test
+    /// seam — no test asserts on `Task.sleep` elapsing.
+    private func startIdleTimerIfNeeded() {
+        guard idleFetchTask == nil else { return }
+        idleTimerStartCountForTest += 1
+        let generation = lifecycleGeneration
+        let base = idleFetchInterval
+        idleFetchTask = Task { [weak self] in
+            var wait = base
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(wait))
+                if Task.isCancelled { return }
+                guard let self else { return }
+                switch await self.runIdlePollTick(generation: generation) {
+                case .stopped:
+                    return
+                case .completed(let ok):
+                    wait = Self.nextBackoff(current: wait, failed: !ok, base: base)
+                }
+            }
+        }
+    }
+
+    /// Outcome of one idle-poll tick.
+    enum IdlePollOutcome: Equatable {
+        case stopped              // stale generation or torn down — exit the loop
+        case completed(ok: Bool)  // fetched; `ok` drives backoff
+    }
+
+    /// One idle-poll tick: stop if this timer is from a prior lifecycle or sync
+    /// was torn down (the generation gate that, with explicit cancellation in
+    /// `performStopSync`, keeps a stale timer from writing after the flock is
+    /// released); otherwise fetch. Extracted so tests drive ticks
+    /// deterministically with no wall-clock sleeps.
+    private func runIdlePollTick(generation: Int) async -> IdlePollOutcome {
+        guard lifecycleGeneration == generation, let library else { return .stopped }
+        let ok = await fetchLibrary(library)
+        return .completed(ok: ok)
+    }
+
+    /// Test-only: run one idle-poll tick deterministically. Defaults to the
+    /// current generation (an "active" tick); pass a captured prior generation
+    /// to prove a stale tick is a no-op.
+    func runIdlePollTickForTest(generation: Int? = nil) async -> IdlePollOutcome {
+        await runIdlePollTick(generation: generation ?? lifecycleGeneration)
+    }
+
+    /// Test-only: current lifecycle generation, to capture a value a later stop
+    /// will invalidate.
+    var lifecycleGenerationForTest: Int { lifecycleGeneration }
+
+    /// Subscribe to app activation notifications so foreground/background
+    /// transitions drive `handleDidBecomeActive` / `handleWillResignActive`.
+    /// Idempotent. (Wired into `performStartSync` in the next task.)
+    private func subscribeActivationNotifications() {
+        guard activationObservers.isEmpty else { return }
+        let nc = NotificationCenter.default
+        activationObservers.append(
+            nc.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in await self?.handleDidBecomeActive() }
+            }
+        )
+        activationObservers.append(
+            nc.addObserver(forName: NSApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.handleWillResignActive() }
+            }
+        )
+    }
+
+    private func unsubscribeActivationNotifications() {
+        let nc = NotificationCenter.default
+        activationObservers.forEach { nc.removeObserver($0) }
+        activationObservers.removeAll()
     }
 
     // MARK: - Idle-fetch backoff
