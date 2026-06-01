@@ -447,6 +447,12 @@ public final class SyncCoordinator: ObservableObject {
     func handleDidBecomeActive() async {
         guard library != nil else { return }
         await fetchRemoteChangesNow()
+        // Re-guard after the await: a `stopSync` (a separate unstructured Task)
+        // can land while the fetch is suspended. Without this we'd start an idle
+        // timer bound to a torn-down generation and leave `idleFetchTask`
+        // non-nil, so the next start's idempotency guard would skip creating its
+        // timer — a live session silently left with no idle poll.
+        guard library != nil else { return }
         startIdleTimerIfNeeded()
     }
 
@@ -518,7 +524,8 @@ public final class SyncCoordinator: ObservableObject {
 
     /// Subscribe to app activation notifications so foreground/background
     /// transitions drive `handleDidBecomeActive` / `handleWillResignActive`.
-    /// Idempotent. (Wired into `performStartSync` in the next task.)
+    /// Idempotent. Called from `performStartSync` on each start; the matching
+    /// `unsubscribeActivationNotifications` runs in `performStopSync`.
     private func subscribeActivationNotifications() {
         guard activationObservers.isEmpty else { return }
         let nc = NotificationCenter.default

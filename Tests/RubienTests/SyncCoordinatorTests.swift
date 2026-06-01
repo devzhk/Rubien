@@ -490,5 +490,41 @@ final class SyncCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.idleTimerStartCountForTest, 0, "no timer when inactive")
         await coordinator.performStopSyncForTest()
     }
+
+    /// Regression for the launch-fetch / stop interleave: a `stopSync` landing
+    /// while the launch fetch is suspended must NOT leave an orphan idle timer
+    /// (which would make the next start skip its own timer). `handleDidBecomeActive`
+    /// re-guards `library` after its `await`.
+    func testStopDuringLaunchFetchDoesNotStartOrphanTimer() async {
+        let spy = FetchSpy()
+        // Break the construction-order cycle (the seam needs the coordinator)
+        // with a box; the seam body runs on the MainActor, so access is safe.
+        final class Box: @unchecked Sendable { weak var coordinator: SyncCoordinator? }
+        let box = Box()
+        let coordinator = SyncCoordinator(
+            appDatabase: db,
+            defaults: defaults,
+            probes: allPassProbes(),
+            makeLibrary: stubLibraryFactory(),
+            startLibrary: { _ in },
+            fetchLibrary: { _ in
+                // Simulate the user toggling sync off during the launch fetch.
+                await box.coordinator?.performStopSyncForTest()
+                return await spy.record()
+            },
+            idleFetchInterval: 1,
+            isAppActive: { true },
+            lockURL: tmpLockURL
+        )
+        box.coordinator = coordinator
+
+        await coordinator.performStartSyncForTest()
+
+        XCTAssertEqual(
+            coordinator.idleTimerStartCountForTest, 0,
+            "a stop during the launch fetch must not start an orphan idle timer"
+        )
+        XCTAssertNil(coordinator.librarySnapshotForTest, "stop tore down the library")
+    }
 }
 #endif
