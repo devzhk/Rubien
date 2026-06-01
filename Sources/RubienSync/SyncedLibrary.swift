@@ -332,6 +332,24 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         }
     }
 
+    /// Update fetch in-flight state and publish status. `internal` so
+    /// `SyncStatusFlickerTests` can drive the transitions without standing up
+    /// a real `CKSyncEngine` (unentitled XCTest raises `CKException`).
+    func noteFetch(inFlight: Bool) {
+        isFetchInFlight = inFlight
+        if inFlight { publishStatus(.syncing) } else { publishIdleIfQuiescent() }
+    }
+
+    func noteSend(inFlight: Bool) {
+        isSendInFlight = inFlight
+        if inFlight { publishStatus(.syncing) } else { publishIdleIfQuiescent() }
+    }
+
+    private func publishIdleIfQuiescent() {
+        guard !isFetchInFlight, !isSendInFlight else { return }
+        publishStatus(.idle)
+    }
+
     /// Test-only hook. Production callers go through `publishStatus`.
     func publishStatusForTest(_ status: SyncStatus) {
         publishStatus(status)
@@ -343,6 +361,13 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     /// local var would deallocate immediately after the `add(...)`
     /// call and commits would never reach the engine.
     private var transactionObserver: SyncTransactionObserver?
+
+    /// Independent in-flight flags so a manual fetch completing mid-send (or
+    /// vice-versa) doesn't publish `.idle` while the other operation is still
+    /// running. Without this, Layer A polling makes a brief banner flicker
+    /// visible whenever a poll's fetch overlaps an automatic send.
+    private var isFetchInFlight = false
+    private var isSendInFlight  = false
 
     /// Install a GRDB `TransactionObserver` that forwards post-commit
     /// activity into the engine automatically. One call at app startup,
@@ -544,11 +569,14 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         case .sentRecordZoneChanges(let event):
             await handleSentZoneChanges(event)
 
-        case .willFetchChanges, .willSendChanges:
-            publishStatus(.syncing)
-
-        case .didFetchChanges, .didSendChanges:
-            publishStatus(.idle)
+        case .willFetchChanges:
+            noteFetch(inFlight: true)
+        case .willSendChanges:
+            noteSend(inFlight: true)
+        case .didFetchChanges:
+            noteFetch(inFlight: false)
+        case .didSendChanges:
+            noteSend(inFlight: false)
 
         case .fetchedDatabaseChanges,
              .sentDatabaseChanges,
