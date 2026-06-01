@@ -820,6 +820,19 @@ struct ContentView: View {
                     prop.options = options
                     try? viewModel.db.savePropertyDefinition(&prop)
                 },
+                // Confirmed clear: drop the option and clear it from every
+                // reference that holds it (the picker only reaches this after
+                // the user confirms an in-use delete, or for an unused option).
+                onDeleteOption: { propId, optionValue in
+                    try? viewModel.db.deletePropertyOption(propertyId: propId, value: optionValue, clearInUse: true)
+                },
+                // Fail-closed strict probe (see AppDatabase.probeDeletePropertyOption):
+                // deletes an unused option outright (→ nil), reports the in-use
+                // count so the picker can confirm (→ count), never clears on an
+                // unexpected error.
+                deleteUnlessInUse: { propId, optionValue in
+                    viewModel.db.probeDeletePropertyOption(propertyId: propId, value: optionValue)
+                },
                 isRefreshingMetadata: viewModel.isImporting,
                 onDoubleClick: { refId in
                     openReader(for: refId)

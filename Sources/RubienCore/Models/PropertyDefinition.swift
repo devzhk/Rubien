@@ -195,4 +195,8 @@ public enum PropertyOptionError: Error, Equatable {
     /// equality bulk-update would silently miss in-use values; full multi-
     /// select rename support is intentionally deferred.
     case unsupportedPropertyType
+    /// `replaceWith` and `clearInUse` are conflicting in-use dispositions
+    /// (migrate vs. clear) — supplying both is a caller bug. Surfaced instead
+    /// of silently picking one so the mistake is visible.
+    case conflictingDisposition
 }

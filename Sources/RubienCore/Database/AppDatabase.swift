@@ -2995,11 +2995,16 @@ extension AppDatabase {
         }
     }
 
-    /// Delete a select option from a PropertyDefinition. References that
-    /// currently point to the deleted option are reassigned to `replaceWith`
-    /// if non-nil; otherwise the operation throws
-    /// `PropertyOptionError.optionInUse` so the caller can prompt for a
-    /// replacement instead of silently orphaning data.
+    /// Delete a select option from a PropertyDefinition. The disposition of
+    /// references that currently point to the deleted option is, in precedence
+    /// order:
+    /// - `replaceWith != nil` → reassign those references to the replacement;
+    /// - else `clearInUse == true` → **clear** the option from those references
+    ///   (singleSelect loses its value, multiSelect drops just this element);
+    /// - else → throw `PropertyOptionError.optionInUse(count:)` so the caller
+    ///   can prompt instead of silently orphaning data.
+    /// Supplying both `replaceWith` and `clearInUse` is a caller bug and throws
+    /// `.conflictingDisposition`.
     ///
     /// Routing by property kind:
     /// - **Tags**: `value` is the stringified tag id. Tag rows are deleted
@@ -3013,7 +3018,13 @@ extension AppDatabase {
     ///   propertyValue.value depending on built-in vs custom).
     /// - **Custom multiSelect**: counts/affects rows whose JSON array
     ///   contains the value; replacement substitutes within each array.
-    public func deletePropertyOption(propertyId: Int64, value: String, replaceWith: String? = nil) throws {
+    public func deletePropertyOption(propertyId: Int64, value: String, replaceWith: String? = nil, clearInUse: Bool = false) throws {
+        // `replaceWith` (migrate) and `clearInUse` (clear) are mutually
+        // exclusive in-use dispositions — reject up front so the type can't be
+        // asked to do two contradictory things at once.
+        if replaceWith != nil && clearInUse {
+            throw PropertyOptionError.conflictingDisposition
+        }
         // `replaceWith == value` is meaningless: it would either re-tag refs
         // to the about-to-be-deleted tag (Tags) or rewrite custom multiSelect
         // arrays back to the value we're about to remove from optionsJSON,
@@ -3057,15 +3068,25 @@ extension AppDatabase {
                                 """,
                             arguments: [replacementId, tagId]
                         )
-                    } else {
+                    } else if !clearInUse {
                         throw PropertyOptionError.optionInUse(count: affectedCount)
                     }
+                    // clearInUse: fall through — `Tag.deleteOne` cascades the
+                    // pivot removal (refs simply lose the tag), so there's
+                    // nothing extra to do for the "clear" disposition here.
                 }
                 _ = try Tag.deleteOne(db, id: tagId)
                 return
             }
 
             guard prop.type == .singleSelect || prop.type == .multiSelect else {
+                throw PropertyOptionError.unsupportedPropertyType
+            }
+            // The fixed Type property's column (`referenceType`) has no empty
+            // raw value, so clearing it to '' would corrupt rows on decode.
+            // Reject in the data layer rather than relying only on the UI/CLI
+            // gate. (Reassign to another valid Type value is still allowed.)
+            if clearInUse, prop.defaultFieldKey == PropertyDefinition.referenceTypeFieldKey {
                 throw PropertyOptionError.unsupportedPropertyType
             }
             var options = prop.options
@@ -3098,9 +3119,16 @@ extension AppDatabase {
                 // Custom multiSelect: scan candidate rows once. The cheap
                 // LIKE prefilter avoids decoding every row in the property;
                 // the post-decode `arr.contains(value)` is the source of truth.
+                // Build the needle from the JSON-encoded form of `value` so
+                // option values containing escapable characters (e.g. an
+                // embedded `"`) match the stored array — a naive `"<value>"`
+                // pattern would false-negative on escaping and undercount.
+                let encoded = (try? JSONEncoder().encode(value))
+                    .flatMap { String(data: $0, encoding: .utf8) }
+                let needle = encoded ?? "\"\(value)\""
                 let candidates = try PropertyValue
                     .filter(PropertyValue.Columns.propertyId == propertyId)
-                    .filter(sql: "value LIKE ?", arguments: ["%\"\(value)\"%"])
+                    .filter(sql: "value LIKE ?", arguments: ["%\(needle)%"])
                     .fetchAll(db)
                 multiSelectAffected = candidates.filter { row in
                     guard let raw = row.value else { return false }
@@ -3110,40 +3138,84 @@ extension AppDatabase {
             }
 
             if affectedCount > 0 {
-                guard let replacement = replaceWith else {
-                    throw PropertyOptionError.optionInUse(count: affectedCount)
-                }
-                // The `replacement == value` self-replacement case is rejected
-                // up front (see top of function), so here we only need to
-                // verify the replacement is one of the OTHER existing options.
-                guard options.contains(where: { $0.value == replacement }) else {
-                    throw PropertyOptionError.replacementNotFound(replacement)
-                }
-                if prop.type == .singleSelect {
-                    if let key = prop.defaultFieldKey,
-                       Self.builtInSingleSelectKeys.contains(key) {
-                        try db.execute(
-                            sql: "UPDATE reference SET \(key) = ? WHERE \(key) = ?",
-                            arguments: [replacement, value]
-                        )
+                if let replacement = replaceWith {
+                    // The `replacement == value` self-replacement case is
+                    // rejected up front (see top of function), so here we only
+                    // need to verify the replacement is one of the OTHER
+                    // existing options.
+                    guard options.contains(where: { $0.value == replacement }) else {
+                        throw PropertyOptionError.replacementNotFound(replacement)
+                    }
+                    if prop.type == .singleSelect {
+                        if let key = prop.defaultFieldKey,
+                           Self.builtInSingleSelectKeys.contains(key) {
+                            // Stamp dateModified in SQL: the trigger doesn't
+                            // self-stamp it, and `ReferenceRecord` syncs it, so
+                            // an unstamped reassign could lose to a stale peer.
+                            try db.execute(
+                                sql: "UPDATE reference SET \(key) = ?, dateModified = \(sqlNowISO8601) WHERE \(key) = ?",
+                                arguments: [replacement, value]
+                            )
+                        } else {
+                            try db.execute(
+                                sql: "UPDATE propertyValue SET value = ? WHERE propertyId = ? AND value = ?",
+                                arguments: [replacement, propertyId, value]
+                            )
+                        }
                     } else {
-                        try db.execute(
-                            sql: "UPDATE propertyValue SET value = ? WHERE propertyId = ? AND value = ?",
-                            arguments: [replacement, propertyId, value]
-                        )
+                        for var row in multiSelectAffected {
+                            guard let raw = row.value else { continue }
+                            let arr = PropertyValue.decodeMultiSelect(raw)
+                            // Substitute, then dedupe — the replacement may
+                            // already be in the array on the same reference.
+                            var seen = Set<String>()
+                            let next = arr.map { $0 == value ? replacement : $0 }
+                                .filter { seen.insert($0).inserted }
+                            row.value = PropertyValue.encodeMultiSelect(next)
+                            // Advance dateModified in the Swift layer (triggers
+                            // don't self-stamp it) so the synced CDPropertyValue
+                            // reflects the rewrite for last-writer-wins.
+                            row.dateModified = Date()
+                            try row.update(db)
+                        }
+                    }
+                } else if clearInUse {
+                    if prop.type == .singleSelect {
+                        if let key = prop.defaultFieldKey,
+                           Self.builtInSingleSelectKeys.contains(key) {
+                            try db.execute(
+                                sql: "UPDATE reference SET \(key) = '', dateModified = \(sqlNowISO8601) WHERE \(key) = ?",
+                                arguments: [value]
+                            )
+                        } else {
+                            // Mirror `setPropertyValue`'s nil→delete: clearing a
+                            // custom singleSelect removes the row entirely.
+                            try db.execute(
+                                sql: "DELETE FROM propertyValue WHERE propertyId = ? AND value = ?",
+                                arguments: [propertyId, value]
+                            )
+                        }
+                    } else {
+                        for var row in multiSelectAffected {
+                            guard let raw = row.value else { continue }
+                            let next = PropertyValue.decodeMultiSelect(raw)
+                                .filter { $0 != value }
+                            if next.isEmpty {
+                                // Empty array == no row (the invariant the rest
+                                // of the code relies on); never persist "[]".
+                                _ = try row.delete(db)
+                            } else {
+                                row.value = PropertyValue.encodeMultiSelect(next)
+                                // Advance dateModified in the Swift layer (the
+                                // trigger doesn't) so the synced row reflects
+                                // the cleared element.
+                                row.dateModified = Date()
+                                try row.update(db)
+                            }
+                        }
                     }
                 } else {
-                    for var row in multiSelectAffected {
-                        guard let raw = row.value else { continue }
-                        let arr = PropertyValue.decodeMultiSelect(raw)
-                        // Substitute, then dedupe — the replacement may
-                        // already be in the array on the same reference.
-                        var seen = Set<String>()
-                        let next = arr.map { $0 == value ? replacement : $0 }
-                            .filter { seen.insert($0).inserted }
-                        row.value = PropertyValue.encodeMultiSelect(next)
-                        try row.update(db)
-                    }
+                    throw PropertyOptionError.optionInUse(count: affectedCount)
                 }
             }
 
@@ -3151,6 +3223,29 @@ extension AppDatabase {
             prop.options = options
             prop.dateModified = Date()
             try prop.update(db)
+        }
+    }
+
+    /// Probe whether a select option can be deleted, **fail-closed**, returning
+    /// how many references still use it. Backs the option picker's
+    /// confirm-when-in-use flow.
+    ///
+    /// Implemented as a strict delete attempt (`clearInUse: false`) so the probe
+    /// and the eventual clear can never disagree on what "in use" means — both
+    /// route through the same counting path in `deletePropertyOption`:
+    /// - returns `nil` if the option was deleted outright (no references used
+    ///   it) **or** could not be deleted for any other reason — a safe no-op, so
+    ///   the caller never performs a destructive clear off an unexpected error;
+    /// - returns the in-use `count` (deletion blocked, nothing changed) so the
+    ///   caller can confirm before calling `deletePropertyOption(…, clearInUse: true)`.
+    public func probeDeletePropertyOption(propertyId: Int64, value: String) -> Int? {
+        do {
+            try deletePropertyOption(propertyId: propertyId, value: value, clearInUse: false)
+            return nil
+        } catch PropertyOptionError.optionInUse(let count) {
+            return count
+        } catch {
+            return nil
         }
     }
 

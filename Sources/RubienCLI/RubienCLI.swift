@@ -1086,7 +1086,7 @@ struct Properties: ParsableCommand {
     @Flag(name: .customLong("rename-option"), help: "Rename a select option (requires --id, --from, --to). For Tags, --from is the stringified tag id. Bulk-updates affected reference rows.")
     var renameOption = false
 
-    @Flag(name: .customLong("delete-option"), help: "Remove a select option (requires --id, --value). For Tags, --value is the stringified tag id. If the option is in use, supply --replace-with to migrate affected rows.")
+    @Flag(name: .customLong("delete-option"), help: "Remove a select option (requires --id, --value). For Tags, --value is the stringified tag id. If the option is in use, supply --replace-with to migrate affected rows or --clear-in-use to clear it from them.")
     var deleteOption = false
 
     @Option(name: .long, parsing: .singleValue, help: "Property definition ID. With operations: single target. With list: repeatable filter selector. Errors with `unresolved-selectors` when any id doesn't exist.")
@@ -1106,6 +1106,9 @@ struct Properties: ParsableCommand {
 
     @Option(name: .customLong("replace-with"), help: "Replacement option for in-use values when deleting (with --delete-option). For Tags, the stringified id of another tag.")
     var replaceWith: String?
+
+    @Flag(name: .customLong("clear-in-use"), help: "When deleting an in-use option (with --delete-option), clear it from affected references instead of refusing. Mutually exclusive with --replace-with.")
+    var clearOptionInUse = false
 
     @Flag(name: .long, help: "Upsert a property value on a reference (requires --reference, --id, --value). Replace semantics for multiSelect; pair with --add-value or --remove-value for incremental edits.")
     var set = false
@@ -1295,7 +1298,8 @@ struct Properties: ParsableCommand {
                 try AppDatabase.shared.deletePropertyOption(
                     propertyId: propId,
                     value: v,
-                    replaceWith: replaceWith
+                    replaceWith: replaceWith,
+                    clearInUse: clearOptionInUse
                 )
             } catch let error as PropertyOptionError {
                 printJSONError(describePropertyOptionError(error))
@@ -1510,13 +1514,15 @@ struct Properties: ParsableCommand {
         case .optionNotFound:
             return "Option not found in this property"
         case .optionInUse(let count):
-            return "Cannot delete: \(count) reference\(count == 1 ? "" : "s") still use this option. Pass --replace-with <existing-value> to migrate them."
+            return "Cannot delete: \(count) reference\(count == 1 ? "" : "s") still use this option. Pass --replace-with <existing-value> to migrate them, or --clear-in-use to clear it from them."
         case .replacementNotFound(let name):
             return "Replacement option '\(name)' is not an existing option on this property."
         case .duplicateValue(let name):
             return "An option with value '\(name)' already exists on this property — pick a different rename target."
         case .unsupportedPropertyType:
             return "Option rename / delete only applies to select properties (singleSelect, multiSelect, and the built-in Tags property)."
+        case .conflictingDisposition:
+            return "Pass either --replace-with or --clear-in-use, not both."
         }
     }
 

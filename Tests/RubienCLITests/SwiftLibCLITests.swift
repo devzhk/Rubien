@@ -760,6 +760,67 @@ final class RubienCLITests: XCTestCase {
         XCTAssertTrue(optionValues.contains(renamed), "new option name must be present")
     }
 
+    /// --delete-option --clear-in-use removes an in-use option (which would
+    /// otherwise error with optionInUse) and clears it from affected
+    /// references. Round-trips against a throwaway custom singleSelect property.
+    func testPropertiesDeleteOptionClearInUseClearsReferenceValues() throws {
+        try skipIfBinaryMissing()
+        let propName = "ClearInUse-\(UUID().uuidString.prefix(8))"
+        let created = try runCLI(["properties", "--create", "--name", propName, "--type", "singleSelect", "--options", "Alpha,Beta"])
+        XCTAssertEqual(created.exitCode, 0, "create failed: \(created.stderr)")
+        guard let createdJSON = try JSONSerialization.jsonObject(with: Data(created.stdout.utf8)) as? [String: Any],
+              let propId = createdJSON["id"] as? String else {
+            XCTFail("could not parse created property id from \(created.stdout)")
+            return
+        }
+        let addRef = try runCLI(["add", "--title", "ClearInUse Ref \(UUID().uuidString.prefix(8))"])
+        guard let refId = parseId(from: Data(addRef.stdout.utf8)) else {
+            XCTFail("add reference failed: \(addRef.stderr)")
+            return
+        }
+        defer {
+            _ = try? runCLI(["delete", String(refId), "--force"])
+            _ = try? runCLI(["properties", "--delete", propId])
+        }
+
+        let setResult = try runCLI(["properties", "--set", "--reference", String(refId), "--id", propId, "--value", "Alpha"])
+        XCTAssertEqual(setResult.exitCode, 0, "set failed: \(setResult.stderr)")
+
+        let del = try runCLI(["properties", "--delete-option", "--id", propId, "--value", "Alpha", "--clear-in-use"])
+        XCTAssertEqual(del.exitCode, 0, "clear-in-use delete must succeed on an in-use option: \(del.stderr)")
+
+        let afterProps = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
+        let updated = afterProps.first { ($0["id"] as? String) == propId }
+        let optionValues = (updated?["options"] as? [[String: Any]])?.compactMap { $0["value"] as? String } ?? []
+        XCTAssertFalse(optionValues.contains("Alpha"), "deleted option must be gone")
+        XCTAssertTrue(optionValues.contains("Beta"), "other options must survive")
+
+        let refValues = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties", "--reference", String(refId)]).stdout.utf8)) as? [[String: Any]] ?? []
+        XCTAssertFalse(refValues.contains { ($0["propertyId"] as? String) == propId }, "reference value must be cleared")
+    }
+
+    /// --clear-in-use and --replace-with are conflicting dispositions; passing
+    /// both fails with a clear message rather than silently picking one.
+    func testPropertiesDeleteOptionClearAndReplaceConflict() throws {
+        try skipIfBinaryMissing()
+        let propName = "ClearConflict-\(UUID().uuidString.prefix(8))"
+        let created = try runCLI(["properties", "--create", "--name", propName, "--type", "singleSelect", "--options", "Alpha,Beta"])
+        XCTAssertEqual(created.exitCode, 0, "create failed: \(created.stderr)")
+        guard let createdJSON = try JSONSerialization.jsonObject(with: Data(created.stdout.utf8)) as? [String: Any],
+              let propId = createdJSON["id"] as? String else {
+            XCTFail("could not parse created property id")
+            return
+        }
+        defer { _ = try? runCLI(["properties", "--delete", propId]) }
+
+        let result = try runCLI(["properties", "--delete-option", "--id", propId, "--value", "Alpha", "--replace-with", "Beta", "--clear-in-use"])
+        XCTAssertNotEqual(result.exitCode, 0, "conflicting dispositions must fail")
+        XCTAssertTrue(
+            (result.stdout + result.stderr).lowercased().contains("either"),
+            "error should explain the conflict: \(result.stdout) \(result.stderr)"
+        )
+    }
+
     func testPropertiesSetDefaultPropertyIsRefused() throws {
         try skipIfBinaryMissing()
 

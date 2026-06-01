@@ -136,6 +136,9 @@ struct InlineSingleSelectRow: View {
     /// on hover). The caller handles persistence + the in-use reassignment
     /// path. See `SelectOptionPicker.onDeleteOption`.
     var onDeleteOption: ((String) -> Void)? = nil
+    /// Opts deletion into the confirm-when-in-use flow. See
+    /// `SelectOptionPicker.deleteUnlessInUse`.
+    var deleteUnlessInUse: ((String) -> Int?)? = nil
     /// Optional explanatory message rendered at the bottom of the picker when
     /// `onCreateOption` is nil. See `SelectOptionPicker.lockedHint`.
     var lockedHint: String? = nil
@@ -169,6 +172,7 @@ struct InlineSingleSelectRow: View {
                 },
                 onCreateOption: onCreateOption,
                 onDeleteOption: onDeleteOption,
+                deleteUnlessInUse: deleteUnlessInUse,
                 lockedHint: lockedHint
             )
         }
@@ -228,6 +232,10 @@ struct InlineMultiSelectOptionRow: View {
     let options: [SelectOption]
     let onUpdate: ([String]) -> Void
     let onCreateOption: (String) -> Void
+    /// Pass non-nil to expose a trash affordance per option (see
+    /// `SelectOptionPicker.onDeleteOption` / `deleteUnlessInUse`).
+    var onDeleteOption: ((String) -> Void)? = nil
+    var deleteUnlessInUse: ((String) -> Int?)? = nil
 
     @State private var showPicker = false
 
@@ -258,7 +266,9 @@ struct InlineMultiSelectOptionRow: View {
                     selectedValues: selectedValues,
                     options: options,
                     onCommit: onUpdate,
-                    onCreateOption: onCreateOption
+                    onCreateOption: onCreateOption,
+                    onDeleteOption: onDeleteOption,
+                    deleteUnlessInUse: deleteUnlessInUse
                 )
             }
         }
@@ -432,12 +442,23 @@ struct SelectOptionPicker: View {
     /// the actual mutation (calling `db.deletePropertyOption`) and any in-use
     /// reassignment. Nil hides the affordance entirely (Type / read-only paths).
     var onDeleteOption: ((String) -> Void)? = nil
+    /// Opts deletion into a confirm-when-in-use flow. Attempts to delete the
+    /// option and returns: `nil` if it was deleted outright (unused) **or**
+    /// could not be deleted (a no-op — fails closed, nothing destructive
+    /// happened), or the number of references using it (deletion was blocked;
+    /// the picker shows an inline confirmation and only then calls
+    /// `onDeleteOption` to perform the destructive clear). When nil, `onDeleteOption`
+    /// fires immediately on trash tap — the no-confirm reassign path used by Status.
+    var deleteUnlessInUse: ((String) -> Int?)? = nil
     /// Optional explanatory message shown at the bottom of the picker when
     /// `onCreateOption` is nil. Lets us tell the user *why* creation is locked.
     var lockedHint: String? = nil
 
     @State private var search = ""
     @State private var localSelected: Set<String> = []
+    /// Set while an in-use option awaits delete confirmation; renders the
+    /// inline confirm prompt in place of the option list.
+    @State private var confirming: (value: String, count: Int)?
     @Environment(\.dismiss) private var dismiss
 
     private var filteredOptions: [SelectOption] {
@@ -448,6 +469,24 @@ struct SelectOptionPicker: View {
     private var canCreate: Bool { onCreateOption != nil }
 
     var body: some View {
+        Group {
+            if let pending = confirming {
+                confirmView(pending)
+            } else {
+                pickerBody
+            }
+        }
+        .frame(width: 220)
+        .onAppear {
+            localSelected = Set(selectedValues)
+        }
+        // No `onDisappear { onCommit(...) }` — both branches commit eagerly
+        // now (single-select on tap, multi-select on each toggle). Deferring
+        // to disappear would wait for NSPopover's ~500–800ms dismiss
+        // animation before the cell update.
+    }
+
+    private var pickerBody: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
@@ -503,8 +542,8 @@ struct SelectOptionPicker: View {
                                     onCommit(Array(localSelected))
                                 }
                             },
-                            onDelete: onDeleteOption.map { handler in
-                                { handler(option.value) }
+                            onDelete: onDeleteOption == nil ? nil : {
+                                requestDelete(option.value)
                             }
                         )
                     }
@@ -561,14 +600,48 @@ struct SelectOptionPicker: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .frame(width: 220)
-        .onAppear {
-            localSelected = Set(selectedValues)
+    }
+
+    /// Trash tapped on `value`. With no `deleteUnlessInUse` gate, delete
+    /// immediately (Status's reassign path). With a gate, attempt the delete:
+    /// if the option is still in use the gate returns a count and we surface an
+    /// inline confirmation before performing the destructive clear.
+    private func requestDelete(_ value: String) {
+        // The row only wires this up when `onDeleteOption != nil`, so the
+        // optional-chained call below always fires.
+        guard let probe = deleteUnlessInUse else {
+            onDeleteOption?(value)
+            return
         }
-        // No `onDisappear { onCommit(...) }` — both branches commit eagerly
-        // now (single-select on tap, multi-select on each toggle). Deferring
-        // to disappear would wait for NSPopover's ~500–800ms dismiss
-        // animation before the cell update.
+        if let count = probe(value) {
+            confirming = (value, count)
+        }
+        // nil → already deleted (unused) or a safe no-op; nothing to confirm.
+    }
+
+    @ViewBuilder
+    private func confirmView(_ pending: (value: String, count: Int)) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Remove \u{201C}\(pending.value)\u{201D}?")
+                .font(.system(size: 13, weight: .semibold))
+                .fixedSize(horizontal: false, vertical: true)
+            Text("This clears it from \(pending.count) reference\(pending.count == 1 ? "" : "s").")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                Button("Cancel") { confirming = nil }
+                    .buttonStyle(.bordered)
+                Button("Remove") {
+                    onDeleteOption?(pending.value)
+                    confirming = nil
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+            }
+        }
+        .padding(12)
     }
 }
 

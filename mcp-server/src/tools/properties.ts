@@ -203,7 +203,8 @@ export function registerPropertyTools(server: McpServer): void {
       description:
         "Remove a select option from a property. " + tagsContractNote(
           "For Tags, deleting a tag with attached references requires `replaceWith` (the stringified id of another tag) — affected references are re-tagged before the old tag is removed. Without `replaceWith`, in-use options surface an `optionInUse` error.",
-        ),
+        ) +
+        " To delete an in-use option without migrating, set `clearInUse: true` — affected references have the option cleared from their value (singleSelect loses its value; multiSelect drops just this option). `clearInUse` and `replaceWith` are mutually exclusive.",
       inputSchema: {
         id: z.string().describe("Property ID"),
         value: z.string().describe("Option value to delete (tag id for Tags)"),
@@ -213,10 +214,16 @@ export function registerPropertyTools(server: McpServer): void {
           .describe(
             "Replacement option value for affected rows (required when the option is in use)",
           ),
+        clearInUse: z
+          .boolean()
+          .optional()
+          .describe(
+            "Clear the option from affected references instead of migrating. Mutually exclusive with replaceWith.",
+          ),
       },
       annotations: { destructiveHint: true },
     },
-    async ({ id, value, replaceWith }) =>
+    async ({ id, value, replaceWith, clearInUse }) =>
       runCliAsTool([
         "properties",
         "--delete-option",
@@ -224,7 +231,10 @@ export function registerPropertyTools(server: McpServer): void {
         id,
         "--value",
         value,
-        ...flagsFromOptions({ "--replace-with": replaceWith }),
+        ...flagsFromOptions({
+          "--replace-with": replaceWith,
+          "--clear-in-use": clearInUse,
+        }),
       ]),
   );
 

@@ -736,6 +736,12 @@ struct ReferenceDetailView: View {
                 },
                 onCreateOption: { newOption in
                     addOptionToProperty(propId: propId, optionValue: newOption)
+                },
+                onDeleteOption: { optionValue in
+                    try? db.deletePropertyOption(propertyId: propId, value: optionValue, clearInUse: true)
+                },
+                deleteUnlessInUse: { optionValue in
+                    db.probeDeletePropertyOption(propertyId: propId, value: optionValue)
                 }
             )
         case .multiSelect:
@@ -750,6 +756,12 @@ struct ReferenceDetailView: View {
                 },
                 onCreateOption: { newOption in
                     addOptionToProperty(propId: propId, optionValue: newOption)
+                },
+                onDeleteOption: { optionValue in
+                    try? db.deletePropertyOption(propertyId: propId, value: optionValue, clearInUse: true)
+                },
+                deleteUnlessInUse: { optionValue in
+                    db.probeDeletePropertyOption(propertyId: propId, value: optionValue)
                 }
             )
         case .checkbox:

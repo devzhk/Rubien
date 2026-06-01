@@ -329,6 +329,8 @@ struct EditableSingleSelectCell: View, Equatable {
     let options: [SelectOption]
     let onSelect: (String) -> Void
     var onCreateOption: ((String) -> Void)? = nil
+    var onDeleteOption: ((String) -> Void)? = nil
+    var deleteUnlessInUse: ((String) -> Int?)? = nil
 
     static func == (lhs: EditableSingleSelectCell, rhs: EditableSingleSelectCell) -> Bool {
         lhs.value == rhs.value && lhs.options == rhs.options
@@ -371,7 +373,9 @@ struct EditableSingleSelectCell: View, Equatable {
                 // "create" affordance — Type relies on this to lock its
                 // option set (it would otherwise display "Create X" but the
                 // value would be silently dropped by the rawValue guard).
-                onCreateOption: onCreateOption
+                onCreateOption: onCreateOption,
+                onDeleteOption: onDeleteOption,
+                deleteUnlessInUse: deleteUnlessInUse
             )
         }
     }
@@ -384,6 +388,8 @@ struct EditableMultiSelectCell: View, Equatable {
     let options: [SelectOption]
     let onUpdate: ([String]) -> Void
     var onCreateOption: ((String) -> Void)? = nil
+    var onDeleteOption: ((String) -> Void)? = nil
+    var deleteUnlessInUse: ((String) -> Int?)? = nil
 
     static func == (lhs: EditableMultiSelectCell, rhs: EditableMultiSelectCell) -> Bool {
         lhs.selectedValues == rhs.selectedValues && lhs.options == rhs.options
@@ -428,7 +434,9 @@ struct EditableMultiSelectCell: View, Equatable {
                 selectedValues: selectedValues,
                 options: options,
                 onCommit: onUpdate,
-                onCreateOption: onCreateOption
+                onCreateOption: onCreateOption,
+                onDeleteOption: onDeleteOption,
+                deleteUnlessInUse: deleteUnlessInUse
             )
         }
     }
@@ -717,6 +725,8 @@ struct EditableCustomPropertyCell: View, Equatable {
     let onCancel: () -> Void
     let commitCustom: (Int64, Int64, String?) -> Void
     let onCreateOption: (Int64, String) -> Void
+    let onDeleteOption: (Int64, String) -> Void
+    let deleteUnlessInUse: (Int64, String) -> Int?
     var onTab: ((_ backwards: Bool) -> Void)? = nil
     var wrap: Bool = false
 
@@ -781,6 +791,12 @@ struct EditableCustomPropertyCell: View, Equatable {
                 },
                 onCreateOption: { newName in
                     onCreateOption(propId, newName)
+                },
+                onDeleteOption: { optionValue in
+                    onDeleteOption(propId, optionValue)
+                },
+                deleteUnlessInUse: { optionValue in
+                    deleteUnlessInUse(propId, optionValue)
                 }
             )
             .equatable()
@@ -795,6 +811,12 @@ struct EditableCustomPropertyCell: View, Equatable {
                 },
                 onCreateOption: { newName in
                     onCreateOption(propId, newName)
+                },
+                onDeleteOption: { optionValue in
+                    onDeleteOption(propId, optionValue)
+                },
+                deleteUnlessInUse: { optionValue in
+                    deleteUnlessInUse(propId, optionValue)
                 }
             )
             .equatable()

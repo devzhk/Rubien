@@ -23,6 +23,8 @@ struct ReferenceTableView: View {
     let onCreateTag: (String) -> Int64?
     let onDeleteTag: (Int64) -> Void
     let onCreateOption: (Int64, String) -> Void
+    let onDeleteOption: (Int64, String) -> Void
+    let deleteUnlessInUse: (Int64, String) -> Int?
     var isRefreshingMetadata = false
     var onDoubleClick: ((Int64) -> Void)? = nil
 
@@ -174,6 +176,8 @@ struct ReferenceTableView: View {
             onCreateTag: onCreateTag,
             onDeleteTag: onDeleteTag,
             onCreateOption: onCreateOption,
+            onDeleteOption: onDeleteOption,
+            deleteUnlessInUse: deleteUnlessInUse,
             customProperties: propertyDefs.filter { prop in
                 guard prop.isVisible else { return false }
                 if !prop.isDefault { return true }
@@ -425,6 +429,8 @@ private struct ReferenceTableContent: View {
     let onCreateTag: (String) -> Int64?
     let onDeleteTag: (Int64) -> Void
     let onCreateOption: (Int64, String) -> Void
+    let onDeleteOption: (Int64, String) -> Void
+    let deleteUnlessInUse: (Int64, String) -> Int?
     let customProperties: [PropertyDefinition]
     /// Status PropertyDefinition. Passed separately because `customProperties`
     /// filters Status out (the table renders a hardcoded Status column).
@@ -574,6 +580,8 @@ private struct ReferenceTableContent: View {
                 onCancel: cancel,
                 commitCustom: commitCustom,
                 onCreateOption: onCreateOption,
+                onDeleteOption: onDeleteOption,
+                deleteUnlessInUse: deleteUnlessInUse,
                 onTab: { back in
                     advanceEdit(from: refId, fieldKey: customKey, backwards: back)
                 },
