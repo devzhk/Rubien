@@ -412,4 +412,28 @@ final class TagsPropertyRoutingTests: XCTestCase {
         XCTAssertEqual(count, 1)                                         // in use → confirm, nothing deleted
         XCTAssertNotNil(try db.fetchAllTags().first { $0.id == tagId }) // tag still present
     }
+
+    func testProbeDeleteTagUsedByMultipleReferencesReturnsFullCountAndKeepsPivots() throws {
+        let db = try makeDB()
+        let prop = try tagsProp(db)
+        let ref1 = try makeRef(db, title: "Paper 1")
+        let ref2 = try makeRef(db, title: "Paper 2")
+        let tagId = try makeTag(db, name: "shared", color: "#5856D6")
+        try db.setTags(forReference: ref1, tagIds: [tagId])
+        try db.setTags(forReference: ref2, tagIds: [tagId])
+
+        let count = db.probeDeletePropertyOption(propertyId: prop.id!, value: String(tagId))
+
+        XCTAssertEqual(count, 2)                                         // full in-use count drives the "N references" copy
+        XCTAssertNotNil(try db.fetchAllTags().first { $0.id == tagId }) // tag survives the blocked probe
+        // The in-use probe is non-destructive: both pivots must remain.
+        let pivots = try db.dbWriter.read { dbConn in
+            try Int.fetchOne(
+                dbConn,
+                sql: "SELECT COUNT(*) FROM referenceTag WHERE tagId = ?",
+                arguments: [tagId]
+            ) ?? 0
+        }
+        XCTAssertEqual(pivots, 2, "in-use probe must not delete referenceTag pivots")
+    }
 }

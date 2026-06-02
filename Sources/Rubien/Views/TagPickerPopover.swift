@@ -184,6 +184,10 @@ struct TagPickerPopover: View {
         }
     }
 
+    // NOTE: this confirm view and the measured-min-height fix above deliberately
+    // mirror SelectOptionPicker (InlinePropertyRow.swift). Two call sites don't
+    // justify a shared abstraction yet; if a third in-use-confirm picker appears,
+    // extract a shared InUseConfirmView + min-height modifier at that point.
     @ViewBuilder
     private func confirmView(_ pending: (id: Int64, name: String, count: Int)) -> some View {
         VStack(alignment: .leading, spacing: 10) {
