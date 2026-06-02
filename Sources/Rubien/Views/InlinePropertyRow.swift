@@ -459,6 +459,14 @@ struct SelectOptionPicker: View {
     /// Set while an in-use option awaits delete confirmation; renders the
     /// inline confirm prompt in place of the option list.
     @State private var confirming: (value: String, count: Int)?
+    /// Measured natural height of the option list. Once measured, we floor the
+    /// scroll area at `min(content, 200)` so the popover can't get stuck shorter
+    /// after the (shorter) confirm view swaps back to the list: NSPopover
+    /// re-proposes its stale, smaller content size and a *greedy* ScrollView
+    /// would absorb it, leaving the picker squished. A definite floor forces the
+    /// popover to restore. Stays `nil`-constrained until measured, so first
+    /// appearance is unchanged.
+    @State private var listContentHeight: CGFloat = 0
     @Environment(\.dismiss) private var dismiss
 
     private var filteredOptions: [SelectOption] {
@@ -583,8 +591,16 @@ struct SelectOptionPicker: View {
                     }
                 }
                 .padding(.vertical, 4)
+                .onGeometryChange(for: CGFloat.self) { proxy in
+                    proxy.size.height
+                } action: { height in
+                    listContentHeight = height
+                }
             }
-            .frame(maxHeight: 200)
+            .frame(
+                minHeight: listContentHeight > 0 ? min(listContentHeight, 200) : nil,
+                maxHeight: 200
+            )
 
             // Footer hint for properties whose options are intentionally fixed
             // (Type drives BibTeX export buckets — see PropertyManagerPopover /
