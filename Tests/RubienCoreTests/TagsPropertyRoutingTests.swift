@@ -386,4 +386,30 @@ final class TagsPropertyRoutingTests: XCTestCase {
         XCTAssertEqual(try db.fetchTags(forReference: refA).map(\.id), [newTag])
         XCTAssertEqual(Set(try db.fetchTags(forReference: refB).compactMap(\.id)), [newTag])
     }
+
+    // MARK: - probeDeletePropertyOption on Tags (TagPickerPopover gate contract)
+
+    func testProbeDeleteUnusedTagDeletesItAndReturnsNil() throws {
+        let db = try makeDB()
+        let prop = try tagsProp(db)
+        let tagId = try makeTag(db, name: "orphan", color: "#FF0000")
+
+        let count = db.probeDeletePropertyOption(propertyId: prop.id!, value: String(tagId))
+
+        XCTAssertNil(count)                                              // unused → deleted outright, no confirm
+        XCTAssertNil(try db.fetchAllTags().first { $0.id == tagId })   // tag is gone
+    }
+
+    func testProbeDeleteInUseTagReturnsCountWithoutDeleting() throws {
+        let db = try makeDB()
+        let prop = try tagsProp(db)
+        let refId = try makeRef(db, title: "Paper")
+        let tagId = try makeTag(db, name: "acceleration", color: "#FF9500")
+        try db.setTags(forReference: refId, tagIds: [tagId])
+
+        let count = db.probeDeletePropertyOption(propertyId: prop.id!, value: String(tagId))
+
+        XCTAssertEqual(count, 1)                                         // in use → confirm, nothing deleted
+        XCTAssertNotNil(try db.fetchAllTags().first { $0.id == tagId }) // tag still present
+    }
 }
