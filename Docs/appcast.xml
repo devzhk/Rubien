@@ -93,5 +93,26 @@
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.1.6</title>
+            <description><![CDATA[• iCloud sync now pulls remote changes automatically — on launch, on focus,
+  and periodically while open.
+• Fixed a sync stall where a cross-device tag conflict could halt
+  all syncing; conflicts now self-resolve.
+• Deleting an in-use tag or select option now asks
+  first; unused ones delete in one click.
+• Fixed an option-picker height glitch after canceling
+  a delete.]]></description>
+            <pubDate>Tue, 02 Jun 2026 06:19:26 +0000</pubDate>
+            <sparkle:version>7</sparkle:version>
+            <sparkle:shortVersionString>0.1.6</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.1.6/Rubien-0.1.6.dmg"
+                sparkle:edSignature="1xTee9BdtkGALOx2+90GNvrlV+5W8f5KeoLGSQ6z82HgJb7gM2+FPd4Xk2OtUWSGPASKlWvKeaHlKnuqzMXTDg=="
+                length="16900914"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
