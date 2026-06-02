@@ -318,13 +318,20 @@ extension SyncEntityType {
     ///
     /// Caller's transaction must have set `applyingRemote` in `syncSession`
     /// so the triggers don't re-dirty the row we just wrote.
-    public func applyRemoteRecord(_ record: CKRecord, entityId: String, db: Database) throws {
+    /// Returns `true` if the record was applied/persisted (so the caller should
+    /// `markPulled`), `false` if it was skipped — a malformed id/record, an
+    /// empty-name tag, or a referencePDF with no materialization. A skipped
+    /// record must NOT be `markPulled`: that would stamp the server's
+    /// systemFields and clear `isDirty` on a row this device never synced,
+    /// silently dropping a pending local edit.
+    @discardableResult
+    public func applyRemoteRecord(_ record: CKRecord, entityId: String, db: Database) throws -> Bool {
         // `entityId` is the caller-stripped local id (no "<type>:" prefix).
         // Don't read `record.recordID.recordName` directly — it carries the
         // prefixed form so `Int64(...)` would fail for every row.
         switch self {
         case .reference:
-            guard let id = Int64(entityId) else { return }
+            guard let id = Int64(entityId) else { return false }
             var row = Reference(record: record)
             row.id = id
             // Reference no longer carries a PDF filename (B8). Per-device PDF
@@ -335,13 +342,81 @@ extension SyncEntityType {
             try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
 
         case .tag:
-            guard let id = Int64(entityId) else { return }
+            guard let id = Int64(entityId) else { return false }
             var row = Tag(record: record)
             row.id = id
+            // Defense-in-depth: a missing/blank name decodes to "" (TagRecord) —
+            // a malformed/forward-incompat record. Skip persistence (return false
+            // → the caller skips markPulled, so we don't stamp server state on a
+            // row we didn't apply) rather than upsert a "" that would itself trip
+            // UNIQUE(name) and wedge a later batch.
+            guard !row.name.isEmpty else { return false }
+            // Reconcile a name collision the way `.propertyDefinition` does below,
+            // but ADOPT THE INCOMING rowID. A local tag with the same name at a
+            // different rowID (a peer's delete+recreate not yet applied here, or an
+            // offline dual-create) makes the plain upsert throw UNIQUE(name) and
+            // roll back the WHOLE fetched batch — silently wedging all sync on the
+            // device. Unlike built-in PropertyDefinitions (which keep-local because
+            // they carry no child rows), tags have `referenceTag` pivot children
+            // and no stable secondary key, and the incoming fetch carries pivots
+            // keyed to the INCOMING tagId — so we converge on the incoming rowID
+            // and re-key the local pivots across.
+            if let loserId = try Int64.fetchOne(
+                db,
+                sql: "SELECT id FROM tag WHERE name = ? AND id <> ? LIMIT 1",
+                arguments: [row.name, id]
+            ) {
+                // Capture the loser's pivots (with their own dateModified, carried
+                // through verbatim) before deleting them: in the delete-free apply
+                // batch FK enforcement is OFF, so ON DELETE CASCADE does NOT fire —
+                // this explicit cleanup is load-bearing.
+                let pivots = try Row.fetchAll(
+                    db,
+                    sql: "SELECT referenceId, dateModified FROM referenceTag WHERE tagId = ?",
+                    arguments: [loserId]
+                )
+                try db.execute(sql: "DELETE FROM referenceTag WHERE tagId = ?", arguments: [loserId])
+                try db.execute(sql: "DELETE FROM tag WHERE id = ?", arguments: [loserId])  // frees the name
+                // Triggers are suppressed under applyingRemote, so clear the loser's
+                // stale bookkeeping by hand (tag + its pivots), else an orphan
+                // syncState/tombstone keeps referencing the gone rowID.
+                try db.execute(sql: "DELETE FROM syncState WHERE entityType = 'tag' AND entityId = ?", arguments: [String(loserId)])
+                try db.execute(sql: "DELETE FROM tombstone WHERE entityType = 'tag' AND entityId = ?", arguments: [String(loserId)])
+                try db.execute(sql: "DELETE FROM syncState WHERE entityType = 'referenceTag' AND entityId LIKE ?", arguments: ["%\(SyncConstants.pivotSeparator)\(loserId)"])
+                try db.execute(sql: "DELETE FROM tombstone WHERE entityType = 'referenceTag' AND entityId LIKE ?", arguments: ["%\(SyncConstants.pivotSeparator)\(loserId)"])
+                // Land the incoming tag at its rowID. UPDATE if that rowID is
+                // already occupied by an unrelated tag (Option A: overwrite it —
+                // the same outcome the plain-rowID upsert already produces on any
+                // rowID collision; the occupant's own pivots survive and silently
+                // re-label, the deferred A-pks bystander cost), else INSERT.
+                try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
+                // Re-key the loser's pivots onto the incoming rowID, preserving each
+                // pivot's own dateModified. INSERT OR IGNORE in case a reference
+                // already carries it (UNIQUE PK). These re-keyed rows are LOCAL
+                // truth the device must push, but the dirty-tracking trigger is
+                // suppressed under applyingRemote — so dirty each one by hand, else
+                // the association never propagates and is lost on other devices.
+                for pivot in pivots {
+                    let refId: Int64 = pivot["referenceId"]
+                    let pivotDate: DatabaseValue = pivot["dateModified"]
+                    try db.execute(
+                        sql: "INSERT OR IGNORE INTO referenceTag (referenceId, tagId, dateModified) VALUES (?, ?, ?)",
+                        arguments: [refId, id, pivotDate]
+                    )
+                    try db.execute(
+                        sql: """
+                            INSERT INTO syncState (entityType, entityId, isDirty) VALUES ('referenceTag', ?, 1)
+                                ON CONFLICT(entityType, entityId) DO UPDATE SET isDirty = 1
+                            """,
+                        arguments: [ReferenceTag.recordName(referenceId: refId, tagId: id)]
+                    )
+                }
+                return true
+            }
             try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
 
         case .referenceTag:
-            guard let pivot = ReferenceTag(record: record) else { return }
+            guard let pivot = ReferenceTag(record: record) else { return false }
             // Pivot's only "fields" are its composite PK + dateModified, the
             // latter being schema-only. Insert-if-absent is enough — update
             // would be a no-op.
@@ -353,28 +428,28 @@ extension SyncEntityType {
             }
 
         case .pdfAnnotation:
-            guard let id = Int64(entityId), var row = PDFAnnotationRecord(record: record) else { return }
+            guard let id = Int64(entityId), var row = PDFAnnotationRecord(record: record) else { return false }
             row.id = id
             try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
 
         case .webAnnotation:
-            guard let id = Int64(entityId), var row = WebAnnotationRecord(record: record) else { return }
+            guard let id = Int64(entityId), var row = WebAnnotationRecord(record: record) else { return false }
             row.id = id
             try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
 
         case .metadataIntake:
-            guard let id = Int64(entityId) else { return }
+            guard let id = Int64(entityId) else { return false }
             var row = MetadataIntake(record: record)
             row.id = id
             try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
 
         case .metadataEvidence:
-            guard let id = Int64(entityId), var row = MetadataEvidence(record: record) else { return }
+            guard let id = Int64(entityId), var row = MetadataEvidence(record: record) else { return false }
             row.id = id
             try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
 
         case .propertyDefinition:
-            guard let id = Int64(entityId) else { return }
+            guard let id = Int64(entityId) else { return false }
             var row = PropertyDefinition(record: record)
             // Built-in PropertyDefinitions (defaultFieldKey != nil) are seeded
             // independently on every device, so their rowIDs diverge ("Last
@@ -407,12 +482,12 @@ extension SyncEntityType {
             }
 
         case .propertyValue:
-            guard let id = Int64(entityId), var row = PropertyValue(record: record) else { return }
+            guard let id = Int64(entityId), var row = PropertyValue(record: record) else { return false }
             row.id = id
             try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
 
         case .databaseView:
-            guard let id = Int64(entityId) else { return }
+            guard let id = Int64(entityId) else { return false }
             var row = DatabaseView(record: record)
             row.id = id
             try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
@@ -424,7 +499,7 @@ extension SyncEntityType {
             // only for the SyncEntityDispatchTests call sites that still
             // exercise the single-shot signature.
             guard let prepared = try Self.prepareReferencePDFMaterialization(record: record) else {
-                return
+                return false
             }
             let previousFilename = try Self.applyPreparedReferencePDF(prepared, db: db)
             if let previousFilename {
@@ -432,6 +507,7 @@ extension SyncEntityType {
                 try? FileManager.default.removeItem(at: oldURL)
             }
         }
+        return true
     }
 
     /// Apply a pulled deletion. Calls `DELETE` by key; FK cascades handle

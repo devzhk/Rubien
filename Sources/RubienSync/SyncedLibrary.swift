@@ -906,13 +906,15 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                 continue
             }
 
-            try type.applyRemoteRecord(record, entityId: entityId, db: db)
-            try stateStore.markPulled(
-                db,
-                entityType: type,
-                entityId: entityId,
-                record: record
-            )
+            let applied = try type.applyRemoteRecord(record, entityId: entityId, db: db)
+            if applied {
+                try stateStore.markPulled(
+                    db,
+                    entityType: type,
+                    entityId: entityId,
+                    record: record
+                )
+            }
         }
 
         for deletion in deletions {
@@ -1159,18 +1161,22 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             displacedFilename = try await appDatabase.dbWriter.write { [stateStore] db -> String? in
                 try stateStore.setApplyingRemote(db)
                 let displaced: String?
+                let applied: Bool
                 if type == .referencePDF, let prepared = preparedPDF {
                     displaced = try SyncEntityType.applyPreparedReferencePDF(prepared, db: db)
+                    applied = true
                 } else {
-                    try type.applyRemoteRecord(serverRecord, entityId: entityId, db: db)
+                    applied = try type.applyRemoteRecord(serverRecord, entityId: entityId, db: db)
                     displaced = nil
                 }
-                try stateStore.markPulled(
-                    db,
-                    entityType: type,
-                    entityId: entityId,
-                    record: serverRecord
-                )
+                if applied {
+                    try stateStore.markPulled(
+                        db,
+                        entityType: type,
+                        entityId: entityId,
+                        record: serverRecord
+                    )
+                }
                 try stateStore.clearApplyingRemote(db)
                 return displaced
             }
