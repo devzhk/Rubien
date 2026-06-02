@@ -15,6 +15,7 @@ struct ReferenceDetailView: View {
     var onUpdateTags: ((Int64, [Int64]) -> Void)?
     var onCreateTag: ((String) -> Int64?)?
     var onDeleteTag: ((Int64) -> Void)?
+    var deleteTagUnlessInUse: ((Int64) -> Int?)?
 
     @State private var editedRef: Reference
     @State private var editingField: String?
@@ -45,6 +46,7 @@ struct ReferenceDetailView: View {
          onUpdateTags: ((Int64, [Int64]) -> Void)? = nil,
          onCreateTag: ((String) -> Int64?)? = nil,
          onDeleteTag: ((Int64) -> Void)? = nil,
+         deleteTagUnlessInUse: ((Int64) -> Int?)? = nil,
          propertyDefs: Binding<[PropertyDefinition]>) {
         self.reference = reference
         self.allTags = allTags
@@ -57,6 +59,7 @@ struct ReferenceDetailView: View {
         self.onUpdateTags = onUpdateTags
         self.onCreateTag = onCreateTag
         self.onDeleteTag = onDeleteTag
+        self.deleteTagUnlessInUse = deleteTagUnlessInUse
         self._editedRef = State(initialValue: reference)
         self._propertyDefs = propertyDefs
     }
@@ -354,7 +357,8 @@ struct ReferenceDetailView: View {
                 onCreateTag: { name in onCreateTag?(name) ?? nil },
                 onDeleteTag: { tagId in
                     onDeleteTag?(tagId)
-                }
+                },
+                deleteTagUnlessInUse: { tagId in deleteTagUnlessInUse?(tagId) ?? nil }
             )
         case "year":
             InlineNumberRow(

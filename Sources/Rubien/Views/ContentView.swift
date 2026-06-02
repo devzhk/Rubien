@@ -481,6 +481,15 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
+    /// Probe whether a tag can be deleted, fail-closed. Returns the in-use
+    /// reference count (→ confirm) or nil (deleted outright because unused, or
+    /// Tags property not resolvable — a safe no-op). Routes through the seeded
+    /// Tags PropertyDefinition so it shares deletePropertyOption's counting path.
+    func probeDeleteTag(id: Int64) -> Int? {
+        guard let tagsPropId = propertyDefs.first(where: { $0.isTags })?.id else { return nil }
+        return db.probeDeletePropertyOption(propertyId: tagsPropId, value: String(id))
+    }
+
     func saveDatabaseView(_ view: inout DatabaseView) {
         do {
             try db.saveDatabaseView(&view)
@@ -812,6 +821,7 @@ struct ContentView: View {
                 onUpdateTags: { refId, tagIds in viewModel.setTags(forReference: refId, tagIds: tagIds) },
                 onCreateTag: { name in viewModel.createTag(name: name) },
                 onDeleteTag: { tagId in viewModel.deleteTag(id: tagId) },
+                deleteTagUnlessInUse: { tagId in viewModel.probeDeleteTag(id: tagId) },
                 onCreateOption: { propId, optionValue in
                     guard var prop = viewModel.propertyDefs.first(where: { $0.id == propId }) else { return }
                     let color = ColorPalette.nextUnused(excluding: Set(prop.options.map(\.color)))
@@ -878,6 +888,7 @@ struct ContentView: View {
                     onUpdateTags: { refId, tagIds in viewModel.setTags(forReference: refId, tagIds: tagIds) },
                     onCreateTag: { name in viewModel.createTag(name: name) },
                     onDeleteTag: { tagId in viewModel.deleteTag(id: tagId) },
+                    deleteTagUnlessInUse: { tagId in viewModel.probeDeleteTag(id: tagId) },
                     propertyDefs: Binding(
                         get: { viewModel.propertyDefs },
                         set: { viewModel.propertyDefs = $0 }

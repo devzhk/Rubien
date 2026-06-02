@@ -188,6 +188,7 @@ struct InlineTagsRow: View {
     let onUpdateTags: ([Int64]) -> Void
     let onCreateTag: (String) -> Int64?
     let onDeleteTag: (Int64) -> Void
+    let deleteTagUnlessInUse: (Int64) -> Int?
 
     @State private var showPicker = false
 
@@ -217,7 +218,8 @@ struct InlineTagsRow: View {
                     allTags: allTags,
                     onCommit: onUpdateTags,
                     onCreateTag: onCreateTag,
-                    onDeleteTag: onDeleteTag
+                    onDeleteTag: onDeleteTag,
+                    deleteTagUnlessInUse: deleteTagUnlessInUse
                 )
             }
         }

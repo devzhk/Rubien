@@ -13,8 +13,21 @@ struct TagPickerPopover: View {
     /// the newly-created id in that immediate commit.
     let onCreateTag: (String) -> Int64?
     let onDeleteTag: (Int64) -> Void
+    /// Probe (mirrors SelectOptionPicker.deleteUnlessInUse): returns the in-use
+    /// reference count when the tag is still assigned (→ inline confirm), or nil
+    /// when it was deleted outright because unused, or could not be probed
+    /// (fail-closed no-op). Always wired — required, not optional — so a tag
+    /// delete can never skip the gate.
+    let deleteTagUnlessInUse: (Int64) -> Int?
     @State private var search = ""
     @State private var localIds: Set<Int64> = []
+    /// Set while an in-use tag awaits delete confirmation; renders the inline
+    /// confirm prompt in place of the tag list.
+    @State private var confirming: (id: Int64, name: String, count: Int)?
+    /// Measured natural height of the tag list — floors the scroll area at
+    /// min(content, 200) once measured so the popover restores its height after
+    /// the (shorter) confirm view swaps back. Same fix as SelectOptionPicker.
+    @State private var listContentHeight: CGFloat = 0
     @FocusState private var isSearchFocused: Bool
 
     private var filteredTags: [Tag] {
@@ -44,6 +57,21 @@ struct TagPickerPopover: View {
     }
 
     var body: some View {
+        Group {
+            if let pending = confirming {
+                confirmView(pending)
+            } else {
+                pickerBody
+            }
+        }
+        .frame(width: 220)
+        .onAppear {
+            localIds = Set(assignedTags.compactMap(\.id))
+            DispatchQueue.main.async { isSearchFocused = true }
+        }
+    }
+
+    private var pickerBody: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
@@ -92,17 +120,7 @@ struct TagPickerPopover: View {
                             .buttonStyle(.plain)
 
                             Button {
-                                if let id = tag.id {
-                                    // Commit the per-reference removal first
-                                    // (defensive — both orderings converge via
-                                    // the FK cascade-delete on referenceTag,
-                                    // but writing without the about-to-delete
-                                    // tag id avoids a brief inconsistent
-                                    // intermediate state).
-                                    localIds.remove(id)
-                                    flushCommit()
-                                    onDeleteTag(id)
-                                }
+                                requestDelete(tag)
                             } label: {
                                 Image(systemName: "trash")
                                     .font(.system(size: 10))
@@ -139,18 +157,60 @@ struct TagPickerPopover: View {
                     }
                 }
                 .padding(.vertical, 4)
+                .onGeometryChange(for: CGFloat.self) { proxy in
+                    proxy.size.height
+                } action: { height in
+                    listContentHeight = height
+                }
             }
-            .frame(maxHeight: 200)
-        }
-        .frame(width: 220)
-        .onAppear {
-            localIds = Set(assignedTags.compactMap(\.id))
-            DispatchQueue.main.async { isSearchFocused = true }
+            .frame(
+                minHeight: listContentHeight > 0 ? min(listContentHeight, 200) : nil,
+                maxHeight: 200
+            )
         }
         // No `onDisappear { onCommit(...) }` — every mutation path above already
         // fires `flushCommit()`. Deferring to disappear would wait for
         // NSPopover's ~500–800ms dismiss animation before the cell update,
         // which is the lag pattern this refactor eliminates.
+    }
+
+    /// Trash tapped on `tag`. Probe for usage: an in-use tag surfaces the inline
+    /// confirm; an unused tag is deleted outright by the probe (nothing more to
+    /// do — mirrors SelectOptionPicker.requestDelete).
+    private func requestDelete(_ tag: Tag) {
+        guard let id = tag.id else { return }
+        if let count = deleteTagUnlessInUse(id) {
+            confirming = (id, tag.name, count)
+        }
+    }
+
+    @ViewBuilder
+    private func confirmView(_ pending: (id: Int64, name: String, count: Int)) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Delete the tag \u{201C}\(pending.name)\u{201D}?")
+                .font(.system(size: 13, weight: .semibold))
+                .fixedSize(horizontal: false, vertical: true)
+            Text("This removes it from \(pending.count) reference\(pending.count == 1 ? "" : "s").")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                Button("Cancel") { confirming = nil }
+                    .buttonStyle(.bordered)
+                Button("Delete") {
+                    // Mirror the original trash ordering: drop the per-reference
+                    // pivot first (defensive), then the global delete.
+                    localIds.remove(pending.id)
+                    flushCommit()
+                    onDeleteTag(pending.id)
+                    confirming = nil
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+            }
+        }
+        .padding(12)
     }
 }
 #endif

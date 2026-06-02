@@ -22,6 +22,7 @@ struct ReferenceTableView: View {
     let onUpdateTags: (Int64, [Int64]) -> Void
     let onCreateTag: (String) -> Int64?
     let onDeleteTag: (Int64) -> Void
+    let deleteTagUnlessInUse: (Int64) -> Int?
     let onCreateOption: (Int64, String) -> Void
     let onDeleteOption: (Int64, String) -> Void
     let deleteUnlessInUse: (Int64, String) -> Int?
@@ -175,6 +176,7 @@ struct ReferenceTableView: View {
             onUpdateTags: onUpdateTags,
             onCreateTag: onCreateTag,
             onDeleteTag: onDeleteTag,
+            deleteTagUnlessInUse: deleteTagUnlessInUse,
             onCreateOption: onCreateOption,
             onDeleteOption: onDeleteOption,
             deleteUnlessInUse: deleteUnlessInUse,
@@ -428,6 +430,7 @@ private struct ReferenceTableContent: View {
     let onUpdateTags: (Int64, [Int64]) -> Void
     let onCreateTag: (String) -> Int64?
     let onDeleteTag: (Int64) -> Void
+    let deleteTagUnlessInUse: (Int64) -> Int?
     let onCreateOption: (Int64, String) -> Void
     let onDeleteOption: (Int64, String) -> Void
     let deleteUnlessInUse: (Int64, String) -> Int?
@@ -622,7 +625,8 @@ private struct ReferenceTableContent: View {
                     referenceId: ref.id ?? -1,
                     onUpdateTags: { tagIds in onUpdateTags(ref.id ?? -1, tagIds) },
                     onCreateTag: onCreateTag,
-                    onDeleteTag: onDeleteTag
+                    onDeleteTag: onDeleteTag,
+                    deleteTagUnlessInUse: deleteTagUnlessInUse
                 )
                 .equatable()
             }
@@ -897,6 +901,7 @@ struct TagsCellView: View, Equatable {
     let onUpdateTags: ([Int64]) -> Void
     let onCreateTag: (String) -> Int64?
     let onDeleteTag: (Int64) -> Void
+    let deleteTagUnlessInUse: (Int64) -> Int?
 
     @State private var showPopover = false
 
@@ -944,7 +949,8 @@ struct TagsCellView: View, Equatable {
                 allTags: allTags,
                 onCommit: { tagIds in onUpdateTags(tagIds) },
                 onCreateTag: onCreateTag,
-                onDeleteTag: onDeleteTag
+                onDeleteTag: onDeleteTag,
+                deleteTagUnlessInUse: deleteTagUnlessInUse
             )
         }
     }
