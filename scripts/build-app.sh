@@ -321,8 +321,11 @@ sign_bundle() {
     fi
 
     # Clean up temp release entitlements (no EXIT trap: would clobber any
-    # script-level trap; sign_bundle returns right after this).
-    [ -n "$prod_ent_dir" ] && rm -rf "$prod_ent_dir"
+    # script-level trap; sign_bundle returns right after this). Use an if-block,
+    # NOT `[ -n … ] && rm`: under `set -e` that one-liner returns 1 when
+    # prod_ent_dir is empty (every non-release build), which aborts the whole
+    # script here — right after signing, before create_dmg ever runs.
+    if [ -n "$prod_ent_dir" ]; then rm -rf "$prod_ent_dir"; fi
 }
 
 embed_app_icon() {
