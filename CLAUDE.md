@@ -66,12 +66,14 @@ GRDB + a single `DatabaseMigrator` in `AppDatabase.swift`. Hard rules:
 | # | Path | When |
 |---|---|---|
 | 0 | `$RUBIEN_LIBRARY_ROOT` (verbatim) | Explicit override |
-| 1 | `~/Library/Group Containers/9TXK4V3SS8.com.rubien.shared/Rubien/` | Signed-with-entitlement process |
+| 1 | `~/Library/Group Containers/9TXK4V3SS8.group.com.rubien.shared/Rubien/` | Signed-with-entitlement process |
 | 2 | `~/Library/Application Support/Rubien/` | Unsandboxed Mac dev builds |
 | 3 | `$XDG_DATA_HOME/rubien/` (default `~/.local/share/rubien/`) | Linux |
 | 4 | Temp dir | Last resort |
 
 PDF storage, metadata artifacts, and the sync state sidecar all ride this same root, so the whole library moves together. A startup migration auto-promotes an existing library when you switch between sandboxed/unsandboxed modes.
+
+**Foot-gun — finding the app's *live* `library.sqlite`:** several copies coexist on disk, so `find … -name library.sqlite | head` or hand-typing the path will silently hit the wrong one. Known traps: timestamped `.backup-*` / `.empty-backup-*` siblings next to the live DB; a **legacy `9TXK4V3SS8.com.rubien.shared` container (no `group.`)** left over from before the App Group id gained the `group.` prefix (the active id is `9TXK4V3SS8.group.com.rubien.shared`, per `AppDatabase.appGroupID`); and `rubien-cli` (unsigned → no entitlement) resolving to `~/Library/Application Support/Rubien/`, a *different* library, unless you pass `RUBIEN_LIBRARY_ROOT`. To inspect the **running app's** actual DB, ask the process itself: `lsof -p "$(pgrep -f 'Rubien.app/Contents/MacOS/Rubien')" | grep library.sqlite`.
 
 ### Metadata resolution
 
