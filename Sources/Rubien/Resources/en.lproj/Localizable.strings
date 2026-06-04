@@ -125,3 +125,9 @@
 "Replace existing PDF?" = "Replace existing PDF?";
 "This will overwrite the current attachment." = "This will overwrite the current attachment.";
 "Replace" = "Replace";
+
+// Detail panel — inline edit tooltips
+"Edit title" = "Edit title";
+"Edit authors" = "Edit authors";
+"Edit abstract" = "Edit abstract";
+"Edit notes" = "Edit notes";

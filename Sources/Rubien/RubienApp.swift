@@ -99,6 +99,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
 
+        // Show `.help(…)` tooltips a bit sooner than AppKit's slow default.
+        // Registration domain only: volatile, not written to the user's prefs,
+        // and an explicit user setting still overrides it. Value is in ms.
+        UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 1500])
+
         // Configure API contact email for CrossRef/OpenAlex polite pool
         MetadataFetcher.contactEmail = RubienPreferences.apiContactEmail
 

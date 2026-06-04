@@ -121,12 +121,17 @@ struct ReferenceDetailView: View {
                     onCancel: { cancelEdit() }
                 )
             } else {
-                Text(reference.title)
-                    .font(.title2.bold())
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                    .onTapGesture { beginEdit("title") }
+                HoverRegion { isHovering in
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(reference.title)
+                            .font(.title2.bold())
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        if isHovering {
+                            editPencil("title", help: String(localized: "Edit title", bundle: .module))
+                        }
+                    }
+                }
             }
 
             // Authors — click to edit
@@ -140,15 +145,20 @@ struct ReferenceDetailView: View {
                     onCancel: { cancelEdit() }
                 )
             } else if !reference.authors.isEmpty {
-                Text(reference.authors.displayString)
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .lineLimit(2)
-                    .truncationMode(.tail)
-                    .contentShape(Rectangle())
-                    .onTapGesture { beginEdit("authors") }
+                HoverRegion { isHovering in
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(reference.authors.displayString)
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .lineLimit(2)
+                            .truncationMode(.tail)
+                        if isHovering {
+                            editPencil("authors", help: String(localized: "Edit authors", bundle: .module))
+                        }
+                    }
+                }
             } else {
                 Text("Add authors")
                     .font(.body)
@@ -864,39 +874,45 @@ struct ReferenceDetailView: View {
         let hasAbstract = !(reference.abstract ?? "").isEmpty
 
         if editingField == "abstract" || hasAbstract {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Abstract", bundle: .module)
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .textCase(.uppercase)
-
-                if editingField == "abstract" {
-                    TextEditor(text: Binding(
-                        get: { editedRef.abstract ?? "" },
-                        set: { editedRef.abstract = $0.isEmpty ? nil : $0 }
-                    ))
-                    .font(.callout)
-                    .frame(minHeight: 100)
-                    .scrollContentBackground(.hidden)
-                    .padding(4)
-                    .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 6))
-                    .onExitCommand { commitFieldAndSave("abstract") }
-
+            HoverRegion { isHovering in
+                VStack(alignment: .leading, spacing: 6) {
                     HStack {
+                        Text("Abstract", bundle: .module)
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .textCase(.uppercase)
                         Spacer()
-                        Button("Done") { commitFieldAndSave("abstract") }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
+                        if editingField != "abstract" && isHovering {
+                            editPencil("abstract", help: String(localized: "Edit abstract", bundle: .module))
+                        }
                     }
-                } else {
-                    Text(reference.abstract ?? "")
+
+                    if editingField == "abstract" {
+                        TextEditor(text: Binding(
+                            get: { editedRef.abstract ?? "" },
+                            set: { editedRef.abstract = $0.isEmpty ? nil : $0 }
+                        ))
                         .font(.callout)
-                        .textSelection(.enabled)
-                        .lineSpacing(4)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .contentShape(Rectangle())
-                        .onTapGesture { beginEdit("abstract") }
+                        .frame(minHeight: 100)
+                        .scrollContentBackground(.hidden)
+                        .padding(4)
+                        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 6))
+                        .onExitCommand { commitFieldAndSave("abstract") }
+
+                        HStack {
+                            Spacer()
+                            Button("Done") { commitFieldAndSave("abstract") }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                        }
+                    } else {
+                        Text(reference.abstract ?? "")
+                            .font(.callout)
+                            .textSelection(.enabled)
+                            .lineSpacing(4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
         }
@@ -912,38 +928,44 @@ struct ReferenceDetailView: View {
             : String(localized: "Notes", bundle: .module)
 
         if editingField == "notes" || hasNotes {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(sectionTitle)
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                    .textCase(.uppercase)
-
-                if editingField == "notes" {
-                    TextEditor(text: Binding(
-                        get: { editedRef.notes ?? "" },
-                        set: { editedRef.notes = $0.isEmpty ? nil : $0 }
-                    ))
-                    .font(.callout)
-                    .frame(minHeight: 80)
-                    .scrollContentBackground(.hidden)
-                    .padding(4)
-                    .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 6))
-                    .onExitCommand { commitFieldAndSave("notes") }
-
+            HoverRegion { isHovering in
+                VStack(alignment: .leading, spacing: 6) {
                     HStack {
+                        Text(sectionTitle)
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                            .textCase(.uppercase)
                         Spacer()
-                        Button("Done") { commitFieldAndSave("notes") }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
+                        if editingField != "notes" && isHovering {
+                            editPencil("notes", help: String(localized: "Edit notes", bundle: .module))
+                        }
                     }
-                } else {
-                    Text(reference.notes ?? "")
+
+                    if editingField == "notes" {
+                        TextEditor(text: Binding(
+                            get: { editedRef.notes ?? "" },
+                            set: { editedRef.notes = $0.isEmpty ? nil : $0 }
+                        ))
                         .font(.callout)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .contentShape(Rectangle())
-                        .onTapGesture { beginEdit("notes") }
+                        .frame(minHeight: 80)
+                        .scrollContentBackground(.hidden)
+                        .padding(4)
+                        .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 6))
+                        .onExitCommand { commitFieldAndSave("notes") }
+
+                        HStack {
+                            Spacer()
+                            Button("Done") { commitFieldAndSave("notes") }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+                        }
+                    } else {
+                        Text(reference.notes ?? "")
+                            .font(.callout)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
         }
@@ -1066,6 +1088,17 @@ struct ReferenceDetailView: View {
         var updated = editedRef
         updated.dateModified = Date()
         onSave(updated)
+    }
+
+    /// The edit affordance for the four "prose" fields whose display text stays
+    /// `.textSelection(.enabled)`. A bare `.onTapGesture` on selectable text never
+    /// fires on macOS (the text layer swallows the click), so a `Button` gives a
+    /// reliable target while the text stays selectable/copyable. Callers insert it
+    /// only while the field is hovered (see `HoverRegion`), keeping it out of the
+    /// view/accessibility tree otherwise. `EditPencilButton` carries the visuals.
+    @ViewBuilder
+    private func editPencil(_ field: String, help: String) -> some View {
+        EditPencilButton(help: help) { beginEdit(field) }
     }
 
     // MARK: - Custom Property Helpers
@@ -1331,6 +1364,58 @@ struct ReferenceDetailView: View {
 }
 
 // MARK: - Inline Title Editor
+
+/// Hosts hover state locally for one inline-editable region and passes the
+/// current hover flag into its content (used to reveal an `editPencil`). Keeping
+/// the flag in this small subview — rather than a shared `@State` on
+/// `ReferenceDetailView` — means a mouse enter/leave only re-evaluates this
+/// region, not the whole detail panel (whose `body` re-runs `hasPDFInCache` DB
+/// lookups). Mirrors the local-`Bool` `.onHover` pattern used across the app.
+///
+/// `.contentShape(Rectangle())` makes the *entire* frame hoverable, including the
+/// empty gap between a leading, full-width `Text` and a trailing pencil. Without
+/// it, that gap isn't hit-tested, so moving the pointer toward the revealed pencil
+/// drops the hover and the pencil vanishes before it can be clicked.
+private struct HoverRegion<Content: View>: View {
+    @ViewBuilder var content: (Bool) -> Content
+    @State private var isHovering = false
+
+    var body: some View {
+        content(isHovering)
+            .contentShape(Rectangle())
+            .onHover { isHovering = $0 }
+    }
+}
+
+/// The hover-revealed pencil for an inline-editable prose field. Owns its own
+/// hover state so it can read as a real, clickable button: a subtle rounded chip
+/// that brightens, an accent-tinted glyph, and a link (pointing-hand) cursor when
+/// the pointer is on target — so it's easy to spot and gives a clear on-hover cue.
+private struct EditPencilButton: View {
+    let help: String
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "square.and.pencil")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(isHovered ? Color.accentColor : Color.secondary)
+                .padding(4)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.primary.opacity(isHovered ? 0.10 : 0.06))
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .accessibilityLabel(help)
+        .pointerStyle(.link)
+        .onHover { isHovered = $0 }
+        .animation(.easeOut(duration: 0.12), value: isHovered)
+    }
+}
 
 private struct InlineTitleEditor: View {
     @Binding var text: String
