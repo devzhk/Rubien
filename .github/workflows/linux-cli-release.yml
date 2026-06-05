@@ -61,10 +61,23 @@ jobs:
             /opt/r/rubien-cli styles
             /opt/r/rubien-cli cite 1 --style apa'
 
+      - name: Sign the tarball (ed25519, dedicated Linux-CLI key)
+        env:
+          RUBIEN_CLI_SIGNING_KEY: ${{ secrets.RUBIEN_CLI_SIGNING_KEY }}
+        run: |
+          printf '%s' "$RUBIEN_CLI_SIGNING_KEY" > /tmp/cli-signing.pem
+          # Ed25519 is PureEdDSA: sign the raw tarball bytes -> 64-byte detached sig.
+          openssl pkeyutl -sign -inkey /tmp/cli-signing.pem -rawin \
+            -in "rubien-cli-${{ inputs.tag }}-linux-x86_64.tar.gz" \
+            -out "rubien-cli-${{ inputs.tag }}-linux-x86_64.tar.gz.sig"
+          rm -f /tmp/cli-signing.pem
+          test "$(wc -c < "rubien-cli-${{ inputs.tag }}-linux-x86_64.tar.gz.sig")" -eq 64
+
       - name: Upload to the public releases repo
         env:
           GH_TOKEN: ${{ secrets.RELEASES_UPLOAD_TOKEN }}
         run: |
           gh release upload "${{ inputs.tag }}" \
             "rubien-cli-${{ inputs.tag }}-linux-x86_64.tar.gz" \
+            "rubien-cli-${{ inputs.tag }}-linux-x86_64.tar.gz.sig" \
             --repo devzhk/Rubien-releases --clobber
