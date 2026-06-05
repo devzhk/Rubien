@@ -207,7 +207,7 @@ enum SelfUpdater {
 
     static func resolveSelfPath() throws -> String {
         var buf = [CChar](repeating: 0, count: 4096)
-        let n = buf.withUnsafeMutableBufferPointer { readlink("/proc/self/exe", $0.baseAddress, $0.count - 1) }
+        let n = buf.withUnsafeMutableBufferPointer { readlink("/proc/self/exe", $0.baseAddress!, $0.count - 1) }
         guard n > 0 else { throw Err(description: "cannot resolve /proc/self/exe") }
         buf[n] = 0
         return String(cString: buf)
