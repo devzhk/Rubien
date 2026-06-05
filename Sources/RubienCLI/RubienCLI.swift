@@ -13,7 +13,7 @@ struct RubienCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "rubien-cli",
         abstract: "rubien-cli — manage your Rubien reference library from the command line",
-        version: "1.0.0",
+        version: RubienCLIVersion.marketing,
         subcommands: Self.allSubcommands
     )
 

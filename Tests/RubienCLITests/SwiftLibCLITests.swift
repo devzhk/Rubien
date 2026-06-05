@@ -115,7 +115,8 @@ final class RubienCLITests: XCTestCase {
         let result = try runCLI(["--version"])
         XCTAssertEqual(result.exitCode, 0)
         let output = (result.stdout + result.stderr).trimmingCharacters(in: .whitespacesAndNewlines)
-        XCTAssertFalse(output.isEmpty, "--version should produce output")
+        XCTAssertEqual(output, "0.1.7",
+                       "--version must reflect VERSION, not the old 1.0.0 placeholder")
     }
 
     func testVersionSubcommandJSON() throws {
