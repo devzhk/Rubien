@@ -198,6 +198,21 @@ if [ "$APPCAST_TARGET" = "production" ]; then
         --latest
 fi
 
+# 17. Dispatch the Linux rubien-cli build (async, best-effort). The Mac release
+#     above is already LIVE; a Linux build/upload failure does NOT affect Mac.
+#     gh defaults to the origin (private source) repo, where the workflow lives.
+if [ "$APPCAST_TARGET" = "production" ]; then
+    if gh workflow run linux-cli-release.yml -f tag="v${VERSION}"; then
+        sleep 3
+        RUN_URL="$(gh run list --workflow=linux-cli-release.yml --limit=1 --json url --jq '.[0].url' 2>/dev/null || true)"
+        echo "   ↗ Linux CLI build dispatched: ${RUN_URL:-<not yet listed — use: gh run watch>}"
+        echo "     If it fails, re-run: gh workflow run linux-cli-release.yml -f tag=v${VERSION}"
+    else
+        echo "   ⚠ Linux CLI dispatch FAILED (Mac release is still fine)."
+        echo "     Run manually: gh workflow run linux-cli-release.yml -f tag=v${VERSION}"
+    fi
+fi
+
 echo "✓ Release $VERSION complete."
 echo "   DMG: $DMG_PATH"
 echo "   Appcast: $APPCAST_PATH"
