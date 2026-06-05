@@ -53,6 +53,7 @@ Linux needs system deps first — see [Linux CLI](../README.md#linux-cli). For d
 | `properties` | List or manage property definitions, options, and per-reference values (covers tags via the built-in `Tags` property) |
 | `annotations` | List PDF annotations for a reference |
 | `styles` | List available citation styles |
+| `version` | Print the CLI marketing version and monotonic build number as JSON (`{"build":8,"version":"0.1.7"}`); the MCP server's version guard requires `build >= MIN_CLI_BUILD` |
 | `views` | Manage database views |
 | `pdf info` | Probe PDF: page count, text-layer flag, and outline-derived sections |
 | `pdf text` | Extract text from a reference's PDF by page range or section title |
@@ -474,6 +475,33 @@ rubien-cli styles
 No options.
 
 **Output:** JSON array of `{id, title, isBuiltin, citationKind}`.
+
+---
+
+## version
+
+Print the CLI's marketing version and monotonic build number. The values are
+baked into the binary at build time from `VERSION` / `BUILD.txt` (regenerated
+into `Sources/RubienCLI/GeneratedVersion.swift` by
+`scripts/generate-cli-version.sh`; `release.sh` regenerates and commits it each
+release). The MCP server probes this on startup and refuses to run against a CLI
+older than its `MIN_CLI_BUILD`, so `build` is the field that gates
+compatibility — not the marketing `version`.
+
+```bash
+rubien-cli version
+```
+
+No options.
+
+**Output:**
+
+```json
+{
+  "build": 8,
+  "version": "0.1.7"
+}
+```
 
 ---
 

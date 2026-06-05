@@ -27,6 +27,11 @@ jobs:
     container: swift:6.3-jammy
     steps:
       - uses: actions/checkout@v4
+      - name: Verify generated CLI version is in sync
+        run: |
+          ./scripts/generate-cli-version.sh
+          git diff --exit-code Sources/RubienCLI/GeneratedVersion.swift \
+            || (echo "::error::GeneratedVersion.swift is stale. Run ./scripts/generate-cli-version.sh and commit." && exit 1)
       - name: Install system deps
         # poppler/cairo/gdk-pixbuf power RubienPDFKit's Linux backend.
         run: |

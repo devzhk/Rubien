@@ -47,6 +47,9 @@ fi
 # 2. Read VERSION and BUILD
 VERSION="$(cat VERSION | tr -d '[:space:]')"
 BUILD_NUMBER="$(cat BUILD.txt | tr -d '[:space:]')"
+# Regenerate the CLI version constant so the built binary reports this release's
+# version/build (the MCP version guard compares the build number).
+"$PROJECT_DIR/scripts/generate-cli-version.sh"
 echo "▸ Releasing Rubien $VERSION (build $BUILD_NUMBER) → $APPCAST_TARGET appcast"
 
 # 3. Build
@@ -169,7 +172,7 @@ export RELEASE_NOTES_TEXT="${RELEASE_NOTES_TEXT:-Rubien ${VERSION} (Beta). See G
 rubien_appcast_prepend_item
 
 # 14. Push appcast change first
-git add "$APPCAST_PATH"
+git add "$APPCAST_PATH" Sources/RubienCLI/GeneratedVersion.swift
 git commit -m "Release v${VERSION} (build ${BUILD_NUMBER}): update ${APPCAST_TARGET} appcast"
 if [ "$APPCAST_TARGET" = "production" ]; then
     git push origin main
