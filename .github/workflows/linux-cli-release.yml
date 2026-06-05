@@ -1,0 +1,70 @@
+name: Linux CLI Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build + upload rubien-cli for (e.g. v0.1.7)"
+        required: true
+        type: string
+
+jobs:
+  build:
+    name: Build + smoke + upload (x86_64)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Build static-stdlib rubien-cli + stage resource bundle
+        run: |
+          docker run --rm -v "$PWD":/src -w /src swift:6.3-jammy bash -c '
+            apt-get update &&
+            apt-get install -y libsqlite3-dev libpoppler-glib-dev libcairo2-dev libgdk-pixbuf-2.0-dev pkg-config &&
+            swift build -c release --product rubien-cli -Xswiftc -static-stdlib &&
+            rm -rf /src/stage && mkdir -p /src/stage &&
+            cp .build/release/rubien-cli /src/stage/ &&
+            cp -r .build/release/*.resources /src/stage/ 2>/dev/null || true &&
+            cp -r .build/release/*.bundle    /src/stage/ 2>/dev/null || true &&
+            ls -d /src/stage/*.resources >/dev/null'
+
+      - name: Package tarball (binary + resource bundle + install note)
+        run: |
+          cat > stage/INSTALL.txt <<'EOF'
+          rubien-cli (Linux x86_64). Requires Ubuntu 22.04+ (glibc >= 2.35).
+          Runtime deps: sudo apt install libsqlite3-0 libcurl4 libxml2 libpoppler-glib8 libcairo2 libgdk-pixbuf-2.0-0 libglib2.0-0 ca-certificates
+          KEEP rubien-cli AND the *.resources directories together (the CLI loads
+          bundled citation styles from beside the binary). Point the MCP server
+          at the extracted binary:
+            export RUBIEN_CLI=/path/to/extracted/rubien-cli
+            claude mcp add rubien -- npx -y rubien-mcp-server
+          EOF
+          tar -C stage -czf "rubien-cli-${{ inputs.tag }}-linux-x86_64.tar.gz" .
+
+      - name: Smoke test from the TARBALL in a clean container
+        # Mirrors D1's spike so the recurring RELEASE GATE is as strong as the
+        # one-time spike: `add --identifier` exercises network + libxml2,
+        # `cite` exercises the citeproc resource bundle. (One arXiv network call
+        # runs in the gate; if it ever flakes, that single line can be relaxed.)
+        run: |
+          docker run --rm -v "$PWD/rubien-cli-${{ inputs.tag }}-linux-x86_64.tar.gz":/t.tgz ubuntu:22.04 bash -c '
+            set -e
+            apt-get update
+            apt-get install -y --no-install-recommends libsqlite3-0 libcurl4 libxml2 libpoppler-glib8 libcairo2 libgdk-pixbuf-2.0-0 libglib2.0-0 ca-certificates
+            mkdir -p /opt/r && tar -C /opt/r -xzf /t.tgz
+            ls -d /opt/r/*.resources >/dev/null
+            export RUBIEN_LIBRARY_ROOT=/tmp/lib
+            /opt/r/rubien-cli version
+            /opt/r/rubien-cli list
+            /opt/r/rubien-cli add --identifier 10.48550/arXiv.1706.03762
+            /opt/r/rubien-cli styles
+            /opt/r/rubien-cli cite 1 --style apa'
+
+      - name: Upload to the public releases repo
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_UPLOAD_TOKEN }}
+        run: |
+          gh release upload "${{ inputs.tag }}" \
+            "rubien-cli-${{ inputs.tag }}-linux-x86_64.tar.gz" \
+            --repo devzhk/Rubien-releases --clobber
