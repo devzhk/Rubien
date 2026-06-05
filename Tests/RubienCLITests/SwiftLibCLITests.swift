@@ -118,6 +118,23 @@ final class RubienCLITests: XCTestCase {
         XCTAssertFalse(output.isEmpty, "--version should produce output")
     }
 
+    func testVersionSubcommandJSON() throws {
+        try skipIfBinaryMissing()
+        let result = try runCLI(["version"])
+        XCTAssertEqual(result.exitCode, 0, "stderr: \(result.stderr)")
+        let data = Data(result.stdout.utf8)
+        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        XCTAssertNotNil(obj, "version output should be a JSON object")
+        let version = obj?["version"] as? String
+        let build = obj?["build"] as? Int
+        XCTAssertNotNil(version, "version field must be a string")
+        XCTAssertNotNil(build, "build field must be an integer")
+        XCTAssertEqual(obj?.count, 2, "version JSON must have exactly two keys: version and build")
+        // Build is the monotonic integer the MCP guard compares against.
+        XCTAssertGreaterThanOrEqual(build ?? 0, 8)
+        XCTAssertEqual(version, "0.1.7")
+    }
+
     // MARK: - List
 
     func testListCommand() throws {

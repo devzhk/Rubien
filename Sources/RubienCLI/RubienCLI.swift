@@ -31,6 +31,7 @@ struct RubienCLI: AsyncParsableCommand {
             Properties.self,
             Annotations.self,
             Styles.self,
+            Version.self,
             Export.self,
             Views.self,
             Pdf.self,
@@ -1567,6 +1568,21 @@ struct Annotations: ParsableCommand {
             )
         }
         printJSON(dtos)
+    }
+}
+
+struct Version: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Print the CLI marketing version and monotonic build number as JSON")
+
+    struct VersionInfo: Encodable {
+        let version: String
+        let build: Int
+    }
+
+    func run() throws {
+        printJSON(VersionInfo(version: RubienCLIVersion.marketing,
+                              build: RubienCLIVersion.build))
     }
 }
 
