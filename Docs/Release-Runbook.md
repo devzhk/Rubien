@@ -73,6 +73,29 @@ export CODESIGN_IDENTITY="Developer ID Application: <Your Name> (9TXK4V3SS8)"
 
 `release.sh` is the single entry point: it bumps `BUILD.txt` if you forgot, calls `scripts/build-app.sh` (which assembles + signs + embeds Sparkle, then builds the DMG), notarizes, signs the appcast item with `sign_update`, prepends the item to `Docs/appcast.xml`, commits + pushes the appcast change, tags the source commit on the private repo, and creates the GitHub release with the DMG on the public `devzhk/Rubien-releases` repo via `gh release create --repo`.
 
+## Linux `rubien-cli` build (automatic)
+
+`release.sh` dispatches the `linux-cli-release.yml` workflow automatically after publishing the Mac release (production target). It builds a static-stdlib x86_64 binary, smoke-tests it from the tarball in a clean container, signs it (ed25519), and uploads the `.tar.gz` + `.tar.gz.sig` to `devzhk/Rubien-releases`. To re-run manually:
+
+```bash
+gh workflow run linux-cli-release.yml -f tag=vX.Y.Z
+gh run watch
+```
+
+**Required CI secrets** (private source repo → Settings → Secrets and variables → Actions):
+- `RELEASES_UPLOAD_TOKEN` — fine-grained PAT with **Contents: Read and write** on `devzhk/Rubien-releases`.
+- `RUBIEN_CLI_SIGNING_KEY` — the dedicated **ed25519 private key (PEM)** that signs the tarball (public key is compiled into `rubien-cli`; `self-update` verifies it). Generate per Phase F1. **Back it up like the Sparkle key — losing/rotating it breaks `self-update` for shipped binaries.**
+
+## Publish the MCP server to npm (after the release is live)
+
+Gated on **G1**: the just-cut release must be live and its `rubien-cli` must report `build >= 8` (`rubien-cli version`). Only then:
+
+```bash
+cd mcp-server && npm publish
+```
+
+This runs `prepublishOnly` (build + tests) first, and prompts for npm 2FA. The published package is platform-agnostic; it resolves `rubien-cli` at runtime on the user's host.
+
 ## Staging end-to-end test (before significant updater changes)
 
 1. Build a synthetic 0.1.0 baseline DMG (set `VERSION=0.1.0`, `BUILD.txt=1`).
@@ -90,6 +113,20 @@ export CODESIGN_IDENTITY="Developer ID Application: <Your Name> (9TXK4V3SS8)"
 7. Observe: toolbar badge appears, menu item enables, Settings shows "Update 0.1.1 ready", click "Install and Relaunch" — app swaps and relaunches.
 8. About panel shows 0.1.1.
 
+## Validate `self-update` (after a second signed release exists)
+
+On a clean Linux x86_64 box with only the runtime deps + the extracted prior tarball:
+
+```bash
+rubien-cli self-update --check     # JSON: {current, latest, updateAvailable}
+rubien-cli self-update             # downloads, verifies signature, replaces in place
+rubien-cli version                 # reports the new build
+```
+
+Negative checks (must REFUSE without replacing the binary):
+- **Tamper:** a corrupted tarball with the real `.sig` (or a flipped byte) → exits non-zero with "signature verification FAILED".
+- **Rollback:** a higher tag whose signed tarball is an OLDER build → exits non-zero ("build … is not newer").
+
 ## If a release goes wrong
 
 ```bash
@@ -106,6 +143,10 @@ gh release edit v0.1.X --notes-file pulled.md
 ```
 
 For genuine emergencies (data corruption, crash-on-launch), add `<sparkle:criticalUpdate/>` to the fix-forward `<item>` so Sparkle checks more aggressively.
+
+## Split-release failure policy
+
+The Mac DMG + appcast go live immediately when `release.sh` finishes; the Linux `rubien-cli` build is **asynchronous** (CI). A Linux build/upload failure does **not** affect the Mac release — fix it by re-running the workflow (`gh workflow run linux-cli-release.yml -f tag=vX.Y.Z`; uploads are idempotent via `--clobber`). Release notes may note the Linux asset lags the Mac DMG by a few minutes.
 
 ## EdDSA key compromise — recovery
 

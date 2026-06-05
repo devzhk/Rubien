@@ -19,6 +19,16 @@ The name means *the keeper of borrowed knowledge.*
 - **iCloud sync** *(Mac only)* — `CKSyncEngine`-backed two-way sync of references, tags, annotations, custom properties, and views across Macs signed into the same iCloud account. Toggle in Settings → iCloud Sync.
 - **CLI** — `rubien-cli` exposes everything as scriptable JSON. 16 subcommands on Mac, 15 on Linux (no `sync`). Tag operations live under `properties` against the built-in Tags property. Full reference in [`Docs/CLI-Reference.md`](Docs/CLI-Reference.md).
 
+## MCP server
+
+Rubien ships an MCP server (`rubien-mcp-server`) so Claude Code and claude.ai can manage your library through Claude:
+
+```bash
+claude mcp add rubien -- npx -y rubien-mcp-server
+```
+
+It wraps `rubien-cli` (bundled inside Rubien.app on macOS; a prebuilt binary on Linux — see below). See [`mcp-server/README.md`](mcp-server/README.md) for HTTP mode, the startup version guard, and the full tool catalog.
+
 ## Supported sources
 
 Rubien adds references from:
@@ -76,6 +86,12 @@ This nukes the local package checkouts and SwiftPM state, then re-fetches cleanl
 ## Linux CLI
 
 `rubien-cli` builds and runs on Linux (x86_64 + arm64). The SwiftUI app and `RubienSync` (CloudKit) stay Mac-only — Linux gets 15 of the 16 CLI subcommands, everything except `sync`. PDF support (read text, render page images, extract metadata) comes via `RubienPDFKit`'s poppler-glib backend.
+
+### Prebuilt binary
+
+A prebuilt Linux `rubien-cli` (x86_64) ships with the next release. Until then, build from source (below). Once installed, keep it current with `rubien-cli self-update` (downloads the latest signed release and replaces itself in place, after verifying an ed25519 signature).
+
+### Build from source
 
 Build on Ubuntu 22.04 (or any distro with the Swift 6.3 toolchain):
 
