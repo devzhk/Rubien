@@ -99,6 +99,7 @@ let package = Package(
                 "RubienPDFKit",
                 .target(name: "RubienSync", condition: .when(platforms: [.macOS])),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Crypto", package: "swift-crypto", condition: .when(platforms: [.linux])),
             ],
             exclude: [
                 "RubienCLI.entitlements"
