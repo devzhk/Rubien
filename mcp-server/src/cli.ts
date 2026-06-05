@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { CliVersion } from "./versionGuard.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -147,4 +148,26 @@ function extractFormat(args: string[]): string {
  *  for schema validation (use zod `.parse` at the call site). */
 export async function invokeCliTyped<T>(args: string[], options: CliOptions = {}): Promise<T> {
   return (await invokeCli(args, options)) as T;
+}
+
+/**
+ * Probe `rubien-cli version` with a short timeout. Returns the parsed
+ * {version, build} or null on any failure (missing subcommand on an old CLI,
+ * non-zero exit, malformed output, timeout). Never throws.
+ */
+export async function getCliVersion(): Promise<CliVersion | null> {
+  try {
+    const result = await invokeCli(["version"], { timeoutMs: 5_000 });
+    if (
+      result &&
+      typeof result === "object" &&
+      typeof (result as Record<string, unknown>).version === "string" &&
+      typeof (result as Record<string, unknown>).build === "number"
+    ) {
+      return result as unknown as CliVersion;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
