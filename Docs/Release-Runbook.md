@@ -71,7 +71,7 @@ export CODESIGN_IDENTITY="Developer ID Application: <Your Name> (9TXK4V3SS8)"
 # - Within ~24 hours, existing installs see the "Update ready" indicator
 ```
 
-`release.sh` is the single entry point: it bumps `BUILD.txt` if you forgot, calls `scripts/build-app.sh` (which assembles + signs + embeds Sparkle, then builds the DMG), notarizes, signs the appcast item with `sign_update`, prepends the item to `Docs/appcast.xml`, commits + pushes the appcast change, tags the source commit on the private repo, and creates the GitHub release with the DMG on the public `devzhk/Rubien-releases` repo via `gh release create --repo`.
+**You must bump `VERSION` (if the marketing version is changing) and `BUILD.txt` (every release) before running — `release.sh` does not bump them for you.** `release.sh` is then the single entry point: it calls `scripts/build-app.sh` (which assembles + signs + embeds Sparkle, then builds the DMG), notarizes, signs the appcast item with `sign_update`, prepends the item to `Docs/appcast.xml`, commits + pushes the appcast change, tags the source commit on the private repo, and creates the GitHub release with the DMG on the public `devzhk/Rubien-releases` repo via `gh release create --repo`.
 
 ## Linux `rubien-cli` build (automatic)
 
@@ -114,6 +114,8 @@ This runs `prepublishOnly` (build + tests) first, and prompts for npm 2FA. The p
 8. About panel shows 0.1.1.
 
 ## Validate `self-update` (after a second signed release exists)
+
+> **Known limitation:** the in-place update swaps the `*.resources` bundles, then atomically `rename(2)`s the binary last, restoring backups on any error. A power loss or `SIGKILL` mid-swap is not transactional across *both* the binary and resources — but it leaves either the prior binary intact (rename hadn't run) or recoverable `*.bak` bundles beside the binary; re-running `self-update` (or re-extracting the tarball) recovers. There is no remote bricking.
 
 On a clean Linux x86_64 box with only the runtime deps + the extracted prior tarball:
 
@@ -177,7 +179,7 @@ Avoid losing both anchors simultaneously by storing them in independent failure 
 - `Docs/appcast.xml` — production Sparkle feed (served by GitHub Pages from the private repo; its `<enclosure>` DMG URLs point at the public `devzhk/Rubien-releases` repo).
 - `Docs/staging-appcast.xml` — staging feed for end-to-end tests.
 - `Docs/index.md` — GitHub Pages landing page.
-- `scripts/release.sh` — orchestrator. Bumps `BUILD.txt`, calls `build-app.sh`, notarizes, signs the appcast item, commits + pushes the appcast, tags the source on the private repo, and calls `gh release create --repo "$RELEASES_REPO"` to upload the DMG to the public releases repo.
+- `scripts/release.sh` — orchestrator. Reads (does not bump) `VERSION` + `BUILD.txt`, calls `build-app.sh`, notarizes, signs the appcast item, commits + pushes the appcast, tags the source on the private repo, and calls `gh release create --repo "$RELEASES_REPO"` to upload the DMG to the public releases repo.
 - `scripts/build-app.sh` — assembles + signs the `.app` bundle and the DMG. Also usable standalone for dev builds.
   - The `embed_sparkle_framework` step inside this script manually copies `Sparkle.framework` into the bundle's `Contents/Frameworks/`. SwiftPM-via-`xcodebuild` does not auto-embed framework dependencies into the assembled bundle, so the script handles it explicitly before code-signing runs.
 - `scripts/lib/codesign.sh` — ordered Sparkle component signing. The order matters: `Installer.xpc → Downloader.xpc → Autoupdate → Updater.app → Sparkle.framework`. Never use `--deep`. `Downloader.xpc` needs `--preserve-metadata=entitlements`.

@@ -2,8 +2,10 @@
 set -euo pipefail
 #
 # scripts/release.sh — end-to-end Rubien release pipeline.
-# Run from a clean working tree on `main` after editing VERSION and (if
-# desired) BUILD.txt. The script bumps BUILD.txt if not pre-bumped.
+# Run from a clean working tree on `main` after editing VERSION and BUILD.txt.
+# This script does NOT bump VERSION/BUILD.txt — set them yourself first. BUILD.txt
+# must increase every release: Sparkle's "is newer" check AND the MCP server's
+# version guard both compare it.
 #
 # Required env (one-time set up via xcrun notarytool store-credentials):
 #   CODESIGN_IDENTITY  — e.g. "Developer ID Application: <Name> (9TXK4V3SS8)"

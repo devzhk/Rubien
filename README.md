@@ -17,7 +17,7 @@ The name means *the keeper of borrowed knowledge.*
 - **FTS5 search** — SQLite full-text search across title, authors, journal, abstract, notes, DOI.
 - **BibTeX / RIS import & export** — standard parsers, round-trip friendly.
 - **iCloud sync** *(Mac only)* — `CKSyncEngine`-backed two-way sync of references, tags, annotations, custom properties, and views across Macs signed into the same iCloud account. Toggle in Settings → iCloud Sync.
-- **CLI** — `rubien-cli` exposes everything as scriptable JSON. 16 subcommands on Mac, 15 on Linux (no `sync`). Tag operations live under `properties` against the built-in Tags property. Full reference in [`Docs/CLI-Reference.md`](Docs/CLI-Reference.md).
+- **CLI** — `rubien-cli` exposes everything as scriptable JSON. 18 subcommands on Mac, 17 on Linux (no `sync`). Tag operations live under `properties` against the built-in Tags property. Full reference in [`Docs/CLI-Reference.md`](Docs/CLI-Reference.md).
 
 ## MCP server
 
@@ -85,7 +85,7 @@ This nukes the local package checkouts and SwiftPM state, then re-fetches cleanl
 
 ## Linux CLI
 
-`rubien-cli` builds and runs on Linux (x86_64 + arm64). The SwiftUI app and `RubienSync` (CloudKit) stay Mac-only — Linux gets 15 of the 16 CLI subcommands, everything except `sync`. PDF support (read text, render page images, extract metadata) comes via `RubienPDFKit`'s poppler-glib backend.
+`rubien-cli` builds and runs on Linux (x86_64 + arm64). The SwiftUI app and `RubienSync` (CloudKit) stay Mac-only — Linux gets 17 of the 18 CLI subcommands, everything except `sync`. PDF support (read text, render page images, extract metadata) comes via `RubienPDFKit`'s poppler-glib backend.
 
 ### Prebuilt binary
 
@@ -102,14 +102,20 @@ sudo apt-get install -y libsqlite3-dev libpoppler-glib-dev libcairo2-dev libgdk-
 # Release build (use for installation)
 swift build --product rubien-cli -c release
 
-# Install to /usr/local/bin so `rubien-cli` is on $PATH
+# Install to /usr/local/bin so `rubien-cli` is on $PATH.
+# Install the binary AND its resource bundles together — the CLI loads bundled
+# citation styles via Bundle.module from beside the binary, so a bare-binary
+# install breaks `styles`/`cite`.
 sudo install -m 755 .build/release/rubien-cli /usr/local/bin/rubien-cli
+sudo cp -r .build/release/*.resources /usr/local/bin/
 
-# Or, if you prefer not to use sudo and have ~/bin on $PATH
+# Or, if you prefer not to use sudo and have ~/bin on $PATH (copy the resource
+# bundles into the same directory for the reason above).
 install -m 755 .build/release/rubien-cli ~/bin/rubien-cli
+cp -r .build/release/*.resources ~/bin/
 
 # Verify
-rubien-cli --help     # 15 subcommands; no `sync`
+rubien-cli --help     # 17 subcommands; no `sync`
 ```
 
 For local development iterate against the debug build at `.build/debug/rubien-cli` (rebuilt by `swift build --product rubien-cli` without `-c release`).

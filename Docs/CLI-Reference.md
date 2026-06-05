@@ -54,6 +54,7 @@ Linux needs system deps first — see [Linux CLI](../README.md#linux-cli). For d
 | `annotations` | List PDF annotations for a reference |
 | `styles` | List available citation styles |
 | `version` | Print the CLI marketing version and monotonic build number as JSON (`{"build":8,"version":"0.1.7"}`); the MCP server's version guard requires `build >= MIN_CLI_BUILD` |
+| `self-update` | (Linux) Download the latest signed release and replace `rubien-cli` in place after verifying an ed25519 signature; `--check` reports `{current, latest, updateAvailable}` as JSON and changes nothing. On macOS it is a no-op (Rubien.app/Sparkle manages the bundled CLI). |
 | `views` | Manage database views |
 | `pdf info` | Probe PDF: page count, text-layer flag, and outline-derived sections |
 | `pdf text` | Extract text from a reference's PDF by page range or section title |
@@ -500,6 +501,29 @@ No options.
 {
   "build": 8,
   "version": "0.1.7"
+}
+```
+
+---
+
+## self-update
+
+Update `rubien-cli` in place from the latest signed GitHub release. **Linux only** — on macOS it prints a no-op notice (Rubien.app updates the bundled CLI via Sparkle).
+
+```
+rubien-cli self-update [--check]
+```
+
+- `--check` — report the latest available version as JSON and change nothing.
+
+On Linux, `self-update` downloads the latest `rubien-cli-*-linux-x86_64.tar.gz` and its `.sig` from the public releases repo, verifies the ed25519 signature with the public key compiled into the binary, and only then replaces the binary and its `*.resources` bundles (transactionally, with rollback on failure). It refuses to replace the binary with a build that is not strictly newer than the running one.
+
+**Output** (`--check`):
+```json
+{
+  "current" : "0.1.7",
+  "latest" : "0.1.8",
+  "updateAvailable" : true
 }
 ```
 

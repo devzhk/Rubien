@@ -51,7 +51,7 @@ Five Swift targets in `Package.swift`:
 - **`RubienCore`** (library) — everything usable without AppKit: GRDB models, migrations, metadata resolvers, BibTeX/RIS importers, citation engines. Depends on `RubienPDFKit`. Only target the CLI/tests depend on directly.
 - **`RubienSync`** (library, Mac-only) — CloudKit mapping + `CKSyncEngine`. CLI does not link it.
 - **`Rubien`** (app executable, Mac-only) — SwiftUI views, readers.
-- **`RubienCLI`** (executable, `rubien-cli`) — 16 subcommands on Mac, 15 on Linux (no `sync`).
+- **`RubienCLI`** (executable, `rubien-cli`) — 18 subcommands on Mac, 17 on Linux (no `sync`).
 
 ### Data layer
 
