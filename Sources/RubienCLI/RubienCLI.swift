@@ -32,6 +32,7 @@ struct RubienCLI: AsyncParsableCommand {
             Annotations.self,
             Styles.self,
             Version.self,
+            SelfUpdate.self,
             Export.self,
             Views.self,
             Pdf.self,
