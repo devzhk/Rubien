@@ -6,6 +6,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { buildServer } from "./server.js";
 import { requireBearer } from "./auth.js";
+import { getCliVersion } from "./cli.js";
+import { MIN_CLI_BUILD, evaluateCliVersion } from "./versionGuard.js";
 
 const USAGE = `Usage:
   rubien-mcp-server [--stdio]
@@ -115,6 +117,21 @@ async function runHttp(port: number, bearerToken: string): Promise<void> {
 
 async function main(): Promise<void> {
   const args = parseCliArgs(process.argv.slice(2));
+
+  // Version guard: probe the resolved CLI once, before connecting any
+  // transport. `--help` already exited inside parseCliArgs, so help works
+  // even with no CLI installed.
+  const guard = evaluateCliVersion(await getCliVersion(), MIN_CLI_BUILD);
+  if (!guard.ok) {
+    // Set exitCode + return rather than process.exit(1): the async stderr
+    // write to a pipe can truncate if we exit immediately. No transport is
+    // connected and the probe child has finished, so the event loop drains
+    // and the process exits with code 1 after stderr flushes.
+    process.stderr.write((guard.message ?? "rubien-cli version check failed") + "\n");
+    process.exitCode = 1;
+    return;
+  }
+
   if (args.mode === "stdio") {
     await runStdio();
   } else {
