@@ -9,6 +9,22 @@ The server is a thin Node/TypeScript process. It spawns `rubien-cli` under the h
 
 Pick the section below that matches your client. Most users want one of the two stdio paths.
 
+## Install (Claude Code)
+
+```bash
+claude mcp add rubien -- npx -y rubien-mcp-server
+```
+
+This needs `rubien-cli` on the host:
+- **Mac:** install Rubien.app (DMG) — the entitled `rubien-cli` ships inside it; nothing else to do.
+- **Linux:** `sudo apt install libsqlite3-0 libcurl4 libxml2 libpoppler-glib8 libcairo2 libgdk-pixbuf-2.0-0 libglib2.0-0 ca-certificates`, then download `rubien-cli-*-linux-x86_64.tar.gz` from
+  https://github.com/devzhk/Rubien-releases/releases and **extract it to a directory, keeping `rubien-cli` and the `*.resources` folders together** (the CLI loads citation styles from beside the binary). Point the server at it: `export RUBIEN_CLI=/path/to/extracted/rubien-cli`. Do **not** copy the bare binary onto `PATH` alone — it would lose its resource bundles.
+
+The server checks the CLI's build at startup; if it's too old it prints an update
+instruction and exits (rather than failing mid-call). On **Mac**, update Rubien.app
+(Sparkle). On **Linux**, run `rubien-cli self-update` (signature-verified, replaces in
+place) — or re-download the tarball.
+
 ## Prerequisites
 
 - Node.js ≥ 20
@@ -29,16 +45,9 @@ To pin the spawned CLI to a specific library directory regardless of which binar
 - Mac unsandboxed: `~/Library/Application Support/Rubien`
 - Linux: `~/.local/share/rubien` (or wherever `$XDG_DATA_HOME/rubien` resolved to)
 
-## Install & build
-
-```bash
-cd mcp-server
-npm install
-npm run build         # → dist/
-npm test              # vitest unit tests
-```
-
 ## Claude Code (stdio)
+
+The npx command above is the recommended path. To run a local checkout instead (see [Development](#development) for the build):
 
 ```bash
 claude mcp add rubien node $(pwd)/dist/index.js
@@ -147,6 +156,17 @@ Every tool's argument shape is defined in zod in the tool file; the expected *re
 If a Swift DTO changes, update both the Swift side and `src/schemas.ts` in the same commit, per the CLAUDE.md rule about keeping the CLI and data layer in lockstep.
 
 ## Development
+
+Build from a local checkout (instead of `npx`):
+
+```bash
+cd mcp-server
+npm install
+npm run build         # → dist/
+npm test              # vitest unit tests
+```
+
+Watch mode:
 
 ```bash
 npm run dev       # tsc --watch
