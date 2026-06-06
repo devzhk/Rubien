@@ -17,7 +17,7 @@ struct SelfUpdate: AsyncParsableCommand {
     var check = false
 
     // Raw 32-byte ed25519 public key (hex) for the dedicated Linux-CLI signing key.
-    static let publicKeyHex = "636600b7b7064e14aadc8cc18b721b7203ce0d7b8e935840bb5bf526d6e16831"
+    static let publicKeyHex = "9a9e3cf8ae279d9c7ecbe8efdc82c51292417911745f6e6e8c31627b8b108fc8"
     static let latestURL = URL(string:
         "https://api.github.com/repos/devzhk/Rubien-releases/releases/latest")!
 
