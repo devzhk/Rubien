@@ -114,5 +114,25 @@
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.1.7</title>
+            <description><![CDATA[• Reader: refreshed liquid-glass annotation popovers and a cleaner, transparent note
+  editor
+• Detail view: edit title, authors, abstract, and notes inline
+• MCP server now on npm: connect Claude
+  to your library with  npx -y rubien-mcp-server
+• Prebuilt Linux rubien-cli now ships with releases (signed,
+  with in-place self-update)]]></description>
+            <pubDate>Sat, 06 Jun 2026 23:53:24 +0000</pubDate>
+            <sparkle:version>8</sparkle:version>
+            <sparkle:shortVersionString>0.1.7</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.1.7/Rubien-0.1.7.dmg"
+                sparkle:edSignature="2tKrbK8/Dr3XKzzTkpijulALQEEivaxBK7Bofa9ifhe188lHKDxxLz1FDxDwfi4JJZHop6X2s5CjhYZTr3oSAQ=="
+                length="16950660"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
