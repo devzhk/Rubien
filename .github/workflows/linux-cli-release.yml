@@ -31,6 +31,11 @@ jobs:
 
       - name: Package tarball (binary + resource bundle + install note)
         run: |
+          # The build step's container runs as root, so `stage/` and its contents
+          # are root-owned on the Linux runner — take ownership back before writing
+          # INSTALL.txt / tarring. (Docker Desktop masks this locally by mapping
+          # bind-mount ownership to the host user; a real Linux runner does not.)
+          sudo chown -R "$(id -u):$(id -g)" stage
           cat > stage/INSTALL.txt <<'EOF'
           rubien-cli (Linux x86_64). Requires Ubuntu 22.04+ (glibc >= 2.35).
           Runtime deps: sudo apt install libsqlite3-0 libcurl4 libxml2 libpoppler-glib8 libcairo2 libgdk-pixbuf-2.0-0 libglib2.0-0 ca-certificates
