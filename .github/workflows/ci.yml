@@ -28,9 +28,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Verify generated CLI version is in sync
+        # git-free comparison: `git diff` fails inside the swift:6.3-jammy
+        # container (dubious-ownership → "not a git repository"). Regenerate
+        # and compare the bytes directly instead.
         run: |
+          cp Sources/RubienCLI/GeneratedVersion.swift /tmp/gv-committed.swift
           ./scripts/generate-cli-version.sh
-          git diff --exit-code Sources/RubienCLI/GeneratedVersion.swift \
+          diff -u /tmp/gv-committed.swift Sources/RubienCLI/GeneratedVersion.swift \
             || (echo "::error::GeneratedVersion.swift is stale. Run ./scripts/generate-cli-version.sh and commit." && exit 1)
       - name: Install system deps
         # poppler/cairo/gdk-pixbuf power RubienPDFKit's Linux backend.
