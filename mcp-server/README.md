@@ -33,11 +33,11 @@ place) — or re-download the tarball.
   2. `/Applications/Rubien.app/Contents/Helpers/rubien-cli` (installed app bundle, Mac)
   3. `~/Applications/Rubien.app/Contents/Helpers/rubien-cli` (Mac)
   4. `./build/Rubien.app/Contents/Helpers/rubien-cli` (dev build output, Mac)
-  5. `rubien-cli` on `PATH` (Linux installs land here — see [Linux CLI](../README.md#linux-cli))
+  5. `rubien-cli` on `PATH` (Linux installs land here — see the **Install** section above)
 
 **On Mac, prefer the bundled helper.** It's signed with the App Group entitlement and reads the same `library.sqlite` the Rubien app uses. A bare `rubien-cli` on PATH is typically an SPM dev build without the entitlement, which hits a *different* database — see "Database location" in `Docs/CLI-Reference.md`.
 
-**On Linux**, the server runs against a `rubien-cli` built per the README's Linux CLI section. Everything works except `rubien_sync_status`, which always errors (`sync` subcommand isn't registered on Linux builds — CloudKit doesn't exist there).
+**On Linux**, the server runs against a `rubien-cli` installed per the **Install** section above (prebuilt Linux tarball, or built from source). Everything works except `rubien_sync_status`, which always errors (`sync` subcommand isn't registered on Linux builds — CloudKit doesn't exist there).
 
 To pin the spawned CLI to a specific library directory regardless of which binary resolves, set `RUBIEN_LIBRARY_ROOT` in the MCP server's `env` block (Claude Code: `claude mcp add rubien --env RUBIEN_LIBRARY_ROOT=...`; Claude Desktop: under `mcpServers.rubien.env` in `claude_desktop_config.json`). The path is used verbatim — point it at the directory that contains `library.sqlite`:
 
