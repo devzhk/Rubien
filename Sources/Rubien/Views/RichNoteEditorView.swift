@@ -8,6 +8,10 @@ struct RichNoteEditorView: NSViewRepresentable {
     @Binding var markdown: String
     var placeholder: String = "Add a note…"
     var autoFocus: Bool = true
+    /// When true, the editor body is rendered transparent instead of the light
+    /// theme's opaque white, so a glass/material surface behind the host view
+    /// shows through. Text colors still come from the active theme.
+    var transparentBackground: Bool = false
     var onFocus: (() -> Void)?
     var onBlur: (() -> Void)?
     var onContentHeightChanged: ((CGFloat) -> Void)?
@@ -40,6 +44,8 @@ struct RichNoteEditorView: NSViewRepresentable {
             let theme = colorScheme == .dark ? "dark" : "light"
             coord.currentTheme = theme
             pooled.evaluateJavaScript("window.NoteEditor?.setTheme('\(theme)')", completionHandler: nil)
+            coord.currentTransparent = transparentBackground
+            Self.applyBackground(transparent: transparentBackground, to: pooled)
 
             let escapedPlaceholder = placeholder
                 .replacingOccurrences(of: "\\", with: "\\\\")
@@ -92,6 +98,11 @@ struct RichNoteEditorView: NSViewRepresentable {
             webView.evaluateJavaScript("window.NoteEditor?.setTheme('\(theme)')", completionHandler: nil)
         }
 
+        if coord.isEditorReady && coord.currentTransparent != transparentBackground {
+            coord.currentTransparent = transparentBackground
+            Self.applyBackground(transparent: transparentBackground, to: webView)
+        }
+
         if coord.isEditorReady && coord.lastSwiftMarkdown != markdown && !coord.isUserEditing {
             coord.lastSwiftMarkdown = markdown
             let escaped = Self.escapeForJS(markdown)
@@ -116,6 +127,18 @@ struct RichNoteEditorView: NSViewRepresentable {
             .replacingOccurrences(of: "\r", with: "")
     }
 
+    /// Toggles the editor body between the theme's opaque background and a
+    /// transparent one. An inline style on the root element outranks the
+    /// stylesheet `--bg`, so it holds in either theme; `removeProperty`
+    /// restores the stylesheet default when a pooled WebView is later reused in
+    /// an opaque-surface context.
+    static func applyBackground(transparent: Bool, to webView: WKWebView) {
+        let js = transparent
+            ? "document.documentElement.style.setProperty('--bg', 'transparent')"
+            : "document.documentElement.style.removeProperty('--bg')"
+        webView.evaluateJavaScript(js, completionHandler: nil)
+    }
+
     private func loadEditorHTML(_ webView: WKWebView) {
         if let url = Bundle.module.url(forResource: "NoteEditor", withExtension: "html", subdirectory: "Resources") {
             webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
@@ -133,6 +156,7 @@ struct RichNoteEditorView: NSViewRepresentable {
         var isUserEditing = false
         var lastSwiftMarkdown = ""
         var currentTheme = ""
+        var currentTransparent = false
         var ownsWebView = false
 
         init(parent: RichNoteEditorView) {
@@ -149,6 +173,10 @@ struct RichNoteEditorView: NSViewRepresentable {
                 let theme = parent.colorScheme == .dark ? "dark" : "light"
                 currentTheme = theme
                 webView?.evaluateJavaScript("window.NoteEditor?.setTheme('\(theme)')", completionHandler: nil)
+                currentTransparent = parent.transparentBackground
+                if let webView {
+                    RichNoteEditorView.applyBackground(transparent: parent.transparentBackground, to: webView)
+                }
 
                 let escapedPlaceholder = parent.placeholder
                     .replacingOccurrences(of: "\\", with: "\\\\")

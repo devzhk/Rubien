@@ -35,7 +35,6 @@ struct AnnotationSelectionPopover: View {
     let onDismiss: () -> Void
 
     @State private var editorContentHeight: CGFloat = 36
-    private let bgColor: Color = Color(nsColor: NSColor(white: 0.97, alpha: 1))
 
     var body: some View {
         VStack(spacing: 0) {
@@ -98,6 +97,7 @@ struct AnnotationSelectionPopover: View {
                     markdown: $noteMarkdown,
                     placeholder: String(localized: "Add a note…", bundle: .module),
                     autoFocus: false,
+                    transparentBackground: true,
                     onContentHeightChanged: { height in
                         editorContentHeight = height
                     }
@@ -139,13 +139,7 @@ struct AnnotationSelectionPopover: View {
             }
         }
         .frame(width: 340)
-        .background(bgColor, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .strokeBorder(Color.black.opacity(0.14), lineWidth: 0.5)
-        )
-        .shadow(color: .black.opacity(0.28), radius: 16, y: 6)
-        .shadow(color: .black.opacity(0.12), radius: 3, y: 1)
+        .modifier(AnnotationPopoverGlassSurface())
         .environment(\.colorScheme, .light)
         .onExitCommand { onDismiss() }
     }
@@ -185,8 +179,6 @@ struct ExistingAnnotationPopover: View {
     @State private var editingMarkdown = ""
     @State private var autoSaveTask: Task<Void, Never>?
     @State private var editorContentHeight: CGFloat = 36
-
-    private let bgColor: Color = Color(nsColor: NSColor(white: 0.97, alpha: 1))
 
     var body: some View {
         VStack(spacing: 0) {
@@ -242,6 +234,7 @@ struct ExistingAnnotationPopover: View {
                     markdown: $editingMarkdown,
                     placeholder: String(localized: "Add a note…", bundle: .module),
                     autoFocus: true,
+                    transparentBackground: true,
                     onContentHeightChanged: { height in
                         editorContentHeight = height
                     }
@@ -270,13 +263,7 @@ struct ExistingAnnotationPopover: View {
             }
         }
         .frame(width: 340)
-        .background(bgColor, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .strokeBorder(Color.black.opacity(0.14), lineWidth: 0.5)
-        )
-        .shadow(color: .black.opacity(0.28), radius: 16, y: 6)
-        .shadow(color: .black.opacity(0.12), radius: 3, y: 1)
+        .modifier(AnnotationPopoverGlassSurface())
         .environment(\.colorScheme, .light)
         .onExitCommand { onDismiss() }
         .onAppear {
@@ -326,6 +313,36 @@ struct NotionToolbarButtonStyle: ButtonStyle {
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
             .animation(.easeOut(duration: 0.12), value: isHovered)
             .onHover { isHovered = $0 }
+    }
+}
+
+// MARK: - Shared glass surface for the annotation popovers
+//
+// Mirrors the PDF reader's floating control panel (`FloatingReaderTabSurface`):
+// real Liquid Glass on macOS 26+, an `.ultraThinMaterial` fallback below. Both
+// popovers force `.environment(\.colorScheme, .light)` (their separators, color
+// swatches, and the light-themed note editor are all tuned for a light backing),
+// so this renders the light glass variant. The note editor opts into a transparent
+// body here (`transparentBackground: true`), so the whole popover — toolbar, editor,
+// and footer — reads as one translucent sheet; its light-theme dark text stays
+// legible over the light glass.
+private struct AnnotationPopoverGlassSurface: ViewModifier {
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 9, style: .continuous)
+        if #available(macOS 26.0, *) {
+            content
+                .glassEffect(.regular, in: shape)
+                .shadow(color: .black.opacity(0.18), radius: 12, y: 5)
+        } else {
+            content
+                .background(.ultraThinMaterial, in: shape)
+                .overlay(
+                    shape.strokeBorder(Color.white.opacity(0.22), lineWidth: 0.5)
+                )
+                .shadow(color: .black.opacity(0.28), radius: 16, y: 6)
+                .shadow(color: .black.opacity(0.12), radius: 3, y: 1)
+        }
     }
 }
 #endif
