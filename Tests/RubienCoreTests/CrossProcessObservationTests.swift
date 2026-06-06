@@ -42,13 +42,26 @@ final class CrossProcessObservationTests: XCTestCase {
     /// pool A's `ValueObservation` does not see writes that committed through
     /// pool B. If GRDB ever changes this (e.g. adds WAL polling), this test
     /// fails loudly so we know the broadcaster could be retired.
+    ///
+    /// Observes poolA's **raw** `ValueObservation` directly rather than
+    /// `observeReferences()`. The latter merges in the process-wide
+    /// `LibraryChangeBroadcaster`, whose Darwin-`notify` events can be delivered
+    /// (coalesced / late) from elsewhere in the suite and land in this test's
+    /// quiet window as a spurious second emission — the cause of this test's CI
+    /// flakiness. Observing GRDB directly is exactly what this assertion is about
+    /// and is deterministic; the broadcaster's own behavior is covered by
+    /// `testTriggerLocalRefreshSurfacesCrossPoolWrites`.
     func testValueObservationDoesNotSeeCrossPoolWrites() throws {
         let initialEmission = expectation(description: "initial emission from poolA")
-        let staleEmission = expectation(description: "no second emission within 200ms")
+        let staleEmission = expectation(description: "no second emission within 500ms")
         staleEmission.isInverted = true
 
         var emissions: [[Reference]] = []
-        poolA.observeReferences()
+        ValueObservation
+            .tracking { db in
+                try Reference.order(Reference.Columns.dateAdded.desc).fetchAll(db)
+            }
+            .publisher(in: poolA.dbWriter, scheduling: .immediate)
             .receive(on: DispatchQueue.main)
             .sink(
                 receiveCompletion: { _ in },
@@ -63,13 +76,14 @@ final class CrossProcessObservationTests: XCTestCase {
         wait(for: [initialEmission], timeout: 1)
         XCTAssertEqual(emissions.first?.count, 0, "expected initial empty snapshot")
 
-        // Cross-pool write: this row lands on disk but poolA's pool has no
-        // hook to learn about it. Without the broadcaster, no second emission.
+        // Cross-pool write: this row lands on disk via poolB, but poolA's
+        // ValueObservation observes only its own writer's commits, so it must
+        // not re-emit.
         var ref = Reference(title: "Cross-pool write — should be invisible to poolA's ValueObservation")
         try poolB.saveReference(&ref)
         XCTAssertNotNil(ref.id)
 
-        wait(for: [staleEmission], timeout: 0.2)
+        wait(for: [staleEmission], timeout: 0.5)
         XCTAssertEqual(emissions.count, 1, "ValueObservation must not emit for cross-pool writes")
     }
 
