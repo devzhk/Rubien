@@ -49,19 +49,28 @@ public struct AuthorName: Codable, Hashable, Sendable {
     }
 
     /// Parse a free-text name like "John Smith" → AuthorName(given: "John", family: "Smith")
-    /// Also handles "Smith, John" (comma-separated family-first)
+    /// Also handles "Smith, John" (comma-separated family-first).
+    ///
+    /// BibTeX brace-protected groups are honored: a comma/space inside `{…}` is not a
+    /// given/family boundary (so `{International Brain Lab}` stays one corporate family
+    /// name), and protection braces are stripped from the result.
     public static func parse(_ text: String) -> AuthorName {
         let trimmed = text.trimmingCharacters(in: .whitespaces)
-        if let commaIdx = trimmed.firstIndex(of: ",") {
-            let family = String(trimmed[..<commaIdx]).trimmingCharacters(in: .whitespaces)
-            let given = String(trimmed[trimmed.index(after: commaIdx)...]).trimmingCharacters(in: .whitespaces)
+        // A comma at brace depth 0 separates "Family, Given" (BibTeX/CSL convention).
+        let commaParts = splitRespectingBraces(trimmed, on: ",")
+        if commaParts.count >= 2 {
+            let family = strippedName(commaParts[0])
+            let given = strippedName(commaParts[1...].joined(separator: ","))
             return AuthorName(given: given, family: family)
         }
-        let parts = trimmed.components(separatedBy: " ").filter { !$0.isEmpty }
+        // No top-level comma: the last whitespace-delimited token (at depth 0) is the family.
+        let parts = splitRespectingBraces(trimmed, on: " ").filter { !$0.isEmpty }
         if parts.count >= 2 {
-            return AuthorName(given: parts.dropLast().joined(separator: " "), family: parts.last!)
+            let given = strippedName(parts.dropLast().joined(separator: " "))
+            let family = strippedName(parts.last!)
+            return AuthorName(given: given, family: family)
         }
-        return AuthorName(given: "", family: trimmed)
+        return AuthorName(given: "", family: strippedName(trimmed))
     }
 
     /// Parse a plain-text authors string into structured array.
@@ -70,22 +79,37 @@ public struct AuthorName: Codable, Hashable, Sendable {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
 
-        // First split by ";" or " and "
+        // First split by ";" or " and ". Both detection AND splitting honor BibTeX
+        // brace-protected groups, so a separator that appears only inside `{…}` (e.g. the
+        // " and " in `{Barnes and Noble}`) neither selects a mode nor splits authors —
+        // the two must agree or the chosen mode can yield a single un-split segment.
+        // " and " detection is case-insensitive (matching the historical behavior) while
+        // the split stays case-sensitive on the original text.
         let segments: [String]
-        if trimmed.contains(";") {
-            segments = trimmed.split(separator: ";").map { $0.trimmingCharacters(in: .whitespaces) }
-        } else if trimmed.lowercased().contains(" and ") {
-            segments = trimmed.components(separatedBy: " and ").map { $0.trimmingCharacters(in: .whitespaces) }
+        let semicolonParts = splitRespectingBraces(trimmed, on: ";")
+        if semicolonParts.count > 1 {
+            segments = semicolonParts.map { $0.trimmingCharacters(in: .whitespaces) }
+        } else if splitRespectingBraces(trimmed.lowercased(), on: " and ").count > 1 {
+            // Detection runs on the lowercased copy (case-insensitive) while the split stays
+            // case-sensitive on the original; the two inputs differ, so this is not redundant.
+            segments = splitRespectingBraces(trimmed, on: " and ").map { $0.trimmingCharacters(in: .whitespaces) }
         } else {
             // Comma-separated: could be "Smith, John, Doe, Jane" (family-first pairs)
             // or "John Smith, Jane Doe" (full names). Detect by checking if first segment
-            // looks like a single word (family name).
-            let parts = trimmed.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
+            // looks like a single word (family name). Empty fields (leading/trailing/double
+            // commas) are dropped to match the previous `split(separator:)` semantics so the
+            // pair-grouping count is unaffected by a stray trailing comma.
+            let parts = splitRespectingBraces(trimmed, on: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
             if parts.count >= 2 {
+                // A "Family, Given" pair has a single-token family; a comma-separated list of
+                // full names ("John Smith, Jane Doe") does not. The token check is brace-aware
+                // so a protected multi-word family (`{de la Vega}`) still counts as one token.
                 let looksLikeFamilyGivenPairs =
-                    (parts.count == 2 && !parts[0].contains(" ")) ||
+                    (parts.count == 2 && isSingleNameToken(parts[0])) ||
                     (parts.count.isMultiple(of: 2) &&
-                        stride(from: 0, to: parts.count, by: 2).allSatisfy { !parts[$0].contains(" ") })
+                        stride(from: 0, to: parts.count, by: 2).allSatisfy { isSingleNameToken(parts[$0]) })
 
                 if looksLikeFamilyGivenPairs {
                     // Likely "Family, Given" pairs — group by twos
@@ -93,10 +117,13 @@ public struct AuthorName: Codable, Hashable, Sendable {
                     var i = 0
                     while i < parts.count {
                         if i + 1 < parts.count {
-                            result.append(AuthorName(given: parts[i + 1], family: parts[i]))
+                            result.append(AuthorName(
+                                given: strippedName(parts[i + 1]),
+                                family: strippedName(parts[i])
+                            ))
                             i += 2
                         } else {
-                            result.append(AuthorName(given: "", family: parts[i]))
+                            result.append(AuthorName(given: "", family: strippedName(parts[i])))
                             i += 1
                         }
                     }
@@ -114,6 +141,65 @@ public struct AuthorName: Codable, Hashable, Sendable {
             .filter { !$0.isEmpty }
             .map { parse($0) }
             .filter { !$0.family.isEmpty }
+    }
+
+    /// Strip BibTeX protection braces from a name component and trim whitespace the braces
+    /// may have padded (`{ Smith }` → `Smith`). Brace-free input is only trimmed.
+    private static func strippedName(_ name: String) -> String {
+        BibTeXBraces.strip(name).trimmingCharacters(in: .whitespaces)
+    }
+
+    /// True when `name` is a single name token — it has no space at BibTeX brace depth 0.
+    /// A brace-protected multi-word group like `{de la Vega}` counts as one token because its
+    /// inner spaces are protected, so `{de la Vega}, Maria` is recognized as a Family/Given
+    /// pair rather than two separate authors.
+    private static func isSingleNameToken(_ name: String) -> Bool {
+        splitRespectingBraces(name, on: " ").count <= 1
+    }
+
+    /// Split `text` on `separator`, honoring it only at BibTeX brace depth 0 so a
+    /// brace-protected group (`{Barnes and Noble}`) is never broken apart. Matches
+    /// `components(separatedBy:)` semantics (empty fields preserved) so the callers'
+    /// existing trim/filter passes behave identically. Escaped braces (`\{`, `\}`) do not
+    /// affect depth.
+    private static func splitRespectingBraces(_ text: String, on separator: String) -> [String] {
+        // Fast path: no braces → plain split. Keeps every non-BibTeX caller byte-for-byte
+        // identical to the previous behavior (and allocation-light).
+        guard text.contains("{") else { return text.components(separatedBy: separator) }
+
+        let sep = Array(separator)
+        let chars = Array(text)
+        var parts: [String] = []
+        var current = ""
+        var depth = 0
+        var i = 0
+        while i < chars.count {
+            let c = chars[i]
+            if c == "\\", i + 1 < chars.count {
+                // Escaped char (e.g. `\{`): copy both bytes verbatim, no depth change.
+                current.append(c)
+                current.append(chars[i + 1])
+                i += 2
+                continue
+            }
+            if c == "{" {
+                depth += 1; current.append(c); i += 1; continue
+            }
+            if c == "}" {
+                if depth > 0 { depth -= 1 }
+                current.append(c); i += 1; continue
+            }
+            if depth == 0, c == sep[0], i + sep.count <= chars.count, Array(chars[i ..< i + sep.count]) == sep {
+                parts.append(current)
+                current = ""
+                i += sep.count
+                continue
+            }
+            current.append(c)
+            i += 1
+        }
+        parts.append(current)
+        return parts
     }
 }
 

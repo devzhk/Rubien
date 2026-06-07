@@ -5,7 +5,7 @@ import XCTest
 @testable import RubienCore
 
 final class ImporterAndMetadataTests: XCTestCase {
-    func testBibTeXParseMapsEntryTypesAndPreservesNestedBraceContent() throws {
+    func testBibTeXParseMapsEntryTypesAndStripsProtectionBraces() throws {
         let bibtex = """
         @article{smith2024,
           title = {Understanding {Swift} Testing},
@@ -33,7 +33,8 @@ final class ImporterAndMetadataTests: XCTestCase {
         XCTAssertEqual(references.count, 2)
 
         let article = try XCTUnwrap(references.first)
-        XCTAssertEqual(article.title, "Understanding {Swift} Testing")
+        // Inner braces are BibTeX capitalization-protection markers, stripped on import.
+        XCTAssertEqual(article.title, "Understanding Swift Testing")
         XCTAssertEqual(article.authors, [
             AuthorName(given: "John", family: "Smith"),
             AuthorName(given: "Jane", family: "Doe"),

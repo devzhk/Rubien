@@ -148,6 +148,112 @@ final class ReferenceTests: XCTestCase {
         XCTAssertTrue(authors.isEmpty)
     }
 
+    // MARK: - AuthorName brace handling (BibTeX capitalization-protection)
+
+    func testParseStripsProtectionBracesFromParticle() {
+        // `{de la Vega}` keeps the lowercase particle together in BibTeX; the braces
+        // are protection markers and must not survive into the parsed name.
+        let author = AuthorName.parse("{de la Vega}, Maria")
+        XCTAssertEqual(author.family, "de la Vega")
+        XCTAssertEqual(author.given, "Maria")
+    }
+
+    func testParseStripsBracesFromCorporateName() {
+        // A whole-name brace group is one corporate author; spaces inside it are not a
+        // given/family boundary.
+        let author = AuthorName.parse("{International Brain Lab}")
+        XCTAssertEqual(author.family, "International Brain Lab")
+        XCTAssertTrue(author.given.isEmpty)
+    }
+
+    func testParseListStripsBracesFromCorporateAuthorInAndList() {
+        // Real Zotero export shape: brace-protected corporate author joined with " and ".
+        let authors = AuthorName.parseList("{International Brain Lab} and Brandon Benson")
+        XCTAssertEqual(authors, [
+            AuthorName(given: "", family: "International Brain Lab"),
+            AuthorName(given: "Brandon", family: "Benson"),
+        ])
+    }
+
+    func testParseListDoesNotSplitOnBraceProtectedAnd() {
+        // The " and " inside the braces belongs to one corporate name and must NOT be
+        // treated as an author separator.
+        let authors = AuthorName.parseList("{Barnes and Noble Inc.} and Smith, John")
+        XCTAssertEqual(authors, [
+            AuthorName(given: "", family: "Barnes and Noble Inc."),
+            AuthorName(given: "John", family: "Smith"),
+        ])
+    }
+
+    func testParseListNonBracedBehaviorUnchanged() {
+        // Regression guard: non-braced input (every non-BibTeX caller) is untouched.
+        XCTAssertEqual(
+            AuthorName.parseList("Smith, John and Doe, Jane"),
+            [AuthorName(given: "John", family: "Smith"), AuthorName(given: "Jane", family: "Doe")]
+        )
+    }
+
+    func testParseListTrailingCommaStillGroupsAsPair() {
+        // Regression guard: a stray trailing comma must not turn one "Family, Given" pair
+        // into two separate authors (empty fields are dropped, matching `split`).
+        XCTAssertEqual(
+            AuthorName.parseList("Smith, John,"),
+            [AuthorName(given: "John", family: "Smith")]
+        )
+    }
+
+    func testParseListConsecutiveCommasIgnoreEmptyFields() {
+        XCTAssertEqual(
+            AuthorName.parseList("Smith, John,, Doe, Jane"),
+            [AuthorName(given: "John", family: "Smith"), AuthorName(given: "Jane", family: "Doe")]
+        )
+    }
+
+    func testParseListProtectedSemicolonDoesNotSelectSemicolonMode() {
+        // The ";" lives inside braces, so it must not select semicolon mode and swallow the
+        // real top-level " and " separator.
+        XCTAssertEqual(
+            AuthorName.parseList("{Research; Lab} and Smith, John"),
+            [AuthorName(given: "", family: "Research; Lab"), AuthorName(given: "John", family: "Smith")]
+        )
+    }
+
+    func testParseSuffixWithMultipleCommasPreservesGivenRemainder() {
+        // `Family, Suffix, Given` — everything after the first depth-0 comma is the given
+        // remainder (parity with the original `firstIndex(of: ",")` behavior).
+        let author = AuthorName.parse("Smith, Jr., John")
+        XCTAssertEqual(author.family, "Smith")
+        XCTAssertEqual(author.given, "Jr., John")
+    }
+
+    func testParseListBraceProtectedFamilyWithGivenIsSingleAuthor() {
+        // `{de la Vega}, Maria` is ONE author: the brace-protected multi-word family must not
+        // be mistaken for a comma-separated list of full names just because it has spaces.
+        XCTAssertEqual(
+            AuthorName.parseList("{de la Vega}, Maria"),
+            [AuthorName(given: "Maria", family: "de la Vega")]
+        )
+    }
+
+    func testParseListBraceInteriorPaddingTrimmed() {
+        // Whitespace revealed from inside braces (`{ Smith }`) must be trimmed, not retained.
+        XCTAssertEqual(
+            AuthorName.parseList("{ Smith }, John"),
+            [AuthorName(given: "John", family: "Smith")]
+        )
+    }
+
+    func testParseListBraceProtectedFamilyGivenPairs() {
+        // Two protected-family pairs must group correctly (brace-aware single-token check).
+        XCTAssertEqual(
+            AuthorName.parseList("{de la Vega}, Maria, {von Braun}, Werner"),
+            [
+                AuthorName(given: "Maria", family: "de la Vega"),
+                AuthorName(given: "Werner", family: "von Braun"),
+            ]
+        )
+    }
+
     // MARK: - Authors displayString
 
     func testAuthorsDisplayString() {

@@ -63,13 +63,105 @@ final class BibTeXImporterCVFTests: XCTestCase {
         """
         let refs = BibTeXImporter.parse(bib)
         XCTAssertEqual(refs.count, 1)
-        // Braces are preserved as-is by BibTeXImporter (LaTeX case-protection).
-        // We assert the title still parses and contains the meaningful content.
-        XCTAssertTrue(refs[0].title.contains("Foundations of"))
-        XCTAssertTrue(refs[0].title.contains("Manifold Learning"))
-        // BibTeXImporter preserves inner braces literally (LaTeX case-protection).
-        // The parser appends '{' and '}' characters at depth > 0, so {S} survives verbatim.
-        XCTAssertTrue(refs[0].title.contains("{S}"))
+        // Inner braces are BibTeX capitalization-protection markers, not literal
+        // content: {S} must be stripped to S so the title reads naturally.
+        XCTAssertEqual(refs[0].title, "Foundations of S^n Manifold Learning")
+    }
+
+    // MARK: - Capitalization-protection braces stripped from title (Zotero export)
+
+    func testTitleStripsCapitalizationProtectionBraces() {
+        // Real-world Zotero `Better BibTeX` export: every protected word is wrapped
+        // in braces. These must not leak into the displayed title.
+        let bib = """
+        @article{epfl_2025,
+            author = {Last, First},
+            title = {{EPFL}-{Smart}-{Kitchen}-30: {Densely} annotated cooking dataset with {3D} kinematics to challenge video and language models},
+            year = {2025}
+        }
+        """
+        let refs = BibTeXImporter.parse(bib)
+        XCTAssertEqual(refs.count, 1)
+        XCTAssertEqual(
+            refs[0].title,
+            "EPFL-Smart-Kitchen-30: Densely annotated cooking dataset with 3D kinematics to challenge video and language models"
+        )
+    }
+
+    func testTitleStripsTitleCaseProtectionBraces() {
+        // Zotero wraps each word of a title-cased entry: {A} {Self}-{Controlled} ...
+        let bib = """
+        @article{selfctrl_2024,
+            title = {A {Self}-{Controlled} {Mind} {Is} {Reflected} by {Stable} {Mental} {Processing}},
+            year = {2024}
+        }
+        """
+        let refs = BibTeXImporter.parse(bib)
+        XCTAssertEqual(refs.count, 1)
+        XCTAssertEqual(refs[0].title, "A Self-Controlled Mind Is Reflected by Stable Mental Processing")
+    }
+
+    func testProtectionBracesStrippedFromJournalAndPublisher() {
+        // The same brace convention applies to every display-text field, not just title.
+        let bib = """
+        @article{abbr_2024,
+            title = {Some Paper},
+            journal = {{IEEE} Transactions on {PAMI}},
+            publisher = {{MIT} Press},
+            year = {2024}
+        }
+        """
+        let refs = BibTeXImporter.parse(bib)
+        XCTAssertEqual(refs.count, 1)
+        XCTAssertEqual(refs[0].journal, "IEEE Transactions on PAMI")
+        XCTAssertEqual(refs[0].publisher, "MIT Press")
+    }
+
+    func testProtectionBracesStrippedFromBooktitle() {
+        // `booktitle` only surfaces when there is no `journal` (importer maps
+        // `journal ?? booktitle`); a conference paper also exposes it via `eventTitle`.
+        let bib = """
+        @inproceedings{conf_2024,
+            title = {Some Paper},
+            booktitle = {{NeurIPS} 2024},
+            year = {2024}
+        }
+        """
+        let refs = BibTeXImporter.parse(bib)
+        XCTAssertEqual(refs.count, 1)
+        XCTAssertEqual(refs[0].journal, "NeurIPS 2024")
+        XCTAssertEqual(refs[0].eventTitle, "NeurIPS 2024")
+    }
+
+    func testAuthorProtectionBracesStrippedOnImport() {
+        // End-to-end shape from the user's real library: a brace-protected corporate
+        // author must import with clean names and not be split on its internal " and ".
+        let bib = """
+        @article{ibl_2023,
+            author = {{International Brain Lab} and Benson, Brandon},
+            title = {A Brain-Wide Map},
+            year = {2023}
+        }
+        """
+        let refs = BibTeXImporter.parse(bib)
+        XCTAssertEqual(refs.count, 1)
+        XCTAssertEqual(refs[0].authors.count, 2)
+        XCTAssertEqual(refs[0].authors[0], AuthorName(given: "", family: "International Brain Lab"))
+        XCTAssertEqual(refs[0].authors[1], AuthorName(given: "Brandon", family: "Benson"))
+    }
+
+    func testEscapedLiteralBracesPreservedInTitle() {
+        // `\{` / `\}` are escaped *literal* braces (LaTeX), not protection markers —
+        // they must survive de-bracing while bare protection braces are removed.
+        let bib = """
+        @article{literal_2024,
+            title = {The \\{Set\\} of {Natural} Numbers},
+            year = {2024}
+        }
+        """
+        let refs = BibTeXImporter.parse(bib)
+        XCTAssertEqual(refs.count, 1)
+        XCTAssertEqual(refs[0].title, "The \\{Set\\} of Natural Numbers")
     }
 
     // MARK: - Bare-word month

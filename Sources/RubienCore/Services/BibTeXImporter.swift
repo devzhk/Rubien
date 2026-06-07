@@ -100,6 +100,18 @@ public enum BibTeXImporter {
                 _ = scanner.scanString(",")
             }
 
+            // Strip BibTeX capitalization-protection braces (e.g. `{EPFL}` → `EPFL`) from
+            // display-text fields so they don't leak into titles/journals/etc. The scanner
+            // removes only the outermost `{…}` delimiter; inner protection braces survive
+            // until here. `author`/`editor` are skipped so `AuthorName.parseList` still sees
+            // brace-grouped names (a protected `and` must not be split); `file` is skipped
+            // because attachment paths can contain literal braces.
+            for key in Array(fields.keys) where key != "author" && key != "editor" && key != "file" {
+                if let value = fields[key] {
+                    fields[key] = BibTeXBraces.strip(value)
+                }
+            }
+
             let refType: ReferenceType = {
                 switch entryType {
                 case "article": return .journalArticle
