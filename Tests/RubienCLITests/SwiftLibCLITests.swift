@@ -110,13 +110,27 @@ final class RubienCLITests: XCTestCase {
 
     // MARK: - Version
 
+    /// The marketing version the CLI must report, read from the repo's VERSION
+    /// file so it never goes stale on a release bump. Asserts the real invariant
+    /// — `--version` reflects VERSION (guards the old 1.0.0-placeholder
+    /// regression) — instead of a hardcoded literal that must be hand-bumped.
+    private func expectedMarketingVersion() throws -> String {
+        let versionURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()   // Tests/RubienCLITests
+            .deletingLastPathComponent()   // Tests
+            .deletingLastPathComponent()   // repo root
+            .appendingPathComponent("VERSION")
+        return try String(contentsOf: versionURL, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     func testVersionOutput() throws {
         try skipIfBinaryMissing()
         let result = try runCLI(["--version"])
         XCTAssertEqual(result.exitCode, 0)
         let output = (result.stdout + result.stderr).trimmingCharacters(in: .whitespacesAndNewlines)
-        XCTAssertEqual(output, "0.1.7",
-                       "--version must reflect VERSION, not the old 1.0.0 placeholder")
+        XCTAssertEqual(output, try expectedMarketingVersion(),
+                       "--version must reflect the VERSION file, not the old 1.0.0 placeholder")
     }
 
     func testVersionSubcommandJSON() throws {
@@ -133,7 +147,7 @@ final class RubienCLITests: XCTestCase {
         XCTAssertEqual(obj?.count, 2, "version JSON must have exactly two keys: version and build")
         // Build is the monotonic integer the MCP guard compares against.
         XCTAssertGreaterThanOrEqual(build ?? 0, 8)
-        XCTAssertEqual(version, "0.1.7")
+        XCTAssertEqual(version, try expectedMarketingVersion())
     }
 
     // MARK: - List
