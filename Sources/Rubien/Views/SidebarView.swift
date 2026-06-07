@@ -7,14 +7,11 @@ struct SidebarView: View {
     let titleKeywords: [(word: String, count: Int)]
     @Binding var selection: SidebarItem
     let referenceCount: Int
-    let onCreateView: (String) -> Void
+    let onCreateView: (_ name: String, _ icon: String) -> Void
     let onDeleteView: (Int64) -> Void
-    let onRenameView: (Int64, String) -> Void
+    let onUpdateView: (_ id: Int64, _ name: String, _ icon: String) -> Void
 
-    @State private var showNewViewSheet = false
-    @State private var newViewName = ""
-    @State private var renamingViewId: Int64?
-    @State private var renamingViewName = ""
+    @State private var editorMode: ViewEditorMode?
 
     private var defaultView: DatabaseView? {
         databaseViews.first(where: \.isDefault)
@@ -49,7 +46,7 @@ struct SidebarView: View {
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(.secondary)
                         Spacer()
-                        Button { showNewViewSheet = true } label: {
+                        Button { editorMode = .create } label: {
                             Image(systemName: "plus")
                                 .font(.system(size: 11, weight: .medium))
                                 .foregroundStyle(.tertiary)
@@ -77,12 +74,11 @@ struct SidebarView: View {
                                 selection = .view(view.id!)
                             }
                             .contextMenu {
-                                Button("Rename…") {
-                                    renamingViewId = view.id
-                                    renamingViewName = view.name
+                                Button("Edit View…") {
+                                    editorMode = .edit(view)
                                 }
                                 Button("Duplicate") {
-                                    onCreateView(view.name + " Copy")
+                                    onCreateView(view.name + " Copy", view.icon)
                                 }
                                 Divider()
                                 Button("Delete", role: .destructive) {
@@ -101,27 +97,16 @@ struct SidebarView: View {
         }
         .legacyBackground(Color(nsColor: .controlBackgroundColor))
         .navigationTitle("Rubien")
-        .sheet(isPresented: $showNewViewSheet) {
-            NewViewSheet(name: $newViewName) {
-                let name = newViewName.trimmingCharacters(in: .whitespaces)
-                guard !name.isEmpty else { return }
-                onCreateView(name)
-                newViewName = ""
-                showNewViewSheet = false
-            }
-        }
-        .alert("Rename View", isPresented: Binding(
-            get: { renamingViewId != nil },
-            set: { if !$0 { renamingViewId = nil } }
-        )) {
-            TextField("Name", text: $renamingViewName)
-            Button("Rename") {
-                if let id = renamingViewId {
-                    onRenameView(id, renamingViewName)
+        .sheet(item: $editorMode) { mode in
+            ViewEditorSheet(mode: mode) { name, icon in
+                switch mode {
+                case .create:
+                    onCreateView(name, icon)
+                case .edit(let view):
+                    if let id = view.id { onUpdateView(id, name, icon) }
                 }
-                renamingViewId = nil
+                editorMode = nil
             }
-            Button("Cancel", role: .cancel) { renamingViewId = nil }
         }
     }
 
@@ -270,34 +255,87 @@ extension Color {
     }
 }
 
-// MARK: - New View Sheet
+// MARK: - View Editor
 
-private struct NewViewSheet: View {
-    @Binding var name: String
-    let onCreate: () -> Void
+/// Distinguishes "create a new view" from "edit this existing view". A bare
+/// optional `DatabaseView?` can't express this — `nil` would be ambiguous
+/// between "creating" and "sheet closed" — so the mode is explicit.
+private enum ViewEditorMode: Identifiable {
+    case create
+    case edit(DatabaseView)
 
+    var id: String {
+        switch self {
+        case .create: return "create"
+        case .edit(let view): return "edit-\(view.id.map(String.init) ?? "new")"
+        }
+    }
+}
+
+private struct ViewEditorSheet: View {
+    let mode: ViewEditorMode
+    let onSave: (_ name: String, _ icon: String) -> Void
+
+    @State private var name: String
+    @State private var icon: String
     @Environment(\.dismiss) private var dismiss
 
+    init(mode: ViewEditorMode, onSave: @escaping (String, String) -> Void) {
+        self.mode = mode
+        self.onSave = onSave
+        switch mode {
+        case .create:
+            _name = State(initialValue: "")
+            _icon = State(initialValue: ViewIconCatalog.defaultIcon)
+        case .edit(let view):
+            _name = State(initialValue: view.name)
+            _icon = State(initialValue: view.icon)
+        }
+    }
+
+    private var title: String {
+        switch mode {
+        case .create: return "New View"
+        case .edit: return "Edit View"
+        }
+    }
+
+    private var saveLabel: String {
+        switch mode {
+        case .create: return "Create"
+        case .edit: return "Save"
+        }
+    }
+
+    private var trimmedName: String {
+        name.trimmingCharacters(in: .whitespaces)
+    }
+
     var body: some View {
-        VStack(spacing: 16) {
-            Text("New View")
+        VStack(alignment: .leading, spacing: 16) {
+            Text(title)
                 .font(.headline)
             TextField("View name", text: $name)
                 .textFieldStyle(.roundedBorder)
-                .frame(width: 250)
-                .onSubmit { onCreate() }
+                .frame(width: 260)
+                .onSubmit(save)
+            ViewIconGrid(selection: $icon)
+                .frame(width: 260)
             HStack {
-                Button("Cancel", role: .cancel) {
-                    name = ""
-                    dismiss()
-                }
-                .keyboardShortcut(.cancelAction)
-                Button("Create") { onCreate() }
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button(saveLabel, action: save)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .disabled(trimmedName.isEmpty)
             }
         }
         .padding(20)
+    }
+
+    private func save() {
+        guard !trimmedName.isEmpty else { return }
+        onSave(trimmedName, icon)
     }
 }
 #endif

@@ -15,24 +15,17 @@ struct ViewIconGrid: View {
     var body: some View {
         LazyVGrid(columns: columns, spacing: 6) {
             ForEach(ViewIconCatalog.all, id: \.self) { symbol in
+                let isSelected = selection == symbol
                 Button {
                     selection = symbol
                 } label: {
                     Image(systemName: symbol)
                         .font(.system(size: 15, weight: .regular))
                         .frame(width: 34, height: 30)
-                        .foregroundStyle(
-                            selection == symbol
-                                ? Color.white
-                                : Color.primary.opacity(0.8)
-                        )
+                        .foregroundStyle(isSelected ? Color.white : Color.primary.opacity(0.8))
                         .background(
                             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .fill(
-                                    selection == symbol
-                                        ? Color.accentColor
-                                        : Color.primary.opacity(0.06)
-                                )
+                                .fill(isSelected ? Color.accentColor : Color.primary.opacity(0.06))
                         )
                         .contentShape(
                             RoundedRectangle(cornerRadius: 7, style: .continuous)

@@ -509,10 +509,11 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
-    func createDatabaseView(name: String, scope: ViewScope = .all) {
+    func createDatabaseView(name: String, icon: String = ViewIconCatalog.defaultIcon, scope: ViewScope = .all) {
         let maxOrder = databaseViews.map(\.displayOrder).max() ?? 0
         var view = DatabaseView(
             name: name,
+            icon: icon,
             scope: scope,
             isDefault: false,
             displayOrder: maxOrder + 1
@@ -523,9 +524,10 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
-    func renameDatabaseView(id: Int64, name: String) {
+    func updateDatabaseView(id: Int64, name: String, icon: String) {
         guard var view = databaseViews.first(where: { $0.id == id }) else { return }
         view.name = name
+        view.icon = icon
         saveDatabaseView(&view)
     }
 
@@ -800,9 +802,9 @@ struct ContentView: View {
                 titleKeywords: viewModel.titleKeywords,
                 selection: $viewModel.selectedSidebar,
                 referenceCount: viewModel.references.count,
-                onCreateView: { name in viewModel.createDatabaseView(name: name) },
+                onCreateView: { name, icon in viewModel.createDatabaseView(name: name, icon: icon) },
                 onDeleteView: { viewModel.deleteDatabaseView(id: $0) },
-                onRenameView: { id, name in viewModel.renameDatabaseView(id: id, name: name) }
+                onUpdateView: { id, name, icon in viewModel.updateDatabaseView(id: id, name: name, icon: icon) }
             )
             .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 300)
         } content: {
