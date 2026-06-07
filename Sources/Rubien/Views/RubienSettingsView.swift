@@ -20,6 +20,13 @@ struct RubienSettingsView: View {
 
     var body: some View {
         TabView {
+            generalPane
+                .tabItem {
+                    Label(
+                        String(localized: "General", bundle: .module),
+                        systemImage: "gearshape"
+                    )
+                }
             iCloudSyncPane
                 .tabItem {
                     Label(
@@ -35,6 +42,27 @@ struct RubienSettingsView: View {
             #endif
         }
         .frame(width: 480, height: 320)
+    }
+
+    @ViewBuilder
+    private var generalPane: some View {
+        Form {
+            Section(String(localized: "Appearance", bundle: .module)) {
+                Picker(
+                    String(localized: "Theme", bundle: .module),
+                    selection: Binding(
+                        get: { RubienPreferences.colorScheme },
+                        set: { RubienPreferences.setColorScheme($0) }
+                    )
+                ) {
+                    ForEach(ColorSchemePreference.allCases, id: \.self) { pref in
+                        Text(pref.localizedTitle).tag(pref)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+        }
+        .formStyle(.grouped)
     }
 
     @ViewBuilder

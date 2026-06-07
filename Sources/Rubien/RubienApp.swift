@@ -96,6 +96,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var activationCancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Apply the saved appearance before activation so the first window
+        // paints in the chosen theme (no system→chosen flash on relaunch).
+        RubienPreferences.applyColorScheme()
+
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
 

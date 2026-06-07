@@ -147,6 +147,11 @@ final class ReaderWindowManager {
             backing: .buffered,
             defer: false
         )
+        // Intentionally leave `window.appearance` nil: these reader windows
+        // live outside the SwiftUI scene graph, so they inherit the app-wide
+        // theme from `NSApplication.appearance` (set by
+        // `RubienPreferences.applyColorScheme`) and repaint live when the user
+        // changes the theme. Pinning `window.appearance` here would break that.
         window.title = title
         window.isReleasedWhenClosed = false
         window.minSize = minSize
