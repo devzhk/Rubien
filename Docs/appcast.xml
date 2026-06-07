@@ -134,5 +134,23 @@
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.1.8</title>
+            <description><![CDATA[• Appearance — choose Light, Dark, or System in Settings → General. Applies across the
+  whole app, including reader windows.
+• View icons — pick a custom icon for each view when creating or editing
+  it.
+• BibTeX import — {capitalization-protection} braces are now stripped from titles and fields.]]></description>
+            <pubDate>Sun, 07 Jun 2026 21:06:21 +0000</pubDate>
+            <sparkle:version>9</sparkle:version>
+            <sparkle:shortVersionString>0.1.8</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.1.8/Rubien-0.1.8.dmg"
+                sparkle:edSignature="+y2rN8R/foFhZqaBeEdNSmAXTMhl6pc6pcnXReFwPBjzs2YNP93twnbWZwuorBSpr/sKUKkFraCYrquq0vPcAw=="
+                length="16986188"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
