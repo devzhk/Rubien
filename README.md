@@ -89,7 +89,20 @@ This nukes the local package checkouts and SwiftPM state, then re-fetches cleanl
 
 ### Prebuilt binary
 
-A prebuilt Linux `rubien-cli` (x86_64) ships with the next release. Until then, build from source (below). Once installed, keep it current with `rubien-cli self-update` (downloads the latest signed release and replaces itself in place, after verifying an ed25519 signature).
+Download `rubien-cli-<version>-linux-x86_64.tar.gz` from the [latest release](https://github.com/devzhk/Rubien-releases/releases/latest) and extract it, **keeping `rubien-cli` and the `*.resources` folders together** — the CLI loads bundled citation styles via `Bundle.module` from beside the binary, so a bare-binary install breaks `styles`/`cite`:
+
+```bash
+# Runtime deps (Ubuntu 22.04+, glibc >= 2.35; x86_64)
+sudo apt install -y libsqlite3-0 libcurl4 libxml2 libpoppler-glib8 libcairo2 libgdk-pixbuf-2.0-0 libglib2.0-0 ca-certificates
+
+# Extract somewhere stable (binary + *.resources stay together)
+mkdir -p ~/.local/rubien-cli && tar -xzf rubien-cli-*-linux-x86_64.tar.gz -C ~/.local/rubien-cli
+
+# Point tools at it (or add the directory to PATH)
+export RUBIEN_CLI=~/.local/rubien-cli/rubien-cli
+```
+
+Keep it current with `rubien-cli self-update` — it downloads the latest signed release and replaces itself in place after verifying an ed25519 signature. Prefer this over building from source unless you need a non-x86_64 build.
 
 ### Build from source
 
