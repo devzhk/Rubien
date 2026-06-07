@@ -1,7 +1,7 @@
 # Per-view icon picker — design
 
 **Date:** 2026-06-07
-**Status:** Approved (ready for implementation plan)
+**Status:** Implemented (2574157)
 
 ## Problem
 
