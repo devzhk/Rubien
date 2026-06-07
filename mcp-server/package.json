@@ -5,12 +5,12 @@
   "license": "Apache-2.0",
   "author": "devzhk",
   "homepage": "https://github.com/devzhk/Rubien-releases#readme",
-  "repository": { "type": "git", "url": "https://github.com/devzhk/Rubien-releases.git" },
+  "repository": { "type": "git", "url": "git+https://github.com/devzhk/Rubien-releases.git" },
   "bugs": { "url": "https://github.com/devzhk/Rubien-releases/issues" },
   "keywords": ["mcp", "model-context-protocol", "rubien", "reference-manager", "citations"],
   "type": "module",
   "bin": {
-    "rubien-mcp-server": "./dist/index.js"
+    "rubien-mcp-server": "dist/index.js"
   },
   "main": "./dist/index.js",
   "files": [
