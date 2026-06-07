@@ -160,7 +160,7 @@ public struct DatabaseView: Identifiable, Codable, Hashable, Sendable {
     public init(
         id: Int64? = nil,
         name: String,
-        icon: String = "tablecells",
+        icon: String = ViewIconCatalog.defaultIcon,
         scope: ViewScope = .all,
         columns: [ColumnConfig] = ColumnConfig.defaultColumns,
         filters: [ViewFilter] = [],
