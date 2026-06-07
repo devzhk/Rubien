@@ -22,11 +22,11 @@ Options:
 
 Examples:
   # Claude Code
-  claude mcp add rubien node /path/to/mcp-server/dist/index.js
+  claude mcp add rubien -- npx -y rubien-mcp-server
 
-  # claude.ai (remote MCP)
+  # claude.ai (remote MCP) — same package, HTTP mode
   RUBIEN_MCP_BEARER=$(openssl rand -hex 32) \\
-    node dist/index.js --http --port 4000 --bearer-token "$RUBIEN_MCP_BEARER"
+    npx -y rubien-mcp-server --http --port 4000 --bearer-token "$RUBIEN_MCP_BEARER"
   # then: cloudflared tunnel --url http://localhost:4000
 `;
 

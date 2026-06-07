@@ -1,133 +1,124 @@
 # rubien-mcp-server
 
-A Model Context Protocol server that wraps `rubien-cli`, making the Rubien reference library available to Claude Code, Claude Desktop, and claude.ai chat as a callable tool catalog.
+A Model Context Protocol server that wraps `rubien-cli`, exposing your Rubien library to Claude Code, Claude Desktop, and claude.ai (web) as a tool catalog. It spawns `rubien-cli` under the hood and speaks MCP over two transports:
 
-The server is a thin Node/TypeScript process. It spawns `rubien-cli` under the hood and speaks MCP over one of two transports:
+- **stdio** — Claude Code and Claude Desktop. The client spawns the server locally. No network, no auth. What most people want; see [Install](#install).
+- **Streamable HTTP + bearer token** — claude.ai (web) connects as a *remote MCP server* (it can't spawn a local process), so it needs a tunnel. See [claude.ai web](#claudeai-web-remote-mcp-server).
 
-- **stdio** — used by **Claude Code** and **Claude Desktop**. The client launches the server as a child process and talks to it over the pipe. No network, no auth.
-- **Streamable HTTP with bearer-token auth** — used by **claude.ai (web)** via a custom MCP connector. Requires a tunnel (e.g. Cloudflare Tunnel) because your library lives on your Mac.
+## Requirement: `rubien-cli` on the host
 
-Pick the section below that matches your client. Most users want one of the two stdio paths.
+The server is only a wrapper. It needs **Node.js ≥ 20** and the `rubien-cli` binary:
 
-## Install (Claude Code)
+- **Mac:** install **Rubien.app** (the DMG). The entitled `rubien-cli` ships inside it and is found automatically.
+- **Linux:** install the runtime libs and extract the CLI tarball, keeping `rubien-cli` and its `*.resources` folders together (the CLI loads citation styles from beside the binary):
+  ```bash
+  sudo apt install libsqlite3-0 libcurl4 libxml2 libpoppler-glib8 libcairo2 libgdk-pixbuf-2.0-0 libglib2.0-0 ca-certificates
+  # download rubien-cli-*-linux-x86_64.tar.gz, extract, then:
+  export RUBIEN_CLI=/path/to/extracted/rubien-cli
+  ```
+  Tarball: <https://github.com/devzhk/Rubien-releases/releases>. Don't put the bare binary on `PATH` alone — it loses its resource bundles.
+
+At startup the server checks the CLI's build and exits with an update instruction if it's too old. Update via Rubien.app / Sparkle on Mac, or `rubien-cli self-update` on Linux.
+
+## Install
+
+Both stdio clients use the published npm package via `npx -y` — no global install.
+
+### Claude Code
 
 ```bash
 claude mcp add rubien -- npx -y rubien-mcp-server
 ```
 
-This needs `rubien-cli` on the host:
-- **Mac:** install Rubien.app (DMG) — the entitled `rubien-cli` ships inside it; nothing else to do.
-- **Linux:** `sudo apt install libsqlite3-0 libcurl4 libxml2 libpoppler-glib8 libcairo2 libgdk-pixbuf-2.0-0 libglib2.0-0 ca-certificates`, then download `rubien-cli-*-linux-x86_64.tar.gz` from
-  https://github.com/devzhk/Rubien-releases/releases and **extract it to a directory, keeping `rubien-cli` and the `*.resources` folders together** (the CLI loads citation styles from beside the binary). Point the server at it: `export RUBIEN_CLI=/path/to/extracted/rubien-cli`. Do **not** copy the bare binary onto `PATH` alone — it would lose its resource bundles.
+### Claude Desktop
 
-The server checks the CLI's build at startup; if it's too old it prints an update
-instruction and exits (rather than failing mid-call). On **Mac**, update Rubien.app
-(Sparkle). On **Linux**, run `rubien-cli self-update` (signature-verified, replaces in
-place) — or re-download the tarball.
-
-## Prerequisites
-
-- Node.js ≥ 20
-- `rubien-cli` reachable on the host. The server looks for it in this order:
-  1. `$RUBIEN_CLI` env var (explicit path)
-  2. `/Applications/Rubien.app/Contents/Helpers/rubien-cli` (installed app bundle, Mac)
-  3. `~/Applications/Rubien.app/Contents/Helpers/rubien-cli` (Mac)
-  4. `./build/Rubien.app/Contents/Helpers/rubien-cli` (dev build output, Mac)
-  5. `rubien-cli` on `PATH` (Linux installs land here — see the **Install** section above)
-
-**On Mac, prefer the bundled helper.** It's signed with the App Group entitlement and reads the same `library.sqlite` the Rubien app uses. A bare `rubien-cli` on PATH is typically an SPM dev build without the entitlement, which hits a *different* database — see "Database location" in `Docs/CLI-Reference.md`.
-
-**On Linux**, the server runs against a `rubien-cli` installed per the **Install** section above (prebuilt Linux tarball, or built from source). Everything works except `rubien_sync_status`, which always errors (`sync` subcommand isn't registered on Linux builds — CloudKit doesn't exist there).
-
-To pin the spawned CLI to a specific library directory regardless of which binary resolves, set `RUBIEN_LIBRARY_ROOT` in the MCP server's `env` block (Claude Code: `claude mcp add rubien --env RUBIEN_LIBRARY_ROOT=...`; Claude Desktop: under `mcpServers.rubien.env` in `claude_desktop_config.json`). The path is used verbatim — point it at the directory that contains `library.sqlite`:
-
-- Mac sandboxed: `~/Library/Group Containers/9TXK4V3SS8.com.rubien.shared/Rubien`
-- Mac unsandboxed: `~/Library/Application Support/Rubien`
-- Linux: `~/.local/share/rubien` (or wherever `$XDG_DATA_HOME/rubien` resolved to)
-
-## Claude Code (stdio)
-
-The npx command above is the recommended path. To run a local checkout instead (see [Development](#development) for the build):
-
-```bash
-claude mcp add rubien node $(pwd)/dist/index.js
-```
-
-Try it:
-
-> List my 5 most recently added references.
-> Cite reference 42 in Nature style.
-
-Claude Code's permission UI prompts for the destructive tools (`rubien_delete`, `rubien_update`, `rubien_import`, and the property write tools) on first use.
-
-## Claude Desktop (stdio)
-
-Claude Desktop spawns MCP servers itself — no tunnel, no bearer token. Add Rubien to `claude_desktop_config.json` via either route:
-
-- **Edit the file directly** at `~/Library/Application Support/Claude/claude_desktop_config.json`.
-- **Settings → Developer → Edit Config** in Claude Desktop, which opens the same file in your editor.
-
-Add Rubien under `mcpServers`:
+**Settings → Developer → Edit Config** (or edit `~/Library/Application Support/Claude/claude_desktop_config.json`), then restart Claude Desktop:
 
 ```json
 {
   "mcpServers": {
     "rubien": {
-      "command": "node",
-      "args": ["/absolute/path/to/Rubien/mcp-server/dist/index.js"]
+      "command": "npx",
+      "args": ["-y", "rubien-mcp-server"]
     }
   }
 }
 ```
 
-Restart Claude Desktop and Rubien appears in the tool picker. To pin the spawned CLI to a specific library (see *Prerequisites* above for paths), add an `env` block:
+**macOS PATH gotcha:** Claude Desktop launches servers with launchd's minimal `PATH`, not your shell's. If `npx` isn't found, set `"command"` to its absolute path (`which npx` → e.g. `/opt/homebrew/bin/npx`). Affects every npx-based server; Claude Code is unaffected. No `.dxt` one-click package yet.
 
-```json
-"rubien": {
-  "command": "node",
-  "args": ["/absolute/path/to/Rubien/mcp-server/dist/index.js"],
-  "env": {
-    "RUBIEN_LIBRARY_ROOT": "/Users/you/Library/Group Containers/9TXK4V3SS8.com.rubien.shared/Rubien"
-  }
-}
-```
+## claude.ai web (remote MCP server)
 
-> **Future work — Desktop Extension (`.dxt`).** Claude Desktop also supports one-click MCP installs via `.dxt` packages (a zip containing a `manifest.json` + bundled server). Rubien doesn't ship one yet; packaging it would replace the config-file edit above with a double-click install from a GitHub Release asset.
-
-## claude.ai web (Streamable HTTP + Cloudflare Tunnel)
-
-claude.ai (the web app at https://claude.ai) can't spawn a local process, so it talks to the server over HTTPS via a custom MCP connector. Since your library lives on your Mac, you'll need a tunnel to expose the local server, and bearer-token auth to keep strangers out.
+claude.ai connects to rubien as a **remote MCP server** over Streamable HTTP — it can't spawn a local process. It's the *same npm package* in HTTP mode: the server still runs on your Mac (where the library and `rubien-cli` live), and claude.ai reaches it through a Cloudflare Tunnel, with a bearer token to keep strangers out.
 
 ```bash
-# 1. Start the server with a bearer token
+# 1. Start the server in HTTP mode with a bearer token
 RUBIEN_MCP_BEARER=$(openssl rand -hex 32) \
-  node dist/index.js --http --port 4000 --bearer-token "$RUBIEN_MCP_BEARER"
+  npx -y rubien-mcp-server --http --port 4000 --bearer-token "$RUBIEN_MCP_BEARER"
 
 # 2. Open a tunnel
 cloudflared tunnel --url http://localhost:4000
 # → copy the https://*.trycloudflare.com URL
 
-# 3. In claude.ai: Settings → Connectors → Add custom MCP connector
-#    URL:   https://<your-tunnel>.trycloudflare.com
-#    Token: $RUBIEN_MCP_BEARER (from step 1)
+# 3. claude.ai → Settings → Connectors → Add custom MCP connector
+#    URL: the tunnel URL;  Token: $RUBIEN_MCP_BEARER
 ```
 
-Save the bearer token — you'll need it to reconnect after restarts.
+Save the token — you need it to reconnect after restarts.
 
-## Security model
+### Security model
 
-This server is designed for **single-user personal use** only.
+The remote path is **single-user personal use only.**
 
-- The bearer token is a long-lived static secret. There's no rotation, revocation, rate limiting, or replay protection.
-- The server will happily accept any request with the correct token. Don't paste the token into anything you don't trust, and treat a leaked token like an SSH key — regenerate immediately.
-- Cloudflare Tunnel provides TLS termination; the token travels over HTTPS. If you use a plaintext tunnel (e.g. raw ngrok HTTP) the token can be sniffed.
-- A leaked URL without the token is safe — every request gets a 401 — but rotate both if in doubt.
+- The bearer token is a long-lived static secret — no rotation, revocation, rate limiting, or replay protection. Treat it like an SSH key; regenerate if leaked.
+- Cloudflare Tunnel terminates TLS, so the token travels over HTTPS. A plaintext tunnel (e.g. raw ngrok HTTP) exposes it to sniffing.
+- A leaked URL without the token is safe (every request gets a 401) — but rotate both if in doubt.
 
-If this setup ever becomes multi-user, the auth layer needs a real story: OAuth, short-lived tokens, and per-client revocation.
+Multi-user would need a real auth story: OAuth, short-lived tokens, per-client revocation.
+
+## Optional configuration
+
+### Pin the library directory
+
+By default the CLI resolves its own library location. To force one, set `RUBIEN_LIBRARY_ROOT` to the directory containing `library.sqlite`:
+
+- Claude Code: `claude mcp add rubien --env RUBIEN_LIBRARY_ROOT=<dir> -- npx -y rubien-mcp-server`
+- Claude Desktop: add `"env": { "RUBIEN_LIBRARY_ROOT": "<dir>" }` beside `command`/`args`.
+
+| Host | Directory |
+|---|---|
+| Mac (sandboxed app) | `~/Library/Group Containers/9TXK4V3SS8.com.rubien.shared/Rubien` |
+| Mac (unsandboxed dev) | `~/Library/Application Support/Rubien` |
+| Linux | `~/.local/share/rubien` (or `$XDG_DATA_HOME/rubien`) |
+
+### How the server finds `rubien-cli`
+
+First hit wins:
+
+1. `$RUBIEN_CLI` (explicit path)
+2. `/Applications/Rubien.app/Contents/Helpers/rubien-cli` (Mac)
+3. `~/Applications/Rubien.app/Contents/Helpers/rubien-cli` (Mac)
+4. `./build/Rubien.app/Contents/Helpers/rubien-cli` (dev build, Mac)
+5. `rubien-cli` on `PATH` (Linux installs land here)
+
+**On Mac, prefer the bundled helper** (2–4): it's signed with the App Group entitlement and reads the same `library.sqlite` as the app. A bare `rubien-cli` on PATH is usually an unentitled dev build hitting a *different* database (see "Database location" in `Docs/CLI-Reference.md`).
+
+**On Linux**, everything works except `rubien_sync_status` (no CloudKit — the `sync` subcommand isn't built).
+
+### Run a local checkout
+
+For development, point the client at a built `dist/` (see [Development](#development)):
+
+```bash
+claude mcp add rubien -- node $(pwd)/dist/index.js        # Claude Code
+```
+```json
+{ "mcpServers": { "rubien": { "command": "node", "args": ["/abs/path/to/mcp-server/dist/index.js"] } } }
+```
 
 ## Tool catalog
 
-Roughly 36 tools covering every `rubien-cli` subcommand mode. Names are `rubien_<subject>_<action>` so Claude can pick the right tool from a single-word hint:
+~36 tools, one per `rubien-cli` subcommand mode, named `rubien_<subject>_<action>`:
 
 | Surface | Tools |
 |---|---|
@@ -138,42 +129,34 @@ Roughly 36 tools covering every `rubien-cli` subcommand mode. Names are `rubien_
 | Web clips | `rubien_web_get`, `rubien_web_annotations` |
 | Properties (incl. Tags) | `rubien_properties_list`, `rubien_properties_create`, `rubien_properties_delete`, `rubien_properties_rename`, `rubien_properties_show`, `rubien_properties_hide`, `rubien_properties_add_option`, `rubien_properties_rename_option`, `rubien_properties_delete_option`, `rubien_properties_set`, `rubien_properties_add_values`, `rubien_properties_remove_values`, `rubien_properties_clear` |
 | Saved views | `rubien_views_list`, `rubien_views_create`, `rubien_views_delete`, `rubien_views_rename`, `rubien_views_query` |
-| Sync | `rubien_sync_status` (Mac-only — errors on Linux hosts) |
+| Sync | `rubien_sync_status` (Mac-only — errors on Linux) |
 
-The PDF tools cover inspection and acquisition — `rubien_pdf_info` returns page count plus a flattened outline, `rubien_pdf_text` extracts text by page range or section title, `rubien_pdf_page_image` renders a page to PNG for figure inspection, and `rubien_pdf_download` fetches an open-access PDF for an existing reference and attaches it to the library. `rubien_annotations_list` returns the user's highlights/underlines/anchored-notes on the attached PDF.
+PDF tools: `rubien_pdf_info` (page count + outline), `rubien_pdf_text` (by page range or section), `rubien_pdf_page_image` (page → PNG), `rubien_pdf_download` (fetch an open-access PDF and attach it), `rubien_annotations_list` (highlights/underlines/notes on the attached PDF).
 
-The web-clip tools are the counterpart for clipped web pages — `rubien_web_get` returns the extracted body (markdown or HTML, paginated by character offset) along with `siteName` and `annotationCount`, and `rubien_web_annotations` returns highlights with a W3C TextQuoteSelector triple (`prefixText` / `anchorText` / `suffixText`) so the highlight can be located inside the body. Library-only — neither tool fetches from the network.
+Web-clip tools: `rubien_web_get` returns the extracted body (markdown/HTML, paginated) with `siteName` and `annotationCount`; `rubien_web_annotations` returns highlights as a W3C TextQuoteSelector triple (`prefixText`/`anchorText`/`suffixText`) for locating them in the body. Library-only — neither hits the network.
 
-Destructive tools are tagged with `destructiveHint: true` so Claude Code's permission UI flags them. `rubien_delete` always passes `--force` — the confirmation happens in the MCP client permission UI, not in the CLI's TTY prompt. See the comment in `src/tools/references.ts` for rationale.
+Destructive tools carry `destructiveHint: true` so Claude Code's permission UI flags them. `rubien_delete` passes `--force`; confirmation happens in the client UI, not a CLI prompt (see `src/tools/references.ts`).
 
 ## Contract pinning
 
-Every tool's argument shape is defined in zod in the tool file; the expected *response* shape is in `src/schemas.ts`, mirroring the Swift DTOs in `Sources/RubienCLI/RubienCLI.swift` (search for `*DTO`). Crucial convention (see tests in `test/schemas.test.ts`):
+Argument shapes are zod schemas in each tool file; response shapes are in `src/schemas.ts`, mirroring the Swift `*DTO` types in `Sources/RubienCLI/RubienCLI.swift`. Convention (tested in `test/schemas.test.ts`):
 
-- `.optional()` in zod for Swift `Optional` fields — Swift's `JSONEncoder` **omits** nil optionals from output.
-- `.nullable()` only for `AlwaysEncodedOptional<T>` wrappers (currently just `DatabaseViewDTO.groupBy`).
+- `.optional()` for Swift `Optional` fields — `JSONEncoder` omits nil optionals.
+- `.nullable()` only for `AlwaysEncodedOptional<T>` (currently just `DatabaseViewDTO.groupBy`).
 
-If a Swift DTO changes, update both the Swift side and `src/schemas.ts` in the same commit, per the CLAUDE.md rule about keeping the CLI and data layer in lockstep.
+Change a Swift DTO → update `src/schemas.ts` in the same commit (CLAUDE.md CLI/data-layer lockstep rule).
 
 ## Development
-
-Build from a local checkout (instead of `npx`):
 
 ```bash
 cd mcp-server
 npm install
 npm run build         # → dist/
-npm test              # vitest unit tests
+npm test              # vitest
+npm run dev           # tsc --watch
 ```
 
-Watch mode:
-
-```bash
-npm run dev       # tsc --watch
-npm run test:watch
-```
-
-MCP Inspector is the fastest way to poke at tool schemas by hand:
+Poke at tool schemas by hand with MCP Inspector:
 
 ```bash
 npx @modelcontextprotocol/inspector node dist/index.js
