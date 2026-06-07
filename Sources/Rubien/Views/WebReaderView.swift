@@ -665,9 +665,29 @@ final class WebReaderViewModel: ObservableObject {
             guard let bundled = bundledClipperReaderStyleBlock() else { return vars }
             return vars + "\n          <style>\(bundled)</style>\n"
         }()
+        // Keep the clipper's `.theme-light`/`.theme-dark` class in sync with the
+        // live OS/app appearance. The bundled ClipperReader.css themes by class,
+        // not `@media`, so on a theme flip (NSApp.appearance) we re-toggle the
+        // class from `prefers-color-scheme` — which WebKit re-fires via `matchMedia`
+        // `change` as the web view's effectiveAppearance changes.
         let bodyLeadScript = includeClipperTypography
             ? """
-          <script>(function(){try{var m=window.matchMedia&&window.matchMedia("(prefers-color-scheme: dark)");if(m&&m.matches){document.documentElement.classList.remove("theme-light");document.documentElement.classList.add("theme-dark");}}catch(_){}})();</script>
+          <script>
+          (function () {
+            try {
+              var root = document.documentElement;
+              var mq = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)");
+              function applyTheme(isDark) {
+                root.classList.toggle("theme-dark", isDark);
+                root.classList.toggle("theme-light", !isDark);
+              }
+              if (mq) {
+                applyTheme(mq.matches);
+                mq.addEventListener("change", function (e) { applyTheme(e.matches); });
+              }
+            } catch (_) {}
+          })();
+          </script>
 
 """
             : ""

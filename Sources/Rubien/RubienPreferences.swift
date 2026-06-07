@@ -1,6 +1,31 @@
 #if os(macOS)
+import AppKit
 import Foundation
 import SwiftUI
+
+/// User-selectable app appearance. Applied app-wide via `NSApplication.appearance`
+/// (not SwiftUI `.preferredColorScheme`) so it reaches the independent reader
+/// `NSWindow`s, not just the SwiftUI `WindowGroup`.
+enum ColorSchemePreference: String, CaseIterable {
+    case system, light, dark
+
+    /// `nil` for `.system` so the app follows the OS appearance live.
+    var nsAppearance: NSAppearance? {
+        switch self {
+        case .system: return nil
+        case .light:  return NSAppearance(named: .aqua)
+        case .dark:   return NSAppearance(named: .darkAqua)
+        }
+    }
+
+    var localizedTitle: String {
+        switch self {
+        case .system: return String(localized: "System", bundle: .module)
+        case .light:  return String(localized: "Light", bundle: .module)
+        case .dark:   return String(localized: "Dark", bundle: .module)
+        }
+    }
+}
 
 enum RubienPreferences {
     /// 用于 CrossRef / OpenAlex API polite pool 的联系邮箱。
@@ -10,6 +35,34 @@ enum RubienPreferences {
     static var apiContactEmail: String {
         get { UserDefaults.standard.string(forKey: apiContactEmailKey) ?? "" }
         set { UserDefaults.standard.set(newValue, forKey: apiContactEmailKey) }
+    }
+
+    /// App appearance override. Per-device (not synced). Unset or an
+    /// unrecognized value falls back to `.system`, matching the app's
+    /// historical "follow the OS" behavior.
+    static let themePreferenceKey = "Rubien.themePreference"
+
+    static var colorScheme: ColorSchemePreference {
+        get {
+            guard let raw = UserDefaults.standard.string(forKey: themePreferenceKey),
+                  let pref = ColorSchemePreference(rawValue: raw) else { return .system }
+            return pref
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: themePreferenceKey) }
+    }
+
+    /// Applies the stored preference to `NSApplication.appearance` — the one
+    /// place appearance is set (see `ColorSchemePreference` for why this and
+    /// not `.preferredColorScheme`).
+    @MainActor static func applyColorScheme() {
+        NSApplication.shared.appearance = colorScheme.nsAppearance
+    }
+
+    /// Single write path used by the Settings picker: persist, then apply, so
+    /// the appearance side effect can never be skipped.
+    @MainActor static func setColorScheme(_ pref: ColorSchemePreference) {
+        colorScheme = pref
+        applyColorScheme()
     }
 
     /// Gates the B8 PDF asset sync (CDReferencePDF push/pull). Default
