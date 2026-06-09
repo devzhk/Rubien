@@ -2349,9 +2349,34 @@ extension AppDatabase {
         }
     }
 
+    /// Rewrite `displayOrder` so each id's new position is its index in `orderedIds`.
+    /// Only rows that actually move are touched (the `displayOrder <> ?` guard), so an
+    /// unchanged order is a true no-op — no needless dirty-marking or `dateModified`
+    /// churn. `dateModified` is stamped here in the Swift layer (triggers must not, per
+    /// the recursive-trigger rule) to give CloudKit last-write-wins a freshness signal
+    /// when two devices reorder concurrently.
+    public func reorderDatabaseViews(_ orderedIds: [Int64]) throws {
+        try dbWriter.write { db in
+            let now = Date()
+            for (index, viewId) in orderedIds.enumerated() {
+                try db.execute(
+                    sql: """
+                        UPDATE databaseView SET displayOrder = ?, dateModified = ?
+                        WHERE id = ? AND displayOrder <> ?
+                        """,
+                    arguments: [index, now, viewId, index]
+                )
+            }
+        }
+    }
+
     public func fetchAllDatabaseViews() throws -> [DatabaseView] {
         try dbWriter.read { db in
-            try DatabaseView.order(DatabaseView.Columns.displayOrder).fetchAll(db)
+            // `id` tie-breaker keeps the total order deterministic when displayOrder
+            // values collide (e.g. the seeded default view vs. a user view at index 0).
+            try DatabaseView
+                .order(DatabaseView.Columns.displayOrder, DatabaseView.Columns.id)
+                .fetchAll(db)
         }
     }
 
@@ -2370,7 +2395,9 @@ extension AppDatabase {
     #if canImport(Combine) && canImport(Darwin)
     public func observeDatabaseViews() -> AnyPublisher<[DatabaseView], Error> {
         observePublisher { db in
-            try DatabaseView.order(DatabaseView.Columns.displayOrder).fetchAll(db)
+            try DatabaseView
+                .order(DatabaseView.Columns.displayOrder, DatabaseView.Columns.id)
+                .fetchAll(db)
         }
     }
     #endif
