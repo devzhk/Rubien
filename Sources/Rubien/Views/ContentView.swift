@@ -509,6 +509,14 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
+    func reorderDatabaseViews(_ orderedIds: [Int64]) {
+        do {
+            try db.reorderDatabaseViews(orderedIds)
+        } catch {
+            errorMessage = "Reorder views failed: \(error.localizedDescription)"
+        }
+    }
+
     func createDatabaseView(name: String, icon: String = ViewIconCatalog.defaultIcon, scope: ViewScope = .all) {
         let maxOrder = databaseViews.map(\.displayOrder).max() ?? 0
         var view = DatabaseView(
@@ -804,7 +812,8 @@ struct ContentView: View {
                 referenceCount: viewModel.references.count,
                 onCreateView: { name, icon in viewModel.createDatabaseView(name: name, icon: icon) },
                 onDeleteView: { viewModel.deleteDatabaseView(id: $0) },
-                onUpdateView: { id, name, icon in viewModel.updateDatabaseView(id: id, name: name, icon: icon) }
+                onUpdateView: { id, name, icon in viewModel.updateDatabaseView(id: id, name: name, icon: icon) },
+                onReorderViews: { viewModel.reorderDatabaseViews($0) }
             )
             .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 300)
         } content: {

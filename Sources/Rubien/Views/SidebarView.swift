@@ -10,8 +10,14 @@ struct SidebarView: View {
     let onCreateView: (_ name: String, _ icon: String) -> Void
     let onDeleteView: (Int64) -> Void
     let onUpdateView: (_ id: Int64, _ name: String, _ icon: String) -> Void
+    let onReorderViews: (_ orderedIds: [Int64]) -> Void
 
     @State private var editorMode: ViewEditorMode?
+    /// The view being dragged. Non-nil only while a reorder drag is in flight.
+    @State private var draggedViewId: Int64?
+    /// Gap index in `userViews` (0...count) where the dragged row will land. Drives the
+    /// insertion bar; `nil` shows no bar. The rows themselves never move during the drag.
+    @State private var dropInsertionIndex: Int?
 
     private var defaultView: DatabaseView? {
         databaseViews.first(where: \.isDefault)
@@ -19,6 +25,41 @@ struct SidebarView: View {
 
     private var userViews: [DatabaseView] {
         databaseViews.filter { !$0.isDefault }
+    }
+
+    /// Move the insertion bar as the drag hovers the row at `rowIndex`. The bar lands on
+    /// the side of the hovered row facing the dragged row's origin; hovering the dragged
+    /// row itself shows no bar (a drop there wouldn't move anything).
+    private func updateDropTarget(rowIndex i: Int) {
+        guard let dragged = draggedViewId,
+              let source = userViews.firstIndex(where: { $0.id == dragged }) else { return }
+        dropInsertionIndex = i == source ? nil : (i < source ? i : i + 1)
+    }
+
+    /// Commit the drop: move the dragged row to the insertion gap, computed against the
+    /// LIVE `userViews` so a concurrent sync change can't desync it, then persist. Skips
+    /// the write when nothing actually moved.
+    private func commitDrop() {
+        defer { draggedViewId = nil; dropInsertionIndex = nil }
+        guard let dragged = draggedViewId, let gap = dropInsertionIndex else { return }
+        let current = userViews.compactMap(\.id)
+        guard let from = current.firstIndex(of: dragged) else { return }
+        // `gap` was computed during hover against the then-current list; a concurrent
+        // sync may have shrunk the list since, so clamp to the live bounds — otherwise
+        // `move(toOffset:)` traps when the stale gap exceeds the current end index.
+        let gapClamped = min(max(gap, 0), current.count)
+        var reordered = current
+        reordered.move(fromOffsets: IndexSet(integer: from), toOffset: gapClamped)
+        guard reordered != current else { return }
+        onReorderViews(reordered)
+    }
+
+    /// Thin accent line marking where a dropped row will land.
+    private var insertionBar: some View {
+        RoundedRectangle(cornerRadius: 1.5)
+            .fill(Color.accentColor)
+            .frame(height: 3)
+            .padding(.horizontal, 8)
     }
 
     var body: some View {
@@ -65,13 +106,31 @@ struct SidebarView: View {
                             .padding(.leading, 10)
                             .padding(.vertical, 4)
                     } else {
-                        ForEach(userViews) { view in
+                        // Reorder uses a per-row `.onDrop` only — deliberately NO
+                        // container-level drop target over the list. A parent `.onDrop`
+                        // swallows the rows' `dropEntered` and silently breaks reordering.
+                        // SwiftUI also gives no drag-cancel callback, so an abandoned drag
+                        // just leaves the row dimmed until the next selection clears it
+                        // (see `.onChange(of: selection)` below).
+                        ForEach(Array(userViews.enumerated()), id: \.element.id) { index, view in
                             SidebarRow(
                                 icon: view.icon,
                                 label: view.name,
                                 isSelected: selection == .view(view.id!)
                             ) {
                                 selection = .view(view.id!)
+                            }
+                            // Dim the row being dragged; the others stay put — only the
+                            // insertion bar moves, so there's no duplicate row on screen.
+                            .opacity(draggedViewId == view.id ? 0.4 : 1)
+                            .overlay(alignment: .top) {
+                                if dropInsertionIndex == index { insertionBar.offset(y: -2.5) }
+                            }
+                            .overlay(alignment: .bottom) {
+                                if dropInsertionIndex == userViews.count,
+                                   index == userViews.count - 1 {
+                                    insertionBar.offset(y: 2.5)
+                                }
                             }
                             .contextMenu {
                                 Button("Edit View…") {
@@ -85,6 +144,16 @@ struct SidebarView: View {
                                     if let id = view.id { onDeleteView(id) }
                                 }
                             }
+                            .onDrag {
+                                draggedViewId = view.id
+                                dropInsertionIndex = nil
+                                return NSItemProvider(object: "\(view.id!)" as NSString)
+                            }
+                            .onDrop(of: [.text], delegate: ViewReorderDropDelegate(
+                                rowIndex: index,
+                                onHover: updateDropTarget,
+                                onDrop: commitDrop
+                            ))
                         }
                     }
                 }
@@ -106,6 +175,15 @@ struct SidebarView: View {
                     if let id = view.id { onUpdateView(id, name, icon) }
                 }
                 editorMode = nil
+            }
+        }
+        .onChange(of: selection) { _, _ in
+            // SwiftUI gives no callback for a drag abandoned outside the list (or via
+            // Esc), so the drag state can linger. Clear it on the next selection — only
+            // the insertion bar is ever affected, and a fresh `.onDrag` re-seeds anyway.
+            if draggedViewId != nil {
+                draggedViewId = nil
+                dropInsertionIndex = nil
             }
         }
     }
@@ -336,6 +414,30 @@ private struct ViewEditorSheet: View {
     private func save() {
         guard !trimmedName.isEmpty else { return }
         onSave(trimmedName, icon)
+    }
+}
+
+// MARK: - Drag Reorder Drop Delegate
+
+/// Per-row drop target for sidebar view reordering. It moves no rows itself — it only
+/// reports which row the drag is hovering (`onHover`) so the parent can position the
+/// insertion bar, and fires `onDrop` to commit the move. The single database write
+/// happens once at drop, not on every hover.
+private struct ViewReorderDropDelegate: DropDelegate {
+    let rowIndex: Int
+    let onHover: (Int) -> Void
+    let onDrop: () -> Void
+
+    func dropEntered(info: DropInfo) { onHover(rowIndex) }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        onHover(rowIndex)
+        return DropProposal(operation: .move)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        onDrop()
+        return true
     }
 }
 #endif
