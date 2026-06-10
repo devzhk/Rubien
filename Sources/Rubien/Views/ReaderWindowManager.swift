@@ -67,7 +67,7 @@ final class ReaderWindowManager {
         }
         .frame(minWidth: 800, minHeight: 600)
 
-        window.contentViewController = NSHostingController(rootView: readerView)
+        window.contentViewController = makeRubienHostingController(rootView: readerView)
         registerWindow(window, title: title, forReferenceId: refId)
     }
 
@@ -98,7 +98,7 @@ final class ReaderWindowManager {
         }
         .frame(minWidth: 800, minHeight: 600)
 
-        window.contentViewController = NSHostingController(rootView: readerView)
+        window.contentViewController = makeRubienHostingController(rootView: readerView)
         registerWindow(window, title: title, forReferenceId: refId)
     }
 

@@ -60,6 +60,17 @@ struct RubienSettingsView: View {
                     }
                 }
                 .pickerStyle(.segmented)
+
+                HStack {
+                    Text(String(localized: "Accent Color", bundle: .module))
+                    Spacer()
+                    Button(String(localized: "Reset to Default", bundle: .module)) {
+                        AccentColorManager.shared.resetToDefault()
+                    }
+                    .controlSize(.small)
+                    .disabled(AccentColorManager.shared.customColor == nil)
+                    AccentColorWell()
+                }
             }
         }
         .formStyle(.grouped)

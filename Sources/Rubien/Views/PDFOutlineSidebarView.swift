@@ -98,6 +98,9 @@ struct PDFOutlineSidebarView: View {
     }
 
     private func flashTitle(_ title: String, on page: PDFPage, at point: CGPoint, pdfView: PDFView) {
+        // Captured once so the flash and its fade use the same color even if
+        // the user changes the accent mid-animation.
+        let accent = AccentColorManager.shared.effectiveNSColor
         let selections = pdfView.document?.findString(title, withOptions: [.caseInsensitive]) ?? []
         let match = selections.first(where: { $0.pages.contains(page) })
 
@@ -109,9 +112,9 @@ struct PDFOutlineSidebarView: View {
                 let pageBounds = page.bounds(for: .mediaBox)
                 highlightRect = CGRect(x: pageBounds.minX + 20, y: point.y - 14, width: pageBounds.width - 40, height: 16)
                 let flash = PDFAnnotation(bounds: highlightRect, forType: .highlight, withProperties: nil)
-                flash.color = NSColor.controlAccentColor.withAlphaComponent(0.4)
+                flash.color = accent.withAlphaComponent(0.4)
                 page.addAnnotation(flash)
-                fadeOutAndRemoveFlash(flash, on: page, pdfView: pdfView)
+                fadeOutAndRemoveFlash(flash, on: page, pdfView: pdfView, accent: accent)
                 return
             }
             highlightRect = bounds.insetBy(dx: -3, dy: -2)
@@ -126,14 +129,16 @@ struct PDFOutlineSidebarView: View {
         }
 
         let flash = PDFAnnotation(bounds: highlightRect, forType: .highlight, withProperties: nil)
-        flash.color = NSColor.controlAccentColor.withAlphaComponent(0.4)
+        flash.color = accent.withAlphaComponent(0.4)
         page.addAnnotation(flash)
 
-        fadeOutAndRemoveFlash(flash, on: page, pdfView: pdfView)
+        fadeOutAndRemoveFlash(flash, on: page, pdfView: pdfView, accent: accent)
     }
 
     /// Fade-out the flash highlight over ~0.5s before removing it.
-    private func fadeOutAndRemoveFlash(_ flash: PDFAnnotation, on page: PDFPage, pdfView: PDFView) {
+    /// `accent` is passed in (not read from the MainActor manager) because the
+    /// fade steps run in plain `DispatchQueue.main.asyncAfter` closures.
+    private func fadeOutAndRemoveFlash(_ flash: PDFAnnotation, on page: PDFPage, pdfView: PDFView, accent: NSColor) {
         let totalDuration: Double = 2.0
         let fadeSteps = 5
         let fadeStart = totalDuration - 0.5
@@ -143,7 +148,7 @@ struct PDFOutlineSidebarView: View {
             let delay = fadeStart + Double(step) * stepInterval
             let alpha = 0.4 * (1.0 - Double(step + 1) / Double(fadeSteps))
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                flash.color = NSColor.controlAccentColor.withAlphaComponent(CGFloat(alpha))
+                flash.color = accent.withAlphaComponent(CGFloat(alpha))
                 pdfView.setNeedsDisplay(pdfView.bounds)
             }
         }

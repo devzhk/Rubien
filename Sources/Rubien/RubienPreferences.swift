@@ -65,6 +65,22 @@ enum RubienPreferences {
         applyColorScheme()
     }
 
+    /// Custom app accent color as "#RRGGBB". Per-device (not synced).
+    /// nil/unset = no override — the app follows the system accent as before.
+    /// Raw string only; validation lives in `AccentColorManager`.
+    static let accentColorHexKey = "Rubien.accentColorHex"
+
+    static var accentColorHex: String? {
+        get { UserDefaults.standard.string(forKey: accentColorHexKey) }
+        set {
+            if let newValue {
+                UserDefaults.standard.set(newValue, forKey: accentColorHexKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: accentColorHexKey)
+            }
+        }
+    }
+
     /// Gates the B8 PDF asset sync (CDReferencePDF push/pull). Default
     /// flipped from false → true in Phase E Task 35 once the schema
     /// invariant test + dateModified cleanup landed. Users can still

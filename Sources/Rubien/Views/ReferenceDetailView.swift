@@ -1267,7 +1267,7 @@ struct ReferenceDetailView: View {
         let restoredFrame = window.setFrameUsingName(autosaveName)
         enforceQuickPreviewWindowSizeIfNeeded(window, minimumSize: minimumSize, preferredSize: preferredSize)
 
-        window.contentViewController = NSHostingController(
+        window.contentViewController = makeRubienHostingController(
             rootView: PDFPreviewView(url: url) { window.close() }
         )
         if !restoredFrame { window.center() }

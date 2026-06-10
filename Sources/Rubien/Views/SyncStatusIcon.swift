@@ -38,8 +38,7 @@ struct SyncStatusIcon: View {
         switch status {
         case .disabled, .signedOut: return .secondary
         case .unavailable: return .orange
-        case .idle: return .accentColor
-        case .syncing: return .blue
+        case .idle, .syncing: return .accentColor
         case .error: return .red
         }
     }

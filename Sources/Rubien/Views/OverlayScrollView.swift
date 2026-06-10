@@ -33,7 +33,7 @@ private struct LegacyOverlayScrollView<Content: View>: NSViewRepresentable {
         scrollView.contentView.drawsBackground = false
         scrollView.applyRubienElegantScrollers()
 
-        let hostingView = NSHostingView(rootView: content)
+        let hostingView = NSHostingView(rootView: AccentedRoot(content: content))
         hostingView.translatesAutoresizingMaskIntoConstraints = false
 
         scrollView.documentView = hostingView
@@ -50,8 +50,8 @@ private struct LegacyOverlayScrollView<Content: View>: NSViewRepresentable {
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        guard let hostingView = scrollView.documentView as? NSHostingView<Content> else { return }
-        hostingView.rootView = content
+        guard let hostingView = scrollView.documentView as? NSHostingView<AccentedRoot<Content>> else { return }
+        hostingView.rootView = AccentedRoot(content: content)
         scrollView.applyRubienElegantScrollers()
         // SwiftUI doesn't re-measure intrinsicContentSize on rootView swap;
         // nudge AppKit to recompute it before the next layout pass.
@@ -60,5 +60,15 @@ private struct LegacyOverlayScrollView<Content: View>: NSViewRepresentable {
             scrollView.reflectScrolledClipView(scrollView.contentView)
         }
     }
+}
+
+/// `NSHostingView` starts a fresh SwiftUI environment — the accent injected
+/// at the window root doesn't cross the representable boundary, so re-apply
+/// it on this nested root. A concrete wrapper view (rather than exposing the
+/// modifier's `ModifiedContent` type app-wide) so the `documentView` cast
+/// above has a nameable type.
+private struct AccentedRoot<Content: View>: View {
+    let content: Content
+    var body: some View { content.rubienAccent() }
 }
 #endif

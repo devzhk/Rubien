@@ -48,6 +48,7 @@ struct RubienApp: App {
                     showToast(message, tone: .success)
                 }
                 .environmentObject(syncCoordinator)
+                .rubienAccent()
         }
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified(showsTitle: false))
@@ -65,6 +66,7 @@ struct RubienApp: App {
                 .environment(updateController)
                 #endif
                 .environmentObject(syncCoordinator)
+                .rubienAccent()
         }
     }
 
