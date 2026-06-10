@@ -18,6 +18,11 @@ struct SidebarView: View {
     /// Gap index in `userViews` (0...count) where the dragged row will land. Drives the
     /// insertion bar; `nil` shows no bar. The rows themselves never move during the drag.
     @State private var dropInsertionIndex: Int?
+    /// Monotonic token identifying the current drag session; bumped by every `.onDrag`.
+    /// The cancel watchdog is keyed on it (NOT on `draggedViewId` — re-dragging the same
+    /// row would reuse the id and fail to restart the task) and compares it before
+    /// clearing, so a stale watchdog can never cancel a newer drag.
+    @State private var dragSession = 0
 
     private var defaultView: DatabaseView? {
         databaseViews.first(where: \.isDefault)
@@ -110,8 +115,8 @@ struct SidebarView: View {
                         // container-level drop target over the list. A parent `.onDrop`
                         // swallows the rows' `dropEntered` and silently breaks reordering.
                         // SwiftUI also gives no drag-cancel callback, so an abandoned drag
-                        // just leaves the row dimmed until the next selection clears it
-                        // (see `.onChange(of: selection)` below).
+                        // (Esc, or released outside the list) is cleaned up by the
+                        // mouse-button watchdog (see `.task(id: dragSession)` below).
                         ForEach(Array(userViews.enumerated()), id: \.element.id) { index, view in
                             SidebarRow(
                                 icon: view.icon,
@@ -145,6 +150,7 @@ struct SidebarView: View {
                                 }
                             }
                             .onDrag {
+                                dragSession += 1
                                 draggedViewId = view.id
                                 dropInsertionIndex = nil
                                 return NSItemProvider(object: "\(view.id!)" as NSString)
@@ -177,11 +183,26 @@ struct SidebarView: View {
                 editorMode = nil
             }
         }
-        .onChange(of: selection) { _, _ in
-            // SwiftUI gives no callback for a drag abandoned outside the list (or via
-            // Esc), so the drag state can linger. Clear it on the next selection — only
-            // the insertion bar is ever affected, and a fresh `.onDrag` re-seeds anyway.
-            if draggedViewId != nil {
+        // Watchdog for drags that end without a drop (Esc, or released outside the
+        // list): SwiftUI's `.onDrag` has no cancel callback, and a container-level drop
+        // target can't catch it either — it swallows the rows' `dropEntered` and breaks
+        // reordering (see the comment above the ForEach). The mouse button going up is
+        // a reliable post-drag cleanup signal — every session is over by then (Esc may
+        // end one earlier, while the button is still held) — so poll that.
+        .task(id: dragSession) {
+            guard draggedViewId != nil else { return }
+            let session = dragSession
+            while !Task.isCancelled, NSEvent.pressedMouseButtons != 0 {
+                try? await Task.sleep(for: .milliseconds(120))
+            }
+            // Button is up. A successful drop fires performDrop and clears the drag
+            // state well within this grace period (heuristic, not a hard ordering
+            // guarantee). After it, surviving state from THIS session means the drag
+            // was cancelled; a newer session must be left alone — the token check also
+            // covers the MainActor window where a new `.onDrag` has already mutated
+            // state but SwiftUI hasn't yet cancelled this task.
+            try? await Task.sleep(for: .milliseconds(300))
+            if dragSession == session, draggedViewId != nil {
                 draggedViewId = nil
                 dropInsertionIndex = nil
             }
