@@ -470,7 +470,7 @@ struct PDFReaderView: View {
 
             // Elevated plane: center PDF + right annotation sidebar
             HStack(spacing: 0) {
-                ZStack(alignment: .bottom) {
+                ZStack {
                     AnnotatablePDFView(viewModel: viewModel)
                         .padding(6)
                         .overlay {
@@ -489,10 +489,6 @@ struct PDFReaderView: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                             .allowsHitTesting(false)
                     }
-
-                    floatingReaderTab
-                        .padding(.horizontal, 18)
-                        .padding(.bottom, 12)
                 }
                 .frame(minWidth: 400, maxWidth: .infinity, maxHeight: .infinity)
                 .background(
@@ -562,6 +558,42 @@ struct PDFReaderView: View {
         )
         .navigationTitle(viewModel.reference.title)
         .legacyToolbarBackground(pdfContainerBackground, for: .windowToolbar)
+        .toolbar {
+            ToolbarItemGroup(placement: .automatic) {
+                Button {
+                    withAnimation { showOutlineSidebar.toggle() }
+                } label: {
+                    Label(String(localized: "Outline", bundle: .module), systemImage: "sidebar.left")
+                }
+                .help(String(localized: "Toggle outline sidebar", bundle: .module))
+
+                Button(action: zoomOut) {
+                    Image(systemName: "minus.magnifyingglass")
+                }
+                .help(String(localized: "Zoom out", bundle: .module))
+
+                Button(action: zoomIn) {
+                    Image(systemName: "plus.magnifyingglass")
+                }
+                .help(String(localized: "Zoom in", bundle: .module))
+
+                Button(action: fitToWidth) {
+                    Label(String(localized: "Fit width", bundle: .module), systemImage: "arrow.left.and.right")
+                }
+                .help(String(localized: "Fit width", bundle: .module))
+
+                pageIndicator
+            }
+
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    withAnimation { showAnnotationSidebar.toggle() }
+                } label: {
+                    Label("\(viewModel.annotations.count)", systemImage: "sidebar.right")
+                }
+                .help(String(localized: "Toggle annotations sidebar", bundle: .module))
+            }
+        }
         .onAppear {
             NoteEditorPool.shared.warmUp()
             viewModel.openSearchUI = {
@@ -666,64 +698,6 @@ struct PDFReaderView: View {
         }
     }
 
-    private var floatingReaderTab: some View {
-        HStack(spacing: 4) {
-            // Left sidebar toggle (TOC / Info)
-            Button {
-                withAnimation { showOutlineSidebar.toggle() }
-            } label: {
-                Image(systemName: showOutlineSidebar ? "sidebar.left" : "sidebar.left")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(showOutlineSidebar ? .primary : .secondary)
-                    .frame(width: 26, height: 20)
-                    .contentShape(Capsule(style: .continuous))
-            }
-            .buttonStyle(FloatingGlassCapsuleButtonStyle(isActive: showOutlineSidebar))
-            .help(String(localized: "Toggle outline sidebar", bundle: .module))
-
-            HStack(spacing: 1) {
-                floatingIconButton(systemName: "minus.magnifyingglass", help: String(localized: "Zoom out", bundle: .module), action: zoomOut)
-                floatingIconButton(systemName: "plus.magnifyingglass", help: String(localized: "Zoom in", bundle: .module), action: zoomIn)
-                floatingIconButton(systemName: "arrow.left.and.right", help: String(localized: "Fit width", bundle: .module), action: fitToWidth)
-            }
-            .padding(.horizontal, 3)
-            .padding(.vertical, 2)
-            .background(floatingInnerFill, in: Capsule(style: .continuous))
-            .overlay(
-                Capsule(style: .continuous)
-                    .strokeBorder(floatingInnerStroke, lineWidth: 0.45)
-            )
-
-            pageIndicator
-
-            // Right sidebar toggle (Annotations)
-            Button {
-                withAnimation { showAnnotationSidebar.toggle() }
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: showAnnotationSidebar ? "sidebar.right" : "sidebar.right")
-                        .font(.system(size: 10, weight: .semibold))
-                    Text("\(viewModel.annotations.count)")
-                        .font(.system(size: 11, weight: .medium))
-                        .monospacedDigit()
-                }
-                .foregroundStyle(showAnnotationSidebar ? .primary : .secondary)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .contentShape(Capsule(style: .continuous))
-            }
-            .buttonStyle(FloatingGlassCapsuleButtonStyle(isActive: showAnnotationSidebar))
-            .help(String(localized: "Toggle annotations sidebar", bundle: .module))
-        }
-        .padding(.horizontal, 5)
-        .padding(.vertical, 5)
-        .modifier(FloatingReaderTabSurface(
-            outerStroke: floatingOuterStroke,
-            shadowPrimary: floatingShadowPrimary,
-            shadowSecondary: floatingShadowSecondary
-        ))
-    }
-
     @ViewBuilder
     private var pageIndicator: some View {
         if isEditingPage {
@@ -731,13 +705,13 @@ struct PDFReaderView: View {
                 .font(.system(size: 11, weight: .medium))
                 .monospacedDigit()
                 .multilineTextAlignment(.center)
-                .frame(width: 40)
+                .frame(width: 44)
                 .textFieldStyle(.plain)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 3)
-                .background(floatingInnerFill, in: Capsule(style: .continuous))
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 8))
                 .overlay(
-                    Capsule(style: .continuous)
+                    RoundedRectangle(cornerRadius: 8)
                         .strokeBorder(Color.accentColor.opacity(0.5), lineWidth: 1)
                 )
                 .onSubmit {
@@ -755,13 +729,10 @@ struct PDFReaderView: View {
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.primary)
                 .monospacedDigit()
-                .padding(.horizontal, 10)
+                .frame(minWidth: 54)
+                .padding(.horizontal, 6)
                 .padding(.vertical, 3)
-                .background(floatingInnerFill, in: Capsule(style: .continuous))
-                .overlay(
-                    Capsule(style: .continuous)
-                        .strokeBorder(floatingInnerStroke, lineWidth: 0.45)
-                )
+                .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 8))
                 .onTapGesture {
                     pageInputText = "\(viewModel.currentPageIndex + 1)"
                     isEditingPage = true
@@ -769,46 +740,10 @@ struct PDFReaderView: View {
         }
     }
 
-    private func floatingIconButton(systemName: String, help: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: systemName)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.primary)
-                .frame(width: 22, height: 20)
-                .contentShape(Capsule(style: .continuous))
-        }
-        .buttonStyle(FloatingGlassIconButtonStyle())
-        .help(help)
-    }
-
     private var pageDisplayText: String {
         guard viewModel.totalPages > 0 else { return "PDF" }
         return "\(viewModel.currentPageIndex + 1)/\(viewModel.totalPages)"
     }
-
-    private var floatingInnerFill: Color {
-        Color.white.opacity(colorScheme == .dark ? 0.07 : 0.24)
-    }
-
-    private var floatingInnerStroke: Color {
-        Color.white.opacity(colorScheme == .dark ? 0.08 : 0.18)
-    }
-
-    private var floatingOuterStroke: Color {
-        Color.white.opacity(colorScheme == .dark ? 0.12 : 0.28)
-    }
-
-    private var floatingShadowPrimary: Color {
-        Color.black.opacity(colorScheme == .dark ? 0.22 : 0.07)
-    }
-
-    private var floatingShadowSecondary: Color {
-        Color.black.opacity(colorScheme == .dark ? 0.12 : 0.03)
-    }
-
-
-
-
 
     private var pdfContainerBackground: Color {
         Color(nsColor: NSColor(name: nil) { trait in
@@ -816,10 +751,6 @@ struct PDFReaderView: View {
                 ? NSColor(calibratedWhite: 0.15, alpha: 1.0)
                 : NSColor(calibratedWhite: 0.90, alpha: 1.0)
         })
-    }
-
-    private var panelEdgeShadowColor: Color {
-        Color.black.opacity(colorScheme == .dark ? 0.22 : 0.09)
     }
 
     private func zoomIn() {
@@ -863,60 +794,6 @@ struct PDFReaderView: View {
             }
         }
         return nil
-    }
-}
-
-private struct FloatingGlassIconButtonStyle: ButtonStyle {
-    @Environment(\.colorScheme) private var colorScheme
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .background(
-                Capsule(style: .continuous)
-                    .fill(
-                        Color.white.opacity(
-                            configuration.isPressed
-                                ? (colorScheme == .dark ? 0.13 : 0.34)
-                                : (colorScheme == .dark ? 0.04 : 0.12)
-                        )
-                    )
-            )
-            .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
-    }
-}
-
-private struct FloatingGlassCapsuleButtonStyle: ButtonStyle {
-    @Environment(\.colorScheme) private var colorScheme
-    let isActive: Bool
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .background(
-                Capsule(style: .continuous)
-                    .fill(
-                        Color.white.opacity(
-                            configuration.isPressed
-                                ? (colorScheme == .dark ? 0.14 : 0.36)
-                                : (isActive
-                                    ? (colorScheme == .dark ? 0.08 : 0.20)
-                                    : (colorScheme == .dark ? 0.04 : 0.10))
-                        )
-                    )
-            )
-            .overlay(
-                Capsule(style: .continuous)
-                    .strokeBorder(
-                        Color.white.opacity(
-                            isActive
-                                ? (colorScheme == .dark ? 0.08 : 0.16)
-                                : 0
-                        ),
-                        lineWidth: 0.45
-                    )
-            )
-            .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
@@ -1592,25 +1469,4 @@ struct AnnotatablePDFView: NSViewRepresentable {
     }
 }
 
-private struct FloatingReaderTabSurface: ViewModifier {
-    let outerStroke: Color
-    let shadowPrimary: Color
-    let shadowSecondary: Color
-
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if #available(macOS 26.0, *) {
-            content.glassEffect(.regular, in: Capsule(style: .continuous))
-        } else {
-            content
-                .background(.ultraThinMaterial, in: Capsule(style: .continuous))
-                .overlay(
-                    Capsule(style: .continuous)
-                        .strokeBorder(outerStroke, lineWidth: 0.55)
-                )
-                .shadow(color: shadowPrimary, radius: 10, y: 4)
-                .shadow(color: shadowSecondary, radius: 2, y: 1)
-        }
-    }
-}
 #endif

@@ -318,8 +318,7 @@ struct NotionToolbarButtonStyle: ButtonStyle {
 
 // MARK: - Shared glass surface for the annotation popovers
 //
-// Mirrors the PDF reader's floating control panel (`FloatingReaderTabSurface`):
-// real Liquid Glass on macOS 26+, an `.ultraThinMaterial` fallback below. Both
+// Uses real Liquid Glass on macOS 26+, with an `.ultraThinMaterial` fallback below. Both
 // popovers force `.environment(\.colorScheme, .light)` (their separators, color
 // swatches, and the light-themed note editor are all tuned for a light backing),
 // so this renders the light glass variant. The note editor opts into a transparent
