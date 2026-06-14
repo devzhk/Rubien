@@ -2880,6 +2880,7 @@ extension AppDatabase {
     }
 
     public func savePropertyDefinition(_ prop: inout PropertyDefinition) throws {
+        prop.normalizeOptions()
         try dbWriter.write { db in
             try prop.save(db)
         }

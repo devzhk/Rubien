@@ -322,6 +322,70 @@ final class StatusOptionMutationTests: XCTestCase {
         return prop
     }
 
+    func testFetchPropertyDefinitionDeduplicatesDuplicateOptionValues() throws {
+        let db = try makeDB()
+        let rawOptions = try encodedOptions([
+            SelectOption(value: "diffusion", color: "#007AFF"),
+            SelectOption(value: "diffusion", color: "#FF9500"),
+            SelectOption(value: "autoregressive", color: "#34C759"),
+        ])
+
+        try db.dbWriter.write { writer in
+            try writer.execute(sql: """
+                INSERT INTO propertyDefinition(name, type, optionsJSON, sortOrder, isDefault, isVisible)
+                VALUES ('Method', 'singleSelect', ?, 99, 0, 1)
+                """, arguments: [rawOptions])
+        }
+
+        let custom = try db.fetchAllPropertyDefinitions().first { $0.name == "Method" }!
+        XCTAssertEqual(custom.options.map(\.value), ["diffusion", "autoregressive"])
+        XCTAssertEqual(custom.options.first?.color, "#007AFF")
+    }
+
+    func testSavePropertyDefinitionPersistsDeduplicatedOptionsJSON() throws {
+        let db = try makeDB()
+        var custom = PropertyDefinition(
+            name: "Method",
+            type: .singleSelect,
+            sortOrder: 99,
+            isDefault: false,
+            isVisible: true
+        )
+        custom.optionsJSON = try encodedOptionObjects([
+            ["value": "diffusion", "color": "#007AFF", "remoteField": "keep"],
+            ["value": "diffusion", "color": "#FF9500", "remoteField": "drop"],
+            ["value": "autoregressive", "color": "#34C759", "remoteField": "keep2"],
+        ])
+
+        try db.savePropertyDefinition(&custom)
+
+        XCTAssertEqual(custom.options.map(\.value), ["diffusion", "autoregressive"])
+        let storedRaw = try db.dbWriter.read { reader in
+            try String.fetchOne(
+                reader,
+                sql: "SELECT optionsJSON FROM propertyDefinition WHERE id = ?",
+                arguments: [custom.id!]
+            )
+        }
+        let stored = try XCTUnwrap(storedRaw)
+        let decoded = try JSONDecoder().decode([SelectOption].self, from: Data(stored.utf8))
+        XCTAssertEqual(decoded.map(\.value), ["diffusion", "autoregressive"])
+        XCTAssertEqual(decoded.first?.color, "#007AFF")
+        let objects = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(stored.utf8)) as? [[String: Any]])
+        XCTAssertEqual(objects.first?["remoteField"] as? String, "keep")
+        XCTAssertEqual(objects.dropFirst().first?["remoteField"] as? String, "keep2")
+    }
+
+    private func encodedOptions(_ options: [SelectOption]) throws -> String {
+        let data = try JSONEncoder().encode(options)
+        return try XCTUnwrap(String(data: data, encoding: .utf8))
+    }
+
+    private func encodedOptionObjects(_ options: [[String: Any]]) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: options)
+        return try XCTUnwrap(String(data: data, encoding: .utf8))
+    }
+
     /// Clearing an in-use singleSelect option deletes the affected
     /// `propertyValue` rows (the reference loses its value entirely) rather
     /// than reassigning them, and drops the option from the definition.

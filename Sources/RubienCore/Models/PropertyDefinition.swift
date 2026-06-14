@@ -94,10 +94,10 @@ public struct PropertyDefinition: Identifiable, Codable, Hashable, Sendable {
                   let decoded = try? JSONDecoder().decode([SelectOption].self, from: data) else {
                 return []
             }
-            return decoded
+            return Self.normalizedOptions(decoded)
         }
         set {
-            optionsJSON = Self.encodeOptions(newValue)
+            optionsJSON = Self.encodeOptions(Self.normalizedOptions(newValue))
         }
     }
 
@@ -107,6 +107,38 @@ public struct PropertyDefinition: Identifiable, Codable, Hashable, Sendable {
             return "[]"
         }
         return json
+    }
+
+    public static func normalizedOptions(_ options: [SelectOption]) -> [SelectOption] {
+        var seen = Set<String>()
+        var normalized: [SelectOption] = []
+        normalized.reserveCapacity(options.count)
+        for option in options where seen.insert(option.value).inserted {
+            normalized.append(option)
+        }
+        return normalized
+    }
+
+    public mutating func normalizeOptions() {
+        optionsJSON = Self.normalizedOptionsJSON(optionsJSON)
+    }
+
+    public static func normalizedOptionsJSON(_ json: String) -> String {
+        guard let data = json.data(using: .utf8),
+              let rawOptions = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            return "[]"
+        }
+        var seen = Set<String>()
+        let normalized = rawOptions.filter { rawOption in
+            guard let value = rawOption["value"] as? String else { return false }
+            return seen.insert(value).inserted
+        }
+        guard JSONSerialization.isValidJSONObject(normalized),
+              let normalizedData = try? JSONSerialization.data(withJSONObject: normalized),
+              let normalizedJSON = String(data: normalizedData, encoding: .utf8) else {
+            return "[]"
+        }
+        return normalizedJSON
     }
 
     public var customizationID: String {

@@ -471,9 +471,13 @@ struct SelectOptionPicker: View {
     @State private var listContentHeight: CGFloat = 0
     @Environment(\.dismiss) private var dismiss
 
+    private var normalizedOptions: [SelectOption] {
+        PropertyDefinition.normalizedOptions(options)
+    }
+
     private var filteredOptions: [SelectOption] {
-        if search.isEmpty { return options }
-        return options.filter { $0.value.localizedCaseInsensitiveContains(search) }
+        if search.isEmpty { return normalizedOptions }
+        return normalizedOptions.filter { $0.value.localizedCaseInsensitiveContains(search) }
     }
 
     private var canCreate: Bool { onCreateOption != nil }
@@ -508,7 +512,7 @@ struct SelectOptionPicker: View {
                     .onSubmit {
                         guard let onCreateOption else { return }
                         let trimmed = search.trimmingCharacters(in: .whitespaces)
-                        if !trimmed.isEmpty && !options.contains(where: { $0.value.lowercased() == trimmed.lowercased() }) {
+                        if !trimmed.isEmpty && !normalizedOptions.contains(where: { $0.value.lowercased() == trimmed.lowercased() }) {
                             onCreateOption(trimmed)
                             if isSingleSelect {
                                 localSelected = [trimmed]
@@ -560,7 +564,7 @@ struct SelectOptionPicker: View {
 
                     if let onCreateOption,
                        !search.isEmpty,
-                       !options.contains(where: { $0.value.lowercased() == search.trimmingCharacters(in: .whitespaces).lowercased() }) {
+                       !normalizedOptions.contains(where: { $0.value.lowercased() == search.trimmingCharacters(in: .whitespaces).lowercased() }) {
                         Button {
                             let trimmed = search.trimmingCharacters(in: .whitespaces)
                             if !trimmed.isEmpty {
