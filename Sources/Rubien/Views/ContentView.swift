@@ -775,6 +775,7 @@ struct ContentView: View {
     @State private var cslImportMessage: String?
     @State private var columnVisibility = NavigationSplitViewVisibility.all
     @State private var selectedId: Int64?
+    @State private var tableScrollRequest = 0
     @State private var columnConfigs: [ColumnConfig] = {
         guard let data = UserDefaults.standard.data(forKey: RubienPreferences.columnConfigsKey),
               let decoded = try? JSONDecoder().decode([ColumnConfig].self, from: data) else {
@@ -872,7 +873,8 @@ struct ContentView: View {
                 viewName: viewModel.currentViewName,
                 isDirty: viewModel.isCurrentViewDirty,
                 onSaveView: { viewModel.saveDraftForCurrentView() },
-                onDiscardView: { viewModel.discardDraftForCurrentView() }
+                onDiscardView: { viewModel.discardDraftForCurrentView() },
+                scrollRequest: tableScrollRequest
             )
             .navigationSplitViewColumnWidth(min: 400, ideal: 600, max: .infinity)
         } detail: {
@@ -1057,7 +1059,7 @@ struct ContentView: View {
                     scope: viewModel.currentReferenceScope,
                     isPresented: $showSearch,
                     onSelect: { ref in
-                        selectedId = ref.id
+                        revealReferenceFromSearch(ref)
                     },
                     onDeleteMultiple: { refs in
                         deleteReferences(refs)
@@ -1228,6 +1230,18 @@ struct ContentView: View {
     private func importBibTeX() {
         guard let url = OpenPanelPicker.pickBibTeXFile() else { return }
         viewModel.importBibTeX(from: url)
+    }
+
+    private func revealReferenceFromSearch(_ reference: Reference) {
+        guard let id = reference.id else { return }
+        if let defaultViewId = viewModel.databaseViews.first(where: \.isDefault)?.id {
+            viewModel.selectedSidebar = .view(defaultViewId)
+        } else {
+            viewModel.selectedSidebar = .allReferences
+        }
+        selectedId = id
+        tableScrollRequest += 1
+        columnVisibility = .all
     }
 
     private func importRIS() {

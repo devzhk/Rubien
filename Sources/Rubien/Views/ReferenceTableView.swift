@@ -1,4 +1,5 @@
 #if os(macOS)
+import AppKit
 import SwiftUI
 import RubienCore
 
@@ -41,6 +42,7 @@ struct ReferenceTableView: View {
     var isDirty: Bool = false
     var onSaveView: () -> Void = {}
     var onDiscardView: () -> Void = {}
+    var scrollRequest: Int = 0
 
     @State private var selection = Set<Reference.ID>()
     @State private var showDeleteConfirm = false
@@ -150,6 +152,15 @@ struct ReferenceTableView: View {
         } message: {
             Text("This action cannot be undone.", bundle: .module)
         }
+        .onAppear {
+            syncSelectionFromSelectedId()
+        }
+        .onChange(of: selectedId) { _, _ in
+            syncSelectionFromSelectedId()
+        }
+        .onChange(of: scrollRequest) { _, _ in
+            syncSelectionFromSelectedId()
+        }
     }
 
     // MARK: - Table
@@ -193,6 +204,13 @@ struct ReferenceTableView: View {
             wrapForColumn: { id in viewColumnWraps.contains(id) },
             columnCustomization: $columnCustomization
         )
+        .background(
+            ReferenceTableSelectionScroller(
+                selectedId: selectedId,
+                scrollRequest: scrollRequest,
+                rowIDs: visibleTableRowIDs(processed: processed, buckets: buckets)
+            )
+        )
         .contextMenu(forSelectionType: Reference.ID.self) { ids in
             if let id = ids.first, let ref = references.first(where: { $0.id == id }) {
                 contextMenuContent(for: ref)
@@ -220,6 +238,44 @@ struct ReferenceTableView: View {
             if mirrored != tableSortOrder {
                 tableSortOrder = mirrored
             }
+        }
+    }
+
+    private func syncSelectionFromSelectedId() {
+        guard let selectedId else {
+            if !selection.isEmpty {
+                selection.removeAll()
+            }
+            return
+        }
+
+        expandCollapsedGroup(containing: selectedId)
+        let target: Set<Reference.ID> = [Optional(selectedId)]
+        if selection != target {
+            selection = target
+        }
+    }
+
+    private func expandCollapsedGroup(containing selectedId: Int64) {
+        guard groupBy?.collapsed.isEmpty == false,
+              let config = groupBy else { return }
+        let buckets = GroupEngine.apply(processedReferences, config: config, context: pipelineContext)
+        guard let bucket = buckets.first(where: { bucket in
+            bucket.references.contains { $0.id == selectedId }
+        }) else { return }
+        groupBy?.collapsed.remove(bucket.key)
+    }
+
+    private func visibleTableRowIDs(processed: [Reference], buckets: [GroupBucket]?) -> [Int64?] {
+        guard let buckets else {
+            return processed.map(\.id)
+        }
+        return buckets.flatMap { bucket -> [Int64?] in
+            var ids: [Int64?] = [nil]
+            if groupBy?.collapsed.contains(bucket.key) != true {
+                ids.append(contentsOf: bucket.references.map(\.id))
+            }
+            return ids
         }
     }
 
@@ -792,6 +848,138 @@ private struct ReferenceTableContent: View {
 
     private func persistColumnCustomization(_ value: TableColumnCustomization<Reference>) {
         RubienPreferences.saveTableColumnCustomization(value)
+    }
+}
+
+private struct ReferenceTableSelectionScroller: NSViewRepresentable {
+    let selectedId: Int64?
+    let scrollRequest: Int
+    let rowIDs: [Int64?]
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        NSView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.selectedId = selectedId
+        context.coordinator.scrollRequest = scrollRequest
+        context.coordinator.rowIDs = rowIDs
+        context.coordinator.scheduleScroll(from: nsView)
+    }
+
+    final class Coordinator {
+        private struct ScrollKey: Equatable {
+            var selectedId: Int64
+            var scrollRequest: Int
+            var rowIDs: [Int64?]
+        }
+
+        var selectedId: Int64?
+        var scrollRequest = 0
+        var rowIDs: [Int64?] = []
+        private var lastScrollKey: ScrollKey?
+
+        func scheduleScroll(from view: NSView) {
+            guard let selectedId else {
+                lastScrollKey = nil
+                return
+            }
+
+            let key = ScrollKey(selectedId: selectedId, scrollRequest: scrollRequest, rowIDs: rowIDs)
+            guard key != lastScrollKey else { return }
+
+            DispatchQueue.main.async { [weak view, weak self] in
+                guard let view else { return }
+                self?.scrollIfNeeded(from: view)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak view, weak self] in
+                guard let view else { return }
+                self?.scrollIfNeeded(from: view, force: true)
+            }
+        }
+
+        private func scrollIfNeeded(from view: NSView, attempt: Int = 0, force: Bool = false) {
+            guard let selectedId else {
+                lastScrollKey = nil
+                return
+            }
+
+            let key = ScrollKey(selectedId: selectedId, scrollRequest: scrollRequest, rowIDs: rowIDs)
+            guard force || key != lastScrollKey else { return }
+            guard let tableView = Self.findTableView(from: view) else {
+                retry(from: view, attempt: attempt, force: force)
+                return
+            }
+
+            guard let selectedRow = rowIDs.firstIndex(of: selectedId),
+                  selectedRow < tableView.numberOfRows else {
+                retry(from: view, attempt: attempt, force: force)
+                return
+            }
+
+            if !tableView.selectedRowIndexes.contains(selectedRow) {
+                tableView.selectRowIndexes(IndexSet(integer: selectedRow), byExtendingSelection: false)
+            }
+            reveal(row: selectedRow, in: tableView)
+            lastScrollKey = key
+        }
+
+        private func reveal(row: Int, in tableView: NSTableView) {
+            tableView.layoutSubtreeIfNeeded()
+            tableView.scrollRowToVisible(row)
+
+            guard let scrollView = tableView.enclosingScrollView else { return }
+            let rowRect = tableView.rect(ofRow: row)
+            guard !rowRect.isEmpty else { return }
+
+            let clipView = scrollView.contentView
+            var targetBounds = clipView.bounds
+            targetBounds.origin.y = rowRect.midY - (targetBounds.height / 2)
+
+            let constrained = clipView.constrainBoundsRect(targetBounds)
+            clipView.scroll(to: constrained.origin)
+            scrollView.reflectScrolledClipView(clipView)
+        }
+
+        private func retry(from view: NSView, attempt: Int, force: Bool) {
+            guard attempt < 6 else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak view, weak self] in
+                guard let view else { return }
+                self?.scrollIfNeeded(from: view, attempt: attempt + 1, force: force)
+            }
+        }
+
+        private static func findTableView(from view: NSView) -> NSTableView? {
+            var candidate: NSView? = view
+            while let current = candidate {
+                if let tableView = current as? NSTableView {
+                    return tableView
+                }
+                if let tableView = current.firstDescendant(of: NSTableView.self) {
+                    return tableView
+                }
+                candidate = current.superview
+            }
+            return view.window?.contentView?.firstDescendant(of: NSTableView.self)
+        }
+    }
+}
+
+private extension NSView {
+    func firstDescendant<T: NSView>(of type: T.Type) -> T? {
+        for subview in subviews {
+            if let match = subview as? T {
+                return match
+            }
+            if let match = subview.firstDescendant(of: type) {
+                return match
+            }
+        }
+        return nil
     }
 }
 
