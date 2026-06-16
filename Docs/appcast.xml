@@ -152,23 +152,5 @@
                 type="application/octet-stream"
             />
         </item>
-        <item>
-            <title>Rubien 0.1.9</title>
-            <description><![CDATA[• User-customizable accent color
-• Drag to reorder saved views in the sidebar
-• PDF reader controls moved into the toolbar
-• More reliable iCloud sync (defers fetches while the sync engine is busy)
-• Fixes: search-result scrolling, duplicate options in the select picker, and stale drag state after a cancelled drag]]></description>
-            <pubDate>Tue, 16 Jun 2026 05:09:43 +0000</pubDate>
-            <sparkle:version>10</sparkle:version>
-            <sparkle:shortVersionString>0.1.9</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <enclosure
-                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.1.9/Rubien-0.1.9.dmg"
-                sparkle:edSignature="gNGbgbdNKQ5hgDsuWBaDqP4E/kmBEszd81VtL9dtQJiQMOXZfw7r4RKk5ktM7Ufs84liG6Y7dWMfOUdKqZbbCA=="
-                length="17043628"
-                type="application/octet-stream"
-            />
-        </item>
     </channel>
 </rss>
