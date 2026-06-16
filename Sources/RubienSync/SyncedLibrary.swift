@@ -55,12 +55,6 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     private let containerProvider: @Sendable () -> CKContainer
     private var _container: CKContainer?
 
-    /// Schedules a deferred fetch outside the current actor turn. Production
-    /// uses an unstructured task so CKSyncEngine delegate callbacks can unwind
-    /// before `fetchChanges()` is called; tests inject a recorder/no-op to
-    /// verify deferral without touching the CloudKit runtime.
-    private let deferredFetchScheduler: @Sendable (@escaping @Sendable () async -> Void) -> Void
-
     /// Lazy engine — built on demand so the delegate (`self`) is fully
     /// initialized before the CKSyncEngine starts issuing async callbacks.
     private var _engine: CKSyncEngine?
@@ -88,10 +82,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         // pass `{ RubienPreferences.pdfAssetSyncEnabled }`; the
         // `PDFUploadDrainerTests` pass `{ true }` / `{ false }` explicitly
         // to exercise the on/off branches.
-        pdfAssetSyncEnabledProvider: @escaping @Sendable () -> Bool = { false },
-        deferredFetchScheduler: @escaping @Sendable (@escaping @Sendable () async -> Void) -> Void = { operation in
-            Task { await operation() }
-        }
+        pdfAssetSyncEnabledProvider: @escaping @Sendable () -> Bool = { false }
     ) {
         var continuation: AsyncStream<SyncStatus>.Continuation!
         self.statusStream = AsyncStream { cont in continuation = cont }
@@ -101,7 +92,6 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         self.engineStateStore = SyncEngineStateStore(fileURL: stateFileURL)
         self.containerProvider = containerProvider
         self.pdfAssetSyncEnabledProvider = pdfAssetSyncEnabledProvider
-        self.deferredFetchScheduler = deferredFetchScheduler
     }
 
     private var container: CKContainer {
@@ -358,7 +348,6 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     private func publishIdleIfQuiescent() {
         guard !isFetchInFlight, !isSendInFlight else { return }
         publishStatus(.idle)
-        scheduleDeferredFetchIfQuiescent()
     }
 
     /// Test-only hook. Production callers go through `publishStatus`.
@@ -384,7 +373,6 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     /// read-then-set below has no suspension point and is race-free across
     /// concurrent callers (launch / foreground / idle timer / error recovery).
     private var isExplicitFetchRunning = false
-    private var needsDeferredExplicitFetch = false
 
     /// Install a GRDB `TransactionObserver` that forwards post-commit
     /// activity into the engine automatically. One call at app startup,
@@ -460,15 +448,9 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     /// off. Only called once the library is live, so `engine` already exists.
     @discardableResult
     public func fetchRemoteChanges() async -> Bool {
-        guard !isExplicitFetchRunning, !isFetchInFlight, !isSendInFlight else {
-            needsDeferredExplicitFetch = true
-            return true
-        }
+        guard !isExplicitFetchRunning else { return true }
         isExplicitFetchRunning = true
-        defer {
-            isExplicitFetchRunning = false
-            scheduleDeferredFetchIfQuiescent()
-        }
+        defer { isExplicitFetchRunning = false }
         do {
             try await engine.fetchChanges()
             return true
@@ -476,13 +458,6 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             log.error("fetchRemoteChanges failed: \(error.localizedDescription, privacy: .public)")
             return false
         }
-    }
-
-    private func scheduleDeferredFetchIfQuiescent() {
-        guard needsDeferredExplicitFetch else { return }
-        guard !isExplicitFetchRunning, !isFetchInFlight, !isSendInFlight else { return }
-        needsDeferredExplicitFetch = false
-        deferredFetchScheduler { await self.fetchRemoteChanges() }
     }
 
     private var engine: CKSyncEngine {
