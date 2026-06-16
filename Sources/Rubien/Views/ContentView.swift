@@ -667,10 +667,17 @@ final class LibraryViewModel: ObservableObject {
         viewDrafts.removeValue(forKey: id)
     }
 
+    /// Auto-selects the default database view at startup — but ONCE. Re-running it on every
+    /// `databaseViews` emission (sync, view reorder, late load) would yank the user back to the
+    /// default view after they (or an import/search reveal) navigated to `.allReferences`,
+    /// re-hiding any row the default view's filters exclude.
+    private var hasAppliedDefaultView = false
     func selectDefaultViewIfNeeded() {
+        guard !hasAppliedDefaultView else { return }
         if case .allReferences = selectedSidebar,
            let defaultView = databaseViews.first(where: \.isDefault),
            let id = defaultView.id {
+            hasAppliedDefaultView = true
             selectedSidebar = .view(id)
         }
     }
