@@ -101,6 +101,7 @@ Rules every new sync work must follow:
 - **Forward-compat decode.** Unknown enum rawValues fall back to safe defaults rather than throwing — a newer peer writing a novel case must not crash an older decoder.
 - **Triggers do NOT self-`UPDATE` `dateModified`.** SQLite's `recursive_triggers = ON` would loop. Stamp `dateModified` in the Swift mutation layer.
 - **Synced tables hold no local-only columns.** Enforced by `SyncSchemaInvariantTests`. Add a column to a synced table → must add the corresponding CKRecord field.
+- **Never call `CKSyncEngine.fetchChanges()` / `sendChanges()` from inside `handleEvent(_:syncEngine:)`.** CloudKit asserts against re-entering the engine from its own delegate callback (`EXC_BREAKPOINT`/SIGTRAP), and wrapping the call in a `Task {}` does **not** help when it's kicked as a consequence of an event (e.g. a deferred fetch off `.didFetchChanges`/idle). This shipped as the 0.1.9 crash (`d339dbf`, reverted in 0.1.10). Kick explicit fetches from launch / foreground / idle-timer instead — never from within `handleEvent`.
 
 PDF binaries sync as a sibling `CDReferencePDF` record carrying a `CKAsset`; per-device materialization state lives in a local-only `pdfCache` table (never observed by sync triggers). iOS on-demand fetch / LRU eviction is deferred to the iOS-port plan.
 
