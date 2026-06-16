@@ -48,6 +48,39 @@ final class LibraryViewModelTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(ref.dateModified, before)
     }
 
+    func testSaveReferenceReturnsCreatedThenExistingForDuplicate() throws {
+        let db = try makeTestDB()
+        let vm = LibraryViewModel(db: db)
+
+        var first = Reference(title: "Dedup Target")
+        first.doi = "10.1234/dedup.feedback"
+        let firstResult = vm.saveReference(&first)
+        XCTAssertEqual(firstResult, .created)
+
+        var dup = Reference(title: "Dedup Target (re-added)")
+        dup.doi = "10.1234/dedup.feedback"
+        let dupResult = vm.saveReference(&dup)
+        XCTAssertEqual(dupResult, .existing, "Re-adding the same DOI should merge, not create")
+        XCTAssertEqual(dup.id, first.id, "Duplicate should resolve to the existing row")
+    }
+
+    func testAddConfirmationMessageDistinguishesCreatedFromExisting() {
+        let created = LibraryViewModel.addConfirmationMessage(for: .created)
+        let existing = LibraryViewModel.addConfirmationMessage(for: .existing)
+        XCTAssertFalse(created.isEmpty)
+        XCTAssertFalse(existing.isEmpty)
+        XCTAssertNotEqual(created, existing, "Created and duplicate adds must give different feedback")
+    }
+
+    func testFlashAddConfirmationSetsToastWithoutTouchingImportProgress() throws {
+        let db = try makeTestDB()
+        let vm = LibraryViewModel(db: db)
+        XCTAssertNil(vm.addConfirmation)
+        vm.flashAddConfirmation("Already in your library")
+        XCTAssertEqual(vm.addConfirmation?.message, "Already in your library")
+        XCTAssertNil(vm.importProgress, "Add confirmation must not clobber bulk-import progress")
+    }
+
     // MARK: - Delete Reference
 
     func testDeleteReferenceRemovesFromDB() throws {

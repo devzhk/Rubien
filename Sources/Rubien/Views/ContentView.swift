@@ -79,6 +79,10 @@ final class LibraryViewModel: ObservableObject {
     }
     @Published var isImporting = false
     @Published var importProgress: String?
+    /// Transient confirmation for single-reference adds — kept SEPARATE from
+    /// `importProgress` so a quick "Added"/"Already in your library" toast can't clobber
+    /// active bulk-import progress. The UUID token guards auto-dismiss against stale timers.
+    @Published var addConfirmation: AddConfirmation?
     @Published var errorMessage: String?
     /// All reference titles for smart keyword extraction (unaffected by filters).
     @Published private(set) var allReferenceTitles: [String] = []
@@ -345,12 +349,39 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
-    func saveReference(_ ref: inout Reference) {
+    struct AddConfirmation: Equatable, Identifiable {
+        let id: UUID
+        let message: String
+    }
+
+    /// User-facing toast text for a single-add outcome. Static + pure so it's unit-testable.
+    static func addConfirmationMessage(for result: AppDatabase.ReferenceSaveResult) -> String {
+        switch result {
+        case .created:  return String(localized: "Added to library", bundle: .module)
+        case .existing: return String(localized: "Already in your library", bundle: .module)
+        }
+    }
+
+    /// Shows a transient single-add confirmation toast and auto-dismisses it. The UUID token
+    /// ensures an older dismissal timer can't clear a newer message.
+    func flashAddConfirmation(_ message: String) {
+        let confirmation = AddConfirmation(id: UUID(), message: message)
+        addConfirmation = confirmation
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+            if self?.addConfirmation?.id == confirmation.id {
+                self?.addConfirmation = nil
+            }
+        }
+    }
+
+    @discardableResult
+    func saveReference(_ ref: inout Reference) -> AppDatabase.ReferenceSaveResult? {
         ref.dateModified = Date()
         do {
-            try db.saveReference(&ref)
+            return try db.saveReference(&ref)
         } catch {
             errorMessage = "Save failed: \(error.localizedDescription)"
+            return nil
         }
     }
 
@@ -407,15 +438,16 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
+    @discardableResult
     func saveManualReference(
         _ ref: inout Reference,
         reviewedBy: String = "manual-entry",
         pdfFilename: String? = nil
-    ) {
+    ) -> AppDatabase.ReferenceSaveResult? {
         if ref.id == nil && !ref.verificationStatus.isLibraryReady {
             ref = MetadataVerifier.manuallyVerified(ref, reviewedBy: reviewedBy)
         }
-        saveReference(&ref)
+        let result = saveReference(&ref)
         if let pdfFilename, let id = ref.id {
             do {
                 try db.attachImportedPDFs(rowIds: [id], filenames: [pdfFilename])
@@ -425,6 +457,7 @@ final class LibraryViewModel: ObservableObject {
                 errorMessage = "Attach PDF failed: \(error.localizedDescription)"
             }
         }
+        return result
     }
 
     func batchImportReferences(_ refs: [Reference]) {
@@ -1011,7 +1044,8 @@ struct ContentView: View {
             AddReferenceView(
                 onSave: { ref, pdfFilename in
                     var r = ref
-                    viewModel.saveManualReference(&r, pdfFilename: pdfFilename)
+                    let result = viewModel.saveManualReference(&r, pdfFilename: pdfFilename)
+                    confirmAndReveal(r, result: result)
                 },
                 initialReferenceType: addReferenceInitialType
             )
@@ -1020,7 +1054,8 @@ struct ContentView: View {
             WebImportView(
                 onSave: { ref in
                     var r = ref
-                    viewModel.saveManualReference(&r, reviewedBy: "web-import")
+                    let result = viewModel.saveManualReference(&r, reviewedBy: "web-import")
+                    confirmAndReveal(r, result: result)
                 }
             )
         }
@@ -1059,7 +1094,7 @@ struct ContentView: View {
                     scope: viewModel.currentReferenceScope,
                     isPresented: $showSearch,
                     onSelect: { ref in
-                        revealReferenceFromSearch(ref)
+                        revealReference(ref)
                     },
                     onDeleteMultiple: { refs in
                         deleteReferences(refs)
@@ -1078,19 +1113,28 @@ struct ContentView: View {
                 .animation(.spring(response: 0.35, dampingFraction: 0.8), value: progress)
             }
         }
+        .overlay(alignment: .top) {
+            if let confirmation = viewModel.addConfirmation {
+                FloatingProgressToast(message: confirmation.message, isSpinning: false)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .zIndex(11)
+                    .animation(.spring(response: 0.35, dampingFraction: 0.8), value: confirmation.id)
+            }
+        }
         .sheet(isPresented: $showAddByIdentifier) {
             AddByIdentifierView(
                 resolver: metadataResolver,
                 onSave: { ref, downloadPDF, pdfURLOverride in
                     var r = ref
-                    viewModel.saveReference(&r)
-                    if downloadPDF, let id = r.id {
+                    let result = viewModel.saveReference(&r)
+                    if downloadPDF, result != nil, let id = r.id {
                         viewModel.downloadPDFInBackground(
                             for: r,
                             id: id,
                             pdfURLOverride: pdfURLOverride
                         )
                     }
+                    confirmAndReveal(r, result: result)
                 },
                 onQueueResult: { result, input in
                     queueResolutionResult(
@@ -1232,16 +1276,24 @@ struct ContentView: View {
         viewModel.importBibTeX(from: url)
     }
 
-    private func revealReferenceFromSearch(_ reference: Reference) {
+    private func revealReference(_ reference: Reference) {
         guard let id = reference.id else { return }
-        if let defaultViewId = viewModel.databaseViews.first(where: \.isDefault)?.id {
-            viewModel.selectedSidebar = .view(defaultViewId)
-        } else {
+        // Land on the unfiltered .allReferences scope (which always renders the row) unless we're
+        // already there. Never the default database view — its saved filters could hide the row.
+        if case .allReferences = viewModel.selectedSidebar {} else {
             viewModel.selectedSidebar = .allReferences
         }
         selectedId = id
         tableScrollRequest += 1
         columnVisibility = .all
+    }
+
+    /// Single-add follow-through: confirmation toast (created vs duplicate) + reveal the row.
+    /// `result == nil` means the save failed and already surfaced an error alert.
+    private func confirmAndReveal(_ reference: Reference, result: AppDatabase.ReferenceSaveResult?) {
+        guard let result else { return }
+        viewModel.flashAddConfirmation(LibraryViewModel.addConfirmationMessage(for: result))
+        revealReference(reference)
     }
 
     private func importRIS() {
