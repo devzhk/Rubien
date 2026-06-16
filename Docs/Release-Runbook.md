@@ -56,6 +56,7 @@ git checkout main && git pull
 # 2. Bump the marketing version (if needed) and the build counter
 $EDITOR VERSION       # e.g. 0.1.0 → 0.1.1
 $EDITOR BUILD.txt     # increment by 1
+./scripts/generate-cli-version.sh   # regenerate checked-in GeneratedVersion.swift — CI fails if it drifts
 
 # 3. Set the Developer ID identity in your shell
 export CODESIGN_IDENTITY="Developer ID Application: <Your Name> (9TXK4V3SS8)"
@@ -71,7 +72,7 @@ export CODESIGN_IDENTITY="Developer ID Application: <Your Name> (9TXK4V3SS8)"
 # - Within ~24 hours, existing installs see the "Update ready" indicator
 ```
 
-**You must bump `VERSION` (if the marketing version is changing) and `BUILD.txt` (every release) before running — `release.sh` does not bump them for you.** `release.sh` is then the single entry point: it calls `scripts/build-app.sh` (which assembles + signs + embeds Sparkle, then builds the DMG), notarizes, signs the appcast item with `sign_update`, prepends the item to `Docs/appcast.xml`, commits + pushes the appcast change, tags the source commit on the private repo, and creates the GitHub release with the DMG on the public `devzhk/Rubien-releases` repo via `gh release create --repo`.
+**You must bump `VERSION` (if the marketing version is changing) and `BUILD.txt` (every release) before running — `release.sh` does not bump them for you. Then run `./scripts/generate-cli-version.sh` and commit the regenerated `Sources/RubienCLI/GeneratedVersion.swift` alongside the bump; the file is checked in and CI's "Verify generated CLI version is in sync" step fails the build if it drifts from `VERSION` + `BUILD.txt`.** `release.sh` is then the single entry point: it calls `scripts/build-app.sh` (which assembles + signs + embeds Sparkle, then builds the DMG), notarizes, signs the appcast item with `sign_update`, prepends the item to `Docs/appcast.xml`, commits + pushes the appcast change, tags the source commit on the private repo, and creates the GitHub release with the DMG on the public `devzhk/Rubien-releases` repo via `gh release create --repo`.
 
 ## Linux `rubien-cli` build (automatic)
 
