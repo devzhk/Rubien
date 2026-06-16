@@ -152,5 +152,21 @@
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.1.10</title>
+            <description><![CDATA[• Fix a crash that could occur during iCloud sync
+• Search now ranks results by relevance (best match first), not just by date added
+• Re-adding a paper already in your library now confirms it and jumps to it, instead of silently doing nothing]]></description>
+            <pubDate>Tue, 16 Jun 2026 22:23:31 +0000</pubDate>
+            <sparkle:version>11</sparkle:version>
+            <sparkle:shortVersionString>0.1.10</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.1.10/Rubien-0.1.10.dmg"
+                sparkle:edSignature="V+Kt55+ESgwpJ1w/4FVvsln17uGBPCE58g4ceqCvET+G/njqaV64goeJKx1p7awXJ0wizvy7V4v7V0WKBLuhCw=="
+                length="17044045"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
