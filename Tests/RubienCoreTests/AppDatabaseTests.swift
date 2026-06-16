@@ -49,6 +49,34 @@ final class AppDatabaseTests: XCTestCase {
         XCTAssertEqual(fetched[0].year, 2023)
     }
 
+    func testSearchRanksByRelevanceNotRecency() throws {
+        let db = try makeDatabase()
+
+        // Strong bm25 match for "principles", added EARLIER.
+        var strong = Reference(title: "The Principles of Diffusion Models")
+        strong.dateAdded = Date(timeIntervalSince1970: 1_000)
+        try db.saveReference(&strong)
+
+        // Weak match ("principles" buried in a long title), added LATER → newest by date.
+        var weak = Reference(
+            title: "A Broad Survey of Modern Machine Learning Methods and Their Guiding Principles Across Many Domains"
+        )
+        weak.dateAdded = Date(timeIntervalSince1970: 2_000)
+        try db.saveReference(&weak)
+
+        // searchReferences ranks the stronger match first despite it being the older row.
+        let byRelevance = try db.searchReferences(query: "principles")
+        XCTAssertEqual(byRelevance.map(\.id), [strong.id, weak.id],
+                       "Search should rank by bm25 relevance, not recency")
+
+        // The default (non-search) keyword fetch stays chronological (newest first).
+        var filter = ReferenceFilter()
+        filter.keyword = "principles"
+        let byDate = try db.fetchReferences(scope: .all, filter: filter, limit: 0)
+        XCTAssertEqual(byDate.map(\.id), [weak.id, strong.id],
+                       "Non-search fetch should remain dateAdded DESC")
+    }
+
     func testUpdateReference() throws {
         let db = try makeDatabase()
         var ref = Reference(title: "Original Title")

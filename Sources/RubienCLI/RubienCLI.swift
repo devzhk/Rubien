@@ -530,7 +530,7 @@ struct Search: ParsableCommand {
             }
             filter.keywordOperator = parsed
         }
-        let refs = try AppDatabase.shared.fetchReferences(scope: .all, filter: filter, limit: limit)
+        let refs = try AppDatabase.shared.fetchReferences(scope: .all, filter: filter, limit: limit, orderBy: .relevance)
         printJSON(try mapReferenceDTOs(refs))
     }
 }

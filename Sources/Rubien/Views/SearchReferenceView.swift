@@ -511,7 +511,7 @@ struct SearchOverlay: View {
             let fetched: [Reference] = try await withCheckedThrowingContinuation { continuation in
                 DispatchQueue.global(qos: .userInitiated).async {
                     do {
-                        let refs = try db.fetchReferences(scope: scope, filter: filter, limit: limit)
+                        let refs = try db.fetchReferences(scope: scope, filter: filter, limit: limit, orderBy: .relevance)
                         continuation.resume(returning: refs)
                     } catch {
                         continuation.resume(throwing: error)

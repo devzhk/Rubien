@@ -1507,12 +1507,13 @@ extension AppDatabase {
         }
     }
 
-    /// FTS5 full-text search with prefix matching — "smi" matches "Smith"
+    /// FTS5 full-text search, prefix-matched ("smi" matches "Smith"), ranked by bm25
+    /// relevance (best match first) rather than recency.
     public func searchReferences(query: String, limit: Int = 20) throws -> [Reference] {
         return try dbWriter.read { db in
             var filter = ReferenceFilter()
             filter.keyword = query
-            return try fetchReferences(db: db, scope: .all, filter: filter, limit: limit)
+            return try fetchReferences(db: db, scope: .all, filter: filter, limit: limit, orderBy: .relevance)
         }
     }
 
@@ -1772,13 +1773,24 @@ extension AppDatabase {
         return reference
     }
 
+    /// Result ordering for `fetchReferences`. The live library feed is chronological;
+    /// free-text *search* wants best-match-first.
+    public enum ReferenceOrdering: Sendable {
+        /// Newest first (`dateAdded DESC`) — default for the live table feed and lists.
+        case dateAddedDescending
+        /// FTS5 bm25 relevance, best match first, with a deterministic tiebreaker.
+        /// Falls back to `dateAddedDescending` when there is no keyword/FTS match.
+        case relevance
+    }
+
     public func fetchReferences(
         scope: ReferenceScope,
         filter: ReferenceFilter,
-        limit: Int = 0
+        limit: Int = 0,
+        orderBy: ReferenceOrdering = .dateAddedDescending
     ) throws -> [Reference] {
         try dbWriter.read { db in
-            try fetchReferences(db: db, scope: scope, filter: filter, limit: limit)
+            try fetchReferences(db: db, scope: scope, filter: filter, limit: limit, orderBy: orderBy)
         }
     }
 
@@ -2702,7 +2714,8 @@ extension AppDatabase {
         scope: ReferenceScope,
         filter: ReferenceFilter,
         limit: Int,
-        selectedColumns: [any SQLSelectable]? = nil
+        selectedColumns: [any SQLSelectable]? = nil,
+        orderBy: ReferenceOrdering = .dateAddedDescending
     ) throws -> [Reference] {
         let sanitizedKeywordTokens = filter.keyword
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2719,6 +2732,8 @@ extension AppDatabase {
 
         // ── 1. Build base request from scope ──────────────────────────────
         var request: QueryInterfaceRequest<Reference>
+        // FTS MATCH expression, captured so relevance ordering can re-run bm25 on it.
+        var relevanceMatch: String?
         switch scope {
         case .all:
             request = Reference.all()
@@ -2755,6 +2770,7 @@ extension AppDatabase {
                     sql: "id IN (SELECT rowid FROM referenceFts WHERE referenceFts MATCH ?)",
                     arguments: [ftsQuery]
                 )
+                relevanceMatch = ftsQuery
             }
         }
         if !filter.author.isEmpty {
@@ -2790,7 +2806,17 @@ extension AppDatabase {
         }
 
         // ── 3. Order + limit ──────────────────────────────────────────────
-        request = request.order(Reference.Columns.dateAdded.desc)
+        if orderBy == .relevance, let relevanceMatch {
+            // bm25 best-match-first. The correlated subquery re-derives the score for each
+            // already-FTS-filtered row, so the request shape (scope/filters/limit) is untouched.
+            // bm25 is ascending (more negative = better); dateAdded + id make ties deterministic.
+            request = request.order(
+                sql: "(SELECT bm25(referenceFts) FROM referenceFts WHERE referenceFts MATCH ? AND referenceFts.rowid = reference.id) ASC, reference.dateAdded DESC, reference.id DESC",
+                arguments: [relevanceMatch]
+            )
+        } else {
+            request = request.order(Reference.Columns.dateAdded.desc)
+        }
         if limit > 0 {
             request = request.limit(limit)
         }

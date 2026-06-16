@@ -84,7 +84,7 @@ rubien-cli search "diffusion gan" --op or --in title --limit 50
 | `--in` | Comma list | (all 12 FTS columns) | Constrain to columns: `title`, `abstract`, `notes`, `authors`, `journal`, `doi`, `publisher`, `isbn`, `issn`, `institution`, `webContent`, `siteName` |
 | `--op` | `and` \| `or` | `and` | Combinator across query tokens — `and` = every token must match; `or` = any token |
 
-**Output:** JSON array of reference objects.
+**Output:** JSON array of reference objects, ranked by full-text relevance (bm25, best match first). (`list --keyword` stays newest-first; use `search` when you want relevance ranking.)
 
 ---
 
