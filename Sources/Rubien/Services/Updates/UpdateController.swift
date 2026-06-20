@@ -35,6 +35,12 @@ final class UpdateController {
 
     private let updater: any UpdaterProtocol
 
+    // Ensures the launch-time background check fires at most once per process
+    // (a second window appearing would otherwise re-trigger it). Sparkle warns
+    // that forced background checks belong at launch only, not arbitrary later
+    // points — see `kickLaunchBackgroundCheck()`.
+    private var didKickLaunchBackgroundCheck = false
+
     // Strongly retained — SPUStandardUpdaterController stores delegates as
     // weak references, so the delegate must outlive init by being owned here.
     private let userDriverDelegate: UpdateUserDriverDelegate
@@ -107,6 +113,30 @@ final class UpdateController {
 
     func checkNow() {
         updater.checkForUpdates()
+    }
+
+    /// Forces a single silent background update check, intended to be called
+    /// once at app launch.
+    ///
+    /// The gentle toolbar reminder (`updateReadyToInstall` → the
+    /// `UpdateIndicator` badge) is only ever raised from Sparkle's *scheduled*
+    /// path (`standardUserDriverShouldHandleShowingScheduledUpdate`) — never
+    /// from a user-initiated `checkForUpdates()`. Left to itself, Sparkle drives
+    /// that path solely off its internal timer (`SUScheduledCheckInterval`, 24h)
+    /// while the app is running. On a frequently-relaunched build the app is
+    /// rarely open at the moment the timer would fire, so the icon effectively
+    /// never appears and updates are only discoverable via "Check Now".
+    /// `checkForUpdatesInBackground()` runs that same scheduled path on demand,
+    /// surfacing the icon within seconds of launch instead.
+    ///
+    /// Gated on `automaticallyChecks` to honor the user's preference (per
+    /// Sparkle's guidance for launch-time checks) and made idempotent so
+    /// re-opening a window doesn't re-kick mid-session.
+    func kickLaunchBackgroundCheck() {
+        guard !didKickLaunchBackgroundCheck else { return }
+        didKickLaunchBackgroundCheck = true
+        guard automaticallyChecks else { return }
+        updater.checkForUpdatesInBackground()
     }
 
     func installAndRelaunch() {

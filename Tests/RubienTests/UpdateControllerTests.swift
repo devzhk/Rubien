@@ -31,6 +31,41 @@ final class UpdateControllerTests: XCTestCase {
         XCTAssertEqual(fake.checkForUpdatesCallCount, 1)
     }
 
+    func testKickLaunchBackgroundCheckRunsWhenAutomaticEnabled() {
+        let fake = FakeUpdater()
+        fake.automaticallyChecksForUpdates = true
+        let controller = UpdateController(updater: fake)
+
+        controller.kickLaunchBackgroundCheck()
+
+        XCTAssertEqual(fake.checkForUpdatesInBackgroundCallCount, 1)
+        // Must not go through the user-initiated path (which shows Sparkle's
+        // standard UI instead of the gentle toolbar icon).
+        XCTAssertEqual(fake.checkForUpdatesCallCount, 0)
+    }
+
+    func testKickLaunchBackgroundCheckSkipsWhenAutomaticDisabled() {
+        let fake = FakeUpdater()
+        fake.automaticallyChecksForUpdates = false
+        let controller = UpdateController(updater: fake)
+
+        controller.kickLaunchBackgroundCheck()
+
+        XCTAssertEqual(fake.checkForUpdatesInBackgroundCallCount, 0)
+    }
+
+    func testKickLaunchBackgroundCheckIsIdempotent() {
+        let fake = FakeUpdater()
+        fake.automaticallyChecksForUpdates = true
+        let controller = UpdateController(updater: fake)
+
+        controller.kickLaunchBackgroundCheck()
+        controller.kickLaunchBackgroundCheck()
+        controller.kickLaunchBackgroundCheck()
+
+        XCTAssertEqual(fake.checkForUpdatesInBackgroundCallCount, 1)
+    }
+
     func testAutomaticallyChecksRoundTrip() {
         let fake = FakeUpdater()
         fake.automaticallyChecksForUpdates = true

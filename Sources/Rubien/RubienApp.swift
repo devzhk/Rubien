@@ -39,6 +39,16 @@ struct RubienApp: App {
                 .task {
                     await syncCoordinator.startIfEnabled()
                 }
+                #if canImport(Sparkle)
+                .task {
+                    // Force one silent background check at launch so the gentle
+                    // update reminder (toolbar icon) can surface without waiting
+                    // for Sparkle's 24h scheduler to happen to fire while the app
+                    // is open — which on a frequently-relaunched build it rarely
+                    // does. Idempotent + preference-gated inside the controller.
+                    updateController.kickLaunchBackgroundCheck()
+                }
+                #endif
                 .onReceive(NotificationCenter.default.publisher(for: .rubienClipImported)) { note in
                     let title = (note.userInfo?[RubienClipImportedKeys.title] as? String)?
                         .trimmingCharacters(in: .whitespacesAndNewlines)
