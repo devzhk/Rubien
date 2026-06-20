@@ -1860,6 +1860,8 @@ private struct WebReaderContentView: NSViewRepresentable {
             context.coordinator.awaitingReadableExtraction = true
             context.coordinator.lastLoadedHTML = ""
             context.coordinator.currentlyLoadedMode = nil
+            context.coordinator.loadedOriginalURLString = nil
+            context.coordinator.pendingOriginalLoad = nil
             nsView.stopLoading()
             nsView.load(URLRequest(url: pageURL))
             return
@@ -1872,19 +1874,35 @@ private struct WebReaderContentView: NSViewRepresentable {
            let urlString = viewModel.reference.resolvedWebReaderURLString(),
            let pageURL = URL(string: urlString) {
             context.coordinator.awaitingReadableExtraction = false
-            // Skip only if the SAME mode is already shown for the SAME URL.
-            // URL-equality alone is unreliable because clipped HTML uses
-            // sourceURL as baseURL, so nsView.url == sourceURL for both
-            // clipped and original renders.
+            // Skip if we've already initiated the Original load for this exact
+            // URL. We track intent via loadedOriginalURLString rather than
+            // nsView.url because (a) clipped HTML uses sourceURL as baseURL so
+            // nsView.url == sourceURL for both renders, and (b) nsView.url is
+            // transiently about:blank during the two-step load below.
             if context.coordinator.currentlyLoadedMode == .original,
-               nsView.url?.absoluteString == urlString {
+               context.coordinator.loadedOriginalURLString == urlString {
                 return
             }
             context.coordinator.extractionManager.resetForNewNavigation()
             context.coordinator.lastLoadedHTML = ""
             context.coordinator.currentlyLoadedMode = .original
+            context.coordinator.loadedOriginalURLString = urlString
             nsView.stopLoading()
-            nsView.load(URLRequest(url: pageURL))
+            // WebKit collapses a load() that differs from the current document
+            // URL only by fragment into a same-document navigation (scroll, no
+            // reload). The clip is rendered via loadHTMLString(baseURL:
+            // sourceURL), so for a fragment URL — e.g. a hash-route SPA like
+            // foo.github.io/#/post/x — loading the Original page would no-op and
+            // keep showing the clip. Force a real navigation by first resetting
+            // to about:blank, then loading the page once that reset finishes
+            // (correlated by its WKNavigation token in didFinish).
+            if pageURL.fragment != nil,
+               let blankNavigation = nsView.load(URLRequest(url: URL(string: "about:blank")!)) {
+                context.coordinator.pendingOriginalLoad = (blankNavigation, pageURL)
+            } else {
+                context.coordinator.pendingOriginalLoad = nil
+                nsView.load(URLRequest(url: pageURL))
+            }
             return
         }
 
@@ -1902,6 +1920,8 @@ private struct WebReaderContentView: NSViewRepresentable {
             context.coordinator.awaitingReadableExtraction = false
             context.coordinator.lastLoadedHTML = viewModel.renderedHTML
             context.coordinator.currentlyLoadedMode = .clip
+            context.coordinator.loadedOriginalURLString = nil
+            context.coordinator.pendingOriginalLoad = nil
             context.coordinator.invalidateAnnotationsPushCache()
             nsView.loadHTMLString(viewModel.renderedHTML, baseURL: URL(string: referenceBaseURL))
         } else {
@@ -1938,6 +1958,16 @@ private struct WebReaderContentView: NSViewRepresentable {
         /// with sourceURL as baseURL" from "raw Original page loaded from
         /// sourceURL" — `nsView.url` is the same in both cases.
         var currentlyLoadedMode: WebReaderDisplayMode? = nil
+        /// The Original-page URL we've initiated a load for. Stable "intent"
+        /// flag — unlike `nsView.url`, it stays correct through the
+        /// about:blank reset step below, so re-renders don't restart the load.
+        var loadedOriginalURLString: String? = nil
+        /// Set while a two-step Original load is in flight: we load about:blank
+        /// first, then `url` once that finishes — defeats WebKit collapsing a
+        /// fragment-only `load()` into a same-document navigation (see Case 2).
+        /// The about:blank `WKNavigation` is held so didFinish can correlate the
+        /// reset by identity rather than matching the (unreliable) document URL.
+        var pendingOriginalLoad: (navigation: WKNavigation, url: URL)? = nil
 
         let extractionManager = ReaderExtractionManager()
 
@@ -2010,6 +2040,17 @@ private struct WebReaderContentView: NSViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            // Second step of the two-step Original load: the about:blank reset
+            // (matched by its navigation token, so an unrelated didFinish can't
+            // be mistaken for it) has finished — now navigate to the real page.
+            // If the user switched away from Original meanwhile, just drop it.
+            if let pending = pendingOriginalLoad, navigation === pending.navigation {
+                pendingOriginalLoad = nil
+                if parent.viewModel.displayMode == .original {
+                    webView.load(URLRequest(url: pending.url))
+                }
+                return
+            }
             if awaitingReadableExtraction {
                 awaitingReadableExtraction = false
                 let pageURL = webView.url?.absoluteString ?? "(nil)"
@@ -2062,6 +2103,14 @@ private struct WebReaderContentView: NSViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            // If the about:blank reset step itself failed (degenerate), abandon
+            // the two-step load and clear the Original intent so a later switch
+            // re-initiates it instead of being short-circuited by the dedupe guard.
+            if let pending = pendingOriginalLoad, navigation === pending.navigation {
+                pendingOriginalLoad = nil
+                loadedOriginalURLString = nil
+                return
+            }
             finishLiveReadableWithFailureIfNeeded(error.localizedDescription)
         }
 

@@ -88,18 +88,15 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
     func runOnlineArticleExtraction(from webView: WKWebView) {
         hostWebView = webView
 
-        // TEMPORARY DISCRIMINATOR (2026-05-23, Notion-only): 5s upfront wait
-        // to give Notion's SPA time to hydrate the [data-block-id] tree.
-        // Hypothesis: without it, Notion clips capture the marketing fallback
-        // shell instead of the real post. Gated to Notion hosts only —
-        // non-Notion sites should not pay this 5s tax. Revert when the
-        // proper fix lands (substantive-content guard + retry chain).
-        let hostname = (webView.url?.host ?? "").lowercased()
-        let isNotion = hostname == "notion.site" || hostname.hasSuffix(".notion.site") ||
-                       hostname == "notion.so" || hostname.hasSuffix(".notion.so")
-        let delay: TimeInterval = isNotion ? 5.0 : 0.0
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak webView] in
+        // Fully client-rendered pages (React/Vue/Next/Notion/… SPAs) leave their
+        // mount node EMPTY at `didFinish` and only fill it 1–4s later once the
+        // framework hydrates. Extracting immediately would run Defuddle /
+        // Readability against an empty DOM and fail. Wait for substantive
+        // content to appear (bounded), THEN capture the cover image + run
+        // Defuddle. Static pages clear the first probe instantly, so they pay
+        // ~no latency. This generalizes — and replaces — the former Notion-only
+        // fixed 5s delay (the "substantive-content guard" the old TODO promised).
+        waitForSubstantiveContent(in: webView) { [weak self, weak webView] in
             guard let self, let webView else { return }
             // Capture a cover-image candidate from the LIVE DOM before Defuddle strips
             // headers/cover containers. Best-effort: if the capture script fails or
@@ -112,6 +109,50 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
                 self.injectAndRunDefuddle(in: webView)
             }
         }
+    }
+
+    /// Polls the live DOM until it exposes substantive article content, then
+    /// invokes `proceed`. Exits the instant content appears (a static page
+    /// clears the very first probe), and proceeds anyway once `maxWait` elapses
+    /// so a genuinely empty / login-walled page still reaches the existing
+    /// Defuddle → Readability → failure path. Notion keeps a 5s floor so a clip
+    /// never captures its pre-hydration marketing shell — the guarantee the old
+    /// fixed delay provided. Polling (vs. one async wait) keeps this consistent
+    /// with the rest of the manager's `evaluateJavaScript` callback style.
+    private func waitForSubstantiveContent(in webView: WKWebView, then proceed: @escaping () -> Void) {
+        let host = (webView.url?.host ?? "").lowercased()
+        let isNotion = host == "notion.site" || host.hasSuffix(".notion.site") ||
+                       host == "notion.so" || host.hasSuffix(".notion.so")
+        let minWaitMs: Double = isNotion ? 5_000 : 0
+        let maxWaitMs: Double = isNotion ? 12_000 : 10_000
+        let intervalMs = 300
+        let startedAt = DispatchTime.now()
+
+        func poll() {
+            // Stop polling if online-read was canceled mid-wait (tab switch /
+            // new navigation) or the host WKWebView went away — we must not
+            // keep polling, then Defuddle, a context that no longer wants the
+            // result. Re-fetch via the weak `hostWebView` so a torn-down reader
+            // releases promptly. `nil` busy-context = no opinion = proceed.
+            guard isExtractionBusyContext?() != false, let webView = hostWebView else { return }
+            webView.evaluateJavaScript(Self.contentReadinessProbeJS) { [weak self] result, _ in
+                // Re-check after the round-trip: the user may have canceled
+                // while the probe was in flight.
+                guard let self, self.isExtractionBusyContext?() != false else { return }
+                let score = (result as? NSNumber)?.intValue ?? 0
+                let elapsed = Double(DispatchTime.now().uptimeNanoseconds &- startedAt.uptimeNanoseconds) / 1_000_000  // ms since gate start
+                let ready = score >= Self.contentReadinessScoreThreshold && elapsed >= minWaitMs
+                if ready || elapsed >= maxWaitMs {
+                    if elapsed >= maxWaitMs && !ready {
+                        readerExtractionLog.notice("Content-readiness gate timed out (\(Int(elapsed))ms, score=\(score)) — extracting best-effort")
+                    }
+                    proceed()
+                    return
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(intervalMs)) { poll() }
+            }
+        }
+        poll()
     }
 
     private func injectAndRunDefuddle(in webView: WKWebView) {
@@ -285,6 +326,39 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
     })();
     """
 
+
+    // MARK: - Content-readiness gate
+
+    /// Minimum readiness score for the live DOM to count as "has an article".
+    /// An un-hydrated SPA shell scores ~0; a couple of sentences or a few
+    /// structural blocks clear this bar. Deliberately low — its only job is to
+    /// separate "nothing rendered yet" from "real content present".
+    static let contentReadinessScoreThreshold = 250
+
+    /// Scores how much substantive article content the live DOM holds right now:
+    /// `textContent` length (layout-independent — works in hidden / zero-size
+    /// webviews, unlike `innerText`) plus a weighted count of structural block
+    /// elements, measured inside the best content container (semantic
+    /// article/main first, then the common SPA mount nodes, then `<body>`).
+    /// Returns ~0 while a client-rendered page is still an empty shell.
+    static let contentReadinessProbeJS = #"""
+    (function () {
+      function score(el) {
+        if (!el) return 0;
+        var textLen = (el.textContent || '').trim().length;
+        var blocks = el.querySelectorAll('p, li, h1, h2, h3, h4, pre, blockquote, figure, table, img').length;
+        return textLen + blocks * 50;
+      }
+      var el = document.querySelector('article') ||
+               document.querySelector('main') ||
+               document.querySelector('[role="main"]') ||
+               document.getElementById('root') ||
+               document.getElementById('app') ||
+               document.getElementById('__next') ||
+               document.body;
+      return score(el);
+    })()
+    """#
 
     // MARK: - Cover-image capture & injection (Fix 4)
 
