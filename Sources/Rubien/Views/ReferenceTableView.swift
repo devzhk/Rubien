@@ -53,6 +53,14 @@ struct ReferenceTableView: View {
     @State private var columnCustomization: TableColumnCustomization<Reference> =
         RubienPreferences.loadTableColumnCustomization()
 
+    #if canImport(Sparkle)
+    // Gates the update pill (and its separating spacer) in the toolbar so
+    // neither is emitted when no update is pending — otherwise the fixed
+    // ToolbarSpacer would leave a permanent phantom gap after the Properties
+    // button. Injected at the app level alongside ContentView.
+    @Environment(UpdateController.self) private var updateController
+    #endif
+
     var body: some View {
         // Hoist pipeline computations once per body render. `processedReferences`
         // and `groupedBuckets` are computed vars, so reading them multiple times
@@ -127,6 +135,28 @@ struct ReferenceTableView: View {
                     )
                 }
             }
+            // The update pill sits just after the Properties button (both
+            // .navigation / leading), separated by a ToolbarSpacer. Emitted only
+            // while an update is pending so the fixed spacer leaves no phantom
+            // gap the rest of the time. On macOS 26 the item also opts out of the
+            // toolbar's shared glass background (`sharedBackgroundVisibility`)
+            // so the accent pill isn't nested inside an outer neutral glass
+            // platter — that double layer shows up as a seam/halo.
+            #if canImport(Sparkle)
+            if updateController.updateReadyToInstall {
+                if #available(macOS 26.0, *) {
+                    ToolbarSpacer(.fixed, placement: .navigation)
+                    ToolbarItem(placement: .navigation) {
+                        UpdateIndicator()
+                    }
+                    .sharedBackgroundVisibility(.hidden)
+                } else {
+                    ToolbarItem(placement: .navigation) {
+                        UpdateIndicator()
+                    }
+                }
+            }
+            #endif
         }
         .onKeyPress(.init("a"), phases: .down) { event in
             if event.modifiers.contains(.command) {

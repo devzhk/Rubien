@@ -970,11 +970,6 @@ struct ContentView: View {
             ToolbarItem(placement: .principal) {
                 Color.clear.frame(width: 1, height: 1)
             }
-            #if canImport(Sparkle)
-            ToolbarItem(placement: .primaryAction) {
-                UpdateIndicator()
-            }
-            #endif
             ToolbarItemGroup(placement: .primaryAction) {
                 Group {
                 Button {
