@@ -65,12 +65,16 @@ struct ReferenceDetailView: View {
     }
 
     var body: some View {
+        // Resolve PDF-cache state once per render (a synchronous SQLite lookup);
+        // it's read in two places below and the detail re-renders on every
+        // resize-drag frame, so don't query it twice.
+        let hasPDFInCache = reference.hasPDFInCache(in: db)
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 headerSection
                 propertiesCard
                 if canOpenWebReader { webReaderCard }
-                if reference.hasPDFInCache(in: db) { pdfCard }
+                if hasPDFInCache { pdfCard }
                 abstractSection
                 notesSection
                 footerSection
@@ -79,7 +83,7 @@ struct ReferenceDetailView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background {
-            if editingField == nil, reference.hasPDFInCache(in: db) {
+            if editingField == nil, hasPDFInCache {
                 quickPreviewShortcut
             }
         }

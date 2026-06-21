@@ -800,10 +800,50 @@ final class LibraryViewModel: ObservableObject {
     }
 }
 
+/// A floating panel with a leading drag-to-resize edge. Owns the live drag offset
+/// locally so dragging only re-renders this small view — not the enclosing
+/// `ContentView`, whose huge `body` would otherwise re-evaluate every drag frame
+/// and make the resize stutter. Commits the new width to the binding on drag end.
+private struct FloatingDetailPanel<Content: View>: View {
+    @Binding var width: CGFloat
+    let range: ClosedRange<CGFloat>
+    @ViewBuilder var content: () -> Content
+
+    @GestureState private var dragOffset: CGFloat = 0
+
+    var body: some View {
+        content()
+            .frame(width: min(max(width - dragOffset, range.lowerBound), range.upperBound))
+            .overlay(alignment: .leading) {
+                Rectangle()
+                    .fill(.clear)
+                    .frame(width: 8)
+                    .frame(maxHeight: .infinity)
+                    .contentShape(Rectangle())
+                    .pointerStyle(.columnResize)
+                    .gesture(
+                        DragGesture(minimumDistance: 1)
+                            .updating($dragOffset) { value, state, _ in
+                                state = value.translation.width
+                            }
+                            .onEnded { value in
+                                width = min(max(width - value.translation.width, range.lowerBound), range.upperBound)
+                            }
+                    )
+            }
+    }
+}
+
 struct ContentView: View {
     @StateObject private var viewModel = LibraryViewModel()
     @Environment(\.syncCoordinator) private var syncCoordinator: SyncCoordinator?
+    #if canImport(Sparkle)
+    @Environment(UpdateController.self) private var updateController
+    #endif
     @State private var showSearch = false
+    @State private var showPropertyManager = false
+    @State private var showInspector = true
+    @State private var inspectorWidth: CGFloat = 380
     @State private var showAddReference = false
     @State private var addReferenceInitialType: ReferenceType = .journalArticle
     @State private var showWebImport = false
@@ -844,6 +884,191 @@ struct ContentView: View {
         return viewModel.filteredReferences.first { $0.id == selectedId }
     }
 
+    /// The leading toolbar's flat buttons, in order: Properties, Search, the
+    /// add/import actions, then the More-import menu. Rendered with
+    /// `ToolbarHoverButtonStyle` (no glass capsule, just a light hover) and a
+    /// shared `.titleAndIcon` label style. The enclosing `ToolbarItemGroup` opts
+    /// out of the macOS 26 shared glass platter so these stay flat.
+    @ViewBuilder
+    private var leadingToolbarButtons: some View {
+        Group {
+            Button {
+                showPropertyManager.toggle()
+            } label: {
+                Label("Properties", systemImage: "slider.horizontal.3")
+            }
+            .help("Manage properties")
+            .popover(isPresented: $showPropertyManager) {
+                PropertyManagerPopover(
+                    propertyDefs: Binding(
+                        get: { viewModel.propertyDefs },
+                        set: { viewModel.propertyDefs = $0 }
+                    ),
+                    onToggleVisibility: { propId, visible in
+                        try? viewModel.db.togglePropertyVisibility(id: propId, visible: visible)
+                    },
+                    onDelete: { propId in
+                        try? viewModel.db.deletePropertyDefinition(id: propId)
+                    },
+                    onReorder: { orderedIds in
+                        try? viewModel.db.reorderProperties(orderedIds)
+                    },
+                    onCreateProperty: { name, type in
+                        let maxOrder = viewModel.propertyDefs.map(\.sortOrder).max() ?? 0
+                        var newProp = PropertyDefinition(
+                            name: name, type: type, sortOrder: maxOrder + 1, isDefault: false, isVisible: true
+                        )
+                        try? viewModel.db.savePropertyDefinition(&newProp)
+                    },
+                    onRenameProperty: { propId, newName in
+                        if var prop = viewModel.propertyDefs.first(where: { $0.id == propId }) {
+                            prop.name = newName
+                            try? viewModel.db.savePropertyDefinition(&prop)
+                        }
+                    }
+                )
+            }
+
+            Button {
+                showSearch = true
+            } label: {
+                Label(String(localized: "common.search", bundle: .module), systemImage: "magnifyingglass")
+            }
+            .help(String(localized: "Search references", bundle: .module))
+            .keyboardShortcut("f", modifiers: .command)
+
+            Button {
+                showAddByIdentifier = true
+            } label: {
+                Label(String(localized: "content.toolbar.addByIdentifier", bundle: .module), systemImage: "text.magnifyingglass")
+            }
+            .help(String(localized: "Paste a paper URL, DOI, or paper title and fetch metadata automatically", bundle: .module))
+
+            Button {
+                showWebImport = true
+            } label: {
+                Label(String(localized: "Add website", bundle: .module), systemImage: "globe")
+            }
+            .help(String(localized: "Paste a URL and let Rubien clip the title, abstract, and article body", bundle: .module))
+
+            Button {
+                addReferenceInitialType = .journalArticle
+                showAddReference = true
+            } label: {
+                Label(String(localized: "content.toolbar.addManually", bundle: .module), systemImage: "square.and.pencil")
+            }
+            .help(String(localized: "Create a blank reference and fill in its fields", bundle: .module))
+
+            Button {
+                importPDFWithMetadata()
+            } label: {
+                Label(String(localized: "content.toolbar.importPDFAuto", bundle: .module), systemImage: "doc.badge.plus")
+            }
+            .help(String(localized: "Import a PDF and auto-fill its metadata when possible", bundle: .module))
+
+            if !viewModel.pendingMetadataIntakes.isEmpty {
+                Button {
+                    showPendingMetadataQueue = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Label(String(localized: "content.toolbar.pendingQueue", bundle: .module), systemImage: "clock.badge.exclamationmark")
+                        Text("\(viewModel.pendingMetadataIntakes.count)")
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.orange.opacity(0.18), in: Capsule())
+                            .foregroundStyle(.orange)
+                    }
+                }
+                .help(String(localized: "Open the pending metadata queue to review candidates or confirm manually", bundle: .module))
+            }
+
+            Menu {
+                Button(String(localized: "content.toolbar.batchImport", bundle: .module) + "…") { showBatchImport = true }
+                Divider()
+                Button(String(localized: "content.toolbar.importBibTeX", bundle: .module)) { importBibTeX() }
+                Button(String(localized: "content.toolbar.importRIS", bundle: .module)) { importRIS() }
+                Button(String(localized: "content.toolbar.importZoteroFolder", bundle: .module)) { pickZoteroFolder() }
+                Divider()
+                Button(String(localized: "Import citation styles (.csl)…", bundle: .module)) { importCitationStyles() }
+            } label: {
+                Label(String(localized: "More import options", bundle: .module), systemImage: "tray.and.arrow.down")
+            }
+            .menuStyle(.button)
+            .help(String(localized: "More import options", bundle: .module))
+            .disabled(viewModel.isImporting)
+        }
+        .labelStyle(.titleAndIcon)
+        .buttonStyle(ToolbarHoverButtonStyle())
+    }
+
+    /// Toolbar toggle that shows / hides the floating detail panel.
+    @ViewBuilder
+    private var detailsToggleButton: some View {
+        Button {
+            showInspector.toggle()
+        } label: {
+            Label("Details", systemImage: "sidebar.trailing")
+        }
+        .help("Show or hide the details panel")
+    }
+
+    /// The reference detail as a floating glass card that overlays the table:
+    /// the table stays full-width and visible (blurred) behind the translucent
+    /// glass, and the card can be toggled away. Rounded + shadowed so it reads as
+    /// floating. Visibility is the caller's (`showInspector`).
+    @ViewBuilder
+    private var detailPanel: some View {
+        Group {
+            if let ref = selectedReference {
+                ReferenceDetailView(
+                    reference: ref,
+                    allTags: viewModel.tags,
+                    liveTags: viewModel.referenceTagMap[ref.id ?? -1] ?? [],
+                    db: viewModel.db,
+                    onSave: { updated in
+                        var r = updated
+                        viewModel.saveReference(&r)
+                    },
+                    onDelete: {
+                        deleteReferences([ref])
+                    },
+                    onOpenPDFReader: { r in
+                        ReaderWindowManager.shared.openPDFReader(for: r, db: viewModel.db)
+                    },
+                    onOpenWebReader: { r in
+                        ReaderWindowManager.shared.openWebReader(for: r, db: viewModel.db)
+                    },
+                    onUpdateTags: { refId, tagIds in viewModel.setTags(forReference: refId, tagIds: tagIds) },
+                    onCreateTag: { name in viewModel.createTag(name: name) },
+                    onDeleteTag: { tagId in viewModel.deleteTag(id: tagId) },
+                    deleteTagUnlessInUse: { tagId in viewModel.probeDeleteTag(id: tagId) },
+                    propertyDefs: Binding(
+                        get: { viewModel.propertyDefs },
+                        set: { viewModel.propertyDefs = $0 }
+                    )
+                )
+            } else if selectedId != nil {
+                ProgressView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                VStack(spacing: 12) {
+                    Image(systemName: "books.vertical")
+                        .font(.system(size: 48))
+                        .foregroundStyle(.tertiary)
+                    Text("Select a reference", bundle: .module)
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                    Text(String(format: String(localized: "%d references", bundle: .module), viewModel.references.count))
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .neutralGlassCard(cornerRadius: 14)
+    }
+
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             SidebarView(
@@ -857,7 +1082,7 @@ struct ContentView: View {
                 onReorderViews: { viewModel.reorderDatabaseViews($0) }
             )
             .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 300)
-        } content: {
+        } detail: {
             ReferenceTableView(
                 references: viewModel.filteredReferences,
                 tagMap: viewModel.referenceTagMap,
@@ -916,131 +1141,65 @@ struct ContentView: View {
                 onDiscardView: { viewModel.discardDraftForCurrentView() },
                 scrollRequest: tableScrollRequest
             )
-            .navigationSplitViewColumnWidth(min: 400, ideal: 600, max: .infinity)
-        } detail: {
-            Group {
-            if let ref = selectedReference {
-                ReferenceDetailView(
-                    reference: ref,
-                    allTags: viewModel.tags,
-                    liveTags: viewModel.referenceTagMap[ref.id ?? -1] ?? [],
-                    db: viewModel.db,
-                    onSave: { updated in
-                        var r = updated
-                        viewModel.saveReference(&r)
-                    },
-                    onDelete: {
-                        deleteReferences([ref])
-                    },
-                    onOpenPDFReader: { r in
-                        ReaderWindowManager.shared.openPDFReader(for: r, db: viewModel.db)
-                    },
-                    onOpenWebReader: { r in
-                        ReaderWindowManager.shared.openWebReader(for: r, db: viewModel.db)
-                    },
-                    onUpdateTags: { refId, tagIds in viewModel.setTags(forReference: refId, tagIds: tagIds) },
-                    onCreateTag: { name in viewModel.createTag(name: name) },
-                    onDeleteTag: { tagId in viewModel.deleteTag(id: tagId) },
-                    deleteTagUnlessInUse: { tagId in viewModel.probeDeleteTag(id: tagId) },
-                    propertyDefs: Binding(
-                        get: { viewModel.propertyDefs },
-                        set: { viewModel.propertyDefs = $0 }
-                    )
-                )
-            } else if selectedId != nil {
-                ProgressView()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                VStack(spacing: 12) {
-                    Image(systemName: "books.vertical")
-                        .font(.system(size: 48))
-                        .foregroundStyle(.tertiary)
-                    Text("Select a reference", bundle: .module)
-                        .font(.title3)
-                        .foregroundStyle(.secondary)
-                    Text(String(format: String(localized: "%d references", bundle: .module), viewModel.references.count))
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
+            // The detail floats over the table (table stays full-width and shows
+            // through the translucent glass), below the toolbar, shown only while
+            // toggled on. Drag its leading edge to resize the width.
+            .overlay(alignment: .trailing) {
+                if showInspector {
+                    FloatingDetailPanel(width: $inspectorWidth, range: 280...640) {
+                        detailPanel
+                    }
+                    .padding(.vertical, 8)
+                    .padding(.trailing, 6)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
             }
-            }
-            .navigationSplitViewColumnWidth(min: 180, ideal: 350, max: 350)
+            .animation(.easeInOut(duration: 0.22), value: showInspector)
         }
         .toolbar(content: {
+            // Clear center item: anchors the toolbar layout so the trailing
+            // details toggle is pushed to the far-right edge instead of packing
+            // next to the leading group.
             ToolbarItem(placement: .principal) {
                 Color.clear.frame(width: 1, height: 1)
             }
-            ToolbarItemGroup(placement: .primaryAction) {
-                Group {
-                Button {
-                    showSearch = true
-                } label: {
-                    Label(String(localized: "common.search", bundle: .module), systemImage: "magnifyingglass")
+            // All primary actions live on the leading edge in one flat group:
+            // Properties, Search, the add/import actions, then the More menu. On
+            // macOS 26 the group opts out of the toolbar's shared Liquid Glass
+            // platter (`sharedBackgroundVisibility`) so the buttons render flat
+            // with only a light hover highlight, not as glass capsules.
+            if #available(macOS 26.0, *) {
+                ToolbarItemGroup(placement: .navigation) {
+                    leadingToolbarButtons
                 }
-                .help(String(localized: "Search references", bundle: .module))
-                .keyboardShortcut("f", modifiers: .command)
-
-                ControlGroup {
-                    Button(action: { showAddByIdentifier = true }) {
-                        Label(String(localized: "content.toolbar.addByIdentifier", bundle: .module), systemImage: "text.magnifyingglass")
-                    }
-                    .help(String(localized: "Paste a paper URL, DOI, or paper title and fetch metadata automatically", bundle: .module))
-
-                    Button(action: {
-                        showWebImport = true
-                    }) {
-                        Label(String(localized: "Add web clip", bundle: .module), systemImage: "globe")
-                    }
-                    .help(String(localized: "Paste a URL and let Rubien clip the title, abstract, and article body", bundle: .module))
+                .sharedBackgroundVisibility(.hidden)
+            } else {
+                ToolbarItemGroup(placement: .navigation) {
+                    leadingToolbarButtons
                 }
-
-                ControlGroup {
-                    Button(action: {
-                        addReferenceInitialType = .journalArticle
-                        showAddReference = true
-                    }) {
-                        Label(String(localized: "content.toolbar.addManually", bundle: .module), systemImage: "square.and.pencil")
-                    }
-                    .help(String(localized: "Create a blank reference and fill in its fields", bundle: .module))
-
-                    Button(action: { importPDFWithMetadata() }) {
-                        Label(String(localized: "content.toolbar.importPDFAuto", bundle: .module), systemImage: "doc.badge.plus")
-                    }
-                    .help(String(localized: "Import a PDF and auto-fill its metadata when possible", bundle: .module))
-                }
-
-                if !viewModel.pendingMetadataIntakes.isEmpty {
-                    Button(action: { showPendingMetadataQueue = true }) {
-                        HStack(spacing: 6) {
-                            Label(String(localized: "content.toolbar.pendingQueue", bundle: .module), systemImage: "clock.badge.exclamationmark")
-                            Text("\(viewModel.pendingMetadataIntakes.count)")
-                                .font(.caption2.weight(.semibold))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Color.orange.opacity(0.18), in: Capsule())
-                                .foregroundStyle(.orange)
-                        }
-                    }
-                    .help(String(localized: "Open the pending metadata queue to review candidates or confirm manually", bundle: .module))
-                }
-
-                Menu {
-                    Button(String(localized: "content.toolbar.batchImport", bundle: .module) + "…") { showBatchImport = true }
-                    Divider()
-                    Button(String(localized: "content.toolbar.importBibTeX", bundle: .module)) { importBibTeX() }
-                    Button(String(localized: "content.toolbar.importRIS", bundle: .module)) { importRIS() }
-                    Button(String(localized: "content.toolbar.importZoteroFolder", bundle: .module)) { pickZoteroFolder() }
-                    Divider()
-                    Button(String(localized: "Import citation styles (.csl)…", bundle: .module)) { importCitationStyles() }
-                } label: {
-                    Label(String(localized: "More import options", bundle: .module), systemImage: "tray.and.arrow.down")
-                }
-                .help(String(localized: "More import options", bundle: .module))
-                .disabled(viewModel.isImporting)
-                }
-                .labelStyle(.titleAndIcon)
             }
-
+            // The update pill trails the group (still leading-aligned), shown
+            // only while an update is pending so its fixed spacer leaves no
+            // phantom gap otherwise. It keeps its own accent style and likewise
+            // opts out of the shared glass platter.
+            #if canImport(Sparkle)
+            if updateController.updateReadyToInstall {
+                if #available(macOS 26.0, *) {
+                    ToolbarSpacer(.fixed, placement: .navigation)
+                    ToolbarItem(placement: .navigation) {
+                        UpdateIndicator()
+                    }
+                    .sharedBackgroundVisibility(.hidden)
+                } else {
+                    ToolbarItem(placement: .navigation) {
+                        UpdateIndicator()
+                    }
+                }
+            }
+            #endif
+            // Trailing toggle for the details panel, pushed to the far-right edge
+            // by the clear principal item at the top of this toolbar.
+            ToolbarItem(placement: .primaryAction) { detailsToggleButton }
         })
         .sheet(isPresented: $showAddReference) {
             AddReferenceView(

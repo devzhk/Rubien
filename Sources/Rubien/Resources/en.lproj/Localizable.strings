@@ -64,7 +64,7 @@
 // MARK: - Content view / main shell
 
 "content.toolbar.add" = "Add";
-"content.toolbar.addByIdentifier" = "Add by Identifier";
+"content.toolbar.addByIdentifier" = "Add paper";
 "content.toolbar.batchImport" = "Batch Import";
 "content.toolbar.addManually" = "Add manually";
 "content.toolbar.importPDF" = "Import PDF";

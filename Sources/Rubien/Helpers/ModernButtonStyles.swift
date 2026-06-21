@@ -114,4 +114,47 @@ private struct SLDestructiveButtonBody: View {
             .onHover { isHovered = $0 }
     }
 }
+
+// MARK: - ToolbarHoverButtonStyle
+// Flat toolbar button: nothing at rest, a light rounded highlight on hover and a
+// slightly stronger one while pressed. Replaces the macOS 26 Liquid Glass capsule
+// on the main-window toolbar buttons with a lighter, minimal interaction cue.
+// Pair with `.sharedBackgroundVisibility(.hidden)` on the enclosing toolbar
+// item/group (macOS 26+) so the system glass platter doesn't draw behind the flat
+// button. Unlike `SLSecondaryButtonStyle` this has no resting fill. It nudges the
+// label to medium weight to match AppKit's native toolbar buttons — a plain custom
+// ButtonStyle otherwise renders regular weight, which looks too thin — but leaves
+// the font size to each call site.
+
+struct ToolbarHoverButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        ToolbarHoverButtonBody(configuration: configuration)
+    }
+}
+
+private struct ToolbarHoverButtonBody: View {
+    let configuration: ButtonStyleConfiguration
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovered = false
+
+    var body: some View {
+        configuration.label
+            .fontWeight(.medium)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(
+                        configuration.isPressed
+                            ? Color.primary.opacity(0.14)
+                            : (isHovered ? Color.primary.opacity(0.08) : Color.clear)
+                    )
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .opacity(isEnabled ? 1.0 : 0.4)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .animation(.easeOut(duration: 0.12), value: isHovered)
+            .onHover { isHovered = $0 }
+    }
+}
 #endif

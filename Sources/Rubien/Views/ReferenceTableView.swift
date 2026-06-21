@@ -46,20 +46,11 @@ struct ReferenceTableView: View {
 
     @State private var selection = Set<Reference.ID>()
     @State private var showDeleteConfirm = false
-    @State private var showPropertyManager = false
     // Owned here (not in `ReferenceTableContent`) so the Display menu in
     // `ViewChromeBar` can see the same live state — a second UserDefaults
     // read would be stale right after the user hides a column.
     @State private var columnCustomization: TableColumnCustomization<Reference> =
         RubienPreferences.loadTableColumnCustomization()
-
-    #if canImport(Sparkle)
-    // Gates the update pill (and its separating spacer) in the toolbar so
-    // neither is emitted when no update is pending — otherwise the fixed
-    // ToolbarSpacer would leave a permanent phantom gap after the Properties
-    // button. Injected at the app level alongside ContentView.
-    @Environment(UpdateController.self) private var updateController
-    #endif
 
     var body: some View {
         // Hoist pipeline computations once per body render. `processedReferences`
@@ -96,67 +87,6 @@ struct ReferenceTableView: View {
                     batchToolbar
                 }
             }
-        }
-        .toolbar {
-            ToolbarItem(placement: .navigation) {
-                Button {
-                    showPropertyManager.toggle()
-                } label: {
-                    Label("Properties", systemImage: "slider.horizontal.3")
-                        .labelStyle(.titleAndIcon)
-                        .font(.system(size: 12))
-                }
-                .help("Manage properties")
-                .popover(isPresented: $showPropertyManager) {
-                    PropertyManagerPopover(
-                        propertyDefs: $propertyDefs,
-                        onToggleVisibility: { propId, visible in
-                            try? db.togglePropertyVisibility(id: propId, visible: visible)
-                        },
-                        onDelete: { propId in
-                            try? db.deletePropertyDefinition(id: propId)
-                        },
-                        onReorder: { orderedIds in
-                            try? db.reorderProperties(orderedIds)
-                        },
-                        onCreateProperty: { name, type in
-                            let maxOrder = propertyDefs.map(\.sortOrder).max() ?? 0
-                            var newProp = PropertyDefinition(
-                                name: name, type: type, sortOrder: maxOrder + 1, isDefault: false, isVisible: true
-                            )
-                            try? db.savePropertyDefinition(&newProp)
-                        },
-                        onRenameProperty: { propId, newName in
-                            if var prop = propertyDefs.first(where: { $0.id == propId }) {
-                                prop.name = newName
-                                try? db.savePropertyDefinition(&prop)
-                            }
-                        }
-                    )
-                }
-            }
-            // The update pill sits just after the Properties button (both
-            // .navigation / leading), separated by a ToolbarSpacer. Emitted only
-            // while an update is pending so the fixed spacer leaves no phantom
-            // gap the rest of the time. On macOS 26 the item also opts out of the
-            // toolbar's shared glass background (`sharedBackgroundVisibility`)
-            // so the accent pill isn't nested inside an outer neutral glass
-            // platter — that double layer shows up as a seam/halo.
-            #if canImport(Sparkle)
-            if updateController.updateReadyToInstall {
-                if #available(macOS 26.0, *) {
-                    ToolbarSpacer(.fixed, placement: .navigation)
-                    ToolbarItem(placement: .navigation) {
-                        UpdateIndicator()
-                    }
-                    .sharedBackgroundVisibility(.hidden)
-                } else {
-                    ToolbarItem(placement: .navigation) {
-                        UpdateIndicator()
-                    }
-                }
-            }
-            #endif
         }
         .onKeyPress(.init("a"), phases: .down) { event in
             if event.modifiers.contains(.command) {
