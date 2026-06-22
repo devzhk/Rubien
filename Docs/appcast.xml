@@ -168,5 +168,22 @@
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.1.11</title>
+            <description><![CDATA[• New flat, left-aligned toolbar (Properties, Search, Add paper, Add website, Add manually, Import PDF).
+• Reference details now open in a floating, resizable glass panel — toggle it with the Details button.
+• The "Update ready" indicator now appears automatically and is easier to spot.
+• Web clips: more reliable extraction on single-page-app sites, plus correct in-page (#fragment) link handling.]]></description>
+            <pubDate>Mon, 22 Jun 2026 03:24:59 +0000</pubDate>
+            <sparkle:version>12</sparkle:version>
+            <sparkle:shortVersionString>0.1.11</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.1.11/Rubien-0.1.11.dmg"
+                sparkle:edSignature="1d5xY4/tkHbCyMp+bFKO0Nx1V1sca6Ax5EUGm+q5X+yJ9nMa66stmJ/0DgdvBniwom6lzs8qVWJ+Jj4wsv0FCg=="
+                length="17115198"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
