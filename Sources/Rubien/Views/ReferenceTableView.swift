@@ -1,7 +1,10 @@
 #if os(macOS)
 import AppKit
+import os
 import SwiftUI
 import RubienCore
+
+private let tableLog = Logger(subsystem: "Rubien", category: "reference-table")
 
 struct ReferenceTableView: View {
     /// `defaultFieldKey` values for properties that already have their own
@@ -477,7 +480,16 @@ private struct ReferenceTableContent: View {
         editingCell = nil
     }
     private func commitCustom(refId: Int64, propId: Int64, value: String?) {
-        try? db.setPropertyValue(referenceId: refId, propertyId: propId, value: value)
+        // Surface failures instead of swallowing with `try?`: a dropped write
+        // here is invisible data loss. A transient SQLITE_BUSY silently lost
+        // custom-property edits on freshly-added references until the DB busy
+        // timeout was added (see AppDatabase's Configuration); logging keeps any
+        // future regression visible rather than mysterious.
+        do {
+            try db.setPropertyValue(referenceId: refId, propertyId: propId, value: value)
+        } catch {
+            tableLog.error("setPropertyValue failed ref=\(refId, privacy: .public) prop=\(propId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
         editingCell = nil
     }
 

@@ -864,6 +864,16 @@ extension AppDatabase {
         do {
             let dbURL = dirURL.appendingPathComponent(libraryFilename)
             var config = Configuration()
+            // The library is a multi-writer SQLite database: the app, the
+            // CKSyncEngine, and the separate `rubien-cli` / MCP process all
+            // write the same file. GRDB defaults `busyMode` to `.immediateError`,
+            // so a write that finds the lock held by another writer (e.g. the
+            // sync engine pushing a just-added reference) fails *instantly* with
+            // SQLITE_BUSY instead of waiting — which, paired with `try?` at the
+            // call sites, silently dropped user edits (custom property values
+            // never persisted on freshly-added references). A busy timeout makes
+            // contended writes wait briefly for the lock and then succeed.
+            config.busyMode = .timeout(5)
             #if DEBUG
             if RubienCoreDebugLogging.sqlTrace {
                 config.prepareDatabase { db in

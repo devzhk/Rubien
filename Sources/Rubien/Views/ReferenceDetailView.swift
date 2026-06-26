@@ -1,8 +1,11 @@
 #if os(macOS)
 import SwiftUI
+import os
 import PDFKit
 import RubienCore
 import RubienPDFKit
+
+private let detailLog = Logger(subsystem: "Rubien", category: "reference-detail")
 
 struct ReferenceDetailView: View {
     let reference: Reference
@@ -1109,12 +1112,18 @@ struct ReferenceDetailView: View {
 
     private func saveCustomValue(propId: Int64, value: String?) {
         guard let refId = reference.id else { return }
-        if let value {
-            customValues[propId] = value
-        } else {
-            customValues.removeValue(forKey: propId)
+        do {
+            try db.setPropertyValue(referenceId: refId, propertyId: propId, value: value)
+            // Mirror into local state only after the write succeeds, so a failed
+            // write doesn't leave the panel showing a value that wasn't persisted.
+            if let value {
+                customValues[propId] = value
+            } else {
+                customValues.removeValue(forKey: propId)
+            }
+        } catch {
+            detailLog.error("setPropertyValue failed ref=\(refId, privacy: .public) prop=\(propId, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
-        try? db.setPropertyValue(referenceId: refId, propertyId: propId, value: value)
     }
 
     private func addOptionToProperty(propId: Int64, optionValue: String) {
