@@ -174,6 +174,7 @@ struct ReferenceTableView: View {
                 rowIDs: visibleTableRowIDs(processed: processed, buckets: buckets)
             )
         )
+        .background(ReferenceTableRowHover())
         .contextMenu(forSelectionType: Reference.ID.self) { ids in
             if let id = ids.first, let ref = references.first(where: { $0.id == id }) {
                 contextMenuContent(for: ref)
@@ -882,7 +883,7 @@ private struct ReferenceTableSelectionScroller: NSViewRepresentable {
 
             let key = ScrollKey(selectedId: selectedId, scrollRequest: scrollRequest, rowIDs: rowIDs)
             guard force || key != lastScrollKey else { return }
-            guard let tableView = Self.findTableView(from: view) else {
+            guard let tableView = view.nearestTableView() else {
                 retry(from: view, attempt: attempt, force: force)
                 return
             }
@@ -925,19 +926,130 @@ private struct ReferenceTableSelectionScroller: NSViewRepresentable {
             }
         }
 
-        private static func findTableView(from view: NSView) -> NSTableView? {
-            var candidate: NSView? = view
-            while let current = candidate {
-                if let tableView = current as? NSTableView {
-                    return tableView
-                }
-                if let tableView = current.firstDescendant(of: NSTableView.self) {
-                    return tableView
-                }
-                candidate = current.superview
+    }
+}
+
+// MARK: - Row hover highlight
+
+/// Draws a subtle hover highlight on the row under the pointer. SwiftUI's
+/// `Table` exposes no row-hover hook, so this bridges to the backing
+/// `NSTableView` (the same view the selection scroller reaches): a local
+/// mouse-moved monitor maps the pointer to a row and a lightweight,
+/// click-through overlay is positioned over it. Selected rows keep their own
+/// selection highlight, so no hover is drawn on them.
+private struct ReferenceTableRowHover: NSViewRepresentable {
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSView {
+        let anchor = NSView(frame: .zero)
+        context.coordinator.start(from: anchor)
+        return anchor
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        // The NSTableView may not be in the hierarchy yet at make time.
+        context.coordinator.start(from: nsView)
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        coordinator.stop()
+    }
+
+    final class Coordinator {
+        private weak var anchor: NSView?
+        private weak var tableView: NSTableView?
+        private var monitor: Any?
+        private var hoverView: HoverHighlightView?
+        private var hoveredRow = -1
+
+        func start(from view: NSView) {
+            anchor = view
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
+                self?.handle(event)
+                return event
             }
-            return view.window?.contentView?.firstDescendant(of: NSTableView.self)
         }
+
+        func stop() {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+            hoverView?.removeFromSuperview()
+            hoverView = nil
+            tableView = nil
+        }
+
+        deinit { stop() }
+
+        private func resolveTableView() -> NSTableView? {
+            if let tableView, tableView.window != nil { return tableView }
+            guard let found = anchor?.nearestTableView() else {
+                return nil
+            }
+            // Required so the window posts the .mouseMoved events the monitor needs.
+            found.window?.acceptsMouseMovedEvents = true
+            tableView = found
+            return found
+        }
+
+        private func handle(_ event: NSEvent) {
+            guard let tableView = resolveTableView(),
+                  let window = tableView.window,
+                  event.window === window else {
+                clearHover()
+                return
+            }
+            let point = tableView.convert(event.locationInWindow, from: nil)
+            guard tableView.bounds.contains(point) else { clearHover(); return }
+            updateHover(to: tableView.row(at: point), in: tableView)
+        }
+
+        private func updateHover(to row: Int, in tableView: NSTableView) {
+            let valid = row >= 0
+                && row < tableView.numberOfRows
+                && !tableView.selectedRowIndexes.contains(row)
+            guard valid else { clearHover(); return }
+            // Skip if we're already highlighting this row.
+            if row == hoveredRow, hoverView?.isHidden == false { return }
+            hoveredRow = row
+
+            let hv = hoverView ?? makeHoverView()
+            // Keep it above any row views recycled in since the last move, but
+            // only re-front when it isn't already on top.
+            if tableView.subviews.last !== hv {
+                tableView.addSubview(hv, positioned: .above, relativeTo: nil)
+            }
+            hv.frame = tableView.rect(ofRow: row).insetBy(dx: 4, dy: 0)
+            hv.isHidden = false
+        }
+
+        private func clearHover() {
+            hoveredRow = -1
+            hoverView?.isHidden = true
+        }
+
+        private func makeHoverView() -> HoverHighlightView {
+            let hv = HoverHighlightView()
+            hv.wantsLayer = true
+            hoverView = hv
+            return hv
+        }
+    }
+}
+
+/// Subtle, click-through row hover overlay that tracks the system appearance.
+private final class HoverHighlightView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.cornerRadius = 5
+        layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.06).cgColor
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
     }
 }
 
@@ -952,6 +1064,25 @@ private extension NSView {
             }
         }
         return nil
+    }
+
+    /// Finds the `NSTableView` nearest this view: walk up the ancestry checking
+    /// each ancestor's subtree, then fall back to the window's content view.
+    /// Walking up (rather than searching the whole window) matters because the
+    /// `NavigationSplitView` sidebar is itself a `List`/`NSTableView` — a plain
+    /// window-wide search could return it instead of the reference table.
+    func nearestTableView() -> NSTableView? {
+        var candidate: NSView? = self
+        while let current = candidate {
+            if let tableView = current as? NSTableView {
+                return tableView
+            }
+            if let tableView = current.firstDescendant(of: NSTableView.self) {
+                return tableView
+            }
+            candidate = current.superview
+        }
+        return window?.contentView?.firstDescendant(of: NSTableView.self)
     }
 }
 
