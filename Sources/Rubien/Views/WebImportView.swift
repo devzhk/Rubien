@@ -12,6 +12,7 @@ struct WebImportView: View {
     @State private var url = ""
     @State private var clipperError: String?
     @State private var isSaving = false
+    @FocusState private var urlFieldFocused: Bool
 
     private var urlValid: Bool {
         let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -67,6 +68,7 @@ struct WebImportView: View {
                     Section(String(localized: "Web page", bundle: .module)) {
                         TextField(String(localized: "Page URL", bundle: .module), text: $url, prompt: Text(verbatim: "https://…"))
                             .textContentType(.URL)
+                            .focused($urlFieldFocused)
                             .disabled(isSaving)
                         Text("Rubien extracts the title, abstract, and article body from the page.", bundle: .module)
                             .font(.caption)
@@ -87,6 +89,14 @@ struct WebImportView: View {
 
                 }
                 .formStyle(.grouped)
+            }
+            // Let the sheet finish assigning its initial first responder
+            // (Cancel), then move focus to the URL field so it's ready for a
+            // paste and Cancel isn't left with a focus ring. `.defaultFocus`
+            // doesn't reliably win this race for a TextField inside a Form.
+            .task {
+                try? await Task.sleep(for: .milliseconds(100))
+                urlFieldFocused = true
             }
         }
         .frame(width: 460, height: clipperError == nil ? 300 : 380)

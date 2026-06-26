@@ -65,6 +65,9 @@ struct FilterEditorPopover: View {
         }
         .padding(14)
         .frame(width: 320)
+        // The chrome bar disables focus effects; re-enable inside the popover so
+        // its value text fields still show an editing ring.
+        .focusEffectDisabled(false)
     }
 
     // MARK: - Target picker

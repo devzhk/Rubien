@@ -79,6 +79,9 @@ struct ViewChromeBar: View {
             displayButton
                 .padding(.trailing, 12)
         }
+        // Suppress the macOS focus ring on these always-on controls so one of
+        // them isn't auto-highlighted whenever the view loads.
+        .focusEffectDisabled()
     }
 
     private var sortButton: some View {

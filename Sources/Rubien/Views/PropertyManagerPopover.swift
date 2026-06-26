@@ -33,10 +33,12 @@ struct PropertyManagerPopover: View {
                 Button {
                     showNewProperty = true
                 } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 11))
+                    Label("Create", systemImage: "plus")
+                        .font(.system(size: 11, weight: .medium))
+                        .labelStyle(.titleAndIcon)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(ToolbarHoverButtonStyle())
+                .focusEffectDisabled()
                 .help("Add new property")
             }
             .padding(.horizontal, 12)
@@ -85,39 +87,11 @@ struct PropertyManagerPopover: View {
                             .padding(.bottom, 4)
 
                         ForEach(hiddenProps) { prop in
-                            HStack(spacing: 8) {
-                                Image(systemName: prop.type.icon)
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.tertiary)
-                                    .frame(width: 16)
-                                Text(prop.name)
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.secondary)
-                                Spacer()
-                                Button {
-                                    onToggleVisibility(prop.id!, true)
-                                } label: {
-                                    Image(systemName: "eye")
-                                        .font(.system(size: 11))
-                                        .foregroundStyle(.tertiary)
-                                }
-                                .buttonStyle(.plain)
-                                .help("Show property")
-
-                                if !prop.isDefault {
-                                    Button {
-                                        onDelete(prop.id!)
-                                    } label: {
-                                        Image(systemName: "trash")
-                                            .font(.system(size: 10))
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    .buttonStyle(.plain)
-                                    .help("Delete property")
-                                }
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 5)
+                            HiddenPropertyRow(
+                                prop: prop,
+                                onShow: { onToggleVisibility(prop.id!, true) },
+                                onDelete: prop.isDefault ? nil : { onDelete(prop.id!) }
+                            )
                         }
                     }
                 }
@@ -239,9 +213,77 @@ private struct PropertyManagerRow: View {
                 .help("Delete property")
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 5)
+        .propertyRowHover()
     }
+}
+
+// MARK: - Hidden Property Row
+
+private struct HiddenPropertyRow: View {
+    let prop: PropertyDefinition
+    let onShow: () -> Void
+    let onDelete: (() -> Void)?
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: prop.type.icon)
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+                .frame(width: 16)
+            Text(prop.name)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button {
+                onShow()
+            } label: {
+                Image(systemName: "eye")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
+            .buttonStyle(.plain)
+            .help("Show property")
+
+            if let onDelete {
+                Button {
+                    onDelete()
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Delete property")
+            }
+        }
+        .propertyRowHover()
+    }
+}
+
+// MARK: - Row hover highlight
+
+/// Standard row padding plus a subtle hover background, shared by the property
+/// rows. Owns its own hover state so each row highlights on pointer-over.
+private struct PropertyRowHover: ViewModifier {
+    @State private var isHovered = false
+
+    func body(content: Content) -> some View {
+        content
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(isHovered ? Color.primary.opacity(0.06) : Color.clear)
+                    .padding(.horizontal, 6)
+            )
+            .contentShape(Rectangle())
+            .animation(.easeOut(duration: 0.12), value: isHovered)
+            .onHover { isHovered = $0 }
+    }
+}
+
+private extension View {
+    func propertyRowHover() -> some View { modifier(PropertyRowHover()) }
 }
 
 // MARK: - Drop Delegate for Reordering
