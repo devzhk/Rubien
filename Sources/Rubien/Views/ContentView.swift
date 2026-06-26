@@ -852,7 +852,6 @@ struct ContentView: View {
     @State private var pendingZoteroImportFolder: PendingZoteroImport?
     @State private var showPendingMetadataQueue = false
     @State private var pendingQueueNotice: PendingQueueNotice?
-    @State private var cslImportMessage: String?
     @State private var columnVisibility = NavigationSplitViewVisibility.all
     @State private var selectedId: Int64?
     @State private var tableScrollRequest = 0
@@ -952,14 +951,6 @@ struct ContentView: View {
             .help(String(localized: "Paste a URL and let Rubien clip the title, abstract, and article body", bundle: .module))
 
             Button {
-                addReferenceInitialType = .journalArticle
-                showAddReference = true
-            } label: {
-                Label(String(localized: "content.toolbar.addManually", bundle: .module), systemImage: "square.and.pencil")
-            }
-            .help(String(localized: "Create a blank reference and fill in its fields", bundle: .module))
-
-            Button {
                 importPDFWithMetadata()
             } label: {
                 Label(String(localized: "content.toolbar.importPDFAuto", bundle: .module), systemImage: "doc.badge.plus")
@@ -984,19 +975,26 @@ struct ContentView: View {
             }
 
             Menu {
-                Button(String(localized: "content.toolbar.batchImport", bundle: .module) + "…") { showBatchImport = true }
+                Button(String(localized: "content.toolbar.addManually", bundle: .module)) {
+                    addReferenceInitialType = .journalArticle
+                    showAddReference = true
+                }
                 Divider()
-                Button(String(localized: "content.toolbar.importBibTeX", bundle: .module)) { importBibTeX() }
-                Button(String(localized: "content.toolbar.importRIS", bundle: .module)) { importRIS() }
-                Button(String(localized: "content.toolbar.importZoteroFolder", bundle: .module)) { pickZoteroFolder() }
-                Divider()
-                Button(String(localized: "Import citation styles (.csl)…", bundle: .module)) { importCitationStyles() }
+                // Only the import actions are gated while an import runs; manual
+                // reference creation stays available (it was a standalone button before).
+                Group {
+                    Button(String(localized: "content.toolbar.batchImport", bundle: .module) + "…") { showBatchImport = true }
+                    Divider()
+                    Button(String(localized: "content.toolbar.importBibTeX", bundle: .module)) { importBibTeX() }
+                    Button(String(localized: "content.toolbar.importRIS", bundle: .module)) { importRIS() }
+                    Button(String(localized: "content.toolbar.importZoteroFolder", bundle: .module)) { pickZoteroFolder() }
+                }
+                .disabled(viewModel.isImporting)
             } label: {
                 Label(String(localized: "More import options", bundle: .module), systemImage: "tray.and.arrow.down")
             }
             .menuStyle(.button)
             .help(String(localized: "More import options", bundle: .module))
-            .disabled(viewModel.isImporting)
         }
         .labelStyle(.titleAndIcon)
         .buttonStyle(ToolbarHoverButtonStyle())
@@ -1336,19 +1334,6 @@ struct ContentView: View {
                 }
             )
         }
-        .overlay(alignment: .bottom) {
-            if let msg = cslImportMessage {
-                Text(msg)
-                    .font(.callout)
-                    .foregroundStyle(.primary)
-                    .padding(10)
-                    .background(Color(NSColor.controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
-                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color(NSColor.separatorColor).opacity(0.5), lineWidth: 0.5))
-                    .shadow(color: .black.opacity(0.1), radius: 6, y: 3)
-                    .padding(.bottom, 20)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-        }
         .overlay(alignment: .bottomTrailing) {
             if let notice = pendingQueueNotice {
                 VStack(alignment: .leading, spacing: 10) {
@@ -1397,7 +1382,6 @@ struct ContentView: View {
                 .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: cslImportMessage)
         .animation(.easeInOut(duration: 0.2), value: pendingQueueNotice)
         .onChange(of: viewModel.references) { _, newRefs in
             guard let selectedId else { return }
@@ -1748,26 +1732,6 @@ struct ContentView: View {
             if pendingQueueNotice?.id == notice.id {
                 pendingQueueNotice = nil
             }
-        }
-    }
-
-    private func importCitationStyles() {
-        let urls = OpenPanelPicker.pickCitationStyleFiles()
-        guard !urls.isEmpty else { return }
-
-        var imported: [String] = []
-        for url in urls {
-            if let title = try? CSLManager.shared.importCSL(from: url) {
-                imported.append(title)
-            }
-        }
-
-        guard !imported.isEmpty else { return }
-
-        let fmt = String(localized: "Imported: %@", bundle: .module)
-        cslImportMessage = String(format: fmt, imported.joined(separator: ", "))
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-            cslImportMessage = nil
         }
     }
 

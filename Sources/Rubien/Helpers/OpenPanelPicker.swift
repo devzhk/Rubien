@@ -22,15 +22,6 @@ enum OpenPanelPicker {
     }
 
     @MainActor
-    static func pickCitationStyleFiles() -> [URL] {
-        pickFiles(
-            title: "Import citation styles",
-            prompt: "Import",
-            allowedContentTypes: [.xml, type(forExtension: "csl", fallback: .xml)]
-        )
-    }
-
-    @MainActor
     static func pickPDFFile() -> URL? {
         pickSingleFile(
             title: "Choose PDF",
@@ -56,13 +47,6 @@ enum OpenPanelPicker {
         let panel = configuredPanel(title: title, prompt: prompt, allowedContentTypes: allowedContentTypes)
         panel.allowsMultipleSelection = false
         return panel.runModal() == .OK ? panel.url : nil
-    }
-
-    @MainActor
-    private static func pickFiles(title: String, prompt: String, allowedContentTypes: [UTType]) -> [URL] {
-        let panel = configuredPanel(title: title, prompt: prompt, allowedContentTypes: allowedContentTypes)
-        panel.allowsMultipleSelection = true
-        return panel.runModal() == .OK ? panel.urls : []
     }
 
     @MainActor

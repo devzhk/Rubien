@@ -216,24 +216,29 @@ private struct DisplayMenuPopover: View {
 }
 
 /// Used inside a `Button { }` body so the pill itself is the hit target.
+/// Tracks hover locally to give the same subtle highlight as the main toolbar's
+/// `ToolbarHoverButtonStyle`, so the chrome-bar controls read as interactive.
 struct ChromeBarPill: View {
     let iconName: String
     let label: String
 
+    @State private var isHovered = false
+
     var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 4, style: .continuous)
         HStack(spacing: 4) {
             Image(systemName: iconName)
                 .font(.system(size: 9, weight: .medium))
             Text(label)
                 .font(.system(size: 11))
         }
-        .foregroundStyle(.secondary)
+        .foregroundStyle(isHovered ? .primary : .secondary)
         .padding(.horizontal, 6)
         .padding(.vertical, 3)
-        .background(
-            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                .stroke(Color.secondary.opacity(0.2))
-        )
+        .background(shape.fill(isHovered ? Color.primary.opacity(0.08) : Color.clear))
+        .overlay(shape.stroke(Color.secondary.opacity(0.2)))
+        .animation(.easeOut(duration: 0.12), value: isHovered)
+        .onHover { isHovered = $0 }
     }
 }
 #endif

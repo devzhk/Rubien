@@ -7,7 +7,6 @@ struct FilterChromeBar: View {
     let tags: [Tag]
     let propertyDefs: [PropertyDefinition]
 
-    @State private var editingIndex: Int? = nil
     @State private var showAdd: Bool = false
 
     var body: some View {
@@ -18,7 +17,15 @@ struct FilterChromeBar: View {
                 .padding(.top, 5)
 
             ForEach(Array(filters.enumerated()), id: \.offset) { index, filter in
-                pill(for: filter, index: index)
+                FilterChip(
+                    filter: filter,
+                    tags: tags,
+                    propertyDefs: propertyDefs,
+                    onUpdate: { updated in
+                        if index < filters.count { filters[index] = updated }
+                    },
+                    onRemove: { filters.remove(at: index) }
+                )
             }
 
             Button {
@@ -43,11 +50,24 @@ struct FilterChromeBar: View {
         .padding(.vertical, 6)
     }
 
-    @ViewBuilder
-    private func pill(for filter: ViewFilter, index: Int) -> some View {
-        let isEditing = editingIndex == index
+}
+
+/// A single applied-filter chip. Owns its hover + editing state so it highlights
+/// on hover (matching the chrome bar's other controls) and opens its editor
+/// popover on click.
+private struct FilterChip: View {
+    let filter: ViewFilter
+    let tags: [Tag]
+    let propertyDefs: [PropertyDefinition]
+    let onUpdate: (ViewFilter) -> Void
+    let onRemove: () -> Void
+
+    @State private var isHovered = false
+    @State private var isEditing = false
+
+    var body: some View {
         Button {
-            editingIndex = index
+            isEditing = true
         } label: {
             HStack(spacing: 4) {
                 Text(filter.target.displayLabel(propertyDefs: propertyDefs))
@@ -59,7 +79,7 @@ struct FilterChromeBar: View {
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(Color.accentColor)
                 Button {
-                    filters.remove(at: index)
+                    onRemove()
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 7, weight: .bold))
@@ -71,28 +91,24 @@ struct FilterChromeBar: View {
             .padding(.vertical, 4)
             .background(
                 RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(Color.accentColor.opacity(0.08))
+                    .fill(Color.accentColor.opacity(isHovered ? 0.16 : 0.08))
             )
         }
         .buttonStyle(.plain)
-        .popover(isPresented: Binding(
-            get: { isEditing },
-            set: { if !$0 { editingIndex = nil } }
-        )) {
+        .animation(.easeOut(duration: 0.12), value: isHovered)
+        .onHover { isHovered = $0 }
+        .popover(isPresented: $isEditing) {
             FilterEditorPopover(
                 initial: filter,
                 tags: tags,
                 propertyDefs: propertyDefs,
                 onCommit: { updated in
-                    if index < filters.count {
-                        filters[index] = updated
-                    }
-                    editingIndex = nil
+                    onUpdate(updated)
+                    isEditing = false
                 },
-                onCancel: { editingIndex = nil }
+                onCancel: { isEditing = false }
             )
         }
     }
-
 }
 #endif
