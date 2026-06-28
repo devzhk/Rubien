@@ -185,5 +185,21 @@
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.1.12</title>
+            <description><![CDATA[UI polish: subtle hover highlights on table rows, the view chrome bar (Add filter / Sort / Group / Wrap), and the Properties menu make controls read as interactive. "Add manually" now lives in the import menu, and the stray keyboard focus ring that auto-highlighted the first control when a popover or sheet opened is gone.
+
+Reliability: a database busy-timeout keeps concurrent writes from being silently dropped under load.]]></description>
+            <pubDate>Sun, 28 Jun 2026 07:50:55 +0000</pubDate>
+            <sparkle:version>13</sparkle:version>
+            <sparkle:shortVersionString>0.1.12</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.1.12/Rubien-0.1.12.dmg"
+                sparkle:edSignature="l29wDpI1vxj35cBWu0Oi7r8uvphMoPIgSeXzLzPA6R0geBEKAT0LbawL5MSpxW8Jny/DO3T/a9zilGlJcHpTDQ=="
+                length="17132271"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
