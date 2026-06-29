@@ -127,13 +127,25 @@ private struct SLDestructiveButtonBody: View {
 // the font size to each call site.
 
 struct ToolbarHoverButtonStyle: ButtonStyle {
+    /// Hover / pressed highlight strengths. Defaults match the main-window
+    /// toolbar buttons; popover call sites pass stronger values because the
+    /// translucent popover material washes out these faint toolbar opacities.
+    var hoverOpacity: Double = 0.08
+    var pressedOpacity: Double = 0.14
+
     func makeBody(configuration: Configuration) -> some View {
-        ToolbarHoverButtonBody(configuration: configuration)
+        ToolbarHoverButtonBody(
+            configuration: configuration,
+            hoverOpacity: hoverOpacity,
+            pressedOpacity: pressedOpacity
+        )
     }
 }
 
 private struct ToolbarHoverButtonBody: View {
     let configuration: ButtonStyleConfiguration
+    let hoverOpacity: Double
+    let pressedOpacity: Double
     @Environment(\.isEnabled) private var isEnabled
     @State private var isHovered = false
 
@@ -146,8 +158,8 @@ private struct ToolbarHoverButtonBody: View {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .fill(
                         configuration.isPressed
-                            ? Color.primary.opacity(0.14)
-                            : (isHovered ? Color.primary.opacity(0.08) : Color.clear)
+                            ? Color.primary.opacity(pressedOpacity)
+                            : (isHovered ? Color.primary.opacity(hoverOpacity) : Color.clear)
                     )
             )
             .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
