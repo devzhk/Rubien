@@ -1001,6 +1001,14 @@ private struct ReferenceTableRowHover: NSViewRepresentable {
             }
             let point = tableView.convert(event.locationInWindow, from: nil)
             guard tableView.bounds.contains(point) else { clearHover(); return }
+            // The floating detail panel (and any other overlay) sits above the table
+            // in the same window, so `bounds.contains` alone would highlight the row
+            // *under* the panel while the pointer is over it. Require the table to be
+            // the topmost view at the pointer before drawing hover. The hover overlay
+            // itself is click-through (`hitTest` → nil), so it doesn't count as
+            // occluding the row beneath it.
+            let hit = window.contentView?.hitTest(event.locationInWindow)
+            guard hit?.isDescendant(of: tableView) == true else { clearHover(); return }
             updateHover(to: tableView.row(at: point), in: tableView)
         }
 
