@@ -201,5 +201,19 @@ Reliability: a database busy-timeout keeps concurrent writes from being silently
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.1.13</title>
+            <description><![CDATA[Hover highlights now work reliably in every popover — the Properties panel, the tag and status pickers, the sort, group, and display menus, filters, and the date and color pickers. In the Tags picker, the delete icon now appears only on hover, matching the other pickers. And table rows no longer highlight when the pointer moves over the details panel.]]></description>
+            <pubDate>Sat, 04 Jul 2026 06:37:46 +0000</pubDate>
+            <sparkle:version>14</sparkle:version>
+            <sparkle:shortVersionString>0.1.13</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.1.13/Rubien-0.1.13.dmg"
+                sparkle:edSignature="WuNYJEefuQ+6m+ngSDD3iy9f0m3qA8Y5k+JzkBq5k4ep3nAO0GuYsFjWHWUdyq6Anem2Z8dXY/CQtFZe5riMCA=="
+                length="17141079"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
