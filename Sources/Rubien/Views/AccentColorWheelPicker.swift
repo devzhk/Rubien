@@ -25,6 +25,7 @@ struct AccentColorWell: View {
         .popover(isPresented: $showsPopover, arrowEdge: .bottom) {
             ColorWheelPopover()
                 .padding(16)
+                .activatePopoverHover()
         }
     }
 }

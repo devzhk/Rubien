@@ -518,6 +518,7 @@ struct EditableDateCell: View, Equatable {
             .onAppear {
                 editDate = value ?? Date()
             }
+            .activatePopoverHover()
         }
     }
 }

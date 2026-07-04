@@ -28,7 +28,6 @@ struct TagPickerPopover: View {
     /// min(content, 200) once measured so the popover restores its height after
     /// the (shorter) confirm view swaps back. Same fix as SelectOptionPicker.
     @State private var listContentHeight: CGFloat = 0
-    @FocusState private var isSearchFocused: Bool
 
     private var filteredTags: [Tag] {
         if search.isEmpty { return allTags }
@@ -67,8 +66,8 @@ struct TagPickerPopover: View {
         .frame(width: 220)
         .onAppear {
             localIds = Set(assignedTags.compactMap(\.id))
-            DispatchQueue.main.async { isSearchFocused = true }
         }
+        .activatePopoverHover()
     }
 
     private var pickerBody: some View {
@@ -80,7 +79,6 @@ struct TagPickerPopover: View {
                 TextField("Search or create tag…", text: $search)
                     .textFieldStyle(.plain)
                     .font(.system(size: 12))
-                    .focused($isSearchFocused)
                     .onSubmit {
                         let trimmed = search.trimmingCharacters(in: .whitespaces)
                         if !trimmed.isEmpty && !allTags.contains(where: { $0.name.lowercased() == trimmed.lowercased() }) {
@@ -96,41 +94,16 @@ struct TagPickerPopover: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(filteredTags) { tag in
-                        let assigned = isAssigned(tag)
-                        HStack(spacing: 0) {
-                            Button {
-                                if let id = tag.id {
-                                    if localIds.contains(id) { localIds.remove(id) } else { localIds.insert(id) }
-                                    flushCommit()
-                                }
-                            } label: {
-                                HStack(spacing: 8) {
-                                    Image(systemName: assigned ? "checkmark.circle.fill" : "circle")
-                                        .font(.system(size: 13))
-                                        .foregroundStyle(assigned ? Color.accentColor : .secondary)
-                                    Text(tag.name)
-                                        .font(.system(size: 12))
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 2)
-                                        .chipBackground(Color(hex: tag.color))
-                                    Spacer()
-                                }
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-
-                            Button {
-                                requestDelete(tag)
-                            } label: {
-                                Image(systemName: "trash")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(.secondary)
-                            }
-                            .buttonStyle(.plain)
-                            .help("Delete tag")
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 5)
+                        TagPickerRow(
+                            tag: tag,
+                            isAssigned: isAssigned(tag),
+                            onToggle: {
+                                guard let id = tag.id else { return }
+                                if localIds.contains(id) { localIds.remove(id) } else { localIds.insert(id) }
+                                flushCommit()
+                            },
+                            onDelete: { requestDelete(tag) }
+                        )
                     }
 
                     if !search.isEmpty && !allTags.contains(where: { $0.name.lowercased() == search.trimmingCharacters(in: .whitespaces).lowercased() }) {
@@ -215,6 +188,52 @@ struct TagPickerPopover: View {
             }
         }
         .padding(12)
+    }
+}
+
+// MARK: - Single tag row inside the picker
+//
+// Extracted so each row owns its hover state and shows the trash affordance only on
+// pointer-over — matching `SelectOptionPickerRow` (the Status / select-option picker).
+private struct TagPickerRow: View {
+    let tag: Tag
+    let isAssigned: Bool
+    let onToggle: () -> Void
+    let onDelete: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Button(action: onToggle) {
+                HStack(spacing: 8) {
+                    Image(systemName: isAssigned ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 13))
+                        .foregroundStyle(isAssigned ? Color.accentColor : .secondary)
+                    Text(tag.name)
+                        .font(.system(size: 12))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .chipBackground(Color(hex: tag.color))
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if isHovering {
+                Button(action: onDelete) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Delete tag")
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 5)
+        .onHover { isHovering = $0 }
     }
 }
 #endif

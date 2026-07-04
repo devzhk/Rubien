@@ -1,6 +1,5 @@
 #if os(macOS)
 import SwiftUI
-import AppKit
 import RubienCore
 
 struct PropertyManagerPopover: View {
@@ -144,34 +143,7 @@ struct PropertyManagerPopover: View {
             }
         }
         .frame(width: 260)
-        .background(PopoverKeyActivator())
-    }
-}
-
-// MARK: - Popover key-window activator
-//
-// SwiftUI's `.onHover` installs its NSTrackingArea with key-window scope, so hover
-// highlights only fire while the hosting window is key. A `.popover` does not become
-// key on its own: its rows never highlight, and — worse — mouse-moved events keep
-// activating the *main* window's tracking areas instead, leaking hover onto the table
-// rows behind the popover. Making the popover window key on appear activates the
-// popover's own tracking (and deactivates the table's), fixing both the dead hover
-// and the leak-through.
-private struct PopoverKeyActivator: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { ActivatorView() }
-    func updateNSView(_ nsView: NSView, context: Context) {}
-
-    private final class ActivatorView: NSView {
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            guard let window else { return }
-            window.acceptsMouseMovedEvents = true
-            // The popover window may not be ready to take key synchronously on the
-            // same runloop turn it's added, so defer the activation.
-            DispatchQueue.main.async { [weak window] in
-                window?.makeKey()
-            }
-        }
+        .activatePopoverHover()
     }
 }
 

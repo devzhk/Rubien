@@ -96,6 +96,7 @@ struct ViewChromeBar: View {
                 sorts: $sorts,
                 propertyDefs: propertyDefs
             )
+            .activatePopoverHover()
         }
     }
 
@@ -120,6 +121,7 @@ struct ViewChromeBar: View {
                 propertyDefs: propertyDefs,
                 currentBuckets: currentBuckets
             )
+            .activatePopoverHover()
         }
     }
 
@@ -141,6 +143,7 @@ struct ViewChromeBar: View {
                 isColumnVisible: isColumnVisible,
                 propertyDefs: propertyDefs
             )
+            .activatePopoverHover()
         }
     }
 

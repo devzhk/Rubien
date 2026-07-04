@@ -421,6 +421,7 @@ struct InlineDateRow: View {
                 .onAppear {
                     editDate = value ?? Date()
                 }
+                .activatePopoverHover()
             }
         }
     }
@@ -494,6 +495,7 @@ struct SelectOptionPicker: View {
         .onAppear {
             localSelected = Set(selectedValues)
         }
+        .activatePopoverHover()
         // No `onDisappear { onCommit(...) }` — both branches commit eagerly
         // now (single-select on tap, multi-select on each toggle). Deferring
         // to disappear would wait for NSPopover's ~500–800ms dismiss
