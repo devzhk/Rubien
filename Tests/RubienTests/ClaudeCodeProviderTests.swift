@@ -59,6 +59,42 @@ final class ClaudeCodeProviderTests: XCTestCase {
         XCTAssertTrue(events.containsTurnCompleted)
     }
 
+    // MARK: MCP content channel (Phase 2b-ii)
+
+    func testContentChannelInjectsMCPConfigIntoSpawnedArgv() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["deltas": ["ok"], "assistantText": "ok"], into: workspace)
+        let channel = MCPContentChannel(
+            cliURL: URL(fileURLWithPath: "/Applications/Rubien.app/Contents/Helpers/rubien-cli"),
+            libraryRoot: URL(fileURLWithPath: "/tmp/lib"))
+        let provider = ClaudeCodeProvider(executableOverride: fakeCLIPath, contentChannel: channel)
+
+        _ = try await collectAllEvents(provider.send(turn: turn(workspace: workspace)))
+
+        // The fake claude recorded the exact argv it was spawned with.
+        let argv = try readSpawnedArgv(in: workspace)
+        let idx = try XCTUnwrap(argv.firstIndex(of: "--mcp-config"))
+        XCTAssertEqual(argv[idx + 1], channel.configArgument())
+        XCTAssertTrue(argv.contains("--strict-mcp-config"))
+    }
+
+    func testNoContentChannelOmitsMCPConfigFromSpawnedArgv() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["deltas": ["ok"], "assistantText": "ok"], into: workspace)
+        let provider = ClaudeCodeProvider(executableOverride: fakeCLIPath)  // no channel
+
+        _ = try await collectAllEvents(provider.send(turn: turn(workspace: workspace)))
+
+        let argv = try readSpawnedArgv(in: workspace)
+        XCTAssertFalse(argv.contains("--mcp-config"))
+        XCTAssertFalse(argv.contains("--strict-mcp-config"))
+    }
+
+    private func readSpawnedArgv(in workspace: URL) throws -> [String] {
+        let data = try Data(contentsOf: workspace.appendingPathComponent("fake-claude-argv.json"))
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String])
+    }
+
     func testSessionIDRecapturedFromResult() async throws {
         let workspace = try makeWorkspace()
         try writeConfig(["sessionInit": "sess-init-xyz", "sessionResult": "sess-rotated-xyz"],

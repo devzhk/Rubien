@@ -39,6 +39,15 @@ def main():
         sys.stdout.flush()
         return 0
 
+    # Record the exact argv this turn was spawned with, so tests can assert the
+    # flags the provider passed (e.g. the Phase-2b --mcp-config / --strict-mcp-config
+    # content-channel wiring). Written into cwd (= the turn's workspace).
+    try:
+        with open("fake-claude-argv.json", "w") as argv_handle:
+            json.dump(sys.argv, argv_handle)
+    except OSError:
+        pass
+
     cfg = {}
     try:
         with open("fake-claude.json") as handle:

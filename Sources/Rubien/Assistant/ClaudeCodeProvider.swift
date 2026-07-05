@@ -33,9 +33,14 @@ final class ClaudeCodeProvider: AgentProvider {
     /// CLI) and, in production, by the Settings "binary path" override (a later
     /// phase wires `RubienPreferences` here).
     private let executableOverride: String?
+    /// The read-only MCP content channel (Phase 2b) — the bundled `rubien-cli mcp`
+    /// server pointed at the app's library, attached via `--mcp-config`. nil ⇒ the
+    /// turn runs without document tools (the channel couldn't be resolved).
+    private let contentChannel: MCPContentChannel?
 
-    init(executableOverride: String? = nil) {
+    init(executableOverride: String? = nil, contentChannel: MCPContentChannel? = nil) {
         self.executableOverride = executableOverride
+        self.contentChannel = contentChannel
         self.engine = ClaudeTurnEngine()
     }
 
@@ -47,6 +52,7 @@ final class ClaudeCodeProvider: AgentProvider {
         let token = UUID()
         let engine = self.engine
         let override = executableOverride
+        let mcpConfig = contentChannel?.configArgument()
         return AsyncThrowingStream { continuation in
             // Breaking/cancelling the consumed stream (e.g. window closed mid-turn)
             // kills this turn's process group — turn-scoped so it can't clobber a
@@ -57,7 +63,8 @@ final class ClaudeCodeProvider: AgentProvider {
             Task {
                 await engine.startTurn(
                     token: token, request: turn,
-                    executableOverride: override, continuation: continuation)
+                    executableOverride: override, mcpConfig: mcpConfig,
+                    continuation: continuation)
             }
         }
     }
@@ -134,6 +141,7 @@ private actor ClaudeTurnEngine {
         token: UUID,
         request: AgentTurnRequest,
         executableOverride: String?,
+        mcpConfig: String?,
         continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation
     ) {
         // A1: the consumer may have cancelled the stream in the window before this
@@ -157,7 +165,7 @@ private actor ClaudeTurnEngine {
             return
         }
 
-        let arguments = ClaudeCLIInvocation.arguments(for: request)
+        let arguments = ClaudeCLIInvocation.arguments(for: request, mcpConfig: mcpConfig)
         let environment = ClaudeCLIInvocation.environment(
             binaryDirectory: (executable as NSString).deletingLastPathComponent)
 
@@ -498,9 +506,9 @@ private final class LockedBox<Value>: @unchecked Sendable {
 /// Extracted from the engine so it can be verified without spawning anything.
 enum ClaudeCLIInvocation {
 
-    /// The per-turn argv (D3/§4.2). MCP flags are deliberately absent — that is the
-    /// Phase-2b extension point marked below.
-    static func arguments(for request: AgentTurnRequest) -> [String] {
+    /// The per-turn argv (D3/§4.2). `mcpConfig`, when present, is the inline
+    /// `--mcp-config` JSON for the read-only content channel (Phase 2b).
+    static func arguments(for request: AgentTurnRequest, mcpConfig: String? = nil) -> [String] {
         var args = [
             "--input-format", "stream-json",
             "--output-format", "stream-json",
@@ -525,8 +533,14 @@ enum ClaudeCLIInvocation {
             // bypass (D6).
             args += ["--disallowedTools", "WebFetch WebSearch"]
         }
-        // Phase-2b extension point: the MCP content channel goes here —
-        //   args += ["--mcp-config", <rubien-read-only.json>, "--strict-mcp-config"]
+        // The read-only MCP content channel (Phase 2b): an inline `--mcp-config`
+        // naming the bundled `rubien-cli mcp --read-only` server, plus
+        // `--strict-mcp-config` so ONLY Rubien's server loads (no ambient MCP —
+        // pairs with `--setting-sources ''`). Absent when the channel couldn't be
+        // resolved; the turn still runs, just without document tools.
+        if let mcpConfig, !mcpConfig.isEmpty {
+            args += ["--mcp-config", mcpConfig, "--strict-mcp-config"]
+        }
         return args
     }
 
