@@ -63,6 +63,7 @@ Linux needs system deps first — see [Linux CLI](../README.md#linux-cli). For d
 | `pdf download` | Fetch the open-access PDF for a reference and attach it (skip-if-attached; `--force` to replace) |
 | `web get` | Read the extracted body of a clipped web reference |
 | `web annotations` | List web-page annotations for a reference |
+| `mcp` | Run a Model Context Protocol server over stdio, exposing the read APIs as MCP tools (the in-app Assistant content channel; a Node-free replacement for `rubien-mcp-server`). Mac **and** Linux. |
 | `sync status` | Inspect iCloud sync state (JSON only). **Mac-only** — Linux builds omit this subcommand entirely. |
 
 ---
@@ -1017,6 +1018,67 @@ a clipped web reference.
 - Empty array (not error) when the reference has no web annotations or
   the reference ID doesn't exist — same convention as the PDF
   `annotations` subcommand.
+
+---
+
+## mcp
+
+Run a **Model Context Protocol (MCP) server over stdio**, exposing Rubien's
+read APIs as MCP tools. This is the in-app Assistant sidebar's *content
+channel* — the coding-agent runtime (Claude Code / Codex) connects to it and
+reads the document under discussion through these tools — and a **Node-free**
+replacement for the `rubien-mcp-server` npm package: the tool names, input
+schemas, and outputs mirror it exactly, so the two are drop-in interchangeable.
+Available on macOS **and** Linux.
+
+```bash
+# Wire into Claude Code (the app does this automatically via --mcp-config):
+claude mcp add rubien -- rubien-cli mcp --read-only
+
+# Or drive it by hand — newline-delimited JSON-RPC 2.0 on stdio:
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"rubien_get","arguments":{"id":1}}}' \
+  | rubien-cli mcp --read-only
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `--read-only` | Flag | (implied) | Register only read-only tools. Currently the only supported mode — writes are not yet exposed over MCP, so the flag is accepted for forward-compatibility and the server is read-only with or without it. |
+
+**Protocol.** Speaks JSON-RPC 2.0 over stdio (newline-delimited messages, one
+per line): `initialize` (echoes the client's `protocolVersion`, advertises the
+`tools` capability and `serverInfo`), `tools/list`, `tools/call`, and `ping`.
+Notifications (`notifications/initialized`, etc.) get no response. Unknown
+methods return error `-32601`; unknown tools return `-32602`. Diagnostics go to
+stderr; stdout carries only protocol messages.
+
+**Tools** (all `readOnlyHint: true`) — the read tools from the four content
+families, each mapping to the identical subcommand documented above:
+
+| Tool | Backing subcommand |
+|---|---|
+| `rubien_search` | `search` |
+| `rubien_list` | `list` |
+| `rubien_get` | `get` |
+| `rubien_pdf_info` | `pdf info` |
+| `rubien_pdf_text` | `pdf text` |
+| `rubien_pdf_page_image` | `pdf page-image` (returned as an MCP `image` content block + a text metadata block) |
+| `rubien_annotations_list` | `annotations` |
+| `rubien_web_get` | `web get` |
+| `rubien_web_annotations` | `web annotations` |
+
+**Errors.** A tool whose backing command exits non-zero (e.g. a missing
+reference, a reference with no attached PDF) returns a normal result with
+`isError: true` and the CLI's error message as text — not a protocol error —
+so the agent sees it in-band. Missing/invalid arguments surface the same way.
+
+**Library selection.** Like every other subcommand, the server resolves the
+library via `RUBIEN_LIBRARY_ROOT` / the standard storage-root order; the
+running app sets `RUBIEN_LIBRARY_ROOT` so the server reads the app's live
+library. Each `tools/call` runs the corresponding `rubien-cli` subcommand as a
+child process, so tool output is byte-identical to that subcommand.
 
 ---
 
