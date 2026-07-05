@@ -68,6 +68,14 @@ struct RubienApp: App {
             UpdateMenuCommands()
         }
         #endif
+        #if DEBUG
+        // Debug ▸ Assistant Renderer Harness — eyeball the chat transcript
+        // renderer (markdown/LaTeX/streaming/tool chips/hostile input/theme)
+        // without spawning an agent. Debug builds only.
+        .commands {
+            AssistantHarnessMenuCommands()
+        }
+        #endif
         Settings {
             // Same outermost-environmentObject ordering as the WindowGroup.
             RubienSettingsView()
