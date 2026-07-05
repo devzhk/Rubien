@@ -219,6 +219,9 @@ struct AssistantHarnessMenuCommands: Commands {
             Button("Assistant Renderer Harness") {
                 AssistantRendererHarnessWindowController.shared.show()
             }
+            Button("Assistant Sidebar Harness") {
+                AssistantSidebarHarnessWindowController.shared.show()
+            }
         }
     }
 }
