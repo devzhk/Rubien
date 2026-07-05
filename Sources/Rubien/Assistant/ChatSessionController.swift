@@ -1,0 +1,270 @@
+#if os(macOS)
+import Foundation
+import Combine
+
+// MARK: - Renderer seam
+//
+// The controller drives the transcript through this narrow protocol rather than the
+// concrete WebKit `ChatTranscriptController`, so its turn/event logic is unit-tested
+// with a spy (no WKWebView). `ChatTranscriptController`'s methods already match.
+
+@MainActor
+protocol ChatTranscriptSink: AnyObject {
+    func reset()
+    func loadTranscript(_ messages: [ChatRenderMessage])
+    func addUserMessage(_ markdown: String)
+    func beginAssistantMessage()
+    func appendDelta(_ text: String)
+    func commitAssistantMessage(_ markdown: String)
+    func addToolChip(name: String, detail: String?, status: ToolChipStatus)
+    func addNotice(_ markdown: String)
+    func setTheme(_ mode: ChatTheme)
+}
+
+extension ChatTranscriptController: ChatTranscriptSink {}
+
+// MARK: - Per-window chat session controller (Phase 2c)
+//
+// One per reader window. Owns the conversation's in-memory state (nothing is
+// persisted — D5), maps a turn's `AgentEvent` stream onto the transcript renderer,
+// gates concurrent resume-turns across windows, and surfaces approval + availability
+// to the view. The provider (Phase 2a) and the renderer (Phase 1) are injected.
+
+@MainActor
+final class ChatSessionController: ObservableObject {
+
+    /// A pending Claude approval (control protocol). When non-nil the view shows a
+    /// native approval card above the composer.
+    struct PendingApproval: Equatable {
+        let id: String
+        let toolName: String
+        let summary: String
+    }
+
+    // MARK: Published UI state
+    @Published private(set) var isResponding = false
+    @Published private(set) var pendingApproval: PendingApproval?
+    @Published var webAccess: Bool
+    @Published private(set) var availability: AgentAvailability?
+    @Published private(set) var statusText: String?
+    /// The requested resume session is busy in another window (§4.1) — the composer
+    /// surfaces this instead of forking the session file.
+    @Published private(set) var busyElsewhere = false
+    /// A quoted selection staged from "Ask" (2c-4), shown as a chip and prepended as
+    /// a `> …` block on the next send.
+    @Published var stagedSelection: String?
+
+    // MARK: Collaborators (injected)
+    private let provider: any AgentProvider
+    private let transcript: any ChatTranscriptSink
+    private let gate: AssistantTurnGate
+    private let reference: ChatReference
+    private let workspaceURL: URL
+    private let modelOverride: String?
+
+    // MARK: In-memory conversation state (never persisted — D5)
+    /// The live provider session id. Captured from EVERY `.sessionStarted` because it
+    /// **rotates each resume turn** (D5 / Risk #5); always resume the latest.
+    private(set) var liveSessionID: String?
+    /// The seed is applied on the first turn only. Set once a `.sessionStarted` proves
+    /// the seed-bearing process actually started (NOT at send time — else a first turn
+    /// that fails before spawning would drop the reference context on the retry).
+    private var seedSent = false
+    /// The in-flight turn (exposed read-only so tests can await it).
+    private(set) var turnTask: Task<Void, Never>?
+    /// `toolUseStarted` details per tool name, FIFO — the single chip emitted on a
+    /// tool's terminal event pops the oldest (the renderer's `addToolChip` is add-only,
+    /// and events carry no tool-use id to match started↔completed exactly).
+    private var toolDetails: [String: [String?]] = [:]
+    /// Bumped by `send` / `newConversation` to invalidate a superseded turn's late
+    /// events + finalization (the stale-turn guard, §4.1): a drained old stream must
+    /// not corrupt a fresh conversation's state or clobber a newer turn.
+    private(set) var generation = 0
+
+    var providerKind: AgentProviderKind { provider.kind }
+
+    init(
+        provider: any AgentProvider,
+        transcript: any ChatTranscriptSink,
+        reference: ChatReference,
+        workspaceURL: URL,
+        gate: AssistantTurnGate = .shared,
+        webAccess: Bool = true,
+        modelOverride: String? = nil
+    ) {
+        self.provider = provider
+        self.transcript = transcript
+        self.reference = reference
+        self.workspaceURL = workspaceURL
+        self.gate = gate
+        self.webAccess = webAccess
+        self.modelOverride = modelOverride
+    }
+
+    // MARK: Turn lifecycle
+
+    /// Send a user turn. No-ops on empty input or while a turn is already running.
+    func send(_ rawText: String) {
+        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !isResponding else { return }
+
+        generation += 1
+        let gen = generation
+        isResponding = true
+        statusText = "Responding…"
+        busyElsewhere = false
+
+        // The pre-turn id is both the `--resume` target and the gate key; nil for a
+        // fresh conversation (unkeyed, always admitted).
+        let resumeID = liveSessionID
+        let composed = composeUserMessage(text)
+        let request = AgentTurnRequest(
+            workspaceURL: workspaceURL,
+            resumeSessionID: resumeID,
+            prompt: composed,
+            seed: seedSent ? nil : AssistantContext.seed(for: reference),
+            webAccess: webAccess,
+            codexSandbox: .readOnly,
+            modelOverride: modelOverride)
+        let kind = provider.kind
+
+        turnTask = Task { [weak self] in
+            guard let self else { return }
+            // Serialize resume-turns across windows (§4.1). On refusal, DON'T render
+            // the user message — the turn never happened (keep the staged selection so
+            // a retry still carries it).
+            guard await self.gate.tryAcquire(provider: kind, sessionID: resumeID) else {
+                self.refuseTurn(gen: gen)
+                return
+            }
+            self.transcript.addUserMessage(composed)
+            self.stagedSelection = nil
+            self.transcript.beginAssistantMessage()
+            do {
+                for try await event in self.provider.send(turn: request) {
+                    self.handle(event, gen: gen)
+                }
+            } catch {
+                if gen == self.generation {
+                    self.transcript.addNotice("The assistant turn failed: \(error.localizedDescription)")
+                }
+            }
+            // Release BEFORE the task completes, so awaiting `turnTask` guarantees the
+            // slot is free (a fire-and-forget release could race the next acquire).
+            await self.gate.release(provider: kind, sessionID: resumeID)
+            self.finalize(gen: gen)
+        }
+    }
+
+    /// Stop the running turn (process-group kill via the provider); the stream ends,
+    /// which finalizes the turn. Stays in the same conversation.
+    func stop() {
+        guard isResponding else { return }
+        provider.cancel()
+        transcript.addNotice("_Interrupted._")
+    }
+
+    /// Start a fresh conversation: cancel any live turn and reset. Bumping `generation`
+    /// invalidates the old turn's still-draining events + finalization so they can't
+    /// corrupt the fresh state (its awaited gate release still runs — no slot leak).
+    func newConversation() {
+        provider.cancel()
+        generation += 1
+        transcript.reset()
+        liveSessionID = nil
+        seedSent = false
+        isResponding = false
+        statusText = nil
+        busyElsewhere = false
+        pendingApproval = nil
+        stagedSelection = nil
+        toolDetails.removeAll()
+    }
+
+    /// Answer a pending Claude approval; the turn continues on the same stream. A stale
+    /// response (the approval was replaced or the turn ended) is dropped.
+    func respond(to approval: PendingApproval, _ decision: ApprovalDecision) {
+        guard pendingApproval == approval else { return }
+        provider.respondToApproval(id: approval.id, decision)
+        pendingApproval = nil
+    }
+
+    /// Re-probe provider availability (drives the empty-state / Recheck).
+    func recheckAvailability() async {
+        availability = await provider.isAvailable()
+    }
+
+    // MARK: Event mapping (internal for testing)
+
+    func handle(_ event: AgentEvent, gen: Int) {
+        guard gen == generation else { return }  // drop a superseded turn's late events
+        switch event {
+        case .sessionStarted(let id):
+            liveSessionID = id
+            seedSent = true  // the seed-bearing process started → the seed was delivered
+        case .assistantDelta(let text):
+            transcript.appendDelta(text)
+        case .assistantMessageCompleted(let text):
+            transcript.commitAssistantMessage(text)
+        case .toolUseStarted(let name, let detail):
+            toolDetails[name, default: []].append(detail)
+        case .toolUseCompleted(let name):
+            transcript.addToolChip(name: name, detail: popToolDetail(name), status: .completed)
+        case .approvalRequested(let id, let toolName, let summary):
+            pendingApproval = PendingApproval(id: id, toolName: toolName, summary: summary)
+        case .toolDenied(let name, let reason):
+            _ = popToolDetail(name)
+            transcript.addToolChip(name: name, detail: reason, status: .denied)
+        case .turnCompleted:
+            break  // finalization happens once the stream ends (finalize)
+        case .providerNotice(let text):
+            transcript.addNotice(text)
+        }
+    }
+
+    // MARK: Private
+
+    /// Finalize a completed turn's state. Guarded by `gen` so a superseded turn (a newer
+    /// `send` or `newConversation`) is not clobbered. The gate is released by the caller
+    /// (awaited) before this runs.
+    private func finalize(gen: Int) {
+        guard gen == generation else { return }
+        isResponding = false
+        statusText = nil
+        pendingApproval = nil
+        toolDetails.removeAll()
+        turnTask = nil
+    }
+
+    /// A turn refused by the gate (busy in another window): surface it and re-enable the
+    /// composer without having rendered the user message.
+    private func refuseTurn(gen: Int) {
+        guard gen == generation else { return }
+        busyElsewhere = true
+        transcript.addNotice("This conversation is busy in another window. Try again in a moment.")
+        isResponding = false
+        statusText = nil
+        turnTask = nil
+    }
+
+    /// Pop the oldest remembered detail for a tool name (FIFO — events carry no id).
+    private func popToolDetail(_ name: String) -> String? {
+        guard var queue = toolDetails[name], !queue.isEmpty else { return nil }
+        let detail = queue.removeFirst()
+        toolDetails[name] = queue.isEmpty ? nil : queue
+        return detail
+    }
+
+    /// Prepend any staged selection as a markdown blockquote so both the transcript
+    /// and the agent see the quoted passage above the question.
+    private func composeUserMessage(_ text: String) -> String {
+        guard let selection = stagedSelection?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !selection.isEmpty else { return text }
+        let quoted = selection
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { "> \($0)" }
+            .joined(separator: "\n")
+        return "\(quoted)\n\n\(text)"
+    }
+}
+#endif
