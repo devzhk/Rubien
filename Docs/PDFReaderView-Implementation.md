@@ -12,6 +12,7 @@ documented here — read the code for those.
 | File | Responsibility |
 |------|----------------|
 | `Views/PDFReaderView.swift` | Main view, ViewModel, Coordinator, all annotation logic |
+| `Views/PDFLinkPreview.swift` | Internal PDF link target resolution, thumbnail rendering, preview popover |
 | `Views/AnnotationSidebarView.swift` | Right-hand annotation card list (`AnnotationCard`) |
 | `Models/PDFAnnotationRecord.swift` | Persistence model (GRDB) |
 | `Helpers/PDFView+ElegantScrollers.swift` | PDFView extension: internal scroll view lookup + scroller styling |
@@ -214,3 +215,42 @@ AnnotationSidebarView
 Click resolution order inside `mouseUp`: if there's an active
 `currentSelection`, treat the click as a selection commit; otherwise probe
 for a hit annotation; only then fall through to clearing the selection.
+
+---
+
+## 4. Internal PDF link hover previews
+
+`CommitAwarePDFView` installs an `NSTrackingArea` with `.mouseMoved`,
+`.mouseEnteredAndExited`, `.activeInKeyWindow`, and `.inVisibleRect`.
+Hover hit-testing stays in PDFKit space:
+
+```
+mouse location in window
+    → PDFView point
+    → PDFPage via page(for:nearest:)
+    → page point via convert(_:to:)
+    → page.annotation(at:)
+```
+
+Only real PDF link annotations preview. `PDFLinkPreviewResolver` normalizes
+PDFKit's link subtype string, rejects external URL links and non-GoTo actions,
+and resolves internal targets from `PDFActionGoTo.destination` with
+`annotation.destination` as a fallback only when no action is present.
+
+Destination coordinates can be unspecified (`kPDFDestinationUnspecifiedValue`)
+in some PDFs. In that case the preview falls back to the top center of the
+target page's current `PDFView.displayBox`, then clamps the rendered crop to
+that displayed box. Rendering uses the same display box so crop-box and rotated
+pages match what the reader shows.
+
+The coordinator owns the popover lifecycle:
+
+| Event | Behavior |
+|-------|----------|
+| Hover on a previewable link | debounce 120 ms, render a Retina-aware crop, show transient `NSPopover` |
+| Text selection / annotation toolbar active | suppress preview |
+| Scroll, zoom, page change, document reload, teardown | cancel pending render and close the popover |
+
+This is intentionally a PDF-destination feature, not a plain-text citation or
+caption detector. Papers that encode citations, figures, tables, or equations
+as internal links get previews; unlinked text does not.

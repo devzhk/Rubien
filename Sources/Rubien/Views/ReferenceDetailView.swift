@@ -220,12 +220,24 @@ struct ReferenceDetailView: View {
                         Label("Attached", systemImage: "doc.fill")
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
-                        Button("Remove") {
-                            removeAttachedPDF()
+                        Button {
+                            revealAttachedPDF()
+                        } label: {
+                            Image(systemName: "folder")
+                                .font(.system(size: 11, weight: .medium))
                         }
-                        .font(.system(size: 11))
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.red)
+                        .buttonStyle(ToolbarHoverButtonStyle(hoverOpacity: 0.10, pressedOpacity: 0.16))
+                        .help("Reveal in Finder")
+
+                        Button {
+                            removeAttachedPDF()
+                        } label: {
+                            Image(systemName: "trash")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .buttonStyle(SLDestructiveButtonStyle())
+                        .controlSize(.mini)
+                        .help("Remove PDF")
                     }
                 } else {
                     Button {
@@ -1184,6 +1196,18 @@ struct ReferenceDetailView: View {
         var updated = editedRef
         updated.dateModified = Date()
         onSave(updated)
+    }
+
+    private func revealAttachedPDF() {
+        guard let id = editedRef.id else { return }
+        let cache = PDFAssetCache(db: db, storageRoot: AppDatabase.pdfStorageURL)
+
+        Task {
+            guard let url = try? await cache.pathFor(referenceId: id) else { return }
+            await MainActor.run {
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            }
+        }
     }
 
     /// Detach the currently-cached PDF from this reference: removes the file
