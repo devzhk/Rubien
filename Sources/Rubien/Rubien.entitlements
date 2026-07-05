@@ -2,8 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>com.apple.security.app-sandbox</key>
-	<true/>
+	<!-- NOTE: com.apple.security.app-sandbox is deliberately ABSENT. The app
+	     spawns the Claude Code / Codex CLI runtimes for the Assistant sidebar,
+	     which the App Sandbox forbids (children inherit the sandbox and cannot
+	     exec external binaries). CloudKit + the App-Group library are
+	     independent of the sandbox and unaffected — see
+	     Docs/superpowers/specs/2026-07-04-assistant-chat-sidebar-design.md §D1.
+	     Hardened Runtime (applied at codesign time) is retained for notarization. -->
 	<key>com.apple.security.application-groups</key>
 	<array>
 		<string>9TXK4V3SS8.group.com.rubien.shared</string>

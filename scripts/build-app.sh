@@ -58,11 +58,15 @@ HELPERS_DIR="$APP_BUNDLE/Contents/Helpers"
 
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 CODESIGN_ENABLED="${CODESIGN_ENABLED:-1}"
-# Outer app entitlements: sandbox + App Group + Sparkle XPC mach-lookup +
-# iCloud/CloudKit + file access. Default points at the in-repo plist; override
-# via env var for custom builds. Without this, the outer codesign step
-# silently signs with no entitlements, producing a DMG whose installed app
-# can't open its library or auto-update.
+# Outer app entitlements: App Group + Sparkle XPC mach-lookup + iCloud/CloudKit
+# + file access. NOTE: the App Sandbox is deliberately absent so the app can
+# spawn the Claude Code / Codex CLI runtimes for the Assistant sidebar (see
+# Docs/superpowers/specs/2026-07-04-assistant-chat-sidebar-design.md §D1);
+# CloudKit + the App-Group library are unaffected, and Hardened Runtime
+# (--options runtime, below) is retained for notarization. Default points at the
+# in-repo plist; override via env var for custom builds. Without this, the outer
+# codesign step silently signs with no entitlements, producing a DMG whose
+# installed app can't open its library or auto-update.
 CODESIGN_ENTITLEMENTS="${CODESIGN_ENTITLEMENTS:-$PROJECT_DIR/Sources/Rubien/Rubien.entitlements}"
 # Embedded rubien-cli gets its own entitlements so it can claim the shared
 # App Group and read the same library.sqlite the app uses. Default points at
