@@ -1,7 +1,7 @@
 # Assistant Chat Sidebar — Design
 
 **Date:** 2026-07-04
-**Status:** v2 — reworked to the soft-boundary model (control protocol for Claude, OS sandbox for Codex) after the containment/claude-code-chat/codex spikes. Supersedes the hook-based v1 (codex-reviewed 2026-07-04; that review's findings are still incorporated).
+**Status:** v2 — reworked to the soft-boundary model (control protocol for Claude, OS sandbox for Codex) after the containment/claude-code-chat/codex spikes. Supersedes the hook-based v1 (codex-reviewed 2026-07-04; that review's findings are still incorporated). **Phase 0 (App-Sandbox removal) + Phase 1 (transcript renderer) are implemented and committed on branch `assistant-sidebar`; Phases 2–4 remain forward-looking.**
 **Feature name:** Assistant (chat sidebar in the PDF reader and web reader)
 
 ## 1. Summary
@@ -150,7 +150,7 @@ Note the inversion: the *app* leaves its sandbox; the *agents* gain one (Codex a
 | 5 | What output can *execute* | Transcript renderer treats all content as untrusted: raw HTML off in `marked` + DOMPurify + restrictive CSP + link-scheme allowlist (§5.2). |
 | 6 | What the user *clicks* | `openExternalLink` allows `https`/`http` only, confirmation for odd hosts; local paths render inert. |
 | 7 | What persists | Provider transcripts disclosed + deletable (D5); workspace is app-generated only. |
-| 8 | The preamble | AGENTS.md/CLAUDE.md label document/selection as untrusted data — a nudge, not a boundary (layers 1–6 are the boundaries). |
+| 8 | The preamble | The one-line reference **seed** (Claude `--append-system-prompt` / Codex prompt-prefix — D4; *not* a file written into the user's folder) labels document/selection as **untrusted data** — a nudge, not a boundary (layers 1–6 are the boundaries). |
 
 **Residual risk accepted (user decision 2026-07-04):** a prompt-injected document can read local files (Claude, unscoped) and exfiltrate its own text via silent web (when the toggle is on); it cannot mutate the library or disk without a prompt (Claude) or is blocked (Codex read-only). The intended use is public papers/blogs. **If confidential-document support is ever wanted,** the shelved PreToolUse hook (Appendix) reinstates hard read-scoping + deny-by-default as a "Locked" mode.
 
@@ -191,6 +191,9 @@ struct AgentTurnRequest {
     let workspaceURL: URL
     let resumeSessionID: String?
     let prompt: String
+    let seed: String?                 // one-line reference seed naming the reference ID (D4);
+                                      // first turn only (nil on resume — `--resume` carries it forward).
+                                      // Applied as Claude `--append-system-prompt` / a Codex prompt prefix.
     let webAccess: Bool               // Web toggle
     let codexSandbox: CodexSandbox    // .readOnly (default) | .workspaceWrite
     let modelOverride: String?
@@ -212,7 +215,7 @@ enum AgentEvent {
 Parsers are pure functions over `AsyncLineSequence` (NDJSON) that **ignore unknown event types** — runtimes update monthly; degrade, don't throw. CLI version captured at availability-check time and logged per turn.
 
 **Process mechanics (normative):**
-- **Minimal allowlisted env, not inherit-and-strip.** `HOME`, `USER`, `LANG`/`LC_ALL`, `TMPDIR`, `TERM=dumb`, `FORCE_COLOR=0`, `NO_COLOR=1` (stray ANSI must never corrupt the JSON stream — claude-code-chat), `CLAUDE_CODE_ENTRYPOINT=rubien-assistant`, and a Rubien-built `PATH` (binary dir + `/usr/bin:/bin`). Never inherit the app env — GUI apps carry `OPENAI_API_KEY`, `GITHUB_TOKEN`, `SSH_AUTH_SOCK`, cloud creds. Rubien additions (e.g. `RUBIEN_LIBRARY_ROOT` for the Phase-4 MCP server) are explicit.
+- **Minimal allowlisted env, not inherit-and-strip.** `HOME`, `USER`, `LANG`/`LC_ALL`, `TMPDIR`, `TERM=dumb`, `FORCE_COLOR=0`, `NO_COLOR=1` (stray ANSI must never corrupt the JSON stream — claude-code-chat), `CLAUDE_CODE_ENTRYPOINT=rubien-assistant`, and a Rubien-built `PATH` (binary dir + `/usr/bin:/bin`). Never inherit the app env — GUI apps carry `OPENAI_API_KEY`, `GITHUB_TOKEN`, `SSH_AUTH_SOCK`, cloud creds. Rubien additions (e.g. `RUBIEN_LIBRARY_ROOT` for the Phase-2 read-only MCP server — the content channel, D6) are explicit.
 - **Config isolation.** Claude: `--setting-sources ''` (drops ambient settings/MCP/plugins; auth survives — verified). Codex: pin `-s` and reasoning effort; don't inherit the user's `~/.codex` effort default.
 - **Process-tree kill, not `terminate()`.** CLIs spawn shells/helpers that outlive a SIGTERM to the leader. Spawn each turn in its own process group (`posix_spawn` + `POSIX_SPAWN_SETPGROUP`), cancel = `killpg(SIGTERM)` → ~2 s grace → `killpg(SIGKILL)`.
 - **Concurrent pipe draining.** stdout (NDJSON) and stderr (bounded ring buffer) on independent tasks; a full stderr pipe must never deadlock stdout parsing.
@@ -265,15 +268,18 @@ Prompt delivery: a stream-json `user` message on stdin (not argv — avoids ARG_
 - **Narrow-window policy:** opening chat auto-collapses the annotation sidebar when the window can't fit all panes (PDF reader ~800 pt min); reopening annotations collapses chat. No four-panes-squeezed state.
 - Per-window state (readers are standalone `NSWindow`s via `ReaderWindowManager`); no cross-window shared chat in v1. Sidebar visibility + width persist via `RubienPreferences`.
 
-### 5.2 Transcript renderer (`ChatTranscriptView`)
+### 5.2 Transcript renderer (`ChatTranscriptView`) *(Phase 1 — DONE, committed on `assistant-sidebar`)*
 
-- One `WKWebView` per sidebar loading `Resources/ChatTranscript.html`, built by a new **`scripts/chat-renderer/`** esbuild bundle (clone of `scripts/note-editor/build.mjs`): `marked` + **DOMPurify** + `katex` → one committed HTML file. Manual `npm run build`, artifact committed — same discipline as `NoteEditor.html`.
-- **Untrusted-content rendering:** `marked` with raw HTML **disabled**; output through DOMPurify (pinned) before insertion; restrictive CSP `<meta>` (no remote loads, no inline handlers, `script-src` = bundled script only); links limited to `https`/`http` (`javascript:`/`file:`/`data:`/custom → inert). Applies to live streams and restored transcripts alike.
-- KaTeX: reuse the vendored assets + font-inlining from `WebReaderView.bundledKaTeXHeadInjection` / `inlineKaTeXFontsAsDataURIs` (offline, no scheme handler). Delimiters `$…$`, `$$…$$`, `\(…\)`, `\[…\]`.
-- JS API (mirrors `window.NoteEditor`): `window.RubienChat.{loadTranscript, addUserMessage, beginAssistantMessage, appendDelta, commitAssistantMessage, addToolChip, addNotice, setTheme, reset}`.
-- Streaming: deltas append as escaped text with a rAF-throttled markdown re-render of the open bubble; **KaTeX only on commit** (no half-formula flicker).
-- JS→Swift: `chatReady`, `openExternalLink` (scheme-checked again in Swift; confirmation for odd hosts; then `NSWorkspace`), `copyCode`.
-- Theme: reuse the reader's palette injection for light/dark parity.
+- One `WKWebView` per sidebar loading `Resources/ChatTranscript.html`, produced by the **`scripts/chat-renderer/`** esbuild bundle (clone of `scripts/note-editor/build.mjs`): `src/render.js` + `src/chat.js` (`marked` v15 + **DOMPurify pinned `3.4.11`** + vendored `katex`) → one committed, self-contained HTML file. Manual `npm run build`, artifact committed — same discipline as `NoteEditor.html`.
+- **Untrusted-content rendering (`render.js`, pure + importable):** `marked` with raw HTML **neutralized** — a raw `<script>`/`<b>` in the source renders as *escaped visible text* (the renderer's `html` token handler HTML-escapes instead of emitting live markup), never executable HTML; every string `marked` produces then passes through **DOMPurify** before it can reach `innerHTML`. DOMPurify config: `FORBID_TAGS` script/style/iframe/object/embed/form/base/meta/link, an `uponSanitizeAttribute` hook dropping every `on*` handler attribute, and **`ALLOWED_URI_REGEXP = /^https?:/i`** — so **only `http`/`https` links stay live**; `javascript:`/`file:`/`data:`/`mailto:`/custom schemes are stripped inert. Applies identically to live streams and restored transcripts.
+- **CSP:** the built HTML carries a strict `<meta>` CSP — `default-src 'none'`, `img-src`/`font-src data:` (the inlined woff2 only), `style-src`/`script-src 'unsafe-inline'` (everything is inlined; no remote origin exists anywhere), **`connect-src 'none'`** (page is incapable of any fetch/XHR/WebSocket/EventSource), `base-uri 'none'`, `form-action 'none'`. `on*`-handler removal is DOMPurify's job (CSP `'unsafe-inline'` alone would not block inline handlers).
+- **KaTeX (`chat.js`):** reuse the vendored assets + font-inlining from `WebReaderView.bundledKaTeXHeadInjection` / `inlineKaTeXFontsAsDataURIs` (woff2 → data URIs; offline, no scheme handler). Delimiters `$…$`, `$$…$$`, `\(…\)`, `\[…\]`. **`trust:false`** (the default, pinned explicitly) so a hostile `$\href{javascript:…}{x}$` yields no live link, and typesetting runs **only on commit / full render — never mid-stream** (no half-formula flicker).
+- **JS API — `window.RubienChat`** (mirrors `window.NoteEditor`): `reset()`, `loadTranscript(messages)`, `addUserMessage(md)`, `beginAssistantMessage()`, `appendDelta(text)`, `commitAssistantMessage(md)`, `addToolChip({name,detail,status})`, `addNotice(md)`, `setTheme("light"|"dark")`. Streaming: `appendDelta` accumulates markdown and re-renders the open bubble on a rAF throttle (sanitize only, no KaTeX); commit does the authoritative full render (sanitize + KaTeX + code-block copy affordance).
+- **JS→Swift posts:** `chatReady` (the ready handshake — the Swift controller queues every call until it fires), `openExternalLink({url})`, `copyCode({code})`.
+- **Swift→JS is JSON-encoded, never string-interpolated (`ChatTranscriptJS`):** every argument is `JSONEncoder`-encoded into a bare JS literal, so quotes/newlines/backslashes/control chars/unicode, U+2028/U+2029, and `</script>` (Foundation slash-escapes it to `<\/script>`) are all inert. `ChatTranscriptController` (@MainActor) drives Swift→JS through a `chatReady`-gated pending-JS queue and re-applies the theme on ready.
+- **Navigation backstop (`ChatTranscriptView.Coordinator`):** the `WKWebView`'s Coordinator is also its `WKNavigationDelegate` + `WKUIDelegate`. It **allows only the initial local-file load** and cancels/reroutes every other navigation (context-menu "Open Link", modifier-clicks, `target=_blank`, any programmatic/remote nav), sending http/https through the same Swift `ChatExternalLink` classifier the left-click path uses and dropping the rest — a hard backstop so the transcript can never navigate away or load remote content even if the CSP/JS layer were somehow bypassed (threat-model §3).
+- **External-link re-validation (`ChatExternalLink`, Swift):** re-classify every URL before `NSWorkspace.open` — `.open` (plain http/https host), `.confirm` (IP literal / punycode / embedded userinfo / non-standard port → NSAlert), `.reject` (non-http(s), hostless, unparseable → dropped). Never trust the JS side alone.
+- Theme: reuse the reader's palette injection for light/dark parity (`setTheme` stamps `data-theme` on `<html>`).
 
 ### 5.3 Composer & chrome (native SwiftUI)
 
@@ -301,7 +307,7 @@ Prompt delivery: a stream-json `user` message on stdin (not argv — avoids ARG_
 ## 6. Build & release changes
 
 1. **Entitlements (Phase 0 — DONE):** removed `com.apple.security.app-sandbox` (+ comment); Sparkle mach-lookup exceptions **retained**; kept app-groups/iCloud/network/user-selected/automation; `build-app.sh` + `dev-launch.sh` de-sandboxed. Verified via `plutil -lint` + codesign round-trip.
-2. **New bundle:** `scripts/chat-renderer/` (`marked`, `dompurify`, `katex`, `esbuild`) → `Sources/Rubien/Resources/ChatTranscript.html` (committed). Document `npm run build` beside the note-editor.
+2. **New bundle (Phase 1 — DONE):** `scripts/chat-renderer/` (`marked`, `dompurify` **pinned 3.4.11**, vendored `katex`, `esbuild`; `jsdom` for `node --test`) → committed `Sources/Rubien/Resources/ChatTranscript.html`. `npm run build` documented beside the note-editor (`scripts/chat-renderer/README.md`).
 3. **Release smoke (Release-Runbook):** (a) Sparkle-update a real sandboxed 0.1.x install → same library root (`lsof`) + sync round-trip; (b) `codesign -d --entitlements -` shows **no sandbox key** + intact iCloud/App-Group; (c) notarize passes (Hardened Runtime unchanged); (d) Sparkle auto-update works un-sandboxed (decide then whether the mach-lookup exceptions can be dropped).
 4. **First-launch note:** TCC still gates `~/Documents`/`~/Desktop` for un-sandboxed processes; silent agent file access stays in the workspace + library root, so no TCC prompts in the happy path (a user-approved Claude write outside those roots may trigger one — expected).
 
@@ -309,19 +315,18 @@ Prompt delivery: a stream-json `user` message on stdin (not argv — avoids ARG_
 
 - **Parsers (bulk of coverage):** committed fixture NDJSON → event sequences; unknown-line + partial-line tolerance. **Claude:** include a `can_use_tool` control_request fixture → asserts `.approvalRequested` + that a `control_response` is written. **Codex:** exec `--json` fixtures (Phase 3) incl. a sandbox-deny tool result → `.toolDenied`. In `RubienTests`; keep `Sources/Rubien/Assistant/` AppKit-free (run `swift test --filter RubienTests`).
 - **Fake-CLI harness:** a committed test executable that emits controlled NDJSON, a `can_use_tool` request, floods stderr, emits partial lines, delays exit, spawns a grandchild — drives cancellation, process-group kill (no orphan), stderr backpressure, non-zero-exit, auth-error mapping, and the **approval round-trip** (request → decision on stdin → continue).
-- **Workspace builder:** golden files for AGENTS.md/metadata.json; manifest staleness matrix (PDF mtime, web hash, extractor version).
-- **Store:** migration + upsert-on-`(provider,sessionId)` + cascade-on-reference-delete + `chatMessage` restore (in-memory GRDB).
+- **Store (Phase 2):** migration + upsert-on-`(provider,sessionId)` + cascade-on-reference-delete + `chatMessage` restore (in-memory GRDB).
 - **Sync invariants:** neither table registered as `SyncEntityType`; `SyncSchemaInvariantTests` stay green.
-- **Renderer security (JS):** raw-HTML markdown, `javascript:`/`file:` links, `<script>`/handler payloads → all inert post-sanitization.
+- **Renderer (Phase 1 — DONE):** `scripts/chat-renderer/test/security.test.js` + `integration.test.js` — **19 `node --test` cases** (jsdom). `security.test.js` drives the pure `render.js` pipeline with hostile input (raw-HTML markdown, `javascript:`/`file:`/`data:`/`mailto:` links, `<script>`/`on*`-handler payloads → all inert; http/https links + math/code survive); `integration.test.js` boots the **committed `ChatTranscript.html`** and exercises the real `window.RubienChat` end-to-end, incl. KaTeX-on-commit timing and the `trust:false` `\href` boundary. Swift side: **`ChatTranscriptJSTests`** (`RubienTests`) covers the JSON-encoding builder (quotes/newlines/unicode/U+2028/`</script>`), the Codable render models, and the `ChatExternalLink` classifier — no WKWebView instantiated (`swift test --filter RubienTests`; full suite 162/0).
 - **Manual E2E (docs):** ask → streamed answer with a formula; select → Ask; quit/reopen → transcript restored; resume continues context; stop mid-turn (interrupted marker); auth-expired path; **Claude approval flow** (allow once / for-conversation / deny / timeout); **Codex read-only** attempts a write/network → blocked chip; Web toggle off → no web tool.
 
 ## 8. Phasing
 
 Each phase is a green-build, reviewed, committable unit (repo workflow: codex-rescue + /simplify before commit).
 
-- **Phase 0 — Posture flip (DONE, branch-only).** Entitlements + script hygiene + §6.3 verification. Ships with Phase 2.
-- **Phase 1 — Transcript renderer.** `scripts/chat-renderer/` + `ChatTranscriptView` + bridge + sanitization/CSP + renderer security tests, driven by a debug harness feeding canned markdown/LaTeX/streaming/hostile input. No spawning. *(Recommended next.)*
-- **Phase 2 — Claude end-to-end in the web reader.** `AgentProvider` + `ClaudeCodeProvider` (spawn/stream/cancel, stream-json parser, **in-band control protocol**, fixtures + fake-CLI tests), `ApprovalController` + cards, **Rubien MCP wired as the content channel** — bundle the server `dist`, add a **read-only server mode** registering only `pdf_text`/`pdf_page_image`/`get`/`annotations`/`web_get`/`search`, attach via `--mcp-config --strict-mcp-config`, and add a **Node ≥20 check to `isAvailable()`**; the one-line reference **seed** via `--append-system-prompt`; `chatSession`/`chatMessage` migration + store, `AssistantTurnGate`, working-folder setting, sidebar UI + composer + Web toggle, selection→Ask, resume + transcript restore + history deletion, Settings v1 (Claude). Ships as the first assistant release, carrying the Phase-0 flip. *(No hook, socket, or helper binary — the v2 simplification.)*
+- **Phase 0 — Posture flip (DONE — committed on `assistant-sidebar`).** Entitlements + script hygiene + §6.3 verification. Ships with Phase 2 (never alone).
+- **Phase 1 — Transcript renderer (DONE — committed on `assistant-sidebar`).** `scripts/chat-renderer/` esbuild bundle (`render.js`/`chat.js` → committed self-contained `ChatTranscript.html`: marked raw-HTML-off + DOMPurify 3.4.11 + KaTeX `trust:false`/commit-only), `ChatTranscriptView` (WKWebView + navigation/UI-delegate backstop), `ChatTranscriptController` (chatReady-gated JS queue), `ChatTranscriptJS` (JSON-encoded Swift→JS), `ChatTranscriptModels`, and the DEBUG-only `AssistantRendererHarness` (Debug ▸ Assistant Renderer Harness). Tests: 19 `node --test` cases (`security.test.js` + `integration.test.js`) + `ChatTranscriptJSTests`. No spawning.
+- **Phase 2 — Claude end-to-end in the web reader.** `AgentProvider` + `ClaudeCodeProvider` (spawn/stream/cancel, stream-json parser, **in-band control protocol**, fixtures + fake-CLI tests), `ApprovalController` + cards, **Rubien MCP wired as the content channel** — bundle the server `dist`, add a **read-only server mode** registering only `pdf_text`/`pdf_page_image`/`get`/`annotations`/`web_get`/`search`, attach via `--mcp-config --strict-mcp-config`, and add a **Node ≥20 check to `isAvailable()`**; the one-line reference **seed** via `--append-system-prompt`; `chatSession`/`chatMessage` migration + store, `AssistantTurnGate`, working-folder setting, sidebar UI + composer + Web toggle, selection→Ask, resume + transcript restore + history deletion, Settings v1 (Claude). Ships as the first assistant release, carrying the Phase-0 flip. *(Recommended next; no hook, socket, or helper binary — the v2 simplification.)*
 - **Phase 3 — PDF reader + Codex.** PDF sidebar column + narrow-window policy + popover wiring; `CodexProvider` (exec `--json` schema capture → fixtures, resume, `-s read-only`, pinned effort, sandbox-deny chips); provider picker; codex transcript restore via `chatMessage`.
 - **Phase 4 — Writes + depth.** **Library writes** by registering write tools in the MCP server: Claude *prompts* on them (control protocol → approved writes); Codex would *auto-run* them (no exec approval) so codex writes wait for the app-server approval protocol or an explicit opt-in — never register write tools for codex without a gate. Also: usage surfacing, tool-chip polish, long-lived-process latency experiment, optional in-process CLI/Node bootstrap, and the native `rubien-cli mcp` server (Node-free follow-up to drop the Node dependency).
 
@@ -335,7 +340,7 @@ Each phase is a green-build, reviewed, committable unit (repo workflow: codex-re
 | 4 | Sandboxed→unsandboxed Sparkle update surprises | Phase 0 smoke on a real 0.1.13 install before the flip ships (with Phase 2) |
 | 5 | Session id rotation not re-captured → resume breaks after turn 2 | Re-capture from every `result` (D5); covered by a fixture test |
 | 6 | Runtime not installed / not logged in | First-run empty state with install/login instructions; feature hidden until `isAvailable()` passes |
-| 7 | Math-heavy PDF text extraction mangles formulas | Preamble points at the real PDF (Claude Reads PDFs natively); Codex uses `document.md` (asymmetry noted); MCP `rubien_pdf_page_image` in Phase 4 |
+| 7 | Math-heavy PDF text extraction mangles formulas | When `rubien_pdf_text` garbles equations the agent falls back to **`rubien_pdf_page_image`** (a rendered page image read multimodally) — a **v1/Phase-2** MCP tool, uniform across both providers; no PDF path and no `document.md`/extracted-text cache (D4) |
 | 8 | Codex `xhigh` reasoning stall (observed: a spike run timed out) | Pin `model_reasoning_effort` (default medium); never inherit the user's `~/.codex` effort |
 | 9 | Codex auto-runs MCP **write** tools (no exec approval) — a hostile doc could trigger a destructive write | v1 registers **read-only MCP only**; writes gated behind Claude prompts / codex app-server (Phase 4); never register write tools for codex without approval |
 | 10 | Orphaned agent grandchildren after cancel | Process-group kill + fake-CLI grandchild test (§7) |
