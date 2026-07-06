@@ -185,18 +185,15 @@ struct CodexAppServerParser {
 
         guard let name = Self.toolChipName(item) else { return [] }
         let recalled = (item["id"] as? String).flatMap { toolNamesByItemID[$0] } ?? name
-        // Tool status: completed → done chip; failed/declined → denied chip.
-        let status = (item["status"] as? String) ?? "completed"
-        switch status {
-        case "failed", "declined", "cancelled":
-            let reason = (item["aggregatedOutput"] as? String).map(Self.trim) ?? status.capitalized
+        // `item/completed` means the item FINISHED: only the explicit failure statuses
+        // (via the shared classifier) deny; anything else resolves the chip rather than
+        // leaving it spinning. `.started` can't occur here — item/completed is terminal.
+        let status = item["status"] as? String
+        if Self.toolChipStatus(status) == .denied {
+            let reason = (item["aggregatedOutput"] as? String).map(Self.trim) ?? (status ?? "failed").capitalized
             return [.toolDenied(name: recalled, reason: reason)]
-        default:
-            // `item/completed` means the item FINISHED, so any non-failure status
-            // (completed / absent / a future terminal state) resolves the chip rather
-            // than leaving it spinning; only the explicit failure statuses deny.
-            return [.toolUseCompleted(name: recalled)]
         }
+        return [.toolUseCompleted(name: recalled)]
     }
 
     // MARK: Static mapping helpers
@@ -251,6 +248,19 @@ struct CodexAppServerParser {
             if let value = item[key] as? String, !value.isEmpty { return trim(value) }
         }
         return nil
+    }
+
+    /// A tool item's `status` string → chip lifecycle. ONE source of truth shared by
+    /// the live `item/completed` path and the History transcript decode, so both agree
+    /// on which statuses deny (`failed`/`declined`/`cancelled`) vs. are still running
+    /// (`inProgress`/`running`/`queued`, only reachable when History reads a thread
+    /// whose turn never finished) vs. completed (anything else, incl. an absent status).
+    static func toolChipStatus(_ status: String?) -> ToolChipStatus {
+        switch status {
+        case "failed", "declined", "cancelled": return .denied
+        case "inProgress", "running", "queued": return .started
+        default: return .completed
+        }
     }
 
     /// Map a `TokenUsageBreakdown` (the `.last` per-turn slice) to `AgentUsage`, or
@@ -406,9 +416,14 @@ enum CodexAppServerProtocol {
         ])
     }
 
-    static func threadSearch(requestID: Int, searchTerm: String, limit: Int) -> String {
+    /// `cwd` is sent for forward-compat (a future server may honor it) but codex
+    /// 0.142 IGNORES it — search is GLOBAL across every workspace — so results are
+    /// ALSO filtered by `thread.cwd` client-side in `decodeThreadSearch` (verified via
+    /// spike: a bogus cwd returns the same hits). Without the filter, a search in one
+    /// workspace would surface (and resume) another's conversations.
+    static func threadSearch(requestID: Int, searchTerm: String, limit: Int, cwd: String) -> String {
         request(id: requestID, method: "thread/search", params: [
-            "searchTerm": searchTerm, "limit": limit,
+            "searchTerm": searchTerm, "limit": limit, "cwd": cwd,
             "sourceKinds": ["appServer", "cli", "vscode"],
         ])
     }
@@ -416,6 +431,96 @@ enum CodexAppServerProtocol {
     static func turnInterrupt(requestID: Int, threadId: String, turnId: String) -> String {
         request(id: requestID, method: "turn/interrupt",
                 params: ["threadId": threadId, "turnId": turnId])
+    }
+
+    // MARK: - History decoders (thread/list · thread/search · thread/read → 3b-4)
+
+    static let previewLimit = 240
+    static let snippetLimit = 200
+
+    /// `thread/list` result → session summaries (server pre-sorts newest-first).
+    static func decodeThreadList(_ result: [String: Any]) -> [AgentSessionSummary] {
+        let data = result["data"] as? [[String: Any]] ?? []
+        return data.compactMap { sessionSummary(fromThread: $0) }
+    }
+
+    /// `thread/search` result → summaries with a match snippet. Each `data[]` hit is
+    /// `{thread:{…}, snippet}` (the thread wrapped, unlike `thread/list`). Search is
+    /// GLOBAL on codex 0.142 (the `cwd` param is ignored), so hits are filtered to
+    /// `cwd` here — a search must not surface another workspace's conversations (D5).
+    static func decodeThreadSearch(_ result: [String: Any], cwd: String) -> [AgentSessionSummary] {
+        let data = result["data"] as? [[String: Any]] ?? []
+        return data.compactMap { hit in
+            guard let thread = hit["thread"] as? [String: Any],
+                  thread["cwd"] as? String == cwd
+            else { return nil }
+            return sessionSummary(fromThread: thread, snippet: hit["snippet"] as? String)
+        }
+    }
+
+    /// `thread/read {includeTurns:true}` result → renderable rows (read-only preview).
+    /// Walks `thread.turns[].items[]` in order, mirroring the LIVE event mapping:
+    /// userMessage → user row, agentMessage → assistant row, tool items → a completed
+    /// (or denied) chip; reasoning/plan/other items render nothing, as they do live.
+    static func decodeThreadTranscript(_ result: [String: Any]) -> [ChatRenderMessage] {
+        guard let thread = result["thread"] as? [String: Any],
+              let turns = thread["turns"] as? [[String: Any]] else { return [] }
+        var rows: [ChatRenderMessage] = []
+        for turn in turns {
+            for item in (turn["items"] as? [[String: Any]]) ?? [] {
+                if let row = transcriptRow(item, seq: rows.count) { rows.append(row) }
+            }
+        }
+        return rows
+    }
+
+    /// One summary from `thread/list`'s `data[]` or a search hit's `.thread`. `id`
+    /// (the `thread/resume` target + picker identity) is required; `updatedAt` /
+    /// `recencyAt` / `createdAt` are epoch seconds (newest present wins).
+    static func sessionSummary(fromThread thread: [String: Any], snippet: String? = nil) -> AgentSessionSummary? {
+        guard let id = thread["id"] as? String, !id.isEmpty else { return nil }
+        let epoch = (thread["updatedAt"] as? Int)
+            ?? (thread["recencyAt"] as? Int)
+            ?? (thread["createdAt"] as? Int) ?? 0
+        return AgentSessionSummary(
+            id: id,
+            preview: collapse(thread["preview"] as? String ?? "", limit: previewLimit),
+            date: Date(timeIntervalSince1970: TimeInterval(epoch)),
+            matchSnippet: snippet.map { collapse($0, limit: snippetLimit) })
+    }
+
+    private static func transcriptRow(_ item: [String: Any], seq: Int) -> ChatRenderMessage? {
+        switch item["type"] as? String {
+        case "userMessage":
+            let text = joinedText(item["content"])
+            return text.isEmpty ? nil : ChatRenderMessage(role: .user, body: text, seq: seq)
+        case "agentMessage":
+            let text = (item["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return text.isEmpty ? nil : ChatRenderMessage(role: .assistant, body: text, seq: seq)
+        default:
+            // Tool items → a chip; non-tool items (reasoning, plan, …) produce nothing.
+            // The status classifier is shared with the live path, so History and a live
+            // turn agree on denied (failed/declined/cancelled) vs still-running.
+            guard let name = CodexAppServerParser.toolChipName(item) else { return nil }
+            let chip = ToolChipPayload(
+                name: name,
+                detail: CodexAppServerParser.toolChipDetail(item),
+                status: CodexAppServerParser.toolChipStatus(item["status"] as? String))
+            return ChatRenderMessage(role: .tool, body: ChatTranscriptJS.encodeArg(chip), seq: seq)
+        }
+    }
+
+    /// Join a userMessage `content[]`'s text elements (skips non-text, e.g. images).
+    private static func joinedText(_ content: Any?) -> String {
+        let blocks = content as? [[String: Any]] ?? []
+        let texts = blocks.compactMap { ($0["type"] as? String == "text") ? $0["text"] as? String : nil }
+        return texts.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Whitespace-collapse (newlines + runs → single space) + ellipsis-truncate.
+    private static func collapse(_ value: String, limit: Int) -> String {
+        let collapsed = value.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        return collapsed.count > limit ? String(collapsed.prefix(limit - 1)) + "…" : collapsed
     }
 
     /// The response answering a server-initiated approval request. `id` is echoed

@@ -299,5 +299,108 @@ final class CodexAppServerProtocolTests: XCTestCase {
         XCTAssertEqual(obj["id"] as? Int, 5)
         XCTAssertEqual((obj["error"] as? [String: Any])?["code"] as? Int, -32601)
     }
+
+    // MARK: History decoders (thread/list · thread/search · thread/read — 3b-4)
+
+    func testDecodeThreadListMapsSummariesAndSkipsIdless() {
+        let result: [String: Any] = ["data": [
+            ["id": "t1", "preview": "Alpha", "updatedAt": 1_700_000_200],
+            ["preview": "no id — dropped", "updatedAt": 1_700_000_100],  // no id → skipped
+            ["id": "t2", "preview": "Beta", "updatedAt": 1_700_000_000],
+        ]]
+        let out = CodexAppServerProtocol.decodeThreadList(result)
+        XCTAssertEqual(out.map(\.id), ["t1", "t2"])
+        XCTAssertEqual(out[0].date, Date(timeIntervalSince1970: 1_700_000_200))
+        XCTAssertTrue(out.allSatisfy { $0.matchSnippet == nil })
+    }
+
+    func testSessionSummaryEpochFallsBackWhenUpdatedAtMissing() {
+        // No updatedAt → recencyAt; then createdAt; then 0.
+        let recency = CodexAppServerProtocol.sessionSummary(
+            fromThread: ["id": "t", "recencyAt": 111, "createdAt": 99])
+        XCTAssertEqual(recency?.date, Date(timeIntervalSince1970: 111))
+        let created = CodexAppServerProtocol.sessionSummary(fromThread: ["id": "t", "createdAt": 99])
+        XCTAssertEqual(created?.date, Date(timeIntervalSince1970: 99))
+        XCTAssertNil(CodexAppServerProtocol.sessionSummary(fromThread: ["preview": "x"]),
+                     "a thread without an id has no resume target")
+    }
+
+    func testPreviewAndSnippetAreWhitespaceCollapsedAndTruncated() {
+        let long = String(repeating: "wo rd ", count: 100)  // ~600 chars, spaced
+        let summary = CodexAppServerProtocol.sessionSummary(
+            fromThread: ["id": "t", "preview": "  multi\n\nline   preview  "],
+            snippet: long)
+        XCTAssertEqual(summary?.preview, "multi line preview")
+        let snippet = try! XCTUnwrap(summary?.matchSnippet)
+        XCTAssertLessThanOrEqual(snippet.count, CodexAppServerProtocol.snippetLimit)
+        XCTAssertTrue(snippet.hasSuffix("…"))
+    }
+
+    func testDecodeThreadSearchWrapsThreadCarriesSnippetAndFiltersByCwd() {
+        let result: [String: Any] = ["data": [
+            ["thread": ["id": "h1", "preview": "Hit", "updatedAt": 1_700_000_000, "cwd": "/ws"], "snippet": "…ctx…"],
+            ["thread": ["id": "other", "preview": "Foreign", "cwd": "/elsewhere"], "snippet": "x"],  // wrong cwd → dropped
+            ["snippet": "orphan snippet, no thread"],  // no thread → skipped
+        ]]
+        // codex search is global; the decoder scopes hits to the requesting workspace.
+        let out = CodexAppServerProtocol.decodeThreadSearch(result, cwd: "/ws")
+        XCTAssertEqual(out.map(\.id), ["h1"], "only the in-workspace hit survives")
+        XCTAssertEqual(out.first?.matchSnippet, "…ctx…")
+    }
+
+    func testTranscriptJoinsMultiTextUserAndDropsNonTextAndReasoning() {
+        let result: [String: Any] = ["thread": ["turns": [
+            ["items": [
+                ["type": "userMessage", "content": [
+                    ["type": "text", "text": "part one"],
+                    ["type": "image", "url": "x"],          // non-text → skipped
+                    ["type": "text", "text": "part two"],
+                ]],
+                ["type": "reasoning", "text": "internal"],   // reasoning → no row
+                ["type": "agentMessage", "text": "answer"],
+            ]],
+        ]]]
+        let rows = CodexAppServerProtocol.decodeThreadTranscript(result)
+        XCTAssertEqual(rows.map(\.role), [.user, .assistant])
+        XCTAssertEqual(rows[0].body, "part one\n\npart two")
+        XCTAssertEqual(rows[1].body, "answer")
+    }
+
+    func testToolChipStatusClassifierIsSharedAndComplete() {
+        // The denied set MUST match the live parser (failed/declined/cancelled); the
+        // active set only surfaces when History reads a thread whose turn never finished.
+        for denied in ["failed", "declined", "cancelled"] {
+            XCTAssertEqual(CodexAppServerParser.toolChipStatus(denied), .denied)
+        }
+        for active in ["inProgress", "running", "queued"] {
+            XCTAssertEqual(CodexAppServerParser.toolChipStatus(active), .started)
+        }
+        for done in ["completed", "unknownFutureState"] {
+            XCTAssertEqual(CodexAppServerParser.toolChipStatus(done), .completed)
+        }
+        XCTAssertEqual(CodexAppServerParser.toolChipStatus(nil), .completed)
+    }
+
+    func testTranscriptToolStatusMapsDeniedAndActiveConsistently() {
+        let result: [String: Any] = ["thread": ["turns": [
+            ["items": [
+                ["type": "commandExecution", "command": "rm -rf x", "status": "declined"],
+                ["type": "fileChange", "status": "cancelled"],       // cancelled → denied (was dropped before)
+                ["type": "commandExecution", "command": "sleep 9", "status": "inProgress"],  // active → started
+            ]],
+        ]]]
+        let rows = CodexAppServerProtocol.decodeThreadTranscript(result)
+        XCTAssertEqual(rows.map(\.role), [.tool, .tool, .tool])
+        XCTAssertTrue(rows[0].body.contains("\"status\":\"denied\"") && rows[0].body.contains("shell"))
+        XCTAssertTrue(rows[1].body.contains("\"status\":\"denied\""), "cancelled tool is denied, not completed")
+        XCTAssertTrue(rows[2].body.contains("\"status\":\"started\""), "an unfinished tool stays started")
+    }
+
+    func testHistoryDecodersTolerateEmptyOrMissingPayloads() {
+        XCTAssertTrue(CodexAppServerProtocol.decodeThreadList([:]).isEmpty)
+        XCTAssertTrue(CodexAppServerProtocol.decodeThreadSearch(["data": []], cwd: "/x").isEmpty)
+        XCTAssertTrue(CodexAppServerProtocol.decodeThreadTranscript([:]).isEmpty)
+        XCTAssertTrue(CodexAppServerProtocol.decodeThreadTranscript(["thread": ["turns": []]]).isEmpty)
+    }
 }
 #endif

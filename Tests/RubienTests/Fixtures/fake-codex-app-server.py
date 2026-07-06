@@ -20,7 +20,9 @@ workspace; tests rewrite the file between sends). It:
 
 Config keys (all optional): deltas[], assistantText (supports "{threadStarts}"),
 usageLast{...}, approval{reason,command,availableDecisions[]}, unknownRequest(bool),
-hang(bool), exitAfterTurnStart(int).
+hang(bool), exitAfterTurnStart(int). History (3b-4): threads[] (thread/list data),
+searchHits[] (thread/search data, each {thread,snippet}), transcript{turns:[…]}
+(thread/read). All three also record their request params for assertion.
 """
 import json
 import os
@@ -269,6 +271,40 @@ class Server:
                 # Stray interrupt outside a hanging turn: acknowledge it.
                 record(interrupts=OBSERVED["interrupts"] + 1)
                 respond(req_id, {})
+            elif method == "thread/list":
+                # History recents (3b-4). `data[]` of thread summaries; the real server
+                # pre-sorts newest-first. Params recorded so tests assert cwd/sourceKinds.
+                cfg = load_config()
+                record(threadListParams=msg.get("params", {}))
+                respond(req_id, {"data": cfg.get("threads", [
+                    {"id": "TH-A", "preview": "First conversation", "updatedAt": 1700000200},
+                    {"id": "TH-B", "preview": "Second conversation", "updatedAt": 1700000100},
+                ])})
+            elif method == "thread/search":
+                # History search (3b-4). Each `data[]` hit wraps the thread + a `snippet`.
+                # Codex search is GLOBAL — the provider filters hits by thread.cwd, so
+                # the default hit's cwd echoes the REQUESTED cwd (== the workspace the
+                # provider passed), representing an in-workspace hit.
+                params = msg.get("params", {})
+                cfg = load_config()
+                record(threadSearchParams=params)
+                respond(req_id, {"data": cfg.get("searchHits", [
+                    {"thread": {"id": "TH-9", "preview": "Matched conversation",
+                                "updatedAt": 1700000150, "cwd": params.get("cwd")},
+                     "snippet": "…the matching   text…"},
+                ])})
+            elif method == "thread/read":
+                # History transcript preview (3b-4). thread.turns[].items[].
+                cfg = load_config()
+                record(threadReadParams=msg.get("params", {}))
+                respond(req_id, {"thread": cfg.get("transcript", {"turns": [
+                    {"items": [
+                        {"type": "userMessage", "content": [{"type": "text", "text": "Question?"}]},
+                        {"type": "reasoning", "text": "thinking (should be dropped)"},
+                        {"type": "agentMessage", "text": "The answer."},
+                        {"type": "fileChange", "status": "completed", "changes": []},
+                    ]},
+                ]})})
             elif req_id is not None:
                 respond(req_id, {})
 

@@ -409,6 +409,119 @@ final class CodexProviderTests: XCTestCase {
         try await assertEventuallyDead(pid, timeout: 8)
     }
 
+    // MARK: History over the wire (thread/list · thread/search · thread/read — 3b-4)
+
+    func testRecentSessionsListsThreadsScopedToTheWorkspace() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([:], into: workspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        let sessions = await provider.recentSessions(workspaceURL: workspace, limit: 10)
+
+        XCTAssertEqual(sessions.map(\.id), ["TH-A", "TH-B"], "order preserved (server pre-sorts)")
+        XCTAssertEqual(sessions.first?.preview, "First conversation")
+        XCTAssertEqual(sessions.first?.date, Date(timeIntervalSince1970: 1700000200))
+        XCTAssertNil(sessions.first?.matchSnippet, "plain recents carry no snippet")
+
+        // The request must be workspace-scoped and include appServer (Rubien's own
+        // sessions), else History would drop them.
+        let observed = try readObserved(in: workspace)
+        let params = try XCTUnwrap(observed["threadListParams"] as? [String: Any])
+        XCTAssertEqual(params["cwd"] as? String, workspace.path)
+        XCTAssertEqual(params["limit"] as? Int, 10)
+        let sourceKinds = try XCTUnwrap(params["sourceKinds"] as? [String])
+        XCTAssertTrue(sourceKinds.contains("appServer"))
+    }
+
+    func testSearchSessionsReturnsHitsWithSnippets() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([:], into: workspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        let hits = await provider.searchSessions(query: "match", workspaceURL: workspace, limit: 5)
+
+        XCTAssertEqual(hits.map(\.id), ["TH-9"])
+        XCTAssertEqual(hits.first?.matchSnippet, "…the matching text…", "snippet is whitespace-collapsed")
+
+        let observed = try readObserved(in: workspace)
+        let params = try XCTUnwrap(observed["threadSearchParams"] as? [String: Any])
+        XCTAssertEqual(params["searchTerm"] as? String, "match")
+        XCTAssertEqual(params["cwd"] as? String, workspace.path, "search is workspace-scoped")
+    }
+
+    func testSearchSessionsFiltersOutForeignWorkspaceHits() async throws {
+        let workspace = try makeWorkspace()
+        // codex search is global; a hit from another workspace must be dropped.
+        try writeConfig(["searchHits": [
+            ["thread": ["id": "local", "preview": "Mine", "updatedAt": 1_700_000_200, "cwd": workspace.path],
+             "snippet": "hit"],
+            ["thread": ["id": "foreign", "preview": "Theirs", "updatedAt": 1_700_000_300, "cwd": "/some/other/ws"],
+             "snippet": "hit"],
+        ]], into: workspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        let hits = await provider.searchSessions(query: "hit", workspaceURL: workspace, limit: 10)
+
+        XCTAssertEqual(hits.map(\.id), ["local"], "only this workspace's hit survives the cwd filter")
+    }
+
+    func testSearchSessionsShortCircuitsBlankQueryWithoutHittingTheServer() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([:], into: workspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        let hits = await provider.searchSessions(query: "   ", workspaceURL: workspace, limit: 5)
+
+        XCTAssertTrue(hits.isEmpty)
+        // No server spawned at all for an empty query (nothing observed).
+        XCTAssertThrowsError(try readObserved(in: workspace))
+    }
+
+    func testSessionTranscriptDecodesTurnsToRenderRows() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([:], into: workspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        let rows = await provider.sessionTranscript(sessionID: "TH-7", workspaceURL: workspace)
+
+        // userMessage → user, agentMessage → assistant, fileChange → tool chip;
+        // the reasoning item renders nothing (dropped, as it is live).
+        XCTAssertEqual(rows.map(\.role), [.user, .assistant, .tool])
+        XCTAssertEqual(rows[0].body, "Question?")
+        XCTAssertEqual(rows[1].body, "The answer.")
+        XCTAssertTrue(rows[2].body.contains("apply_patch"), "fileChange chip names apply_patch")
+        XCTAssertEqual(rows.map(\.seq), [0, 1, 2])
+
+        // Read-only preview: threadId + includeTurns, NOT a resume.
+        let observed = try readObserved(in: workspace)
+        let params = try XCTUnwrap(observed["threadReadParams"] as? [String: Any])
+        XCTAssertEqual(params["threadId"] as? String, "TH-7")
+        XCTAssertEqual(params["includeTurns"] as? Bool, true)
+        XCTAssertEqual(observed["threadResumes"] as? Int, 0, "thread/read must not resume the thread")
+    }
+
+    func testHistoryReusesTheLiveServerAcrossQueryAndTurn() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["assistantText": "ok"], into: workspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        // A History read spawns the server; a following turn must REUSE it (same pid),
+        // not respawn — the payoff of the long-lived model.
+        _ = await provider.recentSessions(workspaceURL: workspace, limit: 5)
+        let pidAfterQuery = pid_t(try XCTUnwrap(try readObserved(in: workspace)["pid"] as? Int))
+
+        _ = try await collectAllEvents(provider.send(turn: turn(workspace: workspace)))
+        let pidAfterTurn = pid_t(try XCTUnwrap(try readObserved(in: workspace)["pid"] as? Int))
+
+        XCTAssertEqual(pidAfterQuery, pidAfterTurn, "the turn reused the History-spawned server")
+    }
+
     // MARK: Harness plumbing
 
     private var fakeServerPath: String {

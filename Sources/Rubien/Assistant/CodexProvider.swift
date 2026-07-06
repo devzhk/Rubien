@@ -70,8 +70,21 @@ final class CodexProvider: AgentProvider {
         Task { await connection.shutdown() }
     }
 
-    // History over the wire (`thread/list` / `thread/search` / `thread/read`) is
-    // Phase 3b-4 — the protocol-level defaults ([]) apply until then.
+    // History over the wire (`thread/list` / `thread/search` / `thread/read`, 3b-4).
+    // Each delegates to the connection, which reads codex's OWN thread store via the
+    // app-server (Rubien persists nothing — D5). All degrade to `[]` on failure.
+
+    func recentSessions(workspaceURL: URL, limit: Int) async -> [AgentSessionSummary] {
+        await connection.recentThreads(workspaceURL: workspaceURL, limit: limit)
+    }
+
+    func searchSessions(query: String, workspaceURL: URL, limit: Int) async -> [AgentSessionSummary] {
+        await connection.searchThreads(searchTerm: query, workspaceURL: workspaceURL, limit: limit)
+    }
+
+    func sessionTranscript(sessionID: String, workspaceURL: URL) async -> [ChatRenderMessage] {
+        await connection.readTranscript(threadID: sessionID, workspaceURL: workspaceURL)
+    }
 }
 
 // MARK: - CodexInvocation (pure argv + env construction; unit-tested)
@@ -265,7 +278,7 @@ private actor CodexAppServerConnection {
         // 1. Server (lazy spawn + handshake; reused across turns).
         let srv: Server
         do {
-            srv = try await ensureServer(request: request)
+            srv = try await ensureServer(webAccess: request.webAccess, workspaceURL: request.workspaceURL)
         } catch let error as AgentProviderError {
             turn = nil
             continuation.finish(throwing: error)   // hard start failure — mirrors Claude
@@ -462,12 +475,16 @@ private actor CodexAppServerConnection {
     // MARK: Server lifecycle
 
     /// The live server, spawning + handshaking one if needed. A changed web toggle
-    /// forces a respawn (the `-c` snapshot is fixed per process). EVERY caller — the
+    /// forces a respawn (the `-c` snapshot is fixed per process) — UNLESS `reuseAnyWeb`
+    /// (History queries, which don't use web) is set, which reuses whatever server is
+    /// live so a read never respawns just for a web mismatch. EVERY caller — the
     /// spawner and a fast-path reuser — awaits the handshake before returning, so a
-    /// thread/turn request can never hit an un-initialized server (review #1).
-    private func ensureServer(request: AgentTurnRequest) async throws -> Server {
+    /// thread/turn/query request can never hit an un-initialized server (review #1).
+    private func ensureServer(
+        webAccess: Bool, workspaceURL: URL, reuseAnyWeb: Bool = false
+    ) async throws -> Server {
         if let srv = server {
-            if srv.webAccess == request.webAccess {
+            if reuseAnyWeb || srv.webAccess == webAccess {
                 try await joinHandshake(srv)   // fast path still waits for initialize
                 return srv
             }
@@ -481,7 +498,7 @@ private actor CodexAppServerConnection {
         let arguments = CodexInvocation.arguments(
             rubienCLIPath: contentChannel?.cliURL.path,
             libraryRoot: contentChannel?.libraryRoot.path,
-            webAccess: request.webAccess)
+            webAccess: webAccess)
         let environment = CodexInvocation.environment(
             binaryDirectory: (executable as NSString).deletingLastPathComponent)
 
@@ -490,8 +507,8 @@ private actor CodexAppServerConnection {
             executablePath: executable,
             arguments: arguments,
             environment: environment,
-            workingDirectory: request.workspaceURL.path)
-        let srv = Server(process: process, generation: serverGeneration, webAccess: request.webAccess)
+            workingDirectory: workspaceURL.path)
+        let srv = Server(process: process, generation: serverGeneration, webAccess: webAccess)
         server = srv
         shuttingDown = false
         startReaders(srv)
@@ -724,6 +741,63 @@ private actor CodexAppServerConnection {
         else { return }
         logger.error("codex request \(method) timed out after \(Self.requestTimeout)s")
         waiter.resume(returning: .failure(.timeout(method: method)))
+    }
+
+    // MARK: History over the wire (thread/list · thread/search · thread/read — 3b-4)
+
+    /// Extra rows fetched for a search before the client-side `cwd` filter, so a
+    /// workspace with few local hits among many global matches isn't underfilled
+    /// (codex search is global — the `cwd` param is ignored; see `decodeThreadSearch`).
+    private static let searchOverfetch = 5
+
+    /// Recent conversations for `workspaceURL`, newest first (History picker). Reads
+    /// the runtime's OWN store via the app-server; Rubien persists nothing (D5).
+    func recentThreads(workspaceURL: URL, limit: Int) async -> [AgentSessionSummary] {
+        await query(
+            workspaceURL: workspaceURL, method: "thread/list",
+            build: { CodexAppServerProtocol.threadList(requestID: $0, cwd: workspaceURL.path, limit: limit) },
+            decode: CodexAppServerProtocol.decodeThreadList)
+    }
+
+    /// Content search over `workspaceURL`'s threads (History search field). Search is
+    /// global on codex, so over-fetch, filter to this workspace in `decode`, cap at `limit`.
+    func searchThreads(searchTerm: String, workspaceURL: URL, limit: Int) async -> [AgentSessionSummary] {
+        let term = searchTerm.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !term.isEmpty, limit > 0 else { return [] }
+        let hits = await query(
+            workspaceURL: workspaceURL, method: "thread/search",
+            build: { CodexAppServerProtocol.threadSearch(
+                requestID: $0, searchTerm: term, limit: limit * Self.searchOverfetch, cwd: workspaceURL.path) },
+            decode: { CodexAppServerProtocol.decodeThreadSearch($0, cwd: workspaceURL.path) })
+        return Array(hits.prefix(limit))
+    }
+
+    /// A picked thread's renderable transcript, so a resume restores its content.
+    /// `thread/read` is a read-only preview — NOT `thread/resume` (which would load +
+    /// subscribe the thread); the actual continuation resumes on the next turn.
+    func readTranscript(threadID: String, workspaceURL: URL) async -> [ChatRenderMessage] {
+        await query(
+            workspaceURL: workspaceURL, method: "thread/read",
+            build: { CodexAppServerProtocol.threadRead(requestID: $0, threadId: threadID) },
+            decode: CodexAppServerProtocol.decodeThreadTranscript)
+    }
+
+    /// One-shot read: ensure a live server (reuse ANY running one — a read doesn't use
+    /// web; the `webAccess: true` seed only matters for a fresh spawn, and matches the
+    /// turn default so a following turn reuses this server), send the request, and
+    /// decode. Any spawn/handshake/request failure degrades to `[]`, never throwing
+    /// into the UI. `build`/`decode` are called synchronously, so neither escapes.
+    private func query<T>(
+        workspaceURL: URL, method: String,
+        build: (Int) -> String, decode: ([String: Any]) -> [T]
+    ) async -> [T] {
+        do {
+            let srv = try await ensureServer(webAccess: true, workspaceURL: workspaceURL, reuseAnyWeb: true)
+            return decode(try await sendRequest(srv, method: method, build: build))
+        } catch {
+            logger.error("codex \(method) query failed: \(String(describing: error))")
+            return []
+        }
     }
 
     // MARK: Availability
