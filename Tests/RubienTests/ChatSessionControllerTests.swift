@@ -37,6 +37,13 @@ final class ChatSessionControllerTests: XCTestCase {
         await task?.value
     }
 
+    /// Yield the main actor until `condition` holds — deterministic draining of the
+    /// controller's async for-await loop (buffered mock events process one per turn).
+    private func waitUntil(_ condition: @escaping () -> Bool, ticks: Int = 200) async {
+        var n = 0
+        while !condition() && n < ticks { await Task.yield(); n += 1 }
+    }
+
     // MARK: Event mapping (direct)
 
     func testSessionStartedCapturesAndRotatesID() {
@@ -125,6 +132,18 @@ final class ChatSessionControllerTests: XCTestCase {
 
         controller.respond(to: controller.pendingApproval!, .allowOnce)
         XCTAssertEqual(provider.approvals.map(\.0), ["rB"])
+    }
+
+    func testAutoApproveAcceptsWithoutShowingACard() {
+        let provider = MockAgentProvider()
+        let controller = makeController(provider: provider, sink: SpyTranscriptSink())
+        controller.autoApprove = true
+
+        controller.handle(.approvalRequested(id: "rX", toolName: "Write", summary: "note.txt"), gen: controller.generation)
+
+        XCTAssertNil(controller.pendingApproval, "auto mode never shows an approval card")
+        XCTAssertEqual(provider.approvals.map(\.0), ["rX"])
+        XCTAssertEqual(provider.approvals.first?.1, .allowForConversation)
     }
 
     func testProviderNoticeIsRendered() {
@@ -353,6 +372,84 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertTrue(controller.hasMessages, "q2 already rendered — but the refused q3 must not have changed state")
     }
 
+    func testReplayTranscriptRestoresConversationOnPaneRemount() async {
+        let provider = MockAgentProvider()
+        let sink = SpyTranscriptSink()
+        let controller = makeController(provider: provider, sink: sink)
+
+        await runTurn(controller, provider: provider, send: "q1", events: [
+            .sessionStarted(sessionID: "s1"),
+            .assistantMessageCompleted(text: "answer one"),
+            .toolUseStarted(name: "rubien_pdf_text", detail: "pages 1-2"),
+            .toolUseCompleted(name: "rubien_pdf_text"),
+            .providerNotice("a notice"),
+            .turnCompleted(usage: nil),
+        ])
+
+        sink.calls.removeAll()  // simulate the pane being dismantled + remounted
+        controller.replayTranscript()
+
+        guard case .loadTranscript(let messages)? = sink.calls.last else {
+            return XCTFail("replay should end with loadTranscript, got \(sink.calls)")
+        }
+        XCTAssertEqual(sink.calls.first, .reset, "replay resets the fresh WebView first")
+        XCTAssertEqual(messages.map(\.role), [.user, .assistant, .tool, .notice])
+        XCTAssertEqual(messages[0].body, "q1")
+        XCTAssertEqual(messages[1].body, "answer one")
+        XCTAssertTrue(messages[2].body.contains("rubien_pdf_text"), "tool rows restore from the chip JSON")
+        XCTAssertEqual(messages.map(\.seq), [0, 1, 2, 3], "stable ordering")
+    }
+
+    func testReplayMidStreamReopensTheAssistantBubbleForOrdering() async {
+        let provider = MockAgentProvider()
+        let sink = SpyTranscriptSink()
+        let controller = makeController(provider: provider, sink: sink)
+
+        // Start a turn and stream partway: user rendered, a delta, a tool chip.
+        controller.send("q1")
+        let task = controller.turnTask
+        await provider.waitUntilStreaming()
+        provider.emit(.sessionStarted(sessionID: "s1"))
+        provider.emit(.assistantDelta(text: "Let me check"))
+        provider.emit(.toolUseStarted(name: "rubien_web_get", detail: "the article"))
+        provider.emit(.toolUseCompleted(name: "rubien_web_get"))
+        // Drain the buffered events (the tool chip is last, so its arrival proves
+        // the delta before it processed too).
+        await waitUntil { sink.calls.contains { if case .addToolChip = $0 { return true }; return false } }
+
+        XCTAssertTrue(controller.isResponding)
+        sink.calls.removeAll()  // pane toggled off then on → fresh WebView
+        controller.replayTranscript()
+
+        // Restored: reset, the committed rows (user + tool — NOT the partial delta),
+        // then a re-opened bubble for the continuing stream.
+        guard case .reset = sink.calls.first else { return XCTFail("expected reset first: \(sink.calls)") }
+        guard case .loadTranscript(let msgs) = sink.calls[1] else { return XCTFail("expected loadTranscript: \(sink.calls)") }
+        XCTAssertEqual(msgs.map(\.role), [.user, .tool], "partial deltas are not in the log; the open bubble is re-opened, not restored")
+        XCTAssertEqual(sink.calls.last, .beginAssistantMessage, "the live bubble is re-opened after the restored rows")
+
+        // The turn finishes: its commit lands in the re-opened bubble.
+        provider.emit(.assistantMessageCompleted(text: "Final answer"))
+        provider.finishStream()
+        await task?.value
+        XCTAssertTrue(sink.calls.contains(.commitAssistantMessage("Final answer")))
+    }
+
+    func testReplayIsNoOpWhenFreshAndClearedByNewConversation() async {
+        let provider = MockAgentProvider()
+        let sink = SpyTranscriptSink()
+        let controller = makeController(provider: provider, sink: sink)
+
+        controller.replayTranscript()
+        XCTAssertTrue(sink.calls.isEmpty, "nothing to replay on a fresh conversation")
+
+        await runTurn(controller, provider: provider, send: "q1", events: [.assistantMessageCompleted(text: "a"), .turnCompleted(usage: nil)])
+        controller.newConversation()
+        sink.calls.removeAll()
+        controller.replayTranscript()
+        XCTAssertTrue(sink.calls.isEmpty, "newConversation clears the render log")
+    }
+
     func testRecheckAvailabilityReflectsProvider() async {
         let provider = MockAgentProvider(availability: .notFound(reason: "not logged in"))
         let controller = makeController(provider: provider, sink: SpyTranscriptSink())
@@ -451,7 +548,7 @@ final class SpyTranscriptSink: ChatTranscriptSink {
         case setTheme(ChatTheme)
     }
 
-    private(set) var calls: [Call] = []
+    var calls: [Call] = []
 
     func reset() { calls.append(.reset) }
     func loadTranscript(_ messages: [ChatRenderMessage]) { calls.append(.loadTranscript(messages)) }

@@ -1559,6 +1559,11 @@ struct WebReaderView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @State private var showAnnotationSidebar = true
+    @State private var showChatSidebar = false
+    /// Live width of the reader window's content, for the narrow-window pane
+    /// policy (§5.1): when all three panes can't fit, opening one side pane
+    /// collapses the other.
+    @State private var containerWidth: CGFloat = 0
     /// Note-draft text for the selection popover. Lifted from the deleted WebSelectionActionBar
     /// so the shared AnnotationSelectionPopover can take a Binding into the same state across
     /// rebuilds. The `.onChange(of: viewModel.pendingSelection?.text ?? "")` modifier below
@@ -1567,9 +1572,33 @@ struct WebReaderView: View {
     @State private var noteMarkdownForSelection: String = ""
     private let onClose: (() -> Void)?
 
+    // Assistant chat sidebar (Phase 2c): one renderer + session controller per
+    // reader window; conversation state is in-memory only (D5).
+    @StateObject private var chatRenderer: ChatTranscriptController
+    @StateObject private var chatSession: ChatSessionController
+
+    /// Main pane 540 + annotation 260 + chat 300 + dividers/margins: below this,
+    /// the two side panes swap instead of squeezing (§5.1).
+    private static let threePaneMinWidth: CGFloat = 1150
+
     init(reference: Reference, onClose: (() -> Void)? = nil) {
         self.onClose = onClose
         self._viewModel = StateObject(wrappedValue: WebReaderViewModel(reference: reference))
+
+        // The first production provider construction: Claude wrapped with the
+        // read-only MCP content channel (Phase 2b), so the agent reads THIS
+        // document through Rubien's own tools. Reader windows always hold a
+        // persisted reference; `?? 0` is unreachable in practice.
+        let renderer = ChatTranscriptController()
+        self._chatRenderer = StateObject(wrappedValue: renderer)
+        self._chatSession = StateObject(wrappedValue: ChatSessionController(
+            provider: ClaudeCodeProvider(contentChannel: MCPContentChannel.resolveBundled()),
+            transcript: renderer,
+            reference: ChatReference(
+                id: reference.id ?? 0,
+                title: reference.title,
+                authors: reference.authors.displayString),
+            workspaceURL: AssistantContext.ensureWorkspace(AssistantContext.defaultWorkspaceURL)))
     }
 
     var body: some View {
@@ -1608,8 +1637,32 @@ struct WebReaderView: View {
                         .allowsHitTesting(false)
                     }
             }
+
+            if showChatSidebar {
+                ChatSidebarView(session: chatSession, renderer: chatRenderer, onClose: {
+                    withAnimation { showChatSidebar = false }
+                })
+                .frame(minWidth: 300, idealWidth: 340, maxWidth: 560)
+                .overlay(alignment: .leading) {
+                    LinearGradient(
+                        colors: [Color.black.opacity(colorScheme == .dark ? 0.18 : 0.06), .clear],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                    .frame(width: 6)
+                    .allowsHitTesting(false)
+                }
+            }
         }
         .frame(minWidth: 900, minHeight: 620)
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.width
+        } action: { width in
+            containerWidth = width
+        }
+        // Window closing (the root view disappears): kill any in-flight agent
+        // turn's process group (§4.4 step 9).
+        .onDisappear { chatSession.teardown() }
         .animation(
             .spring(response: 0.3, dampingFraction: 0.82),
             value: viewModel.hasSelection && viewModel.selectionToolbarLayout?.visible == true
@@ -1657,10 +1710,28 @@ struct WebReaderView: View {
 
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
-                    withAnimation { showAnnotationSidebar.toggle() }
+                    withAnimation {
+                        showAnnotationSidebar.toggle()
+                        // Narrow-window policy (§5.1): no three-panes-squeezed state.
+                        if showAnnotationSidebar, containerWidth < Self.threePaneMinWidth {
+                            showChatSidebar = false
+                        }
+                    }
                 } label: {
                     Label(String(localized: "Sidebar", bundle: .module), systemImage: "sidebar.right")
                 }
+
+                Button {
+                    withAnimation {
+                        showChatSidebar.toggle()
+                        if showChatSidebar, containerWidth < Self.threePaneMinWidth {
+                            showAnnotationSidebar = false
+                        }
+                    }
+                } label: {
+                    Label(String(localized: "Assistant", bundle: .module), systemImage: "bubble.left.and.text.bubble.right")
+                }
+                .help(String(localized: "Chat about this document", bundle: .module))
             }
         }
         .onAppear {

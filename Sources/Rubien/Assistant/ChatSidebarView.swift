@@ -26,6 +26,7 @@ struct ChatSidebarView: View {
     @State private var modelMenuHovered = false
     @State private var providerMenuHovered = false
     @State private var plusMenuHovered = false
+    @State private var approvalMenuHovered = false
     @FocusState private var composerFocused: Bool
     @Environment(\.colorScheme) private var colorScheme
 
@@ -37,7 +38,12 @@ struct ChatSidebarView: View {
         }
         .frame(minWidth: 300)
         .task { await session.recheckAvailability() }
-        .onAppear { renderer.setTheme(colorScheme == .dark ? .dark : .light) }
+        .onAppear {
+            renderer.setTheme(colorScheme == .dark ? .dark : .light)
+            // Re-mounting the pane created a fresh (empty) WebView — restore the
+            // conversation from the controller's in-memory render log.
+            session.replayTranscript()
+        }
         .onChange(of: colorScheme) { _, new in renderer.setTheme(new == .dark ? .dark : .light) }
     }
 
@@ -343,6 +349,7 @@ struct ChatSidebarView: View {
             composerEditor
             HStack(spacing: 8) {
                 plusMenu
+                approvalPicker
                 Spacer()
                 providerPicker
                 modelPicker
@@ -358,6 +365,49 @@ struct ChatSidebarView: View {
             RoundedRectangle(cornerRadius: 9, style: .continuous)
                 .stroke(Color.primary.opacity(0.12), lineWidth: 1)
         )
+    }
+
+    // MARK: Approval mode switch (Ask ⟷ Auto)
+
+    /// Whether the agent's write/tool-use actions prompt (Ask — a native approval
+    /// card, the D6 soft boundary) or run automatically (Auto). Reads/search are
+    /// silent either way.
+    private var approvalPicker: some View {
+        Menu {
+            Picker("Approvals", selection: $session.autoApprove) {
+                Label("Ask for approval", systemImage: "hand.raised").tag(false)
+                Label("Auto-accept actions", systemImage: "bolt").tag(true)
+            }
+            .pickerStyle(.inline)
+        } label: {
+            approvalPickerText
+                .padding(.horizontal, 6)
+                .frame(height: 24)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .background(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(approvalMenuHovered ? Color.primary.opacity(0.06) : Color.clear)
+        )
+        .onHover { approvalMenuHovered = $0 }
+        .animation(.easeOut(duration: 0.12), value: approvalMenuHovered)
+        .help("Approvals — Ask shows a card before writes/shell; Auto runs them automatically")
+    }
+
+    private var approvalPickerText: Text {
+        let icon = session.autoApprove ? "bolt.fill" : "hand.raised"
+        let word = session.autoApprove ? "Auto" : "Ask"
+        let tint: Color = session.autoApprove ? .orange : Color.primary.opacity(0.80)
+        return ((Text(Image(systemName: icon)) + Text(" \(word)"))
+            .foregroundStyle(tint)
+            + Text(" ")
+            + Text(Image(systemName: "chevron.down"))
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(.secondary))
+            .font(.system(size: 12))
     }
 
     // MARK: Provider (backend) selector

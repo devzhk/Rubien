@@ -304,20 +304,6 @@ body {
   font-size: 12px;
 }
 
-.chat-tool-badge {
-  margin-left: auto;
-  font-size: 10.5px;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  opacity: 0.8;
-}
-.chat-tool-denied .chat-tool-badge {
-  color: var(--chat-status-denied);
-}
-.chat-tool-completed .chat-tool-badge {
-  color: var(--chat-status-completed);
-}
-
 .chat-tool-detail {
   font-family: var(--chat-mono);
   font-size: 11.5px;

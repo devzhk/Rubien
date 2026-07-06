@@ -64,6 +64,11 @@ final class ChatSessionController: ObservableObject {
     /// The conversation's reasoning effort, applied per turn (Claude `--effort`
     /// low/medium/high/xhigh/max). `nil` omits the flag.
     @Published var effortOverride: String?
+    /// When true, tool-use approval requests are accepted automatically (no card).
+    /// Default false — the soft-boundary "Ask" mode where writes prompt via the
+    /// control protocol (D6). A per-conversation choice; reads/search stay silent
+    /// either way.
+    @Published var autoApprove = false
 
     // MARK: Collaborators (injected)
     private let provider: any AgentProvider
@@ -86,6 +91,11 @@ final class ChatSessionController: ObservableObject {
     /// tool's terminal event pops the oldest (the renderer's `addToolChip` is add-only,
     /// and events carry no tool-use id to match started↔completed exactly).
     private var toolDetails: [String: [String?]] = [:]
+    /// The render-only transcript log (D5: in-memory, per-window, never persisted).
+    /// Toggling the sidebar pane dismantles its WKWebView — `replayTranscript()`
+    /// restores the visible transcript from this log when the pane remounts.
+    private var renderLog: [ChatRenderMessage] = []
+    private var renderSeq = 0
     /// Bumped by `send` / `newConversation` to invalidate a superseded turn's late
     /// events + finalization (the stale-turn guard, §4.1): a drained old stream must
     /// not corrupt a fresh conversation's state or clobber a newer turn.
@@ -151,7 +161,7 @@ final class ChatSessionController: ObservableObject {
                 return
             }
             self.hasMessages = true
-            self.transcript.addUserMessage(composed)
+            self.renderUserMessage(composed)
             self.stagedSelection = nil
             self.transcript.beginAssistantMessage()
             do {
@@ -160,7 +170,7 @@ final class ChatSessionController: ObservableObject {
                 }
             } catch {
                 if gen == self.generation {
-                    self.transcript.addNotice("The assistant turn failed: \(error.localizedDescription)")
+                    self.renderNotice("The assistant turn failed: \(error.localizedDescription)")
                 }
             }
             // Release BEFORE the task completes, so awaiting `turnTask` guarantees the
@@ -175,7 +185,33 @@ final class ChatSessionController: ObservableObject {
     func stop() {
         guard isResponding else { return }
         provider.cancel()
-        transcript.addNotice("_Interrupted._")
+        renderNotice("_Interrupted._")
+    }
+
+    /// Window teardown (reader closing): kill any in-flight turn's process group
+    /// without touching the (about-to-vanish) transcript. The running turn task
+    /// holds `self` strongly until its stream ends, so this must be called
+    /// explicitly — deinit would fire too late.
+    func teardown() {
+        provider.cancel()
+    }
+
+    /// Re-render the conversation into a freshly-(re)mounted transcript pane from
+    /// the in-memory log (toggling the pane dismantles + recreates its WebView).
+    /// No-op for a fresh, idle conversation.
+    func replayTranscript() {
+        guard !renderLog.isEmpty || isResponding else { return }
+        transcript.reset()
+        transcript.loadTranscript(renderLog)
+        // If a turn was streaming when the pane was toggled, its open assistant
+        // bubble + partial deltas lived only in the dismantled WebView, not the log
+        // (deltas aren't logged — only the commit is). Re-open a bubble so the
+        // continuing stream lands AFTER the restored rows (the correct position);
+        // the turn's final `assistantMessageCompleted` replaces it with the full
+        // authoritative text.
+        if isResponding {
+            transcript.beginAssistantMessage()
+        }
     }
 
     /// Start a fresh conversation: cancel any live turn and reset. Bumping `generation`
@@ -194,6 +230,8 @@ final class ChatSessionController: ObservableObject {
         pendingApproval = nil
         stagedSelection = nil
         toolDetails.removeAll()
+        renderLog.removeAll()
+        renderSeq = 0
     }
 
     /// Answer a pending Claude approval; the turn continues on the same stream. A stale
@@ -218,23 +256,51 @@ final class ChatSessionController: ObservableObject {
             liveSessionID = id
             seedSent = true  // the seed-bearing process started → the seed was delivered
         case .assistantDelta(let text):
-            transcript.appendDelta(text)
+            transcript.appendDelta(text)  // streaming-only; the commit is what's logged
         case .assistantMessageCompleted(let text):
             transcript.commitAssistantMessage(text)
+            appendToLog(.assistant, text)
         case .toolUseStarted(let name, let detail):
             toolDetails[name, default: []].append(detail)
         case .toolUseCompleted(let name):
-            transcript.addToolChip(name: name, detail: popToolDetail(name), status: .completed)
+            renderToolChip(ToolChipPayload(name: name, detail: popToolDetail(name), status: .completed))
         case .approvalRequested(let id, let toolName, let summary):
-            pendingApproval = PendingApproval(id: id, toolName: toolName, summary: summary)
+            if autoApprove {
+                provider.respondToApproval(id: id, .allowForConversation)  // no card
+            } else {
+                pendingApproval = PendingApproval(id: id, toolName: toolName, summary: summary)
+            }
         case .toolDenied(let name, let reason):
             _ = popToolDetail(name)
-            transcript.addToolChip(name: name, detail: reason, status: .denied)
+            renderToolChip(ToolChipPayload(name: name, detail: reason, status: .denied))
         case .turnCompleted:
             break  // finalization happens once the stream ends (finalize)
         case .providerNotice(let text):
-            transcript.addNotice(text)
+            renderNotice(text)
         }
+    }
+
+    // MARK: Render + log (the log feeds replayTranscript on pane remount)
+
+    private func renderUserMessage(_ markdown: String) {
+        transcript.addUserMessage(markdown)
+        appendToLog(.user, markdown)
+    }
+
+    private func renderNotice(_ markdown: String) {
+        transcript.addNotice(markdown)
+        appendToLog(.notice, markdown)
+    }
+
+    private func renderToolChip(_ chip: ToolChipPayload) {
+        transcript.addToolChip(name: chip.name, detail: chip.detail, status: chip.status)
+        // Tool rows restore from a JSON body, mirroring the JS contract.
+        appendToLog(.tool, ChatTranscriptJS.encodeArg(chip))
+    }
+
+    private func appendToLog(_ role: ChatRole, _ body: String) {
+        renderLog.append(ChatRenderMessage(role: role, body: body, seq: renderSeq))
+        renderSeq += 1
     }
 
     // MARK: Private
@@ -256,7 +322,7 @@ final class ChatSessionController: ObservableObject {
     private func refuseTurn(gen: Int) {
         guard gen == generation else { return }
         busyElsewhere = true
-        transcript.addNotice("This conversation is busy in another window. Try again in a moment.")
+        renderNotice("This conversation is busy in another window. Try again in a moment.")
         isResponding = false
         statusText = nil
         turnTask = nil

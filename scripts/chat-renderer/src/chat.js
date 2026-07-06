@@ -93,12 +93,11 @@ function makeToolChip(chip) {
   const label = document.createElement('span')
   label.className = 'chat-tool-name'
   label.textContent = name // textContent — never HTML
-  const badge = document.createElement('span')
-  badge.className = 'chat-tool-badge'
-  badge.textContent = status
+  // Status is conveyed by the dot color alone (started/completed/denied); the
+  // `chat-tool-<status>` class on root carries it for a11y / styling.
+  root.dataset.status = status
   summary.appendChild(dot)
   summary.appendChild(label)
-  summary.appendChild(badge)
   root.appendChild(summary)
 
   if (detail) {
