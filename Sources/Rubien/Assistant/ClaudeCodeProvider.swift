@@ -135,17 +135,14 @@ private actor ClaudeTurnEngine {
     private static let settleHardKillDelay: Double = 5.0
     /// After an explicit cancel (SIGTERM already sent), SIGKILL if not yet dead.
     private static let cancelHardKillDelay: Double = 2.0
-    /// Bound on awaiting the stderr drain before composing a failure notice (A5).
-    private static let stderrDrainGrace: Double = 0.5
-    /// Trailing stderr bytes included in a failure notice.
-    private static let noticeStderrTailBytes = 500
+    // The crash-notice drain grace + tail size are shared (`AgentProcessExit`).
 
     /// One running turn's mutable state. Reference type, only ever touched inside
     /// this actor's isolation, so it needs no synchronization of its own (the one
     /// exception, `stderr`, is its own locked box read from the drain thread).
     private final class Turn {
         let token: UUID
-        let process: PosixSpawnedProcess
+        let process: SpawnedAgentProcess
         let continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation
         var parser = ClaudeStreamParser()
         /// requestID → the bookkeeping needed to answer a `can_use_tool`.
@@ -159,7 +156,7 @@ private actor ClaudeTurnEngine {
         var terminationTask: Task<Void, Never>?
 
         init(
-            token: UUID, process: PosixSpawnedProcess,
+            token: UUID, process: SpawnedAgentProcess,
             continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation
         ) {
             self.token = token
@@ -202,9 +199,9 @@ private actor ClaudeTurnEngine {
         let environment = ClaudeCLIInvocation.environment(
             binaryDirectory: (executable as NSString).deletingLastPathComponent)
 
-        let process: PosixSpawnedProcess
+        let process: SpawnedAgentProcess
         do {
-            process = try PosixSpawnedProcess.spawn(
+            process = try SpawnedAgentProcess.spawn(
                 executablePath: executable,
                 arguments: arguments,
                 environment: environment,
@@ -335,15 +332,10 @@ private actor ClaudeTurnEngine {
         // (crash / non-zero exit / auth error) → surface a clean notice (§4.5), not
         // a thrown error, so it renders as chat content.
         if !turn.cancelled && !turn.sawResult {
-            // A5: the stderr drain may not have appended the final (error) bytes yet
-            // — wait briefly for its EOF so the notice carries the real message.
-            await turn.stderr.waitForCompletion(timeout: Self.stderrDrainGrace)
-            let exit = Self.exitCode(from: status)
-            let codeDesc = exit.map { "exit code \($0)" } ?? "terminated by signal"
-            var message = "The assistant ended unexpectedly (\(codeDesc))."
-            let tail = turn.stderr.tailString()
-            if !tail.isEmpty { message += "\n\(String(tail.suffix(Self.noticeStderrTailBytes)))" }
-            turn.continuation.yield(.providerNotice(message))
+            // A5: the shared crash notice waits briefly for stderr's final (error)
+            // bytes so the message carries the real error, then composes it.
+            turn.continuation.yield(.providerNotice(
+                await AgentProcessExit.crashNotice(waitStatus: status, stderr: turn.stderr)))
         }
 
         turn.continuation.finish()
@@ -407,15 +399,6 @@ private actor ClaudeTurnEngine {
         turn.process.signalGroup(SIGKILL)
     }
 
-    // MARK: Reaping
-
-    /// POSIX wait-status decode: the exit code for a normal exit, `nil` if killed by
-    /// a signal. (`WIFEXITED`/`WEXITSTATUS` are C macros not imported into Swift.)
-    private static func exitCode(from status: Int32) -> Int32? {
-        if (status & 0x7f) == 0 { return (status >> 8) & 0xff }
-        return nil
-    }
-
     // MARK: Availability
 
     func isAvailable(override: String?) async -> AgentAvailability {
@@ -426,7 +409,11 @@ private actor ClaudeTurnEngine {
             return .notFound(
                 reason: "Claude Code CLI not found. Install it or set its path in Settings → Assistant.")
         }
-        guard let version = await Self.probeVersion(executablePath: path) else {
+        let environment = ClaudeCLIInvocation.environment(
+            binaryDirectory: (path as NSString).deletingLastPathComponent)
+        guard let version = await AgentBinaryProbe.probeVersion(
+            executablePath: path, environment: environment)
+        else {
             return .notFound(reason: "Found claude at \(path) but it did not respond to --version.")
         }
         let availability = AgentAvailability.installed(version: version, path: path)
@@ -434,103 +421,19 @@ private actor ClaudeTurnEngine {
         return availability
     }
 
-    /// Resolution order (§5.5): explicit override → well-known install dirs →
-    /// last-resort login-shell `command -v`.
+    /// Well-known claude install dirs; resolution control flow is shared (§5.5).
     static func resolveExecutable(override: String?) -> String? {
-        let fileManager = FileManager.default
-        if let override, !override.isEmpty {
-            return fileManager.isExecutableFile(atPath: override) ? override : nil
-        }
-        let home = fileManager.homeDirectoryForCurrentUser.path
-        let candidates = [
-            "\(home)/.local/bin/claude",
-            "/opt/homebrew/bin/claude",
-            "/usr/local/bin/claude",
-            "\(home)/.npm-global/bin/claude",
-        ]
-        for candidate in candidates where fileManager.isExecutableFile(atPath: candidate) {
-            return candidate
-        }
-        return shellResolve()
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return AgentBinaryProbe.resolveExecutable(
+            override: override,
+            candidates: [
+                "\(home)/.local/bin/claude",
+                "/opt/homebrew/bin/claude",
+                "/usr/local/bin/claude",
+                "\(home)/.npm-global/bin/claude",
+            ],
+            binaryName: "claude")
     }
-
-    private static func shellResolve() -> String? {
-        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        guard let output = runProbe(
-            executablePath: shell, arguments: ["-l", "-c", "command -v claude"], timeout: 5)
-        else { return nil }
-        let path = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !path.isEmpty, FileManager.default.isExecutableFile(atPath: path) else { return nil }
-        return path
-    }
-
-    private static func probeVersion(executablePath: String) async -> String? {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let output = runProbe(
-                    executablePath: executablePath, arguments: ["--version"], timeout: 5)
-                continuation.resume(returning: output.flatMap(parseVersionString))
-            }
-        }
-    }
-
-    /// Extract a `MAJOR.MINOR.PATCH` from a `--version` line, else the first
-    /// non-empty trimmed line.
-    static func parseVersionString(_ raw: String) -> String? {
-        if let range = raw.range(of: #"\d+\.\d+\.\d+"#, options: .regularExpression) {
-            return String(raw[range])
-        }
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
-    /// Run a short, sanitized, stdin-closed probe with a HARD timeout that holds even
-    /// if a login-shell grandchild keeps stdout open (A4): stdout is read on a
-    /// background queue; on timeout we `terminate()` + close the read handle to
-    /// unblock the read and return. stderr is discarded to `/dev/null` so it can
-    /// never fill and stall the child.
-    private static func runProbe(
-        executablePath: String, arguments: [String], timeout: TimeInterval
-    ) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executablePath)
-        process.arguments = arguments
-        process.environment = ClaudeCLIInvocation.environment(
-            binaryDirectory: (executablePath as NSString).deletingLastPathComponent)
-        let outPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = FileHandle.nullDevice
-        process.standardInput = FileHandle.nullDevice
-        do { try process.run() } catch { return nil }
-
-        let readHandle = outPipe.fileHandleForReading
-        let box = LockedBox<Data>(Data())
-        let done = DispatchSemaphore(value: 0)
-        DispatchQueue.global(qos: .userInitiated).async {
-            box.set(readHandle.readDataToEndOfFile())  // tiny output; unblocked on close
-            done.signal()
-        }
-
-        if done.wait(timeout: .now() + timeout) == .timedOut {
-            process.terminate()          // SIGTERM the direct child…
-            try? readHandle.close()      // …and unblock the read even if a grandchild holds stdout
-            done.wait()                  // let the reader task finish after the close
-            return nil
-        }
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return nil }
-        return String(decoding: box.get(), as: UTF8.self)
-    }
-}
-
-/// A tiny lock-guarded value box so a background reader and the caller can hand off
-/// data across threads without a data race.
-private final class LockedBox<Value>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value: Value
-    init(_ value: Value) { self.value = value }
-    func set(_ newValue: Value) { lock.lock(); value = newValue; lock.unlock() }
-    func get() -> Value { lock.lock(); defer { lock.unlock() }; return value }
 }
 
 // MARK: - CLI invocation (pure argv + env construction; unit-tested)
@@ -585,226 +488,14 @@ enum ClaudeCLIInvocation {
         return args
     }
 
-    /// Minimal ALLOWLISTED environment — never inherit the app env (GUI apps carry
-    /// `*_API_KEY`, `GITHUB_TOKEN`, `SSH_AUTH_SOCK`, cloud creds). `HOME` is required
-    /// so config-dir-relative subscription auth survives `--setting-sources ''`.
+    /// The shared minimal ALLOWLISTED environment (`SpawnedAgentProcess`) + Claude's
+    /// entrypoint marker. `HOME` (in the shared allowlist) is required so config-dir-
+    /// relative subscription auth survives `--setting-sources ''`.
     static func environment(binaryDirectory: String) -> [String: String] {
-        let host = ProcessInfo.processInfo.environment
-        var env: [String: String] = [:]
-        for key in ["HOME", "USER", "LANG", "LC_ALL", "TMPDIR"] {
-            if let value = host[key] { env[key] = value }
-        }
-        env["TERM"] = "dumb"
-        env["FORCE_COLOR"] = "0"
-        env["NO_COLOR"] = "1"                    // stray ANSI must not corrupt the JSON
+        var env = SpawnedAgentProcess.minimalEnvironment(binaryDirectory: binaryDirectory)
         env["CLAUDE_CODE_ENTRYPOINT"] = "rubien-assistant"
-        let dir = binaryDirectory.isEmpty ? "/usr/local/bin" : binaryDirectory
-        env["PATH"] = "\(dir):/usr/bin:/bin"
         return env
     }
 }
 
-// MARK: - Bounded stderr ring buffer (thread-safe)
-
-/// Keeps only the tail of a turn's stderr for the error-notice path; appended from
-/// the stderr drain thread, read at finalize. Lock-guarded so it is safely
-/// `Sendable` across those two domains. Signals `finish()` at EOF so the failure
-/// path can wait for the real (final) error bytes before composing its notice (A5).
-private final class StderrRingBuffer: @unchecked Sendable {
-    private let lock = NSLock()
-    private var data = Data()
-    private let maxBytes = 16 * 1024
-    private let doneSemaphore = DispatchSemaphore(value: 0)
-    private var finished = false
-
-    func append(_ chunk: Data) {
-        lock.lock(); defer { lock.unlock() }
-        data.append(chunk)
-        // Only pay the O(n) trim once the tail is well past the cap (nit-fix: avoids
-        // a copy on every append when hovering near the boundary).
-        if data.count > 2 * maxBytes { data.removeFirst(data.count - maxBytes) }
-    }
-
-    /// Called by the drain thread when stderr reaches EOF.
-    func finish() {
-        lock.lock()
-        let wasFinished = finished
-        finished = true
-        lock.unlock()
-        if !wasFinished { doneSemaphore.signal() }
-    }
-
-    /// Await the drain's EOF, bounded — returns early if it is slow.
-    func waitForCompletion(timeout: TimeInterval) async {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .utility).async {
-                _ = self.doneSemaphore.wait(timeout: .now() + timeout)
-                continuation.resume()
-            }
-        }
-    }
-
-    func tailString() -> String {
-        lock.lock(); defer { lock.unlock() }
-        // B3: byte-boundary trim can leave a mid-codepoint prefix — decode
-        // lossily (replacing invalid bytes) rather than dropping the ENTIRE tail.
-        return String(decoding: data.suffix(maxBytes), as: UTF8.self)
-    }
-}
-
-// MARK: - posix_spawn wrapper (own process group + cwd)
-
-/// A child spawned via `posix_spawn` in its OWN process group so the whole tree can
-/// be signalled with `killpg` (Foundation `Process.terminate()` reaches only the
-/// leader). FileHandles are each accessed from a single domain (stdin: the actor,
-/// stdout: the reader task, stderr: the drain thread), so `@unchecked Sendable` is
-/// sound.
-private final class PosixSpawnedProcess: @unchecked Sendable {
-    let pid: pid_t
-    let stdinHandle: FileHandle
-    let stdoutHandle: FileHandle
-    let stderrHandle: FileHandle
-    private var stdinClosed = false
-    private let stateLock = NSLock()
-    private var hasExited = false
-
-    private init(pid: pid_t, stdin: FileHandle, stdout: FileHandle, stderr: FileHandle) {
-        self.pid = pid
-        self.stdinHandle = stdin
-        self.stdoutHandle = stdout
-        self.stderrHandle = stderr
-    }
-
-    /// Write one NDJSON line to the child's stdin (the prompt / control responses).
-    /// No-op after `closeStdin`; `SIGPIPE` is globally ignored so a dead child can't
-    /// crash the app on write.
-    func writeLine(_ string: String) {
-        guard !stdinClosed else { return }
-        _ = PosixSpawnedProcess.sigpipeIgnored
-        try? stdinHandle.write(contentsOf: Data((string + "\n").utf8))
-    }
-
-    /// Close stdin → the child sees EOF on the stream-json input and exits the turn.
-    func closeStdin() {
-        guard !stdinClosed else { return }
-        stdinClosed = true
-        try? stdinHandle.close()
-    }
-
-    /// Reap the process-group leader. A3: wait for exit WITHOUT reaping first
-    /// (`waitid` + `WNOWAIT`), then — inside the lock — flag `hasExited` and only
-    /// THEN reap (`waitpid`). Because `signalGroup` checks-and-signals inside the
-    /// same lock, no `killpg` can ever fire after the pid is reaped (and thus
-    /// possibly recycled).
-    func wait() async -> Int32 {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .utility).async {
-                // Block until the child has exited, but leave it reapable.
-                var info = siginfo_t()
-                _ = waitid(P_PID, id_t(self.pid), &info, WEXITED | WNOWAIT)
-                self.stateLock.lock()
-                self.hasExited = true          // set BEFORE reaping → no signal past here
-                var status: Int32 = 0
-                _ = waitpid(self.pid, &status, 0)  // immediate; the child already exited
-                self.stateLock.unlock()
-                continuation.resume(returning: status)
-            }
-        }
-    }
-
-    /// Signal the whole process group (leader pgid == pid, since we set pgroup 0).
-    /// The check + `killpg` are one critical section, mutually exclusive with the
-    /// reap in `wait()`, so a signal can never target a reaped/recycled pid (A3).
-    func signalGroup(_ signal: Int32) {
-        stateLock.lock(); defer { stateLock.unlock() }
-        guard pid > 0, !hasExited else { return }
-        _ = killpg(pid, signal)
-    }
-
-    private static let sigpipeIgnored: Void = {
-        signal(SIGPIPE, SIG_IGN)
-        return ()
-    }()
-
-    static func spawn(
-        executablePath: String,
-        arguments: [String],
-        environment: [String: String],
-        workingDirectory: String
-    ) throws -> PosixSpawnedProcess {
-        _ = sigpipeIgnored
-
-        let stdinPipe = Pipe()
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-
-        var fileActions: posix_spawn_file_actions_t?
-        posix_spawn_file_actions_init(&fileActions)
-        defer { posix_spawn_file_actions_destroy(&fileActions) }
-
-        // cwd = the workspace folder (D4).
-        workingDirectory.withCString { _ = posix_spawn_file_actions_addchdir_np(&fileActions, $0) }
-
-        let childStdin = stdinPipe.fileHandleForReading.fileDescriptor
-        let parentStdinWrite = stdinPipe.fileHandleForWriting.fileDescriptor
-        let childStdout = stdoutPipe.fileHandleForWriting.fileDescriptor
-        let parentStdoutRead = stdoutPipe.fileHandleForReading.fileDescriptor
-        let childStderr = stderrPipe.fileHandleForWriting.fileDescriptor
-        let parentStderrRead = stderrPipe.fileHandleForReading.fileDescriptor
-
-        posix_spawn_file_actions_adddup2(&fileActions, childStdin, 0)
-        posix_spawn_file_actions_adddup2(&fileActions, childStdout, 1)
-        posix_spawn_file_actions_adddup2(&fileActions, childStderr, 2)
-        // Close the duplicated originals and the parent ends inside the child.
-        posix_spawn_file_actions_addclose(&fileActions, childStdin)
-        posix_spawn_file_actions_addclose(&fileActions, childStdout)
-        posix_spawn_file_actions_addclose(&fileActions, childStderr)
-        posix_spawn_file_actions_addclose(&fileActions, parentStdinWrite)
-        posix_spawn_file_actions_addclose(&fileActions, parentStdoutRead)
-        posix_spawn_file_actions_addclose(&fileActions, parentStderrRead)
-
-        var attributes: posix_spawnattr_t?
-        posix_spawnattr_init(&attributes)
-        defer { posix_spawnattr_destroy(&attributes) }
-        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP))
-        posix_spawnattr_setpgroup(&attributes, 0)   // new group, pgid == child pid
-
-        let argv = [executablePath] + arguments
-        let envp = environment.map { "\($0.key)=\($0.value)" }
-
-        var pid: pid_t = 0
-        let spawnResult: Int32 = executablePath.withCString { pathPtr in
-            withCStringArray(argv) { argvPtr in
-                withCStringArray(envp) { envpPtr in
-                    posix_spawn(&pid, pathPtr, &fileActions, &attributes, argvPtr, envpPtr)
-                }
-            }
-        }
-        guard spawnResult == 0 else {
-            throw AgentProviderError.spawnFailed(code: spawnResult)
-        }
-
-        // Parent: close the child ends so EOF propagates when the child exits.
-        try? stdinPipe.fileHandleForReading.close()
-        try? stdoutPipe.fileHandleForWriting.close()
-        try? stderrPipe.fileHandleForWriting.close()
-
-        return PosixSpawnedProcess(
-            pid: pid,
-            stdin: stdinPipe.fileHandleForWriting,
-            stdout: stdoutPipe.fileHandleForReading,
-            stderr: stderrPipe.fileHandleForReading)
-    }
-}
-
-/// Build a NULL-terminated C string array for `posix_spawn` argv/envp, freeing every
-/// `strdup` after `body` returns.
-private func withCStringArray<Result>(
-    _ strings: [String], _ body: (UnsafePointer<UnsafeMutablePointer<CChar>?>) -> Result
-) -> Result {
-    var cStrings: [UnsafeMutablePointer<CChar>?] = strings.map { strdup($0) }
-    cStrings.append(nil)
-    defer { for pointer in cStrings where pointer != nil { free(pointer) } }
-    return cStrings.withUnsafeBufferPointer { body($0.baseAddress!) }
-}
 #endif

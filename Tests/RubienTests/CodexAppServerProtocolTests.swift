@@ -152,6 +152,16 @@ final class CodexAppServerProtocolTests: XCTestCase {
         XCTAssertNil(CodexAppServerProtocol.decodeInbound(line: #"{"jsonrpc":"2.0","id":0.5,"result":{}}"#))
     }
 
+    func testNumericAndStringIdsDoNotCollideInUiString() {
+        // The pendingApprovals key is the uiString — .number(1) and .string("1") must
+        // NOT map to the same key (review #5), or one approval would overwrite the other.
+        XCTAssertNotEqual(CodexRPCID.number(1).uiString, CodexRPCID.string("1").uiString)
+        XCTAssertEqual(CodexRPCID.number(1).uiString, "1")
+        // The wire value is still echoed by TYPE, unaffected by the ui tag.
+        XCTAssertEqual(CodexRPCID.string("1").jsonValue as? String, "1")
+        XCTAssertEqual(CodexRPCID.number(1).jsonValue as? Int, 1)
+    }
+
     func testStringIdIsPreservedAsString() {
         let inbound = CodexAppServerProtocol.decodeInbound(
             line: #"{"jsonrpc":"2.0","id":"req-7","method":"item/fileChange/requestApproval","params":{}}"#)

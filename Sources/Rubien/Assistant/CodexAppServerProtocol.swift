@@ -54,11 +54,15 @@ enum CodexRPCID: Equatable, Hashable {
         }
     }
 
-    /// Stable string form for the UI-facing event id (never used on the wire).
+    /// Stable, TYPE-DISAMBIGUATED string for the UI-facing event id + the connection's
+    /// `pendingApprovals` key (never used on the wire — the response echoes `jsonValue`).
+    /// The `s:` tag keeps `.number(1)` ("1") and `.string("1")` ("s:1") from colliding
+    /// (review #5): a numeric id is bare digits, a string id is always `s:`-prefixed, so
+    /// the two spaces can never overlap.
     var uiString: String {
         switch self {
         case .number(let n): return String(n)
-        case .string(let s): return s
+        case .string(let s): return "s:" + s
         }
     }
 }
@@ -322,13 +326,23 @@ enum CodexAppServerProtocol {
         }
     }
 
-    /// Decode a server-initiated APPROVAL request into the bookkeeping the connection
-    /// needs to answer it. Returns `nil` for any other line (tolerant).
+    /// Decode a server-initiated APPROVAL request from a raw line into the answering
+    /// bookkeeping. A tested convenience over `decodeInbound` + `pendingApproval`; the
+    /// live connection decodes once and calls `pendingApproval(id:method:params:)`
+    /// directly. Returns `nil` for any other line (tolerant).
     static func decodeApprovalRequest(line rawLine: String) -> PendingCodexApproval? {
         guard case let .serverRequest(id, method, params)? = decodeInbound(line: rawLine),
               CodexAppServerParser.approvalMethods.contains(method)
         else { return nil }
-        return PendingCodexApproval(
+        return pendingApproval(id: id, method: method, params: params)
+    }
+
+    /// The approval bookkeeping from an already-classified server request (the
+    /// connection's decode-once path).
+    static func pendingApproval(
+        id: CodexRPCID, method: String, params: [String: Any]
+    ) -> PendingCodexApproval {
+        PendingCodexApproval(
             id: id, method: method,
             itemId: params["itemId"] as? String,
             toolName: CodexAppServerParser.approvalToolName(method: method, params: params),

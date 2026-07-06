@@ -209,17 +209,27 @@ protocol AgentProvider: Sendable {
     /// refresh. Never blocks indefinitely (bounded internal timeout).
     func isAvailable() async -> AgentAvailability
 
-    /// Spawn one turn and stream its events. Breaking/cancelling the returned
-    /// stream terminates the process group (via `onTermination`).
+    /// Spawn one turn and stream its events. Breaking/cancelling the returned stream
+    /// ends THE TURN (via `onTermination`): Claude kills the turn's process group
+    /// (its process is the turn); Codex sends `turn/interrupt` and its long-lived
+    /// app-server stays alive (Phase 3b).
     func send(turn: AgentTurnRequest) -> AsyncThrowingStream<AgentEvent, Error>
 
-    /// Answer a pending `approvalRequested` (Claude control protocol). Writes the
-    /// `control_response` to the live turn's stdin so it continues. No-op for
-    /// providers without an approval channel (Codex).
+    /// Answer a pending `approvalRequested`. Claude: writes the `control_response`
+    /// to the live turn's stdin. Codex: answers the server-initiated JSON-RPC
+    /// approval request (Phase 3b).
     func respondToApproval(id: String, _ decision: ApprovalDecision)
 
-    /// Terminate the current turn's whole process group (SIGTERM → grace → SIGKILL).
+    /// Stop the CURRENT TURN. Claude: kills the turn's process group (SIGTERM →
+    /// grace → SIGKILL). Codex: `turn/interrupt` — the server lives on so the
+    /// conversation can continue.
     func cancel()
+
+    /// End the provider entirely (window close): terminate any live process tree.
+    /// Distinct from `cancel()` for providers whose process outlives a turn —
+    /// Codex's app-server dies here, not on every stop. Default: `cancel()`
+    /// (exactly right for Claude's per-turn process).
+    func shutdown()
 
     /// The runtime's own recent sessions for `workspaceURL`, newest first, for the
     /// History picker (§5.3). A light read of the runtime's session store — Rubien
@@ -238,6 +248,7 @@ protocol AgentProvider: Sendable {
 }
 
 extension AgentProvider {
+    func shutdown() { cancel() }
     func recentSessions(workspaceURL: URL, limit: Int) async -> [AgentSessionSummary] { [] }
     func sessionTranscript(sessionID: String, workspaceURL: URL) async -> [ChatRenderMessage] { [] }
     func searchSessions(query: String, workspaceURL: URL, limit: Int) async -> [AgentSessionSummary] { [] }

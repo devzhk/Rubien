@@ -258,7 +258,9 @@ final class ChatSessionController: ObservableObject {
     /// holds `self` strongly until its stream ends, so this must be called
     /// explicitly — deinit would fire too late.
     func teardown() {
-        provider.cancel()
+        // Window close: end the provider entirely (kills a long-lived Codex server;
+        // for Claude the default forwards to cancel()).
+        provider.shutdown()
     }
 
     /// Re-render the conversation into a freshly-(re)mounted transcript pane from
