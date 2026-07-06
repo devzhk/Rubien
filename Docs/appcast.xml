@@ -215,5 +215,26 @@ Reliability: a database busy-timeout keeps concurrent writes from being silently
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.2.0</title>
+            <description><![CDATA[Rubien 0.2.0 — the Assistant
+
+• NEW: the Assistant — chat with Claude about the document you're reading, in both the PDF and web readers. A floating, resizable card that reads the paper through Rubien's own tools (text, figures, your highlights) and can search your library. Requires the Claude Code CLI (claude.ai/code) installed and signed in; configure under Settings ▸ Assistant.
+• Select text → Ask: quote a passage straight into the chat, with page numbers from PDFs.
+• History: browse, search the content of, and resume past conversations — transcripts restore in full.
+• Approvals: read-only tools run silently; anything that writes or runs shell commands asks first (or flip a conversation to Auto).
+• PDF reader: link previews and reveal controls; annotations moved into the left sidebar as a Notes tab, and the page reflows beside the assistant instead of being covered.
+• Note: Rubien is no longer sandboxed (required to run the assistant CLI). Your library, annotations, and iCloud sync are unaffected.]]></description>
+            <pubDate>Mon, 06 Jul 2026 16:49:37 +0000</pubDate>
+            <sparkle:version>15</sparkle:version>
+            <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.2.0/Rubien-0.2.0.dmg"
+                sparkle:edSignature="t+yW66tolRQJOS1w32qbOTc8+I38ZggVT6zgexCFLxA+Mz3s0+D7iXDrs3yikgupFwqA+/CWa2nl6Aqb+Zp6CQ=="
+                length="18080854"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
