@@ -145,3 +145,60 @@ test('http link click routes to Swift; reset clears transcript', async () => {
   await tick()
   assert.equal(T().querySelectorAll('.chat-msg, .chat-notice, .chat-tool-chip').length, 0, 'reset cleared transcript')
 })
+
+// jsdom has no layout engine (scrollHeight/clientHeight/scrollTop are 0), so fake a
+// scroller with real numbers; scrollTo* also fires the 'scroll' event the
+// follow-state listens for. Covers the stick-to-bottom + "N new messages" pill.
+function fakeScroller(window, T, scrollHeight, clientHeight) {
+  let top = 0
+  Object.defineProperty(T, 'scrollHeight', { configurable: true, get: () => scrollHeight })
+  Object.defineProperty(T, 'clientHeight', { configurable: true, get: () => clientHeight })
+  Object.defineProperty(T, 'scrollTop', { configurable: true, get: () => top, set: (v) => { top = v } })
+  const fire = () => T.dispatchEvent(new window.Event('scroll'))
+  return { toBottom() { top = scrollHeight; fire() }, up() { top = 0; fire() } }
+}
+
+test('stick-to-bottom: follows silently at bottom, pills when scrolled up', async () => {
+  const { window, doc, R, T } = await boot()
+  const pill = () => doc.getElementById('chat-jump')
+  const s = fakeScroller(window, T(), 1000, 300)
+
+  s.toBottom()
+  R.addToolChip({ name: 'read', status: 'completed' })
+  await tick()
+  assert.equal(pill().classList.contains('is-visible'), false, 'no pill while following the bottom')
+
+  s.up()
+  R.addToolChip({ name: 'read', status: 'completed' })
+  await tick()
+  assert.ok(pill().classList.contains('is-visible'), 'pill appears once scrolled up')
+  assert.equal(pill().textContent, '1 new message')
+  R.addNotice('hi')
+  await tick()
+  assert.equal(pill().textContent, '2 new messages', 'each new item counts')
+
+  pill().dispatchEvent(new window.MouseEvent('click', { bubbles: true }))
+  await tick()
+  assert.equal(pill().classList.contains('is-visible'), false, 'clicking the pill clears it')
+})
+
+test('stick-to-bottom: a reply scrolled away from mid-stream still pills exactly once', async () => {
+  const { window, doc, R, T } = await boot()
+  const pill = () => doc.getElementById('chat-jump')
+  const s = fakeScroller(window, T(), 1000, 300)
+
+  s.toBottom()
+  R.beginAssistantMessage() // began while following → no pill
+  R.appendDelta('Thinking…')
+  await tick()
+  assert.equal(pill().classList.contains('is-visible'), false)
+
+  s.up() // user scrolls up mid-reply
+  R.appendDelta(' more')
+  await tick()
+  assert.ok(pill().classList.contains('is-visible'), 'a streamed reply surfaces the pill')
+  assert.equal(pill().textContent, '1 new message')
+  R.appendDelta(' and more')
+  await tick()
+  assert.equal(pill().textContent, '1 new message', 'streaming growth is not re-counted per delta')
+})

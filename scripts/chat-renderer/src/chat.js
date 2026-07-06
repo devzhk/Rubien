@@ -26,6 +26,17 @@ let streaming = null // { root, body } | null
 let streamingRaw = '' // accumulated markdown for the open bubble
 let rafHandle = null
 
+// --- Stick-to-bottom + "new messages" pill ------------------------------------
+// The transcript follows the stream ONLY while the user is at the bottom. Once
+// they scroll up to re-read, new content no longer yanks their view down — a small
+// "N new messages" pill appears instead, and clicking it (or scrolling back to the
+// bottom) resumes following.
+const NEAR_BOTTOM_PX = 48 // slack so a hair off the bottom still counts as "at bottom"
+let stickToBottom = true
+let unseenCount = 0 // discrete items added while scrolled up
+let streamingCounted = false // has the OPEN assistant bubble been counted as unseen?
+let jumpPill = null
+
 // --- KaTeX --------------------------------------------------------------------
 
 const KATEX_OPTIONS = {
@@ -127,12 +138,71 @@ function enhanceCodeBlocks(container) {
   })
 }
 
-// TODO(phase-2): unconditionally pins to the bottom — a user scrolling up to
-// re-read during a long stream gets yanked back down every frame. When the real
-// sidebar replaces the debug harness, only auto-scroll when already near bottom.
 function scrollToBottom() {
   if (!transcript) return
   transcript.scrollTop = transcript.scrollHeight
+}
+
+function isNearBottom() {
+  if (!transcript) return true
+  return transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight <= NEAR_BOTTOM_PX
+}
+
+function updateJumpPill() {
+  if (!jumpPill) return
+  const show = unseenCount > 0 && !stickToBottom
+  jumpPill.textContent = unseenCount === 1 ? '1 new message' : `${unseenCount} new messages`
+  jumpPill.classList.toggle('is-visible', show)
+}
+
+// New discrete item (tool chip, notice, or a finalized message): follow if the
+// user is at the bottom, else bump the pill by one.
+function followOrHint(isNewItem) {
+  if (stickToBottom) {
+    scrollToBottom()
+  } else if (isNewItem) {
+    unseenCount += 1
+    updateJumpPill()
+  }
+}
+
+// The open assistant bubble grew (begin or a streaming delta): follow if at the
+// bottom, else surface the pill ONCE for this reply — whether the user was already
+// scrolled up when it began or scrolled up partway through. Idempotent per bubble
+// (`streamingCounted`), so a single streamed reply reads as "1 new message".
+function followStreaming() {
+  if (stickToBottom) {
+    scrollToBottom()
+  } else if (!streamingCounted) {
+    streamingCounted = true
+    unseenCount += 1
+    updateJumpPill()
+  }
+}
+
+// Force the view to the latest and resume following (composer send, transcript
+// load, or the pill click). Clears the unseen counter.
+function jumpToLatest() {
+  stickToBottom = true
+  unseenCount = 0
+  scrollToBottom()
+  updateJumpPill()
+}
+
+// The user drove the scrollbar: re-derive whether we're following. Reaching the
+// bottom clears the pill; scrolling up stops the auto-follow.
+function onUserScroll() {
+  stickToBottom = isNearBottom()
+  if (stickToBottom) unseenCount = 0
+  updateJumpPill()
+}
+
+// The sidebar is resizable: growing it can bring the bottom into view without any
+// scroll event. Keep a following user pinned; otherwise re-derive follow-state (a
+// taller viewport may now be "at bottom", clearing a now-stale pill).
+function onViewportResize() {
+  if (stickToBottom) scrollToBottom()
+  else onUserScroll()
 }
 
 // --- Rendering ----------------------------------------------------------------
@@ -165,7 +235,7 @@ function scheduleStreamRender() {
     rafHandle = null
     if (streaming) {
       streaming.body.innerHTML = renderMarkdown(streamingRaw)
-      scrollToBottom()
+      followStreaming() // grow the open bubble; pill once if scrolled up
     }
   })
 }
@@ -204,6 +274,11 @@ const RubienChat = {
     streaming = null
     streamingRaw = ''
     if (transcript) transcript.innerHTML = ''
+    // A fresh conversation follows from the bottom again.
+    stickToBottom = true
+    unseenCount = 0
+    streamingCounted = false
+    updateJumpPill()
   },
 
   loadTranscript(messages) {
@@ -212,22 +287,24 @@ const RubienChat = {
     // Deterministic order by seq when present; stable otherwise.
     list.sort((a, b) => (Number(a?.seq) || 0) - (Number(b?.seq) || 0))
     for (const m of list) appendRecord(m)
-    scrollToBottom()
+    jumpToLatest()
   },
 
   addUserMessage(markdown) {
     const bubble = makeBubble('user')
     renderFull(bubble.body, String(markdown ?? ''), /* runKaTeX */ true)
     transcript.appendChild(bubble.root)
-    scrollToBottom()
+    // The user just sent this — always show it and resume following.
+    jumpToLatest()
   },
 
   beginAssistantMessage() {
     cancelPendingRender()
     streaming = makeBubble('assistant')
     streamingRaw = ''
+    streamingCounted = false // a new reply — countable once as it grows
     transcript.appendChild(streaming.root)
-    scrollToBottom()
+    followStreaming()
   },
 
   appendDelta(text) {
@@ -242,19 +319,19 @@ const RubienChat = {
     renderFull(streaming.body, String(markdown ?? ''), /* runKaTeX */ true)
     streaming = null
     streamingRaw = ''
-    scrollToBottom()
+    followOrHint(false) // same bubble finalizing — already counted at begin
   },
 
   addToolChip(chip) {
     transcript.appendChild(makeToolChip(chip || {}))
-    scrollToBottom()
+    followOrHint(true)
   },
 
   addNotice(markdown) {
     const n = makeNotice()
     n.body.innerHTML = renderMarkdown(String(markdown ?? ''))
     transcript.appendChild(n.root)
-    scrollToBottom()
+    followOrHint(true)
   },
 
   setTheme(mode) {
@@ -304,6 +381,20 @@ function init() {
   // deterministic).
   useDOMWindow(window)
   installDelegates()
+
+  // "N new messages" pill — hidden until content arrives while scrolled up.
+  jumpPill = document.createElement('button')
+  jumpPill.type = 'button'
+  jumpPill.id = 'chat-jump'
+  jumpPill.addEventListener('click', jumpToLatest)
+  document.body.appendChild(jumpPill)
+  // Follow-state tracks the user's own scrolling (passive — never blocks scroll).
+  transcript.addEventListener('scroll', onUserScroll, { passive: true })
+  // …and a resize of the (resizable) sidebar, which no scroll event covers.
+  if (typeof ResizeObserver === 'function') {
+    new ResizeObserver(onViewportResize).observe(transcript)
+  }
+  window.addEventListener('resize', onViewportResize, { passive: true })
 
   window.RubienChat = RubienChat
 

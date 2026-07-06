@@ -352,3 +352,55 @@ body {
   overflow-y: hidden;
   padding-bottom: 2px;
 }
+
+/* --- "New messages" jump pill (stick-to-bottom escape hatch) ---
+   Fixed to the webview viewport so it stays put while the transcript scrolls.
+   Hidden until content arrives while the user is scrolled up; click resumes
+   following. Solid accent (a control over the glass card, not glass itself). */
+
+#chat-jump {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%) translateY(8px);
+  z-index: 20;
+
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 13px;
+  border: none;
+  border-radius: 999px;
+  background: var(--chat-link);
+  color: #fff;
+  font-family: var(--chat-font);
+  font-size: 12.5px;
+  font-weight: 590;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.22);
+
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+#chat-jump::after {
+  content: "\2193"; /* ↓ */
+  font-size: 13px;
+  line-height: 1;
+}
+
+#chat-jump.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(-50%) translateY(0);
+}
+
+#chat-jump:hover {
+  filter: brightness(1.06);
+}
+
+#chat-jump:active {
+  transform: translateX(-50%) translateY(0) scale(0.97);
+}
