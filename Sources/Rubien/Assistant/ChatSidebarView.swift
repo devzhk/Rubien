@@ -59,7 +59,9 @@ struct ChatSidebarView: View {
     private var header: some View {
         HStack(spacing: 2) {
             HStack(spacing: 5) {
-                Image(systemName: "sparkles")
+                // Same chat glyph as the reader's "Assistant" toolbar button + the
+                // empty state, so the feature reads consistently everywhere.
+                Image(systemName: "bubble.left.and.text.bubble.right")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Color.primary.opacity(0.80))
                 Text("Assistant")

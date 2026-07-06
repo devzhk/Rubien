@@ -64,7 +64,7 @@ struct RubienSettingsView: View {
                 .tabItem {
                     Label(
                         String(localized: "Assistant", bundle: .module),
-                        systemImage: "sparkles"
+                        systemImage: "bubble.left.and.text.bubble.right"
                     )
                 }
             iCloudSyncPane
