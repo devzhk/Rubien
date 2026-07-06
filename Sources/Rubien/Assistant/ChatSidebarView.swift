@@ -659,12 +659,12 @@ struct ChatSidebarView: View {
 // MARK: - Floating card (Phase 3a)
 
 /// The assistant as a floating card over the reader's content — the details-panel
-/// idiom (`FloatingPanel`) wearing the annotation popovers' Liquid Glass surface
-/// (the transcript WebView paints no page background, so the glass shows through
-/// the whole card; bubbles and chips keep their own opaque fills). Resizable from
-/// its leading edge. Readers overlay it with `.overlay(alignment: .trailing)`;
-/// the trailing inset and the show/hide `.animation` stay at the call site (they
-/// differ per reader), the rest of the presentation lives here.
+/// idiom (`FloatingPanel`), not a docked split pane: solid surface, rounded,
+/// hairline-bordered, shadowed, resizable from its leading edge. Readers overlay
+/// it with `.overlay(alignment: .trailing)`; the trailing inset and the show/hide
+/// `.animation` stay at the call site (they differ per reader), the rest of the
+/// presentation lives here. (A Liquid Glass variant was tried and rolled back —
+/// the user prefers the solid surface for chat legibility.)
 struct FloatingChatPanel: View {
     let session: ChatSessionController
     let renderer: ChatTranscriptController
@@ -674,12 +674,29 @@ struct FloatingChatPanel: View {
     var body: some View {
         FloatingPanel(width: $width, range: 300...640) {
             ChatSidebarView(session: session, renderer: renderer, onClose: onClose)
+                .background(Color.chatSurface)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .floatingGlassSurface(cornerRadius: 14)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(Color(nsColor: .separatorColor).opacity(0.5), lineWidth: 0.5)
+                )
+                .shadow(color: .black.opacity(0.18), radius: 10, x: 0, y: 3)
         }
         .padding(.vertical, 8)
         .transition(.move(edge: .trailing).combined(with: .opacity))
     }
+}
+
+extension Color {
+    /// The surface behind the whole chat card. The transcript WebView paints NO
+    /// page background (chat.css: `background: transparent`), so this native
+    /// color is the single owner of the chat surface — header, transcript, and
+    /// composer can't seam. Appearance-dynamic; no colorScheme plumbing needed.
+    static let chatSurface = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            ? NSColor(red: 28 / 255, green: 28 / 255, blue: 30 / 255, alpha: 1)
+            : .white
+    })
 }
 
 // MARK: - History popover (2c-6)
