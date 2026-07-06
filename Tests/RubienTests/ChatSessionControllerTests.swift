@@ -123,15 +123,74 @@ final class ChatSessionControllerTests: XCTestCase {
         let g = controller.generation
         controller.handle(.approvalRequested(id: "rA", toolName: "Write", summary: "a"), gen: g)
         let approvalA = controller.pendingApproval!
-        // A newer approval replaces A.
+
+        controller.respond(to: approvalA, .allowOnce)
+        XCTAssertEqual(provider.approvals.map(\.0), ["rA"])
+
+        // Responding again to the SAME (already-answered, no-longer-queued) approval
+        // — e.g. a double-click racing the state change — must be dropped.
+        controller.respond(to: approvalA, .deny)
+        XCTAssertEqual(provider.approvals.count, 1, "an already-answered approval must not be re-forwarded")
+    }
+
+    func testParallelApprovalsQueueInOrderAndSurfaceSequentially() {
+        // The single-slot regression: two parallel prompting tools each raise a
+        // request; the second must QUEUE behind the first, not overwrite it (an
+        // overwritten request is never answered → claude blocks forever).
+        let provider = MockAgentProvider()
+        let controller = makeController(provider: provider, sink: SpyTranscriptSink())
+        let g = controller.generation
+        controller.handle(.approvalRequested(id: "rA", toolName: "Write", summary: "a"), gen: g)
         controller.handle(.approvalRequested(id: "rB", toolName: "Bash", summary: "b"), gen: g)
 
-        controller.respond(to: approvalA, .deny)  // stale — must be dropped
-        XCTAssertTrue(provider.approvals.isEmpty, "a stale approval response must not be forwarded")
-        XCTAssertEqual(controller.pendingApproval?.id, "rB", "the current approval is untouched")
+        XCTAssertEqual(controller.pendingApprovals.map(\.id), ["rA", "rB"], "both queued, arrival order")
+        XCTAssertEqual(controller.pendingApproval?.id, "rA", "the card shows the head")
 
         controller.respond(to: controller.pendingApproval!, .allowOnce)
-        XCTAssertEqual(provider.approvals.map(\.0), ["rB"])
+        XCTAssertEqual(controller.pendingApproval?.id, "rB", "answering the head surfaces the next")
+
+        controller.respond(to: controller.pendingApproval!, .deny)
+        XCTAssertTrue(controller.pendingApprovals.isEmpty)
+        XCTAssertEqual(provider.approvals.map(\.0), ["rA", "rB"], "every request got exactly one answer")
+    }
+
+    func testTurnEndClearsUnansweredQueuedApprovals() async {
+        // The stream ending (turn done/killed) invalidates the queued requests —
+        // their process is gone, so they're dropped, not answered.
+        let provider = MockAgentProvider()
+        let controller = makeController(provider: provider, sink: SpyTranscriptSink())
+        await runTurn(controller, provider: provider, send: "go", events: [
+            .approvalRequested(id: "w1", toolName: "Write", summary: "a"),
+            .approvalRequested(id: "w2", toolName: "Write", summary: "b"),
+        ])
+        XCTAssertTrue(controller.pendingApprovals.isEmpty, "finalize clears the queue")
+        XCTAssertTrue(provider.approvals.isEmpty, "dropped, not answered")
+    }
+
+    func testNewConversationClearsQueuedApprovals() {
+        let provider = MockAgentProvider()
+        let controller = makeController(provider: provider, sink: SpyTranscriptSink())
+        let g = controller.generation
+        controller.handle(.approvalRequested(id: "w1", toolName: "Write", summary: "a"), gen: g)
+        controller.handle(.approvalRequested(id: "b1", toolName: "Bash", summary: "b"), gen: g)
+        controller.newConversation()
+        XCTAssertTrue(controller.pendingApprovals.isEmpty)
+    }
+
+    func testAllowForConversationSweepsQueuedRequestsForTheSameTool() {
+        let provider = MockAgentProvider()
+        let controller = makeController(provider: provider, sink: SpyTranscriptSink())
+        let g = controller.generation
+        controller.handle(.approvalRequested(id: "w1", toolName: "Write", summary: "a.md"), gen: g)
+        controller.handle(.approvalRequested(id: "w2", toolName: "Write", summary: "b.md"), gen: g)
+        controller.handle(.approvalRequested(id: "b1", toolName: "Bash", summary: "ls"), gen: g)
+
+        // Granting Write for the conversation answers the queued Write too…
+        controller.respond(to: controller.pendingApproval!, .allowForConversation)
+        XCTAssertEqual(provider.approvals.map(\.0), ["w1", "w2"])
+        XCTAssertTrue(provider.approvals.allSatisfy { $0.1 == .allowForConversation })
+        // …but the different tool still prompts.
+        XCTAssertEqual(controller.pendingApproval?.id, "b1", "a different tool is NOT swept")
     }
 
     func testAutoApproveAcceptsWithoutShowingACard() {

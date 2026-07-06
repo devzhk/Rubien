@@ -46,8 +46,8 @@ struct AssistantConversationDefaults: Equatable {
 @MainActor
 final class ChatSessionController: ObservableObject {
 
-    /// A pending Claude approval (control protocol). When non-nil the view shows a
-    /// native approval card above the composer.
+    /// A pending Claude approval (control protocol). The view shows a native card
+    /// for the FIRST queued approval above the composer.
     struct PendingApproval: Equatable {
         let id: String
         let toolName: String
@@ -56,7 +56,15 @@ final class ChatSessionController: ObservableObject {
 
     // MARK: Published UI state
     @Published private(set) var isResponding = false
-    @Published private(set) var pendingApproval: PendingApproval?
+    /// Outstanding approval requests, arrival order. A single-slot design lost
+    /// requests: two parallel prompting tools each raise a `can_use_tool`, the second
+    /// card overwrote the first, and the first request was never answered — wedging
+    /// the turn (claude blocks until every request is answered). The card shows
+    /// `.first`; answering it surfaces the next. Claude answers are keyed by id, so
+    /// queued requests wait indefinitely without timing out.
+    @Published private(set) var pendingApprovals: [PendingApproval] = []
+    /// The approval the card currently shows (the queue head).
+    var pendingApproval: PendingApproval? { pendingApprovals.first }
     @Published var webAccess: Bool
     @Published private(set) var availability: AgentAvailability?
     @Published private(set) var statusText: String?
@@ -266,7 +274,7 @@ final class ChatSessionController: ObservableObject {
         isResponding = false
         statusText = nil
         busyElsewhere = false
-        pendingApproval = nil
+        pendingApprovals.removeAll()
         stagedSelection = nil
     }
 
@@ -306,12 +314,23 @@ final class ChatSessionController: ObservableObject {
         renderNotice("_Resumed a previous conversation:_ “\(summary.preview)”")
     }
 
-    /// Answer a pending Claude approval; the turn continues on the same stream. A stale
-    /// response (the approval was replaced or the turn ended) is dropped.
+    /// Answer a pending Claude approval; the turn continues on the same stream and the
+    /// next queued approval (if any) surfaces on the card. A stale response (the
+    /// request is no longer queued — the turn ended or it was already answered) is
+    /// dropped. "Allow for Conversation" also sweeps queued requests for the SAME
+    /// tool: the user just granted the tool for this conversation, so making them
+    /// re-approve an already-queued call of it would be noise. Deny stays per-request.
     func respond(to approval: PendingApproval, _ decision: ApprovalDecision) {
-        guard pendingApproval == approval else { return }
+        guard pendingApprovals.contains(approval) else { return }
         provider.respondToApproval(id: approval.id, decision)
-        pendingApproval = nil
+        pendingApprovals.removeAll { $0.id == approval.id }
+        if decision == .allowForConversation {
+            let sameTool = pendingApprovals.filter { $0.toolName == approval.toolName }
+            for queued in sameTool {
+                provider.respondToApproval(id: queued.id, .allowForConversation)
+            }
+            pendingApprovals.removeAll { $0.toolName == approval.toolName }
+        }
     }
 
     /// Re-probe provider availability (drives the empty-state / Recheck).
@@ -339,13 +358,10 @@ final class ChatSessionController: ObservableObject {
         case .approvalRequested(let id, let toolName, let summary):
             // Reads/search run silently even in "Ask" — the D6 soft boundary (§3)
             // only prompts for writes/shell. Auto (autoApprove) accepts everything.
-            // Without the read auto-approve, the read-only content channel
-            // (mcp__rubien__*) would prompt on every call, and parallel reads would
-            // strand one another in the single `pendingApproval` slot.
             if autoApprove || Self.isSilentReadTool(toolName) {
                 provider.respondToApproval(id: id, .allowForConversation)  // no card
             } else {
-                pendingApproval = PendingApproval(id: id, toolName: toolName, summary: summary)
+                pendingApprovals.append(PendingApproval(id: id, toolName: toolName, summary: summary))
             }
         case .toolDenied(let name, let reason):
             _ = popToolDetail(name)
@@ -389,7 +405,7 @@ final class ChatSessionController: ObservableObject {
         guard gen == generation else { return }
         isResponding = false
         statusText = nil
-        pendingApproval = nil
+        pendingApprovals.removeAll()
         toolDetails.removeAll()
         turnTask = nil
     }

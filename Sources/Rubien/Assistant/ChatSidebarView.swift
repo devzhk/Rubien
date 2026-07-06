@@ -260,6 +260,13 @@ struct ChatSidebarView: View {
                     .foregroundStyle(Color.primary.opacity(0.80))
                 (Text("Allow ") + Text(approval.toolName).bold() + Text("?"))
                     .font(.system(size: 12))
+                Spacer()
+                // Parallel tool calls queue (one card at a time); show the depth.
+                if session.pendingApprovals.count > 1 {
+                    Text("+\(session.pendingApprovals.count - 1) more")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
             }
             if !approval.summary.isEmpty {
                 Text(approval.summary)
