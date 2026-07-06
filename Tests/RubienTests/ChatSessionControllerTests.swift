@@ -315,6 +315,33 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertEqual(controller.modelOverride, "fable", "no provider ⇒ keep the live values")
     }
 
+    func testSilentReadToolClassification() {
+        XCTAssertTrue(ChatSessionController.isSilentReadTool("mcp__rubien__rubien_get"))
+        XCTAssertTrue(ChatSessionController.isSilentReadTool("mcp__rubien__rubien_pdf_info"))
+        XCTAssertTrue(ChatSessionController.isSilentReadTool("ToolSearch"))
+        XCTAssertTrue(ChatSessionController.isSilentReadTool("Read"))
+        XCTAssertFalse(ChatSessionController.isSilentReadTool("Write"))
+        XCTAssertFalse(ChatSessionController.isSilentReadTool("Edit"))
+        XCTAssertFalse(ChatSessionController.isSilentReadTool("Bash"))
+        XCTAssertFalse(ChatSessionController.isSilentReadTool("mcp__other__thing"),
+                       "only OUR read-only content channel is auto-silent")
+    }
+
+    func testAskModeAutoApprovesReadsButStillPromptsForWrites() {
+        let provider = MockAgentProvider()
+        let controller = makeController(provider: provider, sink: SpyTranscriptSink())
+        let g = controller.generation  // Ask mode (autoApprove defaults false)
+
+        // A read-only content-channel tool auto-runs — no card, even in Ask.
+        controller.handle(.approvalRequested(id: "r1", toolName: "mcp__rubien__rubien_get", summary: ""), gen: g)
+        XCTAssertNil(controller.pendingApproval, "reads must not prompt in Ask mode")
+        XCTAssertEqual(provider.approvals.map(\.0), ["r1"], "the read was auto-answered")
+
+        // A write still prompts.
+        controller.handle(.approvalRequested(id: "w1", toolName: "Write", summary: "note.md"), gen: g)
+        XCTAssertEqual(controller.pendingApproval?.id, "w1", "writes still show the card in Ask mode")
+    }
+
     func testStagedSelectionIsQuotedIntoTheMessageThenCleared() async {
         let provider = MockAgentProvider()
         let sink = SpyTranscriptSink()

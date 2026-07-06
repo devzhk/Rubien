@@ -337,7 +337,12 @@ final class ChatSessionController: ObservableObject {
         case .toolUseCompleted(let name):
             renderToolChip(ToolChipPayload(name: name, detail: popToolDetail(name), status: .completed))
         case .approvalRequested(let id, let toolName, let summary):
-            if autoApprove {
+            // Reads/search run silently even in "Ask" — the D6 soft boundary (§3)
+            // only prompts for writes/shell. Auto (autoApprove) accepts everything.
+            // Without the read auto-approve, the read-only content channel
+            // (mcp__rubien__*) would prompt on every call, and parallel reads would
+            // strand one another in the single `pendingApproval` slot.
+            if autoApprove || Self.isSilentReadTool(toolName) {
                 provider.respondToApproval(id: id, .allowForConversation)  // no card
             } else {
                 pendingApproval = PendingApproval(id: id, toolName: toolName, summary: summary)
@@ -398,6 +403,20 @@ final class ChatSessionController: ObservableObject {
         isResponding = false
         statusText = nil
         turnTask = nil
+    }
+
+    /// Claude's read/search builtins that are safe to run without a prompt (the D6
+    /// soft boundary, §3). Every `mcp__rubien__*` tool is also silent — the content
+    /// channel is a `--read-only` server — handled by the prefix check below.
+    private static let silentReadBuiltins: Set<String> = [
+        "ToolSearch", "Read", "Glob", "Grep", "LS", "NotebookRead", "WebFetch", "WebSearch",
+    ]
+
+    /// Whether a tool may run without an approval card even in "Ask" mode: the Rubien
+    /// read-only content channel (`mcp__rubien__*`) and Claude's read/search builtins.
+    /// Writes / shell (`Write`, `Edit`, `Bash`, …) are absent, so they still prompt.
+    static func isSilentReadTool(_ toolName: String) -> Bool {
+        toolName.hasPrefix("mcp__rubien__") || silentReadBuiltins.contains(toolName)
     }
 
     /// Pop the oldest remembered detail for a tool name (FIFO — events carry no id).
