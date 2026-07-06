@@ -63,12 +63,6 @@ struct RubienSettingsView: View {
                         systemImage: "icloud"
                     )
                 }
-            #if canImport(Sparkle)
-            UpdateSettingsView()
-                .tabItem {
-                    Label("Updates", systemImage: "arrow.down.circle")
-                }
-            #endif
         }
         .frame(width: 540, height: 460)
     }
@@ -101,6 +95,11 @@ struct RubienSettingsView: View {
                     AccentColorWell()
                 }
             }
+
+            #if canImport(Sparkle)
+            // Software updates — folded in from a former standalone Updates tab.
+            UpdateSettingsSection()
+            #endif
         }
         .formStyle(.grouped)
     }
@@ -262,9 +261,11 @@ struct RubienSettingsView: View {
                         RubienPreferences.assistantWorkspacePath = nil
                         workspacePathOverride = ""
                     }
+                    .buttonStyle(.bordered)
                     .controlSize(.small)
                 }
                 Button(String(localized: "Choose…", bundle: .module)) { pickWorkspace() }
+                    .buttonStyle(.bordered)
                     .controlSize(.small)
             }
         } header: {
@@ -323,9 +324,11 @@ struct RubienSettingsView: View {
                         binaryPathOverride = ""
                         recheckClaude()
                     }
+                    .buttonStyle(.bordered)
                     .controlSize(.small)
                 }
                 Button(String(localized: "Choose…", bundle: .module)) { pickBinary() }
+                    .buttonStyle(.bordered)
                     .controlSize(.small)
             }
         } header: {
@@ -366,6 +369,7 @@ struct RubienSettingsView: View {
             }
             Spacer()
             Button(String(localized: "Recheck", bundle: .module)) { recheckClaude() }
+                .buttonStyle(.bordered)
                 .controlSize(.small)
                 .disabled(isProbingClaude)
         }
