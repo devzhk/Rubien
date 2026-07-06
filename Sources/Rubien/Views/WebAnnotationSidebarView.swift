@@ -38,9 +38,7 @@ struct WebAnnotationSidebarView: View {
     private var sidebarHeader: some View {
         VStack(spacing: 8) {
             HStack {
-                Image(systemName: "bookmark.fill")
-                    .foregroundStyle(Color.accentColor)
-                Text("Annotations", bundle: .module)
+                Text("Notes", bundle: .module)
                     .font(.headline)
                 Spacer()
                 Text("\(filteredAnnotations.count)")
@@ -69,10 +67,10 @@ struct WebAnnotationSidebarView: View {
             Image(systemName: "highlighter")
                 .font(.system(size: 26))
                 .foregroundStyle(.tertiary)
-            Text("No annotations yet", bundle: .module)
+            Text("No notes yet", bundle: .module)
                 .font(.callout)
                 .foregroundStyle(.secondary)
-            Text("Select text in the article, then add an annotation from the floating toolbar.", bundle: .module)
+            Text("Select text in the article, then add a highlight, underline, or note from the floating toolbar.", bundle: .module)
                 .font(.caption)
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
@@ -136,7 +134,7 @@ struct WebAnnotationSidebarView: View {
 
     private var compactEmptyAnnotations: some View {
         VStack(spacing: 6) {
-            Text("No annotations yet", bundle: .module)
+            Text("No notes yet", bundle: .module)
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Text("Select text to add a highlight, underline, or note.", bundle: .module)
@@ -310,22 +308,21 @@ private struct WebAnnotationCard: View {
             HStack {
                 Spacer()
 
-                if isHovered {
+                if isHovered || isSelected {
                     HStack(spacing: 8) {
-                        Button { onEdit() } label: {
-                            Image(systemName: "pencil")
-                                .font(.caption2)
-                        }
-                        .buttonStyle(.plain)
-                        .help(String(localized: "Edit note", bundle: .module))
+                        WebAnnotationActionButton(
+                            icon: "pencil",
+                            tint: .secondary,
+                            help: String(localized: "Edit note", bundle: .module),
+                            action: onEdit
+                        )
 
-                        Button { onDelete() } label: {
-                            Image(systemName: "trash")
-                                .font(.caption2)
-                                .foregroundStyle(.red)
-                        }
-                        .buttonStyle(.plain)
-                        .help(String(localized: "Delete annotation", bundle: .module))
+                        WebAnnotationActionButton(
+                            icon: "trash",
+                            tint: .red,
+                            help: String(localized: "Delete note", bundle: .module),
+                            action: onDelete
+                        )
                     }
                     .transition(.opacity)
                 }
@@ -351,6 +348,37 @@ private struct WebAnnotationCard: View {
         .onHover { isHovered = $0 }
         .animation(.easeInOut(duration: 0.15), value: isHovered)
         .animation(.easeInOut(duration: 0.15), value: isSelected)
+    }
+}
+
+private struct WebAnnotationActionButton: View {
+    let icon: String
+    let tint: Color
+    let help: String
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 26, height: 26)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(Color.primary.opacity(isHovered ? 0.10 : 0.04))
+                )
+        }
+        .buttonStyle(.plain)
+        .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.12)) {
+                isHovered = hovering
+            }
+        }
+        .animation(.easeOut(duration: 0.12), value: isHovered)
+        .help(help)
     }
 }
 #endif
