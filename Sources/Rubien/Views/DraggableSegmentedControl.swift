@@ -24,13 +24,18 @@ struct DraggableSegmentedControl<T: Hashable>: View {
                     .offset(x: CGFloat(activeIndex) * segmentWidth + 2)
                     .animation(.easeInOut(duration: 0.2), value: activeIndex)
 
-                // Labels
+                // Labels. Narrow hosts (the reader sidebars go down to 200 pt
+                // with four segments) shrink the text instead of wrapping or
+                // overlapping neighbors.
                 HStack(spacing: 0) {
                     ForEach(items.indices, id: \.self) { index in
                         Text(items[index].label)
                             .font(.caption)
                             .fontWeight(activeIndex == index ? .medium : .regular)
                             .foregroundStyle(activeIndex == index ? Color.accentColor : .secondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                            .padding(.horizontal, 2)
                             .frame(maxWidth: .infinity)
                             .contentShape(Rectangle())
                             .animation(.easeInOut(duration: 0.15), value: activeIndex)

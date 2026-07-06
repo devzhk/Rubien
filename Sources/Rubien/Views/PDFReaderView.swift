@@ -405,9 +405,6 @@ struct PDFReaderView: View {
     @StateObject private var viewModel: PDFReaderViewModel
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
-    @State private var showAnnotationSidebar = true
-    @State private var sidebarWidth: CGFloat = 300
-    @GestureState private var dragOffset: CGFloat = 0
     @State private var showOutlineSidebar = true
     @State private var outlineSidebarWidth: CGFloat = 240
     @GestureState private var outlineDragOffset: CGFloat = 0
@@ -429,12 +426,6 @@ struct PDFReaderView: View {
 
     @StateObject private var chatRenderer: ChatTranscriptController
     @StateObject private var chatSession: ChatSessionController
-
-    /// The annotation sidebar's live width (the drag-clamp expression its
-    /// `.frame` uses), for insetting the floating assistant card beside it.
-    private var annotationSidebarWidth: CGFloat {
-        min(max(sidebarWidth - dragOffset, 260), 500)
-    }
 
     init(reference: Reference, pdfURL: URL, onClose: (() -> Void)? = nil) {
         self.onClose = onClose
@@ -527,37 +518,15 @@ struct PDFReaderView: View {
                 .padding(.horizontal, 8)
                 .padding(.top, 8)
                 .padding(.bottom, 8)
+                // Reflow, don't occlude: shrink the white plane by the chat
+                // card's width so the page refits beside it. +4 keeps a 6 pt gap
+                // to the card given the 8 pt gutter above and the card's insets.
+                // (Tracks committed widths — during a card-resize drag the plane
+                // reflows on release, not per frame.)
+                .padding(.trailing, showChatSidebar ? chatPanelWidth + 4 : 0)
                 .background(pdfContainerBackground)
                 .ignoresSafeArea(.container, edges: .top)
 
-                if showAnnotationSidebar {
-                    Rectangle()
-                        .fill(pdfContainerBackground)
-                        .frame(width: 4)
-                        .frame(maxHeight: .infinity)
-                        .contentShape(Rectangle())
-                        .onHover { hovering in
-                            if hovering {
-                                NSCursor.resizeLeftRight.push()
-                            } else {
-                                NSCursor.pop()
-                            }
-                        }
-                        .gesture(
-                            DragGesture(minimumDistance: 1)
-                                .updating($dragOffset) { value, state, _ in
-                                    state = value.translation.width
-                                }
-                                .onEnded { value in
-                                    let newWidth = sidebarWidth - value.translation.width
-                                    sidebarWidth = min(max(newWidth, 260), 500)
-                                }
-                        )
-
-                    AnnotationSidebarView(viewModel: viewModel)
-                        .frame(width: annotationSidebarWidth)
-                        .transition(.move(edge: .trailing))
-                }
             }
         }
         .frame(minWidth: 800, minHeight: 600)
@@ -565,26 +534,22 @@ struct PDFReaderView: View {
             pdfContainerBackground
                 .ignoresSafeArea(.container, edges: .top)
         }
-        // The assistant floats over the PDF as a resizable Liquid Glass card
-        // (Phase 3a, details-panel idiom) — inset past the annotation sidebar's
-        // live width (fixed pane + 4 pt divider) so it sits beside it, never
-        // over it.
+        // The assistant floats over the PDF as a resizable card (Phase 3a,
+        // details-panel idiom). It owns the trailing edge — all document aids
+        // (outline/search/notes/info) live in the LEFT sidebar's tabs.
         .overlay(alignment: .trailing) {
             if showChatSidebar {
                 FloatingChatPanel(session: chatSession, renderer: chatRenderer, width: $chatPanelWidth) {
                     showChatSidebar = false
                 }
-                .padding(.trailing, showAnnotationSidebar ? annotationSidebarWidth + 4 + 6 : 6)
+                .padding(.trailing, 6)
             }
         }
         .animation(.easeInOut(duration: 0.22), value: showChatSidebar)
+        .animation(.easeInOut(duration: 0.22), value: chatPanelWidth)
         // Window closing (the root view disappears): kill any in-flight agent
         // turn's process group (§4.4 step 9).
         .onDisappear { chatSession.teardown() }
-        .animation(
-            .spring(response: 0.3, dampingFraction: 0.82),
-            value: showAnnotationSidebar
-        )
         .animation(
             .spring(response: 0.3, dampingFraction: 0.82),
             value: showOutlineSidebar
@@ -623,12 +588,22 @@ struct PDFReaderView: View {
             }
 
             ToolbarItemGroup(placement: .primaryAction) {
+                // Annotations live in the left sidebar's Notes tab (the right
+                // edge belongs to the assistant) — this jumps there, or closes
+                // the sidebar when already showing them.
                 Button {
-                    withAnimation { showAnnotationSidebar.toggle() }
+                    withAnimation {
+                        if showOutlineSidebar && outlineSidebarTab == .annotations {
+                            showOutlineSidebar = false
+                        } else {
+                            showOutlineSidebar = true
+                            outlineSidebarTab = .annotations
+                        }
+                    }
                 } label: {
-                    Label("\(viewModel.annotations.count)", systemImage: "sidebar.right")
+                    Label("\(viewModel.annotations.count)", systemImage: "highlighter")
                 }
-                .help(String(localized: "Toggle annotations sidebar", bundle: .module))
+                .help(String(localized: "Show annotations", bundle: .module))
 
                 Button {
                     showChatSidebar.toggle()

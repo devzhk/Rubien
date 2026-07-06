@@ -1595,6 +1595,22 @@ struct WebReaderView: View {
 
     var body: some View {
         HSplitView {
+            // Annotations dock on the LEFT (the trailing edge belongs to the
+            // floating assistant card — two right-side panels felt unbalanced).
+            if showAnnotationSidebar {
+                WebAnnotationSidebarView(viewModel: viewModel)
+                    .frame(minWidth: 260, idealWidth: 300, maxWidth: 400)
+                    .overlay(alignment: .trailing) {
+                        LinearGradient(
+                            colors: [.clear, Color.black.opacity(colorScheme == .dark ? 0.18 : 0.06)],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                        .frame(width: 6)
+                        .allowsHitTesting(false)
+                    }
+            }
+
             ZStack(alignment: .top) {
                 VStack(spacing: 0) {
                     WebReaderContentView(viewModel: viewModel)
@@ -1614,10 +1630,16 @@ struct WebReaderView: View {
                         .padding(.top, 14)
                 }
             }
+            // Reflow, don't occlude: inset the document by the card's width so
+            // the text rewraps beside it — docked semantics, floating look.
+            // 12 = the card's 6 pt trailing gutter + a 6 pt gap. (The inset
+            // tracks committed widths; during a card-resize drag the content
+            // reflows on release, not per frame.)
+            .padding(.trailing, showChatSidebar ? chatPanelWidth + 12 : 0)
             .frame(minWidth: 540)
-            // The assistant floats over the document pane as a resizable Liquid
-            // Glass card (Phase 3a, details-panel idiom) — anchored to this pane,
-            // not the window, so it never covers the annotation sidebar.
+            // The assistant floats over the document pane as a resizable card
+            // (Phase 3a, details-panel idiom) — anchored to this pane, not the
+            // window, so it never covers the annotation sidebar.
             .overlay(alignment: .trailing) {
                 if showChatSidebar {
                     FloatingChatPanel(session: chatSession, renderer: chatRenderer, width: $chatPanelWidth) {
@@ -1627,20 +1649,7 @@ struct WebReaderView: View {
                 }
             }
             .animation(.easeInOut(duration: 0.22), value: showChatSidebar)
-
-            if showAnnotationSidebar {
-                WebAnnotationSidebarView(viewModel: viewModel)
-                    .frame(minWidth: 260, idealWidth: 300, maxWidth: 400)
-                    .overlay(alignment: .leading) {
-                        LinearGradient(
-                            colors: [Color.black.opacity(colorScheme == .dark ? 0.18 : 0.06), .clear],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                        .frame(width: 6)
-                        .allowsHitTesting(false)
-                    }
-            }
+            .animation(.easeInOut(duration: 0.22), value: chatPanelWidth)
         }
         .frame(minWidth: 900, minHeight: 620)
         // Window closing (the root view disappears): kill any in-flight agent
@@ -1695,7 +1704,7 @@ struct WebReaderView: View {
                 Button {
                     withAnimation { showAnnotationSidebar.toggle() }
                 } label: {
-                    Label(String(localized: "Sidebar", bundle: .module), systemImage: "sidebar.right")
+                    Label(String(localized: "Sidebar", bundle: .module), systemImage: "sidebar.left")
                 }
 
                 Button {
