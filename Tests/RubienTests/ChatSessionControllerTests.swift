@@ -184,6 +184,30 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertEqual(provider.lastRequest?.webAccess, false)
     }
 
+    func testModelAndEffortSelectionPropagateToRequest() async {
+        let provider = MockAgentProvider()
+        let controller = makeController(provider: provider, sink: SpyTranscriptSink())
+
+        // The sidebar always shows/uses a concrete model+effort (defaults).
+        await runTurn(controller, provider: provider, send: "q0", events: [.turnCompleted(usage: nil)])
+        XCTAssertEqual(provider.lastRequest?.modelOverride, "opus")
+        XCTAssertEqual(provider.lastRequest?.effortOverride, "high")
+
+        // A picker change applies to the next turn.
+        controller.modelOverride = "sonnet"
+        controller.effortOverride = "medium"
+        await runTurn(controller, provider: provider, send: "q", events: [.turnCompleted(usage: nil)])
+        XCTAssertEqual(provider.lastRequest?.modelOverride, "sonnet")
+        XCTAssertEqual(provider.lastRequest?.effortOverride, "medium")
+
+        // nil (programmatic — no UI path) omits both flags.
+        controller.modelOverride = nil
+        controller.effortOverride = nil
+        await runTurn(controller, provider: provider, send: "q2", events: [.turnCompleted(usage: nil)])
+        XCTAssertNil(provider.lastRequest?.modelOverride)
+        XCTAssertNil(provider.lastRequest?.effortOverride)
+    }
+
     func testStagedSelectionIsQuotedIntoTheMessageThenCleared() async {
         let provider = MockAgentProvider()
         let sink = SpyTranscriptSink()
@@ -306,6 +330,27 @@ final class ChatSessionControllerTests: XCTestCase {
         await runTurn(controller, provider: provider, send: "q2", events: [.turnCompleted(usage: nil)])
         XCTAssertNotNil(provider.lastRequest?.seed)
         XCTAssertNil(provider.lastRequest?.resumeSessionID)
+    }
+
+    func testHasMessagesDrivesTheQuickStartPageLifecycle() async {
+        let gate = AssistantTurnGate()
+        let provider = MockAgentProvider()
+        let controller = makeController(provider: provider, sink: SpyTranscriptSink(), gate: gate)
+        XCTAssertFalse(controller.hasMessages, "fresh conversation shows the quick-start page")
+
+        await runTurn(controller, provider: provider, send: "q1", events: [.sessionStarted(sessionID: "s1"), .turnCompleted(usage: nil)])
+        XCTAssertTrue(controller.hasMessages, "first sent message hides the quick-start page")
+
+        controller.newConversation()
+        XCTAssertFalse(controller.hasMessages, "a new conversation shows it again")
+
+        // A gate-refused turn renders nothing — the page must stay up.
+        await runTurn(controller, provider: provider, send: "q2", events: [.sessionStarted(sessionID: "s2"), .turnCompleted(usage: nil)])
+        _ = await gate.tryAcquire(provider: .claude, sessionID: "s2")
+        controller.send("q3")
+        await controller.turnTask?.value
+        XCTAssertTrue(controller.busyElsewhere)
+        XCTAssertTrue(controller.hasMessages, "q2 already rendered — but the refused q3 must not have changed state")
     }
 
     func testRecheckAvailabilityReflectsProvider() async {

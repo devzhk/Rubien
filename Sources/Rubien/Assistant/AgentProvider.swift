@@ -45,6 +45,10 @@ struct AgentTurnRequest: Sendable, Equatable {
     let codexSandbox: CodexSandbox
     /// Optional model override (empty/`nil` = CLI default). Passed as `--model`.
     let modelOverride: String?
+    /// Optional reasoning-effort override (empty/`nil` = CLI default). Claude:
+    /// `--effort <low|medium|high|xhigh|max>` (verified 2.1.201). Codex (Phase 3):
+    /// maps to `model_reasoning_effort`.
+    let effortOverride: String?
 
     init(
         workspaceURL: URL,
@@ -53,7 +57,8 @@ struct AgentTurnRequest: Sendable, Equatable {
         seed: String? = nil,
         webAccess: Bool = true,
         codexSandbox: CodexSandbox = .readOnly,
-        modelOverride: String? = nil
+        modelOverride: String? = nil,
+        effortOverride: String? = nil
     ) {
         self.workspaceURL = workspaceURL
         self.resumeSessionID = resumeSessionID
@@ -62,6 +67,7 @@ struct AgentTurnRequest: Sendable, Equatable {
         self.webAccess = webAccess
         self.codexSandbox = codexSandbox
         self.modelOverride = modelOverride
+        self.effortOverride = effortOverride
     }
 }
 

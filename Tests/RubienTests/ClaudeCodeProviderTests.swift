@@ -353,7 +353,8 @@ final class ClaudeCodeProviderTests: XCTestCase {
         let request = AgentTurnRequest(
             workspaceURL: URL(fileURLWithPath: "/ws"), resumeSessionID: "sess-42",
             prompt: "hi", seed: "You are discussing reference ID 7.",
-            webAccess: false, codexSandbox: .readOnly, modelOverride: "claude-x")
+            webAccess: false, codexSandbox: .readOnly, modelOverride: "claude-x",
+            effortOverride: "high")
         let args = ClaudeCLIInvocation.arguments(for: request)
 
         XCTAssertTrue(args.containsPair("--input-format", "stream-json"))
@@ -364,8 +365,10 @@ final class ClaudeCodeProviderTests: XCTestCase {
         XCTAssertTrue(args.containsPair("--resume", "sess-42"))
         XCTAssertTrue(args.containsPair("--append-system-prompt", "You are discussing reference ID 7."))
         XCTAssertTrue(args.containsPair("--model", "claude-x"))
+        XCTAssertTrue(args.containsPair("--effort", "high"))
         XCTAssertTrue(args.containsPair("--disallowedTools", "WebFetch WebSearch"))
-        // MCP is Phase 2b — must NOT be wired yet.
+        // No content channel injected in this request (see MCPContentChannelTests
+        // for the wired case).
         XCTAssertFalse(args.contains("--mcp-config"))
     }
 
@@ -376,6 +379,7 @@ final class ClaudeCodeProviderTests: XCTestCase {
         XCTAssertFalse(args.contains("--resume"))
         XCTAssertFalse(args.contains("--append-system-prompt"))
         XCTAssertFalse(args.contains("--model"))
+        XCTAssertFalse(args.contains("--effort"))
         XCTAssertFalse(args.contains("--disallowedTools"))  // web access on
     }
 

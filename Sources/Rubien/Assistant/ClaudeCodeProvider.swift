@@ -528,6 +528,14 @@ enum ClaudeCLIInvocation {
         if let model = request.modelOverride, !model.isEmpty {
             args += ["--model", model]
         }
+        // `--effort` needs the same modern CLI surface the rest of this argv already
+        // requires (--permission-prompt-tool stdio / --setting-sources, verified on
+        // 2.1.201) — an older CLI never ran these turns at all, so no capability
+        // probe. Like --model, the value passes through raw (Settings may send
+        // future levels); an invalid one fails the turn visibly via the §4.5 notice.
+        if let effort = request.effortOverride, !effort.isEmpty {
+            args += ["--effort", effort]
+        }
         if !request.webAccess {
             // Bash `curl` still prompts (control protocol), so this is not a silent
             // bypass (D6).

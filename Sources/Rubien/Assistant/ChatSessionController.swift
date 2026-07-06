@@ -50,9 +50,20 @@ final class ChatSessionController: ObservableObject {
     /// The requested resume session is busy in another window (§4.1) — the composer
     /// surfaces this instead of forking the session file.
     @Published private(set) var busyElsewhere = false
+    /// False until the first message renders — the sidebar shows the quick-start
+    /// page while false. A gate-refused turn renders nothing, so it stays false.
+    @Published private(set) var hasMessages = false
     /// A quoted selection staged from "Ask" (2c-4), shown as a chip and prepended as
     /// a `> …` block on the next send.
     @Published var stagedSelection: String?
+    /// The conversation's model, applied per turn (`--model`). Claude aliases:
+    /// `fable` / `opus` / `sonnet` / `haiku`. The sidebar always shows a concrete
+    /// model (no "CLI default" state); `nil` remains valid programmatically and
+    /// simply omits the flag.
+    @Published var modelOverride: String?
+    /// The conversation's reasoning effort, applied per turn (Claude `--effort`
+    /// low/medium/high/xhigh/max). `nil` omits the flag.
+    @Published var effortOverride: String?
 
     // MARK: Collaborators (injected)
     private let provider: any AgentProvider
@@ -60,7 +71,6 @@ final class ChatSessionController: ObservableObject {
     private let gate: AssistantTurnGate
     private let reference: ChatReference
     private let workspaceURL: URL
-    private let modelOverride: String?
 
     // MARK: In-memory conversation state (never persisted — D5)
     /// The live provider session id. Captured from EVERY `.sessionStarted` because it
@@ -90,7 +100,8 @@ final class ChatSessionController: ObservableObject {
         workspaceURL: URL,
         gate: AssistantTurnGate = .shared,
         webAccess: Bool = true,
-        modelOverride: String? = nil
+        modelOverride: String? = "opus",
+        effortOverride: String? = "high"
     ) {
         self.provider = provider
         self.transcript = transcript
@@ -99,6 +110,7 @@ final class ChatSessionController: ObservableObject {
         self.gate = gate
         self.webAccess = webAccess
         self.modelOverride = modelOverride
+        self.effortOverride = effortOverride
     }
 
     // MARK: Turn lifecycle
@@ -125,7 +137,8 @@ final class ChatSessionController: ObservableObject {
             seed: seedSent ? nil : AssistantContext.seed(for: reference),
             webAccess: webAccess,
             codexSandbox: .readOnly,
-            modelOverride: modelOverride)
+            modelOverride: modelOverride,
+            effortOverride: effortOverride)
         let kind = provider.kind
 
         turnTask = Task { [weak self] in
@@ -137,6 +150,7 @@ final class ChatSessionController: ObservableObject {
                 self.refuseTurn(gen: gen)
                 return
             }
+            self.hasMessages = true
             self.transcript.addUserMessage(composed)
             self.stagedSelection = nil
             self.transcript.beginAssistantMessage()
@@ -173,6 +187,7 @@ final class ChatSessionController: ObservableObject {
         transcript.reset()
         liveSessionID = nil
         seedSent = false
+        hasMessages = false
         isResponding = false
         statusText = nil
         busyElsewhere = false

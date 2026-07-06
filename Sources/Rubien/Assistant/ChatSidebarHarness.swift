@@ -21,8 +21,11 @@ struct ChatSidebarHarnessView: View {
     }
 
     var body: some View {
-        ChatSidebarView(session: session, renderer: renderer)
-            .frame(minWidth: 340, minHeight: 520)
+        ChatSidebarView(session: session, renderer: renderer, onClose: {
+            // In the reader this collapses the pane; in the harness, close the window.
+            NSApp.keyWindow?.performClose(nil)
+        })
+        .frame(minWidth: 340, minHeight: 520)
     }
 }
 
