@@ -106,6 +106,24 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertEqual(dirs.count, Set(dirs).count, "no duplicate PATH entries")
     }
 
+    // SAFETY REGRESSION (end-to-end): the whole posture reaches the real thread/start —
+    // read-only sandbox, on-request approvals, and crucially `approvalsReviewer: "user"`
+    // so codex's own `~/.codex` guardian can't silently auto-approve a mutation.
+    func testThreadStartSendsFullSafetyPostureToTheServer() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["assistantText": "ok"], into: workspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        _ = try await collectAllEvents(provider.send(turn: turn(workspace: workspace)))
+
+        let params = try XCTUnwrap(try readObserved(in: workspace)["lastThreadStartParams"] as? [String: Any])
+        XCTAssertEqual(params["approvalsReviewer"] as? String, "user",
+                       "mutations must route to Rubien's card, not codex's guardian")
+        XCTAssertEqual(params["approvalPolicy"] as? String, "on-request")
+        XCTAssertEqual(params["sandbox"] as? String, "read-only")
+    }
+
     func testWebToggleOffDisablesWebSearchInArgv() async throws {
         let workspace = try makeWorkspace()
         try writeConfig(["assistantText": "ok"], into: workspace)

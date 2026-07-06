@@ -272,6 +272,24 @@ final class CodexAppServerProtocolTests: XCTestCase {
         XCTAssertNil(params["model"], "empty/nil model override is omitted")
     }
 
+    // SAFETY REGRESSION: without `approvalsReviewer: "user"`, codex falls back to the
+    // user's `~/.codex` `approvals_reviewer` — an `auto_review` guardian silently
+    // auto-approves mutations, so a write runs WITHOUT Rubien's approval card. Both
+    // thread/start AND thread/resume must force "user" (approvals route to the client).
+    func testThreadStartAndResumeForceUserApprovalsReviewer() {
+        let start = try! XCTUnwrap(json(CodexAppServerProtocol.threadStart(
+            requestID: 1, cwd: "/w", sandbox: "read-only", approvalPolicy: "on-request",
+            developerInstructions: nil, model: nil))["params"] as? [String: Any])
+        XCTAssertEqual(start["approvalsReviewer"] as? String, "user",
+                       "thread/start must not defer approvals to codex's own guardian")
+
+        let resume = try! XCTUnwrap(json(CodexAppServerProtocol.threadResume(
+            requestID: 2, threadId: "t1"))["params"] as? [String: Any])
+        XCTAssertEqual(resume["approvalsReviewer"] as? String, "user",
+                       "a resumed conversation keeps the client-approval invariant")
+        XCTAssertEqual(resume["threadId"] as? String, "t1")
+    }
+
     func testTurnStartCarriesTextInputAndEffort() {
         let obj = json(CodexAppServerProtocol.turnStart(requestID: 3, threadId: "t", prompt: "hi", effort: "medium"))
         let params = try! XCTUnwrap(obj["params"] as? [String: Any])

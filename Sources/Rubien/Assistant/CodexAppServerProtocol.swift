@@ -374,14 +374,21 @@ enum CodexAppServerProtocol {
         notification(method: "initialized", params: [:])
     }
 
+    /// `approvalsReviewer` MUST be sent explicitly (`"user"`) — unset, codex falls
+    /// back to the user's `~/.codex` `approvals_reviewer`, and a value of `auto_review`
+    /// makes codex's OWN LLM guardian answer approval requests instead of the client,
+    /// so a mutation runs WITHOUT Rubien's approval card (verified against codex 0.142).
+    /// `"user"` routes every on-request approval to Rubien; the controller then cards it
+    /// (Ask) or auto-accepts (Auto). Valid enum: `user | auto_review | guardian_subagent`.
     static func threadStart(
         requestID: Int, cwd: String, sandbox: String, approvalPolicy: String,
-        developerInstructions: String?, model: String?
+        approvalsReviewer: String = "user", developerInstructions: String?, model: String?
     ) -> String {
         var params: [String: Any] = [
             "cwd": cwd,
             "sandbox": sandbox,
             "approvalPolicy": approvalPolicy,
+            "approvalsReviewer": approvalsReviewer,
             "ephemeral": false,
         ]
         if let developerInstructions, !developerInstructions.isEmpty {
@@ -400,8 +407,12 @@ enum CodexAppServerProtocol {
         return request(id: requestID, method: "turn/start", params: params)
     }
 
-    static func threadResume(requestID: Int, threadId: String) -> String {
-        request(id: requestID, method: "thread/resume", params: ["threadId": threadId])
+    /// Re-assert `approvalsReviewer: "user"` on resume too, so a History-resumed
+    /// conversation can't fall back to the `~/.codex` guardian for its mutations (same
+    /// safety invariant as `threadStart`; the param is accepted by `thread/resume`).
+    static func threadResume(requestID: Int, threadId: String, approvalsReviewer: String = "user") -> String {
+        request(id: requestID, method: "thread/resume",
+                params: ["threadId": threadId, "approvalsReviewer": approvalsReviewer])
     }
 
     static func threadRead(requestID: Int, threadId: String) -> String {
