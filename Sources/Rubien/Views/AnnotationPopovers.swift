@@ -33,6 +33,10 @@ struct AnnotationSelectionPopover: View {
     let onCopy: () -> Void
     let onSaveNote: (String) -> Void
     let onDismiss: () -> Void
+    /// Optional "Ask assistant" action (Selection→Ask, §5.4): stages the selected
+    /// text into the chat sidebar and opens it. `nil` (the default) hides the
+    /// button — the PDF reader call site wires it in Phase 3.
+    var onAsk: (() -> Void)? = nil
 
     @State private var editorContentHeight: CGFloat = 36
 
@@ -49,6 +53,12 @@ struct AnnotationSelectionPopover: View {
 
                 toolbarButton(icon: "doc.on.doc", label: String(localized: "Copy", bundle: .module)) {
                     onCopy()
+                }
+
+                if let onAsk {
+                    toolbarButton(icon: "sparkles", label: String(localized: "Ask assistant", bundle: .module)) {
+                        onAsk()
+                    }
                 }
 
                 separator

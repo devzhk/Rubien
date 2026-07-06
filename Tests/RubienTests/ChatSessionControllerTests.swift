@@ -227,6 +227,22 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertNil(provider.lastRequest?.effortOverride)
     }
 
+    func testStageSelectionStagesTextAndBumpsFocusRequestEachTime() async {
+        let controller = makeController(provider: MockAgentProvider(), sink: SpyTranscriptSink())
+        XCTAssertNil(controller.stagedSelection)
+        let start = controller.composerFocusRequest
+
+        controller.stageSelection("first passage")
+        XCTAssertEqual(controller.stagedSelection, "first passage")
+        XCTAssertEqual(controller.composerFocusRequest, start + 1)
+
+        // Re-Asking the identical passage still bumps the token (equality-independent
+        // focus) even though `stagedSelection` is unchanged.
+        controller.stageSelection("first passage")
+        XCTAssertEqual(controller.stagedSelection, "first passage")
+        XCTAssertEqual(controller.composerFocusRequest, start + 2)
+    }
+
     func testStagedSelectionIsQuotedIntoTheMessageThenCleared() async {
         let provider = MockAgentProvider()
         let sink = SpyTranscriptSink()

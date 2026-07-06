@@ -1581,6 +1581,20 @@ struct WebReaderView: View {
     /// the two side panes swap instead of squeezing (§5.1).
     private static let threePaneMinWidth: CGFloat = 1150
 
+    /// Show the assistant sidebar, applying the narrow-window pane policy (§5.1):
+    /// below the three-pane width, opening one side pane collapses the other so
+    /// three panes never squeeze. Call inside `withAnimation`.
+    private func presentChatSidebar() {
+        showChatSidebar = true
+        if containerWidth < Self.threePaneMinWidth { showAnnotationSidebar = false }
+    }
+
+    /// The symmetric counterpart to `presentChatSidebar` for the annotation sidebar.
+    private func presentAnnotationSidebar() {
+        showAnnotationSidebar = true
+        if containerWidth < Self.threePaneMinWidth { showChatSidebar = false }
+    }
+
     init(reference: Reference, onClose: (() -> Void)? = nil) {
         self.onClose = onClose
         self._viewModel = StateObject(wrappedValue: WebReaderViewModel(reference: reference))
@@ -1711,11 +1725,8 @@ struct WebReaderView: View {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
                     withAnimation {
-                        showAnnotationSidebar.toggle()
-                        // Narrow-window policy (§5.1): no three-panes-squeezed state.
-                        if showAnnotationSidebar, containerWidth < Self.threePaneMinWidth {
-                            showChatSidebar = false
-                        }
+                        if showAnnotationSidebar { showAnnotationSidebar = false }
+                        else { presentAnnotationSidebar() }
                     }
                 } label: {
                     Label(String(localized: "Sidebar", bundle: .module), systemImage: "sidebar.right")
@@ -1723,10 +1734,8 @@ struct WebReaderView: View {
 
                 Button {
                     withAnimation {
-                        showChatSidebar.toggle()
-                        if showChatSidebar, containerWidth < Self.threePaneMinWidth {
-                            showAnnotationSidebar = false
-                        }
+                        if showChatSidebar { showChatSidebar = false }
+                        else { presentChatSidebar() }
                     }
                 } label: {
                     Label(String(localized: "Assistant", bundle: .module), systemImage: "bubble.left.and.text.bubble.right")
@@ -1780,6 +1789,16 @@ struct WebReaderView: View {
                     onDismiss: {
                         viewModel.clearSelection()
                         noteMarkdownForSelection = ""
+                    },
+                    onAsk: {
+                        // `pendingSelection.text` is stored pre-trimmed & non-empty
+                        // (the popover only exists for a live selection); compose-time
+                        // trimming re-normalizes it, so no trim is needed here.
+                        guard let text = viewModel.pendingSelection?.text, !text.isEmpty else { return }
+                        chatSession.stageSelection(text)
+                        viewModel.clearSelection()
+                        noteMarkdownForSelection = ""
+                        withAnimation { presentChatSidebar() }
                     }
                 )
                 .fixedSize()

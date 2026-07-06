@@ -56,6 +56,11 @@ final class ChatSessionController: ObservableObject {
     /// A quoted selection staged from "Ask" (2c-4), shown as a chip and prepended as
     /// a `> …` block on the next send.
     @Published var stagedSelection: String?
+    /// Bumped by `stageSelection` to ask the composer to take focus (Selection→Ask,
+    /// §5.4). A monotonic token, not the selection string: re-Asking the *identical*
+    /// passage must still re-focus, which an equality-based observer on
+    /// `stagedSelection` would miss. Never reset (its absolute value is meaningless).
+    @Published private(set) var composerFocusRequest = 0
     /// The conversation's model, applied per turn (`--model`). Claude aliases:
     /// `fable` / `opus` / `sonnet` / `haiku`. The sidebar always shows a concrete
     /// model (no "CLI default" state); `nil` remains valid programmatically and
@@ -178,6 +183,15 @@ final class ChatSessionController: ObservableObject {
             await self.gate.release(provider: kind, sessionID: resumeID)
             self.finalize(gen: gen)
         }
+    }
+
+    /// Stage a reader selection as a quoted chip and ask the composer to focus
+    /// (Selection→Ask, §5.4). The text is consumed as a `> …` block on the next
+    /// send; no auto-send. Bumps `composerFocusRequest` so focus is requested on
+    /// every Ask, even when the same passage is re-selected.
+    func stageSelection(_ text: String) {
+        stagedSelection = text
+        composerFocusRequest += 1
     }
 
     /// Stop the running turn (process-group kill via the provider); the stream ends,

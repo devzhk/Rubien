@@ -43,8 +43,14 @@ struct ChatSidebarView: View {
             // Re-mounting the pane created a fresh (empty) WebView — restore the
             // conversation from the controller's in-memory render log.
             session.replayTranscript()
+            // Opened via Selection→Ask (a selection was staged before the pane
+            // mounted): drop the caret into the composer so the user can type.
+            if session.stagedSelection != nil { focusComposerSoon() }
         }
         .onChange(of: colorScheme) { _, new in renderer.setTheme(new == .dark ? .dark : .light) }
+        // Selection→Ask while the pane is already open — each Ask bumps the token
+        // (even re-Asking the same passage), which focuses the composer (§5.4).
+        .onChange(of: session.composerFocusRequest) { _, _ in focusComposerSoon() }
     }
 
     // MARK: Header (popover-toolbar idiom)
@@ -180,7 +186,7 @@ struct ChatSidebarView: View {
                 .padding(.bottom, 6)
             // Grounded in what the assistant can actually do (the read-only Rubien
             // tools): document text/figures, the user's annotations, library search;
-            // web is the + menu toggle. (Selection→Ask joins in 2c-4.)
+            // web is the + menu toggle. Selecting text in the reader offers "Ask".
             Text("The assistant reads this document through Rubien — its text, figures, and your highlights — and can search your library. Web search can be toggled in the + menu.")
                 .font(.system(size: 12.5))
                 .foregroundStyle(.secondary)
@@ -618,6 +624,17 @@ struct ChatSidebarView: View {
         draft = ""
         session.send(text)
         composerFocused = true
+    }
+
+    /// Move keyboard focus into the composer shortly after a selection is staged
+    /// (Selection→Ask, §5.4). A `@FocusState` set in the same runloop as a fresh
+    /// pane mount doesn't take — the `TextEditor` isn't in the responder chain yet
+    /// — so hop a runloop before requesting focus.
+    private func focusComposerSoon() {
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(50))
+            composerFocused = true
+        }
     }
 }
 
