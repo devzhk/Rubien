@@ -276,31 +276,38 @@ struct ChatSidebarView: View {
                     .textSelection(.enabled)
                     .lineLimit(4)
             }
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 Button {
                     session.respond(to: approval, .allowOnce)
                 } label: {
                     Text("Allow Once")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 4)
-                        .background(Capsule(style: .continuous).fill(Color.accentColor))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(ApprovalPrimaryButtonStyle())
                 .keyboardShortcut(.defaultAction)
 
-                Button("Allow for Conversation") { session.respond(to: approval, .allowForConversation) }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                Button {
+                    session.respond(to: approval, .allowForConversation)
+                } label: {
+                    Text("Allow for Conversation")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                }
+                .buttonStyle(HeaderControlButtonStyle())
 
                 Spacer()
 
-                Button("Deny") { session.respond(to: approval, .deny) }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.red)
+                Button {
+                    session.respond(to: approval, .deny)
+                } label: {
+                    Text("Deny")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.red)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                }
+                .buttonStyle(HeaderControlButtonStyle())
             }
         }
         .padding(10)
@@ -982,6 +989,28 @@ private struct HeaderControlButtonStyle: ButtonStyle {
                           : (isHovered ? Color.primary.opacity(0.06) : Color.clear))
             )
             .scaleEffect(configuration.isPressed ? 0.95 : 1.0)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .animation(.easeOut(duration: 0.12), value: isHovered)
+            .onHover { isHovered = $0 }
+    }
+}
+
+/// The primary approval action (accent capsule). The gray highlight the header
+/// controls use is invisible on the accent fill, so brighten the capsule on hover
+/// and dip + scale on press instead.
+private struct ApprovalPrimaryButtonStyle: ButtonStyle {
+    @State private var isHovered = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 4)
+            .background(Capsule(style: .continuous).fill(Color.accentColor))
+            .brightness(configuration.isPressed ? -0.06 : (isHovered ? 0.10 : 0))
+            .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
+            .contentShape(Capsule())
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
             .animation(.easeOut(duration: 0.12), value: isHovered)
             .onHover { isHovered = $0 }
