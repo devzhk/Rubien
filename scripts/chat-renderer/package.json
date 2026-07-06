@@ -1,0 +1,17 @@
+{
+  "name": "rubien-chat-renderer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "marked": "^15.0.0",
+    "dompurify": "3.4.11"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "jsdom": "^26.0.0"
+  }
+}

@@ -37,6 +37,7 @@ struct RubienCLI: AsyncParsableCommand {
             Views.self,
             Pdf.self,
             Web.self,
+            MCPCommand.self,
         ]
 #if os(macOS)
         cmds.append(SyncCommand.self)

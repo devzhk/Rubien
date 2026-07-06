@@ -61,33 +61,18 @@ struct AnnotationSidebarView: View {
 
     // MARK: - Header
 
+    // Just the type filter — the host tab ("Notes") already names the pane,
+    // so a redundant "Annotations" title/count row was dropped.
     private var sidebarHeader: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center) {
-                Text("Annotations", bundle: .module)
-                    .font(.headline)
-
-                Text("\(filteredAnnotations.count)")
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 2)
-                    .background(Color.primary.opacity(0.06), in: Capsule(style: .continuous))
-
-                Spacer()
-            }
-
-            DraggableSegmentedControl(selection: $filterType, items: [
-                (String(localized: "All", bundle: .module), nil),
-                (String(localized: "Highlight", bundle: .module), .highlight),
-                (String(localized: "Underline", bundle: .module), .underline),
-                (String(localized: "Note", bundle: .module), .note),
-            ])
-        }
+        DraggableSegmentedControl(selection: $filterType, items: [
+            (String(localized: "All", bundle: .module), nil),
+            (String(localized: "Highlight", bundle: .module), .highlight),
+            (String(localized: "Underline", bundle: .module), .underline),
+            (String(localized: "Note", bundle: .module), .note),
+        ])
         .padding(.horizontal, 14)
-        .padding(.top, 14)
-        .padding(.bottom, 12)
+        .padding(.top, 12)
+        .padding(.bottom, 10)
     }
 
     // MARK: - Empty State

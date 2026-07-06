@@ -102,6 +102,99 @@ enum RubienPreferences {
         set { UserDefaults.standard.set(newValue, forKey: pdfAssetSyncEnabledKey) }
     }
 
+    // MARK: - Assistant (Phase 2c)
+    //
+    // Defaults for NEW assistant conversations (a reader builds its session from
+    // these at open time; an already-open conversation keeps its live values, which
+    // stay editable in the sidebar). Per-device, not synced. String overrides treat
+    // "" as unset so a cleared field means "use the built-in default / auto-discover".
+
+    /// The assistant working folder (the agent's cwd, D4). Empty/unset ⇒ the default
+    /// `~/Documents/Rubien Assistant/` (see `assistantWorkspaceURL`).
+    static let assistantWorkspacePathKey = "Rubien.assistant.workspacePath"
+
+    static var assistantWorkspacePath: String? {
+        get {
+            let path = UserDefaults.standard.string(forKey: assistantWorkspacePathKey)
+            return (path?.isEmpty == false) ? path : nil
+        }
+        set {
+            if let newValue, !newValue.isEmpty {
+                UserDefaults.standard.set(newValue, forKey: assistantWorkspacePathKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: assistantWorkspacePathKey)
+            }
+        }
+    }
+
+    /// The resolved working folder: the override if set, else the default. Not yet
+    /// created on disk — the reader passes it through `AssistantContext.ensureWorkspace`.
+    static var assistantWorkspaceURL: URL {
+        AssistantContext.workspaceURL(override: assistantWorkspacePath)
+    }
+
+    /// Default model alias for new conversations (Claude: `fable`/`opus`/`sonnet`).
+    static let assistantModelKey = "Rubien.assistant.model"
+
+    static var assistantModel: String {
+        get {
+            let model = UserDefaults.standard.string(forKey: assistantModelKey)
+            return (model?.isEmpty == false) ? model! : "opus"
+        }
+        set { UserDefaults.standard.set(newValue, forKey: assistantModelKey) }
+    }
+
+    /// Default reasoning effort for new conversations (`low`…`max`).
+    static let assistantEffortKey = "Rubien.assistant.effort"
+
+    static var assistantEffort: String {
+        get {
+            let effort = UserDefaults.standard.string(forKey: assistantEffortKey)
+            return (effort?.isEmpty == false) ? effort! : "high"
+        }
+        set { UserDefaults.standard.set(newValue, forKey: assistantEffortKey) }
+    }
+
+    /// Default web access for new conversations. Unset ⇒ on (the sidebar default).
+    static let assistantWebAccessKey = "Rubien.assistant.webAccess"
+
+    static var assistantWebAccess: Bool {
+        get {
+            let defaults = UserDefaults.standard
+            if defaults.object(forKey: assistantWebAccessKey) == nil { return true }
+            return defaults.bool(forKey: assistantWebAccessKey)
+        }
+        set { UserDefaults.standard.set(newValue, forKey: assistantWebAccessKey) }
+    }
+
+    /// Default approval mode for new conversations: `false` = Ask (prompt before
+    /// writes/shell), `true` = Auto (accept automatically). Unset ⇒ Ask.
+    static let assistantAutoApproveKey = "Rubien.assistant.autoApprove"
+
+    static var assistantAutoApprove: Bool {
+        get { UserDefaults.standard.bool(forKey: assistantAutoApproveKey) }
+        set { UserDefaults.standard.set(newValue, forKey: assistantAutoApproveKey) }
+    }
+
+    /// Explicit path to the `claude` binary; empty/unset ⇒ auto-discovery (§5.5:
+    /// well-known dirs → login-shell `command -v`). Threaded to
+    /// `ClaudeCodeProvider(executableOverride:)`.
+    static let assistantBinaryPathKey = "Rubien.assistant.binaryPath"
+
+    static var assistantBinaryPath: String? {
+        get {
+            let path = UserDefaults.standard.string(forKey: assistantBinaryPathKey)
+            return (path?.isEmpty == false) ? path : nil
+        }
+        set {
+            if let newValue, !newValue.isEmpty {
+                UserDefaults.standard.set(newValue, forKey: assistantBinaryPathKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: assistantBinaryPathKey)
+            }
+        }
+    }
+
     static let columnConfigsKey = "Rubien.columnConfigs"
     static let tableColumnCustomizationKey = "Rubien.tableColumnCustomization"
 

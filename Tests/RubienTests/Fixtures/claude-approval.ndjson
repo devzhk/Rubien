@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","cwd":"/ws","session_id":"bbbbbbbb-4444-4444-8444-444444444444","tools":["Write"],"mcp_servers":[],"apiKeySource":"none","claude_code_version":"2.1.201"}
+{"type":"control_request","request_id":"req-approve-1","request":{"subtype":"can_use_tool","tool_name":"Write","display_name":"Write","input":{"file_path":"/ws/note.txt","content":"hi"},"description":"note.txt","permission_suggestions":[{"type":"setMode","mode":"acceptEdits","destination":"session"}],"tool_use_id":"toolu_appr_1"}}

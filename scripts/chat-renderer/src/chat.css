@@ -1,0 +1,354 @@
+/* chat.css — transcript styling. Theme via CSS custom properties toggled by
+   setTheme() (data-theme on :root). A prefers-color-scheme fallback covers the
+   window between load and the first setTheme call. */
+
+:root {
+  --chat-fg: #1d1d1f;
+  --chat-fg-muted: #6b6b70;
+  --chat-user-bg: #e9f0ff;
+  --chat-user-fg: #10233f;
+  --chat-assistant-bg: #f4f4f6;
+  --chat-assistant-fg: #1d1d1f;
+  --chat-border: #e2e2e6;
+  --chat-link: #0a6cff;
+  --chat-code-bg: #f0f0f3;
+  --chat-code-fg: #1d1d1f;
+  --chat-code-block-bg: #1e1e28;
+  --chat-code-block-fg: #eaeaf0;
+  --chat-chip-bg: #f4f4f6;
+  --chat-chip-border: #e2e2e6;
+  --chat-notice-fg: #7a5c00;
+  --chat-notice-bg: #fff8e6;
+  --chat-status-started: #8a8a90;
+  --chat-status-completed: #1f9d55;
+  --chat-status-denied: #d1453b;
+
+  --chat-radius: 12px;
+  --chat-gap: 12px;
+  --chat-pad: 10px 13px;
+  --chat-font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+  --chat-mono: "SF Mono", ui-monospace, Menlo, Monaco, "Cascadia Code", monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --chat-fg: #f2f2f5;
+    --chat-fg-muted: #9a9aa2;
+    --chat-user-bg: #12386b;
+    --chat-user-fg: #e9f1ff;
+    --chat-assistant-bg: #2a2a2e;
+    --chat-assistant-fg: #f2f2f5;
+    --chat-border: #3a3a3e;
+    --chat-link: #6cb0ff;
+    --chat-code-bg: #2f2f36;
+    --chat-code-fg: #f2f2f5;
+    --chat-code-block-bg: #14141a;
+    --chat-code-block-fg: #eaeaf0;
+    --chat-chip-bg: #2a2a2e;
+    --chat-chip-border: #3a3a3e;
+    --chat-notice-fg: #ffd780;
+    --chat-notice-bg: #3a2f10;
+    --chat-status-started: #8a8a90;
+    --chat-status-completed: #3ad07f;
+    --chat-status-denied: #ff6b60;
+  }
+}
+
+:root[data-theme="dark"] {
+  --chat-fg: #f2f2f5;
+  --chat-fg-muted: #9a9aa2;
+  --chat-user-bg: #12386b;
+  --chat-user-fg: #e9f1ff;
+  --chat-assistant-bg: #2a2a2e;
+  --chat-assistant-fg: #f2f2f5;
+  --chat-border: #3a3a3e;
+  --chat-link: #6cb0ff;
+  --chat-code-bg: #2f2f36;
+  --chat-code-fg: #f2f2f5;
+  --chat-code-block-bg: #14141a;
+  --chat-code-block-fg: #eaeaf0;
+  --chat-chip-bg: #2a2a2e;
+  --chat-chip-border: #3a3a3e;
+  --chat-notice-fg: #ffd780;
+  --chat-notice-bg: #3a2f10;
+  --chat-status-started: #8a8a90;
+  --chat-status-completed: #3ad07f;
+  --chat-status-denied: #ff6b60;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  /* No page background: the WKWebView is non-drawing and the native side
+     (FloatingChatPanel's Liquid Glass card) paints the surface behind the
+     transcript. Bubbles/chips keep their own opaque fills for legibility. */
+  background: transparent;
+  color: var(--chat-fg);
+  font-family: var(--chat-font);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+#transcript {
+  box-sizing: border-box;
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 14px 12px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--chat-gap);
+}
+
+/* --- Message bubbles --- */
+
+.chat-msg {
+  display: flex;
+  flex-direction: column;
+  max-width: 100%;
+}
+
+.chat-msg-user {
+  align-items: flex-end;
+}
+
+.chat-msg-assistant {
+  align-items: flex-start;
+}
+
+.chat-bubble {
+  box-sizing: border-box;
+  max-width: 92%;
+  padding: var(--chat-pad);
+  border-radius: var(--chat-radius);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.chat-msg-user .chat-bubble {
+  background: var(--chat-user-bg);
+  color: var(--chat-user-fg);
+  border-bottom-right-radius: 4px;
+}
+
+.chat-msg-assistant .chat-bubble {
+  background: var(--chat-assistant-bg);
+  color: var(--chat-assistant-fg);
+  border-bottom-left-radius: 4px;
+}
+
+.chat-bubble > :first-child {
+  margin-top: 0;
+}
+.chat-bubble > :last-child {
+  margin-bottom: 0;
+}
+
+.chat-bubble p {
+  margin: 0 0 0.55em;
+}
+.chat-bubble h1,
+.chat-bubble h2,
+.chat-bubble h3 {
+  margin: 0.6em 0 0.35em;
+  line-height: 1.25;
+}
+.chat-bubble h1 { font-size: 1.35em; }
+.chat-bubble h2 { font-size: 1.2em; }
+.chat-bubble h3 { font-size: 1.05em; }
+
+.chat-bubble ul,
+.chat-bubble ol {
+  margin: 0 0 0.55em;
+  padding-left: 1.4em;
+}
+
+.chat-bubble blockquote {
+  margin: 0 0 0.55em;
+  padding: 0.1em 0.9em;
+  border-left: 3px solid var(--chat-border);
+  color: var(--chat-fg-muted);
+}
+
+.chat-bubble a {
+  color: var(--chat-link);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.chat-bubble table {
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+}
+.chat-bubble th,
+.chat-bubble td {
+  border: 1px solid var(--chat-border);
+  padding: 4px 8px;
+}
+
+.chat-bubble img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* --- Inline code --- */
+
+.chat-bubble code {
+  font-family: var(--chat-mono);
+  font-size: 0.88em;
+  background: var(--chat-code-bg);
+  color: var(--chat-code-fg);
+  padding: 0.12em 0.4em;
+  border-radius: 5px;
+}
+
+/* --- Code blocks + copy button --- */
+
+.chat-codeblock {
+  position: relative;
+  margin: 0 0 0.6em;
+}
+
+.chat-codeblock pre {
+  margin: 0;
+  padding: 12px 13px;
+  background: var(--chat-code-block-bg);
+  color: var(--chat-code-block-fg);
+  border-radius: 9px;
+  overflow-x: auto;
+}
+
+.chat-codeblock pre code {
+  background: none;
+  color: inherit;
+  padding: 0;
+  font-size: 0.85em;
+  line-height: 1.45;
+}
+
+.chat-copy-btn {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  font: inherit;
+  font-size: 11px;
+  padding: 2px 9px;
+  color: var(--chat-code-block-fg);
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.chat-codeblock:hover .chat-copy-btn,
+.chat-copy-btn:focus-visible {
+  opacity: 1;
+}
+
+.chat-copy-btn:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+/* --- Tool chip (collapsed <details>) --- */
+
+.chat-tool-chip {
+  border: 1px solid var(--chat-chip-border);
+  background: var(--chat-chip-bg);
+  border-radius: 9px;
+  padding: 2px 4px;
+  font-size: 12.5px;
+  color: var(--chat-fg-muted);
+  align-self: flex-start;
+  max-width: 92%;
+}
+
+.chat-tool-chip summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 7px;
+  cursor: pointer;
+  list-style: none;
+}
+.chat-tool-chip summary::-webkit-details-marker {
+  display: none;
+}
+
+.chat-tool-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  background: var(--chat-status-started);
+}
+.chat-tool-started .chat-tool-dot {
+  background: var(--chat-status-started);
+}
+.chat-tool-completed .chat-tool-dot {
+  background: var(--chat-status-completed);
+}
+.chat-tool-denied .chat-tool-dot {
+  background: var(--chat-status-denied);
+}
+
+.chat-tool-name {
+  font-family: var(--chat-mono);
+  color: var(--chat-fg);
+  font-size: 12px;
+}
+
+.chat-tool-detail {
+  font-family: var(--chat-mono);
+  font-size: 11.5px;
+  color: var(--chat-fg-muted);
+  padding: 4px 8px 7px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* --- Notice line --- */
+
+.chat-notice {
+  align-self: stretch;
+  font-size: 12.5px;
+  color: var(--chat-notice-fg);
+  background: var(--chat-notice-bg);
+  border-radius: 8px;
+  padding: 7px 11px;
+  overflow-wrap: anywhere;
+}
+.chat-notice p {
+  margin: 0;
+}
+
+/* --- Turn status marker --- */
+
+.chat-turn-status {
+  margin-top: 4px;
+  font-size: 11.5px;
+  font-style: italic;
+  color: var(--chat-fg-muted);
+}
+.chat-turn-denied {
+  color: var(--chat-status-denied);
+}
+
+/* --- KaTeX sizing --- */
+
+.chat-bubble .katex {
+  font-size: 1.02em;
+}
+
+.chat-bubble .katex-display {
+  margin: 0.5em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 2px;
+}

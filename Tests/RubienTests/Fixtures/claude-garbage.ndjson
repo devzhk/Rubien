@@ -1,0 +1,10 @@
+Warning: something else wrote to stdout
+{"type":"system","subtype":"init","cwd":"/ws","session_id":"cccccccc-5555-4555-8555-555555555555","mcp_servers":[],"apiKeySource":"none"}
+{"type":"system","subtype":"thinking_tokens","tokens":128}
+{"type":"unknown_future_event","payload":{"anything":123}}
+{"type":"assistant","message":{"content":[{"type":"tex
+
+this line is not json at all
+{"type":"rate_limit_event","rate_limit_info":{"status":"throttled","rateLimitType":"five_hour"},"session_id":"cccccccc-5555-4555-8555-555555555555"}
+{"type":"control_response","response":{"subtype":"success","request_id":"init-1","response":{"commands":[]}}}
+{"type":"result","subtype":"success","is_error":false,"session_id":"cccccccc-5555-4555-8555-555555555555","usage":{},"permission_denials":[]}

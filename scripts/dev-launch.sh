@@ -1,5 +1,5 @@
 #!/bin/bash
-# One-command signed-and-relaunch loop for the sandboxed Rubien.app with
+# One-command signed-and-relaunch loop for the Rubien.app with
 # CloudKit entitlements. For sync testing — everyday dev work that doesn't
 # need sync can still use `swift run Rubien`, which is faster but has no
 # entitlement (sync stays .unavailable).
@@ -122,7 +122,7 @@ sleep 2
 PID=$(pgrep -f "Rubien.app/Contents/MacOS/Rubien" | head -1 || true)
 if [ -n "$PID" ]; then
     echo "✅ Rubien.app running (PID $PID)"
-    echo "   Sandbox DB: $HOME/Library/Containers/com.rubien.app/Data/Library/Application Support/Rubien/"
+    echo "   Library DB: $HOME/Library/Group Containers/$RUBIEN_APP_GROUP_ID/Rubien/"
     echo "   Logs: /usr/bin/log show --predicate 'process == \"Rubien\"' --last 2m --info"
 else
     echo "❌ Failed to launch. Check Console.app for crash reports." >&2

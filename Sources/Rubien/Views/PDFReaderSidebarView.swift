@@ -15,6 +15,7 @@ struct PDFReaderSidebarView: View {
                 items: [
                     (String(localized: "Outline", bundle: .module), .outline),
                     (String(localized: "Search", bundle: .module), .search),
+                    (String(localized: "Notes", bundle: .module), .annotations),
                     (String(localized: "Info", bundle: .module), .info),
                 ]
             )
@@ -28,9 +29,9 @@ struct PDFReaderSidebarView: View {
                 PDFOutlineSidebarView(reference: reference, pdfURL: viewModel.pdfURL)
             case .search:
                 PDFSearchSidebarView(viewModel: viewModel)
-            case .info:
-                PDFInfoSidebarView(reference: reference)
             case .annotations:
+                AnnotationSidebarView(viewModel: viewModel)
+            case .info:
                 PDFInfoSidebarView(reference: reference)
             }
         }

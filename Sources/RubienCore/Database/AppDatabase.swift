@@ -1084,6 +1084,13 @@ extension AppDatabase {
         }
     }
 
+    /// The resolved on-disk root of the active library (honors
+    /// `RUBIEN_LIBRARY_ROOT` and the sandboxed/unsandboxed storage-root order).
+    /// Exposed so the app can point the read-only MCP content channel at exactly
+    /// the same library it is using (passed to `rubien-cli mcp` as
+    /// `RUBIEN_LIBRARY_ROOT`).
+    public static var libraryRootURL: URL { baseRoot }
+
     /// PDF storage directory
     public static var pdfStorageURL: URL {
         ensureDirectory(baseRoot.appendingPathComponent("PDFs", isDirectory: true), fallbackLeaf: "PDFs")

@@ -800,40 +800,6 @@ final class LibraryViewModel: ObservableObject {
     }
 }
 
-/// A floating panel with a leading drag-to-resize edge. Owns the live drag offset
-/// locally so dragging only re-renders this small view — not the enclosing
-/// `ContentView`, whose huge `body` would otherwise re-evaluate every drag frame
-/// and make the resize stutter. Commits the new width to the binding on drag end.
-private struct FloatingDetailPanel<Content: View>: View {
-    @Binding var width: CGFloat
-    let range: ClosedRange<CGFloat>
-    @ViewBuilder var content: () -> Content
-
-    @GestureState private var dragOffset: CGFloat = 0
-
-    var body: some View {
-        content()
-            .frame(width: min(max(width - dragOffset, range.lowerBound), range.upperBound))
-            .overlay(alignment: .leading) {
-                Rectangle()
-                    .fill(.clear)
-                    .frame(width: 8)
-                    .frame(maxHeight: .infinity)
-                    .contentShape(Rectangle())
-                    .pointerStyle(.columnResize)
-                    .gesture(
-                        DragGesture(minimumDistance: 1)
-                            .updating($dragOffset) { value, state, _ in
-                                state = value.translation.width
-                            }
-                            .onEnded { value in
-                                width = min(max(width - value.translation.width, range.lowerBound), range.upperBound)
-                            }
-                    )
-            }
-    }
-}
-
 struct ContentView: View {
     @StateObject private var viewModel = LibraryViewModel()
     @Environment(\.syncCoordinator) private var syncCoordinator: SyncCoordinator?
@@ -1144,7 +1110,7 @@ struct ContentView: View {
             // toggled on. Drag its leading edge to resize the width.
             .overlay(alignment: .trailing) {
                 if showInspector {
-                    FloatingDetailPanel(width: $inspectorWidth, range: 280...640) {
+                    FloatingPanel(width: $inspectorWidth, range: 280...640) {
                         detailPanel
                     }
                     .padding(.vertical, 8)

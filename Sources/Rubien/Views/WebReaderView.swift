@@ -1559,6 +1559,8 @@ struct WebReaderView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @State private var showAnnotationSidebar = true
+    @State private var showChatSidebar = false
+    @State private var chatPanelWidth: CGFloat = 380
     /// Note-draft text for the selection popover. Lifted from the deleted WebSelectionActionBar
     /// so the shared AnnotationSelectionPopover can take a Binding into the same state across
     /// rebuilds. The `.onChange(of: viewModel.pendingSelection?.text ?? "")` modifier below
@@ -1567,13 +1569,48 @@ struct WebReaderView: View {
     @State private var noteMarkdownForSelection: String = ""
     private let onClose: (() -> Void)?
 
+    // Assistant chat (Phase 2c, floating card since Phase 3a): one renderer +
+    // session controller per reader window; conversation state is in-memory
+    // only (D5).
+    @StateObject private var chatRenderer: ChatTranscriptController
+    @StateObject private var chatSession: ChatSessionController
+
     init(reference: Reference, onClose: (() -> Void)? = nil) {
         self.onClose = onClose
         self._viewModel = StateObject(wrappedValue: WebReaderViewModel(reference: reference))
+
+        // The first production provider construction: Claude wrapped with the
+        // read-only MCP content channel (Phase 2b), so the agent reads THIS
+        // document through Rubien's own tools. Reader windows always hold a
+        // persisted reference; `?? 0` is unreachable in practice.
+        // Build the live session from the user's Assistant settings via the shared
+        // production factory (Phase 2c-5) — the PDF reader (Phase 3) reuses the same
+        // path, so the wiring lives in one place. Each seeded value stays editable
+        // per-conversation in the sidebar.
+        let renderer = ChatTranscriptController()
+        self._chatRenderer = StateObject(wrappedValue: renderer)
+        self._chatSession = StateObject(wrappedValue: ReaderChatSession.make(
+            reference: reference, transcript: renderer))
     }
 
     var body: some View {
         HSplitView {
+            // Annotations dock on the LEFT (the trailing edge belongs to the
+            // floating assistant card — two right-side panels felt unbalanced).
+            if showAnnotationSidebar {
+                WebAnnotationSidebarView(viewModel: viewModel)
+                    .frame(minWidth: 260, idealWidth: 300, maxWidth: 400)
+                    .overlay(alignment: .trailing) {
+                        LinearGradient(
+                            colors: [.clear, Color.black.opacity(colorScheme == .dark ? 0.18 : 0.06)],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                        .frame(width: 6)
+                        .allowsHitTesting(false)
+                    }
+            }
+
             ZStack(alignment: .top) {
                 VStack(spacing: 0) {
                     WebReaderContentView(viewModel: viewModel)
@@ -1593,23 +1630,31 @@ struct WebReaderView: View {
                         .padding(.top, 14)
                 }
             }
+            // Reflow, don't occlude: inset the document by the card's width so
+            // the text rewraps beside it — docked semantics, floating look.
+            // 12 = the card's 6 pt trailing gutter + a 6 pt gap. (The inset
+            // tracks committed widths; during a card-resize drag the content
+            // reflows on release, not per frame.)
+            .padding(.trailing, showChatSidebar ? chatPanelWidth + 12 : 0)
             .frame(minWidth: 540)
-
-            if showAnnotationSidebar {
-                WebAnnotationSidebarView(viewModel: viewModel)
-                    .frame(minWidth: 260, idealWidth: 300, maxWidth: 400)
-                    .overlay(alignment: .leading) {
-                        LinearGradient(
-                            colors: [Color.black.opacity(colorScheme == .dark ? 0.18 : 0.06), .clear],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                        .frame(width: 6)
-                        .allowsHitTesting(false)
+            // The assistant floats over the document pane as a resizable card
+            // (Phase 3a, details-panel idiom) — anchored to this pane, not the
+            // window, so it never covers the annotation sidebar.
+            .overlay(alignment: .trailing) {
+                if showChatSidebar {
+                    FloatingChatPanel(session: chatSession, renderer: chatRenderer, width: $chatPanelWidth) {
+                        showChatSidebar = false
                     }
+                    .padding(.trailing, 6)
+                }
             }
+            .animation(.easeInOut(duration: 0.22), value: showChatSidebar)
+            .animation(.easeInOut(duration: 0.22), value: chatPanelWidth)
         }
         .frame(minWidth: 900, minHeight: 620)
+        // Window closing (the root view disappears): kill any in-flight agent
+        // turn's process group (§4.4 step 9).
+        .onDisappear { chatSession.teardown() }
         .animation(
             .spring(response: 0.3, dampingFraction: 0.82),
             value: viewModel.hasSelection && viewModel.selectionToolbarLayout?.visible == true
@@ -1659,8 +1704,15 @@ struct WebReaderView: View {
                 Button {
                     withAnimation { showAnnotationSidebar.toggle() }
                 } label: {
-                    Label(String(localized: "Sidebar", bundle: .module), systemImage: "sidebar.right")
+                    Label(String(localized: "Sidebar", bundle: .module), systemImage: "sidebar.left")
                 }
+
+                Button {
+                    showChatSidebar.toggle()
+                } label: {
+                    Label(String(localized: "Assistant", bundle: .module), systemImage: "bubble.left.and.text.bubble.right")
+                }
+                .help(String(localized: "Chat about this document", bundle: .module))
             }
         }
         .onAppear {
@@ -1709,6 +1761,16 @@ struct WebReaderView: View {
                     onDismiss: {
                         viewModel.clearSelection()
                         noteMarkdownForSelection = ""
+                    },
+                    onAsk: {
+                        // `pendingSelection.text` is stored pre-trimmed & non-empty
+                        // (the popover only exists for a live selection); compose-time
+                        // trimming re-normalizes it, so no trim is needed here.
+                        guard let text = viewModel.pendingSelection?.text, !text.isEmpty else { return }
+                        chatSession.stageSelection(text)
+                        viewModel.clearSelection()
+                        noteMarkdownForSelection = ""
+                        showChatSidebar = true
                     }
                 )
                 .fixedSize()
