@@ -13,7 +13,10 @@ protocol ChatTranscriptSink: AnyObject {
     func reset()
     func loadTranscript(_ messages: [ChatRenderMessage])
     func addUserMessage(_ markdown: String)
-    func beginAssistantMessage()
+    // Deliberately NO beginAssistantMessage: the renderer opens the bubble
+    // lazily on the first delta/commit, so rows land in true chronological
+    // order (an eagerly pre-opened bubble rendered the answer ABOVE the tool
+    // chips that preceded it).
     func appendDelta(_ text: String)
     func commitAssistantMessage(_ markdown: String)
     func addToolChip(name: String, detail: String?, status: ToolChipStatus)
@@ -204,7 +207,10 @@ final class ChatSessionController: ObservableObject {
             self.hasMessages = true
             self.renderUserMessage(composed)
             self.stagedSelection = nil
-            self.transcript.beginAssistantMessage()
+            // NO eager assistant bubble here: the renderer opens one lazily on
+            // the first delta. Pre-opening pinned the bubble ABOVE tool chips
+            // when claude ran tools before its first text, so the answer
+            // rendered above the chips that produced it (wrong chronology).
             do {
                 for try await event in self.provider.send(turn: request) {
                     self.handle(event, gen: gen)
@@ -248,20 +254,15 @@ final class ChatSessionController: ObservableObject {
 
     /// Re-render the conversation into a freshly-(re)mounted transcript pane from
     /// the in-memory log (toggling the pane dismantles + recreates its WebView).
-    /// No-op for a fresh, idle conversation.
+    /// No-op for a fresh, idle conversation. If a turn was streaming when the
+    /// pane was toggled, its partial deltas lived only in the dismantled WebView
+    /// (deltas aren't logged — only the commit is); the continuing stream's next
+    /// delta lazily opens a fresh bubble after the restored rows, and the turn's
+    /// final `assistantMessageCompleted` renders the full authoritative text.
     func replayTranscript() {
         guard !renderLog.isEmpty || isResponding else { return }
         transcript.reset()
         transcript.loadTranscript(renderLog)
-        // If a turn was streaming when the pane was toggled, its open assistant
-        // bubble + partial deltas lived only in the dismantled WebView, not the log
-        // (deltas aren't logged — only the commit is). Re-open a bubble so the
-        // continuing stream lands AFTER the restored rows (the correct position);
-        // the turn's final `assistantMessageCompleted` replaces it with the full
-        // authoritative text.
-        if isResponding {
-            transcript.beginAssistantMessage()
-        }
     }
 
     /// The reset shared by `newConversation` and `resume` (§4.1): cancel any live turn,

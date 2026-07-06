@@ -227,7 +227,7 @@ final class ChatSessionControllerTests: XCTestCase {
         ])
 
         XCTAssertEqual(sink.calls.first, .addUserMessage("hello"))
-        XCTAssertTrue(sink.calls.contains(.beginAssistantMessage))
+        XCTAssertTrue(sink.calls.contains(.appendDelta("Hi")))
         XCTAssertTrue(sink.calls.contains(.commitAssistantMessage("Hi")))
         XCTAssertFalse(controller.isResponding)
         XCTAssertNil(controller.statusText)
@@ -238,6 +238,30 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertNil(request?.resumeSessionID, "first turn is a new conversation")
         XCTAssertNotNil(request?.seed, "first turn carries the reference seed")
         XCTAssertEqual(request?.webAccess, true)
+    }
+
+    func testToolChipsRenderBeforeTheAnswerWhenToolsRunFirst() async {
+        // The reader bug: claude ran its document tools BEFORE the first text,
+        // but an eagerly pre-opened bubble pinned the answer ABOVE the chips.
+        // Chronological order in the sink calls is the contract now.
+        let provider = MockAgentProvider()
+        let sink = SpyTranscriptSink()
+        let controller = makeController(provider: provider, sink: sink)
+
+        await runTurn(controller, provider: provider, send: "summarize", events: [
+            .toolUseStarted(name: "mcp__rubien__rubien_get", detail: nil),
+            .toolUseCompleted(name: "mcp__rubien__rubien_get"),
+            .assistantDelta(text: "The paper"),
+            .assistantMessageCompleted(text: "The paper…"),
+            .turnCompleted(usage: nil),
+        ])
+
+        let chipIndex = sink.calls.firstIndex { if case .addToolChip = $0 { return true }; return false }
+        let deltaIndex = sink.calls.firstIndex { if case .appendDelta = $0 { return true }; return false }
+        guard let chipIndex, let deltaIndex else {
+            return XCTFail("expected both a chip and a delta: \(sink.calls)")
+        }
+        XCTAssertLessThan(chipIndex, deltaIndex, "the chip precedes the answer that used it")
     }
 
     func testSeedIsFirstTurnOnlyAndSessionIDIsRecapturedForResume() async {
@@ -613,14 +637,15 @@ final class ChatSessionControllerTests: XCTestCase {
         sink.calls.removeAll()  // pane toggled off then on → fresh WebView
         controller.replayTranscript()
 
-        // Restored: reset, the committed rows (user + tool — NOT the partial delta),
-        // then a re-opened bubble for the continuing stream.
+        // Restored: reset, then the committed rows (user + tool — NOT the partial
+        // delta). No pre-opened bubble: the continuing stream's next delta/commit
+        // lazily opens one after the restored rows (chronological order).
         guard case .reset = sink.calls.first else { return XCTFail("expected reset first: \(sink.calls)") }
         guard case .loadTranscript(let msgs) = sink.calls[1] else { return XCTFail("expected loadTranscript: \(sink.calls)") }
-        XCTAssertEqual(msgs.map(\.role), [.user, .tool], "partial deltas are not in the log; the open bubble is re-opened, not restored")
-        XCTAssertEqual(sink.calls.last, .beginAssistantMessage, "the live bubble is re-opened after the restored rows")
+        XCTAssertEqual(msgs.map(\.role), [.user, .tool], "partial deltas are not in the log")
+        XCTAssertEqual(sink.calls.count, 2, "replay restores rows only — no eager bubble")
 
-        // The turn finishes: its commit lands in the re-opened bubble.
+        // The turn finishes: its commit lazily opens the bubble and renders there.
         provider.emit(.assistantMessageCompleted(text: "Final answer"))
         provider.finishStream()
         await task?.value
@@ -732,7 +757,6 @@ final class SpyTranscriptSink: ChatTranscriptSink {
         case reset
         case loadTranscript([ChatRenderMessage])
         case addUserMessage(String)
-        case beginAssistantMessage
         case appendDelta(String)
         case commitAssistantMessage(String)
         case addToolChip(String, String?, ToolChipStatus)
@@ -745,7 +769,6 @@ final class SpyTranscriptSink: ChatTranscriptSink {
     func reset() { calls.append(.reset) }
     func loadTranscript(_ messages: [ChatRenderMessage]) { calls.append(.loadTranscript(messages)) }
     func addUserMessage(_ markdown: String) { calls.append(.addUserMessage(markdown)) }
-    func beginAssistantMessage() { calls.append(.beginAssistantMessage) }
     func appendDelta(_ text: String) { calls.append(.appendDelta(text)) }
     func commitAssistantMessage(_ markdown: String) { calls.append(.commitAssistantMessage(markdown)) }
     func addToolChip(name: String, detail: String?, status: ToolChipStatus) {
