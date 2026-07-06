@@ -243,6 +243,23 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertEqual(controller.composerFocusRequest, start + 2)
     }
 
+    func testAutoApproveInitParamSeedsTheProperty() {
+        // Settings ▸ Assistant seeds a new conversation's approval mode via this param.
+        let auto = ChatSessionController(
+            provider: MockAgentProvider(), transcript: SpyTranscriptSink(),
+            reference: ChatReference(id: 1, title: "T", authors: ""),
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"),
+            gate: AssistantTurnGate(), autoApprove: true)
+        XCTAssertTrue(auto.autoApprove)
+
+        let ask = ChatSessionController(
+            provider: MockAgentProvider(), transcript: SpyTranscriptSink(),
+            reference: ChatReference(id: 1, title: "T", authors: ""),
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"),
+            gate: AssistantTurnGate())
+        XCTAssertFalse(ask.autoApprove, "defaults to Ask")
+    }
+
     func testStagedSelectionIsQuotedIntoTheMessageThenCleared() async {
         let provider = MockAgentProvider()
         let sink = SpyTranscriptSink()

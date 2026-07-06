@@ -14,6 +14,19 @@ final class RubienPreferencesTests: XCTestCase {
 
     private var savedPDFAssetSyncEnabled: Bool?
     private var savedThemeRaw: String?
+    /// Snapshot of every assistant key touched by these tests, so the shared
+    /// standard suite is restored verbatim (including the "unset" state) on tearDown.
+    private var savedAssistant: [String: Any] = [:]
+    private var assistantKeys: [String] {
+        [
+            RubienPreferences.assistantModelKey,
+            RubienPreferences.assistantEffortKey,
+            RubienPreferences.assistantWebAccessKey,
+            RubienPreferences.assistantAutoApproveKey,
+            RubienPreferences.assistantWorkspacePathKey,
+            RubienPreferences.assistantBinaryPathKey,
+        ]
+    }
 
     override func setUpWithError() throws {
         try super.setUpWithError()
@@ -28,6 +41,11 @@ final class RubienPreferencesTests: XCTestCase {
         let themeKey = RubienPreferences.themePreferenceKey
         savedThemeRaw = UserDefaults.standard.string(forKey: themeKey)
         UserDefaults.standard.removeObject(forKey: themeKey)
+
+        for key in assistantKeys {
+            if let value = UserDefaults.standard.object(forKey: key) { savedAssistant[key] = value }
+            UserDefaults.standard.removeObject(forKey: key)
+        }
     }
 
     override func tearDown() {
@@ -46,6 +64,15 @@ final class RubienPreferencesTests: XCTestCase {
             UserDefaults.standard.removeObject(forKey: themeKey)
         }
         savedThemeRaw = nil
+
+        for key in assistantKeys {
+            if let value = savedAssistant[key] {
+                UserDefaults.standard.set(value, forKey: key)
+            } else {
+                UserDefaults.standard.removeObject(forKey: key)
+            }
+        }
+        savedAssistant.removeAll()
         super.tearDown()
     }
 
@@ -99,6 +126,51 @@ final class RubienPreferencesTests: XCTestCase {
         XCTAssertEqual(RubienPreferences.colorScheme, .light)
         RubienPreferences.colorScheme = .system
         XCTAssertEqual(RubienPreferences.colorScheme, .system)
+    }
+
+    // MARK: - Assistant defaults (Phase 2c-5)
+
+    func testAssistantDefaultsWhenUnset() {
+        // setUp cleared the keys, so this exercises the unset path — must match the
+        // sidebar's built-in defaults so Settings and the sidebar agree.
+        XCTAssertEqual(RubienPreferences.assistantModel, "opus")
+        XCTAssertEqual(RubienPreferences.assistantEffort, "high")
+        XCTAssertTrue(RubienPreferences.assistantWebAccess)
+        XCTAssertFalse(RubienPreferences.assistantAutoApprove)
+        XCTAssertNil(RubienPreferences.assistantWorkspacePath)
+        XCTAssertNil(RubienPreferences.assistantBinaryPath)
+    }
+
+    func testAssistantPrefsRoundTrip() {
+        RubienPreferences.assistantModel = "sonnet"
+        XCTAssertEqual(RubienPreferences.assistantModel, "sonnet")
+        RubienPreferences.assistantEffort = "medium"
+        XCTAssertEqual(RubienPreferences.assistantEffort, "medium")
+        RubienPreferences.assistantWebAccess = false
+        XCTAssertFalse(RubienPreferences.assistantWebAccess)
+        RubienPreferences.assistantAutoApprove = true
+        XCTAssertTrue(RubienPreferences.assistantAutoApprove)
+        RubienPreferences.assistantWorkspacePath = "/tmp/ws"
+        XCTAssertEqual(RubienPreferences.assistantWorkspacePath, "/tmp/ws")
+        RubienPreferences.assistantBinaryPath = "/usr/local/bin/claude"
+        XCTAssertEqual(RubienPreferences.assistantBinaryPath, "/usr/local/bin/claude")
+    }
+
+    func testAssistantPathOverridesTreatEmptyAsUnset() {
+        RubienPreferences.assistantWorkspacePath = "/tmp/ws"
+        RubienPreferences.assistantWorkspacePath = ""
+        XCTAssertNil(RubienPreferences.assistantWorkspacePath, "empty override clears to nil (use default)")
+
+        RubienPreferences.assistantBinaryPath = "/bin/claude"
+        RubienPreferences.assistantBinaryPath = ""
+        XCTAssertNil(RubienPreferences.assistantBinaryPath, "empty override clears to nil (auto-discover)")
+    }
+
+    func testAssistantWorkspaceURLReflectsOverride() {
+        XCTAssertEqual(RubienPreferences.assistantWorkspaceURL, AssistantContext.defaultWorkspaceURL,
+                       "unset ⇒ the default working folder")
+        RubienPreferences.assistantWorkspacePath = "/tmp/custom-ws"
+        XCTAssertEqual(RubienPreferences.assistantWorkspaceURL.path, "/tmp/custom-ws")
     }
 }
 #endif

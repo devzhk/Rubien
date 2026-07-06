@@ -116,7 +116,8 @@ final class ChatSessionController: ObservableObject {
         gate: AssistantTurnGate = .shared,
         webAccess: Bool = true,
         modelOverride: String? = "opus",
-        effortOverride: String? = "high"
+        effortOverride: String? = "high",
+        autoApprove: Bool = false
     ) {
         self.provider = provider
         self.transcript = transcript
@@ -126,6 +127,7 @@ final class ChatSessionController: ObservableObject {
         self.webAccess = webAccess
         self.modelOverride = modelOverride
         self.effortOverride = effortOverride
+        self.autoApprove = autoApprove
     }
 
     // MARK: Turn lifecycle

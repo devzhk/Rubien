@@ -1,4 +1,5 @@
 #if os(macOS)
+import AppKit
 import SwiftUI
 import RubienCore
 import RubienSync
@@ -7,6 +8,18 @@ struct RubienSettingsView: View {
     @EnvironmentObject private var coordinator: SyncCoordinator
     @State private var cacheBytes: Int64 = 0
     @State private var backfillRemaining: Int = 0
+
+    // Assistant pane (Phase 2c-5). Availability probe + mirrors of the two path
+    // overrides (RubienPreferences isn't observable, so the "Choose…" buttons keep
+    // these in sync to re-render the displayed path).
+    @State private var claudeAvailability: AgentAvailability?
+    @State private var isProbingClaude = false
+    /// Monotonic probe token: only the latest `recheckClaude` result is applied, so a
+    /// Reset/Choose that supersedes an in-flight probe can't be overwritten by the
+    /// stale one landing late.
+    @State private var probeGeneration = 0
+    @State private var workspacePathOverride = ""
+    @State private var binaryPathOverride = ""
     /// Latched at the start of an upload session so the indicator can render
     /// as "Uploading 4 of 31 PDFs to iCloud". Cleared back to nil when the
     /// queue reaches 0 so the next upload session re-latches with its own
@@ -27,6 +40,13 @@ struct RubienSettingsView: View {
                         systemImage: "gearshape"
                     )
                 }
+            assistantPane
+                .tabItem {
+                    Label(
+                        String(localized: "Assistant", bundle: .module),
+                        systemImage: "sparkles"
+                    )
+                }
             iCloudSyncPane
                 .tabItem {
                     Label(
@@ -41,7 +61,7 @@ struct RubienSettingsView: View {
                 }
             #endif
         }
-        .frame(width: 480, height: 320)
+        .frame(width: 540, height: 460)
     }
 
     @ViewBuilder
@@ -190,6 +210,229 @@ struct RubienSettingsView: View {
         case .error(let err):
             return String(format: String(localized: "Sync error: %@", bundle: .module), err.localizedDescription)
         }
+    }
+
+    // MARK: - Assistant pane (Phase 2c-5)
+
+    @ViewBuilder
+    private var assistantPane: some View {
+        Form {
+            assistantWorkspaceSection
+            assistantDefaultsSection
+            assistantCLISection
+        }
+        .formStyle(.grouped)
+        .task {
+            workspacePathOverride = RubienPreferences.assistantWorkspacePath ?? ""
+            binaryPathOverride = RubienPreferences.assistantBinaryPath ?? ""
+            if claudeAvailability == nil { recheckClaude() }
+        }
+    }
+
+    private var assistantWorkspaceSection: some View {
+        Section {
+            HStack(spacing: 8) {
+                Image(systemName: "folder")
+                    .foregroundStyle(.secondary)
+                Text((effectiveWorkspacePath as NSString).abbreviatingWithTildeInPath)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                Spacer()
+                if !workspacePathOverride.isEmpty {
+                    Button(String(localized: "Reset", bundle: .module)) {
+                        RubienPreferences.assistantWorkspacePath = nil
+                        workspacePathOverride = ""
+                    }
+                    .controlSize(.small)
+                }
+                Button(String(localized: "Choose…", bundle: .module)) { pickWorkspace() }
+                    .controlSize(.small)
+            }
+        } header: {
+            Text(String(localized: "Working folder", bundle: .module))
+        } footer: {
+            Text(String(localized: "The assistant works in this folder — its scratch space and any files it writes. Newly opened documents use it as their working directory.", bundle: .module))
+        }
+    }
+
+    private var assistantDefaultsSection: some View {
+        Section {
+            Picker(selection: assistantModelBinding) {
+                ForEach(AssistantModelOptions.models, id: \.value) { Text($0.label).tag($0.value) }
+            } label: {
+                Text(String(localized: "Model", bundle: .module))
+            }
+
+            Picker(selection: assistantEffortBinding) {
+                ForEach(AssistantModelOptions.efforts, id: \.value) { Text($0.label).tag($0.value) }
+            } label: {
+                Text(String(localized: "Reasoning effort", bundle: .module))
+            }
+
+            Toggle(isOn: assistantWebBinding) {
+                Text(String(localized: "Web search", bundle: .module))
+            }
+
+            Picker(selection: assistantApprovalBinding) {
+                Text(String(localized: "Ask before writes", bundle: .module)).tag(false)
+                Text(String(localized: "Auto-accept actions", bundle: .module)).tag(true)
+            } label: {
+                Text(String(localized: "Approvals", bundle: .module))
+            }
+        } header: {
+            Text(String(localized: "Defaults for new conversations", bundle: .module))
+        } footer: {
+            Text(String(localized: "Applied when you open a document; each conversation can still change them in the sidebar. Web search lets the assistant fetch pages you didn’t open. Auto-accept runs its writes and shell commands without asking first.", bundle: .module))
+        }
+    }
+
+    private var assistantCLISection: some View {
+        Section {
+            claudeStatusRow
+            HStack(spacing: 8) {
+                Text(String(localized: "Binary path", bundle: .module))
+                Spacer()
+                Text(binaryPathOverride.isEmpty
+                     ? String(localized: "Auto-discovered", bundle: .module)
+                     : (binaryPathOverride as NSString).abbreviatingWithTildeInPath)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if !binaryPathOverride.isEmpty {
+                    Button(String(localized: "Reset", bundle: .module)) {
+                        RubienPreferences.assistantBinaryPath = nil
+                        binaryPathOverride = ""
+                        recheckClaude()
+                    }
+                    .controlSize(.small)
+                }
+                Button(String(localized: "Choose…", bundle: .module)) { pickBinary() }
+                    .controlSize(.small)
+            }
+        } header: {
+            Text(String(localized: "Claude Code CLI", bundle: .module))
+        } footer: {
+            Text(String(localized: "Not signed in? Run “claude login” in Terminal. Codex support arrives in a later update.", bundle: .module))
+        }
+    }
+
+    @ViewBuilder
+    private var claudeStatusRow: some View {
+        HStack(spacing: 8) {
+            if isProbingClaude {
+                ProgressView().controlSize(.small)
+                Text(String(localized: "Checking…", bundle: .module))
+                    .foregroundStyle(.secondary)
+            } else if let availability = claudeAvailability {
+                Image(systemName: availability.isInstalled ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(availability.isInstalled ? Color.green : Color.orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(claudeStatusTitle(availability))
+                    if availability.isInstalled, let path = availability.resolvedPath {
+                        Text((path as NSString).abbreviatingWithTildeInPath)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    } else if !availability.isInstalled, let reason = availability.unavailableReason {
+                        Text(reason)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            } else {
+                Text(String(localized: "Not checked yet", bundle: .module))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button(String(localized: "Recheck", bundle: .module)) { recheckClaude() }
+                .controlSize(.small)
+                .disabled(isProbingClaude)
+        }
+    }
+
+    // MARK: Assistant pane — bindings & helpers
+
+    /// The effective working folder: the override if set, else the default — the one
+    /// resolver owns the empty→default rule (`workspacePathOverride` mirrors the pref
+    /// so this still re-renders when the picker/reset buttons change it).
+    private var effectiveWorkspacePath: String {
+        AssistantContext.workspaceURL(override: workspacePathOverride).path
+    }
+
+    private var assistantModelBinding: Binding<String> {
+        Binding(get: { RubienPreferences.assistantModel },
+                set: { RubienPreferences.assistantModel = $0 })
+    }
+
+    private var assistantEffortBinding: Binding<String> {
+        Binding(get: { RubienPreferences.assistantEffort },
+                set: { RubienPreferences.assistantEffort = $0 })
+    }
+
+    private var assistantWebBinding: Binding<Bool> {
+        Binding(get: { RubienPreferences.assistantWebAccess },
+                set: { RubienPreferences.assistantWebAccess = $0 })
+    }
+
+    private var assistantApprovalBinding: Binding<Bool> {
+        Binding(get: { RubienPreferences.assistantAutoApprove },
+                set: { RubienPreferences.assistantAutoApprove = $0 })
+    }
+
+    private func claudeStatusTitle(_ availability: AgentAvailability) -> String {
+        guard availability.isInstalled else {
+            return String(localized: "Claude Code not found", bundle: .module)
+        }
+        if let version = availability.version {
+            return String(format: String(localized: "Claude Code %@ installed", bundle: .module), version)
+        }
+        return String(localized: "Claude Code installed", bundle: .module)
+    }
+
+    /// Re-probe the CLI with the current binary-path override. Only a success is
+    /// cached inside the provider, so a fresh instance each time re-checks a
+    /// previously-missing binary (after an install / path change). The generation
+    /// token lets a later probe (e.g. a Reset firing while a Choose probe is still
+    /// running) supersede an earlier one, so only the latest result is shown.
+    private func recheckClaude() {
+        probeGeneration += 1
+        let generation = probeGeneration
+        isProbingClaude = true
+        let override = RubienPreferences.assistantBinaryPath
+        Task {
+            let availability = await ClaudeCodeProvider(executableOverride: override).isAvailable()
+            guard generation == probeGeneration else { return }  // superseded by a newer probe
+            claudeAvailability = availability
+            isProbingClaude = false
+        }
+    }
+
+    private func pickWorkspace() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = String(localized: "Choose", bundle: .module)
+        panel.directoryURL = RubienPreferences.assistantWorkspaceURL
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        RubienPreferences.assistantWorkspacePath = url.path
+        workspacePathOverride = url.path
+    }
+
+    private func pickBinary() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = String(localized: "Choose", bundle: .module)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        RubienPreferences.assistantBinaryPath = url.path
+        binaryPathOverride = url.path
+        recheckClaude()
     }
 }
 #endif

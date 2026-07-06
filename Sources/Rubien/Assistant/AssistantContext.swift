@@ -28,6 +28,16 @@ enum AssistantContext {
         return documents.appendingPathComponent("Rubien Assistant", isDirectory: true)
     }
 
+    /// Resolve the working folder from a user override: a non-empty override path
+    /// wins, otherwise the default `~/Documents/Rubien Assistant/`. Pure (no disk
+    /// touch) — the caller runs it through `ensureWorkspace` to create + validate.
+    static func workspaceURL(override: String?) -> URL {
+        if let override, !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true)
+        }
+        return defaultWorkspaceURL
+    }
+
     /// Ensure the working folder exists, returning the usable URL. Falls back to a
     /// temp-dir "Rubien Assistant" if the preferred folder can't be created (e.g. a
     /// TCC-denied `~/Documents`), so a turn always has a valid cwd.

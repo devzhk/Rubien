@@ -1603,16 +1603,14 @@ struct WebReaderView: View {
         // read-only MCP content channel (Phase 2b), so the agent reads THIS
         // document through Rubien's own tools. Reader windows always hold a
         // persisted reference; `?? 0` is unreachable in practice.
+        // Build the live session from the user's Assistant settings via the shared
+        // production factory (Phase 2c-5) — the PDF reader (Phase 3) reuses the same
+        // path, so the wiring lives in one place. Each seeded value stays editable
+        // per-conversation in the sidebar.
         let renderer = ChatTranscriptController()
         self._chatRenderer = StateObject(wrappedValue: renderer)
-        self._chatSession = StateObject(wrappedValue: ChatSessionController(
-            provider: ClaudeCodeProvider(contentChannel: MCPContentChannel.resolveBundled()),
-            transcript: renderer,
-            reference: ChatReference(
-                id: reference.id ?? 0,
-                title: reference.title,
-                authors: reference.authors.displayString),
-            workspaceURL: AssistantContext.ensureWorkspace(AssistantContext.defaultWorkspaceURL)))
+        self._chatSession = StateObject(wrappedValue: ReaderChatSession.make(
+            reference: reference, transcript: renderer))
     }
 
     var body: some View {

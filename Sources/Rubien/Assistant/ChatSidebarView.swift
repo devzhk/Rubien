@@ -459,12 +459,14 @@ struct ChatSidebarView: View {
 
     // MARK: Model + effort selector (maps to `--model` / `--effort`)
 
-    private static let modelChoices: [(label: String, value: String?)] = [
-        ("Fable", "fable"), ("Opus", "opus"), ("Sonnet", "sonnet"),
-    ]
-    private static let effortChoices: [(label: String, value: String?)] = [
-        ("Low", "low"), ("Medium", "medium"), ("High", "high"), ("xHigh", "xhigh"), ("Max", "max"),
-    ]
+    // Derived from the shared source of truth (AssistantModelOptions) so the
+    // sidebar and Settings ▸ Assistant can't offer different models/efforts. The
+    // picker tags are `String?` because `session.modelOverride` is optional (nil
+    // omits the flag), so the non-optional shared values are lifted to Optional.
+    private static let modelChoices: [(label: String, value: String?)] =
+        AssistantModelOptions.models.map { (label: $0.label, value: Optional($0.value)) }
+    private static let effortChoices: [(label: String, value: String?)] =
+        AssistantModelOptions.efforts.map { (label: $0.label, value: Optional($0.value)) }
 
     private var modelPicker: some View {
         Menu {
@@ -505,15 +507,12 @@ struct ChatSidebarView: View {
     }
 
     private var modelLabel: String {
-        Self.modelChoices.first { $0.value == session.modelOverride }?.label
-            ?? session.modelOverride?.capitalized  // a Settings-set full model name
-            ?? "Model"
+        AssistantModelOptions.modelLabel(for: session.modelOverride)
     }
 
     /// The gray effort word beside the model ("**Opus** High").
     private var effortLabel: String? {
-        guard let effort = session.effortOverride else { return nil }
-        return Self.effortChoices.first { $0.value == effort }?.label ?? effort.capitalized
+        AssistantModelOptions.effortLabel(for: session.effortOverride)
     }
 
     /// "Opus High ˅" as one concatenated Text (dark model · gray effort · chevron),

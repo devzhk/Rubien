@@ -52,6 +52,16 @@ final class AssistantContextTests: XCTestCase {
         XCTAssertEqual(AssistantContext.defaultWorkspaceURL.lastPathComponent, "Rubien Assistant")
     }
 
+    func testWorkspaceURLOverrideWinsWhenNonEmpty() {
+        let resolved = AssistantContext.workspaceURL(override: "/tmp/custom-assistant")
+        XCTAssertEqual(resolved.path, "/tmp/custom-assistant")
+    }
+
+    func testWorkspaceURLFallsBackToDefaultForNilOrEmptyOverride() {
+        XCTAssertEqual(AssistantContext.workspaceURL(override: nil), AssistantContext.defaultWorkspaceURL)
+        XCTAssertEqual(AssistantContext.workspaceURL(override: ""), AssistantContext.defaultWorkspaceURL)
+    }
+
     func testEnsureWorkspaceCreatesAndReturnsTheFolder() throws {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("assistant-ctx-\(UUID().uuidString)/Rubien Assistant", isDirectory: true)
