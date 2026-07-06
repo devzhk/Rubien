@@ -118,7 +118,7 @@ Five test targets:
 
 - `RubienCoreTests` — bulk of business-logic coverage. Fastest loop; prefer adding coverage here.
 - `RubienSyncTests` — CKRecord ↔ model round-trip per entity. Pure in-memory.
-- `RubienTests` — app-level tests that import SwiftUI.
+- `RubienTests` — app-level tests that import SwiftUI. **Every file in this target must be wrapped in `#if os(macOS)` … `#endif`** — SwiftPM compiles all test targets on Linux CI even for a filtered run, and the Mac-only `Rubien` module doesn't exist there ("no such module 'Rubien'"). A macOS build won't catch a missing guard; only Linux CI does.
 - `RubienCLITests` — exercises `.build/debug/rubien-cli` via Process. Keep JSON contracts stable.
 - `RubienPDFKitTests` — cross-backend parity tests. **Mac-only** by `Package.swift` conditional dep; linking poppler into the Linux test bundle triggers a swift-corelibs-xctest+libdispatch hang. Linux contributors who want to run them locally: see `scripts/run-linux-parity-tests.sh`.
 
