@@ -292,14 +292,19 @@ final class ChatSessionControllerTests: XCTestCase {
         let start = controller.composerFocusRequest
 
         controller.stageSelection("first passage")
-        XCTAssertEqual(controller.stagedSelection, "first passage")
+        XCTAssertEqual(controller.stagedSelection?.text, "first passage")
+        XCTAssertNil(controller.stagedSelection?.pageNumber, "a web selection carries no page")
         XCTAssertEqual(controller.composerFocusRequest, start + 1)
 
         // Re-Asking the identical passage still bumps the token (equality-independent
         // focus) even though `stagedSelection` is unchanged.
         controller.stageSelection("first passage")
-        XCTAssertEqual(controller.stagedSelection, "first passage")
+        XCTAssertEqual(controller.stagedSelection?.text, "first passage")
         XCTAssertEqual(controller.composerFocusRequest, start + 2)
+
+        // A PDF selection carries its 1-based page number (§5.4).
+        controller.stageSelection("figure caption", pageNumber: 7)
+        XCTAssertEqual(controller.stagedSelection?.pageNumber, 7)
     }
 
     func testAutoApproveInitParamSeedsTheProperty() {
@@ -405,14 +410,27 @@ final class ChatSessionControllerTests: XCTestCase {
         let provider = MockAgentProvider()
         let sink = SpyTranscriptSink()
         let controller = makeController(provider: provider, sink: sink)
-        controller.stagedSelection = "the scaled dot-product attention"
+        controller.stagedSelection = .init(text: "the scaled dot-product attention")
 
         await runTurn(controller, provider: provider, send: "explain this", events: [.turnCompleted(usage: nil)])
 
         let prompt = provider.lastRequest?.prompt ?? ""
         XCTAssertTrue(prompt.contains("> the scaled dot-product attention"))
         XCTAssertTrue(prompt.contains("explain this"))
+        XCTAssertFalse(prompt.contains("(p. "), "no page label without a page number")
         XCTAssertNil(controller.stagedSelection, "the staged selection is consumed by the send")
+    }
+
+    func testPDFStagedSelectionCarriesItsPageLabelIntoTheQuote() async {
+        let provider = MockAgentProvider()
+        let controller = makeController(provider: provider, sink: SpyTranscriptSink())
+        controller.stageSelection("multi-head attention", pageNumber: 4)
+
+        await runTurn(controller, provider: provider, send: "what is this?", events: [.turnCompleted(usage: nil)])
+
+        let prompt = provider.lastRequest?.prompt ?? ""
+        XCTAssertTrue(prompt.contains("> multi-head attention"), "the passage is quoted")
+        XCTAssertTrue(prompt.contains("> (p. 4)"), "the page label rides inside the blockquote")
     }
 
     func testBusyInAnotherWindowIsSurfacedWithoutSpawning() async {

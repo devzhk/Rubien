@@ -74,9 +74,15 @@ final class ChatSessionController: ObservableObject {
     /// False until the first message renders — the sidebar shows the quick-start
     /// page while false. A gate-refused turn renders nothing, so it stays false.
     @Published private(set) var hasMessages = false
-    /// A quoted selection staged from "Ask" (2c-4), shown as a chip and prepended as
-    /// a `> …` block on the next send.
-    @Published var stagedSelection: String?
+    /// A reader passage staged from "Ask" (§5.4), shown as a chip and prepended as
+    /// a `> …` block on the next send. `pageNumber` (1-based, PDF selections only)
+    /// is rendered as "(p. N)" on both the chip and the sent block.
+    struct StagedSelection {
+        var text: String
+        var pageNumber: Int? = nil
+    }
+
+    @Published var stagedSelection: StagedSelection?
     /// Bumped by `stageSelection` to ask the composer to take focus (Selection→Ask,
     /// §5.4). A monotonic token, not the selection string: re-Asking the *identical*
     /// passage must still re-focus, which an equality-based observer on
@@ -219,8 +225,8 @@ final class ChatSessionController: ObservableObject {
     /// (Selection→Ask, §5.4). The text is consumed as a `> …` block on the next
     /// send; no auto-send. Bumps `composerFocusRequest` so focus is requested on
     /// every Ask, even when the same passage is re-selected.
-    func stageSelection(_ text: String) {
-        stagedSelection = text
+    func stageSelection(_ text: String, pageNumber: Int? = nil) {
+        stagedSelection = StagedSelection(text: text, pageNumber: pageNumber)
         composerFocusRequest += 1
     }
 
@@ -444,14 +450,19 @@ final class ChatSessionController: ObservableObject {
     }
 
     /// Prepend any staged selection as a markdown blockquote so both the transcript
-    /// and the agent see the quoted passage above the question.
+    /// and the agent see the quoted passage above the question, with its page
+    /// number when the passage came from a PDF (§5.4).
     private func composeUserMessage(_ text: String) -> String {
-        guard let selection = stagedSelection?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !selection.isEmpty else { return text }
-        let quoted = selection
+        guard let staged = stagedSelection else { return text }
+        let selection = staged.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !selection.isEmpty else { return text }
+        var quoted = selection
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map { "> \($0)" }
             .joined(separator: "\n")
+        if let page = staged.pageNumber {
+            quoted += "\n>\n> (p. \(page))"
+        }
         return "\(quoted)\n\n\(text)"
     }
 }

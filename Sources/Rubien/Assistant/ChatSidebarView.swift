@@ -208,7 +208,6 @@ struct ChatSidebarView: View {
         }
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color(nsColor: .textBackgroundColor))
     }
 
     private func suggestionRow(_ icon: String, _ prompt: String) -> some View {
@@ -315,16 +314,22 @@ struct ChatSidebarView: View {
         .padding(.top, 8)
     }
 
-    private func selectionChip(_ selection: String) -> some View {
+    private func selectionChip(_ selection: ChatSessionController.StagedSelection) -> some View {
         HStack(spacing: 6) {
             Image(systemName: "quote.opening")
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary)
-            Text(selection)
+            Text(selection.text)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
+            if let page = selection.pageNumber {
+                Text("p. \(page)")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .layoutPriority(1)
+            }
             Spacer()
             Button {
                 session.stagedSelection = nil
@@ -648,6 +653,32 @@ struct ChatSidebarView: View {
             try? await Task.sleep(for: .milliseconds(50))
             composerFocused = true
         }
+    }
+}
+
+// MARK: - Floating card (Phase 3a)
+
+/// The assistant as a floating card over the reader's content — the details-panel
+/// idiom (`FloatingPanel`) wearing the annotation popovers' Liquid Glass surface
+/// (the transcript WebView paints no page background, so the glass shows through
+/// the whole card; bubbles and chips keep their own opaque fills). Resizable from
+/// its leading edge. Readers overlay it with `.overlay(alignment: .trailing)`;
+/// the trailing inset and the show/hide `.animation` stay at the call site (they
+/// differ per reader), the rest of the presentation lives here.
+struct FloatingChatPanel: View {
+    let session: ChatSessionController
+    let renderer: ChatTranscriptController
+    @Binding var width: CGFloat
+    let onClose: () -> Void
+
+    var body: some View {
+        FloatingPanel(width: $width, range: 300...640) {
+            ChatSidebarView(session: session, renderer: renderer, onClose: onClose)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .floatingGlassSurface(cornerRadius: 14)
+        }
+        .padding(.vertical, 8)
+        .transition(.move(edge: .trailing).combined(with: .opacity))
     }
 }
 

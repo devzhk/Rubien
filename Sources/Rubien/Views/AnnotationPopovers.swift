@@ -336,22 +336,8 @@ struct NotionToolbarButtonStyle: ButtonStyle {
 // and footer — reads as one translucent sheet; its light-theme dark text stays
 // legible over the light glass.
 private struct AnnotationPopoverGlassSurface: ViewModifier {
-    @ViewBuilder
     func body(content: Content) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 9, style: .continuous)
-        if #available(macOS 26.0, *) {
-            content
-                .glassEffect(.regular, in: shape)
-                .shadow(color: .black.opacity(0.18), radius: 12, y: 5)
-        } else {
-            content
-                .background(.ultraThinMaterial, in: shape)
-                .overlay(
-                    shape.strokeBorder(Color.white.opacity(0.22), lineWidth: 0.5)
-                )
-                .shadow(color: .black.opacity(0.28), radius: 16, y: 6)
-                .shadow(color: .black.opacity(0.12), radius: 3, y: 1)
-        }
+        content.floatingGlassSurface(cornerRadius: 9)
     }
 }
 #endif

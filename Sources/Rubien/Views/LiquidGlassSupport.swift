@@ -33,6 +33,27 @@ extension View {
         }
     }
 
+    /// The floating-glass treatment shared by the annotation popovers and the
+    /// assistant chat card: real Liquid Glass on macOS 26+, with an
+    /// `.ultraThinMaterial` + hairline + deeper-shadow fallback below. Unlike
+    /// `neutralGlassCard`, this is the *tinted* glass (`glassEffect`) the
+    /// popovers use — the two must stay visually identical.
+    @ViewBuilder
+    func floatingGlassSurface(cornerRadius: CGFloat) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        if #available(macOS 26.0, *) {
+            glassEffect(.regular, in: shape)
+                .shadow(color: .black.opacity(0.18), radius: 12, y: 5)
+        } else {
+            background(.ultraThinMaterial, in: shape)
+                .overlay(
+                    shape.strokeBorder(Color.white.opacity(0.22), lineWidth: 0.5)
+                )
+                .shadow(color: .black.opacity(0.28), radius: 16, y: 6)
+                .shadow(color: .black.opacity(0.12), radius: 3, y: 1)
+        }
+    }
+
     @ViewBuilder
     func legacyToolbarBackground<S: ShapeStyle>(
         _ style: S,

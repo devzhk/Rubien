@@ -1560,10 +1560,7 @@ struct WebReaderView: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var showAnnotationSidebar = true
     @State private var showChatSidebar = false
-    /// Live width of the reader window's content, for the narrow-window pane
-    /// policy (§5.1): when all three panes can't fit, opening one side pane
-    /// collapses the other.
-    @State private var containerWidth: CGFloat = 0
+    @State private var chatPanelWidth: CGFloat = 380
     /// Note-draft text for the selection popover. Lifted from the deleted WebSelectionActionBar
     /// so the shared AnnotationSelectionPopover can take a Binding into the same state across
     /// rebuilds. The `.onChange(of: viewModel.pendingSelection?.text ?? "")` modifier below
@@ -1572,28 +1569,11 @@ struct WebReaderView: View {
     @State private var noteMarkdownForSelection: String = ""
     private let onClose: (() -> Void)?
 
-    // Assistant chat sidebar (Phase 2c): one renderer + session controller per
-    // reader window; conversation state is in-memory only (D5).
+    // Assistant chat (Phase 2c, floating card since Phase 3a): one renderer +
+    // session controller per reader window; conversation state is in-memory
+    // only (D5).
     @StateObject private var chatRenderer: ChatTranscriptController
     @StateObject private var chatSession: ChatSessionController
-
-    /// Main pane 540 + annotation 260 + chat 300 + dividers/margins: below this,
-    /// the two side panes swap instead of squeezing (§5.1).
-    private static let threePaneMinWidth: CGFloat = 1150
-
-    /// Show the assistant sidebar, applying the narrow-window pane policy (§5.1):
-    /// below the three-pane width, opening one side pane collapses the other so
-    /// three panes never squeeze. Call inside `withAnimation`.
-    private func presentChatSidebar() {
-        showChatSidebar = true
-        if containerWidth < Self.threePaneMinWidth { showAnnotationSidebar = false }
-    }
-
-    /// The symmetric counterpart to `presentChatSidebar` for the annotation sidebar.
-    private func presentAnnotationSidebar() {
-        showAnnotationSidebar = true
-        if containerWidth < Self.threePaneMinWidth { showChatSidebar = false }
-    }
 
     init(reference: Reference, onClose: (() -> Void)? = nil) {
         self.onClose = onClose
@@ -1635,6 +1615,18 @@ struct WebReaderView: View {
                 }
             }
             .frame(minWidth: 540)
+            // The assistant floats over the document pane as a resizable Liquid
+            // Glass card (Phase 3a, details-panel idiom) — anchored to this pane,
+            // not the window, so it never covers the annotation sidebar.
+            .overlay(alignment: .trailing) {
+                if showChatSidebar {
+                    FloatingChatPanel(session: chatSession, renderer: chatRenderer, width: $chatPanelWidth) {
+                        showChatSidebar = false
+                    }
+                    .padding(.trailing, 6)
+                }
+            }
+            .animation(.easeInOut(duration: 0.22), value: showChatSidebar)
 
             if showAnnotationSidebar {
                 WebAnnotationSidebarView(viewModel: viewModel)
@@ -1649,29 +1641,8 @@ struct WebReaderView: View {
                         .allowsHitTesting(false)
                     }
             }
-
-            if showChatSidebar {
-                ChatSidebarView(session: chatSession, renderer: chatRenderer, onClose: {
-                    withAnimation { showChatSidebar = false }
-                })
-                .frame(minWidth: 300, idealWidth: 340, maxWidth: 560)
-                .overlay(alignment: .leading) {
-                    LinearGradient(
-                        colors: [Color.black.opacity(colorScheme == .dark ? 0.18 : 0.06), .clear],
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    )
-                    .frame(width: 6)
-                    .allowsHitTesting(false)
-                }
-            }
         }
         .frame(minWidth: 900, minHeight: 620)
-        .onGeometryChange(for: CGFloat.self) { proxy in
-            proxy.size.width
-        } action: { width in
-            containerWidth = width
-        }
         // Window closing (the root view disappears): kill any in-flight agent
         // turn's process group (§4.4 step 9).
         .onDisappear { chatSession.teardown() }
@@ -1722,19 +1693,13 @@ struct WebReaderView: View {
 
             ToolbarItemGroup(placement: .primaryAction) {
                 Button {
-                    withAnimation {
-                        if showAnnotationSidebar { showAnnotationSidebar = false }
-                        else { presentAnnotationSidebar() }
-                    }
+                    withAnimation { showAnnotationSidebar.toggle() }
                 } label: {
                     Label(String(localized: "Sidebar", bundle: .module), systemImage: "sidebar.right")
                 }
 
                 Button {
-                    withAnimation {
-                        if showChatSidebar { showChatSidebar = false }
-                        else { presentChatSidebar() }
-                    }
+                    showChatSidebar.toggle()
                 } label: {
                     Label(String(localized: "Assistant", bundle: .module), systemImage: "bubble.left.and.text.bubble.right")
                 }
@@ -1796,7 +1761,7 @@ struct WebReaderView: View {
                         chatSession.stageSelection(text)
                         viewModel.clearSelection()
                         noteMarkdownForSelection = ""
-                        withAnimation { presentChatSidebar() }
+                        showChatSidebar = true
                     }
                 )
                 .fixedSize()

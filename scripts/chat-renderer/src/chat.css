@@ -3,7 +3,6 @@
    window between load and the first setTheme call. */
 
 :root {
-  --chat-bg: #ffffff;
   --chat-fg: #1d1d1f;
   --chat-fg-muted: #6b6b70;
   --chat-user-bg: #e9f0ff;
@@ -33,7 +32,6 @@
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --chat-bg: #1c1c1e;
     --chat-fg: #f2f2f5;
     --chat-fg-muted: #9a9aa2;
     --chat-user-bg: #12386b;
@@ -57,7 +55,6 @@
 }
 
 :root[data-theme="dark"] {
-  --chat-bg: #1c1c1e;
   --chat-fg: #f2f2f5;
   --chat-fg-muted: #9a9aa2;
   --chat-user-bg: #12386b;
@@ -84,7 +81,10 @@ body {
   margin: 0;
   padding: 0;
   height: 100%;
-  background: var(--chat-bg);
+  /* No page background: the WKWebView is non-drawing and the native side
+     (FloatingChatPanel's Liquid Glass card) paints the surface behind the
+     transcript. Bubbles/chips keep their own opaque fills for legibility. */
+  background: transparent;
   color: var(--chat-fg);
   font-family: var(--chat-font);
   font-size: 14px;

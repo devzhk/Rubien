@@ -421,9 +421,30 @@ struct PDFReaderView: View {
     @State private var noteMarkdownForSelection: String = ""
     private let onClose: (() -> Void)?
 
+    // Assistant chat (Phase 3a): one renderer + session controller per reader
+    // window; conversation state is in-memory only (D5). Floats as a card over
+    // the content (details-panel idiom), not a docked pane.
+    @State private var showChatSidebar = false
+    @State private var chatPanelWidth: CGFloat = 380
+
+    @StateObject private var chatRenderer: ChatTranscriptController
+    @StateObject private var chatSession: ChatSessionController
+
+    /// The annotation sidebar's live width (the drag-clamp expression its
+    /// `.frame` uses), for insetting the floating assistant card beside it.
+    private var annotationSidebarWidth: CGFloat {
+        min(max(sidebarWidth - dragOffset, 260), 500)
+    }
+
     init(reference: Reference, pdfURL: URL, onClose: (() -> Void)? = nil) {
         self.onClose = onClose
         self._viewModel = StateObject(wrappedValue: PDFReaderViewModel(reference: reference, pdfURL: pdfURL))
+        // Live session from the user's Assistant settings via the shared production
+        // factory (Phase 2c-5) — same path as the web reader.
+        let renderer = ChatTranscriptController()
+        self._chatRenderer = StateObject(wrappedValue: renderer)
+        self._chatSession = StateObject(wrappedValue: ReaderChatSession.make(
+            reference: reference, transcript: renderer))
     }
 
     /// Convenience initializer that resolves the PDF URL via the cache.
@@ -534,7 +555,7 @@ struct PDFReaderView: View {
                         )
 
                     AnnotationSidebarView(viewModel: viewModel)
-                        .frame(width: min(max(sidebarWidth - dragOffset, 260), 500))
+                        .frame(width: annotationSidebarWidth)
                         .transition(.move(edge: .trailing))
                 }
             }
@@ -544,6 +565,22 @@ struct PDFReaderView: View {
             pdfContainerBackground
                 .ignoresSafeArea(.container, edges: .top)
         }
+        // The assistant floats over the PDF as a resizable Liquid Glass card
+        // (Phase 3a, details-panel idiom) — inset past the annotation sidebar's
+        // live width (fixed pane + 4 pt divider) so it sits beside it, never
+        // over it.
+        .overlay(alignment: .trailing) {
+            if showChatSidebar {
+                FloatingChatPanel(session: chatSession, renderer: chatRenderer, width: $chatPanelWidth) {
+                    showChatSidebar = false
+                }
+                .padding(.trailing, showAnnotationSidebar ? annotationSidebarWidth + 4 + 6 : 6)
+            }
+        }
+        .animation(.easeInOut(duration: 0.22), value: showChatSidebar)
+        // Window closing (the root view disappears): kill any in-flight agent
+        // turn's process group (§4.4 step 9).
+        .onDisappear { chatSession.teardown() }
         .animation(
             .spring(response: 0.3, dampingFraction: 0.82),
             value: showAnnotationSidebar
@@ -592,6 +629,13 @@ struct PDFReaderView: View {
                     Label("\(viewModel.annotations.count)", systemImage: "sidebar.right")
                 }
                 .help(String(localized: "Toggle annotations sidebar", bundle: .module))
+
+                Button {
+                    showChatSidebar.toggle()
+                } label: {
+                    Label(String(localized: "Assistant", bundle: .module), systemImage: "bubble.left.and.text.bubble.right")
+                }
+                .help(String(localized: "Chat about this document", bundle: .module))
             }
         }
         .onAppear {
@@ -645,6 +689,17 @@ struct PDFReaderView: View {
                     onDismiss: {
                         viewModel.clearStagedSelection()
                         noteMarkdownForSelection = ""
+                    },
+                    onAsk: {
+                        let text = viewModel.stagedSelectionText
+                        guard !text.isEmpty else { return }
+                        // 0-based PDFKit page index → the 1-based "(p. N)" label (§5.4).
+                        chatSession.stageSelection(
+                            text,
+                            pageNumber: (viewModel.stagedSelectionPDFAnchor?.pageIndex).map { $0 + 1 })
+                        viewModel.clearStagedSelection()
+                        noteMarkdownForSelection = ""
+                        showChatSidebar = true
                     }
                 )
                 .fixedSize()
