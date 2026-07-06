@@ -1704,8 +1704,9 @@ struct WebReaderView: View {
                 Button {
                     withAnimation { showAnnotationSidebar.toggle() }
                 } label: {
-                    Label(String(localized: "Sidebar", bundle: .module), systemImage: "sidebar.left")
+                    Label(String(localized: "Notes", bundle: .module), systemImage: "sidebar.left")
                 }
+                .help(String(localized: "Toggle notes sidebar", bundle: .module))
 
                 Button {
                     showChatSidebar.toggle()

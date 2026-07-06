@@ -13,6 +13,23 @@ enum PDFSidebarTab: String, CaseIterable {
     case info
 }
 
+enum PDFReaderMetrics {
+    static let sidebarVisibleDividerWidth: CGFloat = 4
+    static let sidebarResizeHitTargetWidth = ReaderResizeMetrics.hitTargetWidth
+
+    static var sidebarResizeHitTargetOutset: CGFloat {
+        (sidebarResizeHitTargetWidth - sidebarVisibleDividerWidth) / 2
+    }
+
+    static func sidebarWidth(
+        afterTrailingEdgeTranslation translation: CGFloat,
+        from width: CGFloat,
+        in range: ClosedRange<CGFloat>
+    ) -> CGFloat {
+        min(max(width + translation, range.lowerBound), range.upperBound)
+    }
+}
+
 enum AnnotationTool: String, CaseIterable {
     case cursor = "cursor"
     case highlight = "highlight"
@@ -407,7 +424,7 @@ struct PDFReaderView: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var showOutlineSidebar = true
     @State private var outlineSidebarWidth: CGFloat = 240
-    @GestureState private var outlineDragOffset: CGFloat = 0
+    @State private var outlineDragOffset: CGFloat = 0
     @State private var outlineSidebarTab: PDFSidebarTab = .outline
     @State private var isEditingPage = false
     @State private var pageInputText = ""
@@ -456,28 +473,30 @@ struct PDFReaderView: View {
                     .frame(width: min(max(outlineSidebarWidth + outlineDragOffset, 200), 400))
                     .transition(.move(edge: .leading))
 
-                Rectangle()
-                    .fill(pdfContainerBackground)
-                    .frame(width: 4)
-                    .frame(maxHeight: .infinity)
-                    .contentShape(Rectangle())
-                    .onHover { hovering in
-                        if hovering {
-                            NSCursor.resizeLeftRight.push()
-                        } else {
-                            NSCursor.pop()
+                ZStack {
+                    ReaderResizeHandle(
+                        onDragChanged: { translation in
+                            outlineDragOffset = translation
+                        },
+                        onDragEnded: { translation in
+                            outlineSidebarWidth = PDFReaderMetrics.sidebarWidth(
+                                afterTrailingEdgeTranslation: translation,
+                                from: outlineSidebarWidth,
+                                in: 200...400
+                            )
+                            outlineDragOffset = 0
                         }
-                    }
-                    .gesture(
-                        DragGesture(minimumDistance: 1)
-                            .updating($outlineDragOffset) { value, state, _ in
-                                state = value.translation.width
-                            }
-                            .onEnded { value in
-                                let newWidth = outlineSidebarWidth + value.translation.width
-                                outlineSidebarWidth = min(max(newWidth, 200), 400)
-                            }
                     )
+                        .frame(width: PDFReaderMetrics.sidebarResizeHitTargetWidth)
+                        .frame(maxHeight: .infinity)
+
+                    Rectangle()
+                        .fill(pdfContainerBackground)
+                        .frame(width: PDFReaderMetrics.sidebarVisibleDividerWidth)
+                        .frame(maxHeight: .infinity)
+                        .allowsHitTesting(false)
+                }
+                    .padding(.horizontal, -PDFReaderMetrics.sidebarResizeHitTargetOutset)
             }
 
             // Elevated plane: center PDF + right annotation sidebar
