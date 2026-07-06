@@ -261,12 +261,10 @@ struct RubienSettingsView: View {
                         RubienPreferences.assistantWorkspacePath = nil
                         workspacePathOverride = ""
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    .buttonStyle(SettingsActionButtonStyle())
                 }
                 Button(String(localized: "Choose…", bundle: .module)) { pickWorkspace() }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    .buttonStyle(SettingsActionButtonStyle())
             }
         } header: {
             Text(String(localized: "Working folder", bundle: .module))
@@ -324,12 +322,10 @@ struct RubienSettingsView: View {
                         binaryPathOverride = ""
                         recheckClaude()
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    .buttonStyle(SettingsActionButtonStyle())
                 }
                 Button(String(localized: "Choose…", bundle: .module)) { pickBinary() }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                    .buttonStyle(SettingsActionButtonStyle())
             }
         } header: {
             Text(String(localized: "Claude Code CLI", bundle: .module))
@@ -369,8 +365,7 @@ struct RubienSettingsView: View {
             }
             Spacer()
             Button(String(localized: "Recheck", bundle: .module)) { recheckClaude() }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
+                .buttonStyle(SettingsActionButtonStyle())
                 .disabled(isProbingClaude)
         }
     }
@@ -435,6 +430,33 @@ struct RubienSettingsView: View {
         RubienPreferences.assistantBinaryPath = url.path
         binaryPathOverride = url.path
         recheckClaude()
+    }
+}
+
+/// A small text action button for the Settings forms: plain text at rest (no
+/// border), a subtle rounded highlight only on mouse-hover, a touch more on press —
+/// the same idiom as the sidebar's model/effort menu button (`HeaderControlButtonStyle`).
+/// The stock `.bordered` / `.automatic` button gave no visible hover feedback on
+/// macOS, and a persistent border read as heavier than a form action needs.
+private struct SettingsActionButtonStyle: ButtonStyle {
+    @State private var hovered = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(Color.primary.opacity(0.85))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(configuration.isPressed
+                          ? Color.primary.opacity(0.10)
+                          : (hovered ? Color.primary.opacity(0.06) : Color.clear))
+            )
+            .contentShape(Rectangle())
+            .onHover { hovered = $0 }
+            .animation(.easeOut(duration: 0.12), value: hovered)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 #endif
