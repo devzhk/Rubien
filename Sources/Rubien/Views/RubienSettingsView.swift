@@ -20,6 +20,15 @@ struct RubienSettingsView: View {
     @State private var probeGeneration = 0
     @State private var workspacePathOverride = ""
     @State private var binaryPathOverride = ""
+    // Observable mirrors of the four default prefs. A Picker/Toggle bound STRAIGHT to
+    // a `Binding(get:set:)` over RubienPreferences persists but doesn't re-render (the
+    // store isn't observable), so a pick only showed after relaunch — these @State
+    // mirrors drive the controls; `.onChange` writes them through to the prefs. Initial
+    // values match the pref defaults so seeding an unset pref doesn't write one back.
+    @State private var defaultModel = "opus"
+    @State private var defaultEffort = "high"
+    @State private var defaultWebAccess = true
+    @State private var defaultAutoApprove = false
     /// Latched at the start of an upload session so the indicator can render
     /// as "Uploading 4 of 31 PDFs to iCloud". Cleared back to nil when the
     /// queue reaches 0 so the next upload session re-latches with its own
@@ -225,8 +234,17 @@ struct RubienSettingsView: View {
         .task {
             workspacePathOverride = RubienPreferences.assistantWorkspacePath ?? ""
             binaryPathOverride = RubienPreferences.assistantBinaryPath ?? ""
+            defaultModel = RubienPreferences.assistantModel
+            defaultEffort = RubienPreferences.assistantEffort
+            defaultWebAccess = RubienPreferences.assistantWebAccess
+            defaultAutoApprove = RubienPreferences.assistantAutoApprove
             if claudeAvailability == nil { recheckClaude() }
         }
+        // Persist each mirror to the (non-observable) prefs when the user changes it.
+        .onChange(of: defaultModel) { _, value in RubienPreferences.assistantModel = value }
+        .onChange(of: defaultEffort) { _, value in RubienPreferences.assistantEffort = value }
+        .onChange(of: defaultWebAccess) { _, value in RubienPreferences.assistantWebAccess = value }
+        .onChange(of: defaultAutoApprove) { _, value in RubienPreferences.assistantAutoApprove = value }
     }
 
     private var assistantWorkspaceSection: some View {
@@ -258,23 +276,23 @@ struct RubienSettingsView: View {
 
     private var assistantDefaultsSection: some View {
         Section {
-            Picker(selection: assistantModelBinding) {
+            Picker(selection: $defaultModel) {
                 ForEach(AssistantModelOptions.models, id: \.value) { Text($0.label).tag($0.value) }
             } label: {
                 Text(String(localized: "Model", bundle: .module))
             }
 
-            Picker(selection: assistantEffortBinding) {
+            Picker(selection: $defaultEffort) {
                 ForEach(AssistantModelOptions.efforts, id: \.value) { Text($0.label).tag($0.value) }
             } label: {
                 Text(String(localized: "Reasoning effort", bundle: .module))
             }
 
-            Toggle(isOn: assistantWebBinding) {
+            Toggle(isOn: $defaultWebAccess) {
                 Text(String(localized: "Web search", bundle: .module))
             }
 
-            Picker(selection: assistantApprovalBinding) {
+            Picker(selection: $defaultAutoApprove) {
                 Text(String(localized: "Ask before writes", bundle: .module)).tag(false)
                 Text(String(localized: "Auto-accept actions", bundle: .module)).tag(true)
             } label: {
@@ -360,26 +378,6 @@ struct RubienSettingsView: View {
     /// so this still re-renders when the picker/reset buttons change it).
     private var effectiveWorkspacePath: String {
         AssistantContext.workspaceURL(override: workspacePathOverride).path
-    }
-
-    private var assistantModelBinding: Binding<String> {
-        Binding(get: { RubienPreferences.assistantModel },
-                set: { RubienPreferences.assistantModel = $0 })
-    }
-
-    private var assistantEffortBinding: Binding<String> {
-        Binding(get: { RubienPreferences.assistantEffort },
-                set: { RubienPreferences.assistantEffort = $0 })
-    }
-
-    private var assistantWebBinding: Binding<Bool> {
-        Binding(get: { RubienPreferences.assistantWebAccess },
-                set: { RubienPreferences.assistantWebAccess = $0 })
-    }
-
-    private var assistantApprovalBinding: Binding<Bool> {
-        Binding(get: { RubienPreferences.assistantAutoApprove },
-                set: { RubienPreferences.assistantAutoApprove = $0 })
     }
 
     private func claudeStatusTitle(_ availability: AgentAvailability) -> String {
