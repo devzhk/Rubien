@@ -1,3 +1,4 @@
+#if os(macOS)
 import XCTest
 @testable import Rubien
 
@@ -104,3 +105,4 @@ final class MCPContentChannelTests: XCTestCase {
 private final class NoExecutablesFileManager: FileManager {
     override func isExecutableFile(atPath path: String) -> Bool { false }
 }
+#endif

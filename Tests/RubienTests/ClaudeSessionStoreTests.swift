@@ -1,3 +1,4 @@
+#if os(macOS)
 import XCTest
 @testable import Rubien
 
@@ -259,3 +260,4 @@ final class ClaudeSessionStoreTests: XCTestCase {
         XCTAssertFalse(preview.contains("  "), "runs of whitespace collapse to single spaces")
     }
 }
+#endif

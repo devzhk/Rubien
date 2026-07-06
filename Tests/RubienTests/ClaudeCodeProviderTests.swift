@@ -1,3 +1,4 @@
+#if os(macOS)
 import Darwin
 import XCTest
 
@@ -499,3 +500,4 @@ private extension Array where Element == String {
         return false
     }
 }
+#endif

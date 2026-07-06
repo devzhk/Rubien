@@ -1,3 +1,4 @@
+#if os(macOS)
 import XCTest
 
 @testable import Rubien
@@ -56,3 +57,4 @@ final class AssistantTurnGateTests: XCTestCase {
         XCTAssertFalse(busy)
     }
 }
+#endif

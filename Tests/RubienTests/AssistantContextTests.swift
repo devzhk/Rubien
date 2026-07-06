@@ -1,3 +1,4 @@
+#if os(macOS)
 import XCTest
 @testable import Rubien
 
@@ -88,3 +89,4 @@ final class AssistantContextTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: resolved.path))
     }
 }
+#endif

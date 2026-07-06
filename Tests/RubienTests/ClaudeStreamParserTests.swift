@@ -1,3 +1,4 @@
+#if os(macOS)
 import XCTest
 
 @testable import Rubien
@@ -176,3 +177,4 @@ final class ClaudeStreamParserTests: XCTestCase {
         return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
     }
 }
+#endif
