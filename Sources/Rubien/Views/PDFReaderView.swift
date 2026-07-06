@@ -588,23 +588,8 @@ struct PDFReaderView: View {
             }
 
             ToolbarItemGroup(placement: .primaryAction) {
-                // Annotations live in the left sidebar's Notes tab (the right
-                // edge belongs to the assistant) — this jumps there, or closes
-                // the sidebar when already showing them.
-                Button {
-                    withAnimation {
-                        if showOutlineSidebar && outlineSidebarTab == .annotations {
-                            showOutlineSidebar = false
-                        } else {
-                            showOutlineSidebar = true
-                            outlineSidebarTab = .annotations
-                        }
-                    }
-                } label: {
-                    Label("\(viewModel.annotations.count)", systemImage: "highlighter")
-                }
-                .help(String(localized: "Show annotations", bundle: .module))
-
+                // No annotations button — the left sidebar's Notes tab is the
+                // (sole, sufficient) way in; the right edge belongs to the assistant.
                 Button {
                     showChatSidebar.toggle()
                 } label: {
