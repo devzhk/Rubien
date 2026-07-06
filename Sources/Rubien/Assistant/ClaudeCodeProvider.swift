@@ -87,6 +87,14 @@ final class ClaudeCodeProvider: AgentProvider {
             ClaudeSessionStore().recentSessions(workspaceURL: workspaceURL, limit: limit)
         }.value
     }
+
+    /// A picked session's full transcript (resume restores the conversation's
+    /// content). Same off-main-actor file I/O pattern as `recentSessions`.
+    func sessionTranscript(sessionID: String, workspaceURL: URL) async -> [ChatRenderMessage] {
+        await Task.detached(priority: .userInitiated) {
+            ClaudeSessionStore().fullTranscript(sessionID: sessionID, workspaceURL: workspaceURL)
+        }.value
+    }
 }
 
 // MARK: - Turn engine (all mutable state is actor-isolated)

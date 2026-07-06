@@ -83,6 +83,7 @@ struct ClaudeSessionStore {
             if preview == nil,
                obj["type"] as? String == "user",
                obj["isMeta"] as? Bool != true,  // skip Claude's internal/meta entries (command caveats etc.)
+               obj["isSidechain"] as? Bool != true,  // and subagent-internal rows
                let text = Self.firstUserText(obj) {
                 preview = text
             }
@@ -90,6 +91,58 @@ struct ClaudeSessionStore {
         }
         guard let preview, cwdMatches else { return nil }
         return AgentSessionSummary(id: sessionID, preview: preview, date: date)
+    }
+
+    /// Rebuild a picked session's renderable transcript from its JSONL so a resume
+    /// restores the conversation's content, not just a notice. Mirrors the live
+    /// event mapping: user text → user rows, assistant text → assistant rows,
+    /// an assistant message's `tool_use` blocks → completed tool-chip rows right
+    /// after its text (their results arrived later, but the chips belong to the
+    /// message that invoked them). Meta/sidechain entries and tool-result-only
+    /// user turns render nothing, exactly as they do live. Returns `[]` when the
+    /// file is missing/unreadable — the caller falls back to the preview notice.
+    /// Known fidelity limit: a tool the user DENIED restores as a completed chip
+    /// (denials live in stream-only `permission_denials`, not the session file's
+    /// message entries) — accepted for now; denials are rare in history.
+    func fullTranscript(sessionID: String, workspaceURL: URL) -> [ChatRenderMessage] {
+        let dir = projectsRoot.appendingPathComponent(
+            Self.projectDirName(forWorkspacePath: workspaceURL.path), isDirectory: true)
+        let fileURL = dir.appendingPathComponent("\(sessionID).jsonl")
+        guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else { return [] }
+
+        var rows: [ChatRenderMessage] = []
+        func append(_ role: ChatRole, _ body: String) {
+            rows.append(ChatRenderMessage(role: role, body: body, seq: rows.count))
+        }
+        for line in content.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard let obj = Self.parseLine(line),
+                  obj["isMeta"] as? Bool != true,
+                  obj["isSidechain"] as? Bool != true,  // subagent internals are not conversation rows
+                  let message = obj["message"] as? [String: Any]
+            else { continue }
+            switch obj["type"] as? String {
+            case "user":
+                if let text = Self.messageText(message), !text.isEmpty {
+                    append(.user, text)
+                }
+            case "assistant":
+                if let text = Self.messageText(message), !text.isEmpty {
+                    append(.assistant, text)
+                }
+                for block in (message["content"] as? [[String: Any]]) ?? []
+                where block["type"] as? String == "tool_use" {
+                    guard let name = block["name"] as? String else { continue }
+                    let chip = ToolChipPayload(
+                        name: name,
+                        detail: ClaudeStreamParser.summarize(block["input"]),
+                        status: .completed)
+                    append(.tool, ChatTranscriptJS.encodeArg(chip))
+                }
+            default:
+                break
+            }
+        }
+        return rows
     }
 
     /// The file's modification date (cached by `contentsOfDirectory`'s prefetch),
@@ -105,24 +158,27 @@ struct ClaudeSessionStore {
         return obj
     }
 
-    /// Extract the visible text of a `type:"user"` entry. `message.content` is either
-    /// a plain string or an array of typed blocks; join the `text` blocks and skip
-    /// tool-result-only turns (which produce no text). Collapses whitespace and
-    /// truncates for a one-glance preview.
+    /// Extract the visible text of a `type:"user"` entry, collapsed and truncated
+    /// for a one-glance preview. Tool-result-only turns produce no text → nil.
     private static func firstUserText(_ obj: [String: Any]) -> String? {
-        guard let message = obj["message"] as? [String: Any] else { return nil }
-        let raw: String
-        if let string = message["content"] as? String {
-            raw = string
-        } else if let blocks = message["content"] as? [[String: Any]] {
-            raw = blocks
-                .compactMap { ($0["type"] as? String) == "text" ? $0["text"] as? String : nil }
-                .joined(separator: " ")
-        } else {
-            return nil
-        }
+        guard let message = obj["message"] as? [String: Any],
+              let raw = messageText(message) else { return nil }
         let collapsed = raw.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
         guard !collapsed.isEmpty else { return nil }
         return collapsed.count > 140 ? String(collapsed.prefix(140)) + "…" : collapsed
+    }
+
+    /// A message's full visible text: `content` is either a plain string or an
+    /// array of typed blocks (join the `text` blocks; tool_use/tool_result blocks
+    /// carry no visible text). nil when there's no textual content at all.
+    private static func messageText(_ message: [String: Any]) -> String? {
+        if let string = message["content"] as? String { return string }
+        if let blocks = message["content"] as? [[String: Any]] {
+            let joined = blocks
+                .compactMap { ($0["type"] as? String) == "text" ? $0["text"] as? String : nil }
+                .joined(separator: "\n\n")
+            return joined.isEmpty ? nil : joined
+        }
+        return nil
     }
 }

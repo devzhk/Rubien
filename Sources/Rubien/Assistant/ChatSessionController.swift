@@ -127,6 +127,15 @@ final class ChatSessionController: ObservableObject {
     private var seedSent = false
     /// The in-flight turn (exposed read-only so tests can await it).
     private(set) var turnTask: Task<Void, Never>?
+    /// The in-flight resume transcript restore (exposed read-only so tests can
+    /// await it). Stale loads are dropped by the `conversationEpoch` guard, not
+    /// cancelled.
+    private(set) var resumeTask: Task<Void, Never>?
+    /// Bumped ONLY when the conversation identity changes (the reset shared by
+    /// `newConversation`/`resume`) — unlike `generation`, which also advances on
+    /// every send. The resume restore keys on THIS: a quick follow-up send must
+    /// not drop the history load, while a new conversation or another resume must.
+    private var conversationEpoch = 0
     /// `toolUseStarted` details per tool name, FIFO — the single chip emitted on a
     /// tool's terminal event pops the oldest (the renderer's `addToolChip` is add-only,
     /// and events carry no tool-use id to match started↔completed exactly).
@@ -274,6 +283,7 @@ final class ChatSessionController: ObservableObject {
     private func resetConversationState() {
         provider.cancel()
         generation += 1
+        conversationEpoch += 1
         transcript.reset()
         toolDetails.removeAll()
         renderLog.removeAll()
@@ -318,7 +328,37 @@ final class ChatSessionController: ObservableObject {
         liveSessionID = summary.id
         seedSent = true
         hasMessages = true
-        renderNotice("_Resumed a previous conversation:_ “\(summary.preview)”")
+        // Restore the conversation's content from the provider's own store (D5 —
+        // Rubien still persists nothing). The read is asynchronous but fast (one
+        // file); the epoch drops a stale load when another resume/newConversation
+        // won — but NOT when a quick follow-up send did (same conversation; the
+        // history must still prepend).
+        let epoch = conversationEpoch
+        resumeTask = Task { [weak self] in
+            guard let self else { return }
+            let history = await self.provider.sessionTranscript(
+                sessionID: summary.id, workspaceURL: self.workspaceURL)
+            guard epoch == self.conversationEpoch else { return }
+            guard !history.isEmpty else {
+                // Unreadable/empty store (or a provider without one): keep the
+                // old notice-only behavior so the resume is still explained.
+                self.renderNotice("_Resumed a previous conversation:_ “\(summary.preview)”")
+                return
+            }
+            // Prepend the history to anything rendered while it loaded (a quick
+            // follow-up send's user row and stream), re-sequenced, and re-render
+            // the pane from the merged log. If a turn is streaming, its partial
+            // deltas are lost to the reset and the bubble re-opens lazily on the
+            // next delta — the same accepted tradeoff as a mid-stream pane toggle.
+            let tail = self.renderLog
+            self.renderLog = []
+            self.renderSeq = 0
+            for row in history + tail {
+                self.appendToLog(row.role, row.body)
+            }
+            self.transcript.reset()
+            self.transcript.loadTranscript(self.renderLog)
+        }
     }
 
     /// Answer a pending Claude approval; the turn continues on the same stream and the

@@ -752,7 +752,11 @@ private struct ChatHistoryPopover: View {
                         }
                     }
                 }
-                .frame(maxHeight: 340)
+                // A ScrollView has no intrinsic height, and the popover was
+                // sized around the loading spinner before the async rows landed
+                // — a bare `maxHeight` left it collapsed to ~one visible row.
+                // Fixed-height rows make the content height deterministic.
+                .frame(height: min(CGFloat(sessions.count) * HistoryRow.height, 340))
             }
         } else {
             HStack {
@@ -767,6 +771,10 @@ private struct ChatHistoryPopover: View {
 
 /// One selectable past conversation: first-message preview + date, with a hover fill.
 private struct HistoryRow: View {
+    /// Fixed row height so the popover list's total height is deterministic
+    /// (the preview is single-line for the same reason).
+    static let height: CGFloat = 44
+
     let summary: AgentSessionSummary
     let action: () -> Void
     @State private var hovered = false
@@ -777,15 +785,15 @@ private struct HistoryRow: View {
                 Text(summary.preview)
                     .font(.system(size: 12))
                     .foregroundStyle(Color.primary.opacity(0.9))
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                 Text(summary.date.formatted(date: .abbreviated, time: .shortened))
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12)
-            .padding(.vertical, 7)
+            .frame(height: Self.height)
             .background(hovered ? Color.primary.opacity(0.06) : Color.clear)
             .contentShape(Rectangle())
         }

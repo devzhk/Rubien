@@ -222,10 +222,16 @@ protocol AgentProvider: Sendable {
     /// History picker (§5.3). A light read of the runtime's session store — Rubien
     /// stores nothing. Default `[]` (a provider without a readable store).
     func recentSessions(workspaceURL: URL, limit: Int) async -> [AgentSessionSummary]
+
+    /// A picked session's full renderable transcript, so a resume restores the
+    /// conversation's content (still read from the runtime's own store — Rubien
+    /// stores nothing). Default `[]` → the caller shows a preview notice instead.
+    func sessionTranscript(sessionID: String, workspaceURL: URL) async -> [ChatRenderMessage]
 }
 
 extension AgentProvider {
     func recentSessions(workspaceURL: URL, limit: Int) async -> [AgentSessionSummary] { [] }
+    func sessionTranscript(sessionID: String, workspaceURL: URL) async -> [ChatRenderMessage] { [] }
 }
 
 /// Errors thrown *into* a turn's event stream (vs. `providerNotice`, which is a

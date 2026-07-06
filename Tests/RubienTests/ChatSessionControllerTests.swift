@@ -378,17 +378,103 @@ final class ChatSessionControllerTests: XCTestCase {
         let summary = AgentSessionSummary(id: "sess-123", preview: "Prior chat", date: Date(timeIntervalSince1970: 0))
 
         controller.resume(summary)
+        await controller.resumeTask?.value
         XCTAssertEqual(controller.liveSessionID, "sess-123")
-        XCTAssertTrue(controller.hasMessages, "resume shows the transcript (a notice), not the start page")
+        XCTAssertTrue(controller.hasMessages, "resume shows the transcript, not the start page")
+        // The mock has no readable store (empty transcript) → the preview notice
+        // fallback still orients the user.
         XCTAssertTrue(
             sink.calls.contains { if case .addNotice(let md) = $0 { return md.contains("Prior chat") } else { return false } },
-            "a notice with the preview orients the user")
+            "a notice with the preview orients the user when the store is unreadable")
 
         // The resumed session already carries its seed → the next turn resumes that id
         // and does NOT re-send a seed.
         await runTurn(controller, provider: provider, send: "continue", events: [.turnCompleted(usage: nil)])
         XCTAssertEqual(provider.lastRequest?.resumeSessionID, "sess-123")
         XCTAssertNil(provider.lastRequest?.seed, "a resumed conversation must not re-seed")
+    }
+
+    func testResumeRestoresTheConversationTranscript() async {
+        let provider = MockAgentProvider()
+        let sink = SpyTranscriptSink()
+        let controller = makeController(provider: provider, sink: sink)
+        let history = [
+            ChatRenderMessage(role: .user, body: "What is attention?", seq: 0),
+            ChatRenderMessage(role: .tool, body: #"{"name":"rubien_get","status":"completed"}"#, seq: 1),
+            ChatRenderMessage(role: .assistant, body: "A weighted sum.", seq: 2),
+        ]
+        provider.setTranscript(history, for: "sess-777")
+
+        controller.resume(AgentSessionSummary(id: "sess-777", preview: "What is attention?", date: Date(timeIntervalSince1970: 0)))
+        await controller.resumeTask?.value
+
+        // The pane is re-rendered from the restored rows — content, not a notice.
+        guard case .loadTranscript(let msgs)? = sink.calls.last else {
+            return XCTFail("expected a transcript load: \(sink.calls)")
+        }
+        XCTAssertEqual(msgs.map(\.role), [.user, .tool, .assistant])
+        XCTAssertEqual(msgs.map(\.body), history.map(\.body))
+        XCTAssertFalse(sink.calls.contains { if case .addNotice = $0 { return true }; return false },
+                       "no notice when the real content is restored")
+
+        // The restored rows seed the render log, so a pane toggle replays them.
+        sink.calls.removeAll()
+        controller.replayTranscript()
+        guard case .loadTranscript(let replayed)? = sink.calls.last else {
+            return XCTFail("expected replay: \(sink.calls)")
+        }
+        XCTAssertEqual(replayed.map(\.body), history.map(\.body))
+    }
+
+    func testQuickSendAfterResumeStillPrependsTheRestoredHistory() async {
+        // The race codex flagged: a follow-up send bumps `generation` before the
+        // restore lands — the history must still prepend (same conversation),
+        // keyed on `conversationEpoch`, not `generation`.
+        let provider = MockAgentProvider()
+        let sink = SpyTranscriptSink()
+        let controller = makeController(provider: provider, sink: sink)
+        let history = [
+            ChatRenderMessage(role: .user, body: "Old question", seq: 0),
+            ChatRenderMessage(role: .assistant, body: "Old answer", seq: 1),
+        ]
+        provider.setTranscript(history, for: "sess-9")
+        provider.holdTranscripts()
+
+        controller.resume(AgentSessionSummary(id: "sess-9", preview: "Old question", date: Date(timeIntervalSince1970: 0)))
+        controller.send("follow-up")
+        await provider.waitUntilStreaming()  // the send's user row is rendered
+
+        provider.releaseTranscripts()
+        await controller.resumeTask?.value
+
+        guard case .loadTranscript(let msgs)? = sink.calls.last else {
+            return XCTFail("expected the merged transcript load: \(sink.calls)")
+        }
+        XCTAssertEqual(msgs.map(\.body), ["Old question", "Old answer", "follow-up"],
+                       "history prepends the quick send's user row")
+
+        // The still-streaming turn completes into the merged transcript.
+        provider.emit(.assistantMessageCompleted(text: "Continued"))
+        provider.finishStream()
+        await controller.turnTask?.value
+        XCTAssertTrue(sink.calls.contains(.commitAssistantMessage("Continued")))
+    }
+
+    func testRestoreIsDroppedWhenANewConversationSupersedesIt() async {
+        let provider = MockAgentProvider()
+        let sink = SpyTranscriptSink()
+        let controller = makeController(provider: provider, sink: sink)
+        provider.setTranscript([ChatRenderMessage(role: .user, body: "Old", seq: 0)], for: "sess-9")
+        provider.holdTranscripts()
+
+        controller.resume(AgentSessionSummary(id: "sess-9", preview: "Old", date: Date(timeIntervalSince1970: 0)))
+        controller.newConversation()  // supersedes the pending restore
+        sink.calls.removeAll()
+        provider.releaseTranscripts()
+        await controller.resumeTask?.value
+
+        XCTAssertTrue(sink.calls.isEmpty, "a superseded restore renders nothing: \(sink.calls)")
+        XCTAssertFalse(controller.hasMessages)
     }
 
     func testNewConversationKeepsLiveValuesWithoutADefaultsProvider() {
@@ -689,6 +775,9 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
     private var _availability: AgentAvailability
     private var _continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation?
     private var _streamingWaiters: [CheckedContinuation<Void, Never>] = []
+    private var _transcripts: [String: [ChatRenderMessage]] = [:]
+    private var _transcriptHold = false
+    private var _transcriptWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(kind: AgentProviderKind = .claude,
          availability: AgentAvailability = .installed(version: "test", path: "/fake/claude")) {
@@ -698,6 +787,39 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
 
     func isAvailable() async -> AgentAvailability {
         lock.lock(); defer { lock.unlock() }; return _availability
+    }
+
+    func setTranscript(_ rows: [ChatRenderMessage], for sessionID: String) {
+        lock.lock(); defer { lock.unlock() }; _transcripts[sessionID] = rows
+    }
+
+    /// Make `sessionTranscript` block until `releaseTranscripts()` — lets tests
+    /// interleave a send with an in-flight resume restore.
+    func holdTranscripts() {
+        lock.lock(); defer { lock.unlock() }; _transcriptHold = true
+    }
+
+    func releaseTranscripts() {
+        lock.lock()
+        _transcriptHold = false
+        let waiters = _transcriptWaiters
+        _transcriptWaiters = []
+        lock.unlock()
+        for waiter in waiters { waiter.resume() }
+    }
+
+    func sessionTranscript(sessionID: String, workspaceURL: URL) async -> [ChatRenderMessage] {
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if _transcriptHold {
+                _transcriptWaiters.append(cont)
+                lock.unlock()
+            } else {
+                lock.unlock()
+                cont.resume()
+            }
+        }
+        lock.lock(); defer { lock.unlock() }; return _transcripts[sessionID] ?? []
     }
 
     func send(turn: AgentTurnRequest) -> AsyncThrowingStream<AgentEvent, Error> {

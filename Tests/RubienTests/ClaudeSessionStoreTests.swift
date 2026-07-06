@@ -122,6 +122,56 @@ final class ClaudeSessionStoreTests: XCTestCase {
         XCTAssertEqual(store.summarize(fileURL: url, expectedCWD: cwd)?.preview, "The actual question")
     }
 
+    // MARK: fullTranscript (resume restores content)
+
+    func testFullTranscriptRebuildsUserAssistantAndToolRows() throws {
+        let (store, _, workspace, dir) = try makeStore()
+        let cwd = workspace.path
+        try writeSession("conv", lines: [
+            // Meta entries render nothing.
+            #"{"type":"user","isMeta":true,"cwd":"\#(cwd)","message":{"content":"<caveat/>"}}"#,
+            userLine(cwd: cwd, content: "What is attention?"),
+            // One assistant message: text + a tool call. Live rendering commits the
+            // text, then the chip — the restored order must match.
+            #"{"type":"assistant","cwd":"\#(cwd)","message":{"content":[{"type":"text","text":"Let me check."},{"type":"tool_use","name":"mcp__rubien__rubien_get","input":{"id":7}}]}}"#,
+            // The tool result (a user entry with no text) renders nothing.
+            #"{"type":"user","cwd":"\#(cwd)","message":{"content":[{"type":"tool_result","content":"…"}]}}"#,
+            #"{"type":"assistant","cwd":"\#(cwd)","message":{"content":[{"type":"text","text":"It is a weighted sum."}]}}"#,
+        ], mtime: Date(timeIntervalSince1970: 1_000), in: dir)
+
+        let rows = store.fullTranscript(sessionID: "conv", workspaceURL: workspace)
+        XCTAssertEqual(rows.map(\.role), [.user, .assistant, .tool, .assistant])
+        XCTAssertEqual(rows[0].body, "What is attention?")
+        XCTAssertEqual(rows[1].body, "Let me check.")
+        XCTAssertEqual(rows[3].body, "It is a weighted sum.")
+        XCTAssertEqual(rows.map(\.seq), [0, 1, 2, 3], "rows are sequenced in file order")
+
+        let chip = try JSONDecoder().decode(ToolChipPayload.self, from: Data(rows[2].body.utf8))
+        XCTAssertEqual(chip.name, "mcp__rubien__rubien_get")
+        XCTAssertEqual(chip.status, .completed, "historical tool calls restore as completed chips")
+    }
+
+    func testFullTranscriptIsEmptyForAMissingSession() throws {
+        let (store, _, workspace, _) = try makeStore()
+        XCTAssertTrue(store.fullTranscript(sessionID: "nope", workspaceURL: workspace).isEmpty)
+    }
+
+    func testSidechainRowsAreSkippedByTranscriptAndPreview() throws {
+        // Subagent (sidechain) entries are the agent's internals, not the
+        // conversation — they must not render as rows nor become the preview.
+        let (store, _, workspace, dir) = try makeStore()
+        let cwd = workspace.path
+        let url = try writeSession("side", lines: [
+            #"{"type":"user","isSidechain":true,"cwd":"\#(cwd)","message":{"content":"subagent task prompt"}}"#,
+            #"{"type":"assistant","isSidechain":true,"cwd":"\#(cwd)","message":{"content":[{"type":"text","text":"subagent answer"}]}}"#,
+            userLine(cwd: cwd, content: "The real question"),
+        ], mtime: Date(timeIntervalSince1970: 1_000), in: dir)
+
+        let rows = store.fullTranscript(sessionID: "side", workspaceURL: workspace)
+        XCTAssertEqual(rows.map(\.body), ["The real question"])
+        XCTAssertEqual(store.summarize(fileURL: url, expectedCWD: cwd)?.preview, "The real question")
+    }
+
     func testSummarizeCollapsesWhitespaceAndTruncates() throws {
         let (store, _, workspace, dir) = try makeStore()
         let long = String(repeating: "word ", count: 60)  // > 140 chars
