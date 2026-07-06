@@ -360,7 +360,7 @@ final class ChatSessionControllerTests: XCTestCase {
             gate: AssistantTurnGate(),
             webAccess: current.webAccess, modelOverride: current.model,
             effortOverride: current.effort, autoApprove: current.autoApprove,
-            defaultsProvider: { current })
+            defaultsProvider: { _ in current })
 
         current = AssistantConversationDefaults(model: "sonnet", effort: "medium", webAccess: false, autoApprove: true)
         controller.newConversation()
@@ -369,6 +369,83 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertEqual(controller.effortOverride, "medium")
         XCTAssertFalse(controller.webAccess)
         XCTAssertTrue(controller.autoApprove)
+    }
+
+    // MARK: Provider switch (Phase 3b-3)
+
+    /// Switching the backend is a hard cut: it shuts down the outgoing runtime,
+    /// builds the new one from the factory, starts a fresh conversation, and adopts
+    /// the NEW backend's model/effort/sandbox defaults (Claude/Codex slugs differ).
+    func testSwitchProviderTearsDownOldRuntimeAndAdoptsNewBackendDefaults() async {
+        let claude = MockAgentProvider(kind: .claude)
+        let codex = MockAgentProvider(kind: .codex)
+        let factory: (AgentProviderKind) -> any AgentProvider = { $0 == .claude ? claude : codex }
+        let defaults: (AgentProviderKind) -> AssistantConversationDefaults = { kind in
+            switch kind {
+            case .claude:
+                return AssistantConversationDefaults(model: "opus", effort: "high", webAccess: true, autoApprove: false)
+            case .codex:
+                return AssistantConversationDefaults(model: "gpt-5.5", effort: "medium", webAccess: false,
+                                                     autoApprove: true, codexSandbox: .workspaceWrite)
+            }
+        }
+        let controller = ChatSessionController(
+            provider: claude, transcript: SpyTranscriptSink(),
+            reference: ChatReference(id: 1, title: "T", authors: ""),
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"), gate: AssistantTurnGate(),
+            webAccess: true, modelOverride: "opus", effortOverride: "high",
+            autoApprove: false, codexSandbox: .readOnly,
+            providerFactory: factory, defaultsProvider: defaults)
+        XCTAssertEqual(controller.providerKind, .claude)
+        let genBefore = controller.generation
+
+        controller.switchProvider(to: .codex)
+
+        XCTAssertEqual(controller.providerKind, .codex)
+        XCTAssertEqual(controller.modelOverride, "gpt-5.5")
+        XCTAssertEqual(controller.effortOverride, "medium")
+        XCTAssertFalse(controller.webAccess)
+        XCTAssertTrue(controller.autoApprove)
+        XCTAssertEqual(controller.codexSandbox, .workspaceWrite)
+        XCTAssertEqual(claude.cancelCount, 1, "the outgoing runtime is shut down (shutdown → cancel)")
+        XCTAssertGreaterThan(controller.generation, genBefore, "a fresh conversation started")
+        // A turn now sends to the NEW provider, carrying the new backend's sandbox.
+        controller.send("hi")
+        await codex.waitUntilStreaming()
+        XCTAssertEqual(codex.requests.count, 1)
+        XCTAssertEqual(codex.lastRequest?.codexSandbox, .workspaceWrite)
+        XCTAssertTrue(claude.requests.isEmpty, "the old provider gets no turns")
+        codex.finishStream()
+        await controller.turnTask?.value
+    }
+
+    /// Switching to the already-active backend does nothing (no teardown, no rebuild).
+    func testSwitchProviderToSameKindIsNoOp() {
+        let claude = MockAgentProvider(kind: .claude)
+        var built: [AgentProviderKind] = []
+        let factory: (AgentProviderKind) -> any AgentProvider = { built.append($0); return claude }
+        let controller = ChatSessionController(
+            provider: claude, transcript: SpyTranscriptSink(),
+            reference: ChatReference(id: 1, title: "T", authors: ""),
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"), gate: AssistantTurnGate(),
+            providerFactory: factory)
+
+        controller.switchProvider(to: .claude)
+
+        XCTAssertTrue(built.isEmpty, "the factory is not invoked for a same-kind switch")
+        XCTAssertEqual(claude.cancelCount, 0, "the live runtime is not torn down")
+        XCTAssertEqual(controller.providerKind, .claude)
+    }
+
+    /// Without a factory (tests / DEBUG harness) the backend can't be switched.
+    func testSwitchProviderWithoutFactoryIsNoOp() {
+        let claude = MockAgentProvider(kind: .claude)
+        let controller = makeController(provider: claude, sink: SpyTranscriptSink())
+
+        controller.switchProvider(to: .codex)
+
+        XCTAssertEqual(controller.providerKind, .claude)
+        XCTAssertEqual(claude.cancelCount, 0)
     }
 
     func testResumePointsNextTurnAtSessionWithoutReseeding() async {

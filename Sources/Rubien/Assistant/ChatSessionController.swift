@@ -37,6 +37,9 @@ struct AssistantConversationDefaults: Equatable {
     var effort: String?
     var webAccess: Bool
     var autoApprove: Bool
+    /// The Codex OS-sandbox mode to seed (ignored by Claude conversations). Defaulted
+    /// so Claude-only call sites and tests stay unchanged.
+    var codexSandbox: CodexSandbox = .readOnly
 }
 
 // MARK: - Per-window chat session controller (Phase 2c)
@@ -104,18 +107,32 @@ final class ChatSessionController: ObservableObject {
     /// control protocol (D6). A per-conversation choice; reads/search stay silent
     /// either way.
     @Published var autoApprove = false
+    /// The Codex OS-sandbox mode carried on every turn (D6). Ignored by Claude
+    /// (which uses the control protocol, not an OS sandbox). A per-conversation
+    /// choice, seeded from the Codex default and reset on a provider switch.
+    @Published var codexSandbox: CodexSandbox
+    /// The active backend, published so the composer picker + provider-aware model
+    /// list re-render when a switch swaps the underlying provider (Phase 3b-3).
+    @Published private(set) var providerKind: AgentProviderKind
 
     // MARK: Collaborators (injected)
-    private let provider: any AgentProvider
+    /// The live runtime. Mutable so `switchProvider` can swap it in place (the
+    /// controller is a `@StateObject`, so rebuilding it wholesale would fight
+    /// SwiftUI identity); rebuilt from `providerFactory`.
+    private var provider: any AgentProvider
+    /// Builds a provider of a given kind for `switchProvider`. nil (tests / DEBUG
+    /// harness) ⇒ the backend can't be switched (the picker no-ops).
+    private let providerFactory: ((AgentProviderKind) -> any AgentProvider)?
     private let transcript: any ChatTranscriptSink
     private let gate: AssistantTurnGate
     private let reference: ChatReference
     private let workspaceURL: URL
     /// Re-reads the user's Assistant defaults (Settings) when a fresh conversation
     /// starts, so changing a default + hitting "New conversation" adopts it without
-    /// reopening the window. nil (tests / DEBUG harness) ⇒ `newConversation` keeps
-    /// the current live values.
-    private let defaultsProvider: (() -> AssistantConversationDefaults)?
+    /// reopening the window. Takes the CURRENT backend kind so it returns that
+    /// backend's model/effort/sandbox defaults. nil (tests / DEBUG harness) ⇒
+    /// `newConversation` keeps the current live values.
+    private let defaultsProvider: ((AgentProviderKind) -> AssistantConversationDefaults)?
 
     // MARK: In-memory conversation state (never persisted — D5)
     /// The live provider session id. Captured from EVERY `.sessionStarted` because it
@@ -150,8 +167,6 @@ final class ChatSessionController: ObservableObject {
     /// not corrupt a fresh conversation's state or clobber a newer turn.
     private(set) var generation = 0
 
-    var providerKind: AgentProviderKind { provider.kind }
-
     init(
         provider: any AgentProvider,
         transcript: any ChatTranscriptSink,
@@ -162,9 +177,12 @@ final class ChatSessionController: ObservableObject {
         modelOverride: String? = "opus",
         effortOverride: String? = "high",
         autoApprove: Bool = false,
-        defaultsProvider: (() -> AssistantConversationDefaults)? = nil
+        codexSandbox: CodexSandbox = .readOnly,
+        providerFactory: ((AgentProviderKind) -> any AgentProvider)? = nil,
+        defaultsProvider: ((AgentProviderKind) -> AssistantConversationDefaults)? = nil
     ) {
         self.provider = provider
+        self.providerKind = provider.kind
         self.transcript = transcript
         self.reference = reference
         self.workspaceURL = workspaceURL
@@ -173,6 +191,8 @@ final class ChatSessionController: ObservableObject {
         self.modelOverride = modelOverride
         self.effortOverride = effortOverride
         self.autoApprove = autoApprove
+        self.codexSandbox = codexSandbox
+        self.providerFactory = providerFactory
         self.defaultsProvider = defaultsProvider
     }
 
@@ -199,10 +219,15 @@ final class ChatSessionController: ObservableObject {
             prompt: composed,
             seed: seedSent ? nil : AssistantContext.seed(for: reference),
             webAccess: webAccess,
-            codexSandbox: .readOnly,
+            codexSandbox: codexSandbox,
             modelOverride: modelOverride,
             effortOverride: effortOverride)
-        let kind = provider.kind
+        // Pin THIS turn to the provider live at send-time. `switchProvider` can swap
+        // `self.provider` after the task is scheduled but before it reaches `send`; the
+        // captured `turnProvider` keeps the turn (and its gate key) on one backend, so a
+        // stale turn can never be dispatched to the newly-swapped-in runtime.
+        let turnProvider = provider
+        let kind = turnProvider.kind
 
         turnTask = Task { [weak self] in
             guard let self else { return }
@@ -306,12 +331,35 @@ final class ChatSessionController: ObservableObject {
         liveSessionID = nil
         seedSent = false
         hasMessages = false
-        if let defaults = defaultsProvider?() {
+        if let defaults = defaultsProvider?(providerKind) {
             modelOverride = defaults.model
             effortOverride = defaults.effort
             webAccess = defaults.webAccess
             autoApprove = defaults.autoApprove
+            codexSandbox = defaults.codexSandbox
         }
+    }
+
+    /// Switch this conversation's backend runtime (composer picker, Phase 3b-3).
+    /// A switch is a hard cut: the OLD runtime is torn down — its long-lived Codex
+    /// server is killed (not just interrupted like `cancel()`), the new provider is
+    /// built from the factory, and a FRESH conversation starts adopting the new
+    /// backend's defaults (model/effort/sandbox are backend-specific — Claude's
+    /// `opus` is meaningless to Codex). No-op if the kind is unchanged or the
+    /// factory is absent (tests / DEBUG harness). The prior transcript is dropped
+    /// (nothing persisted — D5); History can resume a Codex thread later.
+    func switchProvider(to kind: AgentProviderKind) {
+        guard let providerFactory, kind != providerKind else { return }
+        // Request teardown of the outgoing runtime. `shutdown()` may reap the server
+        // asynchronously, but the old runtime is a separate process on its own pipes —
+        // it can't touch the freshly-built provider below, and any in-flight turn's
+        // still-draining stream is invalidated by the `generation` bump in
+        // `newConversation`. The captured `turnProvider` in `send` keeps that stale
+        // turn pinned to the outgoing runtime, never the new one.
+        provider.shutdown()
+        provider = providerFactory(kind)
+        providerKind = kind
+        newConversation()
     }
 
     /// The runtime's own recent sessions for this conversation's working folder, for

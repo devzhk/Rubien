@@ -437,15 +437,17 @@ struct ChatSidebarView: View {
 
     // MARK: Provider (backend) selector
 
-    /// The runtime backend for this conversation. Claude-only until the Codex
-    /// provider lands (Phase 3) — Codex is listed but not selectable, so the
-    /// control communicates what's coming without a dead end.
+    /// The runtime backend for this conversation. Switching is a hard cut — it tears
+    /// down the current runtime and starts a fresh conversation on the other (model /
+    /// effort / sandbox are backend-specific, so they re-seed). Disabled mid-turn so a
+    /// switch can't yank a streaming response.
     private var providerPicker: some View {
         Menu {
-            Picker("Backend", selection: .constant(AgentProviderKind.claude)) {
+            Picker("Backend", selection: Binding(
+                get: { session.providerKind },
+                set: { session.switchProvider(to: $0) })) {
                 Text("Claude Code").tag(AgentProviderKind.claude)
-                Text("Codex (coming soon)").tag(AgentProviderKind.codex)
-                    .selectionDisabled(true)
+                Text("Codex").tag(AgentProviderKind.codex)
             }
             .pickerStyle(.inline)
         } label: {
@@ -457,17 +459,18 @@ struct ChatSidebarView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
+        .disabled(session.isResponding)
         .background(
             RoundedRectangle(cornerRadius: 5, style: .continuous)
                 .fill(providerMenuHovered ? Color.primary.opacity(0.06) : Color.clear)
         )
         .onHover { providerMenuHovered = $0 }
         .animation(.easeOut(duration: 0.12), value: providerMenuHovered)
-        .help("Backend for this conversation (Codex arrives in a later update)")
+        .help("Backend for this conversation — switching starts a new conversation on the other runtime")
     }
 
     private var providerPickerText: Text {
-        (Text(session.providerKind == .claude ? "Claude" : "Codex")
+        (Text(session.providerKind.displayName)
             .foregroundStyle(Color.primary.opacity(0.80))
             + Text(" ")
             + Text(Image(systemName: "chevron.down"))
@@ -479,24 +482,30 @@ struct ChatSidebarView: View {
     // MARK: Model + effort selector (maps to `--model` / `--effort`)
 
     // Derived from the shared source of truth (AssistantModelOptions) so the
-    // sidebar and Settings ▸ Assistant can't offer different models/efforts. The
-    // picker tags are `String?` because `session.modelOverride` is optional (nil
-    // omits the flag), so the non-optional shared values are lifted to Optional.
-    private static let modelChoices: [(label: String, value: String?)] =
-        AssistantModelOptions.models.map { (label: $0.label, value: Optional($0.value)) }
-    private static let effortChoices: [(label: String, value: String?)] =
-        AssistantModelOptions.efforts.map { (label: $0.label, value: Optional($0.value)) }
+    // sidebar and Settings ▸ Assistant can't offer different models/efforts. Keyed
+    // on the LIVE backend (Claude and Codex accept disjoint slugs), so a provider
+    // switch re-renders the lists. The picker tags are `String?` because
+    // `session.modelOverride` is optional (nil omits the flag), so the non-optional
+    // shared values are lifted to Optional.
+    private var modelChoices: [(label: String, value: String?)] {
+        AssistantModelOptions.models(for: session.providerKind)
+            .map { (label: $0.label, value: Optional($0.value)) }
+    }
+    private var effortChoices: [(label: String, value: String?)] {
+        AssistantModelOptions.efforts(for: session.providerKind)
+            .map { (label: $0.label, value: Optional($0.value)) }
+    }
 
     private var modelPicker: some View {
         Menu {
             Picker("Model", selection: $session.modelOverride) {
-                ForEach(Self.modelChoices, id: \.value) { choice in
+                ForEach(modelChoices, id: \.value) { choice in
                     Text(choice.label).tag(choice.value)
                 }
             }
             .pickerStyle(.inline)
             Picker("Effort", selection: $session.effortOverride) {
-                ForEach(Self.effortChoices, id: \.value) { choice in
+                ForEach(effortChoices, id: \.value) { choice in
                     Text(choice.label).tag(choice.value)
                 }
             }
@@ -526,12 +535,12 @@ struct ChatSidebarView: View {
     }
 
     private var modelLabel: String {
-        AssistantModelOptions.modelLabel(for: session.modelOverride)
+        AssistantModelOptions.modelLabel(for: session.modelOverride, kind: session.providerKind)
     }
 
     /// The gray effort word beside the model ("**Opus** High").
     private var effortLabel: String? {
-        AssistantModelOptions.effortLabel(for: session.effortOverride)
+        AssistantModelOptions.effortLabel(for: session.effortOverride, kind: session.providerKind)
     }
 
     /// "Opus High ˅" as one concatenated Text (dark model · gray effort · chevron),

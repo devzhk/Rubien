@@ -9,9 +9,9 @@ struct RubienSettingsView: View {
     @State private var cacheBytes: Int64 = 0
     @State private var backfillRemaining: Int = 0
 
-    // Assistant pane (Phase 2c-5). Availability probe + mirrors of the two path
-    // overrides (RubienPreferences isn't observable, so the "Choose…" buttons keep
-    // these in sync to re-render the displayed path).
+    // Assistant pane (Phase 2c-5; per-provider in 3b-3). Availability probes + mirrors
+    // of the path overrides (RubienPreferences isn't observable, so the "Choose…"
+    // buttons keep these in sync to re-render the displayed path).
     @State private var claudeAvailability: AgentAvailability?
     @State private var isProbingClaude = false
     /// Monotonic probe token: only the latest `recheckClaude` result is applied, so a
@@ -20,13 +20,24 @@ struct RubienSettingsView: View {
     @State private var probeGeneration = 0
     @State private var workspacePathOverride = ""
     @State private var binaryPathOverride = ""
-    // Observable mirrors of the four default prefs. A Picker/Toggle bound STRAIGHT to
-    // a `Binding(get:set:)` over RubienPreferences persists but doesn't re-render (the
+    // Codex CLI probe + binary mirror (parallel to Claude's — either backend is usable
+    // per-conversation via the composer picker, so both are set up here, 3b-3).
+    @State private var codexAvailability: AgentAvailability?
+    @State private var isProbingCodex = false
+    @State private var codexProbeGeneration = 0
+    @State private var codexBinaryPathOverride = ""
+    // Observable mirrors of the default prefs. A Picker/Toggle bound STRAIGHT to a
+    // `Binding(get:set:)` over RubienPreferences persists but doesn't re-render (the
     // store isn't observable), so a pick only showed after relaunch — these @State
-    // mirrors drive the controls; `.onChange` writes them through to the prefs. Initial
-    // values match the pref defaults so seeding an unset pref doesn't write one back.
+    // mirrors drive the controls; `.onChange` writes them through to the prefs. Model
+    // and effort are BACKEND-SPECIFIC: their mirror re-seeds from the selected default
+    // backend's prefs when `defaultProvider` changes, and writes route back to the
+    // matching backend's pref. Initial values match the pref defaults so seeding an
+    // unset pref doesn't write one back.
+    @State private var defaultProvider: AgentProviderKind = .claude
     @State private var defaultModel = "opus"
     @State private var defaultEffort = "high"
+    @State private var defaultCodexSandbox: CodexSandbox = .readOnly
     @State private var defaultWebAccess = true
     @State private var defaultAutoApprove = false
     /// Latched at the start of an upload session so the indicator can render
@@ -227,23 +238,62 @@ struct RubienSettingsView: View {
         Form {
             assistantWorkspaceSection
             assistantDefaultsSection
-            assistantCLISection
+            assistantClaudeCLISection
+            assistantCodexCLISection
         }
         .formStyle(.grouped)
         .task {
             workspacePathOverride = RubienPreferences.assistantWorkspacePath ?? ""
             binaryPathOverride = RubienPreferences.assistantBinaryPath ?? ""
-            defaultModel = RubienPreferences.assistantModel
-            defaultEffort = RubienPreferences.assistantEffort
+            codexBinaryPathOverride = RubienPreferences.assistantCodexBinaryPath ?? ""
+            defaultProvider = RubienPreferences.assistantProvider
+            defaultCodexSandbox = RubienPreferences.assistantCodexSandbox
             defaultWebAccess = RubienPreferences.assistantWebAccess
             defaultAutoApprove = RubienPreferences.assistantAutoApprove
+            seedModelEffortMirrors(for: defaultProvider)
             if claudeAvailability == nil { recheckClaude() }
+            if codexAvailability == nil { recheckCodex() }
         }
         // Persist each mirror to the (non-observable) prefs when the user changes it.
-        .onChange(of: defaultModel) { _, value in RubienPreferences.assistantModel = value }
-        .onChange(of: defaultEffort) { _, value in RubienPreferences.assistantEffort = value }
+        // Switching the default backend re-seeds the model/effort mirrors from that
+        // backend's own prefs (Claude/Codex slugs are disjoint).
+        .onChange(of: defaultProvider) { _, value in
+            RubienPreferences.assistantProvider = value
+            seedModelEffortMirrors(for: value)
+        }
+        .onChange(of: defaultModel) { _, value in setDefaultModel(value) }
+        .onChange(of: defaultEffort) { _, value in setDefaultEffort(value) }
+        .onChange(of: defaultCodexSandbox) { _, value in RubienPreferences.assistantCodexSandbox = value }
         .onChange(of: defaultWebAccess) { _, value in RubienPreferences.assistantWebAccess = value }
         .onChange(of: defaultAutoApprove) { _, value in RubienPreferences.assistantAutoApprove = value }
+    }
+
+    /// Re-seed the model/effort mirrors from the selected default backend's prefs.
+    /// Called on appear and whenever `defaultProvider` changes.
+    private func seedModelEffortMirrors(for kind: AgentProviderKind) {
+        switch kind {
+        case .claude:
+            defaultModel = RubienPreferences.assistantModel
+            defaultEffort = RubienPreferences.assistantEffort
+        case .codex:
+            defaultModel = RubienPreferences.assistantCodexModel
+            defaultEffort = RubienPreferences.assistantCodexEffort
+        }
+    }
+
+    /// Route a model-mirror change back to the CURRENTLY-selected backend's pref.
+    private func setDefaultModel(_ value: String) {
+        switch defaultProvider {
+        case .claude: RubienPreferences.assistantModel = value
+        case .codex: RubienPreferences.assistantCodexModel = value
+        }
+    }
+
+    private func setDefaultEffort(_ value: String) {
+        switch defaultProvider {
+        case .claude: RubienPreferences.assistantEffort = value
+        case .codex: RubienPreferences.assistantCodexEffort = value
+        }
     }
 
     private var assistantWorkspaceSection: some View {
@@ -275,16 +325,39 @@ struct RubienSettingsView: View {
 
     private var assistantDefaultsSection: some View {
         Section {
+            Picker(selection: $defaultProvider) {
+                Text(String(localized: "Claude Code", bundle: .module)).tag(AgentProviderKind.claude)
+                Text(String(localized: "Codex", bundle: .module)).tag(AgentProviderKind.codex)
+            } label: {
+                Text(String(localized: "Backend", bundle: .module))
+            }
+
+            // Model/effort are the SELECTED backend's — Claude and Codex accept
+            // disjoint slugs, so the lists (and the mirrors) switch with the backend.
             Picker(selection: $defaultModel) {
-                ForEach(AssistantModelOptions.models, id: \.value) { Text($0.label).tag($0.value) }
+                ForEach(AssistantModelOptions.models(for: defaultProvider), id: \.value) {
+                    Text($0.label).tag($0.value)
+                }
             } label: {
                 Text(String(localized: "Model", bundle: .module))
             }
 
             Picker(selection: $defaultEffort) {
-                ForEach(AssistantModelOptions.efforts, id: \.value) { Text($0.label).tag($0.value) }
+                ForEach(AssistantModelOptions.efforts(for: defaultProvider), id: \.value) {
+                    Text($0.label).tag($0.value)
+                }
             } label: {
                 Text(String(localized: "Reasoning effort", bundle: .module))
+            }
+
+            // Codex-only: the OS sandbox a new Codex conversation runs in (D6).
+            if defaultProvider.descriptor.supportsSandbox {
+                Picker(selection: $defaultCodexSandbox) {
+                    Text(String(localized: "Read-only", bundle: .module)).tag(CodexSandbox.readOnly)
+                    Text(String(localized: "Workspace-write", bundle: .module)).tag(CodexSandbox.workspaceWrite)
+                } label: {
+                    Text(String(localized: "Sandbox", bundle: .module))
+                }
             }
 
             Toggle(isOn: $defaultWebAccess) {
@@ -300,52 +373,77 @@ struct RubienSettingsView: View {
         } header: {
             Text(String(localized: "Defaults for new conversations", bundle: .module))
         } footer: {
-            Text(String(localized: "Used for each new conversation — a newly opened document, or “New conversation” in one already open. Each conversation can still change them in its sidebar. Web search lets the assistant fetch pages you didn’t open. Auto-accept runs its writes and shell commands without asking first.", bundle: .module))
+            Text(String(localized: "Used for each new conversation — a newly opened document, or “New conversation” in one already open. Each conversation can pick a backend and change these in its sidebar. Web search lets the assistant fetch pages you didn’t open. Auto-accept runs its writes and shell commands without asking first. Codex’s sandbox limits what a turn can touch on disk (Read-only still asks before any write).", bundle: .module))
         }
     }
 
-    private var assistantCLISection: some View {
+    private var assistantClaudeCLISection: some View {
         Section {
             claudeStatusRow
-            HStack(spacing: 8) {
-                Text(String(localized: "Binary path", bundle: .module))
-                Spacer()
-                Text(binaryPathOverride.isEmpty
-                     ? String(localized: "Auto-discovered", bundle: .module)
-                     : (binaryPathOverride as NSString).abbreviatingWithTildeInPath)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                if !binaryPathOverride.isEmpty {
-                    Button(String(localized: "Reset", bundle: .module)) {
-                        RubienPreferences.assistantBinaryPath = nil
-                        binaryPathOverride = ""
-                        recheckClaude()
-                    }
-                    .buttonStyle(SettingsActionButtonStyle())
-                }
-                Button(String(localized: "Choose…", bundle: .module)) { pickBinary() }
-                    .buttonStyle(SettingsActionButtonStyle())
-            }
+            agentBinaryPathRow(override: binaryPathOverride, onReset: {
+                RubienPreferences.assistantBinaryPath = nil
+                binaryPathOverride = ""
+                recheckClaude()
+            }, onChoose: pickBinary)
         } header: {
             Text(String(localized: "Claude Code CLI", bundle: .module))
         } footer: {
-            Text(String(localized: "Not signed in? Run “claude login” in Terminal. Codex support arrives in a later update.", bundle: .module))
+            Text(String(localized: "Not signed in? Run “claude login” in Terminal.", bundle: .module))
         }
     }
 
-    @ViewBuilder
+    private var assistantCodexCLISection: some View {
+        Section {
+            codexStatusRow
+            agentBinaryPathRow(override: codexBinaryPathOverride, onReset: {
+                RubienPreferences.assistantCodexBinaryPath = nil
+                codexBinaryPathOverride = ""
+                recheckCodex()
+            }, onChoose: pickCodexBinary)
+        } header: {
+            Text(String(localized: "Codex CLI", bundle: .module))
+        } footer: {
+            // The MCP posture (§4): Codex runs over your real ~/.codex, so it uses
+            // the same account + any MCP servers you’ve configured there (its built-in
+            // app connectors are dropped). Rubien’s own document tools are always added.
+            Text(String(localized: "Not signed in? Run “codex login” in Terminal. Codex uses your ~/.codex account and any MCP servers configured there (plus Rubien’s document tools); its sessions are stored by Codex, not Rubien.", bundle: .module))
+        }
+    }
+
     private var claudeStatusRow: some View {
+        agentStatusRow(name: String(localized: "Claude Code", bundle: .module),
+                       availability: claudeAvailability,
+                       isProbing: isProbingClaude,
+                       recheck: recheckClaude)
+    }
+
+    private var codexStatusRow: some View {
+        agentStatusRow(name: String(localized: "Codex", bundle: .module),
+                       availability: codexAvailability,
+                       isProbing: isProbingCodex,
+                       recheck: recheckCodex)
+    }
+
+    /// The shared availability row for either backend's CLI section (icon + title +
+    /// resolved path / reason + Recheck) — Claude and Codex differ only by name +
+    /// state source.
+    @ViewBuilder
+    private func agentStatusRow(
+        name: String,
+        availability: AgentAvailability?,
+        isProbing: Bool,
+        recheck: @escaping () -> Void
+    ) -> some View {
         HStack(spacing: 8) {
-            if isProbingClaude {
+            if isProbing {
                 ProgressView().controlSize(.small)
                 Text(String(localized: "Checking…", bundle: .module))
                     .foregroundStyle(.secondary)
-            } else if let availability = claudeAvailability {
+            } else if let availability {
                 Image(systemName: availability.isInstalled ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
                     .foregroundStyle(availability.isInstalled ? Color.green : Color.orange)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(claudeStatusTitle(availability))
+                    Text(agentStatusTitle(name: name, availability: availability))
                     if availability.isInstalled, let path = availability.resolvedPath {
                         Text((path as NSString).abbreviatingWithTildeInPath)
                             .font(.caption)
@@ -364,9 +462,35 @@ struct RubienSettingsView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button(String(localized: "Recheck", bundle: .module)) { recheckClaude() }
+            Button(String(localized: "Recheck", bundle: .module)) { recheck() }
                 .buttonStyle(SettingsActionButtonStyle())
-                .disabled(isProbingClaude)
+                .disabled(isProbing)
+        }
+    }
+
+    /// The shared "Binary path / Auto-discovered / Reset / Choose…" row for either
+    /// backend's CLI section — they differ only by the mirror + the two actions.
+    @ViewBuilder
+    private func agentBinaryPathRow(
+        override: String,
+        onReset: @escaping () -> Void,
+        onChoose: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: 8) {
+            Text(String(localized: "Binary path", bundle: .module))
+            Spacer()
+            Text(override.isEmpty
+                 ? String(localized: "Auto-discovered", bundle: .module)
+                 : (override as NSString).abbreviatingWithTildeInPath)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            if !override.isEmpty {
+                Button(String(localized: "Reset", bundle: .module), action: onReset)
+                    .buttonStyle(SettingsActionButtonStyle())
+            }
+            Button(String(localized: "Choose…", bundle: .module), action: onChoose)
+                .buttonStyle(SettingsActionButtonStyle())
         }
     }
 
@@ -379,14 +503,14 @@ struct RubienSettingsView: View {
         AssistantContext.workspaceURL(override: workspacePathOverride).path
     }
 
-    private func claudeStatusTitle(_ availability: AgentAvailability) -> String {
+    private func agentStatusTitle(name: String, availability: AgentAvailability) -> String {
         guard availability.isInstalled else {
-            return String(localized: "Claude Code not found", bundle: .module)
+            return String(format: String(localized: "%@ not found", bundle: .module), name)
         }
         if let version = availability.version {
-            return String(format: String(localized: "Claude Code %@ installed", bundle: .module), version)
+            return String(format: String(localized: "%@ %@ installed", bundle: .module), name, version)
         }
-        return String(localized: "Claude Code installed", bundle: .module)
+        return String(format: String(localized: "%@ installed", bundle: .module), name)
     }
 
     /// Re-probe the CLI with the current binary-path override. Only a success is
@@ -407,6 +531,20 @@ struct RubienSettingsView: View {
         }
     }
 
+    /// Codex's parallel probe (its own generation token + binary override).
+    private func recheckCodex() {
+        codexProbeGeneration += 1
+        let generation = codexProbeGeneration
+        isProbingCodex = true
+        let override = RubienPreferences.assistantCodexBinaryPath
+        Task {
+            let availability = await CodexProvider(executableOverride: override).isAvailable()
+            guard generation == codexProbeGeneration else { return }  // superseded by a newer probe
+            codexAvailability = availability
+            isProbingCodex = false
+        }
+    }
+
     private func pickWorkspace() {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -421,15 +559,31 @@ struct RubienSettingsView: View {
     }
 
     private func pickBinary() {
+        pickAgentBinary { path in
+            RubienPreferences.assistantBinaryPath = path
+            binaryPathOverride = path
+            recheckClaude()
+        }
+    }
+
+    private func pickCodexBinary() {
+        pickAgentBinary { path in
+            RubienPreferences.assistantCodexBinaryPath = path
+            codexBinaryPathOverride = path
+            recheckCodex()
+        }
+    }
+
+    /// The shared "choose an executable" open panel; `assign` persists the picked
+    /// path + re-probes for whichever backend invoked it.
+    private func pickAgentBinary(assign: (String) -> Void) {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         panel.prompt = String(localized: "Choose", bundle: .module)
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        RubienPreferences.assistantBinaryPath = url.path
-        binaryPathOverride = url.path
-        recheckClaude()
+        assign(url.path)
     }
 }
 

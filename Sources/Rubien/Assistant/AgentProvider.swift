@@ -10,7 +10,10 @@ import Foundation
 // Contract source: design doc §4.1 (protocol / events / process mechanics) and §4.2
 // (Claude stream-json + control mapping, verified against `claude` 2.1.201).
 
-/// Which coding-agent runtime a provider wraps.
+/// Which coding-agent runtime a provider wraps. Per-backend static data (display
+/// name, model/effort lists, defaults, sandbox support) lives in ONE place —
+/// `AgentBackendDescriptor` (see `AssistantModelOptions.swift`) — so adding a
+/// backend is a single literal, not a new case across a dozen `switch` sites.
 enum AgentProviderKind: String, Codable, Sendable, Equatable, CaseIterable {
     case claude
     case codex

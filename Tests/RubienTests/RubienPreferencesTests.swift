@@ -25,6 +25,11 @@ final class RubienPreferencesTests: XCTestCase {
             RubienPreferences.assistantAutoApproveKey,
             RubienPreferences.assistantWorkspacePathKey,
             RubienPreferences.assistantBinaryPathKey,
+            RubienPreferences.assistantProviderKey,
+            RubienPreferences.assistantCodexModelKey,
+            RubienPreferences.assistantCodexEffortKey,
+            RubienPreferences.assistantCodexSandboxKey,
+            RubienPreferences.assistantCodexBinaryPathKey,
         ]
     }
 
@@ -171,6 +176,52 @@ final class RubienPreferencesTests: XCTestCase {
                        "unset ⇒ the default working folder")
         RubienPreferences.assistantWorkspacePath = "/tmp/custom-ws"
         XCTAssertEqual(RubienPreferences.assistantWorkspaceURL.path, "/tmp/custom-ws")
+    }
+
+    // MARK: - Backend + Codex defaults (Phase 3b-3)
+
+    func testAssistantBackendDefaultsWhenUnset() {
+        XCTAssertEqual(RubienPreferences.assistantProvider, .claude, "unset ⇒ Claude")
+        XCTAssertEqual(RubienPreferences.assistantCodexModel, "gpt-5.5")
+        XCTAssertEqual(RubienPreferences.assistantCodexEffort, "medium",
+                       "Codex effort defaults to medium (dodges the xhigh stall), not high")
+        XCTAssertEqual(RubienPreferences.assistantCodexSandbox, .readOnly)
+        XCTAssertNil(RubienPreferences.assistantCodexBinaryPath)
+    }
+
+    func testAssistantBackendPrefsRoundTrip() {
+        RubienPreferences.assistantProvider = .codex
+        XCTAssertEqual(RubienPreferences.assistantProvider, .codex)
+        RubienPreferences.assistantCodexModel = "gpt-5.5-pro"
+        XCTAssertEqual(RubienPreferences.assistantCodexModel, "gpt-5.5-pro")
+        RubienPreferences.assistantCodexEffort = "xhigh"
+        XCTAssertEqual(RubienPreferences.assistantCodexEffort, "xhigh")
+        RubienPreferences.assistantCodexSandbox = .workspaceWrite
+        XCTAssertEqual(RubienPreferences.assistantCodexSandbox, .workspaceWrite)
+        RubienPreferences.assistantCodexBinaryPath = "/opt/bin/codex"
+        XCTAssertEqual(RubienPreferences.assistantCodexBinaryPath, "/opt/bin/codex")
+    }
+
+    /// A model/effort persisted that the backend doesn't offer (stale pref, a Claude
+    /// slug left in the Codex pref, or a dropped model) must resolve to the backend's
+    /// default rather than leaking an unaccepted slug to the runtime / an empty picker.
+    func testAssistantModelEffortPrefsNormalizeAgainstBackendList() {
+        // A Claude slug is not a Codex model → snaps to the Codex default.
+        RubienPreferences.assistantCodexModel = "opus"
+        XCTAssertEqual(RubienPreferences.assistantCodexModel, "gpt-5.5")
+        // `max` is a Claude effort but not a Codex one → snaps to the Codex default.
+        RubienPreferences.assistantCodexEffort = "max"
+        XCTAssertEqual(RubienPreferences.assistantCodexEffort, "medium")
+        // A Codex slug is not a Claude model → snaps to the Claude default.
+        RubienPreferences.assistantModel = "gpt-5.5"
+        XCTAssertEqual(RubienPreferences.assistantModel, "opus")
+    }
+
+    func testAssistantProviderUnknownRawFallsBackToClaude() {
+        UserDefaults.standard.set("gemini", forKey: RubienPreferences.assistantProviderKey)
+        XCTAssertEqual(RubienPreferences.assistantProvider, .claude)
+        UserDefaults.standard.set("banana", forKey: RubienPreferences.assistantCodexSandboxKey)
+        XCTAssertEqual(RubienPreferences.assistantCodexSandbox, .readOnly)
     }
 }
 #endif

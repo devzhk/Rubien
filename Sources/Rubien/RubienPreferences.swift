@@ -133,24 +133,26 @@ enum RubienPreferences {
         AssistantContext.workspaceURL(override: assistantWorkspacePath)
     }
 
-    /// Default model alias for new conversations (Claude: `fable`/`opus`/`sonnet`).
+    /// Default model alias for new Claude conversations. Normalized against Claude's
+    /// current list, so an empty/unset or stale slug resolves to Claude's default.
     static let assistantModelKey = "Rubien.assistant.model"
 
     static var assistantModel: String {
         get {
-            let model = UserDefaults.standard.string(forKey: assistantModelKey)
-            return (model?.isEmpty == false) ? model! : "opus"
+            let raw = UserDefaults.standard.string(forKey: assistantModelKey) ?? ""
+            return AssistantModelOptions.normalizedModel(raw, for: .claude)
         }
         set { UserDefaults.standard.set(newValue, forKey: assistantModelKey) }
     }
 
-    /// Default reasoning effort for new conversations (`low`…`max`).
+    /// Default reasoning effort for new Claude conversations, normalized to Claude's
+    /// current list (empty/stale ⇒ default).
     static let assistantEffortKey = "Rubien.assistant.effort"
 
     static var assistantEffort: String {
         get {
-            let effort = UserDefaults.standard.string(forKey: assistantEffortKey)
-            return (effort?.isEmpty == false) ? effort! : "high"
+            let raw = UserDefaults.standard.string(forKey: assistantEffortKey) ?? ""
+            return AssistantModelOptions.normalizedEffort(raw, for: .claude)
         }
         set { UserDefaults.standard.set(newValue, forKey: assistantEffortKey) }
     }
@@ -191,6 +193,78 @@ enum RubienPreferences {
                 UserDefaults.standard.set(newValue, forKey: assistantBinaryPathKey)
             } else {
                 UserDefaults.standard.removeObject(forKey: assistantBinaryPathKey)
+            }
+        }
+    }
+
+    // MARK: - Assistant backend + Codex defaults (Phase 3b-3)
+    //
+    // The default runtime for a NEW conversation/window, plus Codex's own model /
+    // effort / sandbox / binary defaults (disjoint from Claude's — Codex accepts
+    // different model slugs and effort levels). The composer picker switches a live
+    // conversation's backend without touching these; Settings edits the defaults.
+
+    /// The default coding-agent backend for a new conversation. Unknown raw ⇒ Claude.
+    static let assistantProviderKey = "Rubien.assistant.provider"
+
+    static var assistantProvider: AgentProviderKind {
+        get {
+            let raw = UserDefaults.standard.string(forKey: assistantProviderKey)
+            return raw.flatMap(AgentProviderKind.init(rawValue:)) ?? .claude
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: assistantProviderKey) }
+    }
+
+    /// Default Codex model slug for new conversations, normalized to Codex's current
+    /// list (empty/unset or a stale slug ⇒ `gpt-5.5`).
+    static let assistantCodexModelKey = "Rubien.assistant.codex.model"
+
+    static var assistantCodexModel: String {
+        get {
+            let raw = UserDefaults.standard.string(forKey: assistantCodexModelKey) ?? ""
+            return AssistantModelOptions.normalizedModel(raw, for: .codex)
+        }
+        set { UserDefaults.standard.set(newValue, forKey: assistantCodexModelKey) }
+    }
+
+    /// Default Codex reasoning effort for new conversations, normalized to Codex's
+    /// current list (empty/stale ⇒ `medium` — deliberately not the `~/.codex`
+    /// default, which is often `xhigh` and stalls).
+    static let assistantCodexEffortKey = "Rubien.assistant.codex.effort"
+
+    static var assistantCodexEffort: String {
+        get {
+            let raw = UserDefaults.standard.string(forKey: assistantCodexEffortKey) ?? ""
+            return AssistantModelOptions.normalizedEffort(raw, for: .codex)
+        }
+        set { UserDefaults.standard.set(newValue, forKey: assistantCodexEffortKey) }
+    }
+
+    /// Default Codex OS-sandbox mode for new conversations. Unknown raw ⇒ read-only.
+    static let assistantCodexSandboxKey = "Rubien.assistant.codex.sandbox"
+
+    static var assistantCodexSandbox: CodexSandbox {
+        get {
+            let raw = UserDefaults.standard.string(forKey: assistantCodexSandboxKey)
+            return raw.flatMap(CodexSandbox.init(rawValue:)) ?? .readOnly
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: assistantCodexSandboxKey) }
+    }
+
+    /// Explicit path to the `codex` binary; empty/unset ⇒ auto-discovery (same
+    /// resolution as Claude). Threaded to `CodexProvider(executableOverride:)`.
+    static let assistantCodexBinaryPathKey = "Rubien.assistant.codex.binaryPath"
+
+    static var assistantCodexBinaryPath: String? {
+        get {
+            let path = UserDefaults.standard.string(forKey: assistantCodexBinaryPathKey)
+            return (path?.isEmpty == false) ? path : nil
+        }
+        set {
+            if let newValue, !newValue.isEmpty {
+                UserDefaults.standard.set(newValue, forKey: assistantCodexBinaryPathKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: assistantCodexBinaryPathKey)
             }
         }
     }
