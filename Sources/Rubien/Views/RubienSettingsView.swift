@@ -283,7 +283,7 @@ struct RubienSettingsView: View {
         } header: {
             Text(String(localized: "Defaults for new conversations", bundle: .module))
         } footer: {
-            Text(String(localized: "Applied when you open a document; each conversation can still change them in the sidebar. Web search lets the assistant fetch pages you didn’t open. Auto-accept runs its writes and shell commands without asking first.", bundle: .module))
+            Text(String(localized: "Used for each new conversation — a newly opened document, or “New conversation” in one already open. Each conversation can still change them in its sidebar. Web search lets the assistant fetch pages you didn’t open. Auto-accept runs its writes and shell commands without asking first.", bundle: .module))
         }
     }
 

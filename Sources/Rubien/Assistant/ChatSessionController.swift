@@ -23,6 +23,19 @@ protocol ChatTranscriptSink: AnyObject {
 
 extension ChatTranscriptController: ChatTranscriptSink {}
 
+// MARK: - Conversation defaults
+
+/// A snapshot of the user's Assistant defaults (Settings ▸ Assistant) applied to a
+/// FRESH conversation: model / effort / web / approval. A new reader window reads
+/// these at construction; `newConversation()` re-reads them (via an injected
+/// provider) so a changed default is adopted in an open window without reopening it.
+struct AssistantConversationDefaults: Equatable {
+    var model: String?
+    var effort: String?
+    var webAccess: Bool
+    var autoApprove: Bool
+}
+
 // MARK: - Per-window chat session controller (Phase 2c)
 //
 // One per reader window. Owns the conversation's in-memory state (nothing is
@@ -81,6 +94,11 @@ final class ChatSessionController: ObservableObject {
     private let gate: AssistantTurnGate
     private let reference: ChatReference
     private let workspaceURL: URL
+    /// Re-reads the user's Assistant defaults (Settings) when a fresh conversation
+    /// starts, so changing a default + hitting "New conversation" adopts it without
+    /// reopening the window. nil (tests / DEBUG harness) ⇒ `newConversation` keeps
+    /// the current live values.
+    private let defaultsProvider: (() -> AssistantConversationDefaults)?
 
     // MARK: In-memory conversation state (never persisted — D5)
     /// The live provider session id. Captured from EVERY `.sessionStarted` because it
@@ -117,7 +135,8 @@ final class ChatSessionController: ObservableObject {
         webAccess: Bool = true,
         modelOverride: String? = "opus",
         effortOverride: String? = "high",
-        autoApprove: Bool = false
+        autoApprove: Bool = false,
+        defaultsProvider: (() -> AssistantConversationDefaults)? = nil
     ) {
         self.provider = provider
         self.transcript = transcript
@@ -128,6 +147,7 @@ final class ChatSessionController: ObservableObject {
         self.modelOverride = modelOverride
         self.effortOverride = effortOverride
         self.autoApprove = autoApprove
+        self.defaultsProvider = defaultsProvider
     }
 
     // MARK: Turn lifecycle
@@ -248,6 +268,15 @@ final class ChatSessionController: ObservableObject {
         toolDetails.removeAll()
         renderLog.removeAll()
         renderSeq = 0
+        // Adopt the latest Settings ▸ Assistant defaults for the fresh conversation,
+        // so a default changed while a reader is open takes effect on New conversation
+        // (a live conversation keeps its own values). No-op when unset (tests/harness).
+        if let defaults = defaultsProvider?() {
+            modelOverride = defaults.model
+            effortOverride = defaults.effort
+            webAccess = defaults.webAccess
+            autoApprove = defaults.autoApprove
+        }
     }
 
     /// Answer a pending Claude approval; the turn continues on the same stream. A stale

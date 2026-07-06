@@ -260,6 +260,41 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertFalse(ask.autoApprove, "defaults to Ask")
     }
 
+    func testNewConversationAdoptsLatestSettingsDefaults() {
+        // A reader stays open while the user changes Settings ▸ Assistant; "New
+        // conversation" should adopt the new defaults (the reader can't be reopened
+        // to pick them up because window reuse keeps the same session).
+        var current = AssistantConversationDefaults(model: "opus", effort: "high", webAccess: true, autoApprove: false)
+        let controller = ChatSessionController(
+            provider: MockAgentProvider(), transcript: SpyTranscriptSink(),
+            reference: ChatReference(id: 1, title: "T", authors: ""),
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"),
+            gate: AssistantTurnGate(),
+            webAccess: current.webAccess, modelOverride: current.model,
+            effortOverride: current.effort, autoApprove: current.autoApprove,
+            defaultsProvider: { current })
+
+        current = AssistantConversationDefaults(model: "sonnet", effort: "medium", webAccess: false, autoApprove: true)
+        controller.newConversation()
+
+        XCTAssertEqual(controller.modelOverride, "sonnet")
+        XCTAssertEqual(controller.effortOverride, "medium")
+        XCTAssertFalse(controller.webAccess)
+        XCTAssertTrue(controller.autoApprove)
+    }
+
+    func testNewConversationKeepsLiveValuesWithoutADefaultsProvider() {
+        let controller = ChatSessionController(
+            provider: MockAgentProvider(), transcript: SpyTranscriptSink(),
+            reference: ChatReference(id: 1, title: "T", authors: ""),
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"),
+            gate: AssistantTurnGate(),
+            modelOverride: "sonnet")
+        controller.modelOverride = "fable"  // a per-conversation override
+        controller.newConversation()
+        XCTAssertEqual(controller.modelOverride, "fable", "no provider ⇒ keep the live values")
+    }
+
     func testStagedSelectionIsQuotedIntoTheMessageThenCleared() async {
         let provider = MockAgentProvider()
         let sink = SpyTranscriptSink()

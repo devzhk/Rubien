@@ -20,7 +20,17 @@ enum ReaderChatSession {
     /// `@StateObject`), so it's injected rather than created here.
     @MainActor
     static func make(reference: Reference, transcript: ChatTranscriptController) -> ChatSessionController {
-        ChatSessionController(
+        // The live pref snapshot, re-read on every fresh conversation so a changed
+        // default is adopted on "New conversation" without reopening the window.
+        let defaultsProvider: () -> AssistantConversationDefaults = {
+            AssistantConversationDefaults(
+                model: RubienPreferences.assistantModel,
+                effort: RubienPreferences.assistantEffort,
+                webAccess: RubienPreferences.assistantWebAccess,
+                autoApprove: RubienPreferences.assistantAutoApprove)
+        }
+        let initial = defaultsProvider()
+        return ChatSessionController(
             provider: ClaudeCodeProvider(
                 executableOverride: RubienPreferences.assistantBinaryPath,
                 contentChannel: MCPContentChannel.resolveBundled()),
@@ -30,10 +40,11 @@ enum ReaderChatSession {
                 title: reference.title,
                 authors: reference.authors.displayString),
             workspaceURL: AssistantContext.ensureWorkspace(RubienPreferences.assistantWorkspaceURL),
-            webAccess: RubienPreferences.assistantWebAccess,
-            modelOverride: RubienPreferences.assistantModel,
-            effortOverride: RubienPreferences.assistantEffort,
-            autoApprove: RubienPreferences.assistantAutoApprove)
+            webAccess: initial.webAccess,
+            modelOverride: initial.model,
+            effortOverride: initial.effort,
+            autoApprove: initial.autoApprove,
+            defaultsProvider: defaultsProvider)
     }
 }
 #endif
