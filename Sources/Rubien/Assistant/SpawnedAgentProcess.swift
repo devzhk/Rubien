@@ -49,8 +49,16 @@ final class SpawnedAgentProcess: @unchecked Sendable {
         env["TERM"] = "dumb"
         env["FORCE_COLOR"] = "0"
         env["NO_COLOR"] = "1"                    // stray ANSI must not corrupt the JSON
+        // The binary's own dir first, then the standard interpreter/tool locations.
+        // Codex is a Node CLI (`#!/usr/bin/env node`), so `node` MUST be resolvable —
+        // when codex is npm-global but node came from the nodejs.org installer
+        // (/usr/local/bin) or Homebrew (/opt/homebrew/bin), it lives in a different dir
+        // than codex, and a bare `<dir>:/usr/bin:/bin` fails to launch codex at all.
+        // (An nvm install keeps node + codex in the same dir, covered by `<dir>`.)
+        // Harmless for Claude's self-contained native binary.
         let dir = binaryDirectory.isEmpty ? "/usr/local/bin" : binaryDirectory
-        env["PATH"] = "\(dir):/usr/bin:/bin"
+        let standard = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"]
+        env["PATH"] = ([dir] + standard.filter { $0 != dir }).joined(separator: ":")
         return env
     }
 

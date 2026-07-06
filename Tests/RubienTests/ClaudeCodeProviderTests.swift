@@ -390,7 +390,9 @@ final class ClaudeCodeProviderTests: XCTestCase {
         XCTAssertEqual(env["NO_COLOR"], "1")
         XCTAssertEqual(env["FORCE_COLOR"], "0")
         XCTAssertEqual(env["CLAUDE_CODE_ENTRYPOINT"], "rubien-assistant")
-        XCTAssertEqual(env["PATH"], "/opt/homebrew/bin:/usr/bin:/bin")
+        // Binary dir first, then the standard interpreter/tool dirs (deduped) — a Node
+        // CLI like codex needs `node` resolvable even when it isn't beside the binary.
+        XCTAssertEqual(env["PATH"], "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin")
         // Secrets a GUI app may carry must never be forwarded.
         XCTAssertNil(env["OPENAI_API_KEY"])
         XCTAssertNil(env["GITHUB_TOKEN"])

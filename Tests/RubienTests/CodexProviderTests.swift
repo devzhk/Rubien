@@ -93,6 +93,19 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertFalse(argv.contains("-c tools.web_search=false"), "web on by default")
     }
 
+    func testEnvironmentPathResolvesNodeForNpmInstalledCodex() {
+        // codex is a Node CLI; when it's npm-global but node came from the installer /
+        // Homebrew, node lives in a DIFFERENT dir than codex — the PATH must still
+        // include the standard interpreter locations or the app-server can't launch
+        // ("env: node: No such file or directory"). Regression for the E2E crash.
+        let env = CodexInvocation.environment(binaryDirectory: "/Users/x/.npm-global/bin")
+        let dirs = (env["PATH"] ?? "").split(separator: ":").map(String.init)
+        XCTAssertEqual(dirs.first, "/Users/x/.npm-global/bin", "binary dir stays first")
+        XCTAssertTrue(dirs.contains("/usr/local/bin"), "nodejs.org installer location")
+        XCTAssertTrue(dirs.contains("/opt/homebrew/bin"), "Homebrew location")
+        XCTAssertEqual(dirs.count, Set(dirs).count, "no duplicate PATH entries")
+    }
+
     func testWebToggleOffDisablesWebSearchInArgv() async throws {
         let workspace = try makeWorkspace()
         try writeConfig(["assistantText": "ok"], into: workspace)
