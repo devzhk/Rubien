@@ -250,33 +250,60 @@ final class ChatSessionController: ObservableObject {
         }
     }
 
-    /// Start a fresh conversation: cancel any live turn and reset. Bumping `generation`
-    /// invalidates the old turn's still-draining events + finalization so they can't
-    /// corrupt the fresh state (its awaited gate release still runs — no slot leak).
-    func newConversation() {
+    /// The reset shared by `newConversation` and `resume` (§4.1): cancel any live turn,
+    /// bump the stale-turn `generation` so the old turn's still-draining events +
+    /// finalization can't corrupt the fresh state (its awaited gate release still runs
+    /// — no slot leak), and clear all transcript + turn UI state. Callers then set the
+    /// session-identity fields (`liveSessionID` / `seedSent` / `hasMessages`) and their
+    /// own tail (adopt defaults, or render a notice).
+    private func resetConversationState() {
         provider.cancel()
         generation += 1
         transcript.reset()
-        liveSessionID = nil
-        seedSent = false
-        hasMessages = false
+        toolDetails.removeAll()
+        renderLog.removeAll()
+        renderSeq = 0
         isResponding = false
         statusText = nil
         busyElsewhere = false
         pendingApproval = nil
         stagedSelection = nil
-        toolDetails.removeAll()
-        renderLog.removeAll()
-        renderSeq = 0
-        // Adopt the latest Settings ▸ Assistant defaults for the fresh conversation,
-        // so a default changed while a reader is open takes effect on New conversation
-        // (a live conversation keeps its own values). No-op when unset (tests/harness).
+    }
+
+    /// Start a fresh conversation: reset, drop the session identity, and adopt the
+    /// latest Settings ▸ Assistant defaults (so a default changed while a reader is
+    /// open takes effect here; a live conversation keeps its own values). Defaults
+    /// re-read is a no-op when the provider is unset (tests / DEBUG harness).
+    func newConversation() {
+        resetConversationState()
+        liveSessionID = nil
+        seedSent = false
+        hasMessages = false
         if let defaults = defaultsProvider?() {
             modelOverride = defaults.model
             effortOverride = defaults.effort
             webAccess = defaults.webAccess
             autoApprove = defaults.autoApprove
         }
+    }
+
+    /// The runtime's own recent sessions for this conversation's working folder, for
+    /// the History picker (§5.3). A light read of the provider's store; Rubien keeps
+    /// nothing. Off-main inside the provider.
+    func listRecentSessions(limit: Int = 25) async -> [AgentSessionSummary] {
+        await provider.recentSessions(workspaceURL: workspaceURL, limit: limit)
+    }
+
+    /// Resume a past conversation from History: point the next turn at its session id
+    /// (`--resume`) and start with a clean pane (Rubien has no stored transcript — D5).
+    /// The resumed session already carries its seed/context, so `seedSent` is set to
+    /// avoid re-seeding. A notice with the preview gives the user their bearings.
+    func resume(_ summary: AgentSessionSummary) {
+        resetConversationState()
+        liveSessionID = summary.id
+        seedSent = true
+        hasMessages = true
+        renderNotice("_Resumed a previous conversation:_ “\(summary.preview)”")
     }
 
     /// Answer a pending Claude approval; the turn continues on the same stream. A stale

@@ -283,6 +283,26 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertTrue(controller.autoApprove)
     }
 
+    func testResumePointsNextTurnAtSessionWithoutReseeding() async {
+        let provider = MockAgentProvider()
+        let sink = SpyTranscriptSink()
+        let controller = makeController(provider: provider, sink: sink)
+        let summary = AgentSessionSummary(id: "sess-123", preview: "Prior chat", date: Date(timeIntervalSince1970: 0))
+
+        controller.resume(summary)
+        XCTAssertEqual(controller.liveSessionID, "sess-123")
+        XCTAssertTrue(controller.hasMessages, "resume shows the transcript (a notice), not the start page")
+        XCTAssertTrue(
+            sink.calls.contains { if case .addNotice(let md) = $0 { return md.contains("Prior chat") } else { return false } },
+            "a notice with the preview orients the user")
+
+        // The resumed session already carries its seed → the next turn resumes that id
+        // and does NOT re-send a seed.
+        await runTurn(controller, provider: provider, send: "continue", events: [.turnCompleted(usage: nil)])
+        XCTAssertEqual(provider.lastRequest?.resumeSessionID, "sess-123")
+        XCTAssertNil(provider.lastRequest?.seed, "a resumed conversation must not re-seed")
+    }
+
     func testNewConversationKeepsLiveValuesWithoutADefaultsProvider() {
         let controller = ChatSessionController(
             provider: MockAgentProvider(), transcript: SpyTranscriptSink(),

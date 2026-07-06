@@ -78,6 +78,15 @@ final class ClaudeCodeProvider: AgentProvider {
         let engine = self.engine
         Task { await engine.cancelCurrent() }
     }
+
+    /// Light read of Claude's own session store for the History picker (§5.3).
+    /// Runs the blocking file I/O off the main actor; `workspaceURL`/`limit` are the
+    /// only captures (the store + FileManager are created inside the detached task).
+    func recentSessions(workspaceURL: URL, limit: Int) async -> [AgentSessionSummary] {
+        await Task.detached(priority: .userInitiated) {
+            ClaudeSessionStore().recentSessions(workspaceURL: workspaceURL, limit: limit)
+        }.value
+    }
 }
 
 // MARK: - Turn engine (all mutable state is actor-isolated)

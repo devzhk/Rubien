@@ -183,6 +183,19 @@ struct AgentAvailability: Sendable, Equatable {
     }
 }
 
+/// One past conversation the provider owns, surfaced in the History picker (§5.3).
+/// Rubien stores no transcripts (D5) — this is a light read of the runtime's OWN
+/// session store (Claude: `~/.claude/projects/<cwd>/<id>.jsonl`), just enough to
+/// pick one to `--resume`. `id` is the runtime session id (the resume target).
+struct AgentSessionSummary: Identifiable, Sendable, Equatable {
+    /// The runtime session id — the `--resume <id>` target and the picker identity.
+    let id: String
+    /// First user-message preview (whitespace-collapsed, truncated).
+    let preview: String
+    /// Last-activity time (the session file's modification date), for sort + display.
+    let date: Date
+}
+
 /// The engine a chat sidebar drives. One instance per provider kind; a turn is one
 /// subprocess (D3). Serialization across windows is the caller's job via
 /// `AssistantTurnGate`.
@@ -204,6 +217,15 @@ protocol AgentProvider: Sendable {
 
     /// Terminate the current turn's whole process group (SIGTERM → grace → SIGKILL).
     func cancel()
+
+    /// The runtime's own recent sessions for `workspaceURL`, newest first, for the
+    /// History picker (§5.3). A light read of the runtime's session store — Rubien
+    /// stores nothing. Default `[]` (a provider without a readable store).
+    func recentSessions(workspaceURL: URL, limit: Int) async -> [AgentSessionSummary]
+}
+
+extension AgentProvider {
+    func recentSessions(workspaceURL: URL, limit: Int) async -> [AgentSessionSummary] { [] }
 }
 
 /// Errors thrown *into* a turn's event stream (vs. `providerNotice`, which is a

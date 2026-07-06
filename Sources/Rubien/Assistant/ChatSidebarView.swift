@@ -23,6 +23,7 @@ struct ChatSidebarView: View {
     var onClose: (() -> Void)? = nil
 
     @State private var draft = ""
+    @State private var showingHistory = false
     @State private var modelMenuHovered = false
     @State private var providerMenuHovered = false
     @State private var plusMenuHovered = false
@@ -70,9 +71,15 @@ struct ChatSidebarView: View {
                 session.newConversation()
                 draft = ""
             }
-            // No-op until 2c-6 (browse the CLI's own sessions for this folder);
-            // enabled so it hovers consistently with the other header controls.
-            iconButton("clock.arrow.circlepath", help: "History — browse past conversations (coming soon)") {}
+            iconButton("clock.arrow.circlepath", help: "History — resume a past conversation") {
+                showingHistory = true
+            }
+            .popover(isPresented: $showingHistory, arrowEdge: .bottom) {
+                ChatHistoryPopover(session: session) {
+                    showingHistory = false
+                    draft = ""
+                }
+            }
             if let onClose {
                 iconButton("xmark", help: "Close the assistant sidebar") { onClose() }
             }
@@ -634,6 +641,101 @@ struct ChatSidebarView: View {
             try? await Task.sleep(for: .milliseconds(50))
             composerFocused = true
         }
+    }
+}
+
+// MARK: - History popover (2c-6)
+
+/// Browses the active provider's OWN recent sessions for this working folder (§5.3)
+/// and `--resume`s a pick. Rubien stores no transcripts (D5); this is a light read of
+/// the runtime's session store. Loaded lazily when the popover opens.
+private struct ChatHistoryPopover: View {
+    let session: ChatSessionController
+    /// Called after a pick is resumed (the sidebar dismisses + clears the draft).
+    var onResumed: () -> Void
+
+    @State private var sessions: [AgentSessionSummary]?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Recent conversations")
+                .font(.system(size: 12, weight: .semibold))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+            Divider()
+            content
+            Divider()
+            Text("The assistant’s own sessions for this working folder.")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+        }
+        .frame(width: 320)
+        .task {
+            if sessions == nil { sessions = await session.listRecentSessions() }
+        }
+    }
+
+    @ViewBuilder private var content: some View {
+        if let sessions {
+            if sessions.isEmpty {
+                Text("No past conversations in this folder yet.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 14)
+            } else {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(sessions) { summary in
+                            HistoryRow(summary: summary) {
+                                session.resume(summary)
+                                onResumed()
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 340)
+            }
+        } else {
+            HStack {
+                Spacer()
+                ProgressView().controlSize(.small)
+                Spacer()
+            }
+            .padding(.vertical, 16)
+        }
+    }
+}
+
+/// One selectable past conversation: first-message preview + date, with a hover fill.
+private struct HistoryRow: View {
+    let summary: AgentSessionSummary
+    let action: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(summary.preview)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Color.primary.opacity(0.9))
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                Text(summary.date.formatted(date: .abbreviated, time: .shortened))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(hovered ? Color.primary.opacity(0.06) : Color.clear)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
     }
 }
 
