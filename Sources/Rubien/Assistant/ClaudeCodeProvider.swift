@@ -95,6 +95,22 @@ final class ClaudeCodeProvider: AgentProvider {
             ClaudeSessionStore().fullTranscript(sessionID: sessionID, workspaceURL: workspaceURL)
         }.value
     }
+
+    /// Content search over the store's sessions (History picker's search field).
+    /// Unlike the one-shot reads above, searches are re-issued per keystroke —
+    /// forward the caller's cancellation into the detached task (detachment
+    /// breaks structured propagation) so a superseded scan stops at its next
+    /// per-file check instead of running to completion.
+    func searchSessions(query: String, workspaceURL: URL, limit: Int) async -> [AgentSessionSummary] {
+        let scan = Task.detached(priority: .userInitiated) {
+            ClaudeSessionStore().searchSessions(query: query, workspaceURL: workspaceURL, limit: limit)
+        }
+        return await withTaskCancellationHandler {
+            await scan.value
+        } onCancel: {
+            scan.cancel()
+        }
+    }
 }
 
 // MARK: - Turn engine (all mutable state is actor-isolated)

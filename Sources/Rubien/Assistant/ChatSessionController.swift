@@ -319,6 +319,12 @@ final class ChatSessionController: ObservableObject {
         await provider.recentSessions(workspaceURL: workspaceURL, limit: limit)
     }
 
+    /// Content search over the provider's sessions for this conversation's working
+    /// folder (History picker's search field, §5.3).
+    func searchSessions(_ query: String, limit: Int = 25) async -> [AgentSessionSummary] {
+        await provider.searchSessions(query: query, workspaceURL: workspaceURL, limit: limit)
+    }
+
     /// Resume a past conversation from History: point the next turn at its session id
     /// (`--resume`) and start with a clean pane (Rubien has no stored transcript — D5).
     /// The resumed session already carries its seed/context, so `seedSent` is set to

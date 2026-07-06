@@ -701,22 +701,35 @@ extension Color {
 
 // MARK: - History popover (2c-6)
 
-/// Browses the active provider's OWN recent sessions for this working folder (§5.3)
-/// and `--resume`s a pick. Rubien stores no transcripts (D5); this is a light read of
-/// the runtime's session store. Loaded lazily when the popover opens.
+/// Browses the active provider's OWN sessions for this working folder (§5.3) and
+/// `--resume`s a pick. Rubien stores no transcripts (D5); this is a light read of
+/// the runtime's session store. Recents load lazily when the popover opens; typing
+/// in the search field switches to a debounced CONTENT search (the visible
+/// user/assistant text of every session, not just first-message previews).
 private struct ChatHistoryPopover: View {
     let session: ChatSessionController
     /// Called after a pick is resumed (the sidebar dismisses + clears the draft).
     var onResumed: () -> Void
 
     @State private var sessions: [AgentSessionSummary]?
+    @State private var query = ""
+    /// nil while a search is in flight (spinner); results otherwise. Ignored when
+    /// the query is empty (recents show).
+    @State private var searchResults: [AgentSessionSummary]?
+    @State private var searchTask: Task<Void, Never>?
+    @FocusState private var searchFocused: Bool
+
+    private var trimmedQuery: String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Recent conversations")
+            Text("Conversations")
                 .font(.system(size: 12, weight: .semibold))
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
+            searchField
             Divider()
             content
             Divider()
@@ -730,52 +743,128 @@ private struct ChatHistoryPopover: View {
         .task {
             if sessions == nil { sessions = await session.listRecentSessions() }
         }
+        .onChange(of: query) { _, _ in scheduleSearch() }
     }
 
-    @ViewBuilder private var content: some View {
-        if let sessions {
-            if sessions.isEmpty {
-                Text("No past conversations in this folder yet.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 14)
-            } else {
-                ScrollView {
-                    VStack(spacing: 0) {
-                        ForEach(sessions) { summary in
-                            HistoryRow(summary: summary) {
-                                session.resume(summary)
-                                onResumed()
-                            }
-                        }
-                    }
+    private var searchField: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+            TextField("Search past conversations", text: $query)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .focused($searchFocused)
+            if !query.isEmpty {
+                Button {
+                    query = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
                 }
-                // A ScrollView has no intrinsic height, and the popover was
-                // sized around the loading spinner before the async rows landed
-                // — a bare `maxHeight` left it collapsed to ~one visible row.
-                // Fixed-height rows make the content height deterministic.
-                .frame(height: min(CGFloat(sessions.count) * HistoryRow.height, 340))
+                .buttonStyle(.plain)
+                .help(String(localized: "Clear search", bundle: .module))
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
+        .onAppear { focusSoon() }
+    }
+
+    /// Debounced content search: typing cancels the previous probe; the query
+    /// must be stable for a beat before files are scanned. An empty query just
+    /// switches the list back to recents.
+    private func scheduleSearch() {
+        searchTask?.cancel()
+        let trimmed = trimmedQuery
+        guard !trimmed.isEmpty else {
+            searchResults = nil
+            return
+        }
+        searchResults = nil  // spinner while (re)searching
+        searchTask = Task {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            let hits = await session.searchSessions(trimmed)
+            guard !Task.isCancelled else { return }
+            searchResults = hits
+        }
+    }
+
+    /// Focus at popover-mount doesn't take; hop the runloop first (the sidebar
+    /// composer's `focusComposerSoon` idiom).
+    private func focusSoon() {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            searchFocused = true
+        }
+    }
+
+    /// Recents and search results share one shape: nil → spinner, empty → label,
+    /// rows → list. Only the source array, empty-text, and highlight differ.
+    @ViewBuilder private var content: some View {
+        let highlight = trimmedQuery.isEmpty ? nil : trimmedQuery
+        let items = highlight == nil ? sessions : searchResults
+        if let items {
+            if items.isEmpty {
+                emptyLabel(highlight == nil
+                    ? "No past conversations in this folder yet."
+                    : "No conversations match “\(trimmedQuery)”.")
+            } else {
+                rowList(items, highlight: highlight)
             }
         } else {
-            HStack {
-                Spacer()
-                ProgressView().controlSize(.small)
-                Spacer()
-            }
-            .padding(.vertical, 16)
+            loadingSpinner
         }
+    }
+
+    private func rowList(_ items: [AgentSessionSummary], highlight: String? = nil) -> some View {
+        ScrollView {
+            VStack(spacing: 0) {
+                ForEach(items) { summary in
+                    HistoryRow(summary: summary, highlightQuery: highlight) {
+                        session.resume(summary)
+                        onResumed()
+                    }
+                }
+            }
+        }
+        // A ScrollView has no intrinsic height, and the popover was sized around
+        // the loading spinner before the async rows landed — a bare `maxHeight`
+        // left it collapsed to ~one visible row. Fixed-height rows make the
+        // content height deterministic.
+        .frame(height: min(CGFloat(items.count) * HistoryRow.height, 340))
+    }
+
+    private func emptyLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 14)
+    }
+
+    private var loadingSpinner: some View {
+        HStack {
+            Spacer()
+            ProgressView().controlSize(.small)
+            Spacer()
+        }
+        .padding(.vertical, 16)
     }
 }
 
-/// One selectable past conversation: first-message preview + date, with a hover fill.
+/// One selectable past conversation: first-message preview + date (or, for a
+/// search hit, the matched snippet with the query bolded), with a hover fill.
 private struct HistoryRow: View {
     /// Fixed row height so the popover list's total height is deterministic
-    /// (the preview is single-line for the same reason).
+    /// (both lines are single-line for the same reason).
     static let height: CGFloat = 44
 
     let summary: AgentSessionSummary
+    var highlightQuery: String? = nil
     let action: () -> Void
     @State private var hovered = false
 
@@ -787,9 +876,11 @@ private struct HistoryRow: View {
                     .foregroundStyle(Color.primary.opacity(0.9))
                     .lineLimit(1)
                     .truncationMode(.tail)
-                Text(summary.date.formatted(date: .abbreviated, time: .shortened))
+                secondLine
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12)
@@ -799,6 +890,27 @@ private struct HistoryRow: View {
         }
         .buttonStyle(.plain)
         .onHover { hovered = $0 }
+    }
+
+    /// The matched snippet (query bolded) for a search hit; the date otherwise.
+    @ViewBuilder private var secondLine: some View {
+        if let snippet = summary.matchSnippet {
+            Text(Self.highlighted(snippet, query: highlightQuery))
+        } else {
+            Text(summary.date.formatted(date: .abbreviated, time: .shortened))
+        }
+    }
+
+    private static func highlighted(_ snippet: String, query: String?) -> AttributedString {
+        var attributed = AttributedString(snippet)
+        // Re-find with the store's own match options — sound by construction (the
+        // snippet window opens ≤ context before the file's FIRST match, so its
+        // first occurrence is that match).
+        if let query, !query.isEmpty,
+           let range = attributed.range(of: query, options: ClaudeSessionStore.matchOptions) {
+            attributed[range].font = .system(size: 10, weight: .bold)
+        }
+        return attributed
     }
 }
 

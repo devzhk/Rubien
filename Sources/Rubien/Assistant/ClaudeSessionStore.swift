@@ -40,28 +40,34 @@ struct ClaudeSessionStore {
     /// call off the main actor.
     func recentSessions(workspaceURL: URL, limit: Int) -> [AgentSessionSummary] {
         guard limit > 0 else { return [] }
-        let dir = projectsRoot.appendingPathComponent(
-            Self.projectDirName(forWorkspacePath: workspaceURL.path), isDirectory: true)
-        guard let entries = try? fileManager.contentsOfDirectory(
-            at: dir,
-            includingPropertiesForKeys: [.contentModificationDateKey],
-            options: [.skipsHiddenFiles]
-        ) else { return [] }
-
-        // Sort by modification date (cached by the enumeration above) BEFORE reading
-        // any file, then read only the newest ~`limit` — a folder with hundreds of
-        // large sessions must not read every transcript just to show 25.
-        let newestFirst = entries
-            .filter { $0.pathExtension == "jsonl" }
-            .sorted { Self.modificationDate(of: $0) > Self.modificationDate(of: $1) }
         var summaries: [AgentSessionSummary] = []
-        for url in newestFirst {
+        for url in sessionFilesNewestFirst(for: workspaceURL) {
             if summaries.count >= limit { break }
             if let summary = summarize(fileURL: url, expectedCWD: workspaceURL.path) {
                 summaries.append(summary)
             }
         }
         return summaries
+    }
+
+    /// The session directory claude uses for `workspaceURL`.
+    private func projectDir(for workspaceURL: URL) -> URL {
+        projectsRoot.appendingPathComponent(
+            Self.projectDirName(forWorkspacePath: workspaceURL.path), isDirectory: true)
+    }
+
+    /// The folder's session files sorted by modification date (prefetched by the
+    /// enumeration) BEFORE reading any body — a folder with hundreds of large
+    /// sessions must not read every transcript just to list or search a few.
+    private func sessionFilesNewestFirst(for workspaceURL: URL) -> [URL] {
+        guard let entries = try? fileManager.contentsOfDirectory(
+            at: projectDir(for: workspaceURL),
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+        return entries
+            .filter { $0.pathExtension == "jsonl" }
+            .sorted { Self.modificationDate(of: $0) > Self.modificationDate(of: $1) }
     }
 
     /// Build a summary for one session file: session id (filename stem), first user
@@ -105,9 +111,7 @@ struct ClaudeSessionStore {
     /// (denials live in stream-only `permission_denials`, not the session file's
     /// message entries) — accepted for now; denials are rare in history.
     func fullTranscript(sessionID: String, workspaceURL: URL) -> [ChatRenderMessage] {
-        let dir = projectsRoot.appendingPathComponent(
-            Self.projectDirName(forWorkspacePath: workspaceURL.path), isDirectory: true)
-        let fileURL = dir.appendingPathComponent("\(sessionID).jsonl")
+        let fileURL = projectDir(for: workspaceURL).appendingPathComponent("\(sessionID).jsonl")
         guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else { return [] }
 
         var rows: [ChatRenderMessage] = []
@@ -116,20 +120,18 @@ struct ClaudeSessionStore {
         }
         for line in content.split(separator: "\n", omittingEmptySubsequences: true) {
             guard let obj = Self.parseLine(line),
-                  obj["isMeta"] as? Bool != true,
-                  obj["isSidechain"] as? Bool != true,  // subagent internals are not conversation rows
-                  let message = obj["message"] as? [String: Any]
+                  let entry = Self.conversationEntry(obj)
             else { continue }
-            switch obj["type"] as? String {
+            switch entry.type {
             case "user":
-                if let text = Self.messageText(message), !text.isEmpty {
+                if let text = Self.messageText(entry.message), !text.isEmpty {
                     append(.user, text)
                 }
             case "assistant":
-                if let text = Self.messageText(message), !text.isEmpty {
+                if let text = Self.messageText(entry.message), !text.isEmpty {
                     append(.assistant, text)
                 }
-                for block in (message["content"] as? [[String: Any]]) ?? []
+                for block in (entry.message["content"] as? [[String: Any]]) ?? []
                 where block["type"] as? String == "tool_use" {
                     guard let name = block["name"] as? String else { continue }
                     let chip = ToolChipPayload(
@@ -143,6 +145,89 @@ struct ClaudeSessionStore {
             }
         }
         return rows
+    }
+
+    /// One parsed JSONL line that belongs to the VISIBLE conversation — a user or
+    /// assistant message that is neither meta nor sidechain (subagent internals).
+    /// The single gate `fullTranscript` (rendering) and the content search
+    /// (matching) both go through, so "search matches what a resume renders"
+    /// holds by construction.
+    private static func conversationEntry(_ obj: [String: Any]) -> (type: String, message: [String: Any])? {
+        guard obj["isMeta"] as? Bool != true,
+              obj["isSidechain"] as? Bool != true,
+              let type = obj["type"] as? String, type == "user" || type == "assistant",
+              let message = obj["message"] as? [String: Any]
+        else { return nil }
+        return (type, message)
+    }
+
+    /// Content search over the folder's sessions: matches the VISIBLE conversation
+    /// text (user + assistant messages, the same rows `fullTranscript` renders —
+    /// never tool payloads, meta, or sidechain internals), case- and
+    /// diacritic-insensitively. Newest first, capped at `limit`; each hit carries
+    /// a `matchSnippet` around its first match. A linear scan of every session
+    /// file — fine at the store's scale (tens of files, ~100 KB each); revisit
+    /// with an index only if folders grow orders of magnitude beyond that.
+    func searchSessions(query: String, workspaceURL: URL, limit: Int) -> [AgentSessionSummary] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, limit > 0 else { return [] }
+        var hits: [AgentSessionSummary] = []
+        for url in sessionFilesNewestFirst(for: workspaceURL) {
+            if hits.count >= limit { break }
+            // A superseded search (the user kept typing) is cancelled by the
+            // provider — stop at the file boundary instead of scanning on.
+            if Task.isCancelled { return hits }
+            // Snippet first: most files won't match, and `summarize` (a second
+            // read, for the title/cwd check) then runs only for actual hits.
+            guard let snippet = firstMatchSnippet(fileURL: url, query: trimmed),
+                  var hit = summarize(fileURL: url, expectedCWD: workspaceURL.path)
+            else { continue }
+            hit.matchSnippet = snippet
+            hits.append(hit)
+        }
+        return hits
+    }
+
+    /// Lines longer than this are skipped by the search scan — no legitimate
+    /// conversation text is megabytes on one line, but a pathological entry
+    /// (huge pasted blob) would otherwise pay full JSON-decode cost per query.
+    private let maxSearchedLineBytes = 1_000_000
+
+    /// How search matching compares text — shared with the History rows' snippet
+    /// highlighting (`HistoryRow`), which re-finds the query to bold it; the two
+    /// drifting apart would silently kill or misplace the bolding.
+    static let matchOptions: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+
+    /// Scan one session file for `query` in its visible text; a snippet around the
+    /// first match, or nil when the session doesn't match.
+    private func firstMatchSnippet(fileURL: URL, query: String) -> String? {
+        guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else { return nil }
+        for line in content.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard line.utf8.count <= maxSearchedLineBytes else { continue }
+            guard let obj = Self.parseLine(line),
+                  let entry = Self.conversationEntry(obj),
+                  let text = Self.messageText(entry.message)
+            else { continue }
+            if let snippet = Self.snippet(around: query, in: text) {
+                return snippet
+            }
+        }
+        return nil
+    }
+
+    /// A whitespace-collapsed window around the first `matchOptions` occurrence
+    /// of `query` in `text`, with "…" marking clipped edges.
+    static func snippet(around query: String, in text: String, context: Int = 40) -> String? {
+        let collapsed = collapseWhitespace(text)
+        guard let range = collapsed.range(of: query, options: matchOptions) else { return nil }
+        let start = collapsed.index(range.lowerBound, offsetBy: -context, limitedBy: collapsed.startIndex)
+            ?? collapsed.startIndex
+        let end = collapsed.index(range.upperBound, offsetBy: context, limitedBy: collapsed.endIndex)
+            ?? collapsed.endIndex
+        let clipped = String(collapsed[start..<end])
+        return (start > collapsed.startIndex ? "…" : "")
+            + clipped
+            + (end < collapsed.endIndex ? "…" : "")
     }
 
     /// The file's modification date (cached by `contentsOfDirectory`'s prefetch),
@@ -163,9 +248,15 @@ struct ClaudeSessionStore {
     private static func firstUserText(_ obj: [String: Any]) -> String? {
         guard let message = obj["message"] as? [String: Any],
               let raw = messageText(message) else { return nil }
-        let collapsed = raw.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        let collapsed = collapseWhitespace(raw)
         guard !collapsed.isEmpty else { return nil }
         return collapsed.count > 140 ? String(collapsed.prefix(140)) + "…" : collapsed
+    }
+
+    /// Runs of any whitespace (incl. newlines) become single spaces — the
+    /// one-line form previews and snippets render.
+    private static func collapseWhitespace(_ text: String) -> String {
+        text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
     }
 
     /// A message's full visible text: `content` is either a plain string or an

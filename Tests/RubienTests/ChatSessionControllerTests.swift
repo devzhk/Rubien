@@ -426,6 +426,19 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertEqual(replayed.map(\.body), history.map(\.body))
     }
 
+    func testSearchSessionsForwardsToTheProviderWithTheWorkspace() async {
+        let provider = MockAgentProvider()
+        let controller = makeController(provider: provider, sink: SpyTranscriptSink())
+        let hit = AgentSessionSummary(
+            id: "s1", preview: "Q", date: Date(timeIntervalSince1970: 0), matchSnippet: "…the match…")
+        provider.setSearchResults([hit])
+
+        let results = await controller.searchSessions("attention")
+        XCTAssertEqual(results, [hit])
+        XCTAssertEqual(provider.searches.map(\.query), ["attention"])
+        XCTAssertEqual(provider.searches.map(\.limit), [25])
+    }
+
     func testQuickSendAfterResumeStillPrependsTheRestoredHistory() async {
         // The race codex flagged: a follow-up send bumps `generation` before the
         // restore lands — the history must still prepend (same conversation),
@@ -778,6 +791,8 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
     private var _transcripts: [String: [ChatRenderMessage]] = [:]
     private var _transcriptHold = false
     private var _transcriptWaiters: [CheckedContinuation<Void, Never>] = []
+    private var _searches: [(query: String, limit: Int)] = []
+    private var _searchResults: [AgentSessionSummary] = []
 
     init(kind: AgentProviderKind = .claude,
          availability: AgentAvailability = .installed(version: "test", path: "/fake/claude")) {
@@ -820,6 +835,20 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
             }
         }
         lock.lock(); defer { lock.unlock() }; return _transcripts[sessionID] ?? []
+    }
+
+    func setSearchResults(_ results: [AgentSessionSummary]) {
+        lock.lock(); defer { lock.unlock() }; _searchResults = results
+    }
+
+    func searchSessions(query: String, workspaceURL: URL, limit: Int) async -> [AgentSessionSummary] {
+        lock.lock(); defer { lock.unlock() }
+        _searches.append((query, limit))
+        return _searchResults
+    }
+
+    var searches: [(query: String, limit: Int)] {
+        lock.lock(); defer { lock.unlock() }; return _searches
     }
 
     func send(turn: AgentTurnRequest) -> AsyncThrowingStream<AgentEvent, Error> {

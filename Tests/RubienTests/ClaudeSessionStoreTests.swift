@@ -172,6 +172,82 @@ final class ClaudeSessionStoreTests: XCTestCase {
         XCTAssertEqual(store.summarize(fileURL: url, expectedCWD: cwd)?.preview, "The real question")
     }
 
+    // MARK: searchSessions (content search)
+
+    private func assistantLine(cwd: String, text: String) -> String {
+        #"{"type":"assistant","cwd":"\#(cwd)","message":{"content":[{"type":"text","text":"\#(text)"}]}}"#
+    }
+
+    func testSearchMatchesAssistantContentNotJustThePreview() throws {
+        let (store, _, workspace, dir) = try makeStore()
+        let cwd = workspace.path
+        try writeSession("hit", lines: [
+            userLine(cwd: cwd, content: "Summarize this"),
+            assistantLine(cwd: cwd, text: "The paper introduces the transformer architecture."),
+        ], mtime: Date(timeIntervalSince1970: 2_000), in: dir)
+        try writeSession("miss", lines: [
+            userLine(cwd: cwd, content: "Unrelated question"),
+            assistantLine(cwd: cwd, text: "Nothing relevant here."),
+        ], mtime: Date(timeIntervalSince1970: 1_000), in: dir)
+
+        let hits = store.searchSessions(query: "transformer", workspaceURL: workspace, limit: 25)
+        XCTAssertEqual(hits.map(\.id), ["hit"], "matches the ANSWER's content, not just previews")
+        XCTAssertEqual(hits.first?.preview, "Summarize this", "the row title stays the conversation's opener")
+        XCTAssertEqual(hits.first?.matchSnippet?.contains("transformer"), true)
+    }
+
+    func testSearchIsCaseInsensitiveAndSnippetsClipWithEllipses() throws {
+        let (store, _, workspace, dir) = try makeStore()
+        let cwd = workspace.path
+        let padding = String(repeating: "lorem ipsum ", count: 20)
+        try writeSession("s", lines: [
+            userLine(cwd: cwd, content: "Q"),
+            assistantLine(cwd: cwd, text: "\(padding)the Transformer core idea\(padding)"),
+        ], mtime: Date(timeIntervalSince1970: 1_000), in: dir)
+
+        let hits = store.searchSessions(query: "TRANSFORMER", workspaceURL: workspace, limit: 25)
+        let snippet = try XCTUnwrap(hits.first?.matchSnippet)
+        XCTAssertTrue(snippet.localizedCaseInsensitiveContains("transformer"))
+        XCTAssertTrue(snippet.hasPrefix("…") && snippet.hasSuffix("…"),
+                      "a mid-text match clips both edges: \(snippet)")
+        XCTAssertLessThan(snippet.count, 120, "the snippet is a window, not the message")
+    }
+
+    func testSearchIgnoresToolPayloadsMetaAndSidechainText() throws {
+        let (store, _, workspace, dir) = try makeStore()
+        let cwd = workspace.path
+        try writeSession("noise", lines: [
+            userLine(cwd: cwd, content: "Visible question"),
+            // "needle" appears ONLY in non-conversation places:
+            #"{"type":"assistant","cwd":"\#(cwd)","message":{"content":[{"type":"tool_use","name":"rubien_search","input":{"query":"needle"}}]}}"#,
+            #"{"type":"user","cwd":"\#(cwd)","message":{"content":[{"type":"tool_result","content":"needle"}]}}"#,
+            #"{"type":"user","isMeta":true,"cwd":"\#(cwd)","message":{"content":"needle"}}"#,
+            #"{"type":"assistant","isSidechain":true,"cwd":"\#(cwd)","message":{"content":[{"type":"text","text":"needle"}]}}"#,
+        ], mtime: Date(timeIntervalSince1970: 1_000), in: dir)
+
+        XCTAssertTrue(store.searchSessions(query: "needle", workspaceURL: workspace, limit: 25).isEmpty,
+                      "tool payloads / results / meta / sidechain text must not match")
+    }
+
+    func testSearchIsNewestFirstAndRespectsLimit() throws {
+        let (store, _, workspace, dir) = try makeStore()
+        let cwd = workspace.path
+        for (i, id) in ["old", "mid", "new"].enumerated() {
+            try writeSession(id, lines: [userLine(cwd: cwd, content: "shared topic \(id)")],
+                             mtime: Date(timeIntervalSince1970: TimeInterval(1_000 + i)), in: dir)
+        }
+        let hits = store.searchSessions(query: "shared topic", workspaceURL: workspace, limit: 2)
+        XCTAssertEqual(hits.map(\.id), ["new", "mid"])
+    }
+
+    func testSearchReturnsNothingForABlankQuery() throws {
+        let (store, _, workspace, dir) = try makeStore()
+        try writeSession("s", lines: [userLine(cwd: workspace.path, content: "Anything")],
+                         mtime: Date(timeIntervalSince1970: 1_000), in: dir)
+        XCTAssertTrue(store.searchSessions(query: "", workspaceURL: workspace, limit: 25).isEmpty)
+        XCTAssertTrue(store.searchSessions(query: "   ", workspaceURL: workspace, limit: 25).isEmpty)
+    }
+
     func testSummarizeCollapsesWhitespaceAndTruncates() throws {
         let (store, _, workspace, dir) = try makeStore()
         let long = String(repeating: "word ", count: 60)  // > 140 chars

@@ -194,6 +194,9 @@ struct AgentSessionSummary: Identifiable, Sendable, Equatable {
     let preview: String
     /// Last-activity time (the session file's modification date), for sort + display.
     let date: Date
+    /// For a content-search hit: a whitespace-collapsed snippet around the first
+    /// match (with "…" where clipped). nil for plain recents listings.
+    var matchSnippet: String? = nil
 }
 
 /// The engine a chat sidebar drives. One instance per provider kind; a turn is one
@@ -227,11 +230,17 @@ protocol AgentProvider: Sendable {
     /// conversation's content (still read from the runtime's own store — Rubien
     /// stores nothing). Default `[]` → the caller shows a preview notice instead.
     func sessionTranscript(sessionID: String, workspaceURL: URL) async -> [ChatRenderMessage]
+
+    /// Content search over the runtime's sessions for `workspaceURL` (the visible
+    /// user/assistant text, not tool payloads), newest first, each hit carrying a
+    /// `matchSnippet`. Default `[]` (a provider without a readable store).
+    func searchSessions(query: String, workspaceURL: URL, limit: Int) async -> [AgentSessionSummary]
 }
 
 extension AgentProvider {
     func recentSessions(workspaceURL: URL, limit: Int) async -> [AgentSessionSummary] { [] }
     func sessionTranscript(sessionID: String, workspaceURL: URL) async -> [ChatRenderMessage] { [] }
+    func searchSessions(query: String, workspaceURL: URL, limit: Int) async -> [AgentSessionSummary] { [] }
 }
 
 /// Errors thrown *into* a turn's event stream (vs. `providerNotice`, which is a
