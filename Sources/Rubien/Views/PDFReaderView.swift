@@ -823,13 +823,33 @@ final class CommitAwarePDFView: PDFView {
     var onSelectionCleared: (() -> Void)?
     var onAnnotationClicked: ((PDFAnnotation) -> Void)?
     var onShowSearchUI: (() -> Void)?
+    var onLinkHoverChanged: ((PDFAnnotation?, CGRect) -> Void)?
 
     /// Arrow key codes (left, right, down, up) for keyboard text-selection extension.
     private static let arrowKeyCodes: ClosedRange<Int> = 0x7B...0x7E
 
     private var userIsSelecting = false
+    private var hoverTrackingArea: NSTrackingArea?
+    private weak var hoveredLinkAnnotation: PDFAnnotation?
 
     override var acceptsFirstResponder: Bool { true }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+
+        if let hoverTrackingArea {
+            removeTrackingArea(hoverTrackingArea)
+        }
+
+        let trackingArea = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(trackingArea)
+        hoverTrackingArea = trackingArea
+    }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "f" {
@@ -841,6 +861,7 @@ final class CommitAwarePDFView: PDFView {
 
     override func mouseDown(with event: NSEvent) {
         userIsSelecting = true
+        resetHoveredLinkPreview()
         super.mouseDown(with: event)
     }
 
@@ -868,6 +889,33 @@ final class CommitAwarePDFView: PDFView {
         }
     }
 
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+
+        guard !userIsSelecting else {
+            resetHoveredLinkPreview()
+            return
+        }
+
+        guard let (annotation, page) = linkAnnotation(at: event) else {
+            resetHoveredLinkPreview()
+            return
+        }
+
+        if hoveredLinkAnnotation === annotation {
+            return
+        }
+
+        hoveredLinkAnnotation = annotation
+        let rectInView = convert(annotation.bounds.standardized, from: page)
+        onLinkHoverChanged?(annotation, rectInView)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        resetHoveredLinkPreview()
+        super.mouseExited(with: event)
+    }
+
     override func keyUp(with event: NSEvent) {
         super.keyUp(with: event)
         // Only commit on shift+arrow (keyboard text-selection extend); never on bare keystrokes,
@@ -883,6 +931,25 @@ final class CommitAwarePDFView: PDFView {
         guard let page = page(for: point, nearest: true) else { return nil }
         let pagePoint = convert(point, to: page)
         return page.annotation(at: pagePoint)
+    }
+
+    func resetHoveredLinkPreview(notify: Bool = true) {
+        let hadHoveredLink = hoveredLinkAnnotation != nil
+        hoveredLinkAnnotation = nil
+        if notify, hadHoveredLink {
+            onLinkHoverChanged?(nil, .zero)
+        }
+    }
+
+    private func linkAnnotation(at event: NSEvent) -> (annotation: PDFAnnotation, page: PDFPage)? {
+        let point = convert(event.locationInWindow, from: nil)
+        guard let page = page(for: point, nearest: true) else { return nil }
+        let pagePoint = convert(point, to: page)
+        guard let annotation = page.annotation(at: pagePoint),
+              PDFLinkPreviewResolver.isPreviewableLink(annotation) else {
+            return nil
+        }
+        return (annotation, page)
     }
 
     private func commitSelectionIfNeeded() {
@@ -948,6 +1015,9 @@ struct AnnotatablePDFView: NSViewRepresentable {
         pdfView.onShowSearchUI = { [weak viewModel = self.viewModel] in
             viewModel?.openSearchUI?()
         }
+        pdfView.onLinkHoverChanged = { [weak coordinator = context.coordinator] annotation, sourceRect in
+            coordinator?.handleLinkHoverChanged(annotation, sourceRectInView: sourceRect)
+        }
 
         DispatchQueue.main.async { [weak coordinator = context.coordinator, weak pdfView] in
             guard let coordinator, let pdfView else { return }
@@ -986,6 +1056,9 @@ struct AnnotatablePDFView: NSViewRepresentable {
         pdfView.onShowSearchUI = { [weak viewModel = context.coordinator.viewModel] in
             viewModel?.openSearchUI?()
         }
+        pdfView.onLinkHoverChanged = { [weak coordinator = context.coordinator] annotation, sourceRect in
+            coordinator?.handleLinkHoverChanged(annotation, sourceRectInView: sourceRect)
+        }
 
         context.coordinator.ensureObservers(for: pdfView)
         viewModel.pdfView = pdfView
@@ -1008,6 +1081,7 @@ struct AnnotatablePDFView: NSViewRepresentable {
     static func dismantleNSView(_ pdfView: PDFView, coordinator: Coordinator) {
         coordinator.teardownObservers()
         coordinator.cancelDocumentLoad()
+        coordinator.closeLinkPreview()
         pdfView.document = nil
     }
 
@@ -1134,6 +1208,8 @@ struct AnnotatablePDFView: NSViewRepresentable {
         private var loadedPDFURL: URL?
         private var documentLoadTask: Task<Void, Never>?
         private var toolbarDebounceTask: Task<Void, Never>?
+        private var linkPreviewTask: Task<Void, Never>?
+        private let linkPreviewPopover = PDFLinkPreviewPopoverController()
         private var lastToolbarCenter: CGPoint = .zero
         private var lastToolbarVisible: Bool = false
 
@@ -1145,6 +1221,8 @@ struct AnnotatablePDFView: NSViewRepresentable {
             teardownObservers()
             cancelDocumentLoad()
             toolbarDebounceTask?.cancel()
+            linkPreviewTask?.cancel()
+            linkPreviewPopover.close()
         }
 
         func ensureObservers(for pdfView: PDFView) {
@@ -1157,6 +1235,7 @@ struct AnnotatablePDFView: NSViewRepresentable {
                     object: clip,
                     queue: .main
                 ) { [weak self] _ in
+                    self?.closeLinkPreview(resetHoverState: true)
                     self?.requestToolbarLayoutUpdate()
                 }
             }
@@ -1169,6 +1248,7 @@ struct AnnotatablePDFView: NSViewRepresentable {
                     object: pdfView,
                     queue: .main
                 ) { [weak self] _ in
+                    self?.closeLinkPreview(resetHoverState: true)
                     self?.requestToolbarLayoutUpdate()
                 }
             }
@@ -1181,6 +1261,7 @@ struct AnnotatablePDFView: NSViewRepresentable {
                     object: pdfView,
                     queue: .main
                 ) { [weak self, weak pdfView] _ in
+                    self?.closeLinkPreview(resetHoverState: true)
                     guard let self, let pdfView,
                           let document = pdfView.document,
                           let firstPage = document.page(at: 0) else { return }
@@ -1201,6 +1282,7 @@ struct AnnotatablePDFView: NSViewRepresentable {
             }
 
             cancelDocumentLoad()
+            closeLinkPreview(resetHoverState: true)
             loadedPDFURL = url
             self.pdfView = pdfView
             viewModel.isDocumentLoading = true
@@ -1243,6 +1325,7 @@ struct AnnotatablePDFView: NSViewRepresentable {
         }
 
         func teardownObservers() {
+            closeLinkPreview(resetHoverState: true)
             removeScrollObserver()
             removeScaleObserver()
             removePageChangedObserver()
@@ -1370,6 +1453,7 @@ struct AnnotatablePDFView: NSViewRepresentable {
         func handleAnnotationClicked(_ annotation: PDFAnnotation) {
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                closeLinkPreview(resetHoverState: true)
                 // Clear any active text selection toolbar
                 viewModel.clearStagedSelection(clearViewSelection: true)
                 for (id, tracked) in trackedAnnotations where tracked.annotation === annotation {
@@ -1381,6 +1465,82 @@ struct AnnotatablePDFView: NSViewRepresentable {
                     return
                 }
             }
+        }
+
+        func handleLinkHoverChanged(_ annotation: PDFAnnotation?, sourceRectInView: CGRect) {
+            linkPreviewTask?.cancel()
+            linkPreviewTask = nil
+
+            guard let annotation else {
+                closeLinkPreview()
+                return
+            }
+
+            guard let pdfView,
+                  let document = pdfView.document,
+                  let target = PDFLinkPreviewResolver.target(
+                      for: annotation,
+                      in: document,
+                      displayBox: pdfView.displayBox
+                  ) else {
+                closeLinkPreview()
+                return
+            }
+
+            let anchorRect = sourceRectInView.standardized.insetBy(dx: -2, dy: -2)
+            linkPreviewTask = Task { @MainActor [weak self, weak pdfView] in
+                try? await Task.sleep(nanoseconds: 120_000_000)
+                guard !Task.isCancelled else { return }
+                guard let self, let pdfView else { return }
+                guard !self.viewModel.hasStagedSelection,
+                      self.viewModel.annotationToolbarLayout?.visible != true else {
+                    self.closeLinkPreview(resetHoverState: true)
+                    return
+                }
+                guard let document = pdfView.document,
+                      target.destinationPageIndex >= 0,
+                      target.destinationPageIndex < document.pageCount,
+                      let page = document.page(at: target.destinationPageIndex),
+                      let image = self.previewImage(for: target, page: page, in: pdfView) else {
+                    self.closeLinkPreview(resetHoverState: true)
+                    return
+                }
+
+                self.linkPreviewPopover.show(
+                    image: image,
+                    target: target,
+                    relativeTo: anchorRect,
+                    of: pdfView
+                )
+            }
+        }
+
+        func closeLinkPreview(resetHoverState: Bool = false) {
+            linkPreviewTask?.cancel()
+            linkPreviewTask = nil
+            linkPreviewPopover.close()
+
+            if resetHoverState {
+                (pdfView as? CommitAwarePDFView)?.resetHoveredLinkPreview(notify: false)
+            }
+        }
+
+        private func previewImage(for target: PDFLinkPreviewTarget, page: PDFPage, in pdfView: PDFView) -> NSImage? {
+            let backingScale = pdfView.window?.backingScaleFactor
+                ?? pdfView.window?.screen?.backingScaleFactor
+                ?? NSScreen.main?.backingScaleFactor
+                ?? 2
+
+            guard let image = PDFLinkPreviewResolver.renderPreview(
+                page: page,
+                cropRect: target.cropRect,
+                backingScale: backingScale,
+                displayBox: target.displayBox
+            ) else {
+                return nil
+            }
+
+            return image
         }
 
         /// Compute position for the annotation action toolbar based on annotation bounds.
