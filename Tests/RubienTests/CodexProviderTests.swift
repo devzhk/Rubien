@@ -590,7 +590,12 @@ final class CodexProviderTests: XCTestCase {
 
     private func readObserved(in workspace: URL) throws -> [String: Any] {
         let data = try Data(contentsOf: workspace.appendingPathComponent("fake-codex-observed.json"))
-        return try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        // Parse OUTSIDE XCTUnwrap: a transient empty/partial read (fixture mid-write)
+        // must throw a plain error that waitForObserved's `try?` can swallow.
+        // XCTUnwrap records a test failure even when its throw is later caught, so a
+        // parse *inside* it taints the polling caller. XCTUnwrap now only guards the cast.
+        let object = try JSONSerialization.jsonObject(with: data)
+        return try XCTUnwrap(object as? [String: Any])
     }
 
     private func waitForObserved(

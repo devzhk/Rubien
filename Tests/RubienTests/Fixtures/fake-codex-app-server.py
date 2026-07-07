@@ -52,11 +52,21 @@ def respond(req_id, result):
     emit({"jsonrpc": "2.0", "id": req_id, "result": result})
 
 
+def _atomic_write_json(filename, obj):
+    # Write a temp file then os.replace() (atomic rename) so a concurrent reader
+    # never sees a truncated/empty file. Plain open(..., "w") truncates BEFORE
+    # json.dump refills it; the Swift tests poll these files and intermittently
+    # caught that empty window (flaky "Unable to parse empty data").
+    tmp = filename + ".tmp"
+    with open(tmp, "w") as handle:
+        json.dump(obj, handle)
+    os.replace(tmp, filename)
+
+
 def record(**kv):
     OBSERVED.update(kv)
     try:
-        with open("fake-codex-observed.json", "w") as handle:
-            json.dump(OBSERVED, handle)
+        _atomic_write_json("fake-codex-observed.json", OBSERVED)
     except OSError:
         pass
 
@@ -315,8 +325,7 @@ def main():
         sys.stdout.flush()
         return 0
     try:
-        with open("fake-codex-argv.json", "w") as handle:
-            json.dump(sys.argv, handle)
+        _atomic_write_json("fake-codex-argv.json", sys.argv)
     except OSError:
         pass
     record(pid=os.getpid())
