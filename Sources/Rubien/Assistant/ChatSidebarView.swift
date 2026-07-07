@@ -276,36 +276,26 @@ struct ChatSidebarView: View {
                     .textSelection(.enabled)
                     .lineLimit(4)
             }
-            HStack(spacing: 8) {
-                Button {
-                    session.respond(to: approval, .allowOnce)
-                } label: {
-                    Text("Allow Once")
+            VStack(spacing: 6) {
+                // Two equal-width, neutral primary actions — the normal highlight is
+                // enough; no accent/red tint. Enter still triggers Allow.
+                HStack(spacing: 8) {
+                    Button("Allow") { session.respond(to: approval, .allowOnce) }
+                        .buttonStyle(ApprovalChoiceButtonStyle())
+                        .keyboardShortcut(.defaultAction)
+                    Button("Deny") { session.respond(to: approval, .deny) }
+                        .buttonStyle(ApprovalChoiceButtonStyle())
                 }
-                .buttonStyle(ApprovalPrimaryButtonStyle())
-                .keyboardShortcut(.defaultAction)
-
+                // The "for the whole conversation" variant, de-emphasized below.
                 Button {
                     session.respond(to: approval, .allowForConversation)
                 } label: {
-                    Text("Allow for Conversation")
-                        .font(.system(size: 11))
+                    Text("Allow for the rest of this conversation")
+                        .font(.system(size: 10.5))
                         .foregroundStyle(.secondary)
-                        .padding(.horizontal, 6)
+                        .padding(.horizontal, 8)
                         .padding(.vertical, 3)
-                }
-                .buttonStyle(HeaderControlButtonStyle())
-
-                Spacer()
-
-                Button {
-                    session.respond(to: approval, .deny)
-                } label: {
-                    Text("Deny")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.red)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
+                        .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(HeaderControlButtonStyle())
             }
@@ -995,22 +985,28 @@ private struct HeaderControlButtonStyle: ButtonStyle {
     }
 }
 
-/// The primary approval action (accent capsule). The gray highlight the header
-/// controls use is invisible on the accent fill, so brighten the capsule on hover
-/// and dip + scale on press instead.
-private struct ApprovalPrimaryButtonStyle: ButtonStyle {
+/// An equal-width, neutral approval action (Allow / Deny). A soft filled + hairline
+/// pill that deepens on hover/press — the normal highlight, no accent or red tint.
+private struct ApprovalChoiceButtonStyle: ButtonStyle {
     @State private var isHovered = false
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 4)
-            .background(Capsule(style: .continuous).fill(Color.accentColor))
-            .brightness(configuration.isPressed ? -0.06 : (isHovered ? 0.10 : 0))
-            .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
-            .contentShape(Capsule())
+            .font(.system(size: 11.5, weight: .medium))
+            .foregroundStyle(Color.primary.opacity(0.85))
+            .frame(maxWidth: .infinity)   // equal width across the row
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(configuration.isPressed
+                          ? Color.primary.opacity(0.14)
+                          : (isHovered ? Color.primary.opacity(0.09) : Color.primary.opacity(0.05)))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
             .animation(.easeOut(duration: 0.12), value: isHovered)
             .onHover { isHovered = $0 }
