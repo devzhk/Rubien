@@ -516,6 +516,21 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertEqual(provider.searches.map(\.limit), [25])
     }
 
+    func testHistoryScopingPassesTheConversationsReferenceID() async {
+        // "This document" scope → the provider gets THIS conversation's reference
+        // id (makeController seeds id 1); unscoped → nil. Both listing and search.
+        let provider = MockAgentProvider()
+        let controller = makeController(provider: provider, sink: SpyTranscriptSink())
+
+        _ = await controller.listRecentSessions(scopedToReference: true)
+        _ = await controller.listRecentSessions()
+        XCTAssertEqual(provider.recentsCalls.map(\.referenceID), [1, nil])
+
+        _ = await controller.searchSessions("q", scopedToReference: true)
+        _ = await controller.searchSessions("q")
+        XCTAssertEqual(provider.searches.map(\.referenceID), [1, nil])
+    }
+
     func testQuickSendAfterResumeStillPrependsTheRestoredHistory() async {
         // The race codex flagged: a follow-up send bumps `generation` before the
         // restore lands — the history must still prepend (same conversation),
@@ -868,8 +883,9 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
     private var _transcripts: [String: [ChatRenderMessage]] = [:]
     private var _transcriptHold = false
     private var _transcriptWaiters: [CheckedContinuation<Void, Never>] = []
-    private var _searches: [(query: String, limit: Int)] = []
+    private var _searches: [(query: String, limit: Int, referenceID: Int64?)] = []
     private var _searchResults: [AgentSessionSummary] = []
+    private var _recentsCalls: [(limit: Int, referenceID: Int64?)] = []
 
     init(kind: AgentProviderKind = .claude,
          availability: AgentAvailability = .installed(version: "test", path: "/fake/claude")) {
@@ -918,14 +934,24 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }; _searchResults = results
     }
 
-    func searchSessions(query: String, workspaceURL: URL, limit: Int) async -> [AgentSessionSummary] {
+    func searchSessions(query: String, workspaceURL: URL, limit: Int, referenceID: Int64?) async -> [AgentSessionSummary] {
         lock.lock(); defer { lock.unlock() }
-        _searches.append((query, limit))
+        _searches.append((query, limit, referenceID))
         return _searchResults
     }
 
-    var searches: [(query: String, limit: Int)] {
+    var searches: [(query: String, limit: Int, referenceID: Int64?)] {
         lock.lock(); defer { lock.unlock() }; return _searches
+    }
+
+    func recentSessions(workspaceURL: URL, limit: Int, referenceID: Int64?) async -> [AgentSessionSummary] {
+        lock.lock(); defer { lock.unlock() }
+        _recentsCalls.append((limit, referenceID))
+        return []
+    }
+
+    var recentsCalls: [(limit: Int, referenceID: Int64?)] {
+        lock.lock(); defer { lock.unlock() }; return _recentsCalls
     }
 
     func send(turn: AgentTurnRequest) -> AsyncThrowingStream<AgentEvent, Error> {

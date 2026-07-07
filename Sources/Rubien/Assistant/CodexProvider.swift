@@ -74,12 +74,14 @@ final class CodexProvider: AgentProvider {
     // Each delegates to the connection, which reads codex's OWN thread store via the
     // app-server (Rubien persists nothing — D5). All degrade to `[]` on failure.
 
-    func recentSessions(workspaceURL: URL, limit: Int) async -> [AgentSessionSummary] {
-        await connection.recentThreads(workspaceURL: workspaceURL, limit: limit)
+    func recentSessions(workspaceURL: URL, limit: Int, referenceID: Int64?) async -> [AgentSessionSummary] {
+        await connection.recentThreads(
+            workspaceURL: workspaceURL, limit: limit, referenceID: referenceID)
     }
 
-    func searchSessions(query: String, workspaceURL: URL, limit: Int) async -> [AgentSessionSummary] {
-        await connection.searchThreads(searchTerm: query, workspaceURL: workspaceURL, limit: limit)
+    func searchSessions(query: String, workspaceURL: URL, limit: Int, referenceID: Int64?) async -> [AgentSessionSummary] {
+        await connection.searchThreads(
+            searchTerm: query, workspaceURL: workspaceURL, limit: limit, referenceID: referenceID)
     }
 
     func sessionTranscript(sessionID: String, workspaceURL: URL) async -> [ChatRenderMessage] {
@@ -119,11 +121,13 @@ enum CodexInvocation {
         }
         if let cli = rubienCLIPath, !cli.isEmpty {
             // Values are parsed as TOML with a raw-string fallback, so bare paths are
-            // safe; the args array must stay valid TOML.
-            args += ["-c", "mcp_servers.rubien.command=\(cli)"]
-            args += ["-c", #"mcp_servers.rubien.args=["mcp","--read-only"]"#]
+            // safe; the args array must stay valid TOML. The key is the canonical
+            // server name — the same one History attribution matches against.
+            let server = "mcp_servers.\(MCPContentChannel.serverName)"
+            args += ["-c", "\(server).command=\(cli)"]
+            args += ["-c", #"\#(server).args=["mcp","--read-only"]"#]
             if let root = libraryRoot, !root.isEmpty {
-                args += ["-c", "mcp_servers.rubien.env.RUBIEN_LIBRARY_ROOT=\(root)"]
+                args += ["-c", "\(server).env.RUBIEN_LIBRARY_ROOT=\(root)"]
             }
         }
         return args
@@ -745,31 +749,103 @@ private actor CodexAppServerConnection {
 
     // MARK: History over the wire (thread/list · thread/search · thread/read — 3b-4)
 
-    /// Extra rows fetched for a search before the client-side `cwd` filter, so a
-    /// workspace with few local hits among many global matches isn't underfilled
-    /// (codex search is global — the `cwd` param is ignored; see `decodeThreadSearch`).
-    private static let searchOverfetch = 5
+    /// Extra rows fetched before a client-side filter (the `cwd` filter on search —
+    /// global on codex, the param is ignored; and the reference filter on a scoped
+    /// listing), so a workspace with few local hits among many isn't underfilled.
+    /// KNOWN BOUND: this is one page, not pagination — a document whose threads
+    /// are ALL older than the newest `limit × 5` candidates lists empty under
+    /// "This document" (the toggle and search still reach them; the claude store,
+    /// which scans its whole folder, has no such bound). If that bites, the fix
+    /// is a `thread/list` continuation loop inside the scoped path.
+    private static let filterOverfetch = 5
 
     /// Recent conversations for `workspaceURL`, newest first (History picker). Reads
     /// the runtime's OWN store via the app-server; Rubien persists nothing (D5).
-    func recentThreads(workspaceURL: URL, limit: Int) async -> [AgentSessionSummary] {
-        await query(
+    /// A non-nil `referenceID` keeps only threads whose rubien tool calls address
+    /// that reference ("This document" scope): `thread/list` returns `turns: []`
+    /// (verified, 0.142), so candidates are over-fetched and each is `thread/read`
+    /// until `limit` matches — sequential with early exit, local IPC.
+    func recentThreads(workspaceURL: URL, limit: Int, referenceID: Int64? = nil) async -> [AgentSessionSummary] {
+        let fetch = referenceID == nil ? limit : limit * Self.filterOverfetch
+        let candidates = await query(
             workspaceURL: workspaceURL, method: "thread/list",
-            build: { CodexAppServerProtocol.threadList(requestID: $0, cwd: workspaceURL.path, limit: limit) },
+            build: { CodexAppServerProtocol.threadList(requestID: $0, cwd: workspaceURL.path, limit: fetch) },
             decode: CodexAppServerProtocol.decodeThreadList)
+        guard let referenceID else { return candidates }
+        return await filterByReference(candidates, referenceID: referenceID,
+                                       workspaceURL: workspaceURL, limit: limit)
     }
 
     /// Content search over `workspaceURL`'s threads (History search field). Search is
-    /// global on codex, so over-fetch, filter to this workspace in `decode`, cap at `limit`.
-    func searchThreads(searchTerm: String, workspaceURL: URL, limit: Int) async -> [AgentSessionSummary] {
+    /// global on codex, so over-fetch, filter to this workspace in `decode`, cap at
+    /// `limit`. A non-nil `referenceID` additionally scopes hits like `recentThreads`.
+    func searchThreads(
+        searchTerm: String, workspaceURL: URL, limit: Int, referenceID: Int64? = nil
+    ) async -> [AgentSessionSummary] {
         let term = searchTerm.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !term.isEmpty, limit > 0 else { return [] }
         let hits = await query(
             workspaceURL: workspaceURL, method: "thread/search",
             build: { CodexAppServerProtocol.threadSearch(
-                requestID: $0, searchTerm: term, limit: limit * Self.searchOverfetch, cwd: workspaceURL.path) },
+                requestID: $0, searchTerm: term, limit: limit * Self.filterOverfetch, cwd: workspaceURL.path) },
             decode: { CodexAppServerProtocol.decodeThreadSearch($0, cwd: workspaceURL.path) })
-        return Array(hits.prefix(limit))
+        guard let referenceID else { return Array(hits.prefix(limit)) }
+        return await filterByReference(hits, referenceID: referenceID,
+                                       workspaceURL: workspaceURL, limit: limit)
+    }
+
+    /// Attribution memo: thread id → (the summary date it was read at, its
+    /// referenced ids). The popover re-runs the scoped listing on every open and
+    /// scope flip; without this, each rerun re-issues up to `limit ×
+    /// filterOverfetch` sequential `thread/read`s for threads that haven't
+    /// changed. A thread only mutates on resume, which moves its `updatedAt` —
+    /// the cached entry's date then mismatches and it re-reads.
+    private var attributionCache: [String: (date: Date, ids: Set<Int64>)] = [:]
+
+    /// Keep the candidates whose thread addresses `referenceID`, reading each via
+    /// `thread/read` until `limit` matches. Duplicate candidates (the same thread
+    /// surfaced through multiple `sourceKinds`) are read and kept once. A read
+    /// FAILURE degrades to skipping that candidate — and is never cached, so a
+    /// transient failure can't pin a thread as unattributed until its next resume.
+    private func filterByReference(
+        _ candidates: [AgentSessionSummary], referenceID: Int64, workspaceURL: URL, limit: Int
+    ) async -> [AgentSessionSummary] {
+        var kept: [AgentSessionSummary] = []
+        var visited: Set<String> = []
+        for candidate in candidates {
+            if kept.count >= limit || Task.isCancelled { break }
+            guard visited.insert(candidate.id).inserted else { continue }
+            let ids: Set<Int64>
+            if let cached = attributionCache[candidate.id], cached.date == candidate.date {
+                ids = cached.ids
+            } else {
+                guard let read = await readReferencedIDs(
+                    threadID: candidate.id, workspaceURL: workspaceURL) else { continue }
+                attributionCache[candidate.id] = (candidate.date, read)
+                ids = read
+                // Cancelled mid-read: the data (if any) is valid and cached, but
+                // don't let a stale scope's scan keep appending rows.
+                if Task.isCancelled { break }
+            }
+            if ids.contains(referenceID) { kept.append(candidate) }
+        }
+        return kept
+    }
+
+    /// One attribution read. nil on failure — distinct from "no references", so
+    /// the caller can skip without caching (unlike `query`, which folds failures
+    /// into an empty result).
+    private func readReferencedIDs(threadID: String, workspaceURL: URL) async -> Set<Int64>? {
+        do {
+            let srv = try await ensureServer(webAccess: true, workspaceURL: workspaceURL, reuseAnyWeb: true)
+            let result = try await sendRequest(srv, method: "thread/read") {
+                CodexAppServerProtocol.threadRead(requestID: $0, threadId: threadID)
+            }
+            return CodexAppServerProtocol.threadReferencedIDs(result)
+        } catch {
+            logger.error("codex attribution read failed: \(String(describing: error))")
+            return nil
+        }
     }
 
     /// A picked thread's renderable transcript, so a resume restores its content.

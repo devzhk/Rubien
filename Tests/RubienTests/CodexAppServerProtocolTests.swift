@@ -419,6 +419,57 @@ final class CodexAppServerProtocolTests: XCTestCase {
         XCTAssertTrue(CodexAppServerProtocol.decodeThreadSearch(["data": []], cwd: "/x").isEmpty)
         XCTAssertTrue(CodexAppServerProtocol.decodeThreadTranscript([:]).isEmpty)
         XCTAssertTrue(CodexAppServerProtocol.decodeThreadTranscript(["thread": ["turns": []]]).isEmpty)
+        XCTAssertTrue(CodexAppServerProtocol.threadReferencedIDs([:]).isEmpty)
+    }
+
+    func testThreadReferencedIDsExtractRubienToolArgumentsOnly() {
+        // The "This document" scope's attribution: only `mcpToolCall` items from
+        // the rubien server count — never other servers, prose, or results. Both
+        // arg keys (`id`/`referenceId`), lenient string ids, and failed calls all
+        // attribute; item shape verified against the live thread/read spike.
+        let result: [String: Any] = ["thread": ["turns": [
+            ["items": [
+                ["type": "userMessage", "content": [["type": "text", "text": "id 999 in prose"]]],
+                ["type": "mcpToolCall", "server": "rubien", "tool": "rubien_get",
+                 "status": "completed", "arguments": ["id": 1675],
+                 "result": ["content": [["type": "text", "text": "{\"id\":31}"]]]],
+                ["type": "mcpToolCall", "server": "rubien", "tool": "rubien_annotations_list",
+                 "status": "failed", "arguments": ["referenceId": 9]],
+                ["type": "mcpToolCall", "server": "other", "tool": "get", "arguments": ["id": 3]],
+                ["type": "mcpToolCall", "server": "rubien", "tool": "rubien_search",
+                 "arguments": ["query": "ppo"]],
+                ["type": "mcpToolCall", "server": "rubien", "tool": "rubien_get",
+                 "arguments": ["id": "12"]],
+            ]],
+        ]]]
+        XCTAssertEqual(CodexAppServerProtocol.threadReferencedIDs(result), [1675, 9, 12])
+    }
+
+    func testReferenceAttributionPolicyIsToolAwareAndRejectsNonIntegerIds() {
+        // The properties trap: `id`/`ids` there are PROPERTY rowids (a colliding
+        // namespace) — the reference is the `reference` argument. Encoded now so
+        // Phase 4's write registration can't silently mis-attribute.
+        XCTAssertEqual(
+            ReferenceAttribution.referencedIDs(
+                tool: "rubien_properties_set", arguments: ["reference": 900, "id": "29"]),
+            [900], "property rowid 29 must not attribute; reference 900 must")
+        XCTAssertTrue(
+            ReferenceAttribution.referencedIDs(
+                tool: "rubien_properties_list", arguments: ["ids": ["29", "31"]]).isEmpty,
+            "properties_list ids are property rowids")
+        // Array-shaped reference ids (cite/delete address MANY references).
+        XCTAssertEqual(
+            ReferenceAttribution.referencedIDs(tool: "rubien_cite", arguments: ["ids": [4, 5]]),
+            [4, 5])
+        // A boolean is not reference 1; a fractional number is not reference 42.
+        XCTAssertNil(ReferenceAttribution.referenceArgument(true))
+        XCTAssertNil(ReferenceAttribution.referenceArgument(42.9))
+        XCTAssertEqual(ReferenceAttribution.referenceArgument(42), 42)
+        XCTAssertEqual(ReferenceAttribution.referenceArgument("42"), 42)
+        // Unknown (future) tools fall back to the default keys.
+        XCTAssertEqual(
+            ReferenceAttribution.referencedIDs(tool: "rubien_future_tool", arguments: ["id": 8]),
+            [8])
     }
 }
 #endif

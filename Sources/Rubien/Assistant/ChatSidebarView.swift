@@ -719,6 +719,14 @@ private struct ChatHistoryPopover: View {
     /// Called after a pick is resumed (the sidebar dismisses + clears the draft).
     var onResumed: () -> Void
 
+    /// Which sessions the popover lists: only those attributed to the open document
+    /// (the default — attribution is the session's rubien tool calls), or every
+    /// session in the working folder.
+    private enum HistoryScope: Hashable {
+        case thisDocument, allDocuments
+    }
+
+    @State private var scope: HistoryScope = .thisDocument
     @State private var sessions: [AgentSessionSummary]?
     @State private var query = ""
     /// nil while a search is in flight (spinner); results otherwise. Ignored when
@@ -737,21 +745,47 @@ private struct ChatHistoryPopover: View {
                 .font(.system(size: 12, weight: .semibold))
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
+            scopePicker
             searchField
             Divider()
             content
             Divider()
-            Text("The assistant’s own sessions for this working folder.")
+            Text(scope == .thisDocument
+                ? "Conversations that read this document."
+                : "The assistant’s own sessions for this working folder.")
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
         }
         .frame(width: 320)
-        .task {
-            if sessions == nil { sessions = await session.listRecentSessions() }
+        // `task(id:)` (re)loads recents on open AND whenever the scope flips,
+        // cancelling the superseded load (a scoped listing scans session bodies).
+        .task(id: scope) {
+            sessions = nil
+            let loaded = await session.listRecentSessions(
+                scopedToReference: scope == .thisDocument)
+            // Cancellation is cooperative: a superseded (cancelled) load can still
+            // return, and without this guard its stale scope's rows would overwrite
+            // the fresh flip's — exactly when the old scoped scan is the slow one.
+            guard !Task.isCancelled else { return }
+            sessions = loaded
         }
         .onChange(of: query) { _, _ in scheduleSearch() }
+        // Re-run an active search under the new scope (the debounce task captures
+        // the scope at schedule time). Empty-query handling is scheduleSearch's own.
+        .onChange(of: scope) { _, _ in scheduleSearch() }
+    }
+
+    /// The reader sidebars' own tab control (hover highlight + sliding indicator)
+    /// rather than a native segmented picker, which has no hover feedback on macOS.
+    private var scopePicker: some View {
+        DraggableSegmentedControl(selection: $scope, items: [
+            (label: "This document", value: HistoryScope.thisDocument),
+            (label: "All documents", value: HistoryScope.allDocuments),
+        ])
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
     }
 
     private var searchField: some View {
@@ -782,7 +816,7 @@ private struct ChatHistoryPopover: View {
 
     /// Debounced content search: typing cancels the previous probe; the query
     /// must be stable for a beat before files are scanned. An empty query just
-    /// switches the list back to recents.
+    /// switches the list back to recents. Honors the scope toggle.
     private func scheduleSearch() {
         searchTask?.cancel()
         let trimmed = trimmedQuery
@@ -791,10 +825,11 @@ private struct ChatHistoryPopover: View {
             return
         }
         searchResults = nil  // spinner while (re)searching
+        let scoped = scope == .thisDocument
         searchTask = Task {
             try? await Task.sleep(nanoseconds: 250_000_000)
             guard !Task.isCancelled else { return }
-            let hits = await session.searchSessions(trimmed)
+            let hits = await session.searchSessions(trimmed, scopedToReference: scoped)
             guard !Task.isCancelled else { return }
             searchResults = hits
         }
@@ -816,9 +851,7 @@ private struct ChatHistoryPopover: View {
         let items = highlight == nil ? sessions : searchResults
         if let items {
             if items.isEmpty {
-                emptyLabel(highlight == nil
-                    ? "No past conversations in this folder yet."
-                    : "No conversations match “\(trimmedQuery)”.")
+                emptyLabel(emptyText(searching: highlight != nil))
             } else {
                 rowList(items, highlight: highlight)
             }
@@ -843,6 +876,22 @@ private struct ChatHistoryPopover: View {
         // left it collapsed to ~one visible row. Fixed-height rows make the
         // content height deterministic.
         .frame(height: min(CGFloat(items.count) * HistoryRow.height, 340))
+    }
+
+    /// The empty-state line, scope- and mode-aware: a scoped miss points at the
+    /// "All documents" toggle so a session filed under another paper isn't read
+    /// as data loss.
+    private func emptyText(searching: Bool) -> String {
+        switch (searching, scope) {
+        case (false, .thisDocument):
+            return "No conversations for this document yet. “All documents” shows every conversation in this folder."
+        case (false, .allDocuments):
+            return "No past conversations in this folder yet."
+        case (true, .thisDocument):
+            return "No conversations for this document match “\(trimmedQuery)”."
+        case (true, .allDocuments):
+            return "No conversations match “\(trimmedQuery)”."
+        }
     }
 
     private func emptyLabel(_ text: String) -> some View {

@@ -36,13 +36,17 @@ struct ClaudeSessionStore {
     }
 
     /// Recent sessions for `workspaceURL`, newest first, capped at `limit`. Returns
-    /// `[]` when the folder has no session directory yet. Does blocking file I/O —
+    /// `[]` when the folder has no session directory yet. A non-nil `referenceID`
+    /// keeps only sessions attributed to that reference (see `sessionReferences`) —
+    /// the History popover's "This document" scope. Does blocking file I/O —
     /// call off the main actor.
-    func recentSessions(workspaceURL: URL, limit: Int) -> [AgentSessionSummary] {
+    func recentSessions(workspaceURL: URL, limit: Int, referenceID: Int64? = nil) -> [AgentSessionSummary] {
         guard limit > 0 else { return [] }
         var summaries: [AgentSessionSummary] = []
         for url in sessionFilesNewestFirst(for: workspaceURL) {
             if summaries.count >= limit { break }
+            if Task.isCancelled { break }
+            if let referenceID, !sessionReferences(fileURL: url, referenceID: referenceID) { continue }
             if let summary = summarize(fileURL: url, expectedCWD: workspaceURL.path) {
                 summaries.append(summary)
             }
@@ -168,7 +172,9 @@ struct ClaudeSessionStore {
     /// a `matchSnippet` around its first match. A linear scan of every session
     /// file — fine at the store's scale (tens of files, ~100 KB each); revisit
     /// with an index only if folders grow orders of magnitude beyond that.
-    func searchSessions(query: String, workspaceURL: URL, limit: Int) -> [AgentSessionSummary] {
+    func searchSessions(
+        query: String, workspaceURL: URL, limit: Int, referenceID: Int64? = nil
+    ) -> [AgentSessionSummary] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, limit > 0 else { return [] }
         var hits: [AgentSessionSummary] = []
@@ -177,15 +183,47 @@ struct ClaudeSessionStore {
             // A superseded search (the user kept typing) is cancelled by the
             // provider — stop at the file boundary instead of scanning on.
             if Task.isCancelled { return hits }
-            // Snippet first: most files won't match, and `summarize` (a second
-            // read, for the title/cwd check) then runs only for actual hits.
-            guard let snippet = firstMatchSnippet(fileURL: url, query: trimmed),
-                  var hit = summarize(fileURL: url, expectedCWD: workspaceURL.path)
-            else { continue }
+            // Snippet first: most files won't match, and the reference scan +
+            // `summarize` (further reads) then run only for actual text hits.
+            guard let snippet = firstMatchSnippet(fileURL: url, query: trimmed) else { continue }
+            if let referenceID, !sessionReferences(fileURL: url, referenceID: referenceID) { continue }
+            guard var hit = summarize(fileURL: url, expectedCWD: workspaceURL.path) else { continue }
             hit.matchSnippet = snippet
             hits.append(hit)
         }
         return hits
+    }
+
+    /// Whether the session contains a rubien MCP tool call addressing `referenceID`
+    /// — the "This document" scope's attribution. The seed is NOT in the JSONL
+    /// (claude does not persist `--append-system-prompt`), but the seeded agent
+    /// reads the document through the rubien tools, so their `tool_use` arguments
+    /// carry the reference (which keys, per tool, is `ReferenceAttribution`'s ONE
+    /// shared policy — the codex scanner rides the same one). Only `tool_use`
+    /// blocks count — never tool RESULTS or prose, which can mention OTHER
+    /// references' ids (e.g. a `rubien_search` result listing the whole library).
+    func sessionReferences(fileURL: URL, referenceID: Int64) -> Bool {
+        let prefix = ReferenceAttribution.claudeToolPrefix
+        guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else { return false }
+        for line in content.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard line.utf8.count <= maxSearchedLineBytes else { continue }
+            guard let obj = Self.parseLine(line),
+                  let entry = Self.conversationEntry(obj),
+                  entry.type == "assistant"
+            else { continue }
+            for block in (entry.message["content"] as? [[String: Any]]) ?? []
+            where block["type"] as? String == "tool_use" {
+                guard let name = block["name"] as? String, name.hasPrefix(prefix),
+                      let input = block["input"] as? [String: Any]
+                else { continue }
+                if ReferenceAttribution.referencedIDs(
+                    tool: String(name.dropFirst(prefix.count)), arguments: input
+                ).contains(referenceID) {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     /// Lines longer than this are skipped by the search scan — no legitimate

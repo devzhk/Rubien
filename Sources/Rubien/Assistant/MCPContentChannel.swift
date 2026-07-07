@@ -18,6 +18,13 @@ struct MCPContentChannel: Sendable, Equatable {
     /// (which would otherwise resolve a different library.sqlite).
     let libraryRoot: URL
 
+    /// The MCP server registration key. Canonical — every site that recognizes
+    /// "our" server derives from this one name: claude's `mcp__<server>__<tool>`
+    /// prefix (`ReferenceAttribution.claudeToolPrefix`, the silent-read-tool gate)
+    /// and codex's `mcpToolCall.server` match in the History attribution scan.
+    /// A rename here renames them all; a hardcoded copy would silently break.
+    static let serverName = "rubien"
+
     /// The `--mcp-config` payload claude reads to spawn our server. `--mcp-config`
     /// accepts a JSON *string* (verified against claude 2.1.201: "Load MCP servers
     /// from JSON files or strings"), so this is passed inline — no temp file to
@@ -25,7 +32,7 @@ struct MCPContentChannel: Sendable, Equatable {
     var configJSON: [String: Any] {
         [
             "mcpServers": [
-                "rubien": [
+                Self.serverName: [
                     "command": cliURL.path,
                     "args": ["mcp", "--read-only"],
                     "env": ["RUBIEN_LIBRARY_ROOT": libraryRoot.path],

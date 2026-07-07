@@ -473,19 +473,46 @@ enum CodexAppServerProtocol {
     }
 
     /// `thread/read {includeTurns:true}` result → renderable rows (read-only preview).
-    /// Walks `thread.turns[].items[]` in order, mirroring the LIVE event mapping:
-    /// userMessage → user row, agentMessage → assistant row, tool items → a completed
-    /// (or denied) chip; reasoning/plan/other items render nothing, as they do live.
+    /// Walks the items in order, mirroring the LIVE event mapping: userMessage →
+    /// user row, agentMessage → assistant row, tool items → a completed (or denied)
+    /// chip; reasoning/plan/other items render nothing, as they do live.
     static func decodeThreadTranscript(_ result: [String: Any]) -> [ChatRenderMessage] {
-        guard let thread = result["thread"] as? [String: Any],
-              let turns = thread["turns"] as? [[String: Any]] else { return [] }
         var rows: [ChatRenderMessage] = []
-        for turn in turns {
-            for item in (turn["items"] as? [[String: Any]]) ?? [] {
-                if let row = transcriptRow(item, seq: rows.count) { rows.append(row) }
-            }
+        for item in threadItems(result) {
+            if let row = transcriptRow(item, seq: rows.count) { rows.append(row) }
         }
         return rows
+    }
+
+    /// The reference ids addressed by a thread's rubien MCP tool calls, from a
+    /// `thread/read {includeTurns:true}` result — the History "This document"
+    /// scope's attribution. Codex returns neither `developerInstructions` (the
+    /// seed) nor per-thread metadata we could stamp, but the seeded agent reads
+    /// the document through the rubien tools, so their `mcpToolCall.arguments`
+    /// carry the reference (which keys, per tool, is `ReferenceAttribution`'s ONE
+    /// shared policy — the claude scanner rides the same one). Only OUR server's
+    /// call items count — never results or prose, which can mention OTHER
+    /// references (e.g. a `rubien_search` result listing the library). A failed
+    /// call still attributes: the agent was addressing that reference.
+    static func threadReferencedIDs(_ result: [String: Any]) -> Set<Int64> {
+        var ids: Set<Int64> = []
+        for item in threadItems(result) {
+            guard item["type"] as? String == "mcpToolCall",
+                  item["server"] as? String == ReferenceAttribution.serverName,
+                  let tool = item["tool"] as? String,
+                  let args = item["arguments"] as? [String: Any]
+            else { continue }
+            ids.formUnion(ReferenceAttribution.referencedIDs(tool: tool, arguments: args))
+        }
+        return ids
+    }
+
+    /// Every item across a `thread/read` result's turns, in order — the ONE walk
+    /// of the wire shape both the transcript decoder and the attribution scan use.
+    private static func threadItems(_ result: [String: Any]) -> [[String: Any]] {
+        guard let thread = result["thread"] as? [String: Any],
+              let turns = thread["turns"] as? [[String: Any]] else { return [] }
+        return turns.flatMap { ($0["items"] as? [[String: Any]]) ?? [] }
     }
 
     /// One summary from `thread/list`'s `data[]` or a search hit's `.thread`. `id`

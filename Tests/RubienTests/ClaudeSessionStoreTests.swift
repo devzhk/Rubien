@@ -249,6 +249,108 @@ final class ClaudeSessionStoreTests: XCTestCase {
         XCTAssertTrue(store.searchSessions(query: "   ", workspaceURL: workspace, limit: 25).isEmpty)
     }
 
+    // MARK: - "This document" scope (reference attribution)
+
+    /// An assistant entry whose message carries one rubien `tool_use` block —
+    /// the attribution signal the scope filter matches.
+    private func rubienToolLine(cwd: String, tool: String, argsJSON: String) -> String {
+        #"{"type":"assistant","cwd":"\#(cwd)","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"mcp__rubien__\#(tool)","input":\#(argsJSON)}]}}"#
+    }
+
+    func testScopedRecentsKeepOnlySessionsWhoseRubienToolsAddressTheReference() throws {
+        let (store, _, workspace, dir) = try makeStore()
+        let cwd = workspace.path
+        try writeSession("about42", lines: [
+            userLine(cwd: cwd, content: "Summarize this"),
+            rubienToolLine(cwd: cwd, tool: "rubien_get", argsJSON: #"{"id":42}"#),
+        ], mtime: Date(timeIntervalSince1970: 3_000), in: dir)
+        try writeSession("about7", lines: [
+            userLine(cwd: cwd, content: "Other paper"),
+            rubienToolLine(cwd: cwd, tool: "rubien_pdf_text", argsJSON: #"{"id":7,"maxChars":50000}"#),
+        ], mtime: Date(timeIntervalSince1970: 2_000), in: dir)
+        try writeSession("noTools", lines: [
+            userLine(cwd: cwd, content: "Generic question"),
+        ], mtime: Date(timeIntervalSince1970: 1_000), in: dir)
+
+        XCTAssertEqual(store.recentSessions(workspaceURL: workspace, limit: 25, referenceID: 42)
+            .map(\.id), ["about42"])
+        XCTAssertEqual(store.recentSessions(workspaceURL: workspace, limit: 25, referenceID: 7)
+            .map(\.id), ["about7"])
+        // Unscoped keeps everything (newest first) — the "All documents" toggle.
+        XCTAssertEqual(store.recentSessions(workspaceURL: workspace, limit: 25)
+            .map(\.id), ["about42", "about7", "noTools"])
+    }
+
+    func testScopedRecentsMatchReferenceIdKeyAndLenientStringIds() throws {
+        let (store, _, workspace, dir) = try makeStore()
+        let cwd = workspace.path
+        // annotations_list addresses the reference via `referenceId`, not `id`.
+        try writeSession("viaReferenceId", lines: [
+            userLine(cwd: cwd, content: "Notes?"),
+            rubienToolLine(cwd: cwd, tool: "rubien_annotations_list", argsJSON: #"{"referenceId":42}"#),
+        ], mtime: Date(timeIntervalSince1970: 2_000), in: dir)
+        // A mistyped string id fails the tool call but still attributes the session.
+        try writeSession("viaStringId", lines: [
+            userLine(cwd: cwd, content: "Get it"),
+            rubienToolLine(cwd: cwd, tool: "rubien_get", argsJSON: #"{"id":"42"}"#),
+        ], mtime: Date(timeIntervalSince1970: 1_000), in: dir)
+
+        XCTAssertEqual(store.recentSessions(workspaceURL: workspace, limit: 25, referenceID: 42)
+            .map(\.id), ["viaReferenceId", "viaStringId"])
+    }
+
+    func testScopedRecentsIgnoreResultsProseAndForeignTools() throws {
+        let (store, _, workspace, dir) = try makeStore()
+        let cwd = workspace.path
+        // The id appears in a tool RESULT, in assistant PROSE, and in a NON-rubien
+        // tool's arguments — none of which attribute the session (a rubien_search
+        // RESULT can mention the whole library's ids).
+        try writeSession("mentionsOnly", lines: [
+            userLine(cwd: cwd, content: "Compare things"),
+            #"{"type":"user","cwd":"\#(cwd)","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t9","content":"{\"id\":42,\"title\":\"other\"}"}]}}"#,
+            assistantLine(cwd: cwd, text: "Reference id 42 (id:42) looks relevant."),
+            #"{"type":"assistant","cwd":"\#(cwd)","message":{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"mcp__other__get","input":{"id":42}}]}}"#,
+        ], mtime: Date(timeIntervalSince1970: 1_000), in: dir)
+
+        XCTAssertTrue(store.recentSessions(workspaceURL: workspace, limit: 25, referenceID: 42).isEmpty)
+    }
+
+    func testScopedRecentsUseTheToolAwarePolicyThroughTheJSONLPath() throws {
+        // A (future, Phase-4) properties call: `reference` attributes, but its
+        // `id` — a PROPERTY rowid in a colliding namespace — must not.
+        let (store, _, workspace, dir) = try makeStore()
+        let cwd = workspace.path
+        try writeSession("tagging", lines: [
+            userLine(cwd: cwd, content: "Tag it to-read"),
+            rubienToolLine(cwd: cwd, tool: "rubien_properties_set",
+                           argsJSON: #"{"reference":42,"id":"7"}"#),
+        ], mtime: Date(timeIntervalSince1970: 1_000), in: dir)
+
+        XCTAssertEqual(store.recentSessions(workspaceURL: workspace, limit: 25, referenceID: 42)
+            .map(\.id), ["tagging"])
+        XCTAssertTrue(store.recentSessions(workspaceURL: workspace, limit: 25, referenceID: 7).isEmpty,
+                      "the property rowid must not attribute the session to reference 7")
+    }
+
+    func testScopedSearchAppliesBothTextAndReferenceFilters() throws {
+        let (store, _, workspace, dir) = try makeStore()
+        let cwd = workspace.path
+        try writeSession("a42", lines: [
+            userLine(cwd: cwd, content: "alpha beta"),
+            rubienToolLine(cwd: cwd, tool: "rubien_get", argsJSON: #"{"id":42}"#),
+        ], mtime: Date(timeIntervalSince1970: 2_000), in: dir)
+        try writeSession("a7", lines: [
+            userLine(cwd: cwd, content: "alpha gamma"),
+            rubienToolLine(cwd: cwd, tool: "rubien_get", argsJSON: #"{"id":7}"#),
+        ], mtime: Date(timeIntervalSince1970: 1_000), in: dir)
+
+        XCTAssertEqual(store.searchSessions(query: "alpha", workspaceURL: workspace, limit: 25, referenceID: 42)
+            .map(\.id), ["a42"])
+        XCTAssertTrue(store.searchSessions(query: "gamma", workspaceURL: workspace, limit: 25, referenceID: 42).isEmpty)
+        XCTAssertEqual(store.searchSessions(query: "alpha", workspaceURL: workspace, limit: 25)
+            .map(\.id), ["a42", "a7"])
+    }
+
     func testSummarizeCollapsesWhitespaceAndTruncates() throws {
         let (store, _, workspace, dir) = try makeStore()
         let long = String(repeating: "word ", count: 60)  // > 140 chars

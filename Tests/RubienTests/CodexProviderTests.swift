@@ -512,6 +512,120 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertThrowsError(try readObserved(in: workspace))
     }
 
+    /// A minimal per-thread transcript whose only item is one rubien tool call
+    /// addressing `refID` — the scoped-filter fixtures.
+    private func rubienThread(refID: Int) -> [String: Any] {
+        ["turns": [["items": [
+            ["type": "mcpToolCall", "server": "rubien", "tool": "rubien_get",
+             "status": "completed", "arguments": ["id": refID]],
+        ]]]]
+    }
+
+    func testScopedRecentSessionsReadEachCandidateAndKeepOnlyTheReference() async throws {
+        let workspace = try makeWorkspace()
+        // thread/list returns turns: [] (verified, 0.142) — the filter must
+        // thread/read each candidate, keeping only threads whose rubien tool
+        // calls address the reference.
+        try writeConfig([
+            "threads": [
+                ["id": "TH-A", "preview": "About 42", "updatedAt": 1_700_000_300, "turns": []],
+                ["id": "TH-B", "preview": "About 7", "updatedAt": 1_700_000_200, "turns": []],
+                ["id": "TH-C", "preview": "About 42 too", "updatedAt": 1_700_000_100, "turns": []],
+            ],
+            "transcripts": [
+                "TH-A": rubienThread(refID: 42),
+                "TH-B": rubienThread(refID: 7),
+                "TH-C": rubienThread(refID: 42),
+            ],
+        ], into: workspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        let scoped = await provider.recentSessions(workspaceURL: workspace, limit: 10, referenceID: 42)
+        XCTAssertEqual(scoped.map(\.id), ["TH-A", "TH-C"], "only the reference's threads, order kept")
+
+        let observed = try readObserved(in: workspace)
+        XCTAssertEqual(try XCTUnwrap(observed["threadReadIds"] as? [String]),
+                       ["TH-A", "TH-B", "TH-C"], "every candidate was read for attribution")
+        // The over-fetched list request (candidates beyond `limit` may be needed
+        // after filtering).
+        let params = try XCTUnwrap(observed["threadListParams"] as? [String: Any])
+        XCTAssertEqual(params["limit"] as? Int, 50)
+    }
+
+    func testScopedRecentSessionsStopReadingOnceTheLimitFills() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "threads": [
+                ["id": "TH-A", "preview": "match", "updatedAt": 1_700_000_300, "turns": []],
+                ["id": "TH-B", "preview": "later", "updatedAt": 1_700_000_200, "turns": []],
+            ],
+            "transcripts": [
+                "TH-A": rubienThread(refID: 42),
+                "TH-B": rubienThread(refID: 42),
+            ],
+        ], into: workspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        let scoped = await provider.recentSessions(workspaceURL: workspace, limit: 1, referenceID: 42)
+        XCTAssertEqual(scoped.map(\.id), ["TH-A"])
+
+        let observed = try readObserved(in: workspace)
+        XCTAssertEqual(try XCTUnwrap(observed["threadReadIds"] as? [String]), ["TH-A"],
+                       "reading stops as soon as the limit fills — TH-B is never read")
+    }
+
+    func testScopedListingMemoizesAttributionAcrossReruns() async throws {
+        // The popover re-lists on every open/scope flip; unchanged threads (same
+        // updatedAt) must not be re-read — the connection memoizes attribution.
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "threads": [
+                ["id": "TH-A", "preview": "match", "updatedAt": 1_700_000_300, "turns": []],
+                ["id": "TH-B", "preview": "other", "updatedAt": 1_700_000_200, "turns": []],
+            ],
+            "transcripts": [
+                "TH-A": rubienThread(refID: 42),
+                "TH-B": rubienThread(refID: 7),
+            ],
+        ], into: workspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        let first = await provider.recentSessions(workspaceURL: workspace, limit: 10, referenceID: 42)
+        let second = await provider.recentSessions(workspaceURL: workspace, limit: 10, referenceID: 42)
+        XCTAssertEqual(first.map(\.id), ["TH-A"])
+        XCTAssertEqual(second.map(\.id), ["TH-A"], "cache hit returns the same attribution")
+
+        let observed = try readObserved(in: workspace)
+        XCTAssertEqual(try XCTUnwrap(observed["threadReadIds"] as? [String]),
+                       ["TH-A", "TH-B"], "the rerun issued NO additional thread/reads")
+    }
+
+    func testScopedSearchFiltersHitsByReference() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "searchHits": [
+                ["thread": ["id": "S-42", "preview": "About 42", "updatedAt": 1_700_000_300,
+                            "cwd": workspace.path, "turns": []], "snippet": "hit"],
+                ["thread": ["id": "S-7", "preview": "About 7", "updatedAt": 1_700_000_200,
+                            "cwd": workspace.path, "turns": []], "snippet": "hit"],
+            ],
+            "transcripts": [
+                "S-42": rubienThread(refID: 42),
+                "S-7": rubienThread(refID: 7),
+            ],
+        ], into: workspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        let hits = await provider.searchSessions(
+            query: "hit", workspaceURL: workspace, limit: 10, referenceID: 42)
+        XCTAssertEqual(hits.map(\.id), ["S-42"], "search hits are scoped like recents")
+        XCTAssertEqual(hits.first?.matchSnippet, "hit", "the snippet survives the filter")
+    }
+
     func testSessionTranscriptDecodesTurnsToRenderRows() async throws {
         let workspace = try makeWorkspace()
         try writeConfig([:], into: workspace)

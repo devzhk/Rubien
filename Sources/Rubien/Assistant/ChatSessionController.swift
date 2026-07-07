@@ -364,15 +364,23 @@ final class ChatSessionController: ObservableObject {
 
     /// The runtime's own recent sessions for this conversation's working folder, for
     /// the History picker (§5.3). A light read of the provider's store; Rubien keeps
-    /// nothing. Off-main inside the provider.
-    func listRecentSessions(limit: Int = 25) async -> [AgentSessionSummary] {
-        await provider.recentSessions(workspaceURL: workspaceURL, limit: limit)
+    /// nothing. Off-main inside the provider. `scopedToReference` keeps only sessions
+    /// attributed to THIS document (the popover's default scope) — attribution is the
+    /// rubien tool calls in the session, since neither runtime persists the seed.
+    func listRecentSessions(limit: Int = 25, scopedToReference: Bool = false) async -> [AgentSessionSummary] {
+        await provider.recentSessions(
+            workspaceURL: workspaceURL, limit: limit,
+            referenceID: scopedToReference ? reference.id : nil)
     }
 
     /// Content search over the provider's sessions for this conversation's working
-    /// folder (History picker's search field, §5.3).
-    func searchSessions(_ query: String, limit: Int = 25) async -> [AgentSessionSummary] {
-        await provider.searchSessions(query: query, workspaceURL: workspaceURL, limit: limit)
+    /// folder (History picker's search field, §5.3). `scopedToReference` as above.
+    func searchSessions(
+        _ query: String, limit: Int = 25, scopedToReference: Bool = false
+    ) async -> [AgentSessionSummary] {
+        await provider.searchSessions(
+            query: query, workspaceURL: workspaceURL, limit: limit,
+            referenceID: scopedToReference ? reference.id : nil)
     }
 
     /// Resume a past conversation from History: point the next turn at its session id
@@ -535,7 +543,8 @@ final class ChatSessionController: ObservableObject {
     /// read-only content channel (`mcp__rubien__*`) and Claude's read/search builtins.
     /// Writes / shell (`Write`, `Edit`, `Bash`, …) are absent, so they still prompt.
     static func isSilentReadTool(_ toolName: String) -> Bool {
-        toolName.hasPrefix("mcp__rubien__") || silentReadBuiltins.contains(toolName)
+        toolName.hasPrefix(ReferenceAttribution.claudeToolPrefix)
+            || silentReadBuiltins.contains(toolName)
     }
 
     /// Pop the oldest remembered detail for a tool name (FIFO — events carry no id).

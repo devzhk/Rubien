@@ -304,17 +304,26 @@ class Server:
                      "snippet": "…the matching   text…"},
                 ])})
             elif method == "thread/read":
-                # History transcript preview (3b-4). thread.turns[].items[].
+                # History transcript preview (3b-4) + the scoped-filter reads: a
+                # per-thread `transcripts[threadId]` wins over the single global
+                # `transcript`, and every read's threadId is appended for assertions.
                 cfg = load_config()
-                record(threadReadParams=msg.get("params", {}))
-                respond(req_id, {"thread": cfg.get("transcript", {"turns": [
-                    {"items": [
-                        {"type": "userMessage", "content": [{"type": "text", "text": "Question?"}]},
-                        {"type": "reasoning", "text": "thinking (should be dropped)"},
-                        {"type": "agentMessage", "text": "The answer."},
-                        {"type": "fileChange", "status": "completed", "changes": []},
-                    ]},
-                ]})})
+                params = msg.get("params", {})
+                record(threadReadParams=params,
+                       threadReadIds=OBSERVED.get("threadReadIds", []) + [params.get("threadId")])
+                # `is None`, not `or`: an explicitly configured EMPTY per-thread
+                # transcript ({}) must be served, not swallowed by falsiness.
+                thread = cfg.get("transcripts", {}).get(params.get("threadId"))
+                if thread is None:
+                    thread = cfg.get("transcript", {"turns": [
+                        {"items": [
+                            {"type": "userMessage", "content": [{"type": "text", "text": "Question?"}]},
+                            {"type": "reasoning", "text": "thinking (should be dropped)"},
+                            {"type": "agentMessage", "text": "The answer."},
+                            {"type": "fileChange", "status": "completed", "changes": []},
+                        ]},
+                    ]})
+                respond(req_id, {"thread": thread})
             elif req_id is not None:
                 respond(req_id, {})
 

@@ -80,31 +80,38 @@ final class ClaudeCodeProvider: AgentProvider {
     }
 
     /// Light read of Claude's own session store for the History picker (§5.3).
-    /// Runs the blocking file I/O off the main actor; `workspaceURL`/`limit` are the
-    /// only captures (the store + FileManager are created inside the detached task).
-    func recentSessions(workspaceURL: URL, limit: Int) async -> [AgentSessionSummary] {
-        await Task.detached(priority: .userInitiated) {
-            ClaudeSessionStore().recentSessions(workspaceURL: workspaceURL, limit: limit)
-        }.value
+    /// A scoped listing (`referenceID` set) scans file bodies for attribution.
+    func recentSessions(workspaceURL: URL, limit: Int, referenceID: Int64?) async -> [AgentSessionSummary] {
+        await storeRead {
+            ClaudeSessionStore().recentSessions(
+                workspaceURL: workspaceURL, limit: limit, referenceID: referenceID)
+        }
     }
 
     /// A picked session's full transcript (resume restores the conversation's
-    /// content). Same off-main-actor file I/O pattern as `recentSessions`.
+    /// content).
     func sessionTranscript(sessionID: String, workspaceURL: URL) async -> [ChatRenderMessage] {
-        await Task.detached(priority: .userInitiated) {
+        await storeRead {
             ClaudeSessionStore().fullTranscript(sessionID: sessionID, workspaceURL: workspaceURL)
-        }.value
+        }
     }
 
     /// Content search over the store's sessions (History picker's search field).
-    /// Unlike the one-shot reads above, searches are re-issued per keystroke —
-    /// forward the caller's cancellation into the detached task (detachment
-    /// breaks structured propagation) so a superseded scan stops at its next
-    /// per-file check instead of running to completion.
-    func searchSessions(query: String, workspaceURL: URL, limit: Int) async -> [AgentSessionSummary] {
-        let scan = Task.detached(priority: .userInitiated) {
-            ClaudeSessionStore().searchSessions(query: query, workspaceURL: workspaceURL, limit: limit)
+    func searchSessions(query: String, workspaceURL: URL, limit: Int, referenceID: Int64?) async -> [AgentSessionSummary] {
+        await storeRead {
+            ClaudeSessionStore().searchSessions(
+                query: query, workspaceURL: workspaceURL, limit: limit, referenceID: referenceID)
         }
+    }
+
+    /// Run one blocking session-store read off the main actor. The closure's value
+    /// parameters are its only captures (the store + FileManager are created inside
+    /// the detached task). Detachment breaks structured cancellation, so the
+    /// caller's cancellation is forwarded explicitly — a superseded scan (search
+    /// keystroke, History scope flip) stops at its next per-file check instead of
+    /// running to completion.
+    private func storeRead<T: Sendable>(_ body: @escaping @Sendable () -> T) async -> T {
+        let scan = Task.detached(priority: .userInitiated, operation: body)
         return await withTaskCancellationHandler {
             await scan.value
         } onCancel: {

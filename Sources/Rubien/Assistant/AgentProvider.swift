@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(CoreFoundation)
+import CoreFoundation  // CFGetTypeID/CFBooleanGetTypeID: not re-exported by Foundation on Linux
+#endif
 
 // MARK: - Agent provider engine (Phase 2a)
 //
@@ -202,6 +205,83 @@ struct AgentSessionSummary: Identifiable, Sendable, Equatable {
     var matchSnippet: String? = nil
 }
 
+/// How a stored conversation is attributed to a reference — the History popover's
+/// "This document" scope. Neither runtime persists the seed (claude drops
+/// `--append-system-prompt` from its JSONL; codex never returns
+/// `developerInstructions`), so the recoverable signal is the rubien MCP TOOL
+/// CALLS a conversation contains: the seeded agent reads the document through
+/// them, and their arguments carry the reference id. ONE shared policy — which
+/// tools, which argument keys, how values coerce — so the Claude (JSONL
+/// `tool_use`) and Codex (`thread/read` `mcpToolCall`) scanners cannot drift.
+enum ReferenceAttribution {
+    /// Our server's registration key, as codex reports it in `mcpToolCall.server`.
+    static var serverName: String { MCPContentChannel.serverName }
+
+    /// Claude's fully-qualified tool-name prefix for our server (claude names MCP
+    /// tools `mcp__<server>__<tool>`). Also the silent-read-tool gate's prefix.
+    static var claudeToolPrefix: String { "mcp__\(serverName)__" }
+
+    /// The reference ids one rubien tool call addresses. `tool` is the BARE tool
+    /// name (codex's `tool` field; claude callers strip `claudeToolPrefix` first).
+    /// Handles scalar and array-shaped keys (`ids`).
+    static func referencedIDs(tool: String, arguments: [String: Any]) -> Set<Int64> {
+        var ids: Set<Int64> = []
+        for key in referenceKeys(for: tool) {
+            switch arguments[key] {
+            case let array as [Any]:
+                ids.formUnion(array.compactMap(referenceArgument))
+            case let value?:
+                if let id = referenceArgument(value) { ids.insert(id) }
+            default:
+                break
+            }
+        }
+        return ids
+    }
+
+    /// Which argument keys carry REFERENCE ids, per tool — tool-aware because the
+    /// keys are not uniform and `id` is not always a reference. Sources of truth:
+    /// `mcp-server/src/tools/*.ts` / `Sources/RubienCLI/MCPToolCatalog.swift`.
+    /// The `--read-only` server the assistant runs registers only read tools
+    /// today, but the write tools are encoded now so Phase 4 (library writes)
+    /// cannot silently mis-attribute. Unknown tools fall back to
+    /// `id`/`referenceId` so a future read tool still attributes (over-inclusion
+    /// beats a miss in a display filter).
+    static func referenceKeys(for tool: String) -> [String] {
+        // The trap: on the properties tools `id`/`ids` are PROPERTY rowids — a
+        // colliding id namespace (`rubien_properties_set {reference: 900,
+        // id: "29"}` addresses reference 900, property 29). The reference, where
+        // one exists, is always the `reference` argument.
+        if tool.hasPrefix("rubien_properties_") { return ["reference"] }
+        return toolKeys[tool] ?? ["id", "referenceId"]
+    }
+
+    /// Only the tools whose keys the default can't cover: array-shaped `ids`
+    /// (delete/cite/export address MANY references). `rubien_get`/`pdf_*`
+    /// (`id`) and `annotations_list`/`web_*` (`referenceId`) ride the default.
+    private static let toolKeys: [String: [String]] = [
+        "rubien_delete": ["ids"],
+        "rubien_cite": ["ids"],
+        "rubien_export": ["ids"],
+    ]
+
+    /// A tool argument as a reference id. Numbers and digit strings both count
+    /// (a mistyped `"id":"42"` call fails the tool but was still ADDRESSING that
+    /// reference) — but a boolean (`{"id":true}` must not attribute reference 1;
+    /// JSON booleans are NSNumber-backed, CFBoolean check per `MCPToolCatalog`
+    /// precedent) or a fractional number (42.9 is not reference 42) never does.
+    static func referenceArgument(_ value: Any?) -> Int64? {
+        if let number = value as? NSNumber {
+            if CFGetTypeID(number) == CFBooleanGetTypeID() { return nil }
+            let double = number.doubleValue
+            guard double == double.rounded(.towardZero) else { return nil }
+            return number.int64Value
+        }
+        if let string = value as? String { return Int64(string) }
+        return nil
+    }
+}
+
 /// The engine a chat sidebar drives. One instance per provider kind; a turn is one
 /// subprocess (D3). Serialization across windows is the caller's job via
 /// `AssistantTurnGate`.
@@ -236,8 +316,11 @@ protocol AgentProvider: Sendable {
 
     /// The runtime's own recent sessions for `workspaceURL`, newest first, for the
     /// History picker (§5.3). A light read of the runtime's session store — Rubien
-    /// stores nothing. Default `[]` (a provider without a readable store).
-    func recentSessions(workspaceURL: URL, limit: Int) async -> [AgentSessionSummary]
+    /// stores nothing. A non-nil `referenceID` keeps only sessions attributed to
+    /// that reference (the popover's "This document" scope): neither runtime
+    /// persists the seed, so attribution is the rubien MCP tool calls whose
+    /// arguments carry the reference id. Default `[]` (no readable store).
+    func recentSessions(workspaceURL: URL, limit: Int, referenceID: Int64?) async -> [AgentSessionSummary]
 
     /// A picked session's full renderable transcript, so a resume restores the
     /// conversation's content (still read from the runtime's own store — Rubien
@@ -246,15 +329,24 @@ protocol AgentProvider: Sendable {
 
     /// Content search over the runtime's sessions for `workspaceURL` (the visible
     /// user/assistant text, not tool payloads), newest first, each hit carrying a
-    /// `matchSnippet`. Default `[]` (a provider without a readable store).
-    func searchSessions(query: String, workspaceURL: URL, limit: Int) async -> [AgentSessionSummary]
+    /// `matchSnippet`. `referenceID` scopes hits like `recentSessions`. Default
+    /// `[]` (a provider without a readable store).
+    func searchSessions(query: String, workspaceURL: URL, limit: Int, referenceID: Int64?) async -> [AgentSessionSummary]
 }
 
 extension AgentProvider {
     func shutdown() { cancel() }
-    func recentSessions(workspaceURL: URL, limit: Int) async -> [AgentSessionSummary] { [] }
+    func recentSessions(workspaceURL: URL, limit: Int, referenceID: Int64?) async -> [AgentSessionSummary] { [] }
     func sessionTranscript(sessionID: String, workspaceURL: URL) async -> [ChatRenderMessage] { [] }
-    func searchSessions(query: String, workspaceURL: URL, limit: Int) async -> [AgentSessionSummary] { [] }
+    func searchSessions(query: String, workspaceURL: URL, limit: Int, referenceID: Int64?) async -> [AgentSessionSummary] { [] }
+
+    /// Unscoped conveniences (existing call sites/tests; forward `referenceID: nil`).
+    func recentSessions(workspaceURL: URL, limit: Int) async -> [AgentSessionSummary] {
+        await recentSessions(workspaceURL: workspaceURL, limit: limit, referenceID: nil)
+    }
+    func searchSessions(query: String, workspaceURL: URL, limit: Int) async -> [AgentSessionSummary] {
+        await searchSessions(query: query, workspaceURL: workspaceURL, limit: limit, referenceID: nil)
+    }
 }
 
 /// Errors thrown *into* a turn's event stream (vs. `providerNotice`, which is a
