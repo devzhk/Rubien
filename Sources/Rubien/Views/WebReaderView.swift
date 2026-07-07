@@ -1747,11 +1747,6 @@ struct WebReaderView: View {
                     onHighlight: { viewModel.applySelectionAction(.highlight) },
                     onUnderline: { viewModel.applySelectionAction(.underline) },
                     onPickColor: { _ in viewModel.applySelectionAction(.highlight) },
-                    onCopy: {
-                        guard let text = viewModel.pendingSelection?.text, !text.isEmpty else { return }
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(text, forType: .string)
-                    },
                     onSaveNote: { md in
                         if let sel = viewModel.pendingSelection {
                             viewModel.addAnnotation(type: .note, selection: sel, noteText: md)

@@ -30,7 +30,6 @@ struct AnnotationSelectionPopover: View {
     let onHighlight: () -> Void
     let onUnderline: () -> Void
     let onPickColor: (String) -> Void
-    let onCopy: () -> Void
     let onSaveNote: (String) -> Void
     let onDismiss: () -> Void
     /// Optional "Ask assistant" action (Selection→Ask, §5.4): stages the selected
@@ -51,12 +50,12 @@ struct AnnotationSelectionPopover: View {
                     onUnderline()
                 }
 
-                toolbarButton(icon: "doc.on.doc", label: String(localized: "Copy", bundle: .module)) {
-                    onCopy()
-                }
-
                 if let onAsk {
-                    toolbarButton(icon: "sparkles", label: String(localized: "Ask assistant", bundle: .module)) {
+                    // The Assistant's one glyph everywhere (reader toolbar, sidebar
+                    // header, Settings tab) — the quick-start hint tells users to
+                    // look for "the chat button", so this must be it.
+                    toolbarButton(icon: "bubble.left.and.text.bubble.right",
+                                  label: String(localized: "Ask assistant", bundle: .module)) {
                         onAsk()
                     }
                 }

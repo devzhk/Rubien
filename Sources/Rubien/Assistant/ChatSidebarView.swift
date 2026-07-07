@@ -190,13 +190,13 @@ struct ChatSidebarView: View {
                 .interpolation(.high)
                 .frame(width: 40, height: 40)
                 .padding(.bottom, 12)
-            Text("Ask about this document")
+            Text("Chat about this document")
                 .font(.system(size: 16, weight: .bold))
                 .padding(.bottom, 6)
-            // Grounded in what the assistant can actually do (the read-only Rubien
-            // tools): document text/figures, the user's annotations, library search;
-            // web is the + menu toggle. Selecting text in the reader offers "Ask".
-            Text("The assistant reads this document through Rubien — its text, figures, and your highlights — and can search your library. Web search can be toggled in the + menu.")
+            // Only the two facts a new user can't guess: the Selection→Ask
+            // affordance and the web toggle. (That the assistant reads THIS
+            // document is already the headline's promise — don't re-explain it.)
+            Text("Select text and click \(Image(systemName: "bubble.left.and.text.bubble.right")) to quote it here. Toggle web search in the + menu.")
                 .font(.system(size: 12.5))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -571,7 +571,10 @@ struct ChatSidebarView: View {
                 .opacity(0)
                 .allowsHitTesting(false)
             if draft.isEmpty {
-                Text("Ask about this document…")
+                // The placeholder doubles as the send-shortcut hint (plain ↩ is a
+                // newline, so ⌘↩ is otherwise undiscoverable — and this line was
+                // spending its words on nothing).
+                Text("Chat about this document — ⌘+↩ to send")
                     .font(.body)
                     .foregroundStyle(.tertiary)
                     // Align with the TextEditor's insertion point (its text
@@ -583,6 +586,25 @@ struct ChatSidebarView: View {
                 .focused($composerFocused)
                 .font(.body)
                 .scrollContentBackground(.hidden)
+                // The composer owns the return key DETERMINISTICALLY. Before this,
+                // send lived on the button as a ⌘↩ key equivalent — and SwiftUI's
+                // loose equivalent matching also fired it for ⇧↩ (undeclared,
+                // version-fragile, and it surprised the user). Now: ⌘↩ sends;
+                // plain ↩ and every other modifier fall through to the text
+                // system (newline) and can never send.
+                .onKeyPress(.return, phases: .down) { press in
+                    // EXACTLY ⌘ — `contains` would also send on ⌘⇧↩/⌘⌥↩. State
+                    // flags are masked out first: caps lock reports as a modifier
+                    // (strict equality would dead-key ⌘↩ for a caps-lock user)
+                    // and keypad-Enter adds .numericPad.
+                    let chord = press.modifiers.subtracting([.capsLock, .numericPad])
+                    guard chord == .command else { return .ignored }
+                    guard !session.isResponding,
+                          !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    else { return .handled }  // consume the chord; never a newline
+                    sendDraft()
+                    return .handled
+                }
         }
         // Grow with content up to ~6 lines, then the editor scrolls internally.
         .frame(maxHeight: 120)
@@ -621,7 +643,9 @@ struct ChatSidebarView: View {
                     .contentShape(Self.sendButtonShape)
             }
             .buttonStyle(.plain)
-            .keyboardShortcut(.return, modifiers: .command)
+            // No .keyboardShortcut here — the composer's onKeyPress is the one
+            // owner of ⌘↩ (a key EQUIVALENT on the button is the loose-matching
+            // pass that made ⇧↩ send by accident).
             .disabled(isEmpty)
             .help("Send (⌘↩)")
         }

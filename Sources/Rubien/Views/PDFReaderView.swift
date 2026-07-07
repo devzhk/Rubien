@@ -650,11 +650,6 @@ struct PDFReaderView: View {
                     onHighlight: { viewModel.applySelectionAction(.highlight) },
                     onUnderline: { viewModel.applySelectionAction(.underline) },
                     onPickColor: { _ in viewModel.applySelectionAction(.highlight) },
-                    onCopy: {
-                        guard !viewModel.stagedSelectionText.isEmpty else { return }
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(viewModel.stagedSelectionText, forType: .string)
-                    },
                     onSaveNote: { md in
                         viewModel.addAnnotations(
                             type: .note,
