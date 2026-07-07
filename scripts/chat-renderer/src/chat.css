@@ -259,10 +259,9 @@ body {
 /* --- Tool chip (collapsed <details>) --- */
 
 .chat-tool-chip {
-  border: 1px solid var(--chat-chip-border);
-  background: var(--chat-chip-bg);
-  border-radius: 9px;
-  padding: 2px 4px;
+  /* No border or fill — a tool call is just a muted, secondary trace (status dot +
+     name) that recedes into the transcript, not a card. */
+  padding: 0;
   font-size: 12.5px;
   color: var(--chat-fg-muted);
   align-self: flex-start;
@@ -273,7 +272,7 @@ body {
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 5px 7px;
+  padding: 3px 2px;
   cursor: pointer;
   list-style: none;
 }
