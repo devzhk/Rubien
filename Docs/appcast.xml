@@ -236,5 +236,23 @@ Reliability: a database busy-timeout keeps concurrent writes from being silently
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.2.1</title>
+            <description><![CDATA[Codex support — switch between Claude Code and Codex per conversation (composer picker, or set a default in Settings → Assistant); model and reasoning effort are selectable.
+
+Also in 0.2.1:
+• Reader — smoother sidebar hover and resize.
+• Assistant chat UX — the transcript no longer yanks your scroll while a reply streams (a "new messages" pill appears instead), plus unified chat iconography and quieter tool-call traces.]]></description>
+            <pubDate>Tue, 07 Jul 2026 03:59:16 +0000</pubDate>
+            <sparkle:version>16</sparkle:version>
+            <sparkle:shortVersionString>0.2.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.2.1/Rubien-0.2.1.dmg"
+                sparkle:edSignature="K2rErGjevqX3t6glzho91HUMuxAuX2KVal+b2NK92kHuF2Wzj+TglplIja8YULZJwcmvc1Ycyci8CXzsq7TRDA=="
+                length="18183293"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
