@@ -131,10 +131,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Configure API contact email for CrossRef/OpenAlex polite pool
         MetadataFetcher.contactEmail = RubienPreferences.apiContactEmail
 
-        // Pre-warm the JSCore engine for the style used in the last session,
-        // so the first citation render doesn't pay the cold-start cost.
-        CiteprocJSCorePool.shared.warmUpLastUsed()
-
         // Belt-and-suspenders for the cross-process observation bridge: if a
         // CLI write happened while the app was in the background and the
         // Darwin notification didn't reach us (e.g. the broadcaster wasn't

@@ -83,7 +83,7 @@ Pipeline in `Sources/Rubien/Services/MetadataResolver.swift`: `DOI → arXiv →
 
 ### Citation engine
 
-`CitationFormatter` (pure Swift, seven built-in styles APA/MLA/Chicago/IEEE/Harvard/Vancouver/Nature) and `CSLEngine` / `CSLManager` (pure Swift, user-imported `.csl` files) handle every live citation path. `CiteprocJSCoreEngine` + the `Resources/Citeproc/` tree are parked — kept in-tree but never invoked; adding a built-in style only needs `CitationFormatter`.
+`CitationFormatter` (pure Swift, seven built-in styles APA/MLA/Chicago/IEEE/Harvard/Vancouver/Nature) and `CSLEngine` / `CSLManager` (pure Swift, user-imported `.csl` files) handle every citation path; adding a built-in style only needs `CitationFormatter`. (A parked citeproc-js JSCore engine + bundled `Resources/Citeproc/` tree were removed in July 2026 — recover from git history if CSL-JS fidelity is ever needed.)
 
 ### Readers and annotations
 
