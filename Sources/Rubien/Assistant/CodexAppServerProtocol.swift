@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(CoreFoundation)
+import CoreFoundation  // CFGetTypeID/CFBooleanGetTypeID: not re-exported by Foundation on Linux
+#endif
 
 // MARK: - Codex app-server protocol codec (verified against codex-cli 0.142.5)
 //
