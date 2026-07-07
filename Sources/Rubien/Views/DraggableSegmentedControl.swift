@@ -1,11 +1,23 @@
 #if os(macOS)
 import SwiftUI
 
+enum ReaderSegmentedControlMetrics {
+    static let activeHighlightOpacity = 0.12
+    static let hoverHighlightOpacity = 0.07
+
+    static func highlightOpacity(isActive: Bool, isHovered: Bool) -> Double {
+        if isActive { return activeHighlightOpacity }
+        if isHovered { return hoverHighlightOpacity }
+        return 0
+    }
+}
+
 struct DraggableSegmentedControl<T: Hashable>: View {
     @Binding var selection: T
     let items: [(label: String, value: T)]
 
     @State private var dragIndex: Int?
+    @State private var hoverIndex: Int?
 
     private var selectedIndex: Int {
         items.firstIndex(where: { $0.value == selection }) ?? 0
@@ -17,9 +29,17 @@ struct DraggableSegmentedControl<T: Hashable>: View {
             let activeIndex = dragIndex ?? selectedIndex
 
             ZStack(alignment: .leading) {
+                if let hoverIndex, hoverIndex != activeIndex {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.primary.opacity(ReaderSegmentedControlMetrics.hoverHighlightOpacity))
+                        .frame(width: segmentWidth - 4, height: 24)
+                        .offset(x: CGFloat(hoverIndex) * segmentWidth + 2)
+                        .animation(.easeInOut(duration: 0.14), value: hoverIndex)
+                }
+
                 // Sliding indicator
                 RoundedRectangle(cornerRadius: 6)
-                    .fill(Color.accentColor.opacity(0.12))
+                    .fill(Color.accentColor.opacity(ReaderSegmentedControlMetrics.activeHighlightOpacity))
                     .frame(width: segmentWidth - 4, height: 24)
                     .offset(x: CGFloat(activeIndex) * segmentWidth + 2)
                     .animation(.easeInOut(duration: 0.2), value: activeIndex)
@@ -29,16 +49,28 @@ struct DraggableSegmentedControl<T: Hashable>: View {
                 // overlapping neighbors.
                 HStack(spacing: 0) {
                     ForEach(items.indices, id: \.self) { index in
+                        let isActive = activeIndex == index
+                        let isHovered = hoverIndex == index
                         Text(items[index].label)
                             .font(.caption)
-                            .fontWeight(activeIndex == index ? .medium : .regular)
-                            .foregroundStyle(activeIndex == index ? Color.accentColor : .secondary)
+                            .fontWeight(isActive || isHovered ? .medium : .regular)
+                            .foregroundStyle(isActive ? Color.accentColor : (isHovered ? .primary : .secondary))
                             .lineLimit(1)
                             .minimumScaleFactor(0.7)
                             .padding(.horizontal, 2)
                             .frame(maxWidth: .infinity)
                             .contentShape(Rectangle())
+                            .onHover { hovering in
+                                withAnimation(.easeOut(duration: 0.12)) {
+                                    if hovering {
+                                        hoverIndex = index
+                                    } else if hoverIndex == index {
+                                        hoverIndex = nil
+                                    }
+                                }
+                            }
                             .animation(.easeInOut(duration: 0.15), value: activeIndex)
+                            .animation(.easeInOut(duration: 0.12), value: hoverIndex)
                     }
                 }
             }
