@@ -5,10 +5,10 @@ import SwiftUI
 /// App-wide custom accent color, backed by `RubienPreferences.accentColorHex`.
 ///
 /// `nil` = no custom accent → no override is applied anywhere and the app
-/// follows the system accent (System Settings → Appearance), which is the
-/// historical behavior: the asset-catalog AccentColor is dormant because the
-/// SPM-built bundle's Info.plist carries no `NSAccentColorName` and the
-/// catalog compiles into the module resource bundle, not the main bundle.
+/// follows the system accent (System Settings → Appearance), the historical
+/// behavior. (There is deliberately no asset-catalog AccentColor /
+/// `NSAccentColorName`: an Info.plist-level accent can't change at runtime,
+/// and the SPM bundle layout wouldn't honor it anyway.)
 ///
 /// Separate from the theme (light/dark) preference — the two compose freely.
 @MainActor @Observable

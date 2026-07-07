@@ -42,9 +42,6 @@ let package = Package(
             dependencies: [
                 .product(name: "GRDB", package: "GRDB.swift"),
                 .product(name: "Crypto", package: "swift-crypto", condition: .when(platforms: [.linux])),
-            ],
-            resources: [
-                .copy("Resources")
             ]
         ),
         .target(
@@ -85,7 +82,6 @@ let package = Package(
                 "Rubien.entitlements"
             ],
             resources: [
-                .process("Assets.xcassets"),
                 .process("Resources")
             ],
             swiftSettings: [

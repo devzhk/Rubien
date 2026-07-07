@@ -174,17 +174,6 @@ public final class CSLManager {
             .init(id: "vancouver", title: "Vancouver", isBuiltin: true, citationKind: .numeric),
             .init(id: "nature", title: "Nature", isBuiltin: true, citationKind: .numeric),
         ]
-        let builtinIDs = Set(styles.map(\.id))
-        if let builtinDir = Bundle.module.url(forResource: "BuiltinCSL", withExtension: nil) {
-            let builtinFiles = (try? FileManager.default.contentsOfDirectory(at: builtinDir, includingPropertiesForKeys: nil)) ?? []
-            for file in builtinFiles where file.pathExtension == "csl" {
-                guard let data = try? Data(contentsOf: file),
-                      let style = CSLXMLParser().parse(data: data),
-                      !builtinIDs.contains(style.id) else { continue }
-                styles.append(.init(id: style.id, title: style.title, isBuiltin: true, citationKind: style.citationKind))
-                xmlCacheUpdates[style.id] = data
-            }
-        }
         if let files = try? FileManager.default.contentsOfDirectory(at: storageDir, includingPropertiesForKeys: nil) {
             for file in files where file.pathExtension == "csl" {
                 if let data = try? Data(contentsOf: file),
@@ -235,21 +224,8 @@ public final class CSLManager {
     /// populates the cache on a miss so subsequent calls are O(1).
     public func cslXmlData(forStyleId styleId: String) -> Data? {
         if let cached = withCacheLock({ cachedXmlData[styleId] }) { return cached }
-        // 1. Search user-imported styles directory
+        // Search user-imported styles directory
         if let files = try? FileManager.default.contentsOfDirectory(at: storageDir, includingPropertiesForKeys: nil) {
-            for file in files where file.pathExtension == "csl" {
-                guard let data = try? Data(contentsOf: file),
-                      let style = CSLXMLParser().parse(data: data),
-                      style.id == styleId else { continue }
-                withCacheLock {
-                    cachedXmlData[styleId] = data
-                }
-                return data
-            }
-        }
-        // 2. Fall back to bundled built-in CSL styles
-        if let builtinDir = Bundle.module.url(forResource: "BuiltinCSL", withExtension: nil),
-           let files = try? FileManager.default.contentsOfDirectory(at: builtinDir, includingPropertiesForKeys: nil) {
             for file in files where file.pathExtension == "csl" {
                 guard let data = try? Data(contentsOf: file),
                       let style = CSLXMLParser().parse(data: data),
