@@ -207,6 +207,16 @@ body {
   border-radius: 5px;
 }
 
+/* --- Math --- */
+
+/* A wide display formula scrolls inside its own line instead of stretching the
+   bubble (mirrors the pre overflow rule below). */
+.chat-bubble .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 2px 0;
+}
+
 /* --- Code blocks + copy button --- */
 
 .chat-codeblock {

@@ -5,7 +5,7 @@
 // KaTeX (`renderMathInElement`, from the inlined auto-render.min.js) runs ONLY on
 // a full/commit render — never mid-stream — to avoid half-formula flicker.
 
-import { renderMarkdown, useDOMWindow } from './render.js'
+import { renderMarkdown, useDOMWindow, MATH_DELIMITERS } from './render.js'
 import './chat.css'
 
 // --- Swift bridge -------------------------------------------------------------
@@ -40,12 +40,11 @@ let jumpPill = null
 // --- KaTeX --------------------------------------------------------------------
 
 const KATEX_OPTIONS = {
-  delimiters: [
-    { left: '$$', right: '$$', display: true },
-    { left: '$', right: '$', display: false },
-    { left: '\\(', right: '\\)', display: false },
-    { left: '\\[', right: '\\]', display: true },
-  ],
+  // Exactly the delimiter forms render.js emits: its math tokenizers normalize
+  // every `$…$` / `$$…$$` to `\( \)` / `\[ \]` before the DOM stage, so raw `$`
+  // is deliberately NOT scanned here — prose like "costs $5 and $10" can never
+  // be eaten as math.
+  delimiters: MATH_DELIMITERS,
   throwOnError: false,
   // Security: KaTeX output is inserted AFTER DOMPurify, so keep KaTeX itself
   // incapable of emitting dangerous markup. `trust:false` (the default, pinned
