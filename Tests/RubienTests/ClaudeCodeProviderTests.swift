@@ -62,6 +62,46 @@ final class ClaudeCodeProviderTests: XCTestCase {
         XCTAssertNotNil(availability.unavailableReason)
     }
 
+    func testAuthIsReprobedEachCallSoMidSessionSignOutIsDetected() async throws {
+        // A fake claude whose auth status is read from a sentinel file, so the second
+        // isAvailable() can observe a different state than the first. Proves auth is NOT
+        // cached (only path + version are) — the cached ready result otherwise made
+        // Recheck a no-op after a logout / token expiry (#11).
+        let workspace = try makeWorkspace()
+        let stateFile = workspace.appendingPathComponent("auth-state")
+        try "in".write(to: stateFile, atomically: true, encoding: .utf8)
+        let cli = workspace.appendingPathComponent("fake-claude-reprobe")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then
+          printf '%s\\n' '9.9.9-fake (Claude Code)'
+          exit 0
+        fi
+        if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+          if [ "$(cat '\(stateFile.path)')" = "in" ]; then
+            printf '%s\\n' '{"loggedIn":true}'
+            exit 0
+          fi
+          printf '%s\\n' '{"loggedIn":false}'
+          exit 1
+        fi
+        exit 0
+        """
+        try script.write(to: cli, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cli.path)
+
+        let provider = ClaudeCodeProvider(executableOverride: cli.path)
+        let first = await provider.isAvailable()
+        XCTAssertTrue(first.isReady, "signed in on the first probe")
+
+        try "out".write(to: stateFile, atomically: true, encoding: .utf8)
+        let second = await provider.isAvailable()
+
+        XCTAssertTrue(second.isInstalled, "path + version stay resolved (cached)")
+        XCTAssertEqual(second.version, "9.9.9", "the cached version is reused")
+        XCTAssertFalse(second.isAuthenticated, "auth re-probed → sign-out detected, not the cached ready state")
+    }
+
     // MARK: Streaming
 
     func testStreamingHappyPathProducesDeltasMessageAndCompletion() async throws {
