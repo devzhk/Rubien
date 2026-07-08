@@ -42,6 +42,28 @@ final class ReaderChromeInteractionTests: XCTestCase {
         )
     }
 
+    func testWebReaderNotesAndAssistantFitDefaultReaderWidth() {
+        XCTAssertLessThanOrEqual(
+            WebReaderMetrics.minimumReadableWidth(
+                chatVisible: true,
+                annotationSidebarVisible: true,
+                chatPanelWidth: WebReaderMetrics.defaultChatPanelWidth
+            ),
+            ReaderWindowMetrics.defaultPreferredWidth
+        )
+    }
+
+    func testWebReaderMinimumWindowWidthCoversDefaultNotesAndAssistantLayout() {
+        XCTAssertGreaterThanOrEqual(
+            WebReaderMetrics.minimumWindowWidth,
+            WebReaderMetrics.minimumReadableWidth(
+                chatVisible: true,
+                annotationSidebarVisible: true,
+                chatPanelWidth: WebReaderMetrics.defaultChatPanelWidth
+            )
+        )
+    }
+
     func testSegmentedControlHoverDoesNotOverrideActiveSegmentHighlight() {
         XCTAssertEqual(
             ReaderSegmentedControlMetrics.highlightOpacity(isActive: true, isHovered: true),

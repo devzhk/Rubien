@@ -30,6 +30,7 @@ final class RubienPreferencesTests: XCTestCase {
             RubienPreferences.assistantCodexEffortKey,
             RubienPreferences.assistantCodexSandboxKey,
             RubienPreferences.assistantCodexBinaryPathKey,
+            RubienPreferences.assistantSidebarVisibleKey,
         ]
     }
 
@@ -222,6 +223,20 @@ final class RubienPreferencesTests: XCTestCase {
         XCTAssertEqual(RubienPreferences.assistantProvider, .claude)
         UserDefaults.standard.set("banana", forKey: RubienPreferences.assistantCodexSandboxKey)
         XCTAssertEqual(RubienPreferences.assistantCodexSandbox, .readOnly)
+    }
+
+    func testAssistantSidebarVisibleDefaultsToTrueWhenUnset() {
+        XCTAssertTrue(
+            RubienPreferences.assistantSidebarVisible,
+            "new reader windows should show the assistant until the user hides it"
+        )
+    }
+
+    func testAssistantSidebarVisibleRoundTrips() {
+        RubienPreferences.assistantSidebarVisible = false
+        XCTAssertFalse(RubienPreferences.assistantSidebarVisible)
+        RubienPreferences.assistantSidebarVisible = true
+        XCTAssertTrue(RubienPreferences.assistantSidebarVisible)
     }
 }
 #endif

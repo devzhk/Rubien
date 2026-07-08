@@ -6,6 +6,18 @@ import RubienCore
 
 private let readerWindowLog = Logger(subsystem: "Rubien", category: "reader-window")
 
+enum ReaderWindowMetrics {
+    static let defaultPreferredWidth: CGFloat = 1000
+    static let defaultPreferredHeight: CGFloat = 800
+    static let visibleFrameInset: CGFloat = 100
+
+    static func preferredWindowSize(minSize: NSSize, visibleFrame: NSRect) -> NSSize {
+        let width = min(max(minSize.width, defaultPreferredWidth), visibleFrame.width - visibleFrameInset)
+        let height = min(max(minSize.height, defaultPreferredHeight), visibleFrame.height - visibleFrameInset)
+        return NSSize(width: width, height: height)
+    }
+}
+
 // MARK: - ReaderWindowManager
 
 /// Manages independent reader windows (PDF / Web) so the main library window
@@ -90,13 +102,19 @@ final class ReaderWindowManager {
         let window = makeWindow(
             title: title,
             autosaveName: "RubienWebReader-\(refId)",
-            minSize: NSSize(width: 800, height: 600)
+            minSize: NSSize(
+                width: WebReaderMetrics.minimumWindowWidth,
+                height: WebReaderMetrics.minimumWindowHeight
+            )
         )
 
         let readerView = WebReaderView(reference: reference) { [weak self] in
             self?.closeWindow(forReferenceId: refId)
         }
-        .frame(minWidth: 800, minHeight: 600)
+        .frame(
+            minWidth: WebReaderMetrics.minimumWindowWidth,
+            minHeight: WebReaderMetrics.minimumWindowHeight
+        )
 
         window.contentViewController = makeRubienHostingController(rootView: readerView)
         registerWindow(window, title: title, forReferenceId: refId)
@@ -232,9 +250,7 @@ final class ReaderWindowManager {
 
     private func preferredWindowSize(minSize: NSSize) -> NSSize {
         let visibleFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 960)
-        let width = min(max(minSize.width, 1000), visibleFrame.width - 100)
-        let height = min(max(minSize.height, 800), visibleFrame.height - 100)
-        return NSSize(width: width, height: height)
+        return ReaderWindowMetrics.preferredWindowSize(minSize: minSize, visibleFrame: visibleFrame)
     }
 }
 #endif

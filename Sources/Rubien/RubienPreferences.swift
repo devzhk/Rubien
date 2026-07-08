@@ -178,6 +178,20 @@ enum RubienPreferences {
         set { UserDefaults.standard.set(newValue, forKey: assistantAutoApproveKey) }
     }
 
+    /// Default visibility for the assistant panel in newly opened reader windows.
+    /// Unset ⇒ visible, so the assistant is discoverable until the user explicitly
+    /// hides it. Existing open readers keep their local state; this seeds new ones.
+    static let assistantSidebarVisibleKey = "Rubien.assistant.sidebarVisible"
+
+    static var assistantSidebarVisible: Bool {
+        get {
+            let defaults = UserDefaults.standard
+            if defaults.object(forKey: assistantSidebarVisibleKey) == nil { return true }
+            return defaults.bool(forKey: assistantSidebarVisibleKey)
+        }
+        set { UserDefaults.standard.set(newValue, forKey: assistantSidebarVisibleKey) }
+    }
+
     /// Explicit path to the `claude` binary; empty/unset ⇒ auto-discovery (§5.5:
     /// well-known dirs → login-shell `command -v`). Threaded to
     /// `ClaudeCodeProvider(executableOverride:)`.

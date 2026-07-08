@@ -26,6 +26,35 @@ struct WebSelectionSnapshot: Equatable {
     var viewportSelectionRect: CGRect?
 }
 
+enum WebReaderMetrics {
+    static let annotationSidebarMinWidth: CGFloat = 260
+    static let defaultChatPanelWidth: CGFloat = 380
+    static let chatTrailingInset: CGFloat = 12
+    static let minimumWindowWidth: CGFloat = minimumReadableWidth(
+        chatVisible: true,
+        annotationSidebarVisible: true,
+        chatPanelWidth: defaultChatPanelWidth
+    )
+    static let minimumWindowHeight: CGFloat = 620
+
+    private static let contentMinWidthWithoutChat: CGFloat = 540
+    private static let contentMinWidthWithChat: CGFloat = 320
+
+    static func contentMinimumWidth(chatVisible: Bool) -> CGFloat {
+        chatVisible ? contentMinWidthWithChat : contentMinWidthWithoutChat
+    }
+
+    static func minimumReadableWidth(
+        chatVisible: Bool,
+        annotationSidebarVisible: Bool,
+        chatPanelWidth: CGFloat
+    ) -> CGFloat {
+        contentMinimumWidth(chatVisible: chatVisible)
+            + (annotationSidebarVisible ? annotationSidebarMinWidth : 0)
+            + (chatVisible ? chatPanelWidth + chatTrailingInset : 0)
+    }
+}
+
 @MainActor
 final class WebReaderViewModel: ObservableObject {
     @Published var annotations: [WebAnnotationRecord] = []
@@ -1559,8 +1588,8 @@ struct WebReaderView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @State private var showAnnotationSidebar = true
-    @State private var showChatSidebar = false
-    @State private var chatPanelWidth: CGFloat = 380
+    @State private var showChatSidebar: Bool
+    @State private var chatPanelWidth: CGFloat = WebReaderMetrics.defaultChatPanelWidth
     /// Note-draft text for the selection popover. Lifted from the deleted WebSelectionActionBar
     /// so the shared AnnotationSelectionPopover can take a Binding into the same state across
     /// rebuilds. The `.onChange(of: viewModel.pendingSelection?.text ?? "")` modifier below
@@ -1577,6 +1606,7 @@ struct WebReaderView: View {
 
     init(reference: Reference, onClose: (() -> Void)? = nil) {
         self.onClose = onClose
+        self._showChatSidebar = State(initialValue: RubienPreferences.assistantSidebarVisible)
         self._viewModel = StateObject(wrappedValue: WebReaderViewModel(reference: reference))
 
         // The first production provider construction: Claude wrapped with the
@@ -1599,7 +1629,7 @@ struct WebReaderView: View {
             // floating assistant card — two right-side panels felt unbalanced).
             if showAnnotationSidebar {
                 WebAnnotationSidebarView(viewModel: viewModel)
-                    .frame(minWidth: 260, idealWidth: 300, maxWidth: 400)
+                    .frame(minWidth: WebReaderMetrics.annotationSidebarMinWidth, idealWidth: 300, maxWidth: 400)
                     .overlay(alignment: .trailing) {
                         LinearGradient(
                             colors: [.clear, Color.black.opacity(colorScheme == .dark ? 0.18 : 0.06)],
@@ -1635,15 +1665,15 @@ struct WebReaderView: View {
             // 12 = the card's 6 pt trailing gutter + a 6 pt gap. (The inset
             // tracks committed widths; during a card-resize drag the content
             // reflows on release, not per frame.)
-            .padding(.trailing, showChatSidebar ? chatPanelWidth + 12 : 0)
-            .frame(minWidth: 540)
+            .padding(.trailing, showChatSidebar ? chatPanelWidth + WebReaderMetrics.chatTrailingInset : 0)
+            .frame(minWidth: WebReaderMetrics.contentMinimumWidth(chatVisible: showChatSidebar))
             // The assistant floats over the document pane as a resizable card
             // (Phase 3a, details-panel idiom) — anchored to this pane, not the
             // window, so it never covers the annotation sidebar.
             .overlay(alignment: .trailing) {
                 if showChatSidebar {
                     FloatingChatPanel(session: chatSession, renderer: chatRenderer, width: $chatPanelWidth) {
-                        showChatSidebar = false
+                        setChatSidebarVisible(false)
                     }
                     .padding(.trailing, 6)
                 }
@@ -1651,7 +1681,7 @@ struct WebReaderView: View {
             .animation(.easeInOut(duration: 0.22), value: showChatSidebar)
             .animation(.easeInOut(duration: 0.22), value: chatPanelWidth)
         }
-        .frame(minWidth: 900, minHeight: 620)
+        .frame(minWidth: WebReaderMetrics.minimumWindowWidth, minHeight: WebReaderMetrics.minimumWindowHeight)
         // Window closing (the root view disappears): kill any in-flight agent
         // turn's process group (§4.4 step 9).
         .onDisappear { chatSession.teardown() }
@@ -1709,7 +1739,7 @@ struct WebReaderView: View {
                 .help(String(localized: "Toggle notes sidebar", bundle: .module))
 
                 Button {
-                    showChatSidebar.toggle()
+                    setChatSidebarVisible(!showChatSidebar)
                 } label: {
                     Label(String(localized: "Assistant", bundle: .module), systemImage: "bubble.left.and.text.bubble.right")
                 }
@@ -1733,6 +1763,11 @@ struct WebReaderView: View {
         } message: {
             Text(viewModel.extractionUserMessage ?? "")
         }
+    }
+
+    private func setChatSidebarVisible(_ visible: Bool) {
+        showChatSidebar = visible
+        RubienPreferences.assistantSidebarVisible = visible
     }
 
     @ViewBuilder
@@ -1766,7 +1801,7 @@ struct WebReaderView: View {
                         chatSession.stageSelection(text)
                         viewModel.clearSelection()
                         noteMarkdownForSelection = ""
-                        showChatSidebar = true
+                        setChatSidebarVisible(true)
                     }
                 )
                 .fixedSize()

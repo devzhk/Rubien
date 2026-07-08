@@ -438,7 +438,7 @@ struct PDFReaderView: View {
     // Assistant chat (Phase 3a): one renderer + session controller per reader
     // window; conversation state is in-memory only (D5). Floats as a card over
     // the content (details-panel idiom), not a docked pane.
-    @State private var showChatSidebar = false
+    @State private var showChatSidebar: Bool
     @State private var chatPanelWidth: CGFloat = 380
 
     @StateObject private var chatRenderer: ChatTranscriptController
@@ -446,6 +446,7 @@ struct PDFReaderView: View {
 
     init(reference: Reference, pdfURL: URL, onClose: (() -> Void)? = nil) {
         self.onClose = onClose
+        self._showChatSidebar = State(initialValue: RubienPreferences.assistantSidebarVisible)
         self._viewModel = StateObject(wrappedValue: PDFReaderViewModel(reference: reference, pdfURL: pdfURL))
         // Live session from the user's Assistant settings via the shared production
         // factory (Phase 2c-5) — same path as the web reader.
@@ -559,7 +560,7 @@ struct PDFReaderView: View {
         .overlay(alignment: .trailing) {
             if showChatSidebar {
                 FloatingChatPanel(session: chatSession, renderer: chatRenderer, width: $chatPanelWidth) {
-                    showChatSidebar = false
+                    setChatSidebarVisible(false)
                 }
                 .padding(.trailing, 6)
             }
@@ -610,7 +611,7 @@ struct PDFReaderView: View {
                 // No annotations button — the left sidebar's Notes tab is the
                 // (sole, sufficient) way in; the right edge belongs to the assistant.
                 Button {
-                    showChatSidebar.toggle()
+                    setChatSidebarVisible(!showChatSidebar)
                 } label: {
                     Label(String(localized: "Assistant", bundle: .module), systemImage: "bubble.left.and.text.bubble.right")
                 }
@@ -636,6 +637,11 @@ struct PDFReaderView: View {
         .onChange(of: viewModel.stagedSelectionText) { _, _ in
             noteMarkdownForSelection = ""
         }
+    }
+
+    private func setChatSidebarVisible(_ visible: Bool) {
+        showChatSidebar = visible
+        RubienPreferences.assistantSidebarVisible = visible
     }
 
     @ViewBuilder
@@ -673,7 +679,7 @@ struct PDFReaderView: View {
                             pageNumber: (viewModel.stagedSelectionPDFAnchor?.pageIndex).map { $0 + 1 })
                         viewModel.clearStagedSelection()
                         noteMarkdownForSelection = ""
-                        showChatSidebar = true
+                        setChatSidebarVisible(true)
                     }
                 )
                 .fixedSize()
