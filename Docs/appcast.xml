@@ -254,5 +254,22 @@ Also in 0.2.1:
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.2.2</title>
+            <description><![CDATA[• Scoped conversation history — the assistant's History opens on "This document", showing only conversations about the paper you're in; switch to "All documents" for everything.
+• The last backend choice (Claude ↔ Codex) is remembered for new conversations.
+• Improved assistant hints — the send shortcut (⌘+↩) is shown in the input box, and the start page is clearer.
+• Minor cleanup.]]></description>
+            <pubDate>Wed, 08 Jul 2026 00:24:59 +0000</pubDate>
+            <sparkle:version>17</sparkle:version>
+            <sparkle:shortVersionString>0.2.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.2.2/Rubien-0.2.2.dmg"
+                sparkle:edSignature="+iklzOeuDcdFUmleHS3vd4k1Btpz0OmUXE/5dJJMI9tJ4dGZDWTZzsEhY2Rr9icqBYgDL9Um7khn2FzGOrysBg=="
+                length="17961219"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
