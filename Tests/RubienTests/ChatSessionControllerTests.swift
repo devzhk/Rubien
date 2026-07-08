@@ -377,6 +377,16 @@ final class ChatSessionControllerTests: XCTestCase {
     /// builds the new one from the factory, starts a fresh conversation, and adopts
     /// the NEW backend's model/effort/sandbox defaults (Claude/Codex slugs differ).
     func testSwitchProviderTearsDownOldRuntimeAndAdoptsNewBackendDefaults() async {
+        let savedProvider = UserDefaults.standard.object(forKey: RubienPreferences.assistantProviderKey)
+        defer {
+            if let savedProvider {
+                UserDefaults.standard.set(savedProvider, forKey: RubienPreferences.assistantProviderKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: RubienPreferences.assistantProviderKey)
+            }
+        }
+        RubienPreferences.assistantProvider = .claude
+
         let claude = MockAgentProvider(kind: .claude)
         let codex = MockAgentProvider(kind: .codex)
         let factory: (AgentProviderKind) -> any AgentProvider = { $0 == .claude ? claude : codex }
@@ -402,6 +412,7 @@ final class ChatSessionControllerTests: XCTestCase {
         controller.switchProvider(to: .codex)
 
         XCTAssertEqual(controller.providerKind, .codex)
+        XCTAssertEqual(RubienPreferences.assistantProvider, .codex)
         XCTAssertEqual(controller.modelOverride, "gpt-5.5")
         XCTAssertEqual(controller.effortOverride, "medium")
         XCTAssertFalse(controller.webAccess)
@@ -421,6 +432,16 @@ final class ChatSessionControllerTests: XCTestCase {
 
     /// Switching to the already-active backend does nothing (no teardown, no rebuild).
     func testSwitchProviderToSameKindIsNoOp() {
+        let savedProvider = UserDefaults.standard.object(forKey: RubienPreferences.assistantProviderKey)
+        defer {
+            if let savedProvider {
+                UserDefaults.standard.set(savedProvider, forKey: RubienPreferences.assistantProviderKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: RubienPreferences.assistantProviderKey)
+            }
+        }
+        RubienPreferences.assistantProvider = .codex
+
         let claude = MockAgentProvider(kind: .claude)
         var built: [AgentProviderKind] = []
         let factory: (AgentProviderKind) -> any AgentProvider = { built.append($0); return claude }
@@ -435,6 +456,7 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertTrue(built.isEmpty, "the factory is not invoked for a same-kind switch")
         XCTAssertEqual(claude.cancelCount, 0, "the live runtime is not torn down")
         XCTAssertEqual(controller.providerKind, .claude)
+        XCTAssertEqual(RubienPreferences.assistantProvider, .codex, "same-kind no-op must not rewrite the remembered default")
     }
 
     /// Without a factory (tests / DEBUG harness) the backend can't be switched.

@@ -202,7 +202,8 @@ enum RubienPreferences {
     // The default runtime for a NEW conversation/window, plus Codex's own model /
     // effort / sandbox / binary defaults (disjoint from Claude's — Codex accepts
     // different model slugs and effort levels). The composer picker switches a live
-    // conversation's backend without touching these; Settings edits the defaults.
+    // conversation's backend and remembers that choice here; Settings edits the same
+    // default directly.
 
     /// The default coding-agent backend for a new conversation. Unknown raw ⇒ Claude.
     static let assistantProviderKey = "Rubien.assistant.provider"

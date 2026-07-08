@@ -347,7 +347,8 @@ final class ChatSessionController: ObservableObject {
     /// backend's defaults (model/effort/sandbox are backend-specific — Claude's
     /// `opus` is meaningless to Codex). No-op if the kind is unchanged or the
     /// factory is absent (tests / DEBUG harness). The prior transcript is dropped
-    /// (nothing persisted — D5); History can resume a Codex thread later.
+    /// (nothing persisted — D5); History can resume a Codex thread later. A real
+    /// switch also becomes the default backend for future conversations.
     func switchProvider(to kind: AgentProviderKind) {
         guard let providerFactory, kind != providerKind else { return }
         // Request teardown of the outgoing runtime. `shutdown()` may reap the server
@@ -359,6 +360,7 @@ final class ChatSessionController: ObservableObject {
         provider.shutdown()
         provider = providerFactory(kind)
         providerKind = kind
+        RubienPreferences.assistantProvider = kind
         newConversation()
     }
 

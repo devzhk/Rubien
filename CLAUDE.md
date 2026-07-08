@@ -32,6 +32,16 @@ swift test --filter RubienCoreTests.CitationFormatterTests/testAPA   # single me
 ./scripts/build-app.sh release   # Release bundle + DMG
 ```
 
+### Launching from a worktree
+
+For ordinary UI checks from a git worktree, run the app from that worktree:
+
+```bash
+swift run Rubien
+```
+
+Avoid `open -a Rubien` or AppleScript activation by app name when verifying worktree changes; macOS may bring forward `/Applications/Rubien.app` instead. Use `./scripts/dev-launch.sh` only when you need signed-app behavior such as App Group / CloudKit entitlements.
+
 ### Foot-gun: stale `.build/checkouts` after toolchain swap
 
 After `sudo xcode-select -s ...` between CommandLineTools and Xcode, SPM's checkout cache can corrupt with cryptic "Source files for target X should be located under …" errors. Fix:
