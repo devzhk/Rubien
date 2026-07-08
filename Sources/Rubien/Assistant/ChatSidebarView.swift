@@ -219,43 +219,34 @@ struct ChatSidebarView: View {
     // MARK: Setup state (§4.5)
 
     private struct AssistantSetupCopy {
-        var isChecking: Bool
         var title: String
         var detail: String
     }
 
     private var assistantSetupCopy: AssistantSetupCopy? {
-        guard let availability = session.availability else {
-            return AssistantSetupCopy(
-                isChecking: true,
-                title: "Checking assistant setup…",
-                detail: "\(session.providerKind.displayName) will be ready after its CLI is installed and signed in.")
-        }
-        guard !availability.isReady else { return nil }
+        // Probe still in flight (`nil`): send is allowed optimistically, so show the
+        // normal quick-start suggestions rather than a "checking" gate. Only a KNOWN
+        // not-ready state surfaces the setup card below.
+        guard let availability = session.availability, !availability.isReady else { return nil }
         switch (session.providerKind, availability.isInstalled, availability.isAuthenticated) {
         case (.claude, false, _):
             return AssistantSetupCopy(
-                isChecking: false,
                 title: "Claude Code CLI wasn’t found.",
                 detail: "Install Claude Code or set the binary path in Settings → Assistant, then recheck.")
         case (.claude, true, false):
             return AssistantSetupCopy(
-                isChecking: false,
                 title: "Claude Code is installed but not signed in.",
                 detail: "Run claude auth login in Terminal, then recheck.")
         case (.codex, false, _):
             return AssistantSetupCopy(
-                isChecking: false,
                 title: "Codex CLI wasn’t found.",
                 detail: "Install Codex or set the binary path in Settings → Assistant, then recheck.")
         case (.codex, true, false):
             return AssistantSetupCopy(
-                isChecking: false,
                 title: "Codex is installed but not signed in.",
                 detail: "Run codex login in Terminal, then recheck.")
         default:
             return AssistantSetupCopy(
-                isChecking: false,
                 title: "\(session.providerKind.displayName) is unavailable.",
                 detail: availability.unavailableReason ?? "Check Settings → Assistant, then recheck.")
         }
@@ -264,14 +255,9 @@ struct ChatSidebarView: View {
     private func assistantSetupBlock(_ copy: AssistantSetupCopy) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 7) {
-                if copy.isChecking {
-                    ProgressView()
-                        .controlSize(.small)
-                } else {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Color.orange)
-                }
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.orange)
                 Text(copy.title)
                     .font(.system(size: 12.5, weight: .semibold))
                     .foregroundStyle(Color.primary.opacity(0.85))
@@ -280,19 +266,17 @@ struct ChatSidebarView: View {
                 .font(.system(size: 11.5))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            if !copy.isChecking {
-                Button {
-                    Task { await session.recheckAvailability() }
-                } label: {
-                    Text("Recheck")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 5)
-                        .background(Capsule(style: .continuous).fill(Color.accentColor))
-                }
-                .buttonStyle(.plain)
+            Button {
+                Task { await session.recheckAvailability() }
+            } label: {
+                Text("Recheck")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                    .background(Capsule(style: .continuous).fill(Color.accentColor))
             }
+            .buttonStyle(.plain)
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
