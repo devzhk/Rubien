@@ -156,25 +156,21 @@ struct ChatSidebarView: View {
     // MARK: Content
 
     @ViewBuilder private var content: some View {
-        if let availability = session.availability, !availability.isInstalled {
-            emptyState(availability)
-        } else {
-            ZStack {
-                // Kept in the hierarchy while covered so the WebView is loaded
-                // and ready the moment the first turn starts streaming.
-                ChatTranscriptView(controller: renderer)
-                if !session.hasMessages {
-                    startPage
-                }
+        ZStack {
+            // Kept in the hierarchy while covered so the WebView is loaded
+            // and ready the moment the first turn starts streaming.
+            ChatTranscriptView(controller: renderer)
+            if !session.hasMessages {
+                startPage
             }
-            if let approval = session.pendingApproval {
-                approvalCard(approval)
-            }
-            if let selection = session.stagedSelection {
-                selectionChip(selection)
-            }
-            composer
         }
+        if let approval = session.pendingApproval {
+            approvalCard(approval)
+        }
+        if let selection = session.stagedSelection {
+            selectionChip(selection)
+        }
+        composer
     }
 
     // MARK: Quick-start page (fresh conversation)
@@ -201,10 +197,14 @@ struct ChatSidebarView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.bottom, 16)
-            VStack(spacing: 8) {
-                suggestionRow("text.alignleft", "Summarize this document")
-                suggestionRow("highlighter", "Recap my highlights and notes")
-                suggestionRow("books.vertical", "Find related papers in my library")
+            if let setup = assistantSetupCopy {
+                assistantSetupBlock(setup)
+            } else {
+                VStack(spacing: 8) {
+                    suggestionRow("text.alignleft", "Summarize this document")
+                    suggestionRow("highlighter", "Recap my highlights and notes")
+                    suggestionRow("books.vertical", "Find related papers in my library")
+                }
             }
             Spacer()
         }
@@ -216,39 +216,94 @@ struct ChatSidebarView: View {
         QuickStartRow(icon: icon, text: prompt) { session.send(prompt) }
     }
 
-    // MARK: Empty state (§4.5)
+    // MARK: Setup state (§4.5)
 
-    private func emptyState(_ availability: AgentAvailability) -> some View {
-        VStack(spacing: 12) {
-            Spacer()
-            Image(systemName: "bubble.left.and.text.bubble.right")
-                .font(.system(size: 34))
-                .foregroundStyle(.secondary)
-            Text("Assistant unavailable")
-                .font(.headline)
-            Text(availability.unavailableReason ?? "The Claude Code CLI wasn’t found.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-            Text("Install Claude Code and run `claude login` in Terminal, then recheck. You can also set the binary path in Settings ▸ Assistant.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-            Button {
-                Task { await session.recheckAvailability() }
-            } label: {
-                Text("Recheck")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 5)
-                    .background(Capsule(style: .continuous).fill(Color.accentColor))
-            }
-            .buttonStyle(.plain)
-            Spacer()
+    private struct AssistantSetupCopy {
+        var isChecking: Bool
+        var title: String
+        var detail: String
+    }
+
+    private var assistantSetupCopy: AssistantSetupCopy? {
+        guard let availability = session.availability else {
+            return AssistantSetupCopy(
+                isChecking: true,
+                title: "Checking assistant setup…",
+                detail: "\(session.providerKind.displayName) will be ready after its CLI is installed and signed in.")
         }
-        .padding(24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        guard !availability.isReady else { return nil }
+        switch (session.providerKind, availability.isInstalled, availability.isAuthenticated) {
+        case (.claude, false, _):
+            return AssistantSetupCopy(
+                isChecking: false,
+                title: "Claude Code CLI wasn’t found.",
+                detail: "Install Claude Code or set the binary path in Settings → Assistant, then recheck.")
+        case (.claude, true, false):
+            return AssistantSetupCopy(
+                isChecking: false,
+                title: "Claude Code is installed but not signed in.",
+                detail: "Run claude auth login in Terminal, then recheck.")
+        case (.codex, false, _):
+            return AssistantSetupCopy(
+                isChecking: false,
+                title: "Codex CLI wasn’t found.",
+                detail: "Install Codex or set the binary path in Settings → Assistant, then recheck.")
+        case (.codex, true, false):
+            return AssistantSetupCopy(
+                isChecking: false,
+                title: "Codex is installed but not signed in.",
+                detail: "Run codex login in Terminal, then recheck.")
+        default:
+            return AssistantSetupCopy(
+                isChecking: false,
+                title: "\(session.providerKind.displayName) is unavailable.",
+                detail: availability.unavailableReason ?? "Check Settings → Assistant, then recheck.")
+        }
+    }
+
+    private func assistantSetupBlock(_ copy: AssistantSetupCopy) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 7) {
+                if copy.isChecking {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.orange)
+                }
+                Text(copy.title)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(Color.primary.opacity(0.85))
+            }
+            Text(copy.detail)
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if !copy.isChecking {
+                Button {
+                    Task { await session.recheckAvailability() }
+                } label: {
+                    Text("Recheck")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 5)
+                        .background(Capsule(style: .continuous).fill(Color.accentColor))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.primary.opacity(0.04))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+        )
     }
 
     // MARK: Approval card (§5.3 — native, not sanitized HTML)
@@ -600,6 +655,7 @@ struct ChatSidebarView: View {
                     let chord = press.modifiers.subtracting([.capsLock, .numericPad])
                     guard chord == .command else { return .ignored }
                     guard !session.isResponding,
+                          session.canSendWithCurrentAvailability,
                           !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     else { return .handled }  // consume the chord; never a newline
                     sendDraft()
@@ -632,6 +688,7 @@ struct ChatSidebarView: View {
             .help("Stop")
         } else {
             let isEmpty = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let canSend = !isEmpty && session.canSendWithCurrentAvailability
             Button {
                 sendDraft()
             } label: {
@@ -639,15 +696,15 @@ struct ChatSidebarView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.white)
                     .frame(width: 27, height: 27)
-                    .background(Self.sendButtonShape.fill(isEmpty ? Color.accentColor.opacity(0.5) : Color.accentColor))
+                    .background(Self.sendButtonShape.fill(canSend ? Color.accentColor : Color.accentColor.opacity(0.5)))
                     .contentShape(Self.sendButtonShape)
             }
             .buttonStyle(.plain)
             // No .keyboardShortcut here — the composer's onKeyPress is the one
             // owner of ⌘↩ (a key EQUIVALENT on the button is the loose-matching
             // pass that made ⇧↩ send by accident).
-            .disabled(isEmpty)
-            .help("Send (⌘↩)")
+            .disabled(!canSend)
+            .help(session.canSendWithCurrentAvailability ? "Send (⌘↩)" : "Finish assistant setup to send")
         }
     }
 
@@ -670,6 +727,10 @@ struct ChatSidebarView: View {
     }
 
     private func sendDraft() {
+        guard session.canSendWithCurrentAvailability else {
+            composerFocused = true
+            return
+        }
         let text = draft
         draft = ""
         session.send(text)

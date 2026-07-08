@@ -179,7 +179,8 @@ final class ChatSessionController: ObservableObject {
         autoApprove: Bool = false,
         codexSandbox: CodexSandbox = .readOnly,
         providerFactory: ((AgentProviderKind) -> any AgentProvider)? = nil,
-        defaultsProvider: ((AgentProviderKind) -> AssistantConversationDefaults)? = nil
+        defaultsProvider: ((AgentProviderKind) -> AssistantConversationDefaults)? = nil,
+        initialAvailability: AgentAvailability? = nil
     ) {
         self.provider = provider
         self.providerKind = provider.kind
@@ -194,14 +195,19 @@ final class ChatSessionController: ObservableObject {
         self.codexSandbox = codexSandbox
         self.providerFactory = providerFactory
         self.defaultsProvider = defaultsProvider
+        self.availability = initialAvailability
     }
 
     // MARK: Turn lifecycle
 
+    var canSendWithCurrentAvailability: Bool {
+        availability?.isReady == true
+    }
+
     /// Send a user turn. No-ops on empty input or while a turn is already running.
     func send(_ rawText: String) {
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !isResponding else { return }
+        guard !text.isEmpty, !isResponding, canSendWithCurrentAvailability else { return }
 
         generation += 1
         let gen = generation
@@ -360,8 +366,10 @@ final class ChatSessionController: ObservableObject {
         provider.shutdown()
         provider = providerFactory(kind)
         providerKind = kind
+        availability = nil
         RubienPreferences.assistantProvider = kind
         newConversation()
+        Task { await recheckAvailability() }
     }
 
     /// The runtime's own recent sessions for this conversation's working folder, for

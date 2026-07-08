@@ -373,7 +373,7 @@ struct RubienSettingsView: View {
         } header: {
             Text(String(localized: "Defaults for new conversations", bundle: .module))
         } footer: {
-            Text(String(localized: "Used for each new conversation — a newly opened document, or “New conversation” in one already open. Each conversation can pick a backend and change these in its sidebar. Web search lets the assistant fetch pages you didn’t open. Auto-accept runs its writes and shell commands without asking first. Codex’s sandbox limits what a turn can touch on disk (Read-only still asks before any write).", bundle: .module))
+            Text(String(localized: "Applies to newly opened documents and new conversations. Existing conversations keep their current settings.", bundle: .module))
         }
     }
 
@@ -387,8 +387,6 @@ struct RubienSettingsView: View {
             }, onChoose: pickBinary)
         } header: {
             Text(String(localized: "Claude Code CLI", bundle: .module))
-        } footer: {
-            Text(String(localized: "Not signed in? Run “claude login” in Terminal.", bundle: .module))
         }
     }
 
@@ -402,11 +400,6 @@ struct RubienSettingsView: View {
             }, onChoose: pickCodexBinary)
         } header: {
             Text(String(localized: "Codex CLI", bundle: .module))
-        } footer: {
-            // The MCP posture (§4): Codex runs over your real ~/.codex, so it uses
-            // the same account + any MCP servers you’ve configured there (its built-in
-            // app connectors are dropped). Rubien’s own document tools are always added.
-            Text(String(localized: "Not signed in? Run “codex login” in Terminal. Codex uses your ~/.codex account and any MCP servers configured there (plus Rubien’s document tools); its sessions are stored by Codex, not Rubien.", bundle: .module))
         }
     }
 
@@ -440,17 +433,17 @@ struct RubienSettingsView: View {
                 Text(String(localized: "Checking…", bundle: .module))
                     .foregroundStyle(.secondary)
             } else if let availability {
-                Image(systemName: availability.isInstalled ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                    .foregroundStyle(availability.isInstalled ? Color.green : Color.orange)
+                Image(systemName: availability.isReady ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .foregroundStyle(availability.isReady ? Color.green : Color.orange)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(agentStatusTitle(name: name, availability: availability))
-                    if availability.isInstalled, let path = availability.resolvedPath {
+                    if availability.isReady, let path = availability.resolvedPath {
                         Text((path as NSString).abbreviatingWithTildeInPath)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
-                    } else if !availability.isInstalled, let reason = availability.unavailableReason {
+                    } else if let reason = availability.unavailableReason {
                         Text(reason)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -507,10 +500,13 @@ struct RubienSettingsView: View {
         guard availability.isInstalled else {
             return String(format: String(localized: "%@ not found", bundle: .module), name)
         }
-        if let version = availability.version {
-            return String(format: String(localized: "%@ %@ installed", bundle: .module), name, version)
+        guard availability.isAuthenticated else {
+            return String(format: String(localized: "%@ not signed in", bundle: .module), name)
         }
-        return String(format: String(localized: "%@ installed", bundle: .module), name)
+        if let version = availability.version {
+            return String(format: String(localized: "%@ %@ ready", bundle: .module), name, version)
+        }
+        return String(format: String(localized: "%@ ready", bundle: .module), name)
     }
 
     /// Re-probe the CLI with the current binary-path override. Only a success is

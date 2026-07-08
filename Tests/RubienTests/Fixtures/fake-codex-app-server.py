@@ -333,6 +333,10 @@ def main():
         sys.stdout.write("0.142.5-fake (codex-cli)\n")
         sys.stdout.flush()
         return 0
+    if len(sys.argv) >= 3 and sys.argv[1:3] == ["login", "status"]:
+        sys.stdout.write("Logged in using ChatGPT\n")
+        sys.stdout.flush()
+        return 0
     try:
         _atomic_write_json("fake-codex-argv.json", sys.argv)
     except OSError:

@@ -414,7 +414,7 @@ private actor ClaudeTurnEngine {
         if let cached = cachedAvailability { return cached }
         guard let path = Self.resolveExecutable(override: override) else {
             return .notFound(
-                reason: "Claude Code CLI not found. Install it or set its path in Settings → Assistant.")
+                reason: "Claude Code CLI wasn’t found. Install Claude Code or set the binary path in Settings → Assistant, then recheck.")
         }
         let environment = ClaudeCLIInvocation.environment(
             binaryDirectory: (path as NSString).deletingLastPathComponent)
@@ -422,6 +422,12 @@ private actor ClaudeTurnEngine {
             executablePath: path, environment: environment)
         else {
             return .notFound(reason: "Found claude at \(path) but it did not respond to --version.")
+        }
+        if await AgentAuthProbe.probeClaude(executablePath: path, environment: environment) == .unauthenticated {
+            return .installedButUnauthenticated(
+                version: version,
+                path: path,
+                reason: "Claude Code is installed but not signed in. Run claude auth login in Terminal, then recheck.")
         }
         let availability = AgentAvailability.installed(version: version, path: path)
         cachedAvailability = availability

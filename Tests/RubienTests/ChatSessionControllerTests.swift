@@ -11,7 +11,8 @@ final class ChatSessionControllerTests: XCTestCase {
         provider: MockAgentProvider,
         sink: SpyTranscriptSink,
         gate: AssistantTurnGate = AssistantTurnGate(),
-        webAccess: Bool = true
+        webAccess: Bool = true,
+        initialAvailability: AgentAvailability? = .installed(version: "test", path: "/fake/claude")
     ) -> ChatSessionController {
         ChatSessionController(
             provider: provider,
@@ -19,7 +20,8 @@ final class ChatSessionControllerTests: XCTestCase {
             reference: ChatReference(id: 1, title: "Attention", authors: "Vaswani et al."),
             workspaceURL: URL(fileURLWithPath: "/tmp/ws"),
             gate: gate,
-            webAccess: webAccess)
+            webAccess: webAccess,
+            initialAvailability: initialAvailability)
     }
 
     /// Drive one full turn: send, wait for the provider stream, feed events, finish.
@@ -421,6 +423,8 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertEqual(claude.cancelCount, 1, "the outgoing runtime is shut down (shutdown → cancel)")
         XCTAssertGreaterThan(controller.generation, genBefore, "a fresh conversation started")
         // A turn now sends to the NEW provider, carrying the new backend's sandbox.
+        await waitUntil { controller.canSendWithCurrentAvailability }
+        XCTAssertTrue(controller.canSendWithCurrentAvailability)
         controller.send("hi")
         await codex.waitUntilStreaming()
         XCTAssertEqual(codex.requests.count, 1)
@@ -886,6 +890,61 @@ final class ChatSessionControllerTests: XCTestCase {
         await controller.recheckAvailability()
         XCTAssertEqual(controller.availability?.isInstalled, false)
         XCTAssertEqual(controller.availability?.unavailableReason, "not logged in")
+    }
+
+    func testCanSendWithCurrentAvailabilityRequiresReadyBackend() {
+        let ready = makeController(provider: MockAgentProvider(), sink: SpyTranscriptSink())
+        XCTAssertTrue(ready.canSendWithCurrentAvailability)
+
+        let checking = makeController(
+            provider: MockAgentProvider(),
+            sink: SpyTranscriptSink(),
+            initialAvailability: nil)
+        XCTAssertFalse(checking.canSendWithCurrentAvailability)
+
+        let signedOut = makeController(
+            provider: MockAgentProvider(),
+            sink: SpyTranscriptSink(),
+            initialAvailability: AgentAvailability(
+                isInstalled: true,
+                isAuthenticated: false,
+                version: "test",
+                resolvedPath: "/fake/claude",
+                unavailableReason: "not signed in"))
+        XCTAssertFalse(signedOut.canSendWithCurrentAvailability)
+    }
+
+    func testSendDoesNotCallProviderWhileAvailabilityIsChecking() {
+        let provider = MockAgentProvider()
+        let controller = makeController(
+            provider: provider,
+            sink: SpyTranscriptSink(),
+            initialAvailability: nil)
+
+        controller.send("hello")
+
+        XCTAssertTrue(provider.requests.isEmpty)
+        XCTAssertFalse(controller.isResponding)
+        XCTAssertFalse(controller.hasMessages)
+    }
+
+    func testSendDoesNotCallProviderWhenBackendIsSignedOut() {
+        let provider = MockAgentProvider()
+        let controller = makeController(
+            provider: provider,
+            sink: SpyTranscriptSink(),
+            initialAvailability: AgentAvailability(
+                isInstalled: true,
+                isAuthenticated: false,
+                version: "test",
+                resolvedPath: "/fake/claude",
+                unavailableReason: "not signed in"))
+
+        controller.send("hello")
+
+        XCTAssertTrue(provider.requests.isEmpty)
+        XCTAssertFalse(controller.isResponding)
+        XCTAssertFalse(controller.hasMessages)
     }
 }
 

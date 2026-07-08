@@ -33,8 +33,26 @@ final class ClaudeCodeProviderTests: XCTestCase {
         let provider = ClaudeCodeProvider(executableOverride: fakeCLIPath)
         let availability = await provider.isAvailable()
         XCTAssertTrue(availability.isInstalled)
+        XCTAssertTrue(availability.isAuthenticated)
         XCTAssertEqual(availability.version, "9.9.9")
         XCTAssertEqual(availability.resolvedPath, fakeCLIPath)
+    }
+
+    func testIsAvailableReportsUnauthenticatedWhenClaudeAuthStatusIsSignedOut() async throws {
+        let cli = try makeClaudeAuthProbeCLI(
+            authOutput: #"{"loggedIn":false,"authMethod":"none"}"#,
+            authExitCode: 1)
+        let provider = ClaudeCodeProvider(executableOverride: cli.path)
+
+        let availability = await provider.isAvailable()
+
+        XCTAssertTrue(availability.isInstalled)
+        XCTAssertFalse(availability.isAuthenticated)
+        XCTAssertEqual(availability.version, "9.9.9")
+        XCTAssertEqual(availability.resolvedPath, cli.path)
+        XCTAssertEqual(
+            availability.unavailableReason,
+            "Claude Code is installed but not signed in. Run claude auth login in Terminal, then recheck.")
     }
 
     func testIsAvailableReportsNotFoundForMissingBinary() async {
@@ -420,6 +438,28 @@ final class ClaudeCodeProviderTests: XCTestCase {
     private func writeConfig(_ config: [String: Any], into workspace: URL) throws {
         let data = try JSONSerialization.data(withJSONObject: config)
         try data.write(to: workspace.appendingPathComponent("fake-claude.json"))
+    }
+
+    private func makeClaudeAuthProbeCLI(authOutput: String, authExitCode: Int) throws -> URL {
+        let workspace = try makeWorkspace()
+        let cli = workspace.appendingPathComponent("fake-claude-auth")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then
+          printf '%s\\n' '9.9.9-fake (Claude Code)'
+          exit 0
+        fi
+        if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+          cat <<'JSON'
+        \(authOutput)
+        JSON
+          exit \(authExitCode)
+        fi
+        exit 0
+        """
+        try script.write(to: cli, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cli.path)
+        return cli
     }
 
     private func turn(workspace: URL, prompt: String = "hello") -> AgentTurnRequest {

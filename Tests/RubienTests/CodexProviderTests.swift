@@ -37,8 +37,26 @@ final class CodexProviderTests: XCTestCase {
         let provider = CodexProvider(executableOverride: fakeServerPath)
         let availability = await provider.isAvailable()
         XCTAssertTrue(availability.isInstalled)
+        XCTAssertTrue(availability.isAuthenticated)
         XCTAssertEqual(availability.version, "0.142.5")
         XCTAssertEqual(availability.resolvedPath, fakeServerPath)
+    }
+
+    func testIsAvailableReportsUnauthenticatedWhenCodexLoginStatusIsSignedOut() async throws {
+        let cli = try makeCodexAuthProbeCLI(
+            authOutput: "Not logged in. Run codex login to authenticate.",
+            authExitCode: 1)
+        let provider = CodexProvider(executableOverride: cli.path)
+
+        let availability = await provider.isAvailable()
+
+        XCTAssertTrue(availability.isInstalled)
+        XCTAssertFalse(availability.isAuthenticated)
+        XCTAssertEqual(availability.version, "0.142.5")
+        XCTAssertEqual(availability.resolvedPath, cli.path)
+        XCTAssertEqual(
+            availability.unavailableReason,
+            "Codex is installed but not signed in. Run codex login in Terminal, then recheck.")
     }
 
     func testIsAvailableReportsNotFoundForMissingBinary() async {
@@ -687,6 +705,26 @@ final class CodexProviderTests: XCTestCase {
     private func writeConfig(_ config: [String: Any], into workspace: URL) throws {
         let data = try JSONSerialization.data(withJSONObject: config)
         try data.write(to: workspace.appendingPathComponent("fake-codex.json"))
+    }
+
+    private func makeCodexAuthProbeCLI(authOutput: String, authExitCode: Int) throws -> URL {
+        let workspace = try makeWorkspace()
+        let cli = workspace.appendingPathComponent("fake-codex-auth")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then
+          printf '%s\\n' 'codex 0.142.5'
+          exit 0
+        fi
+        if [ "$1" = "login" ] && [ "$2" = "status" ]; then
+          printf '%s\\n' '\(authOutput)'
+          exit \(authExitCode)
+        fi
+        exit 0
+        """
+        try script.write(to: cli, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cli.path)
+        return cli
     }
 
     private func turn(

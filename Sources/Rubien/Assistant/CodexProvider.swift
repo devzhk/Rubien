@@ -884,14 +884,21 @@ private actor CodexAppServerConnection {
         if let cached = cachedAvailability { return cached }
         guard let path = Self.resolveExecutable(override: executableOverride) else {
             return .notFound(
-                reason: "Codex CLI not found. Install it or set its path in Settings → Assistant.")
+                reason: "Codex CLI wasn’t found. Install Codex or set the binary path in Settings → Assistant, then recheck.")
         }
+        let environment = CodexInvocation.environment(
+            binaryDirectory: (path as NSString).deletingLastPathComponent)
         guard let version = await AgentBinaryProbe.probeVersion(
             executablePath: path,
-            environment: CodexInvocation.environment(
-                binaryDirectory: (path as NSString).deletingLastPathComponent))
+            environment: environment)
         else {
             return .notFound(reason: "Found codex at \(path) but it did not respond to --version.")
+        }
+        if await AgentAuthProbe.probeCodex(executablePath: path, environment: environment) == .unauthenticated {
+            return .installedButUnauthenticated(
+                version: version,
+                path: path,
+                reason: "Codex is installed but not signed in. Run codex login in Terminal, then recheck.")
         }
         let availability = AgentAvailability.installed(version: version, path: path)
         cachedAvailability = availability

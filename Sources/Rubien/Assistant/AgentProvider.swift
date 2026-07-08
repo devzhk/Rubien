@@ -176,6 +176,8 @@ struct AgentAvailability: Sendable, Equatable {
     /// A human-readable reason when `!isInstalled` (or auth is known-bad).
     var unavailableReason: String?
 
+    var isReady: Bool { isInstalled && isAuthenticated }
+
     static func notFound(reason: String) -> AgentAvailability {
         AgentAvailability(
             isInstalled: false, isAuthenticated: false, version: nil,
@@ -186,6 +188,12 @@ struct AgentAvailability: Sendable, Equatable {
         AgentAvailability(
             isInstalled: true, isAuthenticated: true, version: version,
             resolvedPath: path, unavailableReason: nil)
+    }
+
+    static func installedButUnauthenticated(version: String?, path: String, reason: String) -> AgentAvailability {
+        AgentAvailability(
+            isInstalled: true, isAuthenticated: false, version: version,
+            resolvedPath: path, unavailableReason: reason)
     }
 }
 

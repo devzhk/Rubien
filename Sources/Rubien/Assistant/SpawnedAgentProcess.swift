@@ -275,6 +275,16 @@ enum AgentProcessExit {
 /// Short, sanitized, stdin-closed probes for locating agent binaries and reading
 /// their `--version` — shared by both providers' `isAvailable()` paths.
 enum AgentBinaryProbe {
+    struct CommandResult: Sendable, Equatable {
+        let stdout: String
+        let stderr: String
+        let exitCode: Int32?
+        let timedOut: Bool
+
+        var combinedOutput: String {
+            [stdout, stderr].filter { !$0.isEmpty }.joined(separator: "\n")
+        }
+    }
 
     /// Extract a `MAJOR.MINOR.PATCH` from a `--version` line, else the first
     /// non-empty trimmed line.
@@ -305,10 +315,14 @@ enum AgentBinaryProbe {
     static func probeVersion(executablePath: String, environment: [String: String]) async -> String? {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                let output = run(
+                let result = runCommand(
                     executablePath: executablePath, arguments: ["--version"],
                     environment: environment, timeout: 5)
-                continuation.resume(returning: output.flatMap(parseVersionString))
+                guard let result, result.exitCode == 0, !result.timedOut else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                continuation.resume(returning: parseVersionString(result.stdout))
             }
         }
     }
@@ -337,33 +351,139 @@ enum AgentBinaryProbe {
         executablePath: String, arguments: [String],
         environment: [String: String], timeout: TimeInterval
     ) -> String? {
+        guard let result = runCommand(
+            executablePath: executablePath,
+            arguments: arguments,
+            environment: environment,
+            timeout: timeout),
+              result.exitCode == 0,
+              !result.timedOut
+        else { return nil }
+        return result.stdout
+    }
+
+    /// Run a short probe and return stdout/stderr even for nonzero exits. Auth
+    /// status probes use nonzero as a meaningful "signed out" signal, unlike
+    /// `--version` where only exit 0 is usable.
+    static func runCommand(
+        executablePath: String, arguments: [String],
+        environment: [String: String], timeout: TimeInterval
+    ) -> CommandResult? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = arguments
         process.environment = environment
         let outPipe = Pipe()
+        let errPipe = Pipe()
         process.standardOutput = outPipe
-        process.standardError = FileHandle.nullDevice
+        process.standardError = errPipe
         process.standardInput = FileHandle.nullDevice
         do { try process.run() } catch { return nil }
 
-        let readHandle = outPipe.fileHandleForReading
-        let box = LockedBox<Data>(Data())
-        let done = DispatchSemaphore(value: 0)
-        DispatchQueue.global(qos: .userInitiated).async {
-            box.set(readHandle.readDataToEndOfFile())  // tiny output; unblocked on close
-            done.signal()
+        let stdoutHandle = outPipe.fileHandleForReading
+        let stderrHandle = errPipe.fileHandleForReading
+        let stdoutBox = LockedBox<Data>(Data())
+        let stderrBox = LockedBox<Data>(Data())
+        let done = DispatchGroup()
+        for (handle, box) in [(stdoutHandle, stdoutBox), (stderrHandle, stderrBox)] {
+            done.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                box.set(handle.readDataToEndOfFile())  // tiny output; unblocked on close
+                done.leave()
+            }
         }
 
         if done.wait(timeout: .now() + timeout) == .timedOut {
             process.terminate()          // SIGTERM the direct child…
-            try? readHandle.close()      // …and unblock the read even if a grandchild holds stdout
-            done.wait()                  // let the reader task finish after the close
-            return nil
+            try? stdoutHandle.close()    // …and unblock reads even if a grandchild holds pipes
+            try? stderrHandle.close()
+            done.wait()                  // let the reader tasks finish after the close
+            return CommandResult(
+                stdout: String(decoding: stdoutBox.get(), as: UTF8.self),
+                stderr: String(decoding: stderrBox.get(), as: UTF8.self),
+                exitCode: nil,
+                timedOut: true)
         }
         process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return nil }
-        return String(decoding: box.get(), as: UTF8.self)
+        return CommandResult(
+            stdout: String(decoding: stdoutBox.get(), as: UTF8.self),
+            stderr: String(decoding: stderrBox.get(), as: UTF8.self),
+            exitCode: process.terminationStatus,
+            timedOut: false)
+    }
+}
+
+enum AgentAuthStatus: Equatable {
+    case authenticated
+    case unauthenticated
+    case unknown
+}
+
+enum AgentAuthProbe {
+    static func claudeStatus(from result: AgentBinaryProbe.CommandResult) -> AgentAuthStatus {
+        guard !result.timedOut else { return .unknown }
+        if let data = result.stdout.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let loggedIn = object["loggedIn"] as? Bool {
+            return loggedIn ? .authenticated : .unauthenticated
+        }
+        let output = result.combinedOutput.lowercased()
+        if output.contains("not logged in") || output.contains("not signed in") {
+            return .unauthenticated
+        }
+        return .unknown
+    }
+
+    static func codexStatus(from result: AgentBinaryProbe.CommandResult) -> AgentAuthStatus {
+        guard !result.timedOut else { return .unknown }
+        let output = result.combinedOutput.lowercased()
+        if output.contains("not logged in")
+            || output.contains("not signed in")
+            || output.contains("not authenticated") {
+            return .unauthenticated
+        }
+        if result.exitCode == 0, output.contains("logged in") {
+            return .authenticated
+        }
+        return .unknown
+    }
+
+    static func probeClaude(executablePath: String, environment: [String: String]) async -> AgentAuthStatus {
+        await probe(
+            executablePath: executablePath,
+            arguments: ["auth", "status", "--json"],
+            environment: environment,
+            parser: { AgentAuthProbe.claudeStatus(from: $0) })
+    }
+
+    static func probeCodex(executablePath: String, environment: [String: String]) async -> AgentAuthStatus {
+        await probe(
+            executablePath: executablePath,
+            arguments: ["login", "status"],
+            environment: environment,
+            parser: { AgentAuthProbe.codexStatus(from: $0) })
+    }
+
+    private static func probe(
+        executablePath: String,
+        arguments: [String],
+        environment: [String: String],
+        parser: @escaping @Sendable (AgentBinaryProbe.CommandResult) -> AgentAuthStatus
+    ) async -> AgentAuthStatus {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                guard let result = AgentBinaryProbe.runCommand(
+                    executablePath: executablePath,
+                    arguments: arguments,
+                    environment: environment,
+                    timeout: 5)
+                else {
+                    continuation.resume(returning: .unknown)
+                    return
+                }
+                continuation.resume(returning: parser(result))
+            }
+        }
     }
 }
 

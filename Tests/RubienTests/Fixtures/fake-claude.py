@@ -38,6 +38,10 @@ def main():
         sys.stdout.write("9.9.9-fake (Claude Code)\n")
         sys.stdout.flush()
         return 0
+    if len(sys.argv) >= 4 and sys.argv[1:4] == ["auth", "status", "--json"]:
+        sys.stdout.write('{"loggedIn": true, "authMethod": "claude.ai"}\n')
+        sys.stdout.flush()
+        return 0
 
     # Record the exact argv this turn was spawned with, so tests can assert the
     # flags the provider passed (e.g. the Phase-2b --mcp-config / --strict-mcp-config
