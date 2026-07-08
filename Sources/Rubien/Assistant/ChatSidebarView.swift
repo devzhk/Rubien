@@ -170,6 +170,15 @@ struct ChatSidebarView: View {
         if let selection = session.stagedSelection {
             selectionChip(selection)
         }
+        // A known-not-ready backend while a conversation is showing — the start page
+        // (the setup card's only other home) is hidden once hasMessages is true, so
+        // surface the reason + Recheck above the composer. Covers a signed-out user
+        // resuming a History conversation, or the CLI signing out mid-session.
+        if session.hasMessages, let setup = assistantSetupCopy {
+            assistantSetupBlock(setup)
+                .padding(.horizontal, 10)
+                .padding(.top, 8)
+        }
         composer
     }
 

@@ -1765,9 +1765,12 @@ struct WebReaderView: View {
         }
     }
 
-    private func setChatSidebarVisible(_ visible: Bool) {
+    /// `persist` writes the global default (the toolbar toggle and explicit close do).
+    /// Selection→Ask passes `persist: false` so a one-off Ask reveals the panel for THIS
+    /// window without overwriting a user who deliberately hid the assistant.
+    private func setChatSidebarVisible(_ visible: Bool, persist: Bool = true) {
         showChatSidebar = visible
-        RubienPreferences.assistantSidebarVisible = visible
+        if persist { RubienPreferences.assistantSidebarVisible = visible }
     }
 
     @ViewBuilder
@@ -1801,7 +1804,7 @@ struct WebReaderView: View {
                         chatSession.stageSelection(text)
                         viewModel.clearSelection()
                         noteMarkdownForSelection = ""
-                        setChatSidebarVisible(true)
+                        setChatSidebarVisible(true, persist: false)
                     }
                 )
                 .fixedSize()

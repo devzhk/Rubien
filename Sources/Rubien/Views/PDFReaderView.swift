@@ -639,9 +639,12 @@ struct PDFReaderView: View {
         }
     }
 
-    private func setChatSidebarVisible(_ visible: Bool) {
+    /// `persist` writes the global default (the toolbar toggle and explicit close do).
+    /// Selection→Ask passes `persist: false` so a one-off Ask reveals the panel for THIS
+    /// window without overwriting a user who deliberately hid the assistant.
+    private func setChatSidebarVisible(_ visible: Bool, persist: Bool = true) {
         showChatSidebar = visible
-        RubienPreferences.assistantSidebarVisible = visible
+        if persist { RubienPreferences.assistantSidebarVisible = visible }
     }
 
     @ViewBuilder
@@ -679,7 +682,7 @@ struct PDFReaderView: View {
                             pageNumber: (viewModel.stagedSelectionPDFAnchor?.pageIndex).map { $0 + 1 })
                         viewModel.clearStagedSelection()
                         noteMarkdownForSelection = ""
-                        setChatSidebarVisible(true)
+                        setChatSidebarVisible(true, persist: false)
                     }
                 )
                 .fixedSize()
