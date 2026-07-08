@@ -117,6 +117,25 @@ test('hostile message content is fully inert', async () => {
   assert.ok(tr.querySelector('.chat-msg-assistant strong'), 'legitimate **bold** still rendered')
 })
 
+test('Codex-style LaTeX typesets: bare \\(…\\), \\[…\\], and ```latex fences', async () => {
+  const { R, T } = await boot()
+  R.beginAssistantMessage()
+  // Shape taken verbatim from a real Codex reply (memorization-paper session):
+  // display math wrapped in ```latex fences, inline math as bare \( \).
+  R.commitAssistantMessage(
+    'Sure:\n\n```latex\n\\[\n\\operatorname{mem}_U(X, \\widehat{\\Theta}, \\Theta)\n=\nH(X \\mid \\Theta)\n-\nH(X \\mid \\Theta, \\widehat{\\Theta})\n\\]\n```\n\n' +
+    'Here, \\(\\theta\\) is the reference model, and bare display math:\n\n' +
+    '\\[\nH_K(x \\mid \\theta)\n\\]\n\nworks too. It costs $5 and $10 total.'
+  )
+  await tick()
+  const bubble = [...T().querySelectorAll('.chat-msg-assistant .chat-bubble')].pop()
+  assert.ok(bubble.querySelectorAll('.katex-display').length >= 2, 'both display formulas typeset')
+  assert.ok(bubble.querySelectorAll('.katex').length >= 3, 'inline \\(θ\\) typeset as well')
+  assert.equal(bubble.querySelector('pre'), null, 'no code box around the latex fence')
+  assert.equal(bubble.querySelector('h1,h2'), null, 'no setext headings from = / - formula lines')
+  assert.match(bubble.textContent, /\$5 and \$10/, 'currency stays prose')
+})
+
 test('hostile math (KaTeX trust:false) produces no live link', async () => {
   const { R, T } = await boot()
   R.beginAssistantMessage()

@@ -142,7 +142,8 @@ test('positive: inline math markdown survives to output (KaTeX runs in browser)'
   const out = renderMarkdown('The relation $E=mc^2$ is famous.')
   assertNoExecutableSurface(out, 'math')
   const body = parse(out)
-  assert.ok(body.textContent.includes('E=mc^2'), 'math source text survives sanitization')
+  // Normalized to the delimiter pair the KaTeX DOM pass scans for.
+  assert.ok(body.textContent.includes('\\(E=mc^2\\)'), 'math text normalized to \\( \\)')
 })
 
 test('positive: display math + fenced code survive sanitization', () => {
@@ -150,7 +151,114 @@ test('positive: display math + fenced code survive sanitization', () => {
   assertNoExecutableSurface(out, 'math-code')
   const body = parse(out)
   assert.ok(body.querySelector('pre code'), 'fenced code block rendered')
-  assert.ok(body.textContent.includes('\\int_0^1'), 'display-math source survives')
+  assert.ok(body.textContent.includes('\\[\\int_0^1'), 'display math normalized to \\[ \\]')
+})
+
+// --- Math passthrough (marked must not mangle TeX before the KaTeX DOM pass) ---
+
+test('math: bare \\(…\\) keeps its backslash delimiters (CommonMark escape trap)', () => {
+  const out = renderMarkdown('Here \\(\\theta\\) is small.')
+  assertNoExecutableSurface(out, 'inline-paren-math')
+  const body = parse(out)
+  assert.ok(body.textContent.includes('\\(\\theta\\)'), 'delimiters + TeX intact')
+  assert.equal(body.querySelector('em'), null, 'no emphasis inside math')
+})
+
+test('math: multi-line \\[…\\] with =/- lines stays one block (setext-heading trap)', () => {
+  const codexStyle = '\\[\n\\operatorname{mem}_U(X, \\widehat{\\Theta})\n=\nH(X \\mid \\Theta)\n-\nH(X \\mid \\Theta, \\widehat{\\Theta})\n\\]'
+  const out = renderMarkdown(codexStyle)
+  assertNoExecutableSurface(out, 'display-bracket-math')
+  const body = parse(out)
+  assert.equal(body.querySelector('h1,h2'), null, 'no setext headings out of = / - lines')
+  assert.ok(body.textContent.includes('\\[\\operatorname{mem}_U'), 'block survives with \\[ delimiter')
+  assert.ok(body.textContent.trim().endsWith('\\]'), 'closing delimiter intact')
+})
+
+test('math: underscores and ** inside $…$ are not emphasis', () => {
+  const out = renderMarkdown('Try $a_i ** b_j$ now.')
+  assertNoExecutableSurface(out, 'dollar-emphasis-math')
+  const body = parse(out)
+  assert.equal(body.querySelector('em,strong'), null, 'no em/strong inside math')
+  assert.ok(body.textContent.includes('\\(a_i ** b_j\\)'), 'content intact, normalized delimiters')
+})
+
+test('math: currency is prose, not math', () => {
+  const out = renderMarkdown('It costs $5 and $10 total, or about $7.50 each.')
+  assertNoExecutableSurface(out, 'currency')
+  const body = parse(out)
+  assert.ok(!body.textContent.includes('\\('), 'no math token minted from prices')
+  assert.ok(body.textContent.includes('$5 and $10'), 'dollar amounts untouched')
+})
+
+test('math: \\begin{align}…\\end{align} passes through as one block', () => {
+  const out = renderMarkdown('\\begin{align}\na &= b \\\\\nc &= d\n\\end{align}')
+  assertNoExecutableSurface(out, 'align-env')
+  const body = parse(out)
+  assert.ok(body.textContent.includes('\\begin{align}'), 'environment opener intact')
+  assert.equal(body.querySelector('h1,h2,em,strong'), null, 'interior not markdown-parsed')
+})
+
+test('math: TeX inside code spans and fences stays literal source', () => {
+  const out = renderMarkdown('Use `\\(x\\)` like this:\n\n```text\n\\[y\\]\n```')
+  assertNoExecutableSurface(out, 'code-tex')
+  const body = parse(out)
+  assert.ok(body.querySelector('code'), 'inline code rendered')
+  assert.equal(body.querySelector('code').textContent, '\\(x\\)', 'code span content untouched')
+  assert.ok(body.querySelector('pre code'), 'fence stays a code block')
+})
+
+test('math: ```math and Codex-style ```latex fences become display math text', () => {
+  const md = '```math\nE = mc^2\n```\n\n```latex\n\\[\n\\operatorname{mem}_U(X)\n\\]\n```'
+  const out = renderMarkdown(md)
+  assertNoExecutableSurface(out, 'math-fences')
+  const body = parse(out)
+  assert.equal(body.querySelector('pre'), null, 'neither fence renders as a code box')
+  assert.ok(body.textContent.includes('\\[E = mc^2\\]'), '```math body wrapped for display')
+  assert.ok(body.textContent.includes('\\[\\operatorname{mem}_U(X)\\]'), '```latex display block unwrapped+rewrapped once')
+})
+
+test('math: ```latex fence that is NOT a single formula stays a code block', () => {
+  const out = renderMarkdown('```latex\n\\documentclass{article}\n\\begin{document}\nhi\n\\end{document}\n```')
+  assertNoExecutableSurface(out, 'latex-doc-fence')
+  const body = parse(out)
+  assert.ok(body.querySelector('pre code'), 'document snippet keeps its code box')
+})
+
+test('math: ```latex fence holding SEVERAL formulas stays a code block', () => {
+  const out = renderMarkdown('```latex\n\\[a\\]\ntext between\n\\[b\\]\n```')
+  assertNoExecutableSurface(out, 'latex-multi-fence')
+  const body = parse(out)
+  assert.ok(body.querySelector('pre code'), 'multi-formula body keeps its code box')
+})
+
+test('math: display math directly after a text line is not a setext heading', () => {
+  const out = renderMarkdown('Here is:\n\\[\na\n=\nb\n\\]')
+  assertNoExecutableSurface(out, 'no-blank-line-display')
+  const body = parse(out)
+  assert.equal(body.querySelector('h1,h2'), null, 'no heading swallows the opener')
+  assert.ok(body.textContent.includes('\\[a\n=\nb\\]'), 'math block intact after the text line')
+})
+
+test('math: non-display env inside \\(…\\) keeps its wrapper (pmatrix)', () => {
+  const out = renderMarkdown('Vector \\(\\begin{pmatrix}1\\\\0\\end{pmatrix}\\) here.')
+  assertNoExecutableSurface(out, 'pmatrix')
+  const body = parse(out)
+  assert.ok(body.textContent.includes('\\(\\begin{pmatrix}'), 'wrapper survives — pmatrix is not self-delimiting')
+})
+
+test('math: mid-sentence \\begin{align} is protected from markdown rules', () => {
+  const out = renderMarkdown('So \\begin{align}a_i &= b_j \\\\ c &= d\\end{align} holds.')
+  assertNoExecutableSurface(out, 'inline-env')
+  const body = parse(out)
+  assert.equal(body.querySelector('em,strong'), null, 'no emphasis minted inside the environment')
+  assert.ok(body.textContent.includes('\\begin{align}a_i &= b_j'), 'environment text intact')
+})
+
+test('math: hostile HTML inside math delimiters is escaped text', () => {
+  const out = renderMarkdown('\\(<img src=x onerror=alert(1)>\\) and $<script>alert(1)</script>$')
+  assertNoExecutableSurface(out, 'hostile-math')
+  const body = parse(out)
+  assert.equal(body.querySelector('img,script'), null, 'no live element from math content')
 })
 
 test('markdown formatting still works (emphasis, headings, lists)', () => {
