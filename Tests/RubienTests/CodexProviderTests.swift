@@ -757,7 +757,9 @@ final class CodexProviderTests: XCTestCase {
           exit 0
         fi
         if [ "$1" = "login" ] && [ "$2" = "status" ]; then
-          printf '%s\\n' '\(authOutput)'
+          cat <<'STATUS'
+        \(authOutput)
+        STATUS
           exit \(authExitCode)
         fi
         exit 0
