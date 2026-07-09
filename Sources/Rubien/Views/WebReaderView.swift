@@ -30,12 +30,19 @@ enum WebReaderMetrics {
     static let annotationSidebarMinWidth: CGFloat = 260
     static let defaultChatPanelWidth: CGFloat = 380
     static let chatTrailingInset: CGFloat = 12
-    static let minimumWindowWidth: CGFloat = minimumReadableWidth(
-        chatVisible: true,
-        annotationSidebarVisible: true,
-        chatPanelWidth: defaultChatPanelWidth
-    )
     static let minimumWindowHeight: CGFloat = 620
+
+    /// The window minimum at OPEN time: the notes sidebar always starts visible, the
+    /// assistant per the user's preference. Once open, the live minimum tracks the
+    /// actual panel states (`minimumReadableWidth` via the min-width enforcer), so
+    /// hiding panels lets the window narrow to the content floor instead of pinning
+    /// every web reader to the worst-case both-panels width.
+    static func initialWindowMinWidth(chatVisible: Bool) -> CGFloat {
+        minimumReadableWidth(
+            chatVisible: chatVisible,
+            annotationSidebarVisible: true,
+            chatPanelWidth: defaultChatPanelWidth)
+    }
 
     private static let contentMinWidthWithoutChat: CGFloat = 540
     private static let contentMinWidthWithChat: CGFloat = 320
@@ -52,6 +59,57 @@ enum WebReaderMetrics {
         contentMinimumWidth(chatVisible: chatVisible)
             + (annotationSidebarVisible ? annotationSidebarMinWidth : 0)
             + (chatVisible ? chatPanelWidth + chatTrailingInset : 0)
+    }
+}
+
+/// Keeps the hosting `NSWindow`'s resize floor in step with the web reader's visible
+/// panels (#5/#13). SwiftUI's `.frame(minWidth:)` governs layout but not the window's
+/// user-resize limit once the hosting controller's sizing is detached (readers pass
+/// `sizingOptions: []`), so the floor is applied to the window directly. When a
+/// newly-shown panel raises the floor above the current width, the window grows to fit
+/// (kept on-screen); when panels hide, the floor drops and the user may narrow it.
+private struct ReaderWindowMinWidthEnforcer: NSViewRepresentable {
+    let minWidth: CGFloat
+
+    func makeNSView(context: Context) -> EnforcerView { EnforcerView() }
+
+    func updateNSView(_ view: EnforcerView, context: Context) {
+        view.desiredMinWidth = minWidth
+    }
+
+    final class EnforcerView: NSView {
+        /// Width only — the height floor is set once at window creation and never
+        /// varies with panel state. Guarded so the per-render `updateNSView` churn
+        /// doesn't enqueue redundant applies; queued applies re-read the latest
+        /// value, so they coalesce anyway.
+        var desiredMinWidth: CGFloat = 0 {
+            didSet { if desiredMinWidth != oldValue { applySoon() } }
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            applySoon()
+        }
+
+        /// Deferred: mutating the window mid-layout (updateNSView runs inside a
+        /// layout pass) is unsafe.
+        private func applySoon() {
+            DispatchQueue.main.async { [weak self] in self?.apply() }
+        }
+
+        private func apply() {
+            guard let window, desiredMinWidth > 0 else { return }
+            window.minSize.width = desiredMinWidth
+            var frame = window.frame
+            guard frame.width < desiredMinWidth else { return }
+            frame.size.width = desiredMinWidth
+            // Growing rightward can push past the screen edge — shift left to stay visible.
+            if let screen = window.screen ?? NSScreen.main {
+                let maxX = screen.visibleFrame.maxX
+                if frame.maxX > maxX { frame.origin.x = max(screen.visibleFrame.minX, maxX - frame.width) }
+            }
+            window.setFrame(frame, display: true, animate: true)
+        }
     }
 }
 
@@ -1681,7 +1739,11 @@ struct WebReaderView: View {
             .animation(.easeInOut(duration: 0.22), value: showChatSidebar)
             .animation(.easeInOut(duration: 0.22), value: chatPanelWidth)
         }
-        .frame(minWidth: WebReaderMetrics.minimumWindowWidth, minHeight: WebReaderMetrics.minimumWindowHeight)
+        .frame(minWidth: currentMinimumWindowWidth, minHeight: WebReaderMetrics.minimumWindowHeight)
+        // Keep the NSWindow's own resize floor in step with the visible panels (#5/#13):
+        // hiding both panels lets the user narrow the window to the content floor; showing
+        // one grows the window if it no longer fits.
+        .background(ReaderWindowMinWidthEnforcer(minWidth: currentMinimumWindowWidth))
         // Window closing (the root view disappears): kill any in-flight agent
         // turn's process group (§4.4 step 9).
         .onDisappear { chatSession.teardown() }
@@ -1771,6 +1833,15 @@ struct WebReaderView: View {
     private func setChatSidebarVisible(_ visible: Bool, persist: Bool = true) {
         showChatSidebar = visible
         if persist { RubienPreferences.assistantSidebarVisible = visible }
+    }
+
+    /// The window-width floor for the panels that are actually visible right now —
+    /// the root frame's `minWidth` and the NSWindow resize floor both track this.
+    private var currentMinimumWindowWidth: CGFloat {
+        WebReaderMetrics.minimumReadableWidth(
+            chatVisible: showChatSidebar,
+            annotationSidebarVisible: showAnnotationSidebar,
+            chatPanelWidth: chatPanelWidth)
     }
 
     @ViewBuilder

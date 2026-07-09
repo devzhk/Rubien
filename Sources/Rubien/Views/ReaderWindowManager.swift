@@ -109,8 +109,12 @@ final class ReaderWindowManager {
         recordReaderOpen(referenceId: refId, db: db)
 
         let title = windowTitle(for: reference, suffix: "Web")
+        // Floor for the panels visible at open (notes always starts visible, assistant
+        // per the user's preference); once open, the reader's min-width enforcer keeps
+        // the window floor tracking the live panel states (#5/#13).
         let minSize = NSSize(
-            width: WebReaderMetrics.minimumWindowWidth,
+            width: WebReaderMetrics.initialWindowMinWidth(
+                chatVisible: RubienPreferences.assistantSidebarVisible),
             height: WebReaderMetrics.minimumWindowHeight
         )
         let contentSize = preferredWindowSize(minSize: minSize)
@@ -119,10 +123,6 @@ final class ReaderWindowManager {
         let readerView = WebReaderView(reference: reference) { [weak self] in
             self?.closeWindow(forReferenceId: refId)
         }
-        .frame(
-            minWidth: WebReaderMetrics.minimumWindowWidth,
-            minHeight: WebReaderMetrics.minimumWindowHeight
-        )
 
         window.contentViewController = makeRubienHostingController(rootView: readerView, sizingOptions: [])
         // Assigning the content view controller makes AppKit shrink the window to the

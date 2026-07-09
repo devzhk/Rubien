@@ -53,15 +53,41 @@ final class ReaderChromeInteractionTests: XCTestCase {
         )
     }
 
-    func testWebReaderMinimumWindowWidthCoversDefaultNotesAndAssistantLayout() {
-        XCTAssertGreaterThanOrEqual(
-            WebReaderMetrics.minimumWindowWidth,
+    func testWebReaderInitialWindowMinTracksAssistantVisibilityWithNotesAlwaysOn() {
+        // The open-time floor covers the notes sidebar (always starts visible) plus
+        // the assistant when the preference shows it — and drops the assistant's
+        // share when it's hidden, so a chat-off user isn't pinned to the wide floor.
+        XCTAssertEqual(
+            WebReaderMetrics.initialWindowMinWidth(chatVisible: true),
             WebReaderMetrics.minimumReadableWidth(
                 chatVisible: true,
                 annotationSidebarVisible: true,
                 chatPanelWidth: WebReaderMetrics.defaultChatPanelWidth
             )
         )
+        XCTAssertEqual(
+            WebReaderMetrics.initialWindowMinWidth(chatVisible: false),
+            WebReaderMetrics.minimumReadableWidth(
+                chatVisible: false,
+                annotationSidebarVisible: true,
+                chatPanelWidth: WebReaderMetrics.defaultChatPanelWidth
+            )
+        )
+        XCTAssertLessThan(
+            WebReaderMetrics.initialWindowMinWidth(chatVisible: false),
+            WebReaderMetrics.initialWindowMinWidth(chatVisible: true)
+        )
+    }
+
+    func testWebReaderHiddenPanelsFloorIsTheContentOnlyMinimum() {
+        // With both panels hidden the live floor is the bare content minimum —
+        // well under the old unconditional worst-case (972) that pinned every
+        // web reader regardless of panel state.
+        let bothHidden = WebReaderMetrics.minimumReadableWidth(
+            chatVisible: false, annotationSidebarVisible: false,
+            chatPanelWidth: WebReaderMetrics.defaultChatPanelWidth)
+        XCTAssertEqual(bothHidden, WebReaderMetrics.contentMinimumWidth(chatVisible: false))
+        XCTAssertLessThan(bothHidden, WebReaderMetrics.initialWindowMinWidth(chatVisible: true))
     }
 
     func testSegmentedControlHoverDoesNotOverrideActiveSegmentHighlight() {
