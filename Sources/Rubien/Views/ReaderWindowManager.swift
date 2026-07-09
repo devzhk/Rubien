@@ -7,13 +7,20 @@ import RubienCore
 private let readerWindowLog = Logger(subsystem: "Rubien", category: "reader-window")
 
 enum ReaderWindowMetrics {
-    static let defaultPreferredWidth: CGFloat = 1000
+    static let defaultPreferredWidth: CGFloat = 1200
     static let defaultPreferredHeight: CGFloat = 800
     static let visibleFrameInset: CGFloat = 100
 
-    static func preferredWindowSize(minSize: NSSize, visibleFrame: NSRect) -> NSSize {
-        let width = min(max(minSize.width, defaultPreferredWidth), visibleFrame.width - visibleFrameInset)
-        let height = min(max(minSize.height, defaultPreferredHeight), visibleFrame.height - visibleFrameInset)
+    /// The size to open a reader at: the caller's `desired` size (the user's last
+    /// remembered reader size) when present, else the defaults — clamped to the window
+    /// minimum and the visible screen so it never opens smaller than usable or wider
+    /// than the display. When the screen cap itself falls below the minimum (tiny
+    /// display), the minimum wins — matching what AppKit enforces via `window.minSize`.
+    static func preferredWindowSize(minSize: NSSize, desired: NSSize? = nil, visibleFrame: NSRect) -> NSSize {
+        let maxWidth = max(minSize.width, visibleFrame.width - visibleFrameInset)
+        let maxHeight = max(minSize.height, visibleFrame.height - visibleFrameInset)
+        let width = min(max(minSize.width, desired?.width ?? defaultPreferredWidth), maxWidth)
+        let height = min(max(minSize.height, desired?.height ?? defaultPreferredHeight), maxHeight)
         return NSSize(width: width, height: height)
     }
 }
@@ -68,18 +75,21 @@ final class ReaderWindowManager {
         recordReaderOpen(referenceId: refId, db: db)
 
         let title = windowTitle(for: reference, suffix: "PDF")
-        let window = makeWindow(
-            title: title,
-            autosaveName: "RubienPDFReader-\(refId)",
-            minSize: NSSize(width: 800, height: 600)
-        )
+        let minSize = NSSize(width: 800, height: 600)
+        let contentSize = preferredWindowSize(minSize: minSize)
+        let window = makeWindow(title: title, minSize: minSize, contentSize: contentSize)
 
         let readerView = PDFReaderView(reference: reference, pdfURL: pdfURL) { [weak self] in
             self?.closeWindow(forReferenceId: refId)
         }
         .frame(minWidth: 800, minHeight: 600)
 
-        window.contentViewController = makeRubienHostingController(rootView: readerView)
+        window.contentViewController = makeRubienHostingController(rootView: readerView, sizingOptions: [])
+        // Assigning the content view controller makes AppKit shrink the window to the
+        // SwiftUI content's fitting size — even with empty sizingOptions — clobbering
+        // the remembered/default size. Re-assert it, then center (pre-show; no flash).
+        window.setContentSize(contentSize)
+        window.center()
         registerWindow(window, title: title, forReferenceId: refId)
     }
 
@@ -99,24 +109,27 @@ final class ReaderWindowManager {
         recordReaderOpen(referenceId: refId, db: db)
 
         let title = windowTitle(for: reference, suffix: "Web")
-        let window = makeWindow(
-            title: title,
-            autosaveName: "RubienWebReader-\(refId)",
-            minSize: NSSize(
-                width: WebReaderMetrics.minimumWindowWidth,
-                height: WebReaderMetrics.minimumWindowHeight
-            )
+        // Floor for the panels visible at open (notes always starts visible, assistant
+        // per the user's preference); once open, the reader's min-width enforcer keeps
+        // the window floor tracking the live panel states (#5/#13).
+        let minSize = NSSize(
+            width: WebReaderMetrics.initialWindowMinWidth(
+                chatVisible: RubienPreferences.assistantSidebarVisible),
+            height: WebReaderMetrics.minimumWindowHeight
         )
+        let contentSize = preferredWindowSize(minSize: minSize)
+        let window = makeWindow(title: title, minSize: minSize, contentSize: contentSize)
 
         let readerView = WebReaderView(reference: reference) { [weak self] in
             self?.closeWindow(forReferenceId: refId)
         }
-        .frame(
-            minWidth: WebReaderMetrics.minimumWindowWidth,
-            minHeight: WebReaderMetrics.minimumWindowHeight
-        )
 
-        window.contentViewController = makeRubienHostingController(rootView: readerView)
+        window.contentViewController = makeRubienHostingController(rootView: readerView, sizingOptions: [])
+        // Assigning the content view controller makes AppKit shrink the window to the
+        // SwiftUI content's fitting size — even with empty sizingOptions — clobbering
+        // the remembered/default size. Re-assert it, then center (pre-show; no flash).
+        window.setContentSize(contentSize)
+        window.center()
         registerWindow(window, title: title, forReferenceId: refId)
     }
 
@@ -156,11 +169,9 @@ final class ReaderWindowManager {
         }
     }
 
-    private func makeWindow(title: String, autosaveName: String, minSize: NSSize) -> NSWindow {
-        let preferredSize = preferredWindowSize(minSize: minSize)
-
+    private func makeWindow(title: String, minSize: NSSize, contentSize: NSSize) -> NSWindow {
         let window = NSWindow(
-            contentRect: NSRect(origin: .zero, size: preferredSize),
+            contentRect: NSRect(origin: .zero, size: contentSize),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -187,13 +198,11 @@ final class ReaderWindowManager {
         window.toolbar = toolbar
         window.toolbarStyle = .unified
 
-        window.setFrameAutosaveName(autosaveName)
-
-        // Restore saved frame; if none, use preferred size centered on screen
-        if !window.setFrameUsingName(autosaveName) {
-            window.center()
-        }
-
+        // Readers no longer autosave a per-document frame — papers/blogs are usually
+        // read once, so per-reference memory rarely helps. The window opens at the last
+        // size any reader was left at (`contentSize`, from RubienPreferences via the
+        // caller); the caller re-asserts it after installing the content view
+        // controller and centers. Simultaneous readers tab together (registerWindow).
         return window
     }
 
@@ -217,13 +226,20 @@ final class ReaderWindowManager {
         window.title = title
         window.tab.title = title
 
-        // Observe close to clean up
+        // Observe close to clean up, and remember the size this reader is closing at so
+        // the next reader opens at it (RubienPreferences.readerWindowSize). Content size
+        // (not frame) to match makeWindow's contentRect, so the height can't drift by the
+        // titlebar height each open/close cycle. The observer runs on `queue: .main`, so
+        // `assumeIsolated` gives the main-actor context synchronously — no Task hop.
         let observer = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification,
             object: window,
             queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
+        ) { [weak self] notification in
+            MainActor.assumeIsolated {
+                if let window = notification.object as? NSWindow {
+                    RubienPreferences.readerWindowSize = window.contentRect(forFrameRect: window.frame).size
+                }
                 guard let self else { return }
                 self.windows.removeValue(forKey: refId)
                 self.removeObserver(forReferenceId: refId)
@@ -250,7 +266,8 @@ final class ReaderWindowManager {
 
     private func preferredWindowSize(minSize: NSSize) -> NSSize {
         let visibleFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 960)
-        return ReaderWindowMetrics.preferredWindowSize(minSize: minSize, visibleFrame: visibleFrame)
+        return ReaderWindowMetrics.preferredWindowSize(
+            minSize: minSize, desired: RubienPreferences.readerWindowSize, visibleFrame: visibleFrame)
     }
 }
 #endif

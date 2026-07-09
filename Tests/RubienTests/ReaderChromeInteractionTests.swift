@@ -53,15 +53,41 @@ final class ReaderChromeInteractionTests: XCTestCase {
         )
     }
 
-    func testWebReaderMinimumWindowWidthCoversDefaultNotesAndAssistantLayout() {
-        XCTAssertGreaterThanOrEqual(
-            WebReaderMetrics.minimumWindowWidth,
+    func testWebReaderInitialWindowMinTracksAssistantVisibilityWithNotesAlwaysOn() {
+        // The open-time floor covers the notes sidebar (always starts visible) plus
+        // the assistant when the preference shows it — and drops the assistant's
+        // share when it's hidden, so a chat-off user isn't pinned to the wide floor.
+        XCTAssertEqual(
+            WebReaderMetrics.initialWindowMinWidth(chatVisible: true),
             WebReaderMetrics.minimumReadableWidth(
                 chatVisible: true,
                 annotationSidebarVisible: true,
                 chatPanelWidth: WebReaderMetrics.defaultChatPanelWidth
             )
         )
+        XCTAssertEqual(
+            WebReaderMetrics.initialWindowMinWidth(chatVisible: false),
+            WebReaderMetrics.minimumReadableWidth(
+                chatVisible: false,
+                annotationSidebarVisible: true,
+                chatPanelWidth: WebReaderMetrics.defaultChatPanelWidth
+            )
+        )
+        XCTAssertLessThan(
+            WebReaderMetrics.initialWindowMinWidth(chatVisible: false),
+            WebReaderMetrics.initialWindowMinWidth(chatVisible: true)
+        )
+    }
+
+    func testWebReaderHiddenPanelsFloorIsTheContentOnlyMinimum() {
+        // With both panels hidden the live floor is the bare content minimum —
+        // well under the old unconditional worst-case (972) that pinned every
+        // web reader regardless of panel state.
+        let bothHidden = WebReaderMetrics.minimumReadableWidth(
+            chatVisible: false, annotationSidebarVisible: false,
+            chatPanelWidth: WebReaderMetrics.defaultChatPanelWidth)
+        XCTAssertEqual(bothHidden, WebReaderMetrics.contentMinimumWidth(chatVisible: false))
+        XCTAssertLessThan(bothHidden, WebReaderMetrics.initialWindowMinWidth(chatVisible: true))
     }
 
     func testSegmentedControlHoverDoesNotOverrideActiveSegmentHighlight() {
@@ -77,6 +103,43 @@ final class ReaderChromeInteractionTests: XCTestCase {
             ReaderSegmentedControlMetrics.highlightOpacity(isActive: false, isHovered: false),
             0
         )
+    }
+
+    func testReaderPreferredSizeUsesDesiredClampedToMinimumAndScreen() {
+        let large = NSRect(x: 0, y: 0, width: 3000, height: 2000)
+        let minSize = NSSize(width: 800, height: 600)
+
+        // nil desired → the default preferred size on a roomy screen.
+        XCTAssertEqual(
+            ReaderWindowMetrics.preferredWindowSize(minSize: minSize, desired: nil, visibleFrame: large),
+            NSSize(width: ReaderWindowMetrics.defaultPreferredWidth,
+                   height: ReaderWindowMetrics.defaultPreferredHeight))
+
+        // A remembered size within range is used verbatim.
+        XCTAssertEqual(
+            ReaderWindowMetrics.preferredWindowSize(
+                minSize: minSize, desired: NSSize(width: 1400, height: 900), visibleFrame: large),
+            NSSize(width: 1400, height: 900))
+
+        // Smaller than the window minimum → clamped up to the minimum.
+        XCTAssertEqual(
+            ReaderWindowMetrics.preferredWindowSize(
+                minSize: minSize, desired: NSSize(width: 500, height: 400), visibleFrame: large),
+            minSize)
+
+        // Larger than the screen → clamped to the visible frame minus the inset.
+        let small = NSRect(x: 0, y: 0, width: 1100, height: 900)
+        let clamped = ReaderWindowMetrics.preferredWindowSize(
+            minSize: minSize, desired: NSSize(width: 5000, height: 5000), visibleFrame: small)
+        XCTAssertEqual(clamped.width, small.width - ReaderWindowMetrics.visibleFrameInset)
+        XCTAssertEqual(clamped.height, small.height - ReaderWindowMetrics.visibleFrameInset)
+
+        // Screen cap below the minimum (tiny display) → the minimum still wins,
+        // matching what AppKit enforces via window.minSize.
+        let tiny = NSRect(x: 0, y: 0, width: 700, height: 500)
+        XCTAssertEqual(
+            ReaderWindowMetrics.preferredWindowSize(minSize: minSize, desired: nil, visibleFrame: tiny),
+            minSize)
     }
 }
 #endif
