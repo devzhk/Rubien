@@ -271,5 +271,24 @@ Also in 0.2.1:
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.2.3</title>
+            <description><![CDATA[• Assistant: chat is ready the moment a reader opens — no more “Checking assistant setup…” wait
+• Assistant: signing out mid-session is now detected; setup guidance + Recheck are available even in an open conversation
+• Assistant: fixed a race where switching backends could show the wrong setup status
+• Assistant: Ask no longer flips your assistant-panel preference for future windows; Settings shows the CLI path when installed but signed out
+• Reader: windows remember the last size you used (wider default)
+• Reader: hiding the notes/assistant panels now lets you make the web reader window narrower; showing one grows it to fit]]></description>
+            <pubDate>Thu, 09 Jul 2026 06:49:50 +0000</pubDate>
+            <sparkle:version>18</sparkle:version>
+            <sparkle:shortVersionString>0.2.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.2.3/Rubien-0.2.3.dmg"
+                sparkle:edSignature="RR5uIvdujJ/tbqw8eN1t0hewrnx+qT/nQaRXlPN8wWtp/Fh2lj8mCKjCSI/O8742e7hRMkKqaF9ZvL2nFh15Dg=="
+                length="17958565"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
