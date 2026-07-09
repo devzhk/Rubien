@@ -130,9 +130,11 @@ private actor ClaudeTurnEngine {
     /// in the window between `send()` arming `onTermination` and the `startTurn` task
     /// executing). `startTurn` checks this and bails without spawning (A1).
     private var cancelledTokens: Set<UUID> = []
-    /// Cached only on SUCCESS — a negative probe is never cached, so a UI refresh can
-    /// re-probe after the user installs/logs in (B6).
-    private var cachedAvailability: AgentAvailability?
+    /// Only the binary path + --version is cached (expensive to resolve). Auth is NOT
+    /// cached — it's re-probed on every isAvailable() so a mid-session sign-out / token
+    /// expiry is reflected instead of Recheck being a no-op (#11); a not-found stays
+    /// uncached so installing / logging in later still lights up (B6).
+    private var cachedResolution: (path: String, version: String)?
     private let logger = RubienLogger(subsystem: "com.rubien.assistant", category: "ClaudeProvider")
 
     // Escalation timers (seconds). Named for single-point tuning (B5).
@@ -409,19 +411,33 @@ private actor ClaudeTurnEngine {
     // MARK: Availability
 
     func isAvailable(override: String?) async -> AgentAvailability {
-        // B6: only a SUCCESS is cached — a negative must be re-probed on the next UI
-        // refresh so the feature can light up after the user installs / logs in.
-        if let cached = cachedAvailability { return cached }
-        guard let path = Self.resolveExecutable(override: override) else {
-            return .notFound(
-                reason: "Claude Code CLI wasn’t found. Install Claude Code or set the binary path in Settings → Assistant, then recheck.")
-        }
-        let environment = ClaudeCLIInvocation.environment(
-            binaryDirectory: (path as NSString).deletingLastPathComponent)
-        guard let version = await AgentBinaryProbe.probeVersion(
-            executablePath: path, environment: environment)
-        else {
-            return .notFound(reason: "Found claude at \(path) but it did not respond to --version.")
+        // Resolve the binary + --version once and cache THAT (expensive: candidate walk,
+        // possibly a login-shell `command -v`, plus the version subprocess). Auth is
+        // re-probed on EVERY call so a mid-session sign-out / token expiry is reflected —
+        // caching the ready result made Recheck a no-op after logout (#11).
+        let path: String
+        let version: String
+        let environment: [String: String]
+        if let cached = cachedResolution {
+            path = cached.path
+            version = cached.version
+            environment = ClaudeCLIInvocation.environment(
+                binaryDirectory: (path as NSString).deletingLastPathComponent)
+        } else {
+            guard let resolved = Self.resolveExecutable(override: override) else {
+                return .notFound(
+                    reason: "Claude Code CLI wasn’t found. Install Claude Code or set the binary path in Settings → Assistant, then recheck.")
+            }
+            environment = ClaudeCLIInvocation.environment(
+                binaryDirectory: (resolved as NSString).deletingLastPathComponent)
+            guard let probedVersion = await AgentBinaryProbe.probeVersion(
+                executablePath: resolved, environment: environment)
+            else {
+                return .notFound(reason: "Found claude at \(resolved) but it did not respond to --version.")
+            }
+            cachedResolution = (path: resolved, version: probedVersion)
+            path = resolved
+            version = probedVersion
         }
         if await AgentAuthProbe.probeClaude(executablePath: path, environment: environment) == .unauthenticated {
             return .installedButUnauthenticated(
@@ -429,9 +445,7 @@ private actor ClaudeTurnEngine {
                 path: path,
                 reason: "Claude Code is installed but not signed in. Run claude auth login in Terminal, then recheck.")
         }
-        let availability = AgentAvailability.installed(version: version, path: path)
-        cachedAvailability = availability
-        return availability
+        return .installed(version: version, path: path)
     }
 
     /// Well-known claude install dirs; resolution control flow is shared (§5.5).

@@ -400,6 +400,10 @@ struct RubienSettingsView: View {
             }, onChoose: pickCodexBinary)
         } header: {
             Text(String(localized: "Codex CLI", bundle: .module))
+        } footer: {
+            // Privacy disclosure: Codex persists conversations itself (under ~/.codex),
+            // outside Rubien — the non-obvious fact worth surfacing before first use.
+            Text(String(localized: "Codex uses your ~/.codex account and stores conversations there, not in Rubien.", bundle: .module))
         }
     }
 
@@ -437,13 +441,17 @@ struct RubienSettingsView: View {
                     .foregroundStyle(availability.isReady ? Color.green : Color.orange)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(agentStatusTitle(name: name, availability: availability))
-                    if availability.isReady, let path = availability.resolvedPath {
+                    // Show the resolved path whenever one was found — including the
+                    // installed-but-not-signed-in state — so a user with multiple installs
+                    // can see WHICH binary Rubien probed before running the login it suggests.
+                    if let path = availability.resolvedPath {
                         Text((path as NSString).abbreviatingWithTildeInPath)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .truncationMode(.middle)
-                    } else if let reason = availability.unavailableReason {
+                    }
+                    if !availability.isReady, let reason = availability.unavailableReason {
                         Text(reason)
                             .font(.caption)
                             .foregroundStyle(.secondary)

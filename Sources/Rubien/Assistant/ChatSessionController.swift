@@ -166,6 +166,11 @@ final class ChatSessionController: ObservableObject {
     /// events + finalization (the stale-turn guard, §4.1): a drained old stream must
     /// not corrupt a fresh conversation's state or clobber a newer turn.
     private(set) var generation = 0
+    /// Supersession token for `recheckAvailability`, mirroring the Settings pane's
+    /// `probeGeneration` (`RubienSettingsView`). A probe applies its result only if no
+    /// newer probe or `switchProvider` advanced the token across the `await`, so a slow
+    /// probe of a previously-selected backend can't overwrite the current one's state.
+    private var availabilityProbeToken = 0
 
     init(
         provider: any AgentProvider,
@@ -200,8 +205,14 @@ final class ChatSessionController: ObservableObject {
 
     // MARK: Turn lifecycle
 
+    /// Whether a send is permitted given the latest availability probe. An UNKNOWN
+    /// result (`nil` — the probe is still in flight on a freshly-opened window) is
+    /// treated as allowed, so the composer is usable immediately instead of dead for
+    /// the ~1–2s the probe runs; a send to a genuinely-missing backend then degrades
+    /// to a turn-failure notice (the pre-gate behavior). Only a KNOWN not-ready state
+    /// (`.notFound` / `.installedButUnauthenticated`) blocks send.
     var canSendWithCurrentAvailability: Bool {
-        availability?.isReady == true
+        availability?.isReady ?? true
     }
 
     /// Send a user turn. No-ops on empty input or while a turn is already running.
@@ -244,6 +255,15 @@ final class ChatSessionController: ObservableObject {
                 self.refuseTurn(gen: gen)
                 return
             }
+            // A switchProvider / newConversation / newer send can supersede this turn
+            // while it waited on the gate (now reachable because send is admitted while
+            // availability is still unknown). Bail before mutating the — possibly now
+            // fresh — conversation's UI or spawning the turn, releasing the slot we just
+            // acquired so it doesn't leak.
+            guard gen == self.generation else {
+                await self.gate.release(provider: kind, sessionID: resumeID)
+                return
+            }
             self.hasMessages = true
             self.renderUserMessage(composed)
             self.stagedSelection = nil
@@ -252,7 +272,9 @@ final class ChatSessionController: ObservableObject {
             // when claude ran tools before its first text, so the answer
             // rendered above the chips that produced it (wrong chronology).
             do {
-                for try await event in self.provider.send(turn: request) {
+                // `turnProvider`, not `self.provider`: the latter may have been swapped
+                // by a switchProvider that raced this turn (see the pin comment above).
+                for try await event in turnProvider.send(turn: request) {
                     self.handle(event, gen: gen)
                 }
             } catch {
@@ -367,6 +389,10 @@ final class ChatSessionController: ObservableObject {
         provider = providerFactory(kind)
         providerKind = kind
         availability = nil
+        // Supersede any in-flight probe of the outgoing backend synchronously — a
+        // stale result landing in the gap before the recheck below runs must not write
+        // the wrong backend's availability. The scheduled recheck bumps this again.
+        availabilityProbeToken += 1
         RubienPreferences.assistantProvider = kind
         newConversation()
         Task { await recheckAvailability() }
@@ -454,9 +480,16 @@ final class ChatSessionController: ObservableObject {
         }
     }
 
-    /// Re-probe provider availability (drives the empty-state / Recheck).
+    /// Re-probe provider availability (drives the setup card / Recheck). Guarded by
+    /// `availabilityProbeToken` so a stale in-flight probe — e.g. of the backend that
+    /// was active before a `switchProvider`, or an earlier mount-time probe racing a
+    /// switch — is dropped instead of overwriting the current backend's result.
     func recheckAvailability() async {
-        availability = await provider.isAvailable()
+        availabilityProbeToken += 1
+        let token = availabilityProbeToken
+        let result = await provider.isAvailable()
+        guard token == availabilityProbeToken else { return }
+        availability = result
     }
 
     // MARK: Event mapping (internal for testing)

@@ -892,16 +892,19 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertEqual(controller.availability?.unavailableReason, "not logged in")
     }
 
-    func testCanSendWithCurrentAvailabilityRequiresReadyBackend() {
+    func testCanSendAllowsWhileCheckingButBlocksKnownUnreadyBackend() {
         let ready = makeController(provider: MockAgentProvider(), sink: SpyTranscriptSink())
         XCTAssertTrue(ready.canSendWithCurrentAvailability)
 
+        // Unknown (probe still in flight) is allowed optimistically so the composer is
+        // usable immediately; a doomed send degrades to a turn-failure notice.
         let checking = makeController(
             provider: MockAgentProvider(),
             sink: SpyTranscriptSink(),
             initialAvailability: nil)
-        XCTAssertFalse(checking.canSendWithCurrentAvailability)
+        XCTAssertTrue(checking.canSendWithCurrentAvailability)
 
+        // A KNOWN not-ready state still blocks send.
         let signedOut = makeController(
             provider: MockAgentProvider(),
             sink: SpyTranscriptSink(),
@@ -914,7 +917,7 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertFalse(signedOut.canSendWithCurrentAvailability)
     }
 
-    func testSendDoesNotCallProviderWhileAvailabilityIsChecking() {
+    func testSendCallsProviderOptimisticallyWhileAvailabilityIsChecking() async {
         let provider = MockAgentProvider()
         let controller = makeController(
             provider: provider,
@@ -922,10 +925,70 @@ final class ChatSessionControllerTests: XCTestCase {
             initialAvailability: nil)
 
         controller.send("hello")
+        await provider.waitUntilStreaming()
 
-        XCTAssertTrue(provider.requests.isEmpty)
+        XCTAssertEqual(provider.requests.count, 1, "unknown availability sends optimistically")
+        XCTAssertTrue(controller.isResponding)
+        XCTAssertTrue(controller.hasMessages)
+
+        provider.finishStream()
+        await controller.turnTask?.value
+    }
+
+    func testSwitchProviderDropsStaleProbeFromOutgoingBackend() async {
+        let savedProvider = UserDefaults.standard.object(forKey: RubienPreferences.assistantProviderKey)
+        defer {
+            if let savedProvider {
+                UserDefaults.standard.set(savedProvider, forKey: RubienPreferences.assistantProviderKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: RubienPreferences.assistantProviderKey)
+            }
+        }
+        let claude = MockAgentProvider(
+            kind: .claude, availability: .installed(version: "c", path: "/fake/claude"))
+        let codex = MockAgentProvider(
+            kind: .codex, availability: .notFound(reason: "Codex not installed"))
+        claude.holdAvailability()  // the outgoing backend's probe will land late
+        let controller = ChatSessionController(
+            provider: claude,
+            transcript: SpyTranscriptSink(),
+            reference: ChatReference(id: 1, title: "Attention", authors: "Vaswani et al."),
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"),
+            gate: AssistantTurnGate(),
+            providerFactory: { (kind: AgentProviderKind) in kind == .codex ? codex : claude },
+            initialAvailability: nil)
+
+        // Start the slow Claude probe and park it mid-flight.
+        let staleProbe = Task { await controller.recheckAvailability() }
+        await claude.waitUntilAvailabilityProbing()
+
+        // Switch to Codex; its fast probe lands notFound.
+        controller.switchProvider(to: .codex)
+        await waitUntil { controller.availability?.isInstalled == false }
+        XCTAssertEqual(controller.providerKind, .codex)
+
+        // Let the stale Claude "ready" probe finally return — it must be dropped, not
+        // overwrite Codex's notFound.
+        claude.releaseAvailability()
+        await staleProbe.value
+
+        XCTAssertEqual(controller.providerKind, .codex)
+        XCTAssertFalse(
+            controller.availability?.isReady ?? true,
+            "a stale probe of the outgoing backend must not clobber the new backend's availability")
+    }
+
+    func testSupersededTurnBailsAfterGateAcquireWithoutRenderingOrDispatching() async {
+        let provider = MockAgentProvider()
+        let controller = makeController(provider: provider, sink: SpyTranscriptSink())
+
+        controller.send("hello")       // schedules the turn at the current generation
+        controller.newConversation()   // supersedes it (bumps generation) before its body runs
+        await controller.turnTask?.value
+
+        XCTAssertTrue(provider.requests.isEmpty, "a superseded turn must not dispatch to the provider")
+        XCTAssertFalse(controller.hasMessages, "a superseded turn must not render into the fresh conversation")
         XCTAssertFalse(controller.isResponding)
-        XCTAssertFalse(controller.hasMessages)
     }
 
     func testSendDoesNotCallProviderWhenBackendIsSignedOut() {
@@ -959,6 +1022,9 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
     private var _cancelCount = 0
     private var _approvals: [(String, ApprovalDecision)] = []
     private var _availability: AgentAvailability
+    private var _availabilityHold = false
+    private var _availabilityReleaseWaiters: [CheckedContinuation<Void, Never>] = []
+    private var _availabilityProbeWaiters: [CheckedContinuation<Void, Never>] = []
     private var _continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation?
     private var _streamingWaiters: [CheckedContinuation<Void, Never>] = []
     private var _transcripts: [String: [ChatRenderMessage]] = [:]
@@ -975,7 +1041,47 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
     }
 
     func isAvailable() async -> AgentAvailability {
+        // Park when held so a test can interleave a switch before this probe returns
+        // (mirrors the transcript-hold pattern below).
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if _availabilityHold {
+                _availabilityReleaseWaiters.append(cont)
+                let probeWaiters = _availabilityProbeWaiters
+                _availabilityProbeWaiters = []
+                lock.unlock()
+                for waiter in probeWaiters { waiter.resume() }
+            } else {
+                lock.unlock()
+                cont.resume()
+            }
+        }
         lock.lock(); defer { lock.unlock() }; return _availability
+    }
+
+    /// Make `isAvailable` block until `releaseAvailability()`.
+    func holdAvailability() {
+        lock.lock(); defer { lock.unlock() }; _availabilityHold = true
+    }
+
+    func releaseAvailability() {
+        lock.lock()
+        _availabilityHold = false
+        let waiters = _availabilityReleaseWaiters
+        _availabilityReleaseWaiters = []
+        lock.unlock()
+        for waiter in waiters { waiter.resume() }
+    }
+
+    /// Await until a held `isAvailable()` call has entered and parked.
+    func waitUntilAvailabilityProbing() async {
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if !_availabilityReleaseWaiters.isEmpty {
+                lock.unlock(); c.resume(); return
+            }
+            _availabilityProbeWaiters.append(c); lock.unlock()
+        }
     }
 
     func setTranscript(_ rows: [ChatRenderMessage], for sessionID: String) {

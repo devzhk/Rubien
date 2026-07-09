@@ -255,7 +255,10 @@ private actor CodexAppServerConnection {
     /// Tokens interrupted BEFORE their `startTurn` ran (A1 — the consumer dropped the
     /// stream in the window between `send()` arming `onTermination` and the task).
     private var cancelledTokens: Set<UUID> = []
-    private var cachedAvailability: AgentAvailability?
+    /// Only the binary path + --version is cached (expensive to resolve). Auth is NOT
+    /// cached — re-probed on every isAvailable() so a mid-session sign-out is reflected
+    /// instead of Recheck being a no-op (#11); a not-found stays uncached (B6).
+    private var cachedResolution: (path: String, version: String)?
 
     // MARK: Turn lifecycle
 
@@ -879,20 +882,34 @@ private actor CodexAppServerConnection {
     // MARK: Availability
 
     func isAvailable() async -> AgentAvailability {
-        // Only a SUCCESS is cached — a negative re-probes on the next UI refresh so
-        // the feature lights up after the user installs / logs in (B6).
-        if let cached = cachedAvailability { return cached }
-        guard let path = Self.resolveExecutable(override: executableOverride) else {
-            return .notFound(
-                reason: "Codex CLI wasn’t found. Install Codex or set the binary path in Settings → Assistant, then recheck.")
-        }
-        let environment = CodexInvocation.environment(
-            binaryDirectory: (path as NSString).deletingLastPathComponent)
-        guard let version = await AgentBinaryProbe.probeVersion(
-            executablePath: path,
-            environment: environment)
-        else {
-            return .notFound(reason: "Found codex at \(path) but it did not respond to --version.")
+        // Resolve the binary + --version once and cache THAT (expensive: candidate walk,
+        // possibly a login-shell `command -v`, plus the version subprocess). Auth is
+        // re-probed on EVERY call so a mid-session sign-out / token expiry is reflected —
+        // caching the ready result made Recheck a no-op after logout (#11).
+        let path: String
+        let version: String
+        let environment: [String: String]
+        if let cached = cachedResolution {
+            path = cached.path
+            version = cached.version
+            environment = CodexInvocation.environment(
+                binaryDirectory: (path as NSString).deletingLastPathComponent)
+        } else {
+            guard let resolved = Self.resolveExecutable(override: executableOverride) else {
+                return .notFound(
+                    reason: "Codex CLI wasn’t found. Install Codex or set the binary path in Settings → Assistant, then recheck.")
+            }
+            environment = CodexInvocation.environment(
+                binaryDirectory: (resolved as NSString).deletingLastPathComponent)
+            guard let probedVersion = await AgentBinaryProbe.probeVersion(
+                executablePath: resolved,
+                environment: environment)
+            else {
+                return .notFound(reason: "Found codex at \(resolved) but it did not respond to --version.")
+            }
+            cachedResolution = (path: resolved, version: probedVersion)
+            path = resolved
+            version = probedVersion
         }
         if await AgentAuthProbe.probeCodex(executablePath: path, environment: environment) == .unauthenticated {
             return .installedButUnauthenticated(
@@ -900,9 +917,7 @@ private actor CodexAppServerConnection {
                 path: path,
                 reason: "Codex is installed but not signed in. Run codex login in Terminal, then recheck.")
         }
-        let availability = AgentAvailability.installed(version: version, path: path)
-        cachedAvailability = availability
-        return availability
+        return .installed(version: version, path: path)
     }
 
     /// Well-known codex install dirs; resolution control flow is shared (§5.5).

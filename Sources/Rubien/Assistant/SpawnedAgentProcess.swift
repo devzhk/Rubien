@@ -317,7 +317,7 @@ enum AgentBinaryProbe {
             DispatchQueue.global(qos: .userInitiated).async {
                 let result = runCommand(
                     executablePath: executablePath, arguments: ["--version"],
-                    environment: environment, timeout: 5)
+                    environment: environment, timeout: 5, captureStderr: false)
                 guard let result, result.exitCode == 0, !result.timedOut else {
                     continuation.resume(returning: nil)
                     return
@@ -355,7 +355,8 @@ enum AgentBinaryProbe {
             executablePath: executablePath,
             arguments: arguments,
             environment: environment,
-            timeout: timeout),
+            timeout: timeout,
+            captureStderr: false),
               result.exitCode == 0,
               !result.timedOut
         else { return nil }
@@ -367,25 +368,32 @@ enum AgentBinaryProbe {
     /// `--version` where only exit 0 is usable.
     static func runCommand(
         executablePath: String, arguments: [String],
-        environment: [String: String], timeout: TimeInterval
+        environment: [String: String], timeout: TimeInterval,
+        captureStderr: Bool = true
     ) -> CommandResult? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = arguments
         process.environment = environment
         let outPipe = Pipe()
-        let errPipe = Pipe()
         process.standardOutput = outPipe
-        process.standardError = errPipe
+        // Only pipe stderr when the caller needs it (auth probes read it). Otherwise send
+        // it to /dev/null: a login-shell grandchild that inherits ONLY stderr would else
+        // hold that pipe open and force the timeout, making run() discard a perfectly good
+        // stdout path — the bug that broke version discovery on some setups (A4/#3).
+        let errPipe: Pipe? = captureStderr ? Pipe() : nil
+        process.standardError = errPipe ?? FileHandle.nullDevice
         process.standardInput = FileHandle.nullDevice
         do { try process.run() } catch { return nil }
 
         let stdoutHandle = outPipe.fileHandleForReading
-        let stderrHandle = errPipe.fileHandleForReading
+        let stderrHandle = errPipe?.fileHandleForReading
         let stdoutBox = LockedBox<Data>(Data())
         let stderrBox = LockedBox<Data>(Data())
         let done = DispatchGroup()
-        for (handle, box) in [(stdoutHandle, stdoutBox), (stderrHandle, stderrBox)] {
+        var readers: [(FileHandle, LockedBox<Data>)] = [(stdoutHandle, stdoutBox)]
+        if let stderrHandle { readers.append((stderrHandle, stderrBox)) }
+        for (handle, box) in readers {
             done.enter()
             DispatchQueue.global(qos: .userInitiated).async {
                 box.set(handle.readDataToEndOfFile())  // tiny output; unblocked on close
@@ -396,7 +404,7 @@ enum AgentBinaryProbe {
         if done.wait(timeout: .now() + timeout) == .timedOut {
             process.terminate()          // SIGTERM the direct child…
             try? stdoutHandle.close()    // …and unblock reads even if a grandchild holds pipes
-            try? stderrHandle.close()
+            try? stderrHandle?.close()
             done.wait()                  // let the reader tasks finish after the close
             return CommandResult(
                 stdout: String(decoding: stdoutBox.get(), as: UTF8.self),
@@ -437,6 +445,10 @@ enum AgentAuthProbe {
     static func codexStatus(from result: AgentBinaryProbe.CommandResult) -> AgentAuthStatus {
         guard !result.timedOut else { return .unknown }
         let output = result.combinedOutput.lowercased()
+        // Negatives are checked FIRST and the ordering is load-bearing: "not logged in"
+        // CONTAINS "logged in", so a positive-first check would misread a signed-out CLI
+        // as authenticated. Anything neither clearly negative nor a clean exit-0 "logged
+        // in" stays .unknown — fail open (treated ready), never a false sign-out block.
         if output.contains("not logged in")
             || output.contains("not signed in")
             || output.contains("not authenticated") {
