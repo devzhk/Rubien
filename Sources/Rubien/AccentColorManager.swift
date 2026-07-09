@@ -111,7 +111,16 @@ extension View {
 /// windows can't forget to re-apply the app accent on their fresh SwiftUI
 /// root.
 @MainActor
-func makeRubienHostingController<Content: View>(rootView: Content) -> NSViewController {
-    NSHostingController(rootView: rootView.rubienAccent())
+func makeRubienHostingController<Content: View>(
+    rootView: Content,
+    sizingOptions: NSHostingSizingOptions? = nil
+) -> NSViewController {
+    let controller = NSHostingController(rootView: rootView.rubienAccent())
+    // Reader windows pass `[]`: by default the hosting controller resizes the enclosing
+    // window to the SwiftUI content's fitting size when assigned as contentViewController,
+    // collapsing reader windows to their minimum width and overriding the size the window
+    // manager set (the remembered / default reader size). `[]` stops it driving the frame.
+    if let sizingOptions { controller.sizingOptions = sizingOptions }
+    return controller
 }
 #endif

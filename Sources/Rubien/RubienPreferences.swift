@@ -192,6 +192,30 @@ enum RubienPreferences {
         set { UserDefaults.standard.set(newValue, forKey: assistantSidebarVisibleKey) }
     }
 
+    /// The size the user last left a reader window at, reused as the open size for the
+    /// next reader. Papers/blogs are usually read once, so per-document frame memory
+    /// rarely pays off — a single "last size" is the useful signal (like Safari). nil
+    /// until the first reader is resized/closed; new readers then open at it, clamped
+    /// to the window minimum and the visible screen.
+    static let readerWindowSizeKey = "Rubien.reader.windowSize"
+
+    static var readerWindowSize: CGSize? {
+        get {
+            guard let stored = UserDefaults.standard.dictionary(forKey: readerWindowSizeKey),
+                  let width = stored["w"] as? Double, let height = stored["h"] as? Double,
+                  width > 0, height > 0
+            else { return nil }
+            return CGSize(width: width, height: height)
+        }
+        set {
+            if let newValue {
+                UserDefaults.standard.set(["w": newValue.width, "h": newValue.height], forKey: readerWindowSizeKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: readerWindowSizeKey)
+            }
+        }
+    }
+
     /// Explicit path to the `claude` binary; empty/unset ⇒ auto-discovery (§5.5:
     /// well-known dirs → login-shell `command -v`). Threaded to
     /// `ClaudeCodeProvider(executableOverride:)`.
