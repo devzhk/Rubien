@@ -815,6 +815,11 @@ struct ContentView: View {
     @State private var showWebImport = false
     @State private var showAddByIdentifier = false
     @State private var showBatchImport = false
+    /// Monotonic token owned by `importFilesWithMetadata`. Each batch captures
+    /// its value; the batch's own auto-clear timer only wipes `importProgress`
+    /// if it still matches, so a stale timer from an earlier batch can't erase
+    /// a newer (fast markdown-only) batch's summary toast.
+    @State private var importGeneration = 0
     @State private var pendingZoteroImportFolder: PendingZoteroImport?
     @State private var showPendingMetadataQueue = false
     @State private var pendingQueueNotice: PendingQueueNotice?
@@ -931,6 +936,10 @@ struct ContentView: View {
                 Label(String(localized: "content.toolbar.importPDFAuto", bundle: .module), systemImage: "doc.badge.plus")
             }
             .help(String(localized: "Import PDFs or markdown notes; PDF metadata is auto-filled when possible", bundle: .module))
+            // Gate reentrancy while a batch runs, mirroring the sibling import
+            // Menu group below (a second batch would corrupt shared
+            // isImporting/importProgress/selectedId state).
+            .disabled(viewModel.isImporting)
 
             if !viewModel.pendingMetadataIntakes.isEmpty {
                 Button {
@@ -1435,11 +1444,20 @@ struct ContentView: View {
     /// `queueResolutionResult` so per-file persistence doesn't reset the
     /// batch's progress or schedule stale clear timers.
     private func importFilesWithMetadata() {
+        // Reentrancy guard: the toolbar Button is also `.disabled` while
+        // importing, but this blocks any programmatic re-entry from spawning a
+        // concurrent batch that would corrupt shared isImporting/
+        // importProgress/selectedId state.
+        guard !viewModel.isImporting else { return }
         let urls = OpenPanelPicker.pickImportableFiles()
         guard !urls.isEmpty else { return }
         let mdURLs = urls.filter { $0.pathExtension.lowercased() == "md" }
         let pdfURLs = urls.filter { $0.pathExtension.lowercased() == "pdf" }
 
+        // Claim a fresh generation so this batch's auto-clear timer only wipes
+        // its own summary (see the closure at the end of the Task).
+        importGeneration += 1
+        let generation = importGeneration
         viewModel.isImporting = true
         viewModel.importProgress = String(localized: "content.import.progress.importingPDF", bundle: .module)
 
@@ -1511,9 +1529,12 @@ struct ContentView: View {
                 showPendingQueueNotice(for: intake, message: nil)
             }
             // Auto-clear the toast like viewModel.importBibTeX(from:) does.
+            // Only clear if this is still the latest batch — a newer batch bumps
+            // importGeneration, so a stale timer here becomes a no-op and can't
+            // wipe the newer batch's summary.
             if !summary.isEmpty {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
-                    if !viewModel.isImporting {
+                    if generation == importGeneration && !viewModel.isImporting {
                         viewModel.importProgress = nil
                     }
                 }
@@ -1539,7 +1560,13 @@ struct ContentView: View {
             switch resolution {
             case .verified(let envelope):
                 let reference = envelope.reference
-                finishPDFImport(with: reference, pdfFilename: preparedPDFFilename)
+                guard finishPDFImport(with: reference, pdfFilename: preparedPDFFilename) else {
+                    // Save or PDF attach failed; don't orphan the prepared file.
+                    // Mirrors the `.none` cleanup below.
+                    PDFService.deletePDF(at: preparedPDFFilename)
+                    let fmt = String(localized: "PDF import failed: %@", bundle: .module)
+                    return .failed(String(format: fmt, url.lastPathComponent))
+                }
                 return .imported(title: reference.title)
 
             case .candidate, .blocked, .seedOnly, .rejected:
@@ -1568,19 +1595,31 @@ struct ContentView: View {
         }
     }
 
-    private func finishPDFImport(with reference: Reference, pdfFilename: String?) {
+    /// Saves the resolved reference and attaches its imported PDF.
+    /// Returns `true` only if the reference actually saved **and** (when a PDF
+    /// filename is supplied) the attach succeeded — so the caller can clean up
+    /// an orphaned prepared PDF and report an honest failure. `saveReference`
+    /// returns `nil` when the write threw (it has already surfaced
+    /// `errorMessage`); attach failures set `errorMessage` here and return
+    /// `false`.
+    private func finishPDFImport(with reference: Reference, pdfFilename: String?) -> Bool {
         var mutable = reference
-        viewModel.saveReference(&mutable)
-        if let pdfFilename, let id = mutable.id {
-            do {
-                try viewModel.db.attachImportedPDFs(rowIds: [id], filenames: [pdfFilename])
-                let coordinator = syncCoordinator
-                Task { await coordinator?.kickPDFUploadDrainer() }
-            } catch {
-                viewModel.errorMessage = "Attach PDF failed: \(error.localizedDescription)"
-            }
+        // nil result = save threw; a nil id after "success" is equally a failure.
+        guard viewModel.saveReference(&mutable) != nil, let id = mutable.id else {
+            return false
         }
-        selectedId = mutable.id
+        selectedId = id
+        // No PDF to attach: the reference itself saved, so the import stands.
+        guard let pdfFilename else { return true }
+        do {
+            try viewModel.db.attachImportedPDFs(rowIds: [id], filenames: [pdfFilename])
+            let coordinator = syncCoordinator
+            Task { await coordinator?.kickPDFUploadDrainer() }
+            return true
+        } catch {
+            viewModel.errorMessage = "Attach PDF failed: \(error.localizedDescription)"
+            return false
+        }
     }
 
     private func refreshMetadata(for references: [Reference]) {
