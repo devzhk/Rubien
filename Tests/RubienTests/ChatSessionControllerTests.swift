@@ -1082,6 +1082,57 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertEqual(controller.effortOverride, "low")
     }
 
+    /// A model offering the full effort ladder EXCEPT `ultra` — the shape that makes
+    /// a persisted `ultra` (valid for sol/terra) unsupported once luna governs.
+    private func makeLuna() -> CodexModelInfo {
+        CodexModelInfo(
+            id: "luna", displayName: "Luna", description: nil,
+            efforts: [CodexEffortInfo(value: "low", label: "Low", description: nil),
+                      CodexEffortInfo(value: "medium", label: "Medium", description: nil),
+                      CodexEffortInfo(value: "high", label: "High", description: nil),
+                      CodexEffortInfo(value: "xhigh", label: "xHigh", description: nil),
+                      CodexEffortInfo(value: "max", label: "Max", description: nil)],
+            defaultEffort: "medium", isDefault: false, hidden: false)
+    }
+
+    /// When the resolved codex-default model becomes known (`.modelResolved`), an
+    /// effort the model can't accept is snapped to its default — codex's app-server
+    /// rejects an unsupported effort on turn/start. A still-valid effort is untouched.
+    func testModelResolvedSnapsUnsupportedEffort() async {
+        let luna = makeLuna()
+        let (controller, _) = makeCodexController(
+            catalog: CodexCatalog(models: [luna], fetchedOK: true))
+        controller.refreshCodexCatalog()
+        await waitUntil { !controller.codexModels.isEmpty }
+
+        // `ultra` persisted for another model; luna lacks it → snap to luna's default.
+        controller.effortOverride = "ultra"
+        controller.handle(.modelResolved(model: "luna"), gen: controller.generation)
+        XCTAssertEqual(controller.effortOverride, "medium",
+                       "an unsupported effort snaps to the resolved model's default")
+
+        // A supported effort is NOT overridden.
+        controller.effortOverride = "high"
+        controller.handle(.modelResolved(model: "luna"), gen: controller.generation)
+        XCTAssertEqual(controller.effortOverride, "high", "a valid effort is left alone")
+    }
+
+    /// The other entry point: a PINNED model whose efforts are unknown until the
+    /// catalog loads. Once it does, an unsupported persisted effort is snapped.
+    func testCatalogLoadSnapsUnsupportedEffortForPinnedModel() async {
+        let luna = makeLuna()
+        let (controller, _) = makeCodexController(
+            catalog: CodexCatalog(models: [luna], fetchedOK: true))
+        controller.modelOverride = "luna"    // pinned — governs the effort list
+        controller.effortOverride = "ultra"  // persisted for another model; luna lacks it
+
+        controller.refreshCodexCatalog()
+        await waitUntil { !controller.codexModels.isEmpty }
+
+        XCTAssertEqual(controller.effortOverride, "medium",
+                       "the catalog load snaps a pinned model's unsupported effort to its default")
+    }
+
     /// The Codex model is THREAD-scoped (spec §2.3): changing it once the
     /// conversation has content starts a fresh conversation — preserving the pick
     /// AND the live conversation's own settings. A `defaultsProvider` with

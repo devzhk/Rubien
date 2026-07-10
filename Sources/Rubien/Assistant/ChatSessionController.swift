@@ -529,6 +529,7 @@ final class ChatSessionController: ObservableObject {
             let catalog = await catalogProvider.availableModels()
             guard let self, token == self.catalogFetchToken else { return }
             self.codexModels = catalog?.visibleModels ?? []
+            self.ensureEffortSupported()  // a pinned model's efforts are now known
         }
     }
 
@@ -568,6 +569,22 @@ final class ChatSessionController: ObservableObject {
         effortOverride = defaultEffort
     }
 
+    /// Snap the conversation's effort to one the GOVERNING codex model supports, but
+    /// ONLY when the current value is unsupported — never overriding a still-valid
+    /// choice. codex's app-server REJECTS an unsupported `effort` on turn/start with a
+    /// JSON-RPC error before the turn runs, so an effort persisted for one model
+    /// (e.g. `ultra`) must not ride into one that lacks it. No-op for Claude, an
+    /// unknown/absent governing model, or a model advertising no efforts.
+    private func ensureEffortSupported() {
+        guard providerKind == .codex,
+              let governing = governingCodexModel,
+              !governing.efforts.isEmpty,
+              let current = effortOverride,
+              !governing.efforts.contains(where: { $0.value == current })
+        else { return }
+        effortOverride = governing.defaultEffort ?? governing.efforts.first?.value
+    }
+
     // MARK: Event mapping (internal for testing)
 
     func handle(_ event: AgentEvent, gen: Int) {
@@ -578,6 +595,7 @@ final class ChatSessionController: ObservableObject {
             seedSent = true  // the seed-bearing process started → the seed was delivered
         case .modelResolved(let model):
             resolvedModel = model
+            ensureEffortSupported()  // the governing model is now known — snap a stale effort
         case .assistantDelta(let text):
             transcript.appendDelta(text)  // streaming-only; the commit is what's logged
         case .assistantMessageCompleted(let text):

@@ -143,10 +143,21 @@ enum AssistantModelOptions {
 
     /// The Codex effort picker's rows: the governing model's own effort list
     /// (per-model — 5.6 models add max/ultra), else the universal fallback four.
-    static func codexEffortRows(governing: CodexModelInfo?) -> [(label: String, value: String)] {
+    /// `includingCurrent` appends the conversation's active effort as a trailing row
+    /// when it isn't already listed, so neither picker (sidebar nor Settings) renders
+    /// a blank selection for an out-of-list value — one shared builder, no drift.
+    static func codexEffortRows(
+        governing: CodexModelInfo?, includingCurrent current: String? = nil
+    ) -> [(label: String, value: String)] {
+        var rows: [(label: String, value: String)]
         if let efforts = governing?.efforts, !efforts.isEmpty {
-            return efforts.map { (label: $0.label, value: $0.value) }
+            rows = efforts.map { (label: $0.label, value: $0.value) }
+        } else {
+            rows = AgentProviderKind.codex.descriptor.efforts
         }
-        return AgentProviderKind.codex.descriptor.efforts
+        if let current, !current.isEmpty, !rows.contains(where: { $0.value == current }) {
+            rows.append((label: CodexEffortInfo.label(for: current), value: current))
+        }
+        return rows
     }
 }

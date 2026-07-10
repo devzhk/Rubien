@@ -106,5 +106,24 @@ final class AssistantModelOptionsTests: XCTestCase {
         XCTAssertEqual(AssistantModelOptions.codexEffortRows(governing: sol).map(\.value),
                        ["low", "medium", "high", "xhigh"])
     }
+
+    /// The picker never renders a blank selection: an out-of-list current effort is
+    /// appended as a labeled trailing row; a listed one is not duplicated; nil is a
+    /// no-op (the default-arg parity every existing call site relies on).
+    func testCodexEffortRowsIncludeCurrentWhenUnlisted() {
+        // `terra` offers [low, ultra]; a stored `max` (governing model lacks it) is
+        // appended last with its display label.
+        let withMax = AssistantModelOptions.codexEffortRows(governing: terra, includingCurrent: "max")
+        XCTAssertEqual(withMax.map(\.value), ["low", "ultra", "max"])
+        XCTAssertEqual(withMax.last?.label, "Max")
+        // A current effort already in the list is NOT duplicated.
+        XCTAssertEqual(
+            AssistantModelOptions.codexEffortRows(governing: terra, includingCurrent: "low").map(\.value),
+            ["low", "ultra"])
+        // nil (and empty) current leaves the rows unchanged.
+        XCTAssertEqual(
+            AssistantModelOptions.codexEffortRows(governing: terra, includingCurrent: nil).map(\.value),
+            ["low", "ultra"])
+    }
 }
 #endif

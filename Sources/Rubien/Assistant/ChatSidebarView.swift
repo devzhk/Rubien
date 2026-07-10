@@ -552,7 +552,9 @@ struct ChatSidebarView: View {
             return AssistantModelOptions.efforts(for: .claude)
                 .map { (label: $0.label, value: Optional($0.value)) }
         case .codex:
-            return AssistantModelOptions.codexEffortRows(governing: session.governingCodexModel)
+            return AssistantModelOptions.codexEffortRows(
+                governing: session.governingCodexModel,
+                includingCurrent: session.effortOverride)
                 .map { (label: $0.label, value: Optional($0.value)) }
         }
     }

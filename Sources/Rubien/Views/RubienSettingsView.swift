@@ -324,11 +324,9 @@ struct RubienSettingsView: View {
     /// unlisted stored effort must not blank the control or trigger a write).
     private var settingsCodexEffortRows: [(label: String, value: String)] {
         let governing = codexCatalogModels.first { $0.id == defaultModel }
-        var rows = AssistantModelOptions.codexEffortRows(governing: governing)
-        if !defaultEffort.isEmpty, !rows.contains(where: { $0.value == defaultEffort }) {
-            rows.append((label: CodexEffortInfo.label(for: defaultEffort), value: defaultEffort))
-        }
-        return rows
+        return AssistantModelOptions.codexEffortRows(
+            governing: governing,
+            includingCurrent: defaultEffort.isEmpty ? nil : defaultEffort)
     }
 
     /// Route a model-mirror change back to the CURRENTLY-selected backend's pref.
