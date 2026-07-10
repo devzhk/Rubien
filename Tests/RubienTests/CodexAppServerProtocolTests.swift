@@ -471,5 +471,106 @@ final class CodexAppServerProtocolTests: XCTestCase {
             ReferenceAttribution.referencedIDs(tool: "rubien_future_tool", arguments: ["id": 8]),
             [8])
     }
+
+    // MARK: - model/list (model auto-discovery)
+
+    /// Shape sanitized from a real codex 0.144.1 `model/list` capture (spec §2.1).
+    private let modelListResult: [String: Any] = [
+        "data": [
+            [
+                "id": "gpt-5.5", "model": "gpt-5.5", "displayName": "GPT-5.5",
+                "description": "Frontier model.", "hidden": false, "isDefault": true,
+                "supportedReasoningEfforts": [
+                    ["reasoningEffort": "low", "description": "Fast"],
+                    ["reasoningEffort": "medium", "description": "Balanced"],
+                    ["reasoningEffort": "high", "description": "Deep"],
+                    ["reasoningEffort": "xhigh", "description": "Extra deep"],
+                ],
+                "defaultReasoningEffort": "medium",
+                "inputModalities": ["text", "image"], "futureUnknownField": 42,
+            ],
+            [
+                "id": "gpt-5.6-sol", "model": "gpt-5.6-sol", "displayName": "GPT-5.6-Sol",
+                "description": "Latest frontier agentic coding model.", "hidden": false,
+                "isDefault": false,
+                "supportedReasoningEfforts": [
+                    ["reasoningEffort": "low", "description": "Fast"],
+                    ["reasoningEffort": "max", "description": "Maximum"],
+                    ["reasoningEffort": "ultra", "description": "Maximum + delegation"],
+                ],
+                "defaultReasoningEffort": "low",
+            ],
+            // Hidden entry — decoded, filtered only by visibleModels.
+            ["id": "gpt-5.4", "displayName": "GPT-5.4", "hidden": true, "isDefault": false],
+            // Missing efforts + displayName — falls back to id, empty efforts.
+            ["id": "gpt-x-experimental"],
+            // No usable id — dropped.
+            ["displayName": "Ghost"],
+        ]
+    ]
+
+    func testDecodeModelListMapsFieldsAndTolerartesUnknowns() {
+        let models = CodexAppServerProtocol.decodeModelList(modelListResult)
+        XCTAssertEqual(models.map(\.id), ["gpt-5.5", "gpt-5.6-sol", "gpt-5.4", "gpt-x-experimental"])
+
+        let five5 = models[0]
+        XCTAssertEqual(five5.displayName, "GPT-5.5")
+        XCTAssertEqual(five5.description, "Frontier model.")
+        XCTAssertTrue(five5.isDefault)
+        XCTAssertFalse(five5.hidden)
+        XCTAssertEqual(five5.efforts.map(\.value), ["low", "medium", "high", "xhigh"])
+        XCTAssertEqual(five5.efforts.map(\.label), ["Low", "Medium", "High", "xHigh"])
+        XCTAssertEqual(five5.defaultEffort, "medium")
+
+        let sol = models[1]
+        XCTAssertEqual(sol.efforts.map(\.value), ["low", "max", "ultra"])
+        XCTAssertEqual(sol.efforts.map(\.label), ["Low", "Max", "Ultra"])
+        XCTAssertEqual(sol.defaultEffort, "low")
+
+        XCTAssertTrue(models[2].hidden)
+        let experimental = models[3]
+        XCTAssertEqual(experimental.displayName, "gpt-x-experimental", "missing displayName falls back to id")
+        XCTAssertTrue(experimental.efforts.isEmpty)
+        XCTAssertNil(experimental.defaultEffort)
+        XCTAssertFalse(experimental.isDefault)
+    }
+
+    func testCodexCatalogVisibleModelsFiltersHidden() {
+        let catalog = CodexCatalog(models: CodexAppServerProtocol.decodeModelList(modelListResult), fetchedOK: true)
+        XCTAssertEqual(catalog.visibleModels.map(\.id), ["gpt-5.5", "gpt-5.6-sol", "gpt-x-experimental"])
+        XCTAssertEqual(CodexCatalog.unavailable, CodexCatalog(models: [], fetchedOK: false))
+    }
+
+    func testDecodeModelListEmptyOrGarbageYieldsEmpty() {
+        XCTAssertTrue(CodexAppServerProtocol.decodeModelList([:]).isEmpty)
+        XCTAssertTrue(CodexAppServerProtocol.decodeModelList(["data": "not-an-array"]).isEmpty)
+    }
+
+    func testModelListRequestEncoding() throws {
+        let line = CodexAppServerProtocol.modelList(requestID: 7)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: XCTUnwrap(line.data(using: .utf8))) as? [String: Any])
+        XCTAssertEqual(object["method"] as? String, "model/list")
+        XCTAssertEqual(object["id"] as? Int, 7)
+        XCTAssertEqual((object["params"] as? [String: Any])?.isEmpty, true)
+    }
+
+    /// The thread/start response reports the RESOLVED model — including when the
+    /// request omitted `model` (Codex default; spec §2.2, verified 0.144.1).
+    func testResolvedModelFromThreadResponse() {
+        XCTAssertEqual(
+            CodexAppServerProtocol.resolvedModel(fromThreadResponse:
+                ["thread": ["id": "T1"], "model": "gpt-5.6-terra", "reasoningEffort": "max"]),
+            "gpt-5.6-terra")
+        XCTAssertNil(CodexAppServerProtocol.resolvedModel(fromThreadResponse: ["thread": ["id": "T1"]]))
+        XCTAssertNil(CodexAppServerProtocol.resolvedModel(fromThreadResponse: ["model": ""]))
+    }
+
+    func testEffortLabelMapping() {
+        XCTAssertEqual(CodexEffortInfo.label(for: "low"), "Low")
+        XCTAssertEqual(CodexEffortInfo.label(for: "xhigh"), "xHigh")
+        XCTAssertEqual(CodexEffortInfo.label(for: "ultra"), "Ultra")
+        XCTAssertEqual(CodexEffortInfo.label(for: "some-new-tier"), "Some-New-Tier")
+    }
 }
 #endif
