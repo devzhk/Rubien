@@ -183,7 +183,8 @@ final class RubienPreferencesTests: XCTestCase {
 
     func testAssistantBackendDefaultsWhenUnset() {
         XCTAssertEqual(RubienPreferences.assistantProvider, .claude, "unset ⇒ Claude")
-        XCTAssertEqual(RubienPreferences.assistantCodexModel, "gpt-5.5")
+        XCTAssertNil(RubienPreferences.assistantCodexModel,
+                     "unset ⇒ Codex default (no model sent; codex resolves its own config)")
         XCTAssertEqual(RubienPreferences.assistantCodexEffort, "medium",
                        "Codex effort defaults to medium (dodges the xhigh stall), not high")
         XCTAssertEqual(RubienPreferences.assistantCodexSandbox, .readOnly)
@@ -193,8 +194,10 @@ final class RubienPreferencesTests: XCTestCase {
     func testAssistantBackendPrefsRoundTrip() {
         RubienPreferences.assistantProvider = .codex
         XCTAssertEqual(RubienPreferences.assistantProvider, .codex)
-        RubienPreferences.assistantCodexModel = "gpt-5.5-pro"
-        XCTAssertEqual(RubienPreferences.assistantCodexModel, "gpt-5.5-pro")
+        RubienPreferences.assistantCodexModel = "gpt-5.6-terra"
+        XCTAssertEqual(RubienPreferences.assistantCodexModel, "gpt-5.6-terra")
+        RubienPreferences.assistantCodexModel = nil
+        XCTAssertNil(RubienPreferences.assistantCodexModel, "nil clears back to Codex default")
         RubienPreferences.assistantCodexEffort = "xhigh"
         XCTAssertEqual(RubienPreferences.assistantCodexEffort, "xhigh")
         RubienPreferences.assistantCodexSandbox = .workspaceWrite
@@ -203,17 +206,16 @@ final class RubienPreferencesTests: XCTestCase {
         XCTAssertEqual(RubienPreferences.assistantCodexBinaryPath, "/opt/bin/codex")
     }
 
-    /// A model/effort persisted that the backend doesn't offer (stale pref, a Claude
-    /// slug left in the Codex pref, or a dropped model) must resolve to the backend's
-    /// default rather than leaking an unaccepted slug to the runtime / an empty picker.
-    func testAssistantModelEffortPrefsNormalizeAgainstBackendList() {
-        // A Claude slug is not a Codex model → snaps to the Codex default.
-        RubienPreferences.assistantCodexModel = "opus"
-        XCTAssertEqual(RubienPreferences.assistantCodexModel, "gpt-5.5")
-        // `max` is a Claude effort but not a Codex one → snaps to the Codex default.
-        RubienPreferences.assistantCodexEffort = "max"
-        XCTAssertEqual(RubienPreferences.assistantCodexEffort, "medium")
-        // A Codex slug is not a Claude model → snaps to the Claude default.
+    /// The Codex prefs are RAW (spec §4.4): no static normalization — the old clamp
+    /// would silently rewrite a chosen `max`/`ultra` (absent from the static four)
+    /// back to `medium`, and a pinned model unknown to a static list must survive
+    /// for the catalog-aware picker to handle visibly. Claude prefs still normalize.
+    func testCodexPrefsAreRawClaudePrefsStillNormalize() {
+        RubienPreferences.assistantCodexModel = "gpt-9-future"
+        XCTAssertEqual(RubienPreferences.assistantCodexModel, "gpt-9-future")
+        RubienPreferences.assistantCodexEffort = "ultra"
+        XCTAssertEqual(RubienPreferences.assistantCodexEffort, "ultra", "ultra survives the round-trip")
+        // A Codex slug is not a Claude model → the CLAUDE pref still snaps to its default.
         RubienPreferences.assistantModel = "gpt-5.5"
         XCTAssertEqual(RubienPreferences.assistantModel, "opus")
     }

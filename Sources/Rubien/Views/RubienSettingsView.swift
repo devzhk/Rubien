@@ -276,7 +276,7 @@ struct RubienSettingsView: View {
             defaultModel = RubienPreferences.assistantModel
             defaultEffort = RubienPreferences.assistantEffort
         case .codex:
-            defaultModel = RubienPreferences.assistantCodexModel
+            defaultModel = RubienPreferences.assistantCodexModel ?? ""
             defaultEffort = RubienPreferences.assistantCodexEffort
         }
     }

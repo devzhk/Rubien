@@ -254,27 +254,38 @@ enum RubienPreferences {
         set { UserDefaults.standard.set(newValue.rawValue, forKey: assistantProviderKey) }
     }
 
-    /// Default Codex model slug for new conversations, normalized to Codex's current
-    /// list (empty/unset or a stale slug ⇒ `gpt-5.5`).
+    /// Default Codex model slug for new conversations — RAW (spec §4.4).
+    /// nil/absent = "Codex default": no `model` is sent on `thread/start`; the
+    /// installed codex resolves its own config chain (profile → config.toml →
+    /// builtin). A stored slug is a user pin, sent verbatim; validity is the
+    /// catalog-aware picker's job, never a silent rewrite here.
     static let assistantCodexModelKey = "Rubien.assistant.codex.model"
 
-    static var assistantCodexModel: String {
+    static var assistantCodexModel: String? {
         get {
             let raw = UserDefaults.standard.string(forKey: assistantCodexModelKey) ?? ""
-            return AssistantModelOptions.normalizedModel(raw, for: .codex)
+            return raw.isEmpty ? nil : raw
         }
-        set { UserDefaults.standard.set(newValue, forKey: assistantCodexModelKey) }
+        set {
+            if let value = newValue, !value.isEmpty {
+                UserDefaults.standard.set(value, forKey: assistantCodexModelKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: assistantCodexModelKey)
+            }
+        }
     }
 
-    /// Default Codex reasoning effort for new conversations, normalized to Codex's
-    /// current list (empty/stale ⇒ `medium` — deliberately not the `~/.codex`
-    /// default, which is often `xhigh` and stalls).
+    /// Default Codex reasoning effort for new conversations — RAW except the unset
+    /// fallback `medium` (universal since codex 0.142; deliberately not the
+    /// `~/.codex` default, which is often `xhigh` and stalls). No list clamp: the
+    /// per-model effort lists come from the live catalog (a static clamp would
+    /// silently rewrite a chosen `max`/`ultra` back to `medium`).
     static let assistantCodexEffortKey = "Rubien.assistant.codex.effort"
 
     static var assistantCodexEffort: String {
         get {
             let raw = UserDefaults.standard.string(forKey: assistantCodexEffortKey) ?? ""
-            return AssistantModelOptions.normalizedEffort(raw, for: .codex)
+            return raw.isEmpty ? "medium" : raw
         }
         set { UserDefaults.standard.set(newValue, forKey: assistantCodexEffortKey) }
     }
