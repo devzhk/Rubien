@@ -46,57 +46,7 @@ final class MetadataResolver {
     // MARK: - PDF import
 
     func resolveImportedPDF(url: URL, extracted: PDFService.ExtractedMetadata) async -> MetadataResolutionResult {
-        let seed = MetadataResolutionSeed.fromImportedPDF(url: url, extracted: extracted)
-        let fallback = MetadataResolutionSeed.fallbackReference(from: extracted, url: url)
-
-        if let doi = seed.doi?.rubien_nilIfBlank {
-            let (result, _) = await resolveIdentifierLocally(.doi(doi), seed: seed, fallback: fallback)
-            if case .verified = result { return result }
-            if case .candidate = result { return result }
-            if case .blocked = result { return result }
-        }
-
-        if let isbn = seed.isbn?.rubien_nilIfBlank {
-            let (result, _) = await resolveIdentifierLocally(.isbn(isbn), seed: seed, fallback: fallback)
-            if case .verified = result { return result }
-            if case .candidate = result { return result }
-            if case .blocked = result { return result }
-        }
-
-        if seed.workKindHint == .book,
-           seed.isbn == nil,
-           let title = seed.title?.rubien_nilIfBlank,
-           let bookRef = try? await MetadataFetcher.searchBookByTitle(title) {
-            let evidence = buildGenericEvidence(
-                for: bookRef,
-                fetchMode: .identifier,
-                origin: .identifierAPI,
-                recordKey: bookRef.isbn?.rubien_nilIfBlank,
-                exactIdentifierMatch: false
-            )
-            let result = verifyFetchedRecord(
-                AuthoritativeMetadataRecord(reference: bookRef, evidence: evidence),
-                seed: seed,
-                fallback: fallback,
-                defaultRejectMessage: "Book title search matched, but auto-verification rules were not met."
-            )
-            if case .verified = result { return result }
-            if case .candidate = result { return result }
-            if case .blocked = result { return result }
-        }
-
-        if let title = seed.title?.rubien_nilIfBlank,
-           let titleResult = await resolveByTitle(title, seed: seed, fallback: fallback) {
-            return titleResult
-        }
-
-        return .seedOnly(
-            IntakeEnvelope(
-                seed: seed,
-                fallbackReference: fallback,
-                message: "No authoritative metadata matched; keeping local attachment and seed only."
-            )
-        )
+        await ImportedPDFMetadataResolver.resolve(url: url, extracted: extracted)
     }
 
     // MARK: - Manual entry (paste DOI / arXiv / PMID / ISBN / title)
