@@ -1168,7 +1168,10 @@ struct Import: AsyncParsableCommand {
                 from: source.fileURL,
                 database: AppDatabase.shared
             )
-            notifyLibraryChanged()
+            outcome.postImportNotifications(
+                libraryChanged: notifyLibraryChanged,
+                uploadQueueChanged: PDFUploadQueueBroadcaster.postChangeNotification
+            )
 
             switch outcome {
             case .imported:

@@ -67,6 +67,38 @@ final class PDFImportCoordinatorTests: XCTestCase {
         XCTAssertEqual(try database.fetchPendingMetadataIntakes().map(\.id), [intake.id])
     }
 
+    func testImportedOutcomePostsLibraryAndUploadQueueNotifications() {
+        var libraryNotifications = 0
+        var uploadQueueNotifications = 0
+        let outcome = PDFImportOutcome.imported(Reference(title: "Verified PDF"))
+
+        outcome.postImportNotifications(
+            libraryChanged: { libraryNotifications += 1 },
+            uploadQueueChanged: { uploadQueueNotifications += 1 }
+        )
+
+        XCTAssertEqual(libraryNotifications, 1)
+        XCTAssertEqual(uploadQueueNotifications, 1)
+    }
+
+    func testQueuedOutcomePostsOnlyLibraryNotification() {
+        var libraryNotifications = 0
+        var uploadQueueNotifications = 0
+        let outcome = PDFImportOutcome.queued(MetadataIntake(
+            sourceKind: .importedPDF,
+            verificationStatus: .seedOnly,
+            title: "Queued PDF"
+        ))
+
+        outcome.postImportNotifications(
+            libraryChanged: { libraryNotifications += 1 },
+            uploadQueueChanged: { uploadQueueNotifications += 1 }
+        )
+
+        XCTAssertEqual(libraryNotifications, 1)
+        XCTAssertEqual(uploadQueueNotifications, 0)
+    }
+
     func testImportPDFRemovesUnattachedCopyWhenReferenceAlreadyHasPDF() async throws {
         let database = try makeDatabase()
         let resolution = verifiedResolution()

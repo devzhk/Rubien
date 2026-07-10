@@ -9,6 +9,20 @@ private let pdfImportCoordinatorLog = RubienLogger(
 public enum PDFImportOutcome: Sendable {
     case imported(Reference)
     case queued(MetadataIntake)
+
+    /// Applies the cross-process notifications a command-line front door needs
+    /// after persisting an import. Both outcomes refresh library observers,
+    /// but only an attached PDF creates a `pdfUploadQueue` row that should wake
+    /// the app's sync drainer.
+    public func postImportNotifications(
+        libraryChanged: () -> Void,
+        uploadQueueChanged: () -> Void
+    ) {
+        libraryChanged()
+        if case .imported = self {
+            uploadQueueChanged()
+        }
+    }
 }
 
 /// Coordinates the durable half of a PDF import after a caller has chosen or
