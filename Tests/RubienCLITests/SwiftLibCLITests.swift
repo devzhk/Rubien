@@ -1669,4 +1669,92 @@ final class RubienCLITests: XCTestCase {
         let result = try runCLI(["import", dir.path])
         XCTAssertNotEqual(result.exitCode, 0)
     }
+
+    // MARK: - Markdown folder import (Phase-2 error-contract fixes)
+
+    /// Fix 1: stamping the folder name onto a number/date/checkbox property is
+    /// unsupported. The markdown folder path must report it through the JSON
+    /// error contract (exactly like the Zotero path) instead of letting the
+    /// throw escape to ArgumentParser as bare usage text. `Year` is a built-in
+    /// number property, so `--property Year` exercises the incompatible-type arm.
+    func testImportMarkdownFolderIncompatiblePropertyTypeEmitsJSONError() throws {
+        let dir = try makeClippingsFolder("YearStamp", files: ["a.md": "# Note A\nBody"])
+        let result = try runCLI(["import", dir.path, "--property", "Year"])
+        XCTAssertNotEqual(result.exitCode, 0)
+        let combined = result.stdout + result.stderr
+        // A JSON {"error":…} envelope on stderr, not ArgumentParser usage text.
+        let obj = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.stderr.utf8)) as? [String: String],
+            "expected a JSON error envelope, got: \(combined)"
+        )
+        XCTAssertNotNil(obj["error"], "error envelope must carry an `error` key")
+        XCTAssertFalse(
+            combined.lowercased().contains("usage:"),
+            "must be the JSON error contract, not ArgumentParser usage text: \(combined)"
+        )
+    }
+
+    /// Fix 2: a folder whose only .md files all fail to read (here: invalid
+    /// UTF-8) must exit non-zero — consistent with single-file mode, where one
+    /// unreadable .md already exits non-zero — instead of silently printing a
+    /// success envelope with imported:"0".
+    func testImportMarkdownFolderAllUnreadableExitsNonZero() throws {
+        let dir = try makeClippingsFolder("AllBad", files: [:])
+        let bad = Data([0x23, 0x20, 0xE9, 0xE8, 0xFF])   // "# " + invalid UTF-8
+        try bad.write(to: dir.appendingPathComponent("bad.md"))
+
+        let result = try runCLI(["import", dir.path])
+        XCTAssertNotEqual(result.exitCode, 0)
+        let obj = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.stderr.utf8)) as? [String: String],
+            "expected a JSON error envelope, got stdout=\(result.stdout) stderr=\(result.stderr)"
+        )
+        let message = try XCTUnwrap(obj["error"], "error envelope must carry an `error` key")
+        XCTAssertTrue(message.contains("bad.md"), "error must name the failed file: \(message)")
+    }
+
+    /// Fix 3: routing and import share one enumeration of top-level regular
+    /// files, so a *subdirectory* literally named `nested.md` is filtered out of
+    /// both — it neither hijacks routing nor lands in `failed`. The real note
+    /// beside it still imports.
+    func testImportMarkdownFolderIgnoresSubdirectoryNamedMd() throws {
+        let dir = try makeClippingsFolder("SubdirMd", files: ["real.md": "# Real Note\nBody"])
+        try FileManager.default.createDirectory(
+            at: dir.appendingPathComponent("nested.md", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        let result = try runCLI(["import", dir.path])
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        let obj = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: String]
+        )
+        XCTAssertEqual(obj["imported"], "1", "only the real note imports")
+        XCTAssertEqual(obj["failed"], "", "the subdirectory is filtered out, not a failed file")
+    }
+
+    /// Fix 3: hidden files (leading dot) are skipped by the shared enumeration
+    /// (`.skipsHiddenFiles`, matching ZoteroFolderImporter), so `.hidden.md`
+    /// neither imports nor lands in `failed`. Titles are distinctive so the
+    /// discriminating `list` check cannot collide with the stamped folder name.
+    func testImportMarkdownFolderSkipsHiddenFiles() throws {
+        let dir = try makeClippingsFolder("DotfileSkip", files: [
+            ".hidden.md": "# HiddenOnlyTitle\nBody",
+            "real.md": "# VisibleOnlyTitle\nBody",
+        ])
+        let result = try runCLI(["import", dir.path])
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        let obj = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: String]
+        )
+        XCTAssertEqual(obj["imported"], "1", "only the non-hidden note imports")
+        XCTAssertEqual(obj["failed"], "", "hidden file is skipped, not a failed read")
+
+        let list = try runCLI(["list", "--type", "Markdown"])
+        XCTAssertEqual(list.exitCode, 0, list.stderr)
+        XCTAssertTrue(list.stdout.contains("VisibleOnlyTitle"), "the visible note imported")
+        XCTAssertFalse(
+            list.stdout.contains("HiddenOnlyTitle"),
+            "the hidden note must not import: \(list.stdout)"
+        )
+    }
 }

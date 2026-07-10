@@ -959,9 +959,16 @@ struct Import: ParsableCommand {
         if file != "-" {
             var isDir: ObjCBool = false
             if FileManager.default.fileExists(atPath: file, isDirectory: &isDir), isDir.boolValue {
-                let entries = (try? FileManager.default.contentsOfDirectory(atPath: file)) ?? []
-                let hasBib = entries.contains { $0.lowercased().hasSuffix(".bib") }
-                let hasMD = entries.contains { $0.lowercased().hasSuffix(".md") }
+                let folderURL = URL(fileURLWithPath: file)
+                let regularFiles: [URL]
+                do {
+                    regularFiles = try Self.topLevelRegularFiles(in: folderURL)
+                } catch {
+                    printJSONError("Cannot read folder \(folderURL.lastPathComponent): \(error.localizedDescription)")
+                    throw ExitCode.failure
+                }
+                let hasBib = regularFiles.contains { $0.pathExtension.lowercased() == "bib" }
+                let hasMD = regularFiles.contains { ["md", "markdown"].contains($0.pathExtension.lowercased()) }
 
                 if let forced = format?.lowercased() {
                     switch forced {
@@ -1112,38 +1119,83 @@ struct Import: ParsableCommand {
             throw ExitCode.failure
         }
 
-        let mdFiles = ((try? FileManager.default.contentsOfDirectory(
-            at: folderURL, includingPropertiesForKeys: [.fileSizeKey]
-        )) ?? [])
-            .filter { $0.pathExtension.lowercased() == "md" }
+        // Import from the SAME single enumeration the router routed on, so the
+        // two can never disagree about which files exist (a subdirectory named
+        // `x.md`, a symlink, or a hidden file is filtered out of both).
+        let regularFiles: [URL]
+        do {
+            regularFiles = try Self.topLevelRegularFiles(in: folderURL)
+        } catch {
+            printJSONError("Cannot read folder \(folderURL.lastPathComponent): \(error.localizedDescription)")
+            throw ExitCode.failure
+        }
+        let mdFiles = regularFiles
+            .filter { ["md", "markdown"].contains($0.pathExtension.lowercased()) }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
 
         var refs: [Reference] = []
         var failed: [String] = []
         for url in mdFiles {
             let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-            guard size <= 50 * 1024 * 1024 else { failed.append(url.lastPathComponent); continue }
-            guard let content = try? String(contentsOf: url, encoding: .utf8) else {
-                failed.append(url.lastPathComponent); continue
+            if size <= 50 * 1024 * 1024, let content = try? String(contentsOf: url, encoding: .utf8) {
+                refs.append(MarkdownImporter.parse(
+                    content, filename: url.deletingPathExtension().lastPathComponent
+                ))
+            } else {
+                failed.append(url.lastPathComponent)
             }
-            refs.append(MarkdownImporter.parse(
-                content, filename: url.deletingPathExtension().lastPathComponent
-            ))
         }
 
-        let result = try db.batchImportReferences(
-            refs,
-            stamping: ZoteroImportPropertyTarget(propertyId: propId, value: stampValue),
-            mergePolicy: .markdownFillOnly
+        // Every candidate .md failed to read → exit non-zero, mirroring
+        // single-file mode (one unreadable .md exits non-zero). A genuinely
+        // partial import (some ok, some failed) still reports success with the
+        // `failed` field populated.
+        if refs.isEmpty, !failed.isEmpty {
+            printJSONError("No importable Markdown files (all failed to read): \(failed.joined(separator: ", "))")
+            throw ExitCode.failure
+        }
+
+        do {
+            let result = try db.batchImportReferences(
+                refs,
+                stamping: ZoteroImportPropertyTarget(propertyId: propId, value: stampValue),
+                mergePolicy: .markdownFillOnly
+            )
+            notifyLibraryChanged()
+            printJSON([
+                "imported": "\(result.count)",
+                "failed": failed.joined(separator: ", "),
+                "property": propertyName,
+                "value": stampValue,
+                "file": folderPath,
+            ])
+        } catch let error as ZoteroImportError {
+            // Stamping an incompatible property type (number/date/checkbox)
+            // throws here — report it via the JSON error contract, exactly like
+            // the Zotero folder path, instead of leaking an ArgumentParser trap.
+            printJSONError(error.errorDescription ?? "\(error)")
+            throw ExitCode.failure
+        }
+    }
+
+    /// Top-level, regular (non-directory, non-symlink), non-hidden files in
+    /// `folderURL`. The folder-format router and `runMarkdownFolderImport` both
+    /// filter from this single enumeration so routing and import can never
+    /// disagree about which files a folder holds. `.skipsHiddenFiles` matches
+    /// `ZoteroFolderImporter`'s own enumeration. Throws when the directory
+    /// itself cannot be read (as opposed to being merely empty), so callers can
+    /// report "Cannot read folder …" instead of a misleading "no importable
+    /// files".
+    private static func topLevelRegularFiles(in folderURL: URL) throws -> [URL] {
+        let entries = try FileManager.default.contentsOfDirectory(
+            at: folderURL,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+            options: [.skipsHiddenFiles]
         )
-        notifyLibraryChanged()
-        printJSON([
-            "imported": "\(result.count)",
-            "failed": failed.joined(separator: ", "),
-            "property": propertyName,
-            "value": stampValue,
-            "file": folderPath,
-        ])
+        return entries.filter { url in
+            let vals = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            return (vals?.isRegularFile ?? false) && !(vals?.isSymbolicLink ?? false)
+        }
     }
 }
 
