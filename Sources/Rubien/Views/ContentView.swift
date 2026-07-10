@@ -815,6 +815,7 @@ struct ContentView: View {
     @State private var showWebImport = false
     @State private var showAddByIdentifier = false
     @State private var showBatchImport = false
+    @State private var showImportSourceSheet = false
     /// Monotonic token owned by `importFilesWithMetadata`. Each batch captures
     /// its value; the batch's own auto-clear timer only wipes `importProgress`
     /// if it still matches, so a stale timer from an earlier batch can't erase
@@ -848,7 +849,7 @@ struct ContentView: View {
     /// Per-file result of a single PDF import, surfaced to the batch
     /// coordinator's summary. Never carries UI-state mutations — the
     /// coordinator owns `isImporting`/`importProgress`.
-    private enum PDFImportOutcome {
+    private enum PDFBatchImportOutcome {
         case imported(title: String)
         case queued(MetadataIntake)
         case failed(String)
@@ -931,7 +932,7 @@ struct ContentView: View {
             .help(String(localized: "Paste a URL and let Rubien clip the title, abstract, and article body", bundle: .module))
 
             Button {
-                importFilesWithMetadata()
+                showImportSourceSheet = true
             } label: {
                 Label(String(localized: "content.toolbar.importPDFAuto", bundle: .module), systemImage: "doc.badge.plus")
             }
@@ -1220,6 +1221,11 @@ struct ContentView: View {
                 }
             )
         }
+        .sheet(isPresented: $showImportSourceSheet) {
+            ImportSourceSheet { sources in
+                importFilesWithMetadata(sources)
+            }
+        }
         .sheet(item: $pendingZoteroImportFolder) { pending in
             ZoteroImportSheet(
                 folderURL: pending.url,
@@ -1435,59 +1441,55 @@ struct ContentView: View {
         pendingZoteroImportFolder = PendingZoteroImport(url: url)
     }
 
-    /// Batch coordinator for the "Import PDF/Markdown" toolbar action. Owns
-    /// EVERY `isImporting`/`importProgress` mutation for the whole batch:
-    /// markdown files import instantly via a fill-only local batch, PDFs run
-    /// sequentially through `importSinglePDF(url:)` (which mutates no batch
-    /// state), and the aggregated summary is shown once at the end. It calls
-    /// `viewModel.persistMetadataResolution` directly rather than
-    /// `queueResolutionResult` so per-file persistence doesn't reset the
-    /// batch's progress or schedule stale clear timers.
-    private func importFilesWithMetadata() {
-        // Reentrancy guard: the toolbar Button is also `.disabled` while
-        // importing, but this blocks any programmatic re-entry from spawning a
-        // concurrent batch that would corrupt shared isImporting/
-        // importProgress/selectedId state.
-        guard !viewModel.isImporting else { return }
-        let urls = OpenPanelPicker.pickImportableFiles()
-        guard !urls.isEmpty else { return }
-        // Mirror the CLI/MCP predicate (`["md", "markdown"]`) exactly so app and
-        // CLI agree: the system markdown UTI claims BOTH extensions, and the panel
-        // admits both — filtering on "md" alone silently drops `.markdown` files.
-        let mdURLs = urls.filter { ["md", "markdown"].contains($0.pathExtension.lowercased()) }
-        let pdfURLs = urls.filter { $0.pathExtension.lowercased() == "pdf" }
-        // Defense-in-depth: the panel's allowedContentTypes should only admit
-        // markdown/PDF, but surface anything else in the summary instead of
-        // importing it with no feedback and no error.
-        let unsupported = urls.filter { !["md", "markdown", "pdf"].contains($0.pathExtension.lowercased()) }
+    /// Batch coordinator for materialized PDF/Markdown sources. It owns every
+    /// `isImporting`/`importProgress` mutation for the whole batch; the sheet
+    /// owns only source acquisition and temporary-file creation.
+    private func importFilesWithMetadata(_ sources: [MaterializedImportSource]) {
+        guard !sources.isEmpty else { return }
+        // A source sheet can finish acquisition just as another import starts.
+        // Do not strand its remote temporary directories if that race occurs.
+        guard !viewModel.isImporting else {
+            sources.forEach { $0.cleanup() }
+            return
+        }
+
+        let markdownSources = sources.filter { $0.kind == .markdown }
+        let pdfSources = sources.filter { $0.kind == .pdf }
 
         // Claim a fresh generation so this batch's auto-clear timer only wipes
         // its own summary (see the closure at the end of the Task).
         importGeneration += 1
         let generation = importGeneration
         viewModel.isImporting = true
-        // Seed with wording that matches the selection: "Importing PDF…" is wrong
-        // for an all-markdown batch (partition above runs first so we can branch).
-        viewModel.importProgress = pdfURLs.isEmpty
+        // "Importing PDF…" is wrong for an all-markdown batch.
+        viewModel.importProgress = pdfSources.isEmpty
             ? String(localized: "Importing markdown…", bundle: .module)
             : String(localized: "content.import.progress.importingPDF", bundle: .module)
 
         Task { @MainActor in
+            // Remote materialization is caller-cleanable; local files have no
+            // temporary directory, so cleanup can never delete caller-owned data.
+            defer { sources.forEach { $0.cleanup() } }
+
             var summary: [String] = []
             var firstIntake: MetadataIntake?
 
-            // Markdown: instant local batch (spec §4). 50 MB / UTF-8 guards per file.
-            if !mdURLs.isEmpty {
+            // Markdown: validated by ImportSourceMaterializer, then parsed and
+            // persisted with the existing fill-only merge behavior.
+            if !markdownSources.isEmpty {
                 var refs: [Reference] = []
                 var failed: [String] = []
-                for url in mdURLs {
-                    // Sandboxed app: same security-scoped access dance as
-                    // viewModel.importBibTeX(from:).
-                    let accessing = url.startAccessingSecurityScopedResource()
-                    defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-                    let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-                    guard size <= 50 * 1024 * 1024,
-                          let content = try? String(contentsOf: url, encoding: .utf8) else {
+                for source in markdownSources {
+                    let url = source.fileURL
+                    let accessing = source.temporaryDirectoryURL == nil
+                        ? url.startAccessingSecurityScopedResource()
+                        : false
+                    defer {
+                        if accessing {
+                            url.stopAccessingSecurityScopedResource()
+                        }
+                    }
+                    guard let content = try? String(contentsOf: url, encoding: .utf8) else {
                         failed.append(url.lastPathComponent)
                         continue
                     }
@@ -1517,12 +1519,22 @@ struct ContentView: View {
                 }
             }
 
-            // PDFs: sequential, one metadata resolution at a time (spec §4).
-            for (index, url) in pdfURLs.enumerated() {
-                if pdfURLs.count > 1 {
-                    viewModel.importProgress = "\(url.lastPathComponent) (\(index + 1)/\(pdfURLs.count))…"
+            // PDFs: sequential, one shared metadata-resolution/persistence
+            // operation at a time. The coordinator owns durable PDF cleanup.
+            for (index, source) in pdfSources.enumerated() {
+                let url = source.fileURL
+                if pdfSources.count > 1 {
+                    viewModel.importProgress = "\(url.lastPathComponent) (\(index + 1)/\(pdfSources.count))…"
                 }
-                switch await importSinglePDF(url: url) {
+                let accessing = source.temporaryDirectoryURL == nil
+                    ? url.startAccessingSecurityScopedResource()
+                    : false
+                defer {
+                    if accessing {
+                        url.stopAccessingSecurityScopedResource()
+                    }
+                }
+                switch await importSinglePDF(source: source) {
                 case .imported(let title):
                     let fmt = String(localized: "Imported: %@", bundle: .module)
                     summary.append(String(format: fmt, title))
@@ -1532,15 +1544,6 @@ struct ContentView: View {
                 case .failed(let message):
                     summary.append(message)
                 }
-            }
-
-            // Surface any files the panel let through that we can't import,
-            // so the drop is never silent (see `unsupported` above).
-            if !unsupported.isEmpty {
-                summary.append(
-                    String(format: String(localized: "Unsupported file(s): %@", bundle: .module),
-                           unsupported.map { $0.lastPathComponent }.joined(separator: ", "))
-                )
             }
 
             viewModel.isImporting = false
@@ -1562,85 +1565,25 @@ struct ContentView: View {
         }
     }
 
-    /// Runs the existing single-PDF import + resolution flow for one file.
-    /// Pure per-file: returns the outcome for the batch summary; never mutates
-    /// isImporting/importProgress (the coordinator owns those).
-    private func importSinglePDF(url: URL) async -> PDFImportOutcome {
+    /// Uses the shared PDF coordinator for resolution and persistence, then
+    /// performs only UI-facing follow-through for the batch summary.
+    private func importSinglePDF(source: MaterializedImportSource) async -> PDFBatchImportOutcome {
         do {
-            let prepared = try PDFService.prepareImportedPDF(from: url)
-            // `prepared.pdfPath` is the bare filename of the freshly copied
-            // PDF under `pdfStorageURL`. We carry it through the resolution
-            // flow so the eventual save can register a cache row pointing
-            // at the file.
-            let preparedPDFFilename = prepared.pdfPath
-            _ = MetadataResolutionSeed.fromImportedPDF(url: url, extracted: prepared.extracted)
-
-            // Save/attach/persist failed after the PDF was copied: delete the
-            // orphaned file and report failure keyed on the source filename.
-            func cleanupAndFail() -> PDFImportOutcome {
-                PDFService.deletePDF(at: preparedPDFFilename)
-                let fmt = String(localized: "PDF import failed: %@", bundle: .module)
-                return .failed(String(format: fmt, url.lastPathComponent))
-            }
-
-            let resolution = await metadataResolver.resolveImportedPDF(url: url, extracted: prepared.extracted)
-
-            switch resolution {
-            case .verified(let envelope):
-                let reference = envelope.reference
-                guard finishPDFImport(with: reference, pdfFilename: preparedPDFFilename) else {
-                    return cleanupAndFail()
-                }
+            switch try await PDFImportCoordinator.importPDF(
+                from: source.fileURL,
+                database: viewModel.db
+            ) {
+            case .imported(let reference):
+                selectedId = reference.id
+                let coordinator = syncCoordinator
+                Task { await coordinator?.kickPDFUploadDrainer() }
                 return .imported(title: reference.title)
-
-            case .candidate, .blocked, .seedOnly, .rejected:
-                let persisted = viewModel.persistMetadataResolution(
-                    resolution,
-                    options: MetadataPersistenceOptions(
-                        sourceKind: .importedPDF,
-                        preferredPDFPath: preparedPDFFilename
-                    )
-                )
-                switch persisted {
-                case .verified(let reference):
-                    selectedId = reference.id
-                    return .imported(title: reference.title)
-                case .intake(let intake):
-                    return .queued(intake)
-                case .none:
-                    return cleanupAndFail()
-                }
+            case .queued(let intake):
+                return .queued(intake)
             }
         } catch {
             let fmt = String(localized: "PDF import failed: %@", bundle: .module)
             return .failed(String(format: fmt, error.localizedDescription))
-        }
-    }
-
-    /// Saves the resolved reference and attaches its imported PDF.
-    /// Returns `true` only if the reference actually saved **and** (when a PDF
-    /// filename is supplied) the attach succeeded — so the caller can clean up
-    /// an orphaned prepared PDF and report an honest failure. `saveReference`
-    /// returns `nil` when the write threw (it has already surfaced
-    /// `errorMessage`); attach failures set `errorMessage` here and return
-    /// `false`.
-    private func finishPDFImport(with reference: Reference, pdfFilename: String?) -> Bool {
-        var mutable = reference
-        // nil result = save threw; a nil id after "success" is equally a failure.
-        guard viewModel.saveReference(&mutable) != nil, let id = mutable.id else {
-            return false
-        }
-        selectedId = id
-        // No PDF to attach: the reference itself saved, so the import stands.
-        guard let pdfFilename else { return true }
-        do {
-            try viewModel.db.attachImportedPDFs(rowIds: [id], filenames: [pdfFilename])
-            let coordinator = syncCoordinator
-            Task { await coordinator?.kickPDFUploadDrainer() }
-            return true
-        } catch {
-            viewModel.errorMessage = "Attach PDF failed: \(error.localizedDescription)"
-            return false
         }
     }
 

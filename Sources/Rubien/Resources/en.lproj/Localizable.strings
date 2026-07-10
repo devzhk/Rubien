@@ -44,6 +44,16 @@
 "batchImport.result.queued" = "Queued for review";
 "batchImport.result.failed" = "Failed";
 
+// MARK: - Import source sheet
+
+"importSourceSheet.title" = "Import PDF/Markdown";
+"importSourceSheet.field.placeholder" = "Paste a file path or a URL to a PDF/Markdown file";
+"importSourceSheet.button.choose" = "Choose…";
+"importSourceSheet.button.import" = "Import";
+"importSourceSheet.selection.multiple" = "%d files selected";
+"importSourceSheet.status.preparing" = "Preparing import…";
+"importSourceSheet.error.acquisition" = "Unable to prepare import: %@";
+
 // MARK: - Metadata candidate picker
 
 "candidatePicker.title" = "Choose a match";

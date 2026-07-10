@@ -37,7 +37,11 @@ enum OpenPanelPicker {
         let panel = configuredPanel(
             title: String(localized: "Import PDF/Markdown", bundle: .module),
             prompt: String(localized: "Import", bundle: .module),
-            allowedContentTypes: [.pdf, type(forExtension: "md", fallback: .plainText)]
+            allowedContentTypes: [
+                .pdf,
+                type(forExtension: "md", fallback: .plainText),
+                type(forExtension: "markdown", fallback: .plainText),
+            ]
         )
         panel.allowsMultipleSelection = true
         return panel.runModal() == .OK ? panel.urls : []
