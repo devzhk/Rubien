@@ -840,6 +840,15 @@ struct ContentView: View {
         let url: URL
     }
 
+    /// Per-file result of a single PDF import, surfaced to the batch
+    /// coordinator's summary. Never carries UI-state mutations — the
+    /// coordinator owns `isImporting`/`importProgress`.
+    private enum PDFImportOutcome {
+        case imported(title: String)
+        case queued(MetadataIntake)
+        case failed(String)
+    }
+
     private var metadataResolver: MetadataResolver {
         MetadataResolver()
     }
@@ -917,7 +926,7 @@ struct ContentView: View {
             .help(String(localized: "Paste a URL and let Rubien clip the title, abstract, and article body", bundle: .module))
 
             Button {
-                importPDFWithMetadata()
+                importFilesWithMetadata()
             } label: {
                 Label(String(localized: "content.toolbar.importPDFAuto", bundle: .module), systemImage: "doc.badge.plus")
             }
@@ -1417,61 +1426,149 @@ struct ContentView: View {
         pendingZoteroImportFolder = PendingZoteroImport(url: url)
     }
 
-    private func importPDFWithMetadata() {
-        guard let url = OpenPanelPicker.pickPDFFile() else { return }
+    /// Batch coordinator for the "Import PDF/Markdown" toolbar action. Owns
+    /// EVERY `isImporting`/`importProgress` mutation for the whole batch:
+    /// markdown files import instantly via a fill-only local batch, PDFs run
+    /// sequentially through `importSinglePDF(url:)` (which mutates no batch
+    /// state), and the aggregated summary is shown once at the end. It calls
+    /// `viewModel.persistMetadataResolution` directly rather than
+    /// `queueResolutionResult` so per-file persistence doesn't reset the
+    /// batch's progress or schedule stale clear timers.
+    private func importFilesWithMetadata() {
+        let urls = OpenPanelPicker.pickImportableFiles()
+        guard !urls.isEmpty else { return }
+        let mdURLs = urls.filter { $0.pathExtension.lowercased() == "md" }
+        let pdfURLs = urls.filter { $0.pathExtension.lowercased() == "pdf" }
+
         viewModel.isImporting = true
         viewModel.importProgress = String(localized: "content.import.progress.importingPDF", bundle: .module)
 
         Task { @MainActor in
-            do {
-                let prepared = try PDFService.prepareImportedPDF(from: url)
-                // `prepared.pdfPath` is the bare filename of the freshly copied
-                // PDF under `pdfStorageURL`. We carry it through the resolution
-                // flow so the eventual save can register a cache row pointing
-                // at the file.
-                let preparedPDFFilename = prepared.pdfPath
-                _ = MetadataResolutionSeed.fromImportedPDF(url: url, extracted: prepared.extracted)
+            var summary: [String] = []
+            var firstIntake: MetadataIntake?
 
-                if let doi = prepared.extracted.doi, !doi.isEmpty {
-                    let fmt = String(localized: "content.import.progress.fetchingMetadata", bundle: .module)
-                    viewModel.importProgress = String(format: fmt, doi)
+            // Markdown: instant local batch (spec §4). 50 MB / UTF-8 guards per file.
+            if !mdURLs.isEmpty {
+                var refs: [Reference] = []
+                var failed: [String] = []
+                for url in mdURLs {
+                    // Sandboxed app: same security-scoped access dance as
+                    // viewModel.importBibTeX(from:).
+                    let accessing = url.startAccessingSecurityScopedResource()
+                    defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+                    let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                    guard size <= 50 * 1024 * 1024,
+                          let content = try? String(contentsOf: url, encoding: .utf8) else {
+                        failed.append(url.lastPathComponent)
+                        continue
+                    }
+                    refs.append(MarkdownImporter.parse(
+                        content, filename: url.deletingPathExtension().lastPathComponent
+                    ))
                 }
-
-                let resolution = await metadataResolver.resolveImportedPDF(url: url, extracted: prepared.extracted)
-
-                switch resolution {
-                case .verified(let envelope):
-                    let reference = envelope.reference
-                    let fmt = String(localized: "Imported: %@", bundle: .module)
-                    finishPDFImport(
-                        with: reference,
-                        pdfFilename: preparedPDFFilename,
-                        message: String(format: fmt, reference.title)
-                    )
-
-                case .candidate, .blocked, .seedOnly, .rejected:
-                    let queued = queueResolutionResult(
-                        resolution,
-                        options: MetadataPersistenceOptions(
-                            sourceKind: .importedPDF,
-                            preferredPDFPath: preparedPDFFilename
-                        ),
-                        successMessage: String(localized: "Couldn't auto-verify — added to the pending queue", bundle: .module)
-                    )
-                    if queued == nil {
-                        PDFService.deletePDF(at: preparedPDFFilename)
+                if !refs.isEmpty {
+                    do {
+                        let result = try viewModel.db.batchImportReferences(
+                            refs, mergePolicy: .markdownFillOnly
+                        )
+                        selectedId = result.ids.last
+                        let fmt = String(localized: "Imported %d markdown file(s)", bundle: .module)
+                        summary.append(String(format: fmt, result.count))
+                        // No explicit reload: the list refreshes via observation,
+                        // same as viewModel.importBibTeX(from:).
+                    } catch {
+                        summary.append("Markdown import failed: \(error.localizedDescription)")
                     }
                 }
-            } catch {
-                viewModel.isImporting = false
-                viewModel.importProgress = nil
-                let fmt = String(localized: "PDF import failed: %@", bundle: .module)
-                viewModel.errorMessage = String(format: fmt, error.localizedDescription)
+                if !failed.isEmpty {
+                    summary.append(
+                        String(format: String(localized: "Could not read: %@", bundle: .module),
+                               failed.joined(separator: ", "))
+                    )
+                }
+            }
+
+            // PDFs: sequential, one metadata resolution at a time (spec §4).
+            for (index, url) in pdfURLs.enumerated() {
+                if pdfURLs.count > 1 {
+                    viewModel.importProgress = "\(url.lastPathComponent) (\(index + 1)/\(pdfURLs.count))…"
+                }
+                switch await importSinglePDF(url: url) {
+                case .imported(let title):
+                    let fmt = String(localized: "Imported: %@", bundle: .module)
+                    summary.append(String(format: fmt, title))
+                case .queued(let intake):
+                    if firstIntake == nil { firstIntake = intake }
+                    summary.append(String(localized: "Couldn't auto-verify — added to the pending queue", bundle: .module))
+                case .failed(let message):
+                    summary.append(message)
+                }
+            }
+
+            viewModel.isImporting = false
+            viewModel.importProgress = summary.isEmpty ? nil : summary.joined(separator: " · ")
+            if let intake = firstIntake {
+                showPendingQueueNotice(for: intake, message: nil)
+            }
+            // Auto-clear the toast like viewModel.importBibTeX(from:) does.
+            if !summary.isEmpty {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                    if !viewModel.isImporting {
+                        viewModel.importProgress = nil
+                    }
+                }
             }
         }
     }
 
-    private func finishPDFImport(with reference: Reference, pdfFilename: String?, message: String?) {
+    /// Runs the existing single-PDF import + resolution flow for one file.
+    /// Pure per-file: returns the outcome for the batch summary; never mutates
+    /// isImporting/importProgress (the coordinator owns those).
+    private func importSinglePDF(url: URL) async -> PDFImportOutcome {
+        do {
+            let prepared = try PDFService.prepareImportedPDF(from: url)
+            // `prepared.pdfPath` is the bare filename of the freshly copied
+            // PDF under `pdfStorageURL`. We carry it through the resolution
+            // flow so the eventual save can register a cache row pointing
+            // at the file.
+            let preparedPDFFilename = prepared.pdfPath
+            _ = MetadataResolutionSeed.fromImportedPDF(url: url, extracted: prepared.extracted)
+
+            let resolution = await metadataResolver.resolveImportedPDF(url: url, extracted: prepared.extracted)
+
+            switch resolution {
+            case .verified(let envelope):
+                let reference = envelope.reference
+                finishPDFImport(with: reference, pdfFilename: preparedPDFFilename)
+                return .imported(title: reference.title)
+
+            case .candidate, .blocked, .seedOnly, .rejected:
+                let persisted = viewModel.persistMetadataResolution(
+                    resolution,
+                    options: MetadataPersistenceOptions(
+                        sourceKind: .importedPDF,
+                        preferredPDFPath: preparedPDFFilename
+                    )
+                )
+                switch persisted {
+                case .verified(let reference):
+                    selectedId = reference.id
+                    return .imported(title: reference.title)
+                case .intake(let intake):
+                    return .queued(intake)
+                case .none:
+                    PDFService.deletePDF(at: preparedPDFFilename)
+                    let fmt = String(localized: "PDF import failed: %@", bundle: .module)
+                    return .failed(String(format: fmt, url.lastPathComponent))
+                }
+            }
+        } catch {
+            let fmt = String(localized: "PDF import failed: %@", bundle: .module)
+            return .failed(String(format: fmt, error.localizedDescription))
+        }
+    }
+
+    private func finishPDFImport(with reference: Reference, pdfFilename: String?) {
         var mutable = reference
         viewModel.saveReference(&mutable)
         if let pdfFilename, let id = mutable.id {
@@ -1484,14 +1581,6 @@ struct ContentView: View {
             }
         }
         selectedId = mutable.id
-        viewModel.isImporting = false
-        viewModel.importProgress = message
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            if !viewModel.isImporting {
-                viewModel.importProgress = nil
-            }
-        }
     }
 
     private func refreshMetadata(for references: [Reference]) {
