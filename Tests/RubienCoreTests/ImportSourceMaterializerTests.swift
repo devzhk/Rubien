@@ -2,6 +2,7 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
+import Dispatch
 import XCTest
 @testable import RubienCore
 
@@ -61,12 +62,90 @@ final class ImportSourceURLProtocol: URLProtocol {
     }
 }
 
+/// Sends headers immediately but holds the body until the test releases it.
+/// A cancellation-aware materializer must finish before the release and leave
+/// the delayed callback unable to resurrect a temporary import source.
+final class DelayedMarkdownURLProtocol: URLProtocol {
+    nonisolated(unsafe) static var response: HTTPURLResponse!
+    nonisolated(unsafe) static var data = Data()
+    nonisolated(unsafe) static var requestStarted: XCTestExpectation?
+    nonisolated(unsafe) static var delayedCallbackAttempted: XCTestExpectation?
+    nonisolated(unsafe) static var gate = DispatchSemaphore(value: 0)
+
+    private let lock = NSLock()
+    private var stopped = false
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        client?.urlProtocol(self, didReceive: Self.response, cacheStoragePolicy: .notAllowed)
+        Self.requestStarted?.fulfill()
+
+        let gate = Self.gate
+        DispatchQueue.global().async { [self] in
+            gate.wait()
+            Self.delayedCallbackAttempted?.fulfill()
+
+            lock.lock()
+            let wasStopped = stopped
+            lock.unlock()
+            guard !wasStopped else { return }
+
+            client?.urlProtocol(self, didLoad: Self.data)
+            client?.urlProtocolDidFinishLoading(self)
+        }
+    }
+
+    override func stopLoading() {
+        lock.lock()
+        stopped = true
+        lock.unlock()
+    }
+
+    static func configure(
+        url: URL,
+        requestStarted: XCTestExpectation,
+        delayedCallbackAttempted: XCTestExpectation
+    ) {
+        response = HTTPURLResponse(
+            url: url,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "text/plain"]
+        )!
+        data = Data("# Delayed note".utf8)
+        self.requestStarted = requestStarted
+        self.delayedCallbackAttempted = delayedCallbackAttempted
+        gate = DispatchSemaphore(value: 0)
+    }
+
+    static func makeSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DelayedMarkdownURLProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+
+    static func releaseDelayedCallback() {
+        gate.signal()
+    }
+
+    static func reset() {
+        response = nil
+        data = Data()
+        requestStarted = nil
+        delayedCallbackAttempted = nil
+        gate.signal()
+    }
+}
+
 final class ImportSourceMaterializerTests: XCTestCase {
     private var temporaryRoot: URL!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
         ImportSourceURLProtocol.reset()
+        DelayedMarkdownURLProtocol.reset()
         temporaryRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("ImportSourceMaterializerTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: temporaryRoot, withIntermediateDirectories: true)
@@ -74,6 +153,7 @@ final class ImportSourceMaterializerTests: XCTestCase {
 
     override func tearDownWithError() throws {
         ImportSourceURLProtocol.reset()
+        DelayedMarkdownURLProtocol.reset()
         try? FileManager.default.removeItem(at: temporaryRoot)
         temporaryRoot = nil
         try super.tearDownWithError()
@@ -166,6 +246,48 @@ final class ImportSourceMaterializerTests: XCTestCase {
         }
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: escapedURL.path))
+    }
+
+    func testCancellingDelayedRemoteMarkdownRemovesTemporarySource() async throws {
+        let remoteURL = URL(string: "https://example.test/notes/delayed.md")!
+        let requestStarted = expectation(description: "request started")
+        let delayedCallbackAttempted = expectation(description: "delayed callback attempted")
+        DelayedMarkdownURLProtocol.configure(
+            url: remoteURL,
+            requestStarted: requestStarted,
+            delayedCallbackAttempted: delayedCallbackAttempted
+        )
+        defer { DelayedMarkdownURLProtocol.releaseDelayedCallback() }
+
+        let existingTemporaryDirectories = importTemporaryDirectoryNames()
+        let importTask = Task {
+            try await ImportSourceMaterializer.materialize(
+                remoteURL.absoluteString,
+                localPathPolicy: .requireAbsolute,
+                session: DelayedMarkdownURLProtocol.makeSession()
+            )
+        }
+        let completion = expectation(description: "cancelled import completes")
+        _ = Task {
+            _ = await importTask.result
+            completion.fulfill()
+        }
+
+        await fulfillment(of: [requestStarted], timeout: 1)
+        importTask.cancel()
+        await fulfillment(of: [completion], timeout: 1)
+        DelayedMarkdownURLProtocol.releaseDelayedCallback()
+        await fulfillment(of: [delayedCallbackAttempted], timeout: 1)
+
+        switch await importTask.result {
+        case .success(let materialized):
+            let actualTemporaryDirectories = importTemporaryDirectoryNames()
+            materialized.cleanup()
+            XCTFail("Cancellation returned a materialized source: \(actualTemporaryDirectories)")
+        case .failure(let error):
+            XCTAssertTrue(error is CancellationError, "Expected CancellationError, got: \(error)")
+        }
+        XCTAssertEqual(importTemporaryDirectoryNames(), existingTemporaryDirectories)
     }
 
     func testRemotePDFUsesOriginalFilenameAndCleansUp() async throws {
@@ -333,4 +455,10 @@ final class ImportSourceMaterializerTests: XCTestCase {
     }
 
     private let maximumMarkdownBytes = 50 * 1024 * 1024
+
+    private func importTemporaryDirectoryNames() -> Set<String> {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: temporaryDirectory.path)) ?? []
+        return Set(names.filter { $0.hasPrefix("RubienImport-") })
+    }
 }

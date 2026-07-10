@@ -295,31 +295,56 @@ public enum ImportSourceMaterializer {
     /// HTTP headers or impose a byte cap.
     private final class MarkdownStreamingDownload: NSObject, URLSessionDataDelegate {
         private let destinationURL: URL
-        private var continuation: CheckedContinuation<URL, Error>?
-        private var session: URLSession?
-        private var fileHandle: FileHandle?
-        private var bytesWritten: Int64 = 0
-        private var resultError: Error?
-        private var didFinish = false
+        private let state = State()
 
         init(destinationURL: URL) {
             self.destinationURL = destinationURL
         }
 
         func download(from remoteURL: URL, using sourceSession: URLSession) async throws -> URL {
+            try Task.checkCancellation()
             let configuration = sourceSession.configuration.copy() as! URLSessionConfiguration
             let delegateQueue = OperationQueue()
             delegateQueue.maxConcurrentOperationCount = 1
 
-            return try await withCheckedThrowingContinuation { continuation in
-                self.continuation = continuation
+            return try await withTaskCancellationHandler(operation: {
+                try await self.startDownload(
+                    from: remoteURL,
+                    configuration: configuration,
+                    delegateQueue: delegateQueue
+                )
+            }, onCancel: {
+                self.cancelDownload()
+            })
+        }
+
+        private func startDownload(
+            from remoteURL: URL,
+            configuration: URLSessionConfiguration,
+            delegateQueue: OperationQueue
+        ) async throws -> URL {
+            try await withCheckedThrowingContinuation { continuation in
                 let session = URLSession(
                     configuration: configuration,
                     delegate: self,
                     delegateQueue: delegateQueue
                 )
-                self.session = session
-                session.dataTask(with: remoteURL).resume()
+                let task = session.dataTask(with: remoteURL)
+
+                switch state.start(continuation: continuation, session: session, task: task) {
+                case .resume:
+                    if state.shouldResume(task) {
+                        task.resume()
+                    }
+                case .terminate(let termination):
+                    perform(termination)
+                }
+            }
+        }
+
+        private func cancelDownload() {
+            if let termination = state.cancel() {
+                perform(termination)
             }
         }
 
@@ -329,99 +354,89 @@ public enum ImportSourceMaterializer {
             didReceive response: URLResponse,
             completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
         ) {
-            guard resultError == nil else {
-                completionHandler(.cancel)
-                return
-            }
             guard let httpResponse = response as? HTTPURLResponse else {
-                finish(with: MaterializationError.invalidHTTPResponse)
+                terminate(with: MaterializationError.invalidHTTPResponse)
                 completionHandler(.cancel)
                 return
             }
             guard (200..<300).contains(httpResponse.statusCode) else {
-                finish(with: MaterializationError.httpFailure(httpResponse.statusCode))
+                terminate(with: MaterializationError.httpFailure(httpResponse.statusCode))
                 completionHandler(.cancel)
                 return
             }
 
             let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type")
             guard ImportSourceMaterializer.isSupportedMarkdownContentType(contentType) else {
-                finish(with: MaterializationError.unsupportedMarkdownContentType(contentType))
+                terminate(with: MaterializationError.unsupportedMarkdownContentType(contentType))
                 completionHandler(.cancel)
                 return
             }
             if let contentLength = Self.contentLength(in: httpResponse),
                contentLength > ImportSourceMaterializer.maximumMarkdownBytes {
-                finish(with: MaterializationError.markdownTooLarge(contentLength))
+                terminate(with: MaterializationError.markdownTooLarge(contentLength))
                 completionHandler(.cancel)
                 return
             }
 
-            do {
-                try Data().write(to: destinationURL)
-                fileHandle = try FileHandle(forWritingTo: destinationURL)
+            switch state.openDestination(at: destinationURL) {
+            case .allow:
                 completionHandler(.allow)
-            } catch {
-                finish(with: MaterializationError.temporaryWriteFailed(error))
+            case .cancel(let termination):
+                if let termination {
+                    perform(termination)
+                }
                 completionHandler(.cancel)
             }
         }
 
         func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-            guard resultError == nil else { return }
-            guard let fileHandle else {
-                finish(with: MaterializationError.invalidHTTPResponse)
-                dataTask.cancel()
+            switch state.append(data, maximumBytes: ImportSourceMaterializer.maximumMarkdownBytes) {
+            case .written:
                 return
-            }
-
-            let incomingBytes = Int64(data.count)
-            guard incomingBytes <= ImportSourceMaterializer.maximumMarkdownBytes - bytesWritten else {
-                finish(with: MaterializationError.markdownTooLarge(bytesWritten + incomingBytes))
-                dataTask.cancel()
-                return
-            }
-
-            do {
-                try fileHandle.write(contentsOf: data)
-                bytesWritten += incomingBytes
-            } catch {
-                finish(with: MaterializationError.temporaryWriteFailed(error))
+            case .cancel(let termination):
+                if let termination {
+                    perform(termination)
+                }
                 dataTask.cancel()
             }
         }
 
         func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-            guard !didFinish else { return }
+            if let error {
+                if let urlError = error as? URLError, urlError.code == .cancelled {
+                    terminate(with: CancellationError())
+                } else {
+                    terminate(with: MaterializationError.downloadFailed(error))
+                }
+                return
+            }
 
-            if let resultError {
-                finish(with: resultError)
-            } else if let error {
-                finish(with: MaterializationError.downloadFailed(error))
-            } else if (try? String(contentsOf: destinationURL, encoding: .utf8)) == nil {
-                finish(with: MaterializationError.invalidMarkdownEncoding)
-            } else {
-                finish(with: nil)
+            guard state.isActive else { return }
+            let hasValidUTF8 = (try? String(contentsOf: destinationURL, encoding: .utf8)) != nil
+            if let termination = state.complete(hasValidUTF8: hasValidUTF8, destinationURL: destinationURL) {
+                perform(termination)
             }
         }
 
-        private func finish(with error: Error?) {
-            guard !didFinish else { return }
-            didFinish = true
-            resultError = error
-            if let fileHandle {
-                try? fileHandle.close()
-                self.fileHandle = nil
+        private func terminate(with error: Error) {
+            if let termination = state.terminate(with: error) {
+                perform(termination)
             }
-            if let error {
+        }
+
+        private func perform(_ termination: State.Termination) {
+            try? termination.fileHandle?.close()
+            termination.task.cancel()
+            termination.session.invalidateAndCancel()
+            if case .failure = termination.result {
                 try? FileManager.default.removeItem(at: destinationURL)
-                continuation?.resume(throwing: error)
-            } else {
-                continuation?.resume(returning: destinationURL)
             }
-            continuation = nil
-            session?.invalidateAndCancel()
-            session = nil
+            switch termination.result {
+            case .success(let url):
+                termination.continuation.resume(returning: url)
+            case .failure(let error):
+                termination.continuation.resume(throwing: error)
+            }
         }
 
         private static func contentLength(in response: HTTPURLResponse) -> Int64? {
@@ -429,6 +444,168 @@ public enum ImportSourceMaterializer {
             let trimmedValue = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
             guard let length = Int64(trimmedValue), length >= 0 else { return nil }
             return length
+        }
+
+        /// All terminal transitions run through this lock because a caller's
+        /// cancellation handler can race the URLSession delegate queue.
+        private final class State {
+            struct Termination {
+                let continuation: CheckedContinuation<URL, Error>
+                let session: URLSession
+                let task: URLSessionDataTask
+                let fileHandle: FileHandle?
+                let result: Result<URL, Error>
+            }
+
+            enum StartDecision {
+                case resume
+                case terminate(Termination)
+            }
+
+            enum DestinationDecision {
+                case allow
+                case cancel(Termination?)
+            }
+
+            enum AppendDecision {
+                case written
+                case cancel(Termination?)
+            }
+
+            private let lock = NSLock()
+            private var continuation: CheckedContinuation<URL, Error>?
+            private var session: URLSession?
+            private var task: URLSessionDataTask?
+            private var fileHandle: FileHandle?
+            private var bytesWritten: Int64 = 0
+            private var isTerminated = false
+            private var cancellationRequested = false
+
+            func start(
+                continuation: CheckedContinuation<URL, Error>,
+                session: URLSession,
+                task: URLSessionDataTask
+            ) -> StartDecision {
+                lock.lock()
+                defer { lock.unlock() }
+
+                if cancellationRequested {
+                    isTerminated = true
+                    return .terminate(Termination(
+                        continuation: continuation,
+                        session: session,
+                        task: task,
+                        fileHandle: nil,
+                        result: .failure(CancellationError())
+                    ))
+                }
+
+                self.continuation = continuation
+                self.session = session
+                self.task = task
+                return .resume
+            }
+
+            func shouldResume(_ task: URLSessionDataTask) -> Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                return !isTerminated && self.task === task
+            }
+
+            func cancel() -> Termination? {
+                lock.lock()
+                defer { lock.unlock() }
+                cancellationRequested = true
+                guard continuation != nil else { return nil }
+                return terminateLocked(with: .failure(CancellationError()))
+            }
+
+            func terminate(with error: Error) -> Termination? {
+                lock.lock()
+                defer { lock.unlock() }
+                return terminateLocked(with: .failure(error))
+            }
+
+            func openDestination(at destinationURL: URL) -> DestinationDecision {
+                lock.lock()
+                defer { lock.unlock() }
+                guard !isTerminated else { return .cancel(nil) }
+
+                do {
+                    try Data().write(to: destinationURL)
+                    fileHandle = try FileHandle(forWritingTo: destinationURL)
+                    return .allow
+                } catch {
+                    return .cancel(terminateLocked(with: .failure(
+                        MaterializationError.temporaryWriteFailed(error)
+                    )))
+                }
+            }
+
+            func append(_ data: Data, maximumBytes: Int64) -> AppendDecision {
+                lock.lock()
+                defer { lock.unlock() }
+                guard !isTerminated else { return .cancel(nil) }
+                guard let fileHandle else {
+                    return .cancel(terminateLocked(with: .failure(
+                        MaterializationError.invalidHTTPResponse
+                    )))
+                }
+
+                let incomingBytes = Int64(data.count)
+                guard incomingBytes <= maximumBytes - bytesWritten else {
+                    return .cancel(terminateLocked(with: .failure(
+                        MaterializationError.markdownTooLarge(bytesWritten + incomingBytes)
+                    )))
+                }
+
+                do {
+                    try fileHandle.write(contentsOf: data)
+                    bytesWritten += incomingBytes
+                    return .written
+                } catch {
+                    return .cancel(terminateLocked(with: .failure(
+                        MaterializationError.temporaryWriteFailed(error)
+                    )))
+                }
+            }
+
+            var isActive: Bool {
+                lock.lock()
+                defer { lock.unlock() }
+                return !isTerminated
+            }
+
+            func complete(hasValidUTF8: Bool, destinationURL: URL) -> Termination? {
+                lock.lock()
+                defer { lock.unlock() }
+                let result: Result<URL, Error> = hasValidUTF8
+                    ? .success(destinationURL)
+                    : .failure(MaterializationError.invalidMarkdownEncoding)
+                return terminateLocked(with: result)
+            }
+
+            private func terminateLocked(with result: Result<URL, Error>) -> Termination? {
+                guard !isTerminated,
+                      let continuation,
+                      let session,
+                      let task
+                else { return nil }
+
+                isTerminated = true
+                self.continuation = nil
+                self.session = nil
+                self.task = nil
+                let fileHandle = self.fileHandle
+                self.fileHandle = nil
+                return Termination(
+                    continuation: continuation,
+                    session: session,
+                    task: task,
+                    fileHandle: fileHandle,
+                    result: result
+                )
+            }
         }
     }
 
