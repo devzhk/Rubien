@@ -154,14 +154,144 @@ public enum MarkdownImporter {
         return s
     }
 
-    /// Task 6 replaces this stub with full field mapping.
+    // MARK: - Field mapping
+
     private static func makeReference(
         title: String, fields: [String: FrontmatterValue], body: String
     ) -> Reference {
-        Reference(
+        var url: String?
+        var siteName: String?
+        if let source = scalar(fields["source"]),
+           let parsed = URL(string: source),
+           let scheme = parsed.scheme?.lowercased(),
+           scheme == "http" || scheme == "https",
+           parsed.host != nil {
+            url = source
+            siteName = parsed.host
+        }
+
+        let published = scalar(fields["published"]).flatMap(parseDateParts)
+        let created = scalar(fields["created"]).flatMap(parseDateParts)
+        let accessedDate = created.flatMap { parts -> String? in
+            guard let m = parts.month, let d = parts.day else { return nil }
+            return String(format: "%04d-%02d-%02d", parts.year, m, d)
+        }
+
+        return Reference(
             title: title,
+            authors: authorList(fields["author"]),
+            year: published?.year,
+            url: url,
+            abstract: scalar(fields["description"]),
             webContent: Reference.encodeWebContent(body, format: .markdown),
-            referenceType: .markdown
+            siteName: siteName,
+            referenceType: url != nil ? .webpage : .markdown,
+            accessedDate: accessedDate,
+            issuedMonth: published?.month,
+            issuedDay: published?.day
         )
+    }
+
+    // MARK: Authors
+
+    private static func authorList(_ value: FrontmatterValue?) -> [AuthorName] {
+        let entries: [String]
+        switch value {
+        case .list(let items):
+            entries = items.map(unquote)
+        case .scalar(let raw):
+            let unquoted = unquote(raw)
+            if unquoted.hasPrefix("["), unquoted.hasSuffix("]") {
+                entries = splitFlowList(String(unquoted.dropFirst().dropLast()))
+            } else {
+                entries = [unquoted]
+            }
+        case nil:
+            return []
+        }
+        return entries
+            .map(stripWikiLink)
+            .filter { !$0.isEmpty }
+            .map(AuthorName.parse)
+    }
+
+    /// `[[Jane Doe]]` → `Jane Doe` (Obsidian wiki-link wrapper).
+    static func stripWikiLink(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespaces)
+        if s.hasPrefix("[["), s.hasSuffix("]]"), s.count >= 4 {
+            s = String(s.dropFirst(2).dropLast(2)).trimmingCharacters(in: .whitespaces)
+        }
+        return s
+    }
+
+    /// Split a flow-list interior on top-level commas. Tracks quote, escape,
+    /// AND bracket depth so `"Smith, John"` and `[a, b]` nested inside an
+    /// element never split it.
+    static func splitFlowList(_ interior: String) -> [String] {
+        var elements: [String] = []
+        var current = ""
+        var quote: Character? = nil
+        var escaped = false
+        var depth = 0
+        for ch in interior {
+            if escaped { current.append(ch); escaped = false; continue }
+            if let q = quote {
+                if ch == "\\", q == "\"" { current.append(ch); escaped = true; continue }
+                if ch == q { quote = nil }
+                current.append(ch)
+                continue
+            }
+            switch ch {
+            case "\"", "'":
+                quote = ch; current.append(ch)
+            case "[", "{":
+                depth += 1; current.append(ch)
+            case "]", "}":
+                depth = max(0, depth - 1); current.append(ch)
+            case "," where depth == 0:
+                elements.append(current); current = ""
+            default:
+                current.append(ch)
+            }
+        }
+        elements.append(current)
+        return elements
+            .map { unquote($0.trimmingCharacters(in: .whitespaces)) }
+            .filter { !$0.isEmpty }
+    }
+
+    // MARK: Dates
+
+    /// Accepts `YYYY`, `YYYY-MM`, `YYYY-MM-DD` (calendar-validated, fixed
+    /// Gregorian). A datetime suffix is allowed only after `T` or
+    /// whitespace; any other trailing characters reject the value.
+    static func parseDateParts(_ raw: String) -> (year: Int, month: Int?, day: Int?)? {
+        let token = raw.split(whereSeparator: { $0 == "T" || $0.isWhitespace })
+            .first.map(String.init) ?? ""
+        let parts = token.split(separator: "-", omittingEmptySubsequences: false)
+        func int(_ s: Substring, width: Int) -> Int? {
+            guard s.count == width, s.allSatisfy(\.isNumber) else { return nil }
+            return Int(s)
+        }
+        switch parts.count {
+        case 1:
+            guard let y = int(parts[0], width: 4) else { return nil }
+            return (y, nil, nil)
+        case 2:
+            guard let y = int(parts[0], width: 4), let m = int(parts[1], width: 2),
+                  (1...12).contains(m) else { return nil }
+            return (y, m, nil)
+        case 3:
+            guard let y = int(parts[0], width: 4), let m = int(parts[1], width: 2),
+                  let d = int(parts[2], width: 2) else { return nil }
+            var comps = DateComponents()
+            comps.year = y; comps.month = m; comps.day = d
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = TimeZone(identifier: "UTC")!
+            guard comps.isValidDate(in: calendar) else { return nil }
+            return (y, m, d)
+        default:
+            return nil
+        }
     }
 }
