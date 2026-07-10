@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 @testable import RubienCore
 
@@ -123,5 +124,88 @@ final class PDFDownloadServiceTests: XCTestCase {
         // Ensure the new error path text doesn't regress.
         XCTAssertNotNil(PDFDownloadService.DownloadError.notAPDF.errorDescription)
         XCTAssertNotNil(PDFDownloadService.DownloadError.noOpenAccessPDF.errorDescription)
+    }
+
+    // MARK: - temporary downloads
+
+    func testDownloadTemporaryWritesValidatedPDFToRequestedDirectory() async throws {
+        let remoteURL = "https://example.test/papers/temporary.pdf"
+        let expectedData = Data("%PDF-1.7\ntemporary".utf8)
+        ImportSourceURLProtocol.stub(
+            remoteURL,
+            contentType: "application/pdf; charset=binary",
+            data: expectedData
+        )
+        let destinationDirectory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: destinationDirectory) }
+
+        let downloadedURL = try await PDFDownloadService.downloadTemporary(
+            from: URL(string: remoteURL)!,
+            suggestedFilename: "temporary.pdf",
+            destinationDirectory: destinationDirectory,
+            session: ImportSourceURLProtocol.makeSession()
+        )
+
+        XCTAssertEqual(downloadedURL.deletingLastPathComponent(), destinationDirectory)
+        XCTAssertEqual(downloadedURL.lastPathComponent, "temporary.pdf")
+        XCTAssertEqual(try Data(contentsOf: downloadedURL), expectedData)
+    }
+
+    func testDownloadTemporaryRejectsInvalidContentType() async throws {
+        let remoteURL = "https://example.test/papers/html.pdf"
+        ImportSourceURLProtocol.stub(
+            remoteURL,
+            contentType: "text/html",
+            data: Data("<html>not a PDF</html>".utf8)
+        )
+        let destinationDirectory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: destinationDirectory) }
+
+        await assertNotAPDF(
+            remoteURL: remoteURL,
+            destinationDirectory: destinationDirectory
+        )
+    }
+
+    func testDownloadTemporaryRejectsInvalidPDFMagic() async throws {
+        let remoteURL = "https://example.test/papers/invalid.pdf"
+        ImportSourceURLProtocol.stub(
+            remoteURL,
+            contentType: "application/pdf",
+            data: Data("not a PDF".utf8)
+        )
+        let destinationDirectory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: destinationDirectory) }
+
+        await assertNotAPDF(
+            remoteURL: remoteURL,
+            destinationDirectory: destinationDirectory
+        )
+    }
+
+    private func makeTemporaryDirectory() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PDFDownloadServiceTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    private func assertNotAPDF(remoteURL: String, destinationDirectory: URL) async {
+        do {
+            _ = try await PDFDownloadService.downloadTemporary(
+                from: URL(string: remoteURL)!,
+                suggestedFilename: "download.pdf",
+                destinationDirectory: destinationDirectory,
+                session: ImportSourceURLProtocol.makeSession()
+            )
+            XCTFail("Expected non-PDF response to be rejected")
+        } catch let error as PDFDownloadService.DownloadError {
+            guard case .notAPDF = error else {
+                XCTFail("Expected notAPDF, got: \(error)")
+                return
+            }
+        } catch {
+            XCTFail("Expected DownloadError.notAPDF, got: \(error)")
+        }
     }
 }
