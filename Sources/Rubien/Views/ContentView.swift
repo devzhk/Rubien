@@ -1451,15 +1451,26 @@ struct ContentView: View {
         guard !viewModel.isImporting else { return }
         let urls = OpenPanelPicker.pickImportableFiles()
         guard !urls.isEmpty else { return }
-        let mdURLs = urls.filter { $0.pathExtension.lowercased() == "md" }
+        // Mirror the CLI/MCP predicate (`["md", "markdown"]`) exactly so app and
+        // CLI agree: the system markdown UTI claims BOTH extensions, and the panel
+        // admits both — filtering on "md" alone silently drops `.markdown` files.
+        let mdURLs = urls.filter { ["md", "markdown"].contains($0.pathExtension.lowercased()) }
         let pdfURLs = urls.filter { $0.pathExtension.lowercased() == "pdf" }
+        // Defense-in-depth: the panel's allowedContentTypes should only admit
+        // markdown/PDF, but surface anything else in the summary instead of
+        // importing it with no feedback and no error.
+        let unsupported = urls.filter { !["md", "markdown", "pdf"].contains($0.pathExtension.lowercased()) }
 
         // Claim a fresh generation so this batch's auto-clear timer only wipes
         // its own summary (see the closure at the end of the Task).
         importGeneration += 1
         let generation = importGeneration
         viewModel.isImporting = true
-        viewModel.importProgress = String(localized: "content.import.progress.importingPDF", bundle: .module)
+        // Seed with wording that matches the selection: "Importing PDF…" is wrong
+        // for an all-markdown batch (partition above runs first so we can branch).
+        viewModel.importProgress = pdfURLs.isEmpty
+            ? String(localized: "Importing markdown…", bundle: .module)
+            : String(localized: "content.import.progress.importingPDF", bundle: .module)
 
         Task { @MainActor in
             var summary: [String] = []
@@ -1521,6 +1532,15 @@ struct ContentView: View {
                 case .failed(let message):
                     summary.append(message)
                 }
+            }
+
+            // Surface any files the panel let through that we can't import,
+            // so the drop is never silent (see `unsupported` above).
+            if !unsupported.isEmpty {
+                summary.append(
+                    String(format: String(localized: "Unsupported file(s): %@", bundle: .module),
+                           unsupported.map { $0.lastPathComponent }.joined(separator: ", "))
+                )
             }
 
             viewModel.isImporting = false
