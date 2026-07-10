@@ -17,8 +17,10 @@ struct AgentBackendDescriptor {
     let models: [(label: String, value: String)]
     /// Reasoning-effort levels in display order.
     let efforts: [(label: String, value: String)]
-    /// Seed model for a fresh conversation (must be one of `models`).
-    let defaultModel: String
+    /// Seed model for a fresh conversation (must be one of `models`), or nil for a
+    /// backend whose models are DISCOVERED live (Codex): a nil pick means "send no
+    /// model" and the runtime resolves its own default.
+    let defaultModel: String?
     /// Seed effort for a fresh conversation (must be one of `efforts`).
     let defaultEffort: String
     /// Whether the backend has a user-selectable OS sandbox (Codex only).
@@ -26,11 +28,14 @@ struct AgentBackendDescriptor {
 }
 
 extension AgentProviderKind {
-    /// The static capabilities for this backend. Verified against the runtimes:
-    /// Claude `--model`/`--effort`; Codex slugs from the codex 0.142 binary
-    /// (`gpt-5.5` is the config default). Codex has no `max` effort and defaults to
-    /// `medium` deliberately — the user's `~/.codex` default is often `xhigh`, which
-    /// can stall a turn (Risk #8); pinning `medium` avoids it.
+    /// The static capabilities for this backend. Claude verified against
+    /// `--model`/`--effort` (claude 2.1.206 documents exactly these aliases —
+    /// spec §2.4; no discovery API exists, so Claude stays curated-static).
+    /// Codex models are DISCOVERED live via `CodexModelCatalog` (`model/list`,
+    /// spec §4.1) — the descriptor deliberately has NO baked model list (a
+    /// discovery-failed old codex is exactly the one that would reject baked
+    /// current-generation slugs; finding #1). Its efforts here are the universal
+    /// catalog-less fallback four only, never a normalization gate.
     var descriptor: AgentBackendDescriptor {
         switch self {
         case .claude:
@@ -45,9 +50,9 @@ extension AgentProviderKind {
         case .codex:
             return AgentBackendDescriptor(
                 displayName: "Codex",
-                models: [("GPT-5.5", "gpt-5.5"), ("GPT-5.5 Pro", "gpt-5.5-pro")],
+                models: [],
                 efforts: [("Low", "low"), ("Medium", "medium"), ("High", "high"), ("xHigh", "xhigh")],
-                defaultModel: "gpt-5.5",
+                defaultModel: nil,
                 defaultEffort: "medium",
                 supportsSandbox: true)
         }
@@ -73,7 +78,7 @@ enum AssistantModelOptions {
         kind.descriptor.efforts
     }
 
-    static func defaultModel(for kind: AgentProviderKind) -> String {
+    static func defaultModel(for kind: AgentProviderKind) -> String? {
         kind.descriptor.defaultModel
     }
 
@@ -95,16 +100,53 @@ enum AssistantModelOptions {
         return efforts(for: kind).first { $0.value == value }?.label ?? value.capitalized
     }
 
-    /// Snap a persisted model to one this backend actually offers, else its default —
-    /// so a stale/hand-edited pref (e.g. a Claude slug left in the Codex pref, or a
-    /// dropped model) can't leave a picker with no valid selection or send an
-    /// unaccepted slug to the runtime.
+    /// Snap a persisted model to one this backend's STATIC list offers, else its
+    /// default. Only meaningful for statically-listed backends (Claude); a
+    /// discovery-fed backend (Codex) passes values through — validity there is the
+    /// catalog-aware picker's job (spec §4.4), never a silent rewrite.
     static func normalizedModel(_ value: String, for kind: AgentProviderKind) -> String {
-        models(for: kind).contains { $0.value == value } ? value : defaultModel(for: kind)
+        guard let fallback = defaultModel(for: kind) else { return value }
+        return models(for: kind).contains { $0.value == value } ? value : fallback
     }
 
-    /// Snap a persisted effort to one this backend offers, else its default.
+    /// Snap a persisted effort to the static list — Claude only, same rule as
+    /// `normalizedModel` (Codex efforts are per-model, from the catalog).
     static func normalizedEffort(_ value: String, for kind: AgentProviderKind) -> String {
-        efforts(for: kind).contains { $0.value == value } ? value : defaultEffort(for: kind)
+        guard kind.descriptor.defaultModel != nil else { return value }
+        return efforts(for: kind).contains { $0.value == value } ? value : defaultEffort(for: kind)
+    }
+
+    // MARK: Codex dynamic picker rows (shared by the sidebar and Settings — spec §4.6)
+
+    /// The Codex model picker's rows. Row 0 is always "Codex default" (`value: nil`
+    /// — send no model; codex resolves its own config), suffixed with the resolved
+    /// model's name when known AND the default is the active pick. A `pinned` slug
+    /// absent from the catalog stays visible/selectable (finding #6) — with a
+    /// warning suffix once the catalog has actually loaded, bare while it's pending.
+    static func codexModelRows(
+        models: [CodexModelInfo], pinned: String?, resolvedModel: String?
+    ) -> [(label: String, value: String?)] {
+        var rows: [(label: String, value: String?)] = []
+        if pinned == nil, let resolvedModel {
+            let name = models.first { $0.id == resolvedModel }?.displayName ?? resolvedModel
+            rows.append((label: "Codex default (\(name))", value: nil))
+        } else {
+            rows.append((label: "Codex default", value: nil))
+        }
+        rows += models.map { (label: $0.displayName, value: Optional($0.id)) }
+        if let pinned, !models.contains(where: { $0.id == pinned }) {
+            let label = models.isEmpty ? pinned : "\(pinned) — not offered by this codex"
+            rows.append((label: label, value: pinned))
+        }
+        return rows
+    }
+
+    /// The Codex effort picker's rows: the governing model's own effort list
+    /// (per-model — 5.6 models add max/ultra), else the universal fallback four.
+    static func codexEffortRows(governing: CodexModelInfo?) -> [(label: String, value: String)] {
+        if let efforts = governing?.efforts, !efforts.isEmpty {
+            return efforts.map { (label: $0.label, value: $0.value) }
+        }
+        return AgentProviderKind.codex.descriptor.efforts
     }
 }
