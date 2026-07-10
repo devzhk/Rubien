@@ -167,6 +167,22 @@ final class PDFDownloadServiceTests: XCTestCase {
         )
     }
 
+    func testDownloadTemporaryRejectsLookalikePDFMediaType() async throws {
+        let remoteURL = "https://example.test/papers/lookalike.pdf"
+        ImportSourceURLProtocol.stub(
+            remoteURL,
+            contentType: "application/pdf-malformed",
+            data: Data("%PDF-1.7\nlookalike".utf8)
+        )
+        let destinationDirectory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: destinationDirectory) }
+
+        await assertNotAPDF(
+            remoteURL: remoteURL,
+            destinationDirectory: destinationDirectory
+        )
+    }
+
     func testDownloadTemporaryRejectsInvalidPDFMagic() async throws {
         let remoteURL = "https://example.test/papers/invalid.pdf"
         ImportSourceURLProtocol.stub(

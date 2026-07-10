@@ -64,12 +64,16 @@ public enum PDFDownloadService {
         // let bioRxiv withdrawal pages (HTML served at `.full.pdf` with 200) save
         // as fake PDFs. URLSession.shared.download transparently handles
         // Content-Encoding (gzip/br), so the downloaded body is already decoded.
-        // Media types are case-insensitive per RFC 7231 §3.1.1.1; lowercase
-        // before matching so `Application/PDF` and friends aren't rejected.
-        let contentType = (response as? HTTPURLResponse)?
+        // Media types are case-insensitive per RFC 7231 §3.1.1.1; normalize
+        // the media type (not its parameters) so lookalikes such as
+        // `application/pdf-malformed` cannot pass this validation.
+        let mediaType = (response as? HTTPURLResponse)?
             .value(forHTTPHeaderField: "Content-Type")?
+            .split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false)
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased() ?? ""
-        if !contentType.contains("application/pdf") {
+        if mediaType != "application/pdf" {
             try? FileManager.default.removeItem(at: tempURL)
             throw DownloadError.notAPDF
         }
