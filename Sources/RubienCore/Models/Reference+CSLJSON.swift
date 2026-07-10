@@ -9,6 +9,7 @@ extension ReferenceType {
         case .book:            return "book"
         case .thesis:          return "thesis"
         case .webpage:         return "webpage"
+        case .markdown:        return "document"
         case .other:           return "article"
         }
     }

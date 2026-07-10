@@ -338,7 +338,7 @@ public enum MetadataResolution {
             return .book
         case .thesis:
             return .thesis
-        case .webpage, .other:
+        case .webpage, .other, .markdown:
             return .unknown
         }
     }

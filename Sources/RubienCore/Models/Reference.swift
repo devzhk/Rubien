@@ -1,17 +1,19 @@
 import Foundation
 import GRDB
 
-/// Pruned 2026-05 (v3) from 21 cases to 6. Type now maps 1:1 to BibTeX entry
-/// types; categorization beyond that goes to Tags or custom singleSelect
-/// properties. `webpage` is kept despite collapsing to `@misc` in BibTeX
-/// because it gates the in-app web reader (`Reference.canOpenWebReader`,
-/// `WebReaderView`, `WebImportView`).
+/// Pruned 2026-05 (v3) from 21 cases to 6; `markdown` added 2026-07 for
+/// imported markdown notes. Type maps 1:1 to BibTeX entry types;
+/// categorization beyond that goes to Tags or custom singleSelect
+/// properties. The web reader opens for ANY type with stored `webContent`
+/// (`Reference.canOpenWebReader`); `webpage` additionally gets URL-only
+/// live mode.
 public enum ReferenceType: String, Codable, CaseIterable, DatabaseValueConvertible, Sendable {
     case journalArticle  = "Journal Article"
     case conferencePaper = "Conference Paper"
     case book            = "Book"
     case thesis          = "Thesis"
     case webpage         = "Web Page"
+    case markdown        = "Markdown"
     case other           = "Other"
 
     public var icon: String {
@@ -21,8 +23,18 @@ public enum ReferenceType: String, Codable, CaseIterable, DatabaseValueConvertib
         case .book:            return "book.closed"
         case .thesis:          return "graduationcap"
         case .webpage:         return "globe"
+        case .markdown:        return "doc.plaintext"
         case .other:           return "doc"
         }
+    }
+
+    /// Tolerant decode: a newer peer may write rawValues this binary doesn't
+    /// know. Fall back to `.other` instead of throwing — Reference is embedded
+    /// in persisted JSON (pending metadata-intake queue) and synced records.
+    /// Encoding stays the synthesized rawValue encode.
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = ReferenceType(rawValue: raw) ?? .other
     }
 }
 
@@ -791,7 +803,10 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
         webContent = row["webContent"]
         siteName = row["siteName"]
         favicon = row["favicon"]
-        referenceType = row["referenceType"]
+        // Tolerant decode: unknown rawValue (newer binary wrote this library) → .other,
+        // mirroring ReferenceRecord's CKRecord fallback. The plain subscript would trap.
+        let referenceTypeRaw: String? = row["referenceType"]
+        referenceType = referenceTypeRaw.flatMap(ReferenceType.init(rawValue:)) ?? .other
         metadataSource = row["metadataSource"]
         verificationStatus = row["verificationStatus"] ?? .legacy
         acceptedByRuleID = row["acceptedByRuleID"]

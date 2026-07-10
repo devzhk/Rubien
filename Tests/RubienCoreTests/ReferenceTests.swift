@@ -65,7 +65,7 @@ final class ReferenceTests: XCTestCase {
         XCTAssertEqual(ReferenceType.thesis.rawValue,          "Thesis")
         XCTAssertEqual(ReferenceType.webpage.rawValue,         "Web Page")
         XCTAssertEqual(ReferenceType.other.rawValue,           "Other")
-        XCTAssertEqual(ReferenceType.allCases.count, 6)
+        XCTAssertEqual(ReferenceType.allCases.count, 7)
     }
 
     func testReferenceTypeCSLTypeMapping() {

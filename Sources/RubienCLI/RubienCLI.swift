@@ -1626,8 +1626,7 @@ struct Export: ParsableCommand {
                 case .conferencePaper: entryType = "inproceedings"
                 case .book:            entryType = "book"
                 case .thesis:          entryType = "phdthesis"
-                case .webpage:         entryType = "misc"
-                case .other:           entryType = "misc"
+                case .webpage, .other, .markdown: entryType = "misc"
                 }
                 output += "@\(entryType){\(keys[i]),\n"
                 output += "  title = {\(escapeBibTeX(ref.title))},\n"
@@ -1657,7 +1656,7 @@ struct Export: ParsableCommand {
                 case .conferencePaper: risType = "CONF"
                 case .thesis:          risType = "THES"
                 case .webpage:         risType = "ELEC"
-                case .other:           risType = "GEN"
+                case .other, .markdown: risType = "GEN"
                 }
                 output += "TY  - \(risType)\n"
                 output += "TI  - \(ref.title)\n"
