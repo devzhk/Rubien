@@ -921,7 +921,7 @@ struct ContentView: View {
             } label: {
                 Label(String(localized: "content.toolbar.importPDFAuto", bundle: .module), systemImage: "doc.badge.plus")
             }
-            .help(String(localized: "Import a PDF and auto-fill its metadata when possible", bundle: .module))
+            .help(String(localized: "Import PDFs or markdown notes; PDF metadata is auto-filled when possible", bundle: .module))
 
             if !viewModel.pendingMetadataIntakes.isEmpty {
                 Button {
