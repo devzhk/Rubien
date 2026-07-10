@@ -61,6 +61,7 @@ public enum ImportSourceMaterializer {
         case httpFailure(Int)
         case unsupportedMarkdownContentType(String?)
         case invalidMarkdownEncoding
+        case unsafeRemoteFilename(String)
         case temporaryWriteFailed(Error)
         case downloadFailed(Error)
 
@@ -91,6 +92,8 @@ public enum ImportSourceMaterializer {
                 return "Server returned unsupported Markdown content type: \(value)"
             case .invalidMarkdownEncoding:
                 return "Markdown response is not valid UTF-8"
+            case .unsafeRemoteFilename(let filename):
+                return "Remote URL has an unsafe filename: \(filename)"
             case .temporaryWriteFailed(let error):
                 return "Failed to create temporary import file: \(error.localizedDescription)"
             case .downloadFailed(let error):
@@ -222,9 +225,11 @@ public enum ImportSourceMaterializer {
             let fileURL: URL
             switch kind {
             case .markdown:
+                let filename = try safeRemoteFilename(from: url)
                 fileURL = try await downloadMarkdown(
                     from: url,
                     destinationDirectory: temporaryDirectoryURL,
+                    filename: filename,
                     session: session
                 )
             case .pdf:
@@ -262,58 +267,168 @@ public enum ImportSourceMaterializer {
     private static func downloadMarkdown(
         from remoteURL: URL,
         destinationDirectory: URL,
+        filename: String,
         session: URLSession
     ) async throws -> URL {
-        let (downloadedURL, response) = try await download(from: remoteURL, session: session)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            try? FileManager.default.removeItem(at: downloadedURL)
-            throw MaterializationError.invalidHTTPResponse
-        }
-        guard (200..<300).contains(httpResponse.statusCode) else {
-            try? FileManager.default.removeItem(at: downloadedURL)
-            throw MaterializationError.httpFailure(httpResponse.statusCode)
-        }
-
-        let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type")
-        guard isSupportedMarkdownContentType(contentType) else {
-            try? FileManager.default.removeItem(at: downloadedURL)
-            throw MaterializationError.unsupportedMarkdownContentType(contentType)
-        }
-
-        let fileSize = Int64((try? downloadedURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
-        guard fileSize <= maximumMarkdownBytes else {
-            try? FileManager.default.removeItem(at: downloadedURL)
-            throw MaterializationError.markdownTooLarge(fileSize)
-        }
-        guard (try? String(contentsOf: downloadedURL, encoding: .utf8)) != nil else {
-            try? FileManager.default.removeItem(at: downloadedURL)
-            throw MaterializationError.invalidMarkdownEncoding
-        }
-
-        return try moveDownloadedFile(
-            downloadedURL,
-            to: destinationDirectory.appendingPathComponent(remoteURL.lastPathComponent)
-        )
+        let destinationURL = destinationDirectory.appendingPathComponent(filename)
+        return try await MarkdownStreamingDownload(destinationURL: destinationURL)
+            .download(from: remoteURL, using: session)
     }
 
-    private static func download(
-        from remoteURL: URL,
-        session: URLSession
-    ) async throws -> (URL, URLResponse) {
-        do {
-            return try await session.download(from: remoteURL)
-        } catch {
-            throw MaterializationError.downloadFailed(error)
+    private static func safeRemoteFilename(from remoteURL: URL) throws -> String {
+        let filename = remoteURL.lastPathComponent
+        let isPathSafe = !filename.isEmpty
+            && filename != "."
+            && filename != ".."
+            && !filename.contains("/")
+            && !filename.contains("\\")
+            && !filename.unicodeScalars.contains(where: { $0.value == 0 })
+            && URL(fileURLWithPath: filename).lastPathComponent == filename
+        guard isPathSafe else {
+            throw MaterializationError.unsafeRemoteFilename(filename)
         }
+        return filename
     }
 
-    private static func moveDownloadedFile(_ downloadedURL: URL, to destinationURL: URL) throws -> URL {
-        do {
-            try FileManager.default.moveItem(at: downloadedURL, to: destinationURL)
-            return destinationURL
-        } catch {
-            try? FileManager.default.removeItem(at: downloadedURL)
-            throw MaterializationError.temporaryWriteFailed(error)
+    /// A one-shot, bounded Markdown receiver. `URLSession.download` must not
+    /// be used here: it writes the entire response before callers can inspect
+    /// HTTP headers or impose a byte cap.
+    private final class MarkdownStreamingDownload: NSObject, URLSessionDataDelegate {
+        private let destinationURL: URL
+        private var continuation: CheckedContinuation<URL, Error>?
+        private var session: URLSession?
+        private var fileHandle: FileHandle?
+        private var bytesWritten: Int64 = 0
+        private var resultError: Error?
+        private var didFinish = false
+
+        init(destinationURL: URL) {
+            self.destinationURL = destinationURL
+        }
+
+        func download(from remoteURL: URL, using sourceSession: URLSession) async throws -> URL {
+            let configuration = sourceSession.configuration.copy() as! URLSessionConfiguration
+            let delegateQueue = OperationQueue()
+            delegateQueue.maxConcurrentOperationCount = 1
+
+            return try await withCheckedThrowingContinuation { continuation in
+                self.continuation = continuation
+                let session = URLSession(
+                    configuration: configuration,
+                    delegate: self,
+                    delegateQueue: delegateQueue
+                )
+                self.session = session
+                session.dataTask(with: remoteURL).resume()
+            }
+        }
+
+        func urlSession(
+            _ session: URLSession,
+            dataTask: URLSessionDataTask,
+            didReceive response: URLResponse,
+            completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+        ) {
+            guard resultError == nil else {
+                completionHandler(.cancel)
+                return
+            }
+            guard let httpResponse = response as? HTTPURLResponse else {
+                finish(with: MaterializationError.invalidHTTPResponse)
+                completionHandler(.cancel)
+                return
+            }
+            guard (200..<300).contains(httpResponse.statusCode) else {
+                finish(with: MaterializationError.httpFailure(httpResponse.statusCode))
+                completionHandler(.cancel)
+                return
+            }
+
+            let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type")
+            guard ImportSourceMaterializer.isSupportedMarkdownContentType(contentType) else {
+                finish(with: MaterializationError.unsupportedMarkdownContentType(contentType))
+                completionHandler(.cancel)
+                return
+            }
+            if let contentLength = Self.contentLength(in: httpResponse),
+               contentLength > ImportSourceMaterializer.maximumMarkdownBytes {
+                finish(with: MaterializationError.markdownTooLarge(contentLength))
+                completionHandler(.cancel)
+                return
+            }
+
+            do {
+                try Data().write(to: destinationURL)
+                fileHandle = try FileHandle(forWritingTo: destinationURL)
+                completionHandler(.allow)
+            } catch {
+                finish(with: MaterializationError.temporaryWriteFailed(error))
+                completionHandler(.cancel)
+            }
+        }
+
+        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+            guard resultError == nil else { return }
+            guard let fileHandle else {
+                finish(with: MaterializationError.invalidHTTPResponse)
+                dataTask.cancel()
+                return
+            }
+
+            let incomingBytes = Int64(data.count)
+            guard incomingBytes <= ImportSourceMaterializer.maximumMarkdownBytes - bytesWritten else {
+                finish(with: MaterializationError.markdownTooLarge(bytesWritten + incomingBytes))
+                dataTask.cancel()
+                return
+            }
+
+            do {
+                try fileHandle.write(contentsOf: data)
+                bytesWritten += incomingBytes
+            } catch {
+                finish(with: MaterializationError.temporaryWriteFailed(error))
+                dataTask.cancel()
+            }
+        }
+
+        func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+            guard !didFinish else { return }
+
+            if let resultError {
+                finish(with: resultError)
+            } else if let error {
+                finish(with: MaterializationError.downloadFailed(error))
+            } else if (try? String(contentsOf: destinationURL, encoding: .utf8)) == nil {
+                finish(with: MaterializationError.invalidMarkdownEncoding)
+            } else {
+                finish(with: nil)
+            }
+        }
+
+        private func finish(with error: Error?) {
+            guard !didFinish else { return }
+            didFinish = true
+            resultError = error
+            if let fileHandle {
+                try? fileHandle.close()
+                self.fileHandle = nil
+            }
+            if let error {
+                try? FileManager.default.removeItem(at: destinationURL)
+                continuation?.resume(throwing: error)
+            } else {
+                continuation?.resume(returning: destinationURL)
+            }
+            continuation = nil
+            session?.invalidateAndCancel()
+            session = nil
+        }
+
+        private static func contentLength(in response: HTTPURLResponse) -> Int64? {
+            guard let rawValue = response.value(forHTTPHeaderField: "Content-Length") else { return nil }
+            let trimmedValue = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let length = Int64(trimmedValue), length >= 0 else { return nil }
+            return length
         }
     }
 

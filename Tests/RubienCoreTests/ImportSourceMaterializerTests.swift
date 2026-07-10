@@ -45,14 +45,17 @@ final class ImportSourceURLProtocol: URLProtocol {
         _ urlString: String,
         status: Int = 200,
         contentType: String,
+        headers: [String: String] = [:],
         data: Data
     ) {
         let url = URL(string: urlString)!
+        var responseHeaders = headers
+        responseHeaders["Content-Type"] = contentType
         let response = HTTPURLResponse(
             url: url,
             statusCode: status,
             httpVersion: "HTTP/1.1",
-            headerFields: ["Content-Type": contentType]
+            headerFields: responseHeaders
         )!
         stubs[url] = Stub(data: data, response: response)
     }
@@ -139,6 +142,32 @@ final class ImportSourceMaterializerTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: temporaryDirectoryURL.path))
     }
 
+    func testRemoteMarkdownRejectsDecodedTraversalFilenameWithoutEscapingOwnedDirectory() async {
+        let escapedName = "escaped-\(UUID().uuidString).md"
+        let remoteURL = "https://example.test/%2E%2E%2F\(escapedName)"
+        let escapedURL = FileManager.default.temporaryDirectory.appendingPathComponent(escapedName)
+        defer { try? FileManager.default.removeItem(at: escapedURL) }
+        ImportSourceURLProtocol.stub(
+            remoteURL,
+            contentType: "text/plain",
+            data: Data("# Attempted traversal".utf8)
+        )
+
+        do {
+            let materialized = try await ImportSourceMaterializer.materialize(
+                remoteURL,
+                localPathPolicy: .requireAbsolute,
+                session: ImportSourceURLProtocol.makeSession()
+            )
+            materialized.cleanup()
+            XCTFail("Expected decoded traversal filename to be rejected")
+        } catch {
+            XCTAssertNotNil((error as? LocalizedError)?.errorDescription)
+        }
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: escapedURL.path))
+    }
+
     func testRemotePDFUsesOriginalFilenameAndCleansUp() async throws {
         let remoteURL = "https://example.test/papers/method.pdf"
         ImportSourceURLProtocol.stub(
@@ -218,6 +247,29 @@ final class ImportSourceMaterializerTests: XCTestCase {
         await assertLocalizedMaterializationError(for: remoteURL)
     }
 
+    func testRemoteMarkdownRejectsAdvertisedContentLengthAboveLimit() async {
+        let remoteURL = "https://example.test/notes/advertised-large.md"
+        ImportSourceURLProtocol.stub(
+            remoteURL,
+            contentType: "text/plain",
+            headers: ["Content-Length": String(maximumMarkdownBytes + 1)],
+            data: Data("small body".utf8)
+        )
+
+        await assertMarkdownTooLarge(for: remoteURL)
+    }
+
+    func testRemoteMarkdownRejectsOverLimitBodyWithoutContentLength() async {
+        let remoteURL = "https://example.test/notes/chunked-large.md"
+        ImportSourceURLProtocol.stub(
+            remoteURL,
+            contentType: "text/plain",
+            data: Data(repeating: 0x61, count: maximumMarkdownBytes + 1)
+        )
+
+        await assertMarkdownTooLarge(for: remoteURL)
+    }
+
     func testUnsupportedExtensionIsRejectedWithLocalizedDescription() async {
         await assertLocalizedMaterializationError(for: "https://example.test/notes/unsupported.txt")
     }
@@ -257,4 +309,28 @@ final class ImportSourceMaterializerTests: XCTestCase {
             XCTAssertFalse(error.localizedDescription.isEmpty, file: file, line: line)
         }
     }
+
+    private func assertMarkdownTooLarge(
+        for input: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        do {
+            _ = try await ImportSourceMaterializer.materialize(
+                input,
+                localPathPolicy: .requireAbsolute,
+                session: ImportSourceURLProtocol.makeSession()
+            )
+            XCTFail("Expected Markdown size limit failure", file: file, line: line)
+        } catch let error as ImportSourceMaterializer.MaterializationError {
+            guard case .markdownTooLarge = error else {
+                XCTFail("Expected markdownTooLarge, got: \(error)", file: file, line: line)
+                return
+            }
+        } catch {
+            XCTFail("Expected markdownTooLarge, got: \(error)", file: file, line: line)
+        }
+    }
+
+    private let maximumMarkdownBytes = 50 * 1024 * 1024
 }
