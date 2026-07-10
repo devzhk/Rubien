@@ -41,6 +41,11 @@ struct RubienSettingsView: View {
     /// entries only). Loaded on appear; Recheck force-reloads. Empty while pending
     /// or when discovery failed — the pickers then degrade per spec §4.7.
     @State private var codexCatalogModels: [CodexModelInfo] = []
+    /// Monotonic load token mirroring `codexProbeGeneration`: only the latest
+    /// `loadCodexCatalog` result is applied, so an overlapping load (the on-appear
+    /// fetch racing a Recheck, or a fast Reset→Choose) can't be overwritten by a
+    /// stale one landing late.
+    @State private var codexCatalogLoadGeneration = 0
     @State private var defaultCodexSandbox: CodexSandbox = .readOnly
     @State private var defaultWebAccess = true
     @State private var defaultAutoApprove = false
@@ -613,11 +618,15 @@ struct RubienSettingsView: View {
     /// Fetch the codex model catalog for the Settings pickers. `forceReload`
     /// (Recheck / binary-path change) drops the shared memo first.
     private func loadCodexCatalog(forceReload: Bool = false) {
+        codexCatalogLoadGeneration += 1
+        let generation = codexCatalogLoadGeneration
         let override = RubienPreferences.assistantCodexBinaryPath
         Task { @MainActor in
-            codexCatalogModels = await CodexModelCatalog.shared
+            let models = await CodexModelCatalog.shared
                 .catalog(executableOverride: override, forceReload: forceReload)
                 .visibleModels
+            guard generation == codexCatalogLoadGeneration else { return }  // superseded by a newer load
+            codexCatalogModels = models
         }
     }
 
