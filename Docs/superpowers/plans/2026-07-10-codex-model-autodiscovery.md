@@ -312,9 +312,12 @@ In `Tests/RubienTests/Fixtures/fake-codex-app-server.py`, add a handler in `Serv
             elif method == "model/list":
                 # Model auto-discovery. Config `models` overrides the default set;
                 # `modelListError: true` answers with a JSON-RPC error (old-codex /
-                # failure path). Request count recorded for memoization assertions.
+                # failure path); `modelListDelayMs` delays the response (in-flight
+                # race tests). Request count recorded for memoization assertions.
                 cfg = load_config()
                 record(modelListRequests=OBSERVED.get("modelListRequests", 0) + 1)
+                if cfg.get("modelListDelayMs"):
+                    time.sleep(int(cfg["modelListDelayMs"]) / 1000.0)
                 if cfg.get("modelListError"):
                     emit({"jsonrpc": "2.0", "id": req_id,
                           "error": {"code": -32601, "message": "Method not found"}})
@@ -422,6 +425,27 @@ final class CodexModelCatalogTests: XCTestCase {
         XCTAssertEqual(catalog, .unavailable)
     }
 
+    /// The spec §4.1 stale-completion guarantee: a fetch that was in flight when a
+    /// forceReload happened must not repopulate the cache with its (pre-reload)
+    /// result. The slow fetch reads the ORIGINAL config (default model set); the
+    /// reload reads the rewritten one — the rewritten list must win and stay won.
+    /// Timing tolerance: if the slow fetch happens to read the NEW config, both
+    /// lists match and the test passes vacuously — it can never flake into failure.
+    func testStaleInFlightFetchCannotClobberForceReload() async throws {
+        let store = freshCatalog(config: ["modelListDelayMs": 1500])
+        let slow = Task { await store.catalog(executableOverride: fakeServerPath) }
+        try await Task.sleep(for: .milliseconds(500))   // slow probe is in flight
+        try writeConfig(["models": [["id": "fresh-model", "displayName": "Fresh"]]])
+
+        let reloaded = await store.catalog(executableOverride: fakeServerPath, forceReload: true)
+        XCTAssertEqual(reloaded.models.map(\.id), ["fresh-model"])
+
+        _ = await slow.value   // the stale (gen-0) fetch completes AFTER the reload
+        let cached = await store.catalog(executableOverride: fakeServerPath)
+        XCTAssertEqual(cached.models.map(\.id), ["fresh-model"],
+                       "the stale in-flight fetch must not repopulate the cache (plan-review #2)")
+    }
+
     // MARK: Helpers
 
     /// A fresh actor with its own temp working directory (the fake writes its
@@ -440,6 +464,12 @@ final class CodexModelCatalogTests: XCTestCase {
     }
 
     private var currentWorkspace: URL?
+
+    /// (Re)write the fake's per-turn config into the current actor's cwd.
+    private func writeConfig(_ config: [String: Any]) throws {
+        let url = try XCTUnwrap(currentWorkspace).appendingPathComponent("fake-codex.json")
+        try JSONSerialization.data(withJSONObject: config).write(to: url)
+    }
 
     /// Poll the fake's observed file for the model/list request count (atomic writes;
     /// brief poll covers the child's write racing the assertion).
@@ -503,7 +533,11 @@ actor CodexModelCatalog {
 
     private var cache: [String: CodexCatalog] = [:]
     private var inflight: [String: Task<CodexCatalog, Never>] = [:]
-    private var generation = 0
+    /// Per-PATH invalidation tokens (spec §4.1): `forceReload` bumps a path's
+    /// token so a fetch that started before the bump can't repopulate the entry
+    /// it invalidated. Per-path, not global — reloading one binary must not
+    /// invalidate another's in-flight fetch (plan-review #2).
+    private var generation: [String: Int] = [:]
 
     /// Bound on the whole probe (spawn → handshake → model/list). Local IPC answers
     /// in well under a second; a wedged binary must not hold a picker open forever.
@@ -524,21 +558,24 @@ actor CodexModelCatalog {
         if forceReload {
             cache[path] = nil
             inflight[path] = nil
-            generation += 1
+            generation[path, default: 0] += 1
         }
         if let cached = cache[path] { return cached }
         if let running = inflight[path] { return await running.value }
 
-        let gen = generation
+        let gen = generation[path, default: 0]
         let directory = workingDirectory
         let task = Task { await Self.fetch(executablePath: path, workingDirectory: directory) }
         inflight[path] = task
         let result = await task.value
-        // A forceReload / path invalidation that raced this fetch wins: don't let
-        // the stale completion repopulate the entry it invalidated.
-        if generation == gen {
+        // A forceReload that raced this fetch bumped the path's generation: the
+        // stale completion must not repopulate the entry it invalidated. When the
+        // generation still matches, the inflight entry is necessarily THIS task
+        // (only forceReload replaces it, and that bumps the generation), so it is
+        // safe to clear without comparing Task identities (plan-review #1).
+        if generation[path, default: 0] == gen {
             cache[path] = result
-            if inflight[path] == task { inflight[path] = nil }
+            inflight[path] = nil
         }
         return result
     }
@@ -1244,9 +1281,9 @@ Append to `Tests/RubienTests/ChatSessionControllerTests.swift` (inside the class
 
     private func makeCodexController(
         catalog: CodexCatalog?,
-        provider: MockAgentProvider? = nil
+        defaults: ((AgentProviderKind) -> AssistantConversationDefaults)? = nil
     ) -> (ChatSessionController, MockAgentProvider) {
-        let codex = provider ?? MockAgentProvider(
+        let codex = MockAgentProvider(
             kind: .codex, availability: .installed(version: "t", path: "/fake/codex"))
         codex.setCatalog(catalog)
         let controller = ChatSessionController(
@@ -1254,7 +1291,8 @@ Append to `Tests/RubienTests/ChatSessionControllerTests.swift` (inside the class
             reference: ChatReference(id: 1, title: "T", authors: ""),
             workspaceURL: URL(fileURLWithPath: "/tmp/ws"), gate: AssistantTurnGate(),
             webAccess: true, modelOverride: nil, effortOverride: "medium",
-            autoApprove: false, codexSandbox: .readOnly)
+            autoApprove: false, codexSandbox: .readOnly,
+            defaultsProvider: defaults)
         return (controller, codex)
     }
 
@@ -1312,9 +1350,20 @@ Append to `Tests/RubienTests/ChatSessionControllerTests.swift` (inside the class
     }
 
     /// The Codex model is THREAD-scoped (spec §2.3): changing it once the
-    /// conversation has content starts a fresh conversation, preserving the pick.
-    func testCodexModelChangeMidConversationStartsNewConversation() async {
-        let (controller, codex) = makeCodexController(catalog: .unavailable)
+    /// conversation has content starts a fresh conversation — preserving the pick
+    /// AND the live conversation's own settings. A `defaultsProvider` with
+    /// CONFLICTING values proves the reset does not re-apply Settings defaults
+    /// the way `newConversation()` would (plan-review #3).
+    func testCodexModelChangeMidConversationStartsNewConversationPreservingSettings() async {
+        let conflictingDefaults: (AgentProviderKind) -> AssistantConversationDefaults = { _ in
+            AssistantConversationDefaults(model: nil, effort: "medium",
+                                          webAccess: true, autoApprove: false)
+        }
+        let (controller, codex) = makeCodexController(
+            catalog: .unavailable, defaults: conflictingDefaults)
+        controller.webAccess = false
+        controller.autoApprove = true
+        controller.effortOverride = "xhigh"
         await waitUntil { controller.canSendWithCurrentAvailability }
         controller.send("hi")
         await codex.waitUntilStreaming()
@@ -1329,8 +1378,14 @@ Append to `Tests/RubienTests/ChatSessionControllerTests.swift` (inside the class
 
         XCTAssertEqual(controller.modelOverride, "gpt-5.6-sol", "the pick survives the reset")
         XCTAssertNil(controller.liveSessionID, "a fresh conversation — the old thread's model was fixed")
-        XCTAssertFalse(controller.hasMessages)
         XCTAssertGreaterThan(controller.generation, genBefore)
+        XCTAssertTrue(controller.hasMessages, "the pane shows the reset notice, not the quick-start page")
+        // The LIVE conversation's choices survive — this is NOT a provider switch,
+        // so the conflicting Settings defaults must NOT have been re-applied.
+        XCTAssertFalse(controller.webAccess)
+        XCTAssertTrue(controller.autoApprove)
+        XCTAssertEqual(controller.effortOverride, "xhigh",
+                       "catalog empty ⇒ no defaultEffort known ⇒ effort preserved")
         // Re-selecting the SAME model is a no-op (no gratuitous reset).
         let genAfter = controller.generation
         controller.selectModel("gpt-5.6-sol")
@@ -1467,21 +1522,38 @@ In `Sources/Rubien/Assistant/ChatSessionController.swift`:
 
     /// The model picker's setter. nil = "Codex default" (no model sent; codex
     /// resolves its own config — spec §3). On Codex, the model is THREAD-scoped
-    /// (`thread/start` only — spec §2.3), so changing it once the conversation has
-    /// content starts a fresh conversation, preserving the pick; Claude switches
-    /// live (per-turn `--model`). An explicit pick snaps the effort control to the
-    /// model's own default (spec §3); "Codex default" leaves effort alone.
+    /// (`thread/start` only — spec §2.3): changing it once the conversation has
+    /// content starts a FRESH conversation that PRESERVES the live web/approval/
+    /// effort/sandbox choices — deliberately NOT `newConversation()`, which
+    /// re-applies Settings defaults and would silently flip the user's live
+    /// toggles (plan-review #3) — and notes the reset in the pane (spec §4.6,
+    /// the `resume()` notice precedent). Claude switches live (per-turn
+    /// `--model`). An explicit pick snaps effort to the model's own default when
+    /// the catalog knows it (spec §3); "Codex default" leaves effort alone.
     func selectModel(_ id: String?) {
         guard id != modelOverride else { return }
         if providerKind == .codex, hasMessages {
-            newConversation()
+            resetConversationState()
+            liveSessionID = nil
+            seedSent = false
+            modelOverride = id
+            snapEffortToModelDefault(id)
+            hasMessages = true
+            renderNotice("_New conversation — Codex applies a model change to a fresh conversation._")
+            return
         }
         modelOverride = id
-        if providerKind == .codex, let id,
-           let model = codexModels.first(where: { $0.id == id }),
-           let defaultEffort = model.defaultEffort {
-            effortOverride = defaultEffort
-        }
+        snapEffortToModelDefault(id)
+    }
+
+    /// An explicit model pick adopts that model's `defaultReasoningEffort` when
+    /// the catalog knows it (spec §3); unknown model / "Codex default" (nil)
+    /// leaves the effort alone.
+    private func snapEffortToModelDefault(_ id: String?) {
+        guard providerKind == .codex, let id,
+              let model = codexModels.first(where: { $0.id == id }),
+              let defaultEffort = model.defaultEffort else { return }
+        effortOverride = defaultEffort
     }
 ```
 
@@ -1740,7 +1812,7 @@ Add the row helpers near `seedModelEffortMirrors` (~line 273):
     }
 ```
 
-- [ ] **Step 3: Map the mirror's "" sentinel to nil at the pref boundary**
+- [ ] **Step 3: Map the mirror's "" sentinel to nil at the pref boundary; snap effort on user picks**
 
 Replace `setDefaultModel` (lines 285-290) with:
 
@@ -1756,7 +1828,28 @@ Replace `setDefaultModel` (lines 285-290) with:
     }
 ```
 
-(Task 4 already made `seedModelEffortMirrors` read `?? ""`. `setDefaultEffort` is unchanged — the effort pref stores whatever the picker offers.)
+And replace the model-mirror `.onChange` in `assistantPane` (line 264) with:
+
+```swift
+        .onChange(of: defaultModel) { _, value in
+            // Detect a USER pick vs a mirror RE-SEED (pane appear / backend
+            // switch): a seed sets the mirror to the stored pref, so value ==
+            // pref there. Snapping on seeds would rewrite the stored effort on
+            // mere pane-open — the guard makes the spec-§3 effort snap (an
+            // explicit model pick adopts the model's own default effort;
+            // plan-review #4) fire on real picks only. Compare BEFORE
+            // setDefaultModel persists the new value.
+            let isCodexUserPick = defaultProvider == .codex
+                && value != (RubienPreferences.assistantCodexModel ?? "")
+            setDefaultModel(value)
+            if isCodexUserPick,
+               let snapped = codexCatalogModels.first(where: { $0.id == value })?.defaultEffort {
+                defaultEffort = snapped
+            }
+        }
+```
+
+(Task 4 already made `seedModelEffortMirrors` read `?? ""`. `setDefaultEffort` is unchanged — the effort pref stores whatever the picker offers; the snap writes through `defaultEffort`'s own `.onChange`.)
 
 - [ ] **Step 4: Build + tests + manual check**
 
@@ -1817,6 +1910,15 @@ git commit -m "docs(assistant): mark codex model auto-discovery spec implemented
 Per CLAUDE.md's workflow + the user's standing convention: run a `codex-rescue` review of the full branch diff (backgrounded, `--effort medium`, findings inline) and a `/simplify` sweep; fix what warrants fixing; re-run the Task 9 Step 1 gate before merging to main.
 
 ---
+
+## Plan review (codex task-mrff5fgd-99kqjg, gpt-5.6 @ medium — SOUND-WITH-FIXES, all folded in)
+
+| # | sev | finding | disposition |
+|---|---|---|---|
+| 1 | High | `inflight[path] == task` Task-identity comparison | **Fixed** — per-path generation makes the guard sufficient; comparison removed (Task 2) |
+| 2 | High | global generation strands other paths' in-flight fetches on forceReload | **Fixed** — per-path `generation: [String: Int]` + stale-clobber race test w/ `modelListDelayMs` (Task 2) |
+| 3 | High | `selectModel` → `newConversation()` re-applies Settings defaults over live web/approval/effort/sandbox | **Fixed** — reset preserves live choices (no defaults adoption) + renders the spec-§4.6 notice; test uses conflicting defaultsProvider to prove non-adoption (Task 6) |
+| 4 | Med | Settings model pick doesn't snap default effort | **Fixed** — `.onChange` snap gated to USER picks (a mirror re-seed must not rewrite the stored effort — a trap beyond the finding) (Task 8) |
 
 ## Post-plan notes (not tasks)
 
