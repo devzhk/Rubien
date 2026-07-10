@@ -73,6 +73,30 @@ final class MarkdownImportMergeTests: XCTestCase {
         XCTAssertEqual(merged.abstract, "Curated abstract.")
     }
 
+    func testFillOnlyMergeStampsDateModified() throws {
+        let db = try makeDB()
+        var curated = Reference(title: "T", url: "https://example.com/p4", referenceType: .webpage)
+        _ = try db.saveReference(&curated)
+
+        // Backdate the stored row so "strictly newer" can't flake on
+        // sub-millisecond timing between save and re-import.
+        try db.dbWriter.write { d in
+            try d.execute(
+                sql: "UPDATE reference SET dateModified = ? WHERE id = ?",
+                arguments: [Date(timeIntervalSince1970: 0), curated.id!]
+            )
+        }
+        let before = try db.fetchReferences(ids: [curated.id!]).first!.dateModified
+
+        _ = try db.batchImportReferences(
+            [MarkdownImporter.parse("---\nsource: https://example.com/p4\n---\nBody", filename: "f")],
+            mergePolicy: .markdownFillOnly
+        )
+        let merged = try db.fetchReferences(ids: [curated.id!]).first!
+        XCTAssertGreaterThan(merged.dateModified, before,
+                             "fill-only merge must stamp dateModified like the standard path")
+    }
+
     func testURLLessNotesAlwaysInsert() throws {
         let db = try makeDB()
         let note = MarkdownImporter.parse("Body one", filename: "Meeting notes")

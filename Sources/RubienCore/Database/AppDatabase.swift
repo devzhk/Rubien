@@ -2415,6 +2415,7 @@ extension AppDatabase {
         merged.accessedDate = fillIfEmpty(incoming.accessedDate, existing: existing.accessedDate)
         merged.siteName = fillIfEmpty(incoming.siteName, existing: existing.siteName)
         merged.webContent = preferredLongest(incoming.webContent, over: existing.webContent)
+        merged.dateModified = Date()
         return merged
     }
 }
