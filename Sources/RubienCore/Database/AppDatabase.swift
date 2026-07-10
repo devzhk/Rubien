@@ -551,6 +551,15 @@ public final class AppDatabase: Sendable {
             try Self.applyV5Body(db)
         }
 
+        // v6 (2026-07): ensure the Type PropertyDefinition advertises every
+        // enum-backed option (adds "Markdown" for imported markdown notes).
+        // Structural JSON append via the shared TypeOptionsReconciler; runs
+        // under the applyingRemote guard like v3 — local normalization, not a
+        // user edit, so it must not queue a CloudKit push.
+        migrator.registerMigration("v6") { db in
+            try Self.applyV6Body(db)
+        }
+
         return migrator
     }
 
@@ -674,6 +683,42 @@ public final class AppDatabase: Sendable {
             """)
         }
         try migrator.migrate(queue)
+    }
+
+    /// v6 migration body: ensure the Type PropertyDefinition advertises every
+    /// enum-backed option (adds "Markdown"). Runs under the applyingRemote
+    /// guard for the same reason v3 did: local normalization, not a user edit,
+    /// so it must not queue a CloudKit push. Convergence across devices comes
+    /// from every device running this locally plus the remote-apply
+    /// reconciliation in RubienSync.
+    fileprivate static func applyV6Body(_ db: Database) throws {
+        try db.execute(sql: """
+            INSERT INTO syncSession(key, value) VALUES('applyingRemote','1')
+                ON CONFLICT(key) DO UPDATE SET value='1'
+        """)
+        defer {
+            try? db.execute(sql: "DELETE FROM syncSession WHERE key='applyingRemote'")
+        }
+        guard let current = try String.fetchOne(
+            db,
+            sql: "SELECT optionsJSON FROM propertyDefinition WHERE defaultFieldKey = 'referenceType' LIMIT 1"
+        ) else { return }
+        guard let amended = TypeOptionsReconciler.appendingMissingTypeOptions(toOptionsJSON: current),
+              amended != current else {
+            return  // malformed (nil) → leave untouched; unchanged → nothing to do
+        }
+        try db.execute(
+            sql: "UPDATE propertyDefinition SET optionsJSON = ? WHERE defaultFieldKey = 'referenceType'",
+            arguments: [amended]
+        )
+    }
+
+    /// Test-only: applies the v6 body to an already-migrated queue so tests can
+    /// simulate the v5-shaped / peer-overwritten state and verify idempotence.
+    public static func runV6MigrationForTesting(on queue: DatabaseQueue) throws {
+        try queue.write { db in
+            try applyV6Body(db)
+        }
     }
 
     /// Test-only: applies the v3 prune/normalize body to an arbitrary queue
