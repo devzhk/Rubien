@@ -58,6 +58,71 @@ struct SearchQuery {
     }
 }
 
+/// Sendable result of the non-UI portion of a Markdown source import.
+/// ContentView turns this into UI state only after the worker returns.
+struct MarkdownImportWorkerResult: Sendable {
+    let importedCount: Int?
+    let importedIDs: [Int64]
+    let unreadableFilenames: [String]
+    let errorDescription: String?
+}
+
+/// Reads, parses, and persists Markdown sources without occupying the main
+/// actor. Security-scoped access remains owned by ContentView because it must
+/// stay active for the duration of this worker and be stopped on the UI actor.
+enum MarkdownImportWorker {
+    static func importSources(
+        _ sources: [MaterializedImportSource],
+        database: AppDatabase
+    ) async -> MarkdownImportWorkerResult {
+        await Task.detached(priority: .userInitiated) {
+            var references: [Reference] = []
+            var unreadableFilenames: [String] = []
+
+            for source in sources {
+                let url = source.fileURL
+                guard let content = try? String(contentsOf: url, encoding: .utf8) else {
+                    unreadableFilenames.append(url.lastPathComponent)
+                    continue
+                }
+                references.append(MarkdownImporter.parse(
+                    content,
+                    filename: url.deletingPathExtension().lastPathComponent
+                ))
+            }
+
+            guard !references.isEmpty else {
+                return MarkdownImportWorkerResult(
+                    importedCount: nil,
+                    importedIDs: [],
+                    unreadableFilenames: unreadableFilenames,
+                    errorDescription: nil
+                )
+            }
+
+            do {
+                let result = try database.batchImportReferences(
+                    references,
+                    mergePolicy: .markdownFillOnly
+                )
+                return MarkdownImportWorkerResult(
+                    importedCount: result.count,
+                    importedIDs: result.ids,
+                    unreadableFilenames: unreadableFilenames,
+                    errorDescription: nil
+                )
+            } catch {
+                return MarkdownImportWorkerResult(
+                    importedCount: nil,
+                    importedIDs: [],
+                    unreadableFilenames: unreadableFilenames,
+                    errorDescription: error.localizedDescription
+                )
+            }
+        }.value
+    }
+}
+
 @MainActor
 final class LibraryViewModel: ObservableObject {
     /// The current page of references returned by the database-level query.
@@ -1477,44 +1542,21 @@ struct ContentView: View {
             // Markdown: validated by ImportSourceMaterializer, then parsed and
             // persisted with the existing fill-only merge behavior.
             if !markdownSources.isEmpty {
-                var refs: [Reference] = []
-                var failed: [String] = []
-                for source in markdownSources {
-                    let url = source.fileURL
-                    let accessing = source.temporaryDirectoryURL == nil
-                        ? url.startAccessingSecurityScopedResource()
-                        : false
-                    defer {
-                        if accessing {
-                            url.stopAccessingSecurityScopedResource()
-                        }
-                    }
-                    guard let content = try? String(contentsOf: url, encoding: .utf8) else {
-                        failed.append(url.lastPathComponent)
-                        continue
-                    }
-                    refs.append(MarkdownImporter.parse(
-                        content, filename: url.deletingPathExtension().lastPathComponent
-                    ))
+                let result = await importMarkdownSources(markdownSources)
+                if let count = result.importedCount {
+                    selectedId = result.importedIDs.last
+                    let fmt = String(localized: "Imported %d markdown file(s)", bundle: .module)
+                    summary.append(String(format: fmt, count))
+                    // No explicit reload: the list refreshes via observation,
+                    // same as viewModel.importBibTeX(from:).
                 }
-                if !refs.isEmpty {
-                    do {
-                        let result = try viewModel.db.batchImportReferences(
-                            refs, mergePolicy: .markdownFillOnly
-                        )
-                        selectedId = result.ids.last
-                        let fmt = String(localized: "Imported %d markdown file(s)", bundle: .module)
-                        summary.append(String(format: fmt, result.count))
-                        // No explicit reload: the list refreshes via observation,
-                        // same as viewModel.importBibTeX(from:).
-                    } catch {
-                        summary.append("Markdown import failed: \(error.localizedDescription)")
-                    }
+                if let errorDescription = result.errorDescription {
+                    summary.append("Markdown import failed: \(errorDescription)")
                 }
-                if !failed.isEmpty {
+                if !result.unreadableFilenames.isEmpty {
                     summary.append(
                         String(format: String(localized: "Could not read: %@", bundle: .module),
-                               failed.joined(separator: ", "))
+                               result.unreadableFilenames.joined(separator: ", "))
                     )
                 }
             }
@@ -1563,6 +1605,25 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    /// Security-scoped URLs must remain accessible while the detached worker
+    /// reads them. Both acquisition and release occur on the main actor.
+    @MainActor
+    private func importMarkdownSources(
+        _ sources: [MaterializedImportSource]
+    ) async -> MarkdownImportWorkerResult {
+        var securityScopedURLs: [URL] = []
+        for source in sources where source.temporaryDirectoryURL == nil {
+            let url = source.fileURL
+            if url.startAccessingSecurityScopedResource() {
+                securityScopedURLs.append(url)
+            }
+        }
+        defer {
+            securityScopedURLs.forEach { $0.stopAccessingSecurityScopedResource() }
+        }
+        return await MarkdownImportWorker.importSources(sources, database: viewModel.db)
     }
 
     /// Uses the shared PDF coordinator for resolution and persistence, then
