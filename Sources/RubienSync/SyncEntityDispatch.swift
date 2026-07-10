@@ -475,6 +475,16 @@ extension SyncEntityType {
                 // a stray isDefault=0 would make the built-in deletable and break
                 // the next reconcile. Force it true.
                 row.isDefault = true
+                // Type built-in: never let a peer's options list drop enum-backed
+                // options (an old peer pushes six options → "Markdown" would vanish
+                // and the v6 migration never reruns). Heal structurally (unknown JSON
+                // fields preserved); the applyingRemote guard already active during
+                // pulls keeps this from dirtying the record — every device heals
+                // itself, no push-back churn.
+                if fieldKey == "referenceType",
+                   let healed = TypeOptionsReconciler.appendingMissingTypeOptions(toOptionsJSON: row.optionsJSON) {
+                    row.optionsJSON = healed
+                }
                 try row.update(db)
             } else {
                 row.id = id

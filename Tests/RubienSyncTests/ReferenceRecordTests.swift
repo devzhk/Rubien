@@ -141,6 +141,16 @@ final class ReferenceRecordTests: XCTestCase {
         XCTAssertEqual(decoded.pmcid, original.pmcid)
     }
 
+    /// Task 1 added `ReferenceType.markdown`; the CKRecord surface encodes the
+    /// enum by rawValue, so a markdown reference must survive encode/decode
+    /// (guards against a future decoder regression coercing it to `.other`).
+    func testMarkdownReferenceTypeRoundTrips() throws {
+        let original = Reference(title: "Markdown Notes", referenceType: .markdown)
+        let record = Reference.makeRecord(recordName: recordName, reference: original)
+        let decoded = Reference(record: record)
+        XCTAssertEqual(decoded.referenceType, .markdown, ".markdown must survive the CKRecord round trip")
+    }
+
     // MARK: - ID / attachment boundaries
 
     func testLocalIDIsNotEncodedInRecord() {
