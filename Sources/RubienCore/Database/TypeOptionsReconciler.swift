@@ -30,15 +30,14 @@ public enum TypeOptionsReconciler {
             return nil
         }
         let present = Set(array.compactMap { $0["value"] as? String })
-        var appended = false
-        for type in ReferenceType.allCases where !present.contains(type.rawValue) {
+        let missing = ReferenceType.allCases.filter { !present.contains($0.rawValue) }
+        guard !missing.isEmpty else { return json }
+        for type in missing {
             array.append([
                 "value": type.rawValue,
                 "color": defaultColors[type] ?? "#8E8E93",
             ])
-            appended = true
         }
-        guard appended else { return json }
         guard let out = try? JSONSerialization.data(withJSONObject: array),
               let str = String(data: out, encoding: .utf8) else {
             return nil

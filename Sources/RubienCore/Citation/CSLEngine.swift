@@ -177,15 +177,9 @@ public final class CSLEngine {
     }
 
     private func mapReferenceType(_ type: ReferenceType) -> String {
-        switch type {
-        case .journalArticle:  return "article-journal"
-        case .conferencePaper: return "paper-conference"
-        case .book:            return "book"
-        case .thesis:          return "thesis"
-        case .webpage:         return "webpage"
-        case .markdown:        return "document"
-        case .other:           return "article"
-        }
+        // Single source of truth: `ReferenceType.cslType` (Reference+CSLJSON.swift).
+        // Keeping a parallel switch here means every new case needs a double edit.
+        type.cslType
     }
 
     // MARK: - Name Formatting

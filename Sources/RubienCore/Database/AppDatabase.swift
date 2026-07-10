@@ -2393,7 +2393,10 @@ extension AppDatabase {
             let c = incoming?.trimmingCharacters(in: .whitespacesAndNewlines)
             return (c?.isEmpty == false) ? incoming : existing
         }
-        func preferredLongest(_ incoming: String?, over existing: String?) -> String? {
+        // NOTE: returns the UNTRIMMED original (not the trimmed value), unlike the
+        // same-named local in `mergedReference`. webContent is an encoded envelope;
+        // trimming it would shift character offsets and break annotation anchors.
+        func longerPreservingOriginal(_ incoming: String?, over existing: String?) -> String? {
             let lhs = incoming?.trimmingCharacters(in: .whitespacesAndNewlines)
             let rhs = existing?.trimmingCharacters(in: .whitespacesAndNewlines)
             switch (lhs?.isEmpty == false ? lhs : nil, rhs?.isEmpty == false ? rhs : nil) {
@@ -2419,7 +2422,7 @@ extension AppDatabase {
         }
         merged.accessedDate = fillIfEmpty(incoming.accessedDate, existing: existing.accessedDate)
         merged.siteName = fillIfEmpty(incoming.siteName, existing: existing.siteName)
-        merged.webContent = preferredLongest(incoming.webContent, over: existing.webContent)
+        merged.webContent = longerPreservingOriginal(incoming.webContent, over: existing.webContent)
         merged.dateModified = Date()
         return merged
     }

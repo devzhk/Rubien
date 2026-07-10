@@ -85,7 +85,7 @@ public enum MarkdownImporter {
                     appendListItem(String(trimmed.dropFirst(1)), to: key, in: &fields)
                     continue
                 }
-                if openListKey != nil || sawKey { continue }             // nested map / continuation: opaque
+                if sawKey { continue }                                   // nested map / continuation (or list body): opaque
                 return nil                                               // indented line with no owner
             }
 
