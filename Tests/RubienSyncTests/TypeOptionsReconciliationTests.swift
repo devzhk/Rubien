@@ -79,6 +79,49 @@ final class TypeOptionsReconciliationTests: XCTestCase {
         XCTAssertEqual(dirty, 0, "healing must not push back")
     }
 
+    /// Malformed remote `optionsJSON` must never clobber the valid local list.
+    /// The reconciler returns nil for non-array-of-objects input (contract:
+    /// "nil = leave the stored value untouched"), so the apply path must keep
+    /// the local post-v6 option list rather than saving the peer's garbage.
+    func testMalformedRemoteTypeOptionsPreservesLocal() throws {
+        let localId = try XCTUnwrap(try db.dbWriter.read {
+            try Int64.fetchOne($0, sql: "SELECT id FROM propertyDefinition WHERE defaultFieldKey='referenceType'")
+        })
+
+        // A valid definition, but plant malformed JSON directly in the record's
+        // optionsJSON field — exactly what an old/buggy peer could push.
+        let def = PropertyDefinition(
+            id: localId, name: "Type", type: .singleSelect, options: sixOptions,
+            sortOrder: 0, isDefault: true, defaultFieldKey: "referenceType", isVisible: true
+        )
+        let record = PropertyDefinition.makeRecord(
+            recordName: SyncEntityType.propertyDefinition.qualifiedRecordName(entityId: String(localId)),
+            definition: def
+        )
+        record[PropertyDefinition.RecordField.optionsJSON] = "not json"
+
+        try db.dbWriter.write { d in
+            try self.store.setApplyingRemote(d)
+            _ = try SyncEntityType.propertyDefinition.applyRemoteRecord(
+                record, entityId: String(localId), db: d
+            )
+            try self.store.clearApplyingRemote(d)
+        }
+
+        let stored = try db.dbWriter.read { d in
+            try String.fetchOne(
+                d,
+                sql: "SELECT optionsJSON FROM propertyDefinition WHERE defaultFieldKey='referenceType'"
+            ) ?? ""
+        }
+        XCTAssertNotEqual(stored, "not json", "malformed remote value must not be stored")
+        XCTAssertTrue(stored.contains(#""Markdown""#),
+                      "valid post-v6 local option list survived")
+        // Still a well-formed JSON array of objects.
+        let parsed = (try? JSONSerialization.jsonObject(with: Data(stored.utf8))) as? [[String: Any]]
+        XCTAssertNotNil(parsed, "stored optionsJSON still parses as an array of objects")
+    }
+
     /// Non-Type built-ins must pass through untouched (no accidental healing).
     func testNonTypeBuiltinIsNotTouched() throws {
         let localId = try XCTUnwrap(try db.dbWriter.read {

@@ -2409,9 +2409,14 @@ extension AppDatabase {
             ? incoming.title : existing.title
         merged.authors = existing.authors.isEmpty ? incoming.authors : existing.authors
         merged.abstract = fillIfEmpty(incoming.abstract, existing: existing.abstract)
-        merged.year = existing.year ?? incoming.year
-        merged.issuedMonth = existing.issuedMonth ?? incoming.issuedMonth
-        merged.issuedDay = existing.issuedDay ?? incoming.issuedDay
+        // Issued date is a coarse→fine tuple; fill it atomically so a curated year is
+        // never grafted onto a different year's month/day. `merged` already carries
+        // existing's tuple; only when existing has no year do we adopt incoming's whole.
+        if existing.year == nil {
+            merged.year = incoming.year
+            merged.issuedMonth = incoming.issuedMonth
+            merged.issuedDay = incoming.issuedDay
+        }
         merged.accessedDate = fillIfEmpty(incoming.accessedDate, existing: existing.accessedDate)
         merged.siteName = fillIfEmpty(incoming.siteName, existing: existing.siteName)
         merged.webContent = preferredLongest(incoming.webContent, over: existing.webContent)

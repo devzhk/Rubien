@@ -73,6 +73,38 @@ final class MarkdownImportMergeTests: XCTestCase {
         XCTAssertEqual(merged.abstract, "Curated abstract.")
     }
 
+    /// Regression: the issued date is a coarse→fine tuple and must fill
+    /// atomically. A curated year with no month/day must never absorb an
+    /// incoming clip's month/day (which belong to a *different* year), which
+    /// would synthesize an invalid hybrid date like 2020-05-06.
+    func testFillOnlyMergeDoesNotSynthesizeHybridDate() throws {
+        let db = try makeDB()
+        var curated = Reference(
+            title: "Curated", year: 2020, url: "https://example.com/hybrid-date",
+            referenceType: .webpage
+        )
+        _ = try db.saveReference(&curated)
+        XCTAssertNil(curated.issuedMonth, "precondition: curated has no month")
+        XCTAssertNil(curated.issuedDay, "precondition: curated has no day")
+
+        // Incoming clip for the SAME url carries a full 2021-05-06 date.
+        let incoming = MarkdownImporter.parse(
+            "---\nsource: https://example.com/hybrid-date\npublished: 2021-05-06\n---\nBody",
+            filename: "f"
+        )
+        XCTAssertEqual(incoming.year, 2021)
+        XCTAssertEqual(incoming.issuedMonth, 5)
+        XCTAssertEqual(incoming.issuedDay, 6)
+
+        let result = try db.batchImportReferences([incoming], mergePolicy: .markdownFillOnly)
+        XCTAssertEqual(result.ids, [curated.id!], "merged by url, not duplicated")
+
+        let merged = try db.fetchReferences(ids: [curated.id!]).first!
+        XCTAssertEqual(merged.year, 2020, "curated year is preserved")
+        XCTAssertNil(merged.issuedMonth, "must not graft incoming month onto curated year")
+        XCTAssertNil(merged.issuedDay, "must not graft incoming day onto curated year")
+    }
+
     func testFillOnlyMergeStampsDateModified() throws {
         let db = try makeDB()
         var curated = Reference(title: "T", url: "https://example.com/p4", referenceType: .webpage)
