@@ -129,12 +129,6 @@ final class MigrationV5Tests: XCTestCase {
         }
     }
 
-    /// Full migration through AppDatabase produces a v5 schema and the
-    /// `currentSchemaVersion` constant matches.
-    func testCurrentSchemaVersionIsV5() throws {
-        XCTAssertEqual(AppDatabase.currentSchemaVersion, "v5")
-    }
-
     /// Full-stack migration seeds both new PropertyDefinitions alongside the
     /// existing v1 defaults.
     func testFullStackMigrationProducesV5PropertyDefinitions() throws {

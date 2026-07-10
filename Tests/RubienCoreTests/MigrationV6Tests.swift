@@ -4,6 +4,12 @@ import GRDB
 
 final class MigrationV6Tests: XCTestCase {
 
+    /// The `currentSchemaVersion` constant must track the latest registered
+    /// migration (v6). Its value surfaces in `rubien-cli sync status` JSON.
+    func testCurrentSchemaVersionIsV6() throws {
+        XCTAssertEqual(AppDatabase.currentSchemaVersion, "v6")
+    }
+
     /// The realistic v5-era six-option state (v3 prune output), plus one
     /// forward-compat unknown field that must survive structurally.
     private let sixOptionsJSON = ##"[{"value":"Journal Article","color":"#007AFF"},{"value":"Conference Paper","color":"#AF52DE"},{"value":"Book","color":"#34C759"},{"value":"Thesis","color":"#FF9500"},{"value":"Web Page","color":"#30B0C7"},{"value":"Other","color":"#8E8E93","futureField":"keep-me"}]"##
