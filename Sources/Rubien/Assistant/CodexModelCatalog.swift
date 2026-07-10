@@ -21,7 +21,10 @@ actor CodexModelCatalog {
     static let shared = CodexModelCatalog()
 
     private let workingDirectory: URL
-    private let logger = RubienLogger(subsystem: "com.rubien.assistant", category: "CodexModelCatalog")
+    /// `static` (not an instance property) so the free-standing `fetch` probe —
+    /// deliberately non-isolated from the actor so a slow probe never blocks other
+    /// paths' lookups — can log without threading the logger through as a parameter.
+    private static let logger = RubienLogger(subsystem: "com.rubien.assistant", category: "CodexModelCatalog")
 
     private var cache: [String: CodexCatalog] = [:]
     private var inflight: [String: Task<CodexCatalog, Never>] = [:]
@@ -44,7 +47,8 @@ actor CodexModelCatalog {
     /// unresolvable binary, spawn error, JSON-RPC error (a codex too old for
     /// `model/list`), timeout — returns `.unavailable`; callers degrade per §4.7.
     func catalog(executableOverride: String?, forceReload: Bool = false) async -> CodexCatalog {
-        guard let path = Self.resolveExecutable(override: executableOverride) else {
+        guard let path = CodexProvider.resolveExecutable(override: executableOverride) else {
+            Self.logger.error("codex model/list probe failed: could not resolve a codex binary")
             return .unavailable
         }
         if forceReload {
@@ -72,23 +76,6 @@ actor CodexModelCatalog {
         return result
     }
 
-    /// Well-known codex install dirs; mirrors `CodexAppServerConnection.resolveExecutable`
-    /// (file-private inside `CodexProvider.swift`, so not reusable from here) so both
-    /// call sites resolve the SAME binary via the SAME candidate list — a picker asking
-    /// "what can Codex run?" must agree with what a turn will actually spawn.
-    private static func resolveExecutable(override: String?) -> String? {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return AgentBinaryProbe.resolveExecutable(
-            override: override,
-            candidates: [
-                "\(home)/.npm-global/bin/codex",
-                "/opt/homebrew/bin/codex",
-                "/usr/local/bin/codex",
-                "\(home)/.local/bin/codex",
-            ],
-            binaryName: "codex")
-    }
-
     /// One standalone probe: spawn, handshake, `model/list`, kill. Static + isolated
     /// from the actor so a slow probe never blocks other paths' lookups.
     private static func fetch(executablePath: String, workingDirectory: URL) async -> CodexCatalog {
@@ -105,6 +92,7 @@ actor CodexModelCatalog {
                 environment: environment,
                 workingDirectory: workingDirectory.path)
         } catch {
+            logger.error("codex model/list probe failed: spawn error \(String(describing: error))")
             return .unavailable
         }
 
@@ -128,12 +116,17 @@ actor CodexModelCatalog {
                 guard case let .response(id, result, error)? =
                         CodexAppServerProtocol.decodeInbound(line: line) else { continue }
                 if id == .number(1) {
-                    guard error == nil else { break }
+                    guard error == nil else {
+                        logger.error("codex model/list probe failed: initialize returned an error: \(String(describing: error))")
+                        break
+                    }
                     process.writeLine(CodexAppServerProtocol.initialized())
                     process.writeLine(CodexAppServerProtocol.modelList(requestID: 2))
                 } else if id == .number(2) {
                     if error == nil, let result {
                         models = CodexAppServerProtocol.decodeModelList(result)
+                    } else if error != nil {
+                        logger.error("codex model/list probe failed: model/list returned an error: \(String(describing: error))")
                     }
                     break
                 }
@@ -146,7 +139,10 @@ actor CodexModelCatalog {
         process.signalGroup(SIGKILL)
         Task { _ = await process.wait() }   // reap off-path
 
-        guard let models else { return .unavailable }
+        guard let models else {
+            logger.error("codex model/list probe failed: no model list received (EOF, timeout, or decode failure)")
+            return .unavailable
+        }
         return CodexCatalog(models: models, fetchedOK: true)
     }
 }

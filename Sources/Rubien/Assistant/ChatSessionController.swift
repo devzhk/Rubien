@@ -94,6 +94,10 @@ final class ChatSessionController: ObservableObject {
     /// passage must still re-focus, which an equality-based observer on
     /// `stagedSelection` would miss. Never reset (its absolute value is meaningless).
     @Published private(set) var composerFocusRequest = 0
+    /// The model codex reports the live thread actually runs (`.modelResolved`,
+    /// spec §4.5) — meaningful when `modelOverride == nil` ("Codex default"): the
+    /// picker shows what the default resolved to. Cleared with the conversation.
+    @Published private(set) var resolvedModel: String?
     /// The conversation's model, applied per turn (`--model`). Claude aliases:
     /// `fable` / `opus` / `sonnet` / `haiku`. The sidebar always shows a concrete
     /// model (no "CLI default" state); `nil` remains valid programmatically and
@@ -348,6 +352,7 @@ final class ChatSessionController: ObservableObject {
         busyElsewhere = false
         pendingApprovals.removeAll()
         stagedSelection = nil
+        resolvedModel = nil
     }
 
     /// Start a fresh conversation: reset, drop the session identity, and adopt the
@@ -500,6 +505,8 @@ final class ChatSessionController: ObservableObject {
         case .sessionStarted(let id):
             liveSessionID = id
             seedSent = true  // the seed-bearing process started → the seed was delivered
+        case .modelResolved(let model):
+            resolvedModel = model
         case .assistantDelta(let text):
             transcript.appendDelta(text)  // streaming-only; the commit is what's logged
         case .assistantMessageCompleted(let text):

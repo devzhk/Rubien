@@ -115,6 +115,11 @@ enum AgentEvent: Sendable, Equatable {
     /// from every `result` — the id **rotates each resume turn** (D5), so the
     /// controller must treat the latest `sessionStarted` as the id to `--resume`.
     case sessionStarted(sessionID: String)
+    /// The model the runtime RESOLVED for this conversation — reported by codex's
+    /// `thread/start`/`thread/resume` response, including (especially) when the
+    /// request omitted `model` ("Codex default": codex applies its own config
+    /// chain — spec §2.2). Claude never emits this.
+    case modelResolved(model: String)
     /// A streamed partial-text chunk (from `--include-partial-messages`).
     case assistantDelta(text: String)
     /// The authoritative text of a completed assistant message.
@@ -340,6 +345,12 @@ protocol AgentProvider: Sendable {
     /// `matchSnippet`. `referenceID` scopes hits like `recentSessions`. Default
     /// `[]` (a provider without a readable store).
     func searchSessions(query: String, workspaceURL: URL, limit: Int, referenceID: Int64?) async -> [AgentSessionSummary]
+
+    /// The models the installed runtime reports it supports, for the model picker.
+    /// Three states (spec §4.3): `nil` — this backend has no discovery surface
+    /// (Claude → static list); `.fetchedOK == false` — discovery attempted and
+    /// failed (→ degraded picker); otherwise the live list. Never blocks a turn.
+    func availableModels() async -> CodexCatalog?
 }
 
 extension AgentProvider {
@@ -347,6 +358,7 @@ extension AgentProvider {
     func recentSessions(workspaceURL: URL, limit: Int, referenceID: Int64?) async -> [AgentSessionSummary] { [] }
     func sessionTranscript(sessionID: String, workspaceURL: URL) async -> [ChatRenderMessage] { [] }
     func searchSessions(query: String, workspaceURL: URL, limit: Int, referenceID: Int64?) async -> [AgentSessionSummary] { [] }
+    func availableModels() async -> CodexCatalog? { nil }
 
     /// Unscoped conveniences (existing call sites/tests; forward `referenceID: nil`).
     func recentSessions(workspaceURL: URL, limit: Int) async -> [AgentSessionSummary] {

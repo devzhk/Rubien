@@ -725,6 +725,33 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertEqual(pidAfterQuery, pidAfterTurn, "the turn reused the History-spawned server")
     }
 
+    // MARK: Model auto-discovery seam
+
+    /// The fake's thread/start response carries `"model": "gpt-5.5-fake"` — the
+    /// provider must surface it as `.modelResolved` (spec §2.2/§4.5), after
+    /// `.sessionStarted` and before the turn's content events.
+    func testThreadStartResolvedModelIsSurfaced() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["assistantText": "ok"], into: workspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        let events = try await collectAllEvents(provider.send(turn: turn(workspace: workspace)))
+
+        XCTAssertTrue(events.contains(.modelResolved(model: "gpt-5.5-fake")),
+                      "thread/start's resolved model must stream as an event; got \(events)")
+        let sessionIdx = try XCTUnwrap(events.firstIndex(of: .sessionStarted(sessionID: "TH-1")))
+        let modelIdx = try XCTUnwrap(events.firstIndex(of: .modelResolved(model: "gpt-5.5-fake")))
+        XCTAssertGreaterThan(modelIdx, sessionIdx)
+    }
+
+    func testAvailableModelsDelegatesToCatalog() async throws {
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        let catalog = await provider.availableModels()
+        XCTAssertEqual(catalog?.fetchedOK, true)
+        XCTAssertEqual(catalog?.visibleModels.map(\.id), ["fake-default", "fake-frontier"])
+    }
+
     // MARK: Harness plumbing
 
     private var fakeServerPath: String {
