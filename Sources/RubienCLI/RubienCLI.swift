@@ -942,7 +942,7 @@ struct Import: AsyncParsableCommand {
         abstract: "Import references from BibTeX/RIS/Markdown files, PDFs, folders, or direct HTTP(S) file URLs (use '-' for stdin)"
     )
 
-    @Argument(help: "Path to a .bib, .ris, .md, or .pdf file; a Zotero export folder; a direct HTTP(S) .pdf/.md URL; or '-' to read from stdin")
+    @Argument(help: "Path to a .bib, .ris, .md, or .pdf file; a Zotero export folder; a direct HTTP(S) URL with a .pdf, .md, or .markdown path extension; or '-' to read from stdin")
     var file: String
 
     @Option(name: .long, help: "Format hint when reading from stdin: bib, ris, md")
