@@ -1555,17 +1555,21 @@ struct ContentView: View {
             let preparedPDFFilename = prepared.pdfPath
             _ = MetadataResolutionSeed.fromImportedPDF(url: url, extracted: prepared.extracted)
 
+            // Save/attach/persist failed after the PDF was copied: delete the
+            // orphaned file and report failure keyed on the source filename.
+            func cleanupAndFail() -> PDFImportOutcome {
+                PDFService.deletePDF(at: preparedPDFFilename)
+                let fmt = String(localized: "PDF import failed: %@", bundle: .module)
+                return .failed(String(format: fmt, url.lastPathComponent))
+            }
+
             let resolution = await metadataResolver.resolveImportedPDF(url: url, extracted: prepared.extracted)
 
             switch resolution {
             case .verified(let envelope):
                 let reference = envelope.reference
                 guard finishPDFImport(with: reference, pdfFilename: preparedPDFFilename) else {
-                    // Save or PDF attach failed; don't orphan the prepared file.
-                    // Mirrors the `.none` cleanup below.
-                    PDFService.deletePDF(at: preparedPDFFilename)
-                    let fmt = String(localized: "PDF import failed: %@", bundle: .module)
-                    return .failed(String(format: fmt, url.lastPathComponent))
+                    return cleanupAndFail()
                 }
                 return .imported(title: reference.title)
 
@@ -1584,9 +1588,7 @@ struct ContentView: View {
                 case .intake(let intake):
                     return .queued(intake)
                 case .none:
-                    PDFService.deletePDF(at: preparedPDFFilename)
-                    let fmt = String(localized: "PDF import failed: %@", bundle: .module)
-                    return .failed(String(format: fmt, url.lastPathComponent))
+                    return cleanupAndFail()
                 }
             }
         } catch {
