@@ -1154,6 +1154,18 @@ extension AppDatabase {
     }
 }
 
+// MARK: - Import merge policy
+
+/// How `batchImportReferences` reconciles an incoming reference with a
+/// dedup match. `.standard` is the historical bib/ris behavior
+/// (`mergedReference` — incoming metadata preferred). `.markdownFillOnly`
+/// protects curated data from re-imported markdown files (spec §8):
+/// metadata fills empty fields only; content stays longest-wins.
+public enum ImportMergePolicy: Sendable {
+    case standard
+    case markdownFillOnly
+}
+
 // MARK: - Reference CRUD
 extension AppDatabase {
     public enum ReferenceSaveResult: String, Sendable, Encodable {
@@ -1600,7 +1612,8 @@ extension AppDatabase {
     public func batchImportReferences(
         _ references: [Reference],
         stamping target: ZoteroImportPropertyTarget? = nil,
-        pdfFilenames: [String?]? = nil
+        pdfFilenames: [String?]? = nil,
+        mergePolicy: ImportMergePolicy = .standard
     ) throws -> (count: Int, ids: [Int64]) {
         guard !references.isEmpty else { return (0, []) }
         if let pdfFilenames {
@@ -1617,7 +1630,10 @@ extension AppDatabase {
                 let resolvedId: Int64?
                 if let match = try findDuplicateReferenceID(for: ref, db: db),
                    var existing = try Reference.fetchOne(db, id: match.id) {
-                    existing = mergedReference(existing: existing, incoming: ref)
+                    existing = switch mergePolicy {
+                    case .standard:         mergedReference(existing: existing, incoming: ref)
+                    case .markdownFillOnly: markdownFillMergedReference(existing: existing, incoming: ref)
+                    }
                     try existing.save(db)
                     resolvedId = existing.id
                 } else {
@@ -2364,6 +2380,41 @@ extension AppDatabase {
         merged.pmcid = preferred(incoming.pmcid, over: existing.pmcid)
         merged.dateAdded = existing.dateAdded
         merged.dateModified = Date()
+        return merged
+    }
+
+    /// Spec §8 fill-only merge for markdown imports: never overwrite curated
+    /// metadata; body stays longest-wins (annotation-anchor-safe).
+    private func markdownFillMergedReference(existing: Reference, incoming: Reference) -> Reference {
+        func fillIfEmpty(_ incoming: String?, existing: String?) -> String? {
+            if let e = existing?.trimmingCharacters(in: .whitespacesAndNewlines), !e.isEmpty {
+                return existing
+            }
+            let c = incoming?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return (c?.isEmpty == false) ? incoming : existing
+        }
+        func preferredLongest(_ incoming: String?, over existing: String?) -> String? {
+            let lhs = incoming?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let rhs = existing?.trimmingCharacters(in: .whitespacesAndNewlines)
+            switch (lhs?.isEmpty == false ? lhs : nil, rhs?.isEmpty == false ? rhs : nil) {
+            case let (l?, r?): return l.count >= r.count ? incoming : existing
+            case (.some, nil): return incoming
+            case (nil, .some): return existing
+            default: return nil
+            }
+        }
+
+        var merged = existing
+        merged.title = existing.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? incoming.title : existing.title
+        merged.authors = existing.authors.isEmpty ? incoming.authors : existing.authors
+        merged.abstract = fillIfEmpty(incoming.abstract, existing: existing.abstract)
+        merged.year = existing.year ?? incoming.year
+        merged.issuedMonth = existing.issuedMonth ?? incoming.issuedMonth
+        merged.issuedDay = existing.issuedDay ?? incoming.issuedDay
+        merged.accessedDate = fillIfEmpty(incoming.accessedDate, existing: existing.accessedDate)
+        merged.siteName = fillIfEmpty(incoming.siteName, existing: existing.siteName)
+        merged.webContent = preferredLongest(incoming.webContent, over: existing.webContent)
         return merged
     }
 }
