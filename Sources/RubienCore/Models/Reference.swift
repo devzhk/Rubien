@@ -748,11 +748,11 @@ extension Reference {
         return nil
     }
 
-    /// 是否可打开内置网页阅读器：有剪藏正文，或有可用的 http(s) 原文链接（走「剪藏正文」或「在线阅读」）。
+    /// 是否可打开内置网页阅读器：有剪藏正文即可打开（任意类型）；仅 `webpage` 类型才有仅凭链接的在线阅读。
     public var canOpenWebReader: Bool {
-        guard referenceType == .webpage else { return false }
         let clip = webContent?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !clip.isEmpty { return true }
+        guard referenceType == .webpage else { return false }
         let urlStr = resolvedWebReaderURLString()?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return !urlStr.isEmpty && URL(string: urlStr) != nil
     }
