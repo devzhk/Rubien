@@ -98,6 +98,11 @@ final class ChatSessionController: ObservableObject {
     /// spec §4.5) — meaningful when `modelOverride == nil` ("Codex default"): the
     /// picker shows what the default resolved to. Cleared with the conversation.
     @Published private(set) var resolvedModel: String?
+    /// The installed codex's discovered models (non-hidden), feeding the model
+    /// picker. Empty until `refreshCodexCatalog()` resolves — the picker then
+    /// shows "Codex default" (+ any pin), which is always valid (spec §4.7).
+    /// Claude conversations keep this empty (static lists).
+    @Published private(set) var codexModels: [CodexModelInfo] = []
     /// The conversation's model, applied per turn (`--model`). Claude aliases:
     /// `fable` / `opus` / `sonnet` / `haiku`. The sidebar always shows a concrete
     /// model (no "CLI default" state); `nil` remains valid programmatically and
@@ -175,6 +180,10 @@ final class ChatSessionController: ObservableObject {
     /// newer probe or `switchProvider` advanced the token across the `await`, so a slow
     /// probe of a previously-selected backend can't overwrite the current one's state.
     private var availabilityProbeToken = 0
+    /// Supersession token for `refreshCodexCatalog` (same pattern as
+    /// `availabilityProbeToken`): a slow fetch kicked before a provider switch
+    /// must not repopulate the new backend's (cleared) model list.
+    private var catalogFetchToken = 0
 
     init(
         provider: any AgentProvider,
@@ -400,6 +409,7 @@ final class ChatSessionController: ObservableObject {
         availabilityProbeToken += 1
         RubienPreferences.assistantProvider = kind
         newConversation()
+        refreshCodexCatalog()
         Task { await recheckAvailability() }
     }
 
@@ -495,6 +505,67 @@ final class ChatSessionController: ObservableObject {
         let result = await provider.isAvailable()
         guard token == availabilityProbeToken else { return }
         availability = result
+    }
+
+    /// The model whose effort list governs the picker (spec §4.6): the pinned
+    /// model, else the resolved codex-default model once a thread reported it.
+    var governingCodexModel: CodexModelInfo? {
+        guard let id = modelOverride ?? resolvedModel else { return nil }
+        return codexModels.first { $0.id == id }
+    }
+
+    /// Kick (or re-kick) the model-catalog fetch for the live backend. Codex only —
+    /// for Claude this clears the list. Never blocks a turn (spec §4.1); a result
+    /// arriving after a provider switch is dropped by the token.
+    func refreshCodexCatalog() {
+        catalogFetchToken += 1
+        let token = catalogFetchToken
+        guard providerKind == .codex else {
+            codexModels = []
+            return
+        }
+        let catalogProvider = provider
+        Task { [weak self] in
+            let catalog = await catalogProvider.availableModels()
+            guard let self, token == self.catalogFetchToken else { return }
+            self.codexModels = catalog?.visibleModels ?? []
+        }
+    }
+
+    /// The model picker's setter. nil = "Codex default" (no model sent; codex
+    /// resolves its own config — spec §3). On Codex, the model is THREAD-scoped
+    /// (`thread/start` only — spec §2.3): changing it once the conversation has
+    /// content starts a FRESH conversation that PRESERVES the live web/approval/
+    /// effort/sandbox choices — deliberately NOT `newConversation()`, which
+    /// re-applies Settings defaults and would silently flip the user's live
+    /// toggles (plan-review #3) — and notes the reset in the pane (spec §4.6,
+    /// the `resume()` notice precedent). Claude switches live (per-turn
+    /// `--model`). An explicit pick snaps effort to the model's own default when
+    /// the catalog knows it (spec §3); "Codex default" leaves effort alone.
+    func selectModel(_ id: String?) {
+        guard id != modelOverride else { return }
+        if providerKind == .codex, hasMessages {
+            resetConversationState()
+            liveSessionID = nil
+            seedSent = false
+            modelOverride = id
+            snapEffortToModelDefault(id)
+            hasMessages = true
+            renderNotice("_New conversation — Codex applies a model change to a fresh conversation._")
+            return
+        }
+        modelOverride = id
+        snapEffortToModelDefault(id)
+    }
+
+    /// An explicit model pick adopts that model's `defaultReasoningEffort` when
+    /// the catalog knows it (spec §3); unknown model / "Codex default" (nil)
+    /// leaves the effort alone.
+    private func snapEffortToModelDefault(_ id: String?) {
+        guard providerKind == .codex, let id,
+              let model = codexModels.first(where: { $0.id == id }),
+              let defaultEffort = model.defaultEffort else { return }
+        effortOverride = defaultEffort
     }
 
     // MARK: Event mapping (internal for testing)

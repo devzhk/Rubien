@@ -1009,6 +1009,178 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertFalse(controller.isResponding)
         XCTAssertFalse(controller.hasMessages)
     }
+
+    // MARK: Model auto-discovery (catalog + selection)
+
+    private func makeCodexController(
+        catalog: CodexCatalog?,
+        defaults: ((AgentProviderKind) -> AssistantConversationDefaults)? = nil
+    ) -> (ChatSessionController, MockAgentProvider) {
+        let codex = MockAgentProvider(
+            kind: .codex, availability: .installed(version: "t", path: "/fake/codex"))
+        codex.setCatalog(catalog)
+        let controller = ChatSessionController(
+            provider: codex, transcript: SpyTranscriptSink(),
+            reference: ChatReference(id: 1, title: "T", authors: ""),
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"), gate: AssistantTurnGate(),
+            webAccess: true, modelOverride: nil, effortOverride: "medium",
+            autoApprove: false, codexSandbox: .readOnly,
+            defaultsProvider: defaults)
+        return (controller, codex)
+    }
+
+    func testRefreshCodexCatalogPopulatesVisibleModels() async {
+        let terra = CodexModelInfo(
+            id: "gpt-5.6-terra", displayName: "GPT-5.6-Terra", description: nil,
+            efforts: [CodexEffortInfo(value: "low", label: "Low", description: nil),
+                      CodexEffortInfo(value: "ultra", label: "Ultra", description: nil)],
+            defaultEffort: "medium", isDefault: false, hidden: false)
+        let ghost = CodexModelInfo(
+            id: "ghost", displayName: "Ghost", description: nil,
+            efforts: [], defaultEffort: nil, isDefault: false, hidden: true)
+        let (controller, _) = makeCodexController(
+            catalog: CodexCatalog(models: [terra, ghost], fetchedOK: true))
+
+        controller.refreshCodexCatalog()
+        await waitUntil { !controller.codexModels.isEmpty }
+
+        XCTAssertEqual(controller.codexModels.map(\.id), ["gpt-5.6-terra"], "hidden models dropped")
+        XCTAssertNil(controller.governingCodexModel, "no pin, no resolved model yet")
+        controller.handle(.modelResolved(model: "gpt-5.6-terra"), gen: controller.generation)
+        XCTAssertEqual(controller.governingCodexModel?.id, "gpt-5.6-terra",
+                       "the resolved default governs the effort list")
+    }
+
+    func testCatalogFailureLeavesModelsEmpty() async {
+        let (controller, _) = makeCodexController(catalog: .unavailable)
+        controller.refreshCodexCatalog()
+        // Degrades to the empty list — the picker then shows only "Codex default"
+        // (+ any pin), which works on ANY codex (spec §4.7).
+        try? await Task.sleep(for: .milliseconds(100))
+        XCTAssertTrue(controller.codexModels.isEmpty)
+    }
+
+    func testSelectModelSnapsEffortToModelDefault() async {
+        let sol = CodexModelInfo(
+            id: "gpt-5.6-sol", displayName: "GPT-5.6-Sol", description: nil,
+            efforts: [CodexEffortInfo(value: "low", label: "Low", description: nil)],
+            defaultEffort: "low", isDefault: false, hidden: false)
+        let (controller, _) = makeCodexController(
+            catalog: CodexCatalog(models: [sol], fetchedOK: true))
+        controller.refreshCodexCatalog()
+        await waitUntil { !controller.codexModels.isEmpty }
+        controller.effortOverride = "xhigh"
+
+        controller.selectModel("gpt-5.6-sol")
+
+        XCTAssertEqual(controller.modelOverride, "gpt-5.6-sol")
+        XCTAssertEqual(controller.effortOverride, "low",
+                       "an explicit pick snaps effort to the model's defaultReasoningEffort (spec §3)")
+        // Picking Codex default (nil) leaves effort alone.
+        controller.selectModel(nil)
+        XCTAssertNil(controller.modelOverride)
+        XCTAssertEqual(controller.effortOverride, "low")
+    }
+
+    /// The Codex model is THREAD-scoped (spec §2.3): changing it once the
+    /// conversation has content starts a fresh conversation — preserving the pick
+    /// AND the live conversation's own settings. A `defaultsProvider` with
+    /// CONFLICTING values proves the reset does not re-apply Settings defaults
+    /// the way `newConversation()` would (plan-review #3).
+    func testCodexModelChangeMidConversationStartsNewConversationPreservingSettings() async {
+        let conflictingDefaults: (AgentProviderKind) -> AssistantConversationDefaults = { _ in
+            AssistantConversationDefaults(model: nil, effort: "medium",
+                                          webAccess: true, autoApprove: false)
+        }
+        let (controller, codex) = makeCodexController(
+            catalog: .unavailable, defaults: conflictingDefaults)
+        controller.webAccess = false
+        controller.autoApprove = true
+        controller.effortOverride = "xhigh"
+        await waitUntil { controller.canSendWithCurrentAvailability }
+        controller.send("hi")
+        await codex.waitUntilStreaming()
+        codex.emit(.sessionStarted(sessionID: "TH-1"))
+        codex.finishStream()
+        await controller.turnTask?.value
+        XCTAssertTrue(controller.hasMessages)
+        XCTAssertEqual(controller.liveSessionID, "TH-1")
+        let genBefore = controller.generation
+
+        controller.selectModel("gpt-5.6-sol")
+
+        XCTAssertEqual(controller.modelOverride, "gpt-5.6-sol", "the pick survives the reset")
+        XCTAssertNil(controller.liveSessionID, "a fresh conversation — the old thread's model was fixed")
+        XCTAssertGreaterThan(controller.generation, genBefore)
+        XCTAssertTrue(controller.hasMessages, "the pane shows the reset notice, not the quick-start page")
+        // The LIVE conversation's choices survive — this is NOT a provider switch,
+        // so the conflicting Settings defaults must NOT have been re-applied.
+        XCTAssertFalse(controller.webAccess)
+        XCTAssertTrue(controller.autoApprove)
+        XCTAssertEqual(controller.effortOverride, "xhigh",
+                       "catalog empty ⇒ no defaultEffort known ⇒ effort preserved")
+        // Re-selecting the SAME model is a no-op (no gratuitous reset).
+        let genAfter = controller.generation
+        controller.selectModel("gpt-5.6-sol")
+        XCTAssertEqual(controller.generation, genAfter)
+    }
+
+    func testClaudeModelChangeMidConversationKeepsConversation() async {
+        let claude = MockAgentProvider(kind: .claude)
+        let controller = ChatSessionController(
+            provider: claude, transcript: SpyTranscriptSink(),
+            reference: ChatReference(id: 1, title: "T", authors: ""),
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"), gate: AssistantTurnGate(),
+            webAccess: true, modelOverride: "opus", effortOverride: "high",
+            autoApprove: false, codexSandbox: .readOnly)
+        await waitUntil { controller.canSendWithCurrentAvailability }
+        controller.send("hi")
+        await claude.waitUntilStreaming()
+        claude.emit(.sessionStarted(sessionID: "S-1"))
+        claude.finishStream()
+        await controller.turnTask?.value
+
+        controller.selectModel("sonnet")
+
+        XCTAssertEqual(controller.modelOverride, "sonnet")
+        XCTAssertEqual(controller.liveSessionID, "S-1", "Claude models switch per turn — same conversation")
+        XCTAssertTrue(controller.hasMessages)
+    }
+
+    func testResolvedModelClearedOnNewConversationAndCatalogClearedOnSwitchToClaude() async {
+        let claude = MockAgentProvider(kind: .claude)
+        let (controller, _) = makeCodexControllerWithFactory(claude: claude)
+        controller.handle(.modelResolved(model: "gpt-5.6-terra"), gen: controller.generation)
+        XCTAssertEqual(controller.resolvedModel, "gpt-5.6-terra")
+
+        controller.newConversation()
+        XCTAssertNil(controller.resolvedModel, "a fresh thread's resolution is unknown until thread/start")
+
+        controller.refreshCodexCatalog()
+        await waitUntil { !controller.codexModels.isEmpty }
+        controller.switchProvider(to: .claude)
+        XCTAssertTrue(controller.codexModels.isEmpty, "the catalog is Codex state; cleared on switch")
+    }
+
+    /// Controller wired with a factory so switchProvider works (mirrors the
+    /// existing switch test's shape at line ~392).
+    private func makeCodexControllerWithFactory(
+        claude: MockAgentProvider
+    ) -> (ChatSessionController, MockAgentProvider) {
+        let codex = MockAgentProvider(kind: .codex)
+        codex.setCatalog(CodexCatalog(
+            models: [CodexModelInfo(id: "m", displayName: "M", description: nil,
+                                    efforts: [], defaultEffort: nil, isDefault: false, hidden: false)],
+            fetchedOK: true))
+        let controller = ChatSessionController(
+            provider: codex, transcript: SpyTranscriptSink(),
+            reference: ChatReference(id: 1, title: "T", authors: ""),
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"), gate: AssistantTurnGate(),
+            webAccess: true, modelOverride: nil, effortOverride: "medium",
+            autoApprove: false, codexSandbox: .readOnly,
+            providerFactory: { kind in kind == .claude ? claude : codex })
+        return (controller, codex)
+    }
 }
 
 // MARK: - Test doubles
@@ -1033,6 +1205,15 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
     private var _searches: [(query: String, limit: Int, referenceID: Int64?)] = []
     private var _searchResults: [AgentSessionSummary] = []
     private var _recentsCalls: [(limit: Int, referenceID: Int64?)] = []
+    private var _catalog: CodexCatalog?
+
+    func setCatalog(_ catalog: CodexCatalog?) {
+        lock.lock(); defer { lock.unlock() }; _catalog = catalog
+    }
+
+    func availableModels() async -> CodexCatalog? {
+        lock.lock(); defer { lock.unlock() }; return _catalog
+    }
 
     init(kind: AgentProviderKind = .claude,
          availability: AgentAvailability = .installed(version: "test", path: "/fake/claude")) {
