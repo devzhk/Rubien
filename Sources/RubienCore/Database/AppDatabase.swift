@@ -26,7 +26,7 @@ package enum ImportClassification: Equatable {
 public final class AppDatabase: Sendable {
     /// Bumped whenever a new migration is registered. Surfaced in
     /// `rubien-cli sync status` JSON for diagnostics.
-    public static let currentSchemaVersion = "v5"
+    public static let currentSchemaVersion = "v6"
 
     public let dbWriter: any DatabaseWriter
 
@@ -551,6 +551,15 @@ public final class AppDatabase: Sendable {
             try Self.applyV5Body(db)
         }
 
+        // v6 (2026-07): ensure the Type PropertyDefinition advertises every
+        // enum-backed option (adds "Markdown" for imported markdown notes).
+        // Structural JSON append via the shared TypeOptionsReconciler; runs
+        // under the applyingRemote guard like v3 — local normalization, not a
+        // user edit, so it must not queue a CloudKit push.
+        migrator.registerMigration("v6") { db in
+            try Self.applyV6Body(db)
+        }
+
         return migrator
     }
 
@@ -674,6 +683,42 @@ public final class AppDatabase: Sendable {
             """)
         }
         try migrator.migrate(queue)
+    }
+
+    /// v6 migration body: ensure the Type PropertyDefinition advertises every
+    /// enum-backed option (adds "Markdown"). Runs under the applyingRemote
+    /// guard for the same reason v3 did: local normalization, not a user edit,
+    /// so it must not queue a CloudKit push. Convergence across devices comes
+    /// from every device running this locally plus the remote-apply
+    /// reconciliation in RubienSync.
+    fileprivate static func applyV6Body(_ db: Database) throws {
+        try db.execute(sql: """
+            INSERT INTO syncSession(key, value) VALUES('applyingRemote','1')
+                ON CONFLICT(key) DO UPDATE SET value='1'
+        """)
+        defer {
+            try? db.execute(sql: "DELETE FROM syncSession WHERE key='applyingRemote'")
+        }
+        guard let current = try String.fetchOne(
+            db,
+            sql: "SELECT optionsJSON FROM propertyDefinition WHERE defaultFieldKey = 'referenceType' LIMIT 1"
+        ) else { return }
+        guard let amended = TypeOptionsReconciler.appendingMissingTypeOptions(toOptionsJSON: current),
+              amended != current else {
+            return  // malformed (nil) → leave untouched; unchanged → nothing to do
+        }
+        try db.execute(
+            sql: "UPDATE propertyDefinition SET optionsJSON = ? WHERE defaultFieldKey = 'referenceType'",
+            arguments: [amended]
+        )
+    }
+
+    /// Test-only: applies the v6 body to an already-migrated queue so tests can
+    /// simulate the v5-shaped / peer-overwritten state and verify idempotence.
+    public static func runV6MigrationForTesting(on queue: DatabaseQueue) throws {
+        try queue.write { db in
+            try applyV6Body(db)
+        }
     }
 
     /// Test-only: applies the v3 prune/normalize body to an arbitrary queue
@@ -1107,6 +1152,18 @@ extension AppDatabase {
     public static var syncEngineStateURL: URL {
         baseRoot.appendingPathComponent(syncEngineStateFilename)
     }
+}
+
+// MARK: - Import merge policy
+
+/// How `batchImportReferences` reconciles an incoming reference with a
+/// dedup match. `.standard` is the historical bib/ris behavior
+/// (`mergedReference` — incoming metadata preferred). `.markdownFillOnly`
+/// protects curated data from re-imported markdown files (spec §8):
+/// metadata fills empty fields only; content stays longest-wins.
+public enum ImportMergePolicy: Sendable {
+    case standard
+    case markdownFillOnly
 }
 
 // MARK: - Reference CRUD
@@ -1555,7 +1612,8 @@ extension AppDatabase {
     public func batchImportReferences(
         _ references: [Reference],
         stamping target: ZoteroImportPropertyTarget? = nil,
-        pdfFilenames: [String?]? = nil
+        pdfFilenames: [String?]? = nil,
+        mergePolicy: ImportMergePolicy = .standard
     ) throws -> (count: Int, ids: [Int64]) {
         guard !references.isEmpty else { return (0, []) }
         if let pdfFilenames {
@@ -1572,7 +1630,10 @@ extension AppDatabase {
                 let resolvedId: Int64?
                 if let match = try findDuplicateReferenceID(for: ref, db: db),
                    var existing = try Reference.fetchOne(db, id: match.id) {
-                    existing = mergedReference(existing: existing, incoming: ref)
+                    existing = switch mergePolicy {
+                    case .standard:         mergedReference(existing: existing, incoming: ref)
+                    case .markdownFillOnly: markdownFillMergedReference(existing: existing, incoming: ref)
+                    }
                     try existing.save(db)
                     resolvedId = existing.id
                 } else {
@@ -2318,6 +2379,50 @@ extension AppDatabase {
         merged.pmid = preferred(incoming.pmid, over: existing.pmid)
         merged.pmcid = preferred(incoming.pmcid, over: existing.pmcid)
         merged.dateAdded = existing.dateAdded
+        merged.dateModified = Date()
+        return merged
+    }
+
+    /// Spec §8 fill-only merge for markdown imports: never overwrite curated
+    /// metadata; body stays longest-wins (annotation-anchor-safe).
+    private func markdownFillMergedReference(existing: Reference, incoming: Reference) -> Reference {
+        func fillIfEmpty(_ incoming: String?, existing: String?) -> String? {
+            if let e = existing?.trimmingCharacters(in: .whitespacesAndNewlines), !e.isEmpty {
+                return existing
+            }
+            let c = incoming?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return (c?.isEmpty == false) ? incoming : existing
+        }
+        // NOTE: returns the UNTRIMMED original (not the trimmed value), unlike the
+        // same-named local in `mergedReference`. webContent is an encoded envelope;
+        // trimming it would shift character offsets and break annotation anchors.
+        func longerPreservingOriginal(_ incoming: String?, over existing: String?) -> String? {
+            let lhs = incoming?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let rhs = existing?.trimmingCharacters(in: .whitespacesAndNewlines)
+            switch (lhs?.isEmpty == false ? lhs : nil, rhs?.isEmpty == false ? rhs : nil) {
+            case let (l?, r?): return l.count >= r.count ? incoming : existing
+            case (.some, nil): return incoming
+            case (nil, .some): return existing
+            default: return nil
+            }
+        }
+
+        var merged = existing
+        merged.title = existing.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? incoming.title : existing.title
+        merged.authors = existing.authors.isEmpty ? incoming.authors : existing.authors
+        merged.abstract = fillIfEmpty(incoming.abstract, existing: existing.abstract)
+        // Issued date is a coarse→fine tuple; fill it atomically so a curated year is
+        // never grafted onto a different year's month/day. `merged` already carries
+        // existing's tuple; only when existing has no year do we adopt incoming's whole.
+        if existing.year == nil {
+            merged.year = incoming.year
+            merged.issuedMonth = incoming.issuedMonth
+            merged.issuedDay = incoming.issuedDay
+        }
+        merged.accessedDate = fillIfEmpty(incoming.accessedDate, existing: existing.accessedDate)
+        merged.siteName = fillIfEmpty(incoming.siteName, existing: existing.siteName)
+        merged.webContent = longerPreservingOriginal(incoming.webContent, over: existing.webContent)
         merged.dateModified = Date()
         return merged
     }

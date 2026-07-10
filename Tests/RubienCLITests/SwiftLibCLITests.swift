@@ -91,6 +91,60 @@ final class RubienCLITests: XCTestCase {
         )
     }
 
+    /// Overload of `runCLI` that feeds `stdin` to the child's standard input.
+    /// The write handle is written in full then closed (signalling EOF)
+    /// *before* `waitUntilExit`, so a child reading stdin to end-of-file
+    /// unblocks. stdout/stderr are drained on background threads exactly as
+    /// the no-stdin overload to avoid the ~64KB pipe-buffer deadlock.
+    private func runCLI(_ arguments: [String], stdin: String) throws -> (stdout: String, stderr: String, exitCode: Int32) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: cliBinaryPath)
+        process.arguments = arguments
+        var env = ProcessInfo.processInfo.environment
+        env["RUBIEN_LIBRARY_ROOT"] = testLibraryRoot.path
+        process.environment = env
+
+        let stdinPipe = Pipe()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardInput = stdinPipe
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        var stdoutData = Data()
+        var stderrData = Data()
+        let readGroup = DispatchGroup()
+        let readQueue = DispatchQueue.global(qos: .userInitiated)
+
+        readGroup.enter()
+        readQueue.async {
+            stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            readGroup.leave()
+        }
+        readGroup.enter()
+        readQueue.async {
+            stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            readGroup.leave()
+        }
+
+        try process.run()
+        // Write the payload in full, then close the write end to send EOF so
+        // the child's `readDataToEndOfFile` on stdin returns. Do this before
+        // waiting for exit.
+        let writeHandle = stdinPipe.fileHandleForWriting
+        writeHandle.write(Data(stdin.utf8))
+        try writeHandle.close()
+
+        process.waitUntilExit()
+        readGroup.wait()
+
+        return (
+            stdout: String(data: stdoutData, encoding: .utf8) ?? "",
+            stderr: String(data: stderrData, encoding: .utf8) ?? "",
+            exitCode: process.terminationStatus
+        )
+    }
+
     private func skipIfBinaryMissing() throws {
         guard FileManager.default.isExecutableFile(atPath: cliBinaryPath) else {
             throw XCTSkip("CLI binary not found at \(cliBinaryPath). Run `swift build` first.")
@@ -1416,5 +1470,291 @@ final class RubienCLITests: XCTestCase {
         XCTAssertEqual(result.exitCode, 0, "query should succeed; stderr=\(result.stderr)")
         let refs = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [[String: Any]]
         XCTAssertNotNil(refs, "query output should be a JSON array of references")
+    }
+
+    // MARK: - Import: Markdown files and --format md stdin
+
+    func testImportMarkdownFile() throws {
+        // Sentinel of a different type so the --type filters below can't
+        // pass vacuously.
+        let addResult = try runCLI(["add", "--title", "Sentinel Article"])
+        XCTAssertEqual(addResult.exitCode, 0, addResult.stderr)
+
+        let md = """
+        ---
+        title: "Clip Title"
+        source: "https://example.com/clip"
+        published: 2026-06-13
+        ---
+        Clip body.
+        """
+        let file = testLibraryRoot.appendingPathComponent("clip.md")
+        try md.write(to: file, atomically: true, encoding: .utf8)
+
+        let result = try runCLI(["import", file.path])
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        let obj = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: String]
+        )
+        XCTAssertEqual(obj["imported"], "1")
+
+        let list = try runCLI(["list", "--type", "Web Page"])
+        XCTAssertEqual(list.exitCode, 0, list.stderr)
+        let rows = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(list.stdout.utf8)) as? [[String: Any]]
+        )
+        XCTAssertEqual(rows.count, 1, "only the clip is a Web Page; sentinel filtered out")
+        XCTAssertEqual(rows.first?["title"] as? String, "Clip Title")
+        XCTAssertEqual(rows.first?["referenceType"] as? String, "Web Page")
+    }
+
+    func testImportMarkdownStdinTitlesUntitled() throws {
+        let result = try runCLI(["import", "-", "--format", "md"], stdin: "no frontmatter body")
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        let list = try runCLI(["list", "--type", "Markdown"])
+        XCTAssertEqual(list.exitCode, 0, list.stderr)
+        XCTAssertTrue(list.stdout.contains("Untitled"))
+    }
+
+    func testStdinWithoutFormatMentionsMd() throws {
+        let result = try runCLI(["import", "-"], stdin: "x")
+        XCTAssertNotEqual(result.exitCode, 0)
+        let combined = result.stdout + result.stderr
+        XCTAssertTrue(combined.contains("md"), "error text must list md as a valid format: \(combined)")
+    }
+
+    func testImportMarkdownNoteGetsMarkdownType() throws {
+        _ = try runCLI(["add", "--title", "Sentinel Article"])
+        let file = testLibraryRoot.appendingPathComponent("note.md")
+        try "# Plain Note\nBody".write(to: file, atomically: true, encoding: .utf8)
+        let imported = try runCLI(["import", file.path])
+        XCTAssertEqual(imported.exitCode, 0, imported.stderr)
+
+        let list = try runCLI(["list", "--type", "Markdown"])
+        let rows = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(list.stdout.utf8)) as? [[String: Any]]
+        )
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?["title"] as? String, "Plain Note")
+    }
+
+    func testImportNonUTF8MarkdownEmitsJSONError() throws {
+        let file = testLibraryRoot.appendingPathComponent("latin1.md")
+        let latin1 = Data([0x23, 0x20, 0xE9, 0xE8, 0xFF])   // "# " + Latin-1 bytes, invalid UTF-8
+        try latin1.write(to: file)
+        let result = try runCLI(["import", file.path])
+        XCTAssertNotEqual(result.exitCode, 0)
+        let combined = result.stdout + result.stderr
+        XCTAssertTrue(combined.contains("error"), "JSON error contract expected: \(combined)")
+        XCTAssertTrue(combined.contains("latin1.md"), "error names the file")
+    }
+
+    /// Spec §10 export mappings: Markdown → BibTeX @misc, RIS TY GEN.
+    func testMarkdownTypeExportMappings() throws {
+        let file = testLibraryRoot.appendingPathComponent("note.md")
+        try "# Export Me\nBody".write(to: file, atomically: true, encoding: .utf8)
+        let imported = try runCLI(["import", file.path])
+        XCTAssertEqual(imported.exitCode, 0, imported.stderr)
+
+        let bib = try runCLI(["export", "--format", "bibtex"])
+        XCTAssertEqual(bib.exitCode, 0, bib.stderr)
+        XCTAssertTrue(bib.stdout.contains("@misc{"), bib.stdout)
+
+        let ris = try runCLI(["export", "--format", "ris"])
+        XCTAssertEqual(ris.exitCode, 0, ris.stderr)
+        XCTAssertTrue(ris.stdout.contains("TY  - GEN"), ris.stdout)
+    }
+
+    // MARK: - Markdown folder import (Task 9)
+
+    private func makeClippingsFolder(_ name: String, files: [String: String]) throws -> URL {
+        let dir = testLibraryRoot.appendingPathComponent(name, isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        for (filename, content) in files {
+            try content.write(
+                to: dir.appendingPathComponent(filename), atomically: true, encoding: .utf8
+            )
+        }
+        return dir
+    }
+
+    /// Resolve the built-in Tags option id for a tag name (label), or nil.
+    /// `list --tag` filters by numeric tag id, so we look the id up through
+    /// `properties --name Tags` inline options exactly like the sibling
+    /// multi-select tests (each option's `value` is the stringified tag id).
+    private func tagOptionId(label: String) throws -> String? {
+        let defs = try JSONSerialization.jsonObject(
+            with: Data(try runCLI(["properties", "--name", "Tags"]).stdout.utf8)
+        ) as? [[String: Any]] ?? []
+        let options = (defs.first?["options"] as? [[String: Any]]) ?? []
+        return options.first { ($0["label"] as? String) == label }?["value"] as? String
+    }
+
+    func testImportMarkdownFolderStampsTagsWithBasename() throws {
+        let dir = try makeClippingsFolder("Clippings", files: [
+            "a.md": "# Note A\nBody A",
+            "b.md": "# Note B\nBody B",
+        ])
+        let result = try runCLI(["import", dir.path])
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        let obj = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: String]
+        )
+        XCTAssertEqual(obj["imported"], "2")
+        XCTAssertEqual(obj["failed"], "")
+        XCTAssertEqual(obj["property"], "Tags")
+        XCTAssertEqual(obj["value"], "Clippings")
+
+        // Stamping must be REAL, not just reported: resolve the "Clippings"
+        // tag's numeric id, then confirm the referenceTag pivot actually pins
+        // both notes via `list --tag` (a name-only echo would leave it empty).
+        let tagId = try XCTUnwrap(
+            try tagOptionId(label: "Clippings"), "stamp must create a 'Clippings' tag"
+        )
+        let list = try runCLI(["list", "--tag", tagId])
+        XCTAssertEqual(list.exitCode, 0, list.stderr)
+        XCTAssertTrue(list.stdout.contains("Note A"))
+        XCTAssertTrue(list.stdout.contains("Note B"))
+    }
+
+    func testImportMarkdownFolderPropertyValueOverride() throws {
+        let dir = try makeClippingsFolder("Clips2", files: ["c.md": "# Note C\nBody"])
+        let result = try runCLI([
+            "import", dir.path, "--property", "Tags", "--value", "custom-tag",
+        ])
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        let obj = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: String]
+        )
+        XCTAssertEqual(obj["value"], "custom-tag")
+        let tagId = try XCTUnwrap(try tagOptionId(label: "custom-tag"))
+        let list = try runCLI(["list", "--tag", tagId])
+        XCTAssertTrue(list.stdout.contains("Note C"))
+    }
+
+    func testImportMarkdownFolderReportsFailedFiles() throws {
+        let dir = try makeClippingsFolder("Mixed2", files: ["good.md": "# Good\nBody"])
+        let bad = Data([0x23, 0x20, 0xE9, 0xE8, 0xFF])   // invalid UTF-8
+        try bad.write(to: dir.appendingPathComponent("bad.md"))
+
+        let result = try runCLI(["import", dir.path])
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        let obj = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: String]
+        )
+        XCTAssertEqual(obj["imported"], "1", "valid file still imports")
+        XCTAssertEqual(obj["failed"], "bad.md")
+    }
+
+    func testAmbiguousFolderErrorsAndFormatForces() throws {
+        let dir = try makeClippingsFolder("Ambiguous", files: [
+            "refs.bib": "@article{k, title={T}, year={2020}}",
+            "note.md": "# N\nB",
+        ])
+        let ambiguous = try runCLI(["import", dir.path])
+        XCTAssertNotEqual(ambiguous.exitCode, 0)
+        let combined = ambiguous.stdout + ambiguous.stderr
+        XCTAssertTrue(combined.contains("Ambiguous folder"), combined)
+
+        let forced = try runCLI(["import", dir.path, "--format", "md"])
+        XCTAssertEqual(forced.exitCode, 0, forced.stderr)
+        let obj = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(forced.stdout.utf8)) as? [String: String]
+        )
+        XCTAssertEqual(obj["imported"], "1")
+    }
+
+    func testEmptyFolderErrors() throws {
+        let dir = try makeClippingsFolder("Empty", files: [:])
+        let result = try runCLI(["import", dir.path])
+        XCTAssertNotEqual(result.exitCode, 0)
+    }
+
+    // MARK: - Markdown folder import (Phase-2 error-contract fixes)
+
+    /// Fix 1: stamping the folder name onto a number/date/checkbox property is
+    /// unsupported. The markdown folder path must report it through the JSON
+    /// error contract (exactly like the Zotero path) instead of letting the
+    /// throw escape to ArgumentParser as bare usage text. `Year` is a built-in
+    /// number property, so `--property Year` exercises the incompatible-type arm.
+    func testImportMarkdownFolderIncompatiblePropertyTypeEmitsJSONError() throws {
+        let dir = try makeClippingsFolder("YearStamp", files: ["a.md": "# Note A\nBody"])
+        let result = try runCLI(["import", dir.path, "--property", "Year"])
+        XCTAssertNotEqual(result.exitCode, 0)
+        let combined = result.stdout + result.stderr
+        // A JSON {"error":…} envelope on stderr, not ArgumentParser usage text.
+        let obj = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.stderr.utf8)) as? [String: String],
+            "expected a JSON error envelope, got: \(combined)"
+        )
+        XCTAssertNotNil(obj["error"], "error envelope must carry an `error` key")
+        XCTAssertFalse(
+            combined.lowercased().contains("usage:"),
+            "must be the JSON error contract, not ArgumentParser usage text: \(combined)"
+        )
+    }
+
+    /// Fix 2: a folder whose only .md files all fail to read (here: invalid
+    /// UTF-8) must exit non-zero — consistent with single-file mode, where one
+    /// unreadable .md already exits non-zero — instead of silently printing a
+    /// success envelope with imported:"0".
+    func testImportMarkdownFolderAllUnreadableExitsNonZero() throws {
+        let dir = try makeClippingsFolder("AllBad", files: [:])
+        let bad = Data([0x23, 0x20, 0xE9, 0xE8, 0xFF])   // "# " + invalid UTF-8
+        try bad.write(to: dir.appendingPathComponent("bad.md"))
+
+        let result = try runCLI(["import", dir.path])
+        XCTAssertNotEqual(result.exitCode, 0)
+        let obj = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.stderr.utf8)) as? [String: String],
+            "expected a JSON error envelope, got stdout=\(result.stdout) stderr=\(result.stderr)"
+        )
+        let message = try XCTUnwrap(obj["error"], "error envelope must carry an `error` key")
+        XCTAssertTrue(message.contains("bad.md"), "error must name the failed file: \(message)")
+    }
+
+    /// Fix 3: routing and import share one enumeration of top-level regular
+    /// files, so a *subdirectory* literally named `nested.md` is filtered out of
+    /// both — it neither hijacks routing nor lands in `failed`. The real note
+    /// beside it still imports.
+    func testImportMarkdownFolderIgnoresSubdirectoryNamedMd() throws {
+        let dir = try makeClippingsFolder("SubdirMd", files: ["real.md": "# Real Note\nBody"])
+        try FileManager.default.createDirectory(
+            at: dir.appendingPathComponent("nested.md", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        let result = try runCLI(["import", dir.path])
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        let obj = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: String]
+        )
+        XCTAssertEqual(obj["imported"], "1", "only the real note imports")
+        XCTAssertEqual(obj["failed"], "", "the subdirectory is filtered out, not a failed file")
+    }
+
+    /// Fix 3: hidden files (leading dot) are skipped by the shared enumeration
+    /// (`.skipsHiddenFiles`, matching ZoteroFolderImporter), so `.hidden.md`
+    /// neither imports nor lands in `failed`. Titles are distinctive so the
+    /// discriminating `list` check cannot collide with the stamped folder name.
+    func testImportMarkdownFolderSkipsHiddenFiles() throws {
+        let dir = try makeClippingsFolder("DotfileSkip", files: [
+            ".hidden.md": "# HiddenOnlyTitle\nBody",
+            "real.md": "# VisibleOnlyTitle\nBody",
+        ])
+        let result = try runCLI(["import", dir.path])
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        let obj = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: String]
+        )
+        XCTAssertEqual(obj["imported"], "1", "only the non-hidden note imports")
+        XCTAssertEqual(obj["failed"], "", "hidden file is skipped, not a failed read")
+
+        let list = try runCLI(["list", "--type", "Markdown"])
+        XCTAssertEqual(list.exitCode, 0, list.stderr)
+        XCTAssertTrue(list.stdout.contains("VisibleOnlyTitle"), "the visible note imported")
+        XCTAssertFalse(
+            list.stdout.contains("HiddenOnlyTitle"),
+            "the hidden note must not import: \(list.stdout)"
+        )
     }
 }

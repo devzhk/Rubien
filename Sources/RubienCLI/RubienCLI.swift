@@ -939,28 +939,72 @@ struct Cite: ParsableCommand {
 struct Import: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "import",
-        abstract: "Import references from a BibTeX/RIS file or a Zotero export folder (use '-' for stdin)"
+        abstract: "Import references from a BibTeX/RIS/Markdown file, a Zotero or markdown folder (use '-' for stdin)"
     )
 
-    @Argument(help: "Path to a .bib or .ris file, a Zotero export folder (containing a .bib + files/ tree), or '-' to read from stdin")
+    @Argument(help: "Path to a .bib, .ris, or .md file, a Zotero export folder (containing a .bib + files/ tree), or '-' to read from stdin")
     var file: String
 
-    @Option(name: .long, help: "Format hint when reading from stdin: bib, ris")
+    @Option(name: .long, help: "Format hint when reading from stdin: bib, ris, md")
     var format: String?
 
-    @Option(name: .long, help: "When importing a Zotero folder: stamp every reference with this property (default: Tags)")
+    @Option(name: .long, help: "When importing a Zotero or markdown folder: stamp every reference with this property (default: Tags)")
     var property: String?
 
-    @Option(name: .long, help: "When importing a Zotero folder: value to stamp on the property (default: folder basename)")
+    @Option(name: .long, help: "When importing a Zotero or markdown folder: value to stamp on the property (default: folder basename)")
     var value: String?
 
     func run() throws {
-        // Folder path → Zotero folder importer.
+        // Folder path → route by contents (spec §5).
         if file != "-" {
             var isDir: ObjCBool = false
             if FileManager.default.fileExists(atPath: file, isDirectory: &isDir), isDir.boolValue {
-                try runZoteroFolderImport(folderPath: file)
-                return
+                let folderURL = URL(fileURLWithPath: file)
+                let regularFiles: [URL]
+                do {
+                    regularFiles = try Self.topLevelRegularFiles(in: folderURL)
+                } catch {
+                    printJSONError("Cannot read folder \(folderURL.lastPathComponent): \(error.localizedDescription)")
+                    throw ExitCode.failure
+                }
+                let hasBib = regularFiles.contains { $0.pathExtension.lowercased() == "bib" }
+                let hasMD = regularFiles.contains { ["md", "markdown"].contains($0.pathExtension.lowercased()) }
+
+                if let forced = format?.lowercased() {
+                    switch forced {
+                    case "bib", "bibtex":
+                        guard hasBib else {
+                            printJSONError("No .bib files found in folder")
+                            throw ExitCode.failure
+                        }
+                        try runZoteroFolderImport(folderPath: file)
+                    case "md", "markdown":
+                        guard hasMD else {
+                            printJSONError("No .md files found in folder")
+                            throw ExitCode.failure
+                        }
+                        try runMarkdownFolderImport(folderPath: file)
+                    default:
+                        printJSONError("Unsupported folder format: \(forced). Use bib or md.")
+                        throw ExitCode.failure
+                    }
+                    return
+                }
+
+                switch (hasBib, hasMD) {
+                case (true, true):
+                    printJSONError("Ambiguous folder: contains both .bib and .md. Pass --format bib or --format md to choose.")
+                    throw ExitCode.failure
+                case (true, false):
+                    try runZoteroFolderImport(folderPath: file)
+                    return
+                case (false, true):
+                    try runMarkdownFolderImport(folderPath: file)
+                    return
+                case (false, false):
+                    printJSONError("No importable files found (expected .bib or .md)")
+                    throw ExitCode.failure
+                }
             }
         }
 
@@ -970,7 +1014,7 @@ struct Import: ParsableCommand {
 
         if file == "-" {
             guard let fmt = format?.lowercased() else {
-                printJSONError("--format (bib or ris) is required when reading from stdin")
+                printJSONError("--format (bib, ris, or md) is required when reading from stdin")
                 throw ExitCode.failure
             }
             ext = fmt
@@ -983,26 +1027,40 @@ struct Import: ParsableCommand {
         } else {
             let url = URL(fileURLWithPath: file)
             ext = format?.lowercased() ?? url.pathExtension.lowercased()
-            let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
-            if let size = attrs[.size] as? UInt64, size > 50 * 1024 * 1024 {
-                printJSONError("File exceeds 50 MB limit (\(size / 1024 / 1024) MB)")
+            do {
+                let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+                if let size = attrs[.size] as? UInt64, size > 50 * 1024 * 1024 {
+                    printJSONError("File exceeds 50 MB limit (\(size / 1024 / 1024) MB)")
+                    throw ExitCode.failure
+                }
+                content = try String(contentsOf: url, encoding: .utf8)
+            } catch let error as ExitCode {
+                throw error
+            } catch {
+                printJSONError("Cannot read \(url.lastPathComponent): \(error.localizedDescription)")
                 throw ExitCode.failure
             }
-            content = try String(contentsOf: url, encoding: .utf8)
         }
 
         var refs: [Reference]
+        var mergePolicy: ImportMergePolicy = .standard
         switch ext {
         case "bib", "bibtex":
             refs = BibTeXImporter.parse(content)
         case "ris":
             refs = RISImporter.parse(content)
+        case "md", "markdown":
+            let basename = file == "-"
+                ? nil
+                : URL(fileURLWithPath: file).deletingPathExtension().lastPathComponent
+            refs = [MarkdownImporter.parse(content, filename: basename)]
+            mergePolicy = .markdownFillOnly
         default:
-            printJSONError("Unsupported file format: .\(ext). Use .bib or .ris")
+            printJSONError("Unsupported file format: .\(ext). Use .bib, .ris, or .md")
             throw ExitCode.failure
         }
 
-        let count = try AppDatabase.shared.batchImportReferences(refs)
+        let count = try AppDatabase.shared.batchImportReferences(refs, mergePolicy: mergePolicy).count
         notifyLibraryChanged()
         printJSON(["imported": "\(count)", "file": file])
     }
@@ -1046,6 +1104,97 @@ struct Import: ParsableCommand {
         } catch let error as ZoteroFolderImporter.Error {
             printJSONError(error.errorDescription ?? "\(error)")
             throw ExitCode.failure
+        }
+    }
+
+    private func runMarkdownFolderImport(folderPath: String) throws {
+        let folderURL = URL(fileURLWithPath: folderPath)
+        let db = AppDatabase.shared
+
+        let propertyName = property ?? PropertyDefinition.tagsPropertyName
+        let stampValue = value ?? folderURL.lastPathComponent
+        guard let propDef = try db.findPropertyDefinition(byName: propertyName),
+              let propId = propDef.id else {
+            printJSONError("Property not found: '\(propertyName)'")
+            throw ExitCode.failure
+        }
+
+        // Import from the SAME single enumeration the router routed on, so the
+        // two can never disagree about which files exist (a subdirectory named
+        // `x.md`, a symlink, or a hidden file is filtered out of both).
+        let regularFiles: [URL]
+        do {
+            regularFiles = try Self.topLevelRegularFiles(in: folderURL)
+        } catch {
+            printJSONError("Cannot read folder \(folderURL.lastPathComponent): \(error.localizedDescription)")
+            throw ExitCode.failure
+        }
+        let mdFiles = regularFiles
+            .filter { ["md", "markdown"].contains($0.pathExtension.lowercased()) }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+        var refs: [Reference] = []
+        var failed: [String] = []
+        for url in mdFiles {
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            if size <= 50 * 1024 * 1024, let content = try? String(contentsOf: url, encoding: .utf8) {
+                refs.append(MarkdownImporter.parse(
+                    content, filename: url.deletingPathExtension().lastPathComponent
+                ))
+            } else {
+                failed.append(url.lastPathComponent)
+            }
+        }
+
+        // Every candidate .md failed to read → exit non-zero, mirroring
+        // single-file mode (one unreadable .md exits non-zero). A genuinely
+        // partial import (some ok, some failed) still reports success with the
+        // `failed` field populated.
+        if refs.isEmpty, !failed.isEmpty {
+            printJSONError("No importable Markdown files (all failed to read): \(failed.joined(separator: ", "))")
+            throw ExitCode.failure
+        }
+
+        do {
+            let result = try db.batchImportReferences(
+                refs,
+                stamping: ZoteroImportPropertyTarget(propertyId: propId, value: stampValue),
+                mergePolicy: .markdownFillOnly
+            )
+            notifyLibraryChanged()
+            printJSON([
+                "imported": "\(result.count)",
+                "failed": failed.joined(separator: ", "),
+                "property": propertyName,
+                "value": stampValue,
+                "file": folderPath,
+            ])
+        } catch let error as ZoteroImportError {
+            // Stamping an incompatible property type (number/date/checkbox)
+            // throws here — report it via the JSON error contract, exactly like
+            // the Zotero folder path, instead of leaking an ArgumentParser trap.
+            printJSONError(error.errorDescription ?? "\(error)")
+            throw ExitCode.failure
+        }
+    }
+
+    /// Top-level, regular (non-directory, non-symlink), non-hidden files in
+    /// `folderURL`. The folder-format router and `runMarkdownFolderImport` both
+    /// filter from this single enumeration so routing and import can never
+    /// disagree about which files a folder holds. `.skipsHiddenFiles` matches
+    /// `ZoteroFolderImporter`'s own enumeration. Throws when the directory
+    /// itself cannot be read (as opposed to being merely empty), so callers can
+    /// report "Cannot read folder …" instead of a misleading "no importable
+    /// files".
+    private static func topLevelRegularFiles(in folderURL: URL) throws -> [URL] {
+        let entries = try FileManager.default.contentsOfDirectory(
+            at: folderURL,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+            options: [.skipsHiddenFiles]
+        )
+        return entries.filter { url in
+            let vals = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            return (vals?.isRegularFile ?? false) && !(vals?.isSymbolicLink ?? false)
         }
     }
 }
@@ -1626,8 +1775,7 @@ struct Export: ParsableCommand {
                 case .conferencePaper: entryType = "inproceedings"
                 case .book:            entryType = "book"
                 case .thesis:          entryType = "phdthesis"
-                case .webpage:         entryType = "misc"
-                case .other:           entryType = "misc"
+                case .webpage, .other, .markdown: entryType = "misc"
                 }
                 output += "@\(entryType){\(keys[i]),\n"
                 output += "  title = {\(escapeBibTeX(ref.title))},\n"
@@ -1657,7 +1805,7 @@ struct Export: ParsableCommand {
                 case .conferencePaper: risType = "CONF"
                 case .thesis:          risType = "THES"
                 case .webpage:         risType = "ELEC"
-                case .other:           risType = "GEN"
+                case .other, .markdown: risType = "GEN"
                 }
                 output += "TY  - \(risType)\n"
                 output += "TI  - \(ref.title)\n"

@@ -30,6 +30,19 @@ enum OpenPanelPicker {
         )
     }
 
+    /// Multi-select picker for the Import PDF/Markdown toolbar action.
+    /// Returns [] when cancelled.
+    @MainActor
+    static func pickImportableFiles() -> [URL] {
+        let panel = configuredPanel(
+            title: String(localized: "Import PDF/Markdown", bundle: .module),
+            prompt: String(localized: "Import", bundle: .module),
+            allowedContentTypes: [.pdf, type(forExtension: "md", fallback: .plainText)]
+        )
+        panel.allowsMultipleSelection = true
+        return panel.runModal() == .OK ? panel.urls : []
+    }
+
     @MainActor
     static func pickZoteroFolder() -> URL? {
         let panel = NSOpenPanel()

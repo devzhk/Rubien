@@ -48,3 +48,4 @@ test_pdfview_margins
 # === Sparkle ===
 .sparkle-public-key
 __pycache__/
+.superpowers/

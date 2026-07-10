@@ -1228,7 +1228,8 @@ struct ReferenceDetailView: View {
     // MARK: - Web Reader
 
     private var canOpenWebReader: Bool {
-        reference.referenceType == .webpage && (hasStoredWebContent || resolvedWebReaderURLString != nil)
+        hasStoredWebContent
+            || (reference.referenceType == .webpage && resolvedWebReaderURLString != nil)
     }
 
     private var resolvedWebReaderURLString: String? {

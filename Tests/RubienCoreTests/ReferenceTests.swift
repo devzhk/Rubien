@@ -65,7 +65,7 @@ final class ReferenceTests: XCTestCase {
         XCTAssertEqual(ReferenceType.thesis.rawValue,          "Thesis")
         XCTAssertEqual(ReferenceType.webpage.rawValue,         "Web Page")
         XCTAssertEqual(ReferenceType.other.rawValue,           "Other")
-        XCTAssertEqual(ReferenceType.allCases.count, 6)
+        XCTAssertEqual(ReferenceType.allCases.count, 7)
     }
 
     func testReferenceTypeCSLTypeMapping() {
@@ -328,5 +328,25 @@ final class ReferenceTests: XCTestCase {
         let ref1 = Reference(id: 1, title: "A")
         let ref2 = Reference(id: 2, title: "A")
         XCTAssertNotEqual(ref1, ref2)
+    }
+
+    // MARK: - Web reader gate
+
+    func testCanOpenWebReaderIsContentDriven() {
+        var note = Reference(title: "note", referenceType: .markdown)
+        XCTAssertFalse(note.canOpenWebReader, "no content, no URL → closed")
+
+        note.webContent = Reference.encodeWebContent("# hello", format: .markdown)
+        XCTAssertTrue(note.canOpenWebReader, "any type with content opens")
+
+        var article = Reference(title: "a", referenceType: .journalArticle)
+        article.webContent = Reference.encodeWebContent("body", format: .markdown)
+        XCTAssertTrue(article.canOpenWebReader, "clip survives a type change")
+
+        let urlOnly = Reference(title: "w", url: "https://example.com", referenceType: .webpage)
+        XCTAssertTrue(urlOnly.canOpenWebReader, "webpage URL-only live mode unchanged")
+
+        let otherWithURL = Reference(title: "o", url: "https://example.com", referenceType: .other)
+        XCTAssertFalse(otherWithURL.canOpenWebReader, "URL-only live mode stays webpage-gated")
     }
 }

@@ -21,7 +21,7 @@ public enum MetadataVerifier {
             return verifyThesis(reference: reference, seed: seed, evidence: evidence)
         case .book:
             return verifyBook(reference: reference, seed: seed, evidence: evidence)
-        case .journalArticle, .conferencePaper, .webpage, .other:
+        case .journalArticle, .conferencePaper, .webpage, .other, .markdown:
             return verifyJournalLike(reference: reference, seed: seed, evidence: evidence)
         }
     }

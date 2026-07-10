@@ -68,7 +68,7 @@
 "content.toolbar.batchImport" = "Batch Import";
 "content.toolbar.addManually" = "Add manually";
 "content.toolbar.importPDF" = "Import PDF";
-"content.toolbar.importPDFAuto" = "Import PDF (auto)";
+"content.toolbar.importPDFAuto" = "Import PDF/Markdown";
 "content.toolbar.importBibTeX" = "Import BibTeX…";
 "content.toolbar.importRIS" = "Import RIS…";
 "content.toolbar.importZoteroFolder" = "Import Zotero Folder…";
