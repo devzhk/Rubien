@@ -942,10 +942,10 @@ struct Import: ParsableCommand {
         abstract: "Import references from a BibTeX/RIS file or a Zotero export folder (use '-' for stdin)"
     )
 
-    @Argument(help: "Path to a .bib or .ris file, a Zotero export folder (containing a .bib + files/ tree), or '-' to read from stdin")
+    @Argument(help: "Path to a .bib, .ris, or .md file, a Zotero export folder (containing a .bib + files/ tree), or '-' to read from stdin")
     var file: String
 
-    @Option(name: .long, help: "Format hint when reading from stdin: bib, ris")
+    @Option(name: .long, help: "Format hint when reading from stdin: bib, ris, md")
     var format: String?
 
     @Option(name: .long, help: "When importing a Zotero folder: stamp every reference with this property (default: Tags)")
@@ -970,7 +970,7 @@ struct Import: ParsableCommand {
 
         if file == "-" {
             guard let fmt = format?.lowercased() else {
-                printJSONError("--format (bib or ris) is required when reading from stdin")
+                printJSONError("--format (bib, ris, or md) is required when reading from stdin")
                 throw ExitCode.failure
             }
             ext = fmt
@@ -983,26 +983,40 @@ struct Import: ParsableCommand {
         } else {
             let url = URL(fileURLWithPath: file)
             ext = format?.lowercased() ?? url.pathExtension.lowercased()
-            let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
-            if let size = attrs[.size] as? UInt64, size > 50 * 1024 * 1024 {
-                printJSONError("File exceeds 50 MB limit (\(size / 1024 / 1024) MB)")
+            do {
+                let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+                if let size = attrs[.size] as? UInt64, size > 50 * 1024 * 1024 {
+                    printJSONError("File exceeds 50 MB limit (\(size / 1024 / 1024) MB)")
+                    throw ExitCode.failure
+                }
+                content = try String(contentsOf: url, encoding: .utf8)
+            } catch let error as ExitCode {
+                throw error
+            } catch {
+                printJSONError("Cannot read \(url.lastPathComponent): \(error.localizedDescription)")
                 throw ExitCode.failure
             }
-            content = try String(contentsOf: url, encoding: .utf8)
         }
 
         var refs: [Reference]
+        var mergePolicy: ImportMergePolicy = .standard
         switch ext {
         case "bib", "bibtex":
             refs = BibTeXImporter.parse(content)
         case "ris":
             refs = RISImporter.parse(content)
+        case "md", "markdown":
+            let basename = file == "-"
+                ? nil
+                : URL(fileURLWithPath: file).deletingPathExtension().lastPathComponent
+            refs = [MarkdownImporter.parse(content, filename: basename)]
+            mergePolicy = .markdownFillOnly
         default:
-            printJSONError("Unsupported file format: .\(ext). Use .bib or .ris")
+            printJSONError("Unsupported file format: .\(ext). Use .bib, .ris, or .md")
             throw ExitCode.failure
         }
 
-        let count = try AppDatabase.shared.batchImportReferences(refs)
+        let count = try AppDatabase.shared.batchImportReferences(refs, mergePolicy: mergePolicy).count
         notifyLibraryChanged()
         printJSON(["imported": "\(count)", "file": file])
     }

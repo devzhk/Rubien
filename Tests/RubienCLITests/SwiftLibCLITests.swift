@@ -91,6 +91,60 @@ final class RubienCLITests: XCTestCase {
         )
     }
 
+    /// Overload of `runCLI` that feeds `stdin` to the child's standard input.
+    /// The write handle is written in full then closed (signalling EOF)
+    /// *before* `waitUntilExit`, so a child reading stdin to end-of-file
+    /// unblocks. stdout/stderr are drained on background threads exactly as
+    /// the no-stdin overload to avoid the ~64KB pipe-buffer deadlock.
+    private func runCLI(_ arguments: [String], stdin: String) throws -> (stdout: String, stderr: String, exitCode: Int32) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: cliBinaryPath)
+        process.arguments = arguments
+        var env = ProcessInfo.processInfo.environment
+        env["RUBIEN_LIBRARY_ROOT"] = testLibraryRoot.path
+        process.environment = env
+
+        let stdinPipe = Pipe()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardInput = stdinPipe
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        var stdoutData = Data()
+        var stderrData = Data()
+        let readGroup = DispatchGroup()
+        let readQueue = DispatchQueue.global(qos: .userInitiated)
+
+        readGroup.enter()
+        readQueue.async {
+            stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            readGroup.leave()
+        }
+        readGroup.enter()
+        readQueue.async {
+            stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            readGroup.leave()
+        }
+
+        try process.run()
+        // Write the payload in full, then close the write end to send EOF so
+        // the child's `readDataToEndOfFile` on stdin returns. Do this before
+        // waiting for exit.
+        let writeHandle = stdinPipe.fileHandleForWriting
+        writeHandle.write(Data(stdin.utf8))
+        try writeHandle.close()
+
+        process.waitUntilExit()
+        readGroup.wait()
+
+        return (
+            stdout: String(data: stdoutData, encoding: .utf8) ?? "",
+            stderr: String(data: stderrData, encoding: .utf8) ?? "",
+            exitCode: process.terminationStatus
+        )
+    }
+
     private func skipIfBinaryMissing() throws {
         guard FileManager.default.isExecutableFile(atPath: cliBinaryPath) else {
             throw XCTSkip("CLI binary not found at \(cliBinaryPath). Run `swift build` first.")
@@ -1416,5 +1470,98 @@ final class RubienCLITests: XCTestCase {
         XCTAssertEqual(result.exitCode, 0, "query should succeed; stderr=\(result.stderr)")
         let refs = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [[String: Any]]
         XCTAssertNotNil(refs, "query output should be a JSON array of references")
+    }
+
+    // MARK: - Import: Markdown files and --format md stdin
+
+    func testImportMarkdownFile() throws {
+        // Sentinel of a different type so the --type filters below can't
+        // pass vacuously.
+        let addResult = try runCLI(["add", "--title", "Sentinel Article"])
+        XCTAssertEqual(addResult.exitCode, 0, addResult.stderr)
+
+        let md = """
+        ---
+        title: "Clip Title"
+        source: "https://example.com/clip"
+        published: 2026-06-13
+        ---
+        Clip body.
+        """
+        let file = testLibraryRoot.appendingPathComponent("clip.md")
+        try md.write(to: file, atomically: true, encoding: .utf8)
+
+        let result = try runCLI(["import", file.path])
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        let obj = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: String]
+        )
+        XCTAssertEqual(obj["imported"], "1")
+
+        let list = try runCLI(["list", "--type", "Web Page"])
+        XCTAssertEqual(list.exitCode, 0, list.stderr)
+        let rows = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(list.stdout.utf8)) as? [[String: Any]]
+        )
+        XCTAssertEqual(rows.count, 1, "only the clip is a Web Page; sentinel filtered out")
+        XCTAssertEqual(rows.first?["title"] as? String, "Clip Title")
+        XCTAssertEqual(rows.first?["referenceType"] as? String, "Web Page")
+    }
+
+    func testImportMarkdownStdinTitlesUntitled() throws {
+        let result = try runCLI(["import", "-", "--format", "md"], stdin: "no frontmatter body")
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        let list = try runCLI(["list", "--type", "Markdown"])
+        XCTAssertEqual(list.exitCode, 0, list.stderr)
+        XCTAssertTrue(list.stdout.contains("Untitled"))
+    }
+
+    func testStdinWithoutFormatMentionsMd() throws {
+        let result = try runCLI(["import", "-"], stdin: "x")
+        XCTAssertNotEqual(result.exitCode, 0)
+        let combined = result.stdout + result.stderr
+        XCTAssertTrue(combined.contains("md"), "error text must list md as a valid format: \(combined)")
+    }
+
+    func testImportMarkdownNoteGetsMarkdownType() throws {
+        _ = try runCLI(["add", "--title", "Sentinel Article"])
+        let file = testLibraryRoot.appendingPathComponent("note.md")
+        try "# Plain Note\nBody".write(to: file, atomically: true, encoding: .utf8)
+        let imported = try runCLI(["import", file.path])
+        XCTAssertEqual(imported.exitCode, 0, imported.stderr)
+
+        let list = try runCLI(["list", "--type", "Markdown"])
+        let rows = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(list.stdout.utf8)) as? [[String: Any]]
+        )
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?["title"] as? String, "Plain Note")
+    }
+
+    func testImportNonUTF8MarkdownEmitsJSONError() throws {
+        let file = testLibraryRoot.appendingPathComponent("latin1.md")
+        let latin1 = Data([0x23, 0x20, 0xE9, 0xE8, 0xFF])   // "# " + Latin-1 bytes, invalid UTF-8
+        try latin1.write(to: file)
+        let result = try runCLI(["import", file.path])
+        XCTAssertNotEqual(result.exitCode, 0)
+        let combined = result.stdout + result.stderr
+        XCTAssertTrue(combined.contains("error"), "JSON error contract expected: \(combined)")
+        XCTAssertTrue(combined.contains("latin1.md"), "error names the file")
+    }
+
+    /// Spec §10 export mappings: Markdown → BibTeX @misc, RIS TY GEN.
+    func testMarkdownTypeExportMappings() throws {
+        let file = testLibraryRoot.appendingPathComponent("note.md")
+        try "# Export Me\nBody".write(to: file, atomically: true, encoding: .utf8)
+        let imported = try runCLI(["import", file.path])
+        XCTAssertEqual(imported.exitCode, 0, imported.stderr)
+
+        let bib = try runCLI(["export", "--format", "bibtex"])
+        XCTAssertEqual(bib.exitCode, 0, bib.stderr)
+        XCTAssertTrue(bib.stdout.contains("@misc{"), bib.stdout)
+
+        let ris = try runCLI(["export", "--format", "ris"])
+        XCTAssertEqual(ris.exitCode, 0, ris.stderr)
+        XCTAssertTrue(ris.stdout.contains("TY  - GEN"), ris.stdout)
     }
 }
