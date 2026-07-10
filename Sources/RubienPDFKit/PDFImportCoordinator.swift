@@ -30,11 +30,19 @@ public enum PDFImportCoordinator {
             )
             switch persisted {
             case .verified(let reference):
+                let ownsPreparedCopy: Bool
                 if let referenceID = reference.id,
-                   let attachedPath = try? database.pdfFilename(for: referenceID),
-                   attachedPath != prepared.pdfPath {
-                    // Duplicate resolution merged into a reference that already
-                    // owns a cached PDF, so the fresh copy has no durable owner.
+                   let cacheStatus = try database.pdfCacheStatus(for: referenceID) {
+                    ownsPreparedCopy = cacheStatus.localFilename == prepared.pdfPath
+                        && cacheStatus.materializedAt != nil
+                } else {
+                    ownsPreparedCopy = false
+                }
+                if !ownsPreparedCopy {
+                    // Duplicate resolution can merge into either a materialized
+                    // cache row or a sync-side placeholder. Both preserve their
+                    // existing cache state, so this fresh copy has no durable
+                    // owner and must not be left behind.
                     PDFService.deletePDF(at: prepared.pdfPath)
                 }
                 return .imported(reference)

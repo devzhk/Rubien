@@ -107,6 +107,52 @@ final class PDFImportCoordinatorTests: XCTestCase {
         XCTAssertTrue(duplicateCopies.isEmpty, "A merged reference must not leave an unattached copied PDF behind")
     }
 
+    func testImportPDFRemovesUnattachedCopyWhenDuplicateHasNonMaterializedCachePlaceholder() async throws {
+        let database = try makeDatabase()
+        let resolution = verifiedResolution()
+        guard case .verified(let envelope) = resolution else {
+            return XCTFail("Test setup requires a verified resolution")
+        }
+        var existingReference = envelope.reference
+        try database.saveReference(&existingReference)
+        let existingID = try XCTUnwrap(existingReference.id)
+        let placeholderFilename = "remote-placeholder.pdf"
+
+        try await database.dbWriter.write { db in
+            try db.execute(
+                sql: """
+                INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
+                VALUES(?, ?, 'remote-hash', 2, NULL, ?)
+                """,
+                arguments: [existingID, placeholderFilename, Date()]
+            )
+        }
+
+        let sourceURL = try makeSourcePDF()
+        let outcome = try await PDFImportCoordinator.importPDF(
+            from: sourceURL,
+            database: database,
+            resolver: { _, _ in resolution }
+        )
+
+        guard case .imported(let importedReference) = outcome else {
+            return XCTFail("A duplicate verified resolution should merge into the placeholder reference")
+        }
+        let importedID = try XCTUnwrap(importedReference.id)
+        let copiedFileSuffix = "_\(sourceURL.lastPathComponent)"
+        let duplicateCopies = try FileManager.default.contentsOfDirectory(
+            at: AppDatabase.pdfStorageURL,
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.hasSuffix(copiedFileSuffix) }
+        let placeholder = try XCTUnwrap(try database.pdfCacheStatus(for: existingID))
+
+        XCTAssertEqual(importedID, existingID)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sourceURL.path))
+        XCTAssertTrue(duplicateCopies.isEmpty, "A sync placeholder must not leave the fresh copied PDF unowned")
+        XCTAssertEqual(placeholder.localFilename, placeholderFilename)
+        XCTAssertNil(placeholder.materializedAt, "The existing sync placeholder must be preserved")
+    }
+
     func testImportPDFDeletesOnlyCopiedPDFWhenPersistenceFails() async throws {
         let database = try makeDatabase()
         let sourceURL = try makeSourcePDF()
