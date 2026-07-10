@@ -141,7 +141,8 @@ final class DelayedMarkdownURLProtocol: URLProtocol {
 final class StreamingMarkdownHTTPServer {
     /// URLSession batches very small HTTP body fragments before invoking its
     /// data delegate, so use one modest chunk to observe a real partial write.
-    private static let initialPayload = Data(repeating: 0x61, count: 64 * 1024)
+    static let initialPayloadByteCount = 64 * 1024
+    private static let initialPayload = Data(repeating: 0x61, count: initialPayloadByteCount)
     private static let delayedPayload = Data("# Delayed streamed note\n".utf8)
 
     private let listener: NWListener
@@ -416,7 +417,10 @@ final class ImportSourceMaterializerTests: XCTestCase {
         }
 
         await fulfillment(of: [initialPayloadSent], timeout: 1)
-        guard let ownedDirectory = await waitForTemporaryImportDirectory(containing: filename) else {
+        guard let ownedDirectory = await waitForTemporaryImportDirectory(
+            containing: filename,
+            minimumFileSize: StreamingMarkdownHTTPServer.initialPayloadByteCount
+        ) else {
             importTask.cancel()
             await fulfillment(of: [completion], timeout: 1)
             server.releaseDelayedPayload()
@@ -430,6 +434,12 @@ final class ImportSourceMaterializerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: ownedDirectory) }
         let partialFile = ownedDirectory.appendingPathComponent(filename)
         XCTAssertTrue(FileManager.default.fileExists(atPath: partialFile.path))
+        let partialValues = try partialFile.resourceValues(forKeys: [.fileSizeKey])
+        let partialSize = try XCTUnwrap(partialValues.fileSize)
+        XCTAssertGreaterThanOrEqual(
+            partialSize,
+            StreamingMarkdownHTTPServer.initialPayloadByteCount
+        )
 
         importTask.cancel()
         await fulfillment(of: [completion], timeout: 1)
@@ -613,15 +623,18 @@ final class ImportSourceMaterializerTests: XCTestCase {
 
     private let maximumMarkdownBytes = 50 * 1024 * 1024
 
-    private func waitForTemporaryImportDirectory(containing filename: String) async -> URL? {
+    private func waitForTemporaryImportDirectory(
+        containing filename: String,
+        minimumFileSize: Int
+    ) async -> URL? {
         for _ in 0..<100 {
             let temporaryDirectory = FileManager.default.temporaryDirectory
             let names = (try? FileManager.default.contentsOfDirectory(atPath: temporaryDirectory.path)) ?? []
             for name in names where name.hasPrefix("RubienImport-") {
                 let directoryURL = temporaryDirectory.appendingPathComponent(name, isDirectory: true)
-                if FileManager.default.fileExists(
-                    atPath: directoryURL.appendingPathComponent(filename).path
-                ) {
+                let fileURL = directoryURL.appendingPathComponent(filename)
+                let fileSize = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+                if fileSize >= minimumFileSize {
                     return directoryURL
                 }
             }
