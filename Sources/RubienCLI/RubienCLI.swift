@@ -939,7 +939,7 @@ struct Cite: ParsableCommand {
 struct Import: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "import",
-        abstract: "Import references from a BibTeX/RIS file or a Zotero export folder (use '-' for stdin)"
+        abstract: "Import references from a BibTeX/RIS/Markdown file, a Zotero or markdown folder (use '-' for stdin)"
     )
 
     @Argument(help: "Path to a .bib, .ris, or .md file, a Zotero export folder (containing a .bib + files/ tree), or '-' to read from stdin")
@@ -948,19 +948,56 @@ struct Import: ParsableCommand {
     @Option(name: .long, help: "Format hint when reading from stdin: bib, ris, md")
     var format: String?
 
-    @Option(name: .long, help: "When importing a Zotero folder: stamp every reference with this property (default: Tags)")
+    @Option(name: .long, help: "When importing a Zotero or markdown folder: stamp every reference with this property (default: Tags)")
     var property: String?
 
-    @Option(name: .long, help: "When importing a Zotero folder: value to stamp on the property (default: folder basename)")
+    @Option(name: .long, help: "When importing a Zotero or markdown folder: value to stamp on the property (default: folder basename)")
     var value: String?
 
     func run() throws {
-        // Folder path → Zotero folder importer.
+        // Folder path → route by contents (spec §5).
         if file != "-" {
             var isDir: ObjCBool = false
             if FileManager.default.fileExists(atPath: file, isDirectory: &isDir), isDir.boolValue {
-                try runZoteroFolderImport(folderPath: file)
-                return
+                let entries = (try? FileManager.default.contentsOfDirectory(atPath: file)) ?? []
+                let hasBib = entries.contains { $0.lowercased().hasSuffix(".bib") }
+                let hasMD = entries.contains { $0.lowercased().hasSuffix(".md") }
+
+                if let forced = format?.lowercased() {
+                    switch forced {
+                    case "bib", "bibtex":
+                        guard hasBib else {
+                            printJSONError("No .bib files found in folder")
+                            throw ExitCode.failure
+                        }
+                        try runZoteroFolderImport(folderPath: file)
+                    case "md", "markdown":
+                        guard hasMD else {
+                            printJSONError("No .md files found in folder")
+                            throw ExitCode.failure
+                        }
+                        try runMarkdownFolderImport(folderPath: file)
+                    default:
+                        printJSONError("Unsupported folder format: \(forced). Use bib or md.")
+                        throw ExitCode.failure
+                    }
+                    return
+                }
+
+                switch (hasBib, hasMD) {
+                case (true, true):
+                    printJSONError("Ambiguous folder: contains both .bib and .md. Pass --format bib or --format md to choose.")
+                    throw ExitCode.failure
+                case (true, false):
+                    try runZoteroFolderImport(folderPath: file)
+                    return
+                case (false, true):
+                    try runMarkdownFolderImport(folderPath: file)
+                    return
+                case (false, false):
+                    printJSONError("No importable files found (expected .bib or .md)")
+                    throw ExitCode.failure
+                }
             }
         }
 
@@ -1061,6 +1098,52 @@ struct Import: ParsableCommand {
             printJSONError(error.errorDescription ?? "\(error)")
             throw ExitCode.failure
         }
+    }
+
+    private func runMarkdownFolderImport(folderPath: String) throws {
+        let folderURL = URL(fileURLWithPath: folderPath)
+        let db = AppDatabase.shared
+
+        let propertyName = property ?? PropertyDefinition.tagsPropertyName
+        let stampValue = value ?? folderURL.lastPathComponent
+        guard let propDef = try db.findPropertyDefinition(byName: propertyName),
+              let propId = propDef.id else {
+            printJSONError("Property not found: '\(propertyName)'")
+            throw ExitCode.failure
+        }
+
+        let mdFiles = ((try? FileManager.default.contentsOfDirectory(
+            at: folderURL, includingPropertiesForKeys: [.fileSizeKey]
+        )) ?? [])
+            .filter { $0.pathExtension.lowercased() == "md" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+        var refs: [Reference] = []
+        var failed: [String] = []
+        for url in mdFiles {
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            guard size <= 50 * 1024 * 1024 else { failed.append(url.lastPathComponent); continue }
+            guard let content = try? String(contentsOf: url, encoding: .utf8) else {
+                failed.append(url.lastPathComponent); continue
+            }
+            refs.append(MarkdownImporter.parse(
+                content, filename: url.deletingPathExtension().lastPathComponent
+            ))
+        }
+
+        let result = try db.batchImportReferences(
+            refs,
+            stamping: ZoteroImportPropertyTarget(propertyId: propId, value: stampValue),
+            mergePolicy: .markdownFillOnly
+        )
+        notifyLibraryChanged()
+        printJSON([
+            "imported": "\(result.count)",
+            "failed": failed.joined(separator: ", "),
+            "property": propertyName,
+            "value": stampValue,
+            "file": folderPath,
+        ])
     }
 }
 

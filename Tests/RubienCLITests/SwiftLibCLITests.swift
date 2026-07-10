@@ -1564,4 +1564,109 @@ final class RubienCLITests: XCTestCase {
         XCTAssertEqual(ris.exitCode, 0, ris.stderr)
         XCTAssertTrue(ris.stdout.contains("TY  - GEN"), ris.stdout)
     }
+
+    // MARK: - Markdown folder import (Task 9)
+
+    private func makeClippingsFolder(_ name: String, files: [String: String]) throws -> URL {
+        let dir = testLibraryRoot.appendingPathComponent(name, isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        for (filename, content) in files {
+            try content.write(
+                to: dir.appendingPathComponent(filename), atomically: true, encoding: .utf8
+            )
+        }
+        return dir
+    }
+
+    /// Resolve the built-in Tags option id for a tag name (label), or nil.
+    /// `list --tag` filters by numeric tag id, so we look the id up through
+    /// `properties --name Tags` inline options exactly like the sibling
+    /// multi-select tests (each option's `value` is the stringified tag id).
+    private func tagOptionId(label: String) throws -> String? {
+        let defs = try JSONSerialization.jsonObject(
+            with: Data(try runCLI(["properties", "--name", "Tags"]).stdout.utf8)
+        ) as? [[String: Any]] ?? []
+        let options = (defs.first?["options"] as? [[String: Any]]) ?? []
+        return options.first { ($0["label"] as? String) == label }?["value"] as? String
+    }
+
+    func testImportMarkdownFolderStampsTagsWithBasename() throws {
+        let dir = try makeClippingsFolder("Clippings", files: [
+            "a.md": "# Note A\nBody A",
+            "b.md": "# Note B\nBody B",
+        ])
+        let result = try runCLI(["import", dir.path])
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        let obj = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: String]
+        )
+        XCTAssertEqual(obj["imported"], "2")
+        XCTAssertEqual(obj["failed"], "")
+        XCTAssertEqual(obj["property"], "Tags")
+        XCTAssertEqual(obj["value"], "Clippings")
+
+        // Stamping must be REAL, not just reported: resolve the "Clippings"
+        // tag's numeric id, then confirm the referenceTag pivot actually pins
+        // both notes via `list --tag` (a name-only echo would leave it empty).
+        let tagId = try XCTUnwrap(
+            try tagOptionId(label: "Clippings"), "stamp must create a 'Clippings' tag"
+        )
+        let list = try runCLI(["list", "--tag", tagId])
+        XCTAssertEqual(list.exitCode, 0, list.stderr)
+        XCTAssertTrue(list.stdout.contains("Note A"))
+        XCTAssertTrue(list.stdout.contains("Note B"))
+    }
+
+    func testImportMarkdownFolderPropertyValueOverride() throws {
+        let dir = try makeClippingsFolder("Clips2", files: ["c.md": "# Note C\nBody"])
+        let result = try runCLI([
+            "import", dir.path, "--property", "Tags", "--value", "custom-tag",
+        ])
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        let obj = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: String]
+        )
+        XCTAssertEqual(obj["value"], "custom-tag")
+        let tagId = try XCTUnwrap(try tagOptionId(label: "custom-tag"))
+        let list = try runCLI(["list", "--tag", tagId])
+        XCTAssertTrue(list.stdout.contains("Note C"))
+    }
+
+    func testImportMarkdownFolderReportsFailedFiles() throws {
+        let dir = try makeClippingsFolder("Mixed2", files: ["good.md": "# Good\nBody"])
+        let bad = Data([0x23, 0x20, 0xE9, 0xE8, 0xFF])   // invalid UTF-8
+        try bad.write(to: dir.appendingPathComponent("bad.md"))
+
+        let result = try runCLI(["import", dir.path])
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        let obj = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: String]
+        )
+        XCTAssertEqual(obj["imported"], "1", "valid file still imports")
+        XCTAssertEqual(obj["failed"], "bad.md")
+    }
+
+    func testAmbiguousFolderErrorsAndFormatForces() throws {
+        let dir = try makeClippingsFolder("Ambiguous", files: [
+            "refs.bib": "@article{k, title={T}, year={2020}}",
+            "note.md": "# N\nB",
+        ])
+        let ambiguous = try runCLI(["import", dir.path])
+        XCTAssertNotEqual(ambiguous.exitCode, 0)
+        let combined = ambiguous.stdout + ambiguous.stderr
+        XCTAssertTrue(combined.contains("Ambiguous folder"), combined)
+
+        let forced = try runCLI(["import", dir.path, "--format", "md"])
+        XCTAssertEqual(forced.exitCode, 0, forced.stderr)
+        let obj = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(forced.stdout.utf8)) as? [String: String]
+        )
+        XCTAssertEqual(obj["imported"], "1")
+    }
+
+    func testEmptyFolderErrors() throws {
+        let dir = try makeClippingsFolder("Empty", files: [:])
+        let result = try runCLI(["import", dir.path])
+        XCTAssertNotEqual(result.exitCode, 0)
+    }
 }
