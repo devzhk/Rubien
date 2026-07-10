@@ -4,6 +4,9 @@ import FoundationNetworking
 #endif
 import Dispatch
 import XCTest
+#if canImport(Network)
+import Network
+#endif
 @testable import RubienCore
 
 /// Isolated URLProtocol stub for import-source acquisition tests. Keeping this
@@ -62,18 +65,15 @@ final class ImportSourceURLProtocol: URLProtocol {
     }
 }
 
-/// Sends headers immediately but holds the body until the test releases it.
-/// A cancellation-aware materializer must finish before the release and leave
-/// the delayed callback unable to resurrect a temporary import source.
+/// Sends headers immediately but holds its body until the test releases it.
+/// Its late protocol-client calls intentionally happen after `stopLoading()`.
 final class DelayedMarkdownURLProtocol: URLProtocol {
     nonisolated(unsafe) static var response: HTTPURLResponse!
     nonisolated(unsafe) static var data = Data()
     nonisolated(unsafe) static var requestStarted: XCTestExpectation?
+    nonisolated(unsafe) static var stopLoadingCalled: XCTestExpectation?
     nonisolated(unsafe) static var delayedCallbackAttempted: XCTestExpectation?
     nonisolated(unsafe) static var gate = DispatchSemaphore(value: 0)
-
-    private let lock = NSLock()
-    private var stopped = false
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -85,27 +85,21 @@ final class DelayedMarkdownURLProtocol: URLProtocol {
         let gate = Self.gate
         DispatchQueue.global().async { [self] in
             gate.wait()
-            Self.delayedCallbackAttempted?.fulfill()
-
-            lock.lock()
-            let wasStopped = stopped
-            lock.unlock()
-            guard !wasStopped else { return }
 
             client?.urlProtocol(self, didLoad: Self.data)
             client?.urlProtocolDidFinishLoading(self)
+            Self.delayedCallbackAttempted?.fulfill()
         }
     }
 
     override func stopLoading() {
-        lock.lock()
-        stopped = true
-        lock.unlock()
+        Self.stopLoadingCalled?.fulfill()
     }
 
     static func configure(
         url: URL,
         requestStarted: XCTestExpectation,
+        stopLoadingCalled: XCTestExpectation,
         delayedCallbackAttempted: XCTestExpectation
     ) {
         response = HTTPURLResponse(
@@ -116,6 +110,7 @@ final class DelayedMarkdownURLProtocol: URLProtocol {
         )!
         data = Data("# Delayed note".utf8)
         self.requestStarted = requestStarted
+        self.stopLoadingCalled = stopLoadingCalled
         self.delayedCallbackAttempted = delayedCallbackAttempted
         gate = DispatchSemaphore(value: 0)
     }
@@ -134,10 +129,108 @@ final class DelayedMarkdownURLProtocol: URLProtocol {
         response = nil
         data = Data()
         requestStarted = nil
+        stopLoadingCalled = nil
         delayedCallbackAttempted = nil
         gate.signal()
     }
 }
+
+#if canImport(Network)
+/// A loopback HTTP peer that delivers one body chunk, then waits. Unlike a
+/// custom URLProtocol, this exercises URLSession's real streaming callbacks.
+final class StreamingMarkdownHTTPServer {
+    /// URLSession batches very small HTTP body fragments before invoking its
+    /// data delegate, so use one modest chunk to observe a real partial write.
+    private static let initialPayload = Data(repeating: 0x61, count: 64 * 1024)
+    private static let delayedPayload = Data("# Delayed streamed note\n".utf8)
+
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "com.rubien.tests.streaming-markdown-server")
+    private let releaseGate = DispatchSemaphore(value: 0)
+    private let listenerReady: XCTestExpectation
+    private let initialPayloadSent: XCTestExpectation
+    private let delayedPayloadAttempted: XCTestExpectation
+    private var connection: NWConnection?
+
+    init(
+        listenerReady: XCTestExpectation,
+        initialPayloadSent: XCTestExpectation,
+        delayedPayloadAttempted: XCTestExpectation
+    ) throws {
+        self.listenerReady = listenerReady
+        self.initialPayloadSent = initialPayloadSent
+        self.delayedPayloadAttempted = delayedPayloadAttempted
+        listener = try NWListener(using: .tcp, on: .any)
+        listener.stateUpdateHandler = { [weak self] state in
+            if case .ready = state {
+                self?.listenerReady.fulfill()
+            }
+        }
+        listener.newConnectionHandler = { [weak self] connection in
+            self?.accept(connection)
+        }
+        listener.start(queue: queue)
+    }
+
+    func url(for filename: String) -> URL? {
+        guard let port = listener.port else { return nil }
+        return URL(string: "http://127.0.0.1:\(port.rawValue)/notes/\(filename)")
+    }
+
+    func releaseDelayedPayload() {
+        releaseGate.signal()
+    }
+
+    func stop() {
+        releaseGate.signal()
+        connection?.cancel()
+        listener.cancel()
+    }
+
+    private func accept(_ connection: NWConnection) {
+        self.connection = connection
+        connection.start(queue: queue)
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 16 * 1024) { [weak self] _, _, _, error in
+            guard let self, error == nil else { return }
+            self.sendInitialResponse(on: connection)
+        }
+    }
+
+    private func sendInitialResponse(on connection: NWConnection) {
+        let contentLength = Self.initialPayload.count + Self.delayedPayload.count
+        let headers = Data((
+            "HTTP/1.1 200 OK\r\n" +
+            "Content-Type: text/plain\r\n" +
+            "Content-Length: \(contentLength)\r\n" +
+            "Connection: close\r\n\r\n"
+        ).utf8)
+        connection.send(content: headers, completion: .contentProcessed { _ in })
+        connection.send(content: Self.initialPayload, completion: .contentProcessed { [weak self] _ in
+            self?.initialPayloadSent.fulfill()
+        })
+
+        DispatchQueue.global().async { [weak self, weak connection] in
+            guard let self, let connection else { return }
+            self.releaseGate.wait()
+            self.queue.async { [weak self, weak connection] in
+                guard let self, let connection else { return }
+                self.sendDelayedResponse(on: connection)
+            }
+        }
+    }
+
+    private func sendDelayedResponse(on connection: NWConnection) {
+        connection.send(content: Self.delayedPayload, completion: .contentProcessed { _ in })
+        connection.send(
+            content: nil,
+            contentContext: .finalMessage,
+            isComplete: true,
+            completion: .contentProcessed { _ in connection.cancel() }
+        )
+        delayedPayloadAttempted.fulfill()
+    }
+}
+#endif
 
 final class ImportSourceMaterializerTests: XCTestCase {
     private var temporaryRoot: URL!
@@ -248,18 +341,23 @@ final class ImportSourceMaterializerTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: escapedURL.path))
     }
 
-    func testCancellingDelayedRemoteMarkdownRemovesTemporarySource() async throws {
-        let remoteURL = URL(string: "https://example.test/notes/delayed.md")!
+    func testDelayedProtocolCallbacksAfterCancellationDoNotResumeMaterialization() async throws {
+        // Darwin buffers custom URLProtocol body delivery until it finishes,
+        // so this isolates the forced stale-callback race. The loopback test
+        // below covers cleanup of a real, partially written source file.
+        let filename = "delayed-\(UUID().uuidString).md"
+        let remoteURL = URL(string: "https://example.test/notes/\(filename)")!
         let requestStarted = expectation(description: "request started")
+        let stopLoadingCalled = expectation(description: "URLProtocol stopped")
         let delayedCallbackAttempted = expectation(description: "delayed callback attempted")
         DelayedMarkdownURLProtocol.configure(
             url: remoteURL,
             requestStarted: requestStarted,
+            stopLoadingCalled: stopLoadingCalled,
             delayedCallbackAttempted: delayedCallbackAttempted
         )
         defer { DelayedMarkdownURLProtocol.releaseDelayedCallback() }
 
-        let existingTemporaryDirectories = importTemporaryDirectoryNames()
         let importTask = Task {
             try await ImportSourceMaterializer.materialize(
                 remoteURL.absoluteString,
@@ -275,20 +373,79 @@ final class ImportSourceMaterializerTests: XCTestCase {
 
         await fulfillment(of: [requestStarted], timeout: 1)
         importTask.cancel()
-        await fulfillment(of: [completion], timeout: 1)
+        await fulfillment(of: [completion, stopLoadingCalled], timeout: 1)
         DelayedMarkdownURLProtocol.releaseDelayedCallback()
         await fulfillment(of: [delayedCallbackAttempted], timeout: 1)
 
         switch await importTask.result {
         case .success(let materialized):
-            let actualTemporaryDirectories = importTemporaryDirectoryNames()
             materialized.cleanup()
-            XCTFail("Cancellation returned a materialized source: \(actualTemporaryDirectories)")
+            XCTFail("Cancellation returned a materialized source")
         case .failure(let error):
             XCTAssertTrue(error is CancellationError, "Expected CancellationError, got: \(error)")
         }
-        XCTAssertEqual(importTemporaryDirectoryNames(), existingTemporaryDirectories)
     }
+
+    #if canImport(Network)
+    func testCancellingStreamedRemoteMarkdownRemovesTemporarySource() async throws {
+        let filename = "streamed-\(UUID().uuidString).md"
+        let listenerReady = expectation(description: "loopback listener ready")
+        let initialPayloadSent = expectation(description: "initial payload sent")
+        let delayedPayloadAttempted = expectation(description: "late payload and finish attempted")
+        let server = try StreamingMarkdownHTTPServer(
+            listenerReady: listenerReady,
+            initialPayloadSent: initialPayloadSent,
+            delayedPayloadAttempted: delayedPayloadAttempted
+        )
+        defer { server.stop() }
+
+        await fulfillment(of: [listenerReady], timeout: 1)
+        let remoteURL = try XCTUnwrap(server.url(for: filename))
+        let session = URLSession(configuration: .ephemeral)
+        let importTask = Task {
+            try await ImportSourceMaterializer.materialize(
+                remoteURL.absoluteString,
+                localPathPolicy: .requireAbsolute,
+                session: session
+            )
+        }
+        let completion = expectation(description: "cancelled import completes")
+        _ = Task {
+            _ = await importTask.result
+            completion.fulfill()
+        }
+
+        await fulfillment(of: [initialPayloadSent], timeout: 1)
+        guard let ownedDirectory = await waitForTemporaryImportDirectory(containing: filename) else {
+            importTask.cancel()
+            await fulfillment(of: [completion], timeout: 1)
+            server.releaseDelayedPayload()
+            await fulfillment(of: [delayedPayloadAttempted], timeout: 1)
+            if case .success(let materialized) = await importTask.result {
+                materialized.cleanup()
+            }
+            XCTFail("Expected a test-owned temporary Markdown file before cancellation")
+            return
+        }
+        defer { try? FileManager.default.removeItem(at: ownedDirectory) }
+        let partialFile = ownedDirectory.appendingPathComponent(filename)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: partialFile.path))
+
+        importTask.cancel()
+        await fulfillment(of: [completion], timeout: 1)
+        server.releaseDelayedPayload()
+        await fulfillment(of: [delayedPayloadAttempted], timeout: 1)
+
+        switch await importTask.result {
+        case .success(let materialized):
+            materialized.cleanup()
+            XCTFail("Cancellation returned a materialized source")
+        case .failure(let error):
+            XCTAssertTrue(error is CancellationError, "Expected CancellationError, got: \(error)")
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ownedDirectory.path))
+    }
+    #endif
 
     func testRemotePDFUsesOriginalFilenameAndCleansUp() async throws {
         let remoteURL = "https://example.test/papers/method.pdf"
@@ -456,9 +613,21 @@ final class ImportSourceMaterializerTests: XCTestCase {
 
     private let maximumMarkdownBytes = 50 * 1024 * 1024
 
-    private func importTemporaryDirectoryNames() -> Set<String> {
-        let temporaryDirectory = FileManager.default.temporaryDirectory
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: temporaryDirectory.path)) ?? []
-        return Set(names.filter { $0.hasPrefix("RubienImport-") })
+    private func waitForTemporaryImportDirectory(containing filename: String) async -> URL? {
+        for _ in 0..<100 {
+            let temporaryDirectory = FileManager.default.temporaryDirectory
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: temporaryDirectory.path)) ?? []
+            for name in names where name.hasPrefix("RubienImport-") {
+                let directoryURL = temporaryDirectory.appendingPathComponent(name, isDirectory: true)
+                if FileManager.default.fileExists(
+                    atPath: directoryURL.appendingPathComponent(filename).path
+                ) {
+                    return directoryURL
+                }
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return nil
     }
+
 }
