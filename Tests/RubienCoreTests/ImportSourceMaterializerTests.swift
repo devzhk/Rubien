@@ -95,6 +95,25 @@ final class ImportSourceMaterializerTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: sourceURL.path))
     }
 
+    func testExistingLocalFileURLRetainsTheSelectedURLWithoutRebuildingItFromPath() throws {
+        let sourceURL = temporaryRoot.appendingPathComponent("selected.md")
+        try Data("# Selected note".utf8).write(to: sourceURL)
+        // A security-scoped URL contains access state not recoverable from
+        // `path`. A noncanonical path gives this test a deterministic way to
+        // detect the same destructive path → URL reconstruction.
+        let selectedURL = URL(fileURLWithPath: temporaryRoot.path + "/./selected.md")
+        let reconstructedURL = URL(fileURLWithPath: selectedURL.path).standardizedFileURL
+        XCTAssertNotEqual(selectedURL.absoluteString, reconstructedURL.absoluteString)
+
+        let materialized = try ImportSourceMaterializer.materialize(localFileURL: selectedURL)
+
+        XCTAssertEqual(materialized.fileURL.absoluteString, selectedURL.absoluteString)
+        XCTAssertEqual(materialized.kind, .markdown)
+        XCTAssertNil(materialized.temporaryDirectoryURL)
+        materialized.cleanup()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sourceURL.path))
+    }
+
     func testRemotePlainTextMarkdownUsesOriginalFilenameAndCleansUp() async throws {
         let remoteURL = "https://example.test/notes/research-note.md"
         ImportSourceURLProtocol.stub(

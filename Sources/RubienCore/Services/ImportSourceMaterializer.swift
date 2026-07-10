@@ -140,6 +140,19 @@ public enum ImportSourceMaterializer {
         return try materializeLocal(input: trimmedInput, policy: localPathPolicy)
     }
 
+    /// Validates a local file URL while retaining the exact URL supplied by the
+    /// caller. AppKit open panels can return a security-scoped URL whose access
+    /// capability is not recoverable by rebuilding one from `url.path`.
+    public static func materialize(localFileURL: URL) throws -> MaterializedImportSource {
+        guard localFileURL.isFileURL else {
+            throw MaterializationError.notRegularFile(localFileURL.path)
+        }
+        return try materializeValidatedLocal(
+            input: localFileURL.path,
+            fileURL: localFileURL
+        )
+    }
+
     private static func materializeLocal(
         input: String,
         policy: LocalPathPolicy
@@ -162,19 +175,26 @@ public enum ImportSourceMaterializer {
             }
         }
 
-        let values = try? localURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+        return try materializeValidatedLocal(input: input, fileURL: localURL)
+    }
+
+    private static func materializeValidatedLocal(
+        input: String,
+        fileURL: URL
+    ) throws -> MaterializedImportSource {
+        let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
         guard values?.isRegularFile == true else {
-            throw MaterializationError.notRegularFile(localURL.path)
+            throw MaterializationError.notRegularFile(fileURL.path)
         }
 
-        let kind = try kind(for: localURL)
+        let kind = try kind(for: fileURL)
         if kind == .markdown, Int64(values?.fileSize ?? 0) > maximumMarkdownBytes {
             throw MaterializationError.markdownTooLarge(Int64(values?.fileSize ?? 0))
         }
 
         return MaterializedImportSource(
             input: input,
-            fileURL: localURL,
+            fileURL: fileURL,
             kind: kind,
             temporaryDirectoryURL: nil
         )

@@ -194,7 +194,8 @@ struct ImportSourceSheet: View {
         do {
             for url in state.stagedURLs {
                 // The open panel grants scoped access to sandboxed builds. The
-                // batch coordinator reacquires it while consuming the source.
+                // exact URL is retained so the batch coordinator can reacquire
+                // that same scope while consuming the source.
                 let accessing = url.startAccessingSecurityScopedResource()
                 defer {
                     if accessing {
@@ -202,10 +203,7 @@ struct ImportSourceSheet: View {
                     }
                 }
                 sources.append(
-                    try await ImportSourceMaterializer.materialize(
-                        url.path,
-                        localPathPolicy: .requireAbsolute
-                    )
+                    try ImportSourceMaterializer.materialize(localFileURL: url)
                 )
             }
             return sources
