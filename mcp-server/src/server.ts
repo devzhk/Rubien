@@ -11,7 +11,7 @@ import { registerWebTools } from "./tools/web.js";
 
 export const SERVER_INFO = {
   name: "rubien-mcp-server",
-  version: "0.1.1",
+  version: "0.1.2",
 } as const;
 
 export function buildServer(): McpServer {

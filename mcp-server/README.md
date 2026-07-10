@@ -131,6 +131,8 @@ claude mcp add rubien -- node $(pwd)/dist/index.js        # Claude Code
 | Saved views | `rubien_views_list`, `rubien_views_create`, `rubien_views_delete`, `rubien_views_rename`, `rubien_views_query` |
 | Sync | `rubien_sync_status` (Mac-only — errors on Linux) |
 
+`rubien_import` accepts an absolute path on the host or a direct HTTP(S) URL with a `.pdf`, `.md`, or `.markdown` path extension. Direct URLs are validated by `rubien-cli` before import; stdin (`"-"`) is intentionally unavailable through MCP.
+
 PDF tools: `rubien_pdf_info` (page count + outline), `rubien_pdf_text` (by page range or section), `rubien_pdf_page_image` (page → PNG), `rubien_pdf_download` (fetch an open-access PDF and attach it), `rubien_annotations_list` (highlights/underlines/notes on the attached PDF).
 
 Web-clip tools: `rubien_web_get` returns the extracted body (markdown/HTML, paginated) with `siteName` and `annotationCount`; `rubien_web_annotations` returns highlights as a W3C TextQuoteSelector triple (`prefixText`/`anchorText`/`suffixText`) for locating them in the body. Library-only — neither hits the network.

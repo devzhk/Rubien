@@ -1474,6 +1474,36 @@ final class RubienCLITests: XCTestCase {
 
     // MARK: - Import: Markdown files and --format md stdin
 
+    func testImportPDFPathMissingFileUsesJSONMaterializerError() throws {
+        try skipIfBinaryMissing()
+        let missingFile = testLibraryRoot.appendingPathComponent("missing.pdf")
+
+        let result = try runCLI(["import", missingFile.path])
+
+        XCTAssertNotEqual(result.exitCode, 0)
+        let envelope = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.stderr.utf8)) as? [String: String],
+            "expected JSON error output, got stdout=\(result.stdout) stderr=\(result.stderr)"
+        )
+        let message = try XCTUnwrap(envelope["error"])
+        XCTAssertTrue(message.contains("Local path is not a regular file"), message)
+        XCTAssertFalse(message.contains("Unsupported file format"), message)
+    }
+
+    func testImportMarkdownPathRetainsLegacyEnvelope() throws {
+        try skipIfBinaryMissing()
+        let file = testLibraryRoot.appendingPathComponent("legacy-envelope.md")
+        try "# Legacy Envelope\nBody".write(to: file, atomically: true, encoding: .utf8)
+
+        let result = try runCLI(["import", file.path])
+
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        let envelope = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: String]
+        )
+        XCTAssertEqual(envelope, ["imported": "1", "file": file.path])
+    }
+
     func testImportMarkdownFile() throws {
         // Sentinel of a different type so the --type filters below can't
         // pass vacuously.

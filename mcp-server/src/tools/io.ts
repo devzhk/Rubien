@@ -6,20 +6,20 @@ export function registerIOTools(server: McpServer): void {
   server.registerTool(
     "rubien_import",
     {
-      title: "Import from BibTeX/RIS/markdown or a folder",
+      title: "Import a PDF, BibTeX/RIS, Markdown, or folder",
       description:
-        "Import references from a file (BibTeX .bib / RIS .ris / markdown .md — Obsidian Web Clipper frontmatter is mapped, plain notes import too) or a folder (Zotero export, or a folder of .md files). Folder imports stamp a single-/multi-select property value on every imported reference via property + value (default: Tags = folder basename). A folder containing both .bib and .md needs format to disambiguate.",
+        "Import references from a local file (PDF .pdf / BibTeX .bib / RIS .ris / Markdown .md — Obsidian Web Clipper frontmatter is mapped, plain notes import too), a direct HTTP(S) PDF/Markdown file URL with a supported path extension, or a folder (Zotero export, or a folder of .md files). Folder imports stamp a single-/multi-select property value on every imported reference via property + value (default: Tags = folder basename). A folder containing both .bib and .md needs format to disambiguate.",
       inputSchema: {
         file: z
           .string()
           .describe(
-            "Absolute path on the host. Stdin piping ('-') is not supported through the MCP wrapper; if you need it, invoke rubien-cli directly.",
+            "Absolute path on the host, or a direct HTTP(S) URL with a .pdf, .md, or .markdown path extension. Stdin piping ('-') is not supported through the MCP wrapper; if you need it, invoke rubien-cli directly.",
           ),
         format: z
           .enum(["bib", "ris", "md"])
           .optional()
           .describe(
-            "Override the format inferred from the file extension; also disambiguates folders containing both .bib and .md.",
+            "For folders, disambiguates when both .bib and .md are present. Direct HTTP(S) URLs must have a .pdf, .md, or .markdown path extension.",
           ),
         property: z
           .string()
