@@ -1,6 +1,11 @@
 import Foundation
 import RubienCore
 
+private let pdfImportCoordinatorLog = RubienLogger(
+    subsystem: "com.rubien.pdf",
+    category: "import.coordinator"
+)
+
 public enum PDFImportOutcome: Sendable {
     case imported(Reference)
     case queued(MetadataIntake)
@@ -30,15 +35,11 @@ public enum PDFImportCoordinator {
             )
             switch persisted {
             case .verified(let reference):
-                let ownsPreparedCopy: Bool
-                if let referenceID = reference.id,
-                   let cacheStatus = try database.pdfCacheStatus(for: referenceID) {
-                    ownsPreparedCopy = cacheStatus.localFilename == prepared.pdfPath
-                        && cacheStatus.materializedAt != nil
-                } else {
-                    ownsPreparedCopy = false
-                }
-                if !ownsPreparedCopy {
+                if preparedCopyHasDurableOwner(
+                    prepared.pdfPath,
+                    for: reference,
+                    database: database
+                ) == false {
                     // Duplicate resolution can merge into either a materialized
                     // cache row or a sync-side placeholder. Both preserve their
                     // existing cache state, so this fresh copy has no durable
@@ -52,6 +53,30 @@ public enum PDFImportCoordinator {
         } catch {
             PDFService.deletePDF(at: prepared.pdfPath)
             throw error
+        }
+    }
+
+    /// Returns nil when cache ownership cannot be read after successful
+    /// persistence. In that ambiguous case we preserve the fresh file: the
+    /// reference and its cache state are already committed, and deleting the
+    /// file would risk losing the only materialized copy.
+    private static func preparedCopyHasDurableOwner(
+        _ preparedPath: String,
+        for reference: Reference,
+        database: AppDatabase
+    ) -> Bool? {
+        guard let referenceID = reference.id else { return false }
+        do {
+            guard let cacheStatus = try database.pdfCacheStatus(for: referenceID) else {
+                return false
+            }
+            return cacheStatus.localFilename == preparedPath
+                && cacheStatus.materializedAt != nil
+        } catch {
+            pdfImportCoordinatorLog.error(
+                "Unable to verify imported PDF ownership after persistence: \(error.localizedDescription)"
+            )
+            return nil
         }
     }
 }
