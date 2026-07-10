@@ -6,9 +6,9 @@ export function registerIOTools(server: McpServer): void {
   server.registerTool(
     "rubien_import",
     {
-      title: "Import from BibTeX/RIS/Zotero folder",
+      title: "Import from BibTeX/RIS/markdown or a folder",
       description:
-        "Import references from a file (BibTeX .bib / RIS .ris) or a Zotero-exported folder. For folder imports you can stamp a single-/multi-select property value on every imported reference via property + value.",
+        "Import references from a file (BibTeX .bib / RIS .ris / markdown .md — Obsidian Web Clipper frontmatter is mapped, plain notes import too) or a folder (Zotero export, or a folder of .md files). Folder imports stamp a single-/multi-select property value on every imported reference via property + value (default: Tags = folder basename). A folder containing both .bib and .md needs format to disambiguate.",
       inputSchema: {
         file: z
           .string()
@@ -16,17 +16,19 @@ export function registerIOTools(server: McpServer): void {
             "Absolute path on the host. Stdin piping ('-') is not supported through the MCP wrapper; if you need it, invoke rubien-cli directly.",
           ),
         format: z
-          .enum(["bib", "ris"])
+          .enum(["bib", "ris", "md"])
           .optional()
-          .describe("Override the format inferred from the file extension."),
+          .describe(
+            "Override the format inferred from the file extension; also disambiguates folders containing both .bib and .md.",
+          ),
         property: z
           .string()
           .optional()
-          .describe("(Zotero folder only) Property name to stamp on imported refs"),
+          .describe("(Folder imports) Property name to stamp on imported refs"),
         value: z
           .string()
           .optional()
-          .describe("(Zotero folder only) Value for --property on imported refs"),
+          .describe("(Folder imports) Value for --property on imported refs"),
       },
       annotations: { destructiveHint: true },
     },
