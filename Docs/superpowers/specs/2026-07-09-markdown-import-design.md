@@ -187,12 +187,15 @@ string-keyed/hard-coded sites it cannot — all updated in the same change):
   mirroring the CKRecord convention (`ReferenceRecord.swift:233`).
 
 **Migration (`v6` in the library migrator, `AppDatabase.swift`):** append
-`{"value": "Markdown", "color": "#5AC8FA"}` to the Type PropertyDefinition's
-`optionsJSON` iff no option with value `"Markdown"` exists (idempotent),
-selected by `defaultFieldKey = 'referenceType'`. Follows the **v5
-precedent** (v5 rewrote the same column under a `syncSession
-applyingRemote` guard so the rewrite does not dirty the synced record; every
-device runs the migration locally, no sync churn). Mechanics:
+any missing enum-backed option to the Type PropertyDefinition's
+`optionsJSON` via the shared `TypeOptionsReconciler` (idempotent; in every
+reachable state this appends exactly `{"value": "Markdown", "color":
+"#5AC8FA"}` — the v3 prune guarantees the other six are present and Type
+options are not user-editable), selected by `defaultFieldKey =
+'referenceType'`. Follows the **v3 precedent** (v3 rewrote the same column
+under a `syncSession applyingRemote` guard so the rewrite does not dirty
+the synced record; every device runs the migration locally, no sync
+churn). Mechanics:
 
 - **Structural JSON append**, not decode-as-`[SelectOption]`-and-re-encode:
   parse with `JSONSerialization` as an array of objects, append one object,
@@ -202,8 +205,8 @@ device runs the migration locally, no sync churn). Mechanics:
   reconciliation below is the backstop) rather than replacing undecodable
   data or aborting launch.
 - A `runV6MigrationForTesting(on:)` helper mirrors the existing
-  `runV2MigrationForTesting` pattern so tests can drive a true v5-shaped
-  database.
+  `runV2MigrationForTesting` pattern so tests can drive the pre-v6
+  six-option state.
 
 **Sync reconciliation (closes the convergence hole):** `optionsJSON` is
 itself synced, and applying a remote PropertyDefinition preserves the
@@ -369,7 +372,7 @@ Stated consequences:
   `accessedDate`, `issuedMonth/Day`, …) already sync.
 - New enum rawValue `"Markdown"`: old peers fall back to `.other` on decode
   (existing CKRecord fallback + the two new tolerant-decode layers in §2).
-- New select option: appended by local deterministic migration (v5
+- New select option: appended by local deterministic migration (v3
   pattern) **plus** remote-apply reconciliation (§2) so an old peer's push
   can't remove it. Neither path marks the record dirty.
 
@@ -403,7 +406,7 @@ Stated consequences:
 - **FTS integration:** import a note with a unique body token via
   `AppDatabase`, find it through `searchReferences`.
 - **Migration v6:** fresh DB has the Markdown option once; via
-  `runV6MigrationForTesting` a v5-shaped DB appends exactly once
+  `runV6MigrationForTesting` a pre-v6 six-option DB appends exactly once
   (idempotent); existing option order/colors/unknown JSON fields preserved;
   malformed `optionsJSON` left untouched (no wipe); **no dirty-queue entry
   emitted** (applyingRemote suppression verified).
