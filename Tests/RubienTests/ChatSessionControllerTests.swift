@@ -1162,6 +1162,43 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertTrue(controller.codexModels.isEmpty, "the catalog is Codex state; cleared on switch")
     }
 
+    /// The `catalogFetchToken` analog of `testSwitchProviderDropsStaleProbeFromOutgoingBackend`:
+    /// a codex model-list fetch parked mid-flight when a switch to Claude bumps the
+    /// token must be dropped on return, not repopulate `codexModels` once Claude is
+    /// the live backend.
+    func testRefreshCodexCatalogDropsStaleFetchAfterProviderSwitch() async {
+        let savedProvider = UserDefaults.standard.object(forKey: RubienPreferences.assistantProviderKey)
+        defer {
+            if let savedProvider {
+                UserDefaults.standard.set(savedProvider, forKey: RubienPreferences.assistantProviderKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: RubienPreferences.assistantProviderKey)
+            }
+        }
+        let claude = MockAgentProvider(kind: .claude)
+        let (controller, codex) = makeCodexControllerWithFactory(claude: claude)
+        codex.holdCatalog()  // the pre-switch codex fetch will land late
+
+        // Start the slow codex catalog fetch and park it mid-flight, holding the
+        // pre-switch token.
+        controller.refreshCodexCatalog()
+        await codex.waitUntilCatalogProbing()
+
+        // Switch to Claude: catalogFetchToken bumps, and refreshCodexCatalog's
+        // Claude-side call synchronously clears codexModels (Claude has no catalog).
+        controller.switchProvider(to: .claude)
+        XCTAssertEqual(controller.providerKind, .claude)
+
+        // Let the stale codex fetch finally return — it must be dropped by the
+        // token guard, not overwrite codexModels now that Claude is live.
+        codex.releaseCatalog()
+        try? await Task.sleep(for: .milliseconds(100))
+
+        XCTAssertTrue(
+            controller.codexModels.isEmpty,
+            "a stale catalog fetch from the outgoing codex backend must not repopulate codexModels")
+    }
+
     /// Controller wired with a factory so switchProvider works (mirrors the
     /// existing switch test's shape at line ~392).
     private func makeCodexControllerWithFactory(
@@ -1206,13 +1243,56 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
     private var _searchResults: [AgentSessionSummary] = []
     private var _recentsCalls: [(limit: Int, referenceID: Int64?)] = []
     private var _catalog: CodexCatalog?
+    private var _catalogHold = false
+    private var _catalogReleaseWaiters: [CheckedContinuation<Void, Never>] = []
+    private var _catalogProbeWaiters: [CheckedContinuation<Void, Never>] = []
 
     func setCatalog(_ catalog: CodexCatalog?) {
         lock.lock(); defer { lock.unlock() }; _catalog = catalog
     }
 
     func availableModels() async -> CodexCatalog? {
+        // Park when held so a test can interleave a provider switch before this
+        // fetch returns (mirrors the availability-hold pattern below).
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if _catalogHold {
+                _catalogReleaseWaiters.append(cont)
+                let probeWaiters = _catalogProbeWaiters
+                _catalogProbeWaiters = []
+                lock.unlock()
+                for waiter in probeWaiters { waiter.resume() }
+            } else {
+                lock.unlock()
+                cont.resume()
+            }
+        }
         lock.lock(); defer { lock.unlock() }; return _catalog
+    }
+
+    /// Make `availableModels` block until `releaseCatalog()`.
+    func holdCatalog() {
+        lock.lock(); defer { lock.unlock() }; _catalogHold = true
+    }
+
+    func releaseCatalog() {
+        lock.lock()
+        _catalogHold = false
+        let waiters = _catalogReleaseWaiters
+        _catalogReleaseWaiters = []
+        lock.unlock()
+        for waiter in waiters { waiter.resume() }
+    }
+
+    /// Await until a held `availableModels()` call has entered and parked.
+    func waitUntilCatalogProbing() async {
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if !_catalogReleaseWaiters.isEmpty {
+                lock.unlock(); c.resume(); return
+            }
+            _catalogProbeWaiters.append(c); lock.unlock()
+        }
     }
 
     init(kind: AgentProviderKind = .claude,
