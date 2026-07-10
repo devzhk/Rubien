@@ -19,9 +19,17 @@ public enum MarkdownImporter {
     public static func parse(_ content: String, filename: String?) -> Reference {
         var text = content
         if text.hasPrefix("\u{FEFF}") { text.removeFirst() }
-        let lines = text.components(separatedBy: "\n").map { line in
-            line.hasSuffix("\r") ? String(line.dropLast()) : line
-        }
+        // Normalize line endings BEFORE splitting. `components(separatedBy: "\n")`
+        // is grapheme-aware in swift-corelibs-foundation (Linux): "\r\n" is a
+        // single grapheme cluster, so it won't split inside one — a CRLF file
+        // would come back as ONE line and frontmatter detection
+        // (`lines.first == "---"`) would silently fail (macOS splits on the
+        // scalar, so this passed there but broke on Linux CI). Collapsing
+        // CRLF/CR → LF first makes the split deterministic on every platform.
+        let lines = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .components(separatedBy: "\n")
 
         let block = frontmatterBlock(in: lines)
         var bodyLines = block.map { Array(lines[($0.closingIndex + 1)...]) } ?? lines
