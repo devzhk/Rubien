@@ -1687,7 +1687,7 @@ The sidebar's mount hooks are at `ChatSidebarView.swift:41-50`. Add the catalog 
 - [ ] **Step 5: Build + full assistant test filter + visual harness check**
 
 Run: `swift build 2>&1 | tail -3` → `Build complete!`
-Run: `swift test --filter RubienTests 2>&1 | tail -5` → all PASS.
+Run: `swift test --filter 'RubienTests\..*' 2>&1 | tail -5` → all PASS.
 Optional visual: `swift run Rubien`, Debug ▸ Assistant Sidebar Harness — the harness uses a scripted provider (`availableModels` → nil default), so the Codex picker there shows just "Codex default"; real rows need Task 9's live E2E.
 
 - [ ] **Step 6: Commit**
@@ -1854,7 +1854,7 @@ And replace the model-mirror `.onChange` in `assistantPane` (line 264) with:
 - [ ] **Step 4: Build + tests + manual check**
 
 Run: `swift build 2>&1 | tail -3` → `Build complete!`
-Run: `swift test --filter RubienTests 2>&1 | tail -5` → all PASS.
+Run: `swift test --filter 'RubienTests\..*' 2>&1 | tail -5` → all PASS.
 Manual: `swift run Rubien` → Settings ▸ Assistant → Backend "Codex": Model shows "Codex default" + the real installed models (5.6 trio on codex ≥0.144); picking "GPT-5.6-Sol" flips the effort rows to include Max/Ultra; Recheck repopulates.
 
 - [ ] **Step 5: Commit**
@@ -1874,7 +1874,7 @@ git commit -m "feat(assistant): dynamic codex model/effort defaults in Settings 
 - [ ] **Step 1: Full test gate**
 
 Run: `swift build 2>&1 | tail -3` → `Build complete!`
-Run: `swift test --filter RubienTests 2>&1 | tail -8` → 0 failures (expect ~395+ tests: 370 base + ~25 new).
+Run: `swift test --filter 'RubienTests\..*' 2>&1 | tail -8` → 0 failures (baseline is 400; expect ~425+ with the new tests). NOTE: the filter regex must be `'RubienTests\..*'` (target-dot-wildcard), not bare `RubienTests` nor `'RubienTests\.'` — both of those match 0 XCTest cases in this package layout; the dot-wildcard form scopes to the RubienTests target (400 tests) and avoids the RubienCLITests hang. The trailing swift-testing line "Test run with 0 tests in 0 suites" is expected (RubienTests is XCTest); read the "Executed N tests" line above it.
 
 - [ ] **Step 2: Live E2E against the real codex**
 
