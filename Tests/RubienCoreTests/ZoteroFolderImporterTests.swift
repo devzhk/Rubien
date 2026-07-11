@@ -520,6 +520,40 @@ final class ZoteroFolderImporterTests: XCTestCase {
         XCTAssertEqual(try cachedFilename(for: reference, db: db), stored)
     }
 
+    func testSelectedCommitFailureRollsBackCopiedPDFAndDatabaseWrite() throws {
+        let db = try makeDatabase()
+        let folder = try makeFakeZoteroFolder(
+            name: "SelectedRollback",
+            bibtex: "@article{a, title = {Rollback}, file = {PDF:files/1/a.pdf:application/pdf}}",
+            pdfs: ["files/1/a.pdf": Data("rollback-pdf".utf8)]
+        )
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        let plan = try ZoteroFolderImporter.prepareFolder(at: folder, db: db, propertyTarget: nil)
+        let storeURL = AppDatabase.pdfStorageURL
+        let before = Set((try? FileManager.default.contentsOfDirectory(atPath: storeURL.path)) ?? [])
+        try db.dbWriter.write { database in
+            try database.execute(sql: """
+                CREATE TRIGGER fail_selected_zotero_reference
+                BEFORE INSERT ON reference
+                BEGIN
+                    SELECT RAISE(ABORT, 'injected selected Zotero failure');
+                END
+                """)
+        }
+
+        XCTAssertThrowsError(
+            try ZoteroFolderImporter.commit(
+                plan: plan,
+                selectedEntryIDs: [plan.entries[0].id],
+                db: db
+            )
+        )
+
+        XCTAssertEqual(try db.referenceCount(), 0)
+        let after = Set((try? FileManager.default.contentsOfDirectory(atPath: storeURL.path)) ?? [])
+        XCTAssertEqual(after, before, "A selected PDF copied before the failed transaction must be removed")
+    }
+
     func testBatchedDedupAcrossManyEntries() throws {
         let db = try makeDatabase()
         // Seed three existing references — one matches incoming by DOI, one by ISBN,

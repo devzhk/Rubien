@@ -39,13 +39,20 @@ final class ZoteroImportReviewContext: ImportReviewContext {
         self.committer = committer
         self.items = plan.entries.map { entry in
             let attachmentProblems = entry.rejectedAttachmentPaths + entry.missingAttachmentPaths
+            let attachmentMessage = String(
+                format: String(
+                    localized: "zoteroImport.attachmentNotFound",
+                    bundle: .module
+                ),
+                attachmentProblems.joined(separator: ", ")
+            )
             return ImportReviewItem(
                 id: entry.id,
                 title: entry.reference.title,
                 subtitle: plan.folderURL.lastPathComponent,
                 message: attachmentProblems.isEmpty
                     ? nil
-                    : "PDF not found: \(attachmentProblems.joined(separator: ", "))",
+                    : attachmentMessage,
                 reference: entry.reference,
                 candidates: [],
                 readiness: .ready,
