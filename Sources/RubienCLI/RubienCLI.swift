@@ -1081,11 +1081,14 @@ struct Import: AsyncParsableCommand {
     }
 
     /// Tests whether the argument is intended as a URL without treating it as
-    /// a local path. Unsupported schemes deliberately take the materializer
-    /// route so users receive its clear JSON error rather than a local-path
-    /// failure.
+    /// a local path. Only explicit `scheme://` syntax counts: a bare `scheme:`
+    /// prefix would misroute legal POSIX filenames whose relative form starts
+    /// with `name:` (`notes:2026.md` parses as scheme "notes"). Unsupported
+    /// `scheme://` inputs still deliberately take the materializer route so
+    /// users receive its clear JSON error rather than a local-path failure.
     private static func hasURLScheme(_ input: String) -> Bool {
-        URL(string: input)?.scheme != nil
+        guard let scheme = URL(string: input)?.scheme else { return false }
+        return input.prefix(scheme.count + 3).lowercased() == scheme.lowercased() + "://"
     }
 
     /// Local Markdown remains compatible with its existing `--format` file

@@ -125,7 +125,8 @@ public enum ImportSourceMaterializer {
             throw MaterializationError.emptyInput
         }
 
-        if let candidateURL = URL(string: trimmedInput), let scheme = candidateURL.scheme {
+        if hasExplicitURLScheme(trimmedInput),
+           let candidateURL = URL(string: trimmedInput), let scheme = candidateURL.scheme {
             let normalizedScheme = scheme.lowercased()
             guard normalizedScheme == "http" || normalizedScheme == "https" else {
                 throw MaterializationError.unsupportedScheme(scheme)
@@ -142,6 +143,17 @@ public enum ImportSourceMaterializer {
         }
 
         return try materializeLocal(input: trimmedInput, policy: localPathPolicy)
+    }
+
+    /// Only explicit `scheme://` syntax classifies as a URL input: a bare
+    /// `scheme:` prefix would misclassify legal POSIX filenames whose relative
+    /// form starts with `name:` (`notes:2026.md` parses as scheme "notes") and
+    /// reject them as unsupported schemes instead of importing the local file.
+    /// Non-http(s) `scheme://` inputs still reach the scheme guard above so
+    /// they fail with its clear error rather than a local-path one.
+    private static func hasExplicitURLScheme(_ input: String) -> Bool {
+        guard let scheme = URL(string: input)?.scheme else { return false }
+        return input.prefix(scheme.count + 3).lowercased() == scheme.lowercased() + "://"
     }
 
     /// Validates a local file URL while retaining the exact URL supplied by the

@@ -272,6 +272,28 @@ final class ImportSourceMaterializerTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: sourceURL.path))
     }
 
+    func testRelativeFilenameWithColonClassifiesAsLocalNotURL() async throws {
+        // A colon is legal in POSIX filenames, and the relative form
+        // "notes:2026.md" parses as scheme "notes" under URL(string:). Only
+        // explicit `scheme://` syntax may classify as a URL — a bare `name:`
+        // prefix must take the local-path route and import.
+        let sourceURL = temporaryRoot.appendingPathComponent("notes:2026.md")
+        try Data("# Colon note".utf8).write(to: sourceURL)
+
+        let materialized = try await ImportSourceMaterializer.materialize(
+            "notes:2026.md",
+            localPathPolicy: .resolveRelative(to: temporaryRoot),
+            session: ImportSourceURLProtocol.makeSession()
+        )
+
+        XCTAssertEqual(materialized.input, "notes:2026.md")
+        XCTAssertEqual(materialized.fileURL.standardizedFileURL, sourceURL.standardizedFileURL)
+        XCTAssertEqual(materialized.kind, .markdown)
+        XCTAssertNil(materialized.temporaryDirectoryURL)
+        materialized.cleanup()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sourceURL.path))
+    }
+
     func testExistingLocalFileURLRetainsTheSelectedURLWithoutRebuildingItFromPath() throws {
         let sourceURL = temporaryRoot.appendingPathComponent("selected.md")
         try Data("# Selected note".utf8).write(to: sourceURL)

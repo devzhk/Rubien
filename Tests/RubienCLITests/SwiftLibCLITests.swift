@@ -42,10 +42,13 @@ final class RubienCLITests: XCTestCase {
         try? FileManager.default.removeItem(at: testLibraryRoot)
     }
 
-    private func runCLI(_ arguments: [String]) throws -> (stdout: String, stderr: String, exitCode: Int32) {
+    private func runCLI(
+        _ arguments: [String], currentDirectory: URL? = nil
+    ) throws -> (stdout: String, stderr: String, exitCode: Int32) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: cliBinaryPath)
         process.arguments = arguments
+        if let currentDirectory { process.currentDirectoryURL = currentDirectory }
         var env = ProcessInfo.processInfo.environment
         env["RUBIEN_LIBRARY_ROOT"] = testLibraryRoot.path
         process.environment = env
@@ -1502,6 +1505,26 @@ final class RubienCLITests: XCTestCase {
             JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: String]
         )
         XCTAssertEqual(envelope, ["imported": "1", "file": file.path])
+    }
+
+    func testImportMarkdownFilenameWithColonStaysLocal() throws {
+        try skipIfBinaryMissing()
+        // A colon is legal in POSIX filenames, and relative paths are part of
+        // the documented import contract. A RELATIVE `notes:2026.md` parses as
+        // scheme "notes" under URL(string:) — a bare `scheme:` prefix must not
+        // route a local file to the URL materializer; only `scheme://` is a
+        // URL. (An absolute path can't hit this: the leading `/` kills the
+        // scheme parse.)
+        let file = testLibraryRoot.appendingPathComponent("notes:2026.md")
+        try "# Colon File\nBody".write(to: file, atomically: true, encoding: .utf8)
+
+        let result = try runCLI(["import", "notes:2026.md"], currentDirectory: testLibraryRoot)
+
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        let envelope = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: String]
+        )
+        XCTAssertEqual(envelope, ["imported": "1", "file": "notes:2026.md"])
     }
 
     func testImportMarkdownFile() throws {
