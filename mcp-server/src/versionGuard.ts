@@ -1,10 +1,10 @@
 /**
  * The minimum rubien-cli build this server requires. Equals the release build
- * that first shipped the `version` subcommand. Bump only when a future server
- * release genuinely needs a newer CLI feature; the released CLI's build must
- * always be >= this value.
+ * that first shipped direct URL imports. Bump only when a future server release
+ * genuinely needs a newer CLI feature; the released CLI's build must always be
+ * >= this value.
  */
-export const MIN_CLI_BUILD = 8;
+export const MIN_CLI_BUILD = 19;
 
 export interface CliVersion {
   version: string;

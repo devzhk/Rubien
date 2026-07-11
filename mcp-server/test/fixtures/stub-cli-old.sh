@@ -1,3 +1,3 @@
 #!/bin/sh
-# Reports a build below MIN_CLI_BUILD regardless of args.
-echo '{"version":"0.1.6","build":7}'
+# Reports the last pre-direct-URL-import build regardless of args.
+echo '{"version":"0.2.3","build":18}'
