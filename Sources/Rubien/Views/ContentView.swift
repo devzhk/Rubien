@@ -123,6 +123,20 @@ enum MarkdownImportWorker {
     }
 }
 
+/// Determines whether a metadata intake from the PDF import flow should be
+/// surfaced for immediate review or retained as a batch-style notice.
+enum PendingMetadataIntakePresentation: Equatable {
+    case reviewImmediately
+    case showNotice
+
+    static func forImportedSources(_ sources: [MaterializedImportSource]) -> Self {
+        guard sources.count == 1, sources[0].kind == .pdf else {
+            return .showNotice
+        }
+        return .reviewImmediately
+    }
+}
+
 @MainActor
 final class LibraryViewModel: ObservableObject {
     /// The current page of references returned by the database-level query.
@@ -1520,6 +1534,8 @@ struct ContentView: View {
 
         let markdownSources = sources.filter { $0.kind == .markdown }
         let pdfSources = sources.filter { $0.kind == .pdf }
+        let pendingIntakePresentation = PendingMetadataIntakePresentation
+            .forImportedSources(sources)
 
         // Claim a fresh generation so this batch's auto-clear timer only wipes
         // its own summary (see the closure at the end of the Task).
@@ -1582,7 +1598,10 @@ struct ContentView: View {
                     summary.append(String(format: fmt, title))
                 case .queued(let intake):
                     if firstIntake == nil { firstIntake = intake }
-                    summary.append(String(localized: "Couldn't auto-verify — added to the pending queue", bundle: .module))
+                    let message = pendingIntakePresentation == .reviewImmediately
+                        ? String(localized: "Couldn't auto-verify — review metadata to finish", bundle: .module)
+                        : String(localized: "Couldn't auto-verify — added to the pending queue", bundle: .module)
+                    summary.append(message)
                 case .failed(let message):
                     summary.append(message)
                 }
@@ -1591,7 +1610,13 @@ struct ContentView: View {
             viewModel.isImporting = false
             viewModel.importProgress = summary.isEmpty ? nil : summary.joined(separator: " · ")
             if let intake = firstIntake {
-                showPendingQueueNotice(for: intake, message: nil)
+                switch pendingIntakePresentation {
+                case .reviewImmediately:
+                    pendingQueueNotice = nil
+                    showPendingMetadataQueue = true
+                case .showNotice:
+                    showPendingQueueNotice(for: intake, message: nil)
+                }
             }
             // Auto-clear the toast like viewModel.importBibTeX(from:) does.
             // Only clear if this is still the latest batch — a newer batch bumps
