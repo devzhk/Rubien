@@ -209,7 +209,12 @@ final class PDFImportReviewContextTests: XCTestCase {
     func testUnreadableMarkdownRetryBecomesReadyWithoutPersisting() async throws {
         let database = try AppDatabase(DatabaseQueue(path: ":memory:"))
         let source = try makeRemoteMarkdownSource(named: "retry.md", content: nil)
-        let context = MarkdownImportRetryContext(database: database, sources: [source])
+        let context = MarkdownImportReviewContext(
+            database: database,
+            entries: [],
+            sourcesByEntryID: [:],
+            unreadableSources: [source]
+        )
 
         XCTAssertEqual(context.items.map(\.readiness), [.failed])
         try Data("# Retry succeeded".utf8).write(to: source.fileURL)
@@ -240,18 +245,14 @@ final class PDFImportReviewContextTests: XCTestCase {
         XCTAssertEqual(preparation.entries.count, 1)
         XCTAssertEqual(preparation.unreadableSources.map(\.fileURL), [failedSource.fileURL])
 
-        let readyContext = ReferenceImportReviewContext(
+        let markdownContext = MarkdownImportReviewContext(
             database: database,
             entries: preparation.entries,
-            mergePolicy: .markdownFillOnly
-        )
-        let failedContext = MarkdownImportRetryContext(
-            database: database,
-            sources: preparation.unreadableSources
+            sourcesByEntryID: preparation.sourcesByEntryID,
+            unreadableSources: preparation.unreadableSources
         )
         let composite = CompositeImportReviewContext(
-            children: [readyContext, failedContext],
-            ownedSources: preparation.sourcesByEntryID
+            children: [markdownContext]
         )
         let readyItem = try XCTUnwrap(composite.items.first(where: { $0.readiness == .ready }))
         let failedItem = try XCTUnwrap(composite.items.first(where: { $0.readiness == .failed }))
@@ -268,6 +269,38 @@ final class PDFImportReviewContextTests: XCTestCase {
 
         composite.discard(remainingIDs: [failedItem.id])
         XCTAssertFalse(FileManager.default.fileExists(atPath: failedSource.temporaryDirectoryURL!.path))
+    }
+
+    func testInitiallyReadyAndRetriedMarkdownRowsFailAsOneAtomicGroup() async throws {
+        let database = try AppDatabase(DatabaseQueue(path: ":memory:"))
+        let readySource = try makeRemoteMarkdownSource(
+            named: "atomic-ready.md",
+            content: "# Initially ready"
+        )
+        let retrySource = try makeRemoteMarkdownSource(named: "atomic-retry.md", content: nil)
+        let preparation = await MarkdownImportWorker.prepareSources([readySource, retrySource])
+        let context = MarkdownImportReviewContext(
+            database: database,
+            entries: preparation.entries,
+            sourcesByEntryID: preparation.sourcesByEntryID,
+            unreadableSources: preparation.unreadableSources,
+            committer: { references, _ in
+                XCTAssertEqual(references.count, 2, "All selected Markdown rows must use one batch")
+                throw InjectedMarkdownBatchError()
+            }
+        )
+        let failedItem = try XCTUnwrap(context.items.first(where: { $0.readiness == .failed }))
+        try Data("# Retried ready".utf8).write(to: retrySource.fileURL)
+
+        let retried = await context.retry(itemID: failedItem.id)
+        let selectedIDs = Set([context.items.first(where: { $0.readiness == .ready })!.id, retried.id])
+        let report = await context.commit(selectedIDs: selectedIDs)
+
+        XCTAssertTrue(report.succeededIDs.isEmpty)
+        XCTAssertEqual(Set(report.failures.keys), selectedIDs)
+        XCTAssertEqual(try database.referenceCount(), 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: readySource.temporaryDirectoryURL!.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: retrySource.temporaryDirectoryURL!.path))
     }
 
     private func makeRemoteSource(named filename: String) throws -> MaterializedImportSource {
@@ -328,6 +361,10 @@ final class PDFImportReviewContextTests: XCTestCase {
         )
         return .verified(VerifiedEnvelope(reference: reference, evidence: evidence))
     }
+}
+
+private struct InjectedMarkdownBatchError: LocalizedError {
+    var errorDescription: String? { "Injected Markdown batch failure" }
 }
 
 @MainActor

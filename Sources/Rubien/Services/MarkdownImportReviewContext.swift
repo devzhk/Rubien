@@ -2,10 +2,12 @@
 import Foundation
 import RubienCore
 
-/// Owns Markdown sources that failed their initial read so the shared review
-/// sheet's Retry action can prepare them again without persisting a draft.
+/// Owns all Markdown rows in one review batch so initially prepared and
+/// successfully retried references share one atomic fill-only commit.
 @MainActor
-final class MarkdownImportRetryContext: ImportReviewContext {
+final class MarkdownImportReviewContext: ImportReviewContext {
+    typealias Committer = @Sendable ([Reference], AppDatabase) throws -> Void
+
     let items: [ImportReviewItem]
 
     private struct Payload {
@@ -14,13 +16,34 @@ final class MarkdownImportRetryContext: ImportReviewContext {
     }
 
     private let database: AppDatabase
+    private let committer: Committer
     private var payloads: [UUID: Payload]
 
-    init(database: AppDatabase, sources: [MaterializedImportSource]) {
+    init(
+        database: AppDatabase,
+        entries: [PreparedReferenceImport],
+        sourcesByEntryID: [UUID: MaterializedImportSource],
+        unreadableSources: [MaterializedImportSource],
+        committer: @escaping Committer = { references, database in
+            _ = try database.batchImportReferences(
+                references,
+                mergePolicy: .markdownFillOnly
+            )
+        }
+    ) {
         self.database = database
+        self.committer = committer
+
         var payloads: [UUID: Payload] = [:]
         var items: [ImportReviewItem] = []
-        for source in sources {
+        for entry in entries {
+            guard let source = sourcesByEntryID[entry.id] else {
+                preconditionFailure("Prepared Markdown entry is missing its retained source")
+            }
+            payloads[entry.id] = Payload(source: source, entry: entry)
+            items.append(Self.readyItem(id: entry.id, entry: entry))
+        }
+        for source in unreadableSources {
             let id = UUID()
             payloads[id] = Payload(source: source, entry: nil)
             items.append(Self.failedItem(id: id, source: source))
@@ -30,22 +53,22 @@ final class MarkdownImportRetryContext: ImportReviewContext {
     }
 
     func commit(selectedIDs: Set<UUID>) async -> ImportReviewCommitReport {
-        let selected = selectedIDs.compactMap { id -> (UUID, PreparedReferenceImport)? in
-            guard let entry = payloads[id]?.entry else { return nil }
-            return (id, entry)
+        let selected = items.compactMap { item -> (UUID, PreparedReferenceImport)? in
+            guard selectedIDs.contains(item.id), let entry = payloads[item.id]?.entry else {
+                return nil
+            }
+            return (item.id, entry)
         }
         guard !selected.isEmpty else {
             return ImportReviewCommitReport(succeededIDs: [], failures: [:])
         }
 
         let database = database
+        let committer = committer
         let references = selected.map { $0.1.reference }
         let result = await Task.detached(priority: .userInitiated) {
             do {
-                _ = try database.batchImportReferences(
-                    references,
-                    mergePolicy: .markdownFillOnly
-                )
+                try committer(references, database)
                 return DetachedMarkdownCommitResult.success
             } catch {
                 return DetachedMarkdownCommitResult.failure(error.localizedDescription)
@@ -83,17 +106,7 @@ final class MarkdownImportRetryContext: ImportReviewContext {
         }
         payload.entry = entry
         payloads[itemID] = payload
-        return ImportReviewItem(
-            id: itemID,
-            title: entry.reference.title,
-            subtitle: entry.sourceLabel,
-            message: nil,
-            reference: entry.reference,
-            candidates: [],
-            readiness: .ready,
-            commitError: nil,
-            isWorking: false
-        )
+        return Self.readyItem(id: itemID, entry: entry)
     }
 
     func discard(remainingIDs: Set<UUID>) {
@@ -104,6 +117,23 @@ final class MarkdownImportRetryContext: ImportReviewContext {
 
     private func item(id: UUID) -> ImportReviewItem {
         items.first(where: { $0.id == id })!
+    }
+
+    private static func readyItem(
+        id: UUID,
+        entry: PreparedReferenceImport
+    ) -> ImportReviewItem {
+        ImportReviewItem(
+            id: id,
+            title: entry.reference.title,
+            subtitle: entry.sourceLabel,
+            message: nil,
+            reference: entry.reference,
+            candidates: [],
+            readiness: .ready,
+            commitError: nil,
+            isWorking: false
+        )
     }
 
     private static func failedItem(

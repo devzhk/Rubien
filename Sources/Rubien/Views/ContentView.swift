@@ -1618,23 +1618,13 @@ struct ContentView: View {
             }
 
             var children: [any ImportReviewContext] = []
-            let ownedSources = markdownPreparation.sourcesByEntryID
-
-            if !markdownPreparation.entries.isEmpty {
+            if !markdownPreparation.entries.isEmpty || !markdownPreparation.unreadableSources.isEmpty {
                 children.append(
-                    ReferenceImportReviewContext(
+                    MarkdownImportReviewContext(
                         database: viewModel.db,
                         entries: markdownPreparation.entries,
-                        mergePolicy: .markdownFillOnly
-                    )
-                )
-            }
-
-            if !markdownPreparation.unreadableSources.isEmpty {
-                children.append(
-                    MarkdownImportRetryContext(
-                        database: viewModel.db,
-                        sources: markdownPreparation.unreadableSources
+                        sourcesByEntryID: markdownPreparation.sourcesByEntryID,
+                        unreadableSources: markdownPreparation.unreadableSources
                     )
                 )
             }
@@ -1654,10 +1644,7 @@ struct ContentView: View {
                 )
             }
 
-            let context = CompositeImportReviewContext(
-                children: children,
-                ownedSources: ownedSources
-            )
+            let context = CompositeImportReviewContext(children: children)
             viewModel.isImporting = false
             viewModel.importProgress = nil
             importReviewSession = ImportReviewSession(
