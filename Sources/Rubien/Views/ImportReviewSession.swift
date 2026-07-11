@@ -23,6 +23,10 @@ struct ImportReviewItem: Identifiable, Equatable {
     var isWorking: Bool
 
     var isSelectable: Bool {
+        !isWorking && (readiness == .ready || readiness == .needsProposal)
+    }
+
+    var isSelectedByDefault: Bool {
         readiness == .ready && !isWorking
     }
 }
@@ -86,7 +90,7 @@ final class ImportReviewSession: ObservableObject, Identifiable {
         self.title = title
         self.context = context
         self.items = context.items
-        self.selectedIDs = Set(context.items.filter(\.isSelectable).map(\.id))
+        self.selectedIDs = Set(context.items.filter(\.isSelectedByDefault).map(\.id))
     }
 
     func setSelected(_ selected: Bool, itemID: UUID) {
@@ -107,8 +111,29 @@ final class ImportReviewSession: ObservableObject, Identifiable {
     }
 
     func confirmSelected() async {
-        let selection = selectedIDs.intersection(items.filter(\.isSelectable).map(\.id))
+        var selection = selectedIDs.intersection(items.filter(\.isSelectable).map(\.id))
         guard !selection.isEmpty, !isBusy, !didDiscard else { return }
+
+        for id in selection where items.first(where: { $0.id == id })?.readiness == .needsProposal {
+            replaceItem(context.useProposedMetadata(itemID: id))
+        }
+
+        let readyIDs = Set(
+            items
+                .filter { $0.readiness == .ready && !$0.isWorking }
+                .map(\.id)
+        )
+        let unresolvedIDs = selection.subtracting(readyIDs)
+        for id in unresolvedIDs {
+            updateItem(id: id) { item in
+                item.commitError = String(
+                    localized: "importReview.error.proposalAcceptance",
+                    bundle: .module
+                )
+            }
+        }
+        selection.formIntersection(readyIDs)
+        guard !selection.isEmpty else { return }
 
         isCommitting = true
         for id in selection {
@@ -140,14 +165,6 @@ final class ImportReviewSession: ObservableObject, Identifiable {
         guard beginRowAction(itemID: itemID) else { return }
         let updated = await context.resolveCandidate(itemID: itemID, candidate: candidate)
         finishRowAction(itemID: itemID, updated: updated)
-    }
-
-    func useProposedMetadata(itemID: UUID) {
-        guard beginRowAction(itemID: itemID) else { return }
-        finishRowAction(
-            itemID: itemID,
-            updated: context.useProposedMetadata(itemID: itemID)
-        )
     }
 
     func retry(itemID: UUID) async {
@@ -193,9 +210,12 @@ final class ImportReviewSession: ObservableObject, Identifiable {
 
     private func replaceItem(_ updated: ImportReviewItem) {
         guard let index = items.firstIndex(where: { $0.id == updated.id }) else { return }
+        let wasSelected = selectedIDs.contains(updated.id)
         items[index] = updated
         if updated.isSelectable {
-            selectedIDs.insert(updated.id)
+            if wasSelected || updated.isSelectedByDefault {
+                selectedIDs.insert(updated.id)
+            }
         } else {
             selectedIDs.remove(updated.id)
         }

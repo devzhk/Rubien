@@ -44,7 +44,7 @@ final class MetadataImportReviewContextTests: XCTestCase {
         XCTAssertTrue(try database.fetchPendingMetadataIntakes().isEmpty)
     }
 
-    func testUseProposedMetadataStagesSeedBlockedAndRejectedReferences() throws {
+    func testSelectedProposalsCommitAsOneManuallyVerifiedBatch() async throws {
         let database = try makeDatabase()
         let entries = [
             PreparedMetadataImport(
@@ -82,14 +82,24 @@ final class MetadataImportReviewContextTests: XCTestCase {
             ),
         ]
         let context = MetadataImportReviewContext(database: database, entries: entries)
+        let session = ImportReviewSession(title: "Review identifiers", context: context)
 
         XCTAssertEqual(context.items.map(\.readiness), [.needsProposal, .needsProposal, .needsProposal])
-        for item in context.items {
-            let updated = context.useProposedMetadata(itemID: item.id)
-            XCTAssertEqual(updated.readiness, .ready)
-            XCTAssertEqual(updated.reference?.verificationStatus, .verifiedManual)
-        }
+        XCTAssertTrue(session.selectedIDs.isEmpty)
         XCTAssertEqual(try database.referenceCount(), 0)
+        XCTAssertTrue(try database.fetchPendingMetadataIntakes().isEmpty)
+
+        session.selectAllReady()
+        await session.confirmSelected()
+
+        XCTAssertTrue(session.items.isEmpty)
+        let imported = try database.fetchAllReferences()
+        XCTAssertEqual(Set(imported.map(\.title)), [
+            "Seed proposal",
+            "Blocked proposal",
+            "Rejected proposal",
+        ])
+        XCTAssertTrue(imported.allSatisfy { $0.verificationStatus == .verifiedManual })
         XCTAssertTrue(try database.fetchPendingMetadataIntakes().isEmpty)
     }
 

@@ -7,21 +7,46 @@ import RubienCore
 final class ImportReviewSessionTests: XCTestCase {
     func testReadyRowsStartSelectedAndNonReadyRowsDoNot() {
         let ready = makeItem(title: "Ready A", readiness: .ready)
+        let proposal = makeItem(title: "Review proposal", readiness: .needsProposal)
         let candidate = makeItem(
             title: "Choose B",
             readiness: .needsCandidate,
             candidates: [MetadataCandidate(source: .translationServer, title: "B", score: 0.8)]
         )
         let failed = makeItem(title: "Broken C", readiness: .failed, message: "Unreadable")
-        let context = FakeImportReviewContext(items: [ready, candidate, failed])
+        let context = FakeImportReviewContext(items: [ready, proposal, candidate, failed])
 
         let session = ImportReviewSession(title: "Review import", context: context)
 
+        XCTAssertTrue(proposal.isSelectable)
         XCTAssertEqual(session.selectedIDs, [ready.id])
         session.selectAllReady()
-        XCTAssertEqual(session.selectedIDs, [ready.id])
+        XCTAssertEqual(session.selectedIDs, [ready.id, proposal.id])
         session.selectNone()
         XCTAssertTrue(session.selectedIDs.isEmpty)
+    }
+
+    func testConfirmingSelectedProposalAcceptsItBeforeCommit() async {
+        let proposal = makeItem(title: "Proposal", readiness: .needsProposal)
+        let context = FakeImportReviewContext(items: [proposal])
+        context.proposedItem = makeItem(
+            id: proposal.id,
+            title: "Proposal",
+            readiness: .ready
+        )
+        context.nextReport = ImportReviewCommitReport(
+            succeededIDs: [proposal.id],
+            failures: [:]
+        )
+        let session = ImportReviewSession(title: "Review import", context: context)
+
+        XCTAssertTrue(session.selectedIDs.isEmpty)
+        session.setSelected(true, itemID: proposal.id)
+        await session.confirmSelected()
+
+        XCTAssertEqual(context.proposalCalls, [proposal.id])
+        XCTAssertEqual(context.commitCalls, [[proposal.id]])
+        XCTAssertTrue(session.items.isEmpty)
     }
 
     func testConfirmRemovesSuccessAndRetainsFailures() async {
@@ -105,19 +130,16 @@ final class ImportReviewSessionTests: XCTestCase {
             readiness: .needsCandidate,
             candidates: [MetadataCandidate(source: .translationServer, title: "Match", score: 0.9)]
         )
-        let proposal = makeItem(title: "Proposal", readiness: .needsProposal)
         let failed = makeItem(title: "Failed", readiness: .failed)
-        let context = FakeImportReviewContext(items: [candidate, proposal, failed])
+        let context = FakeImportReviewContext(items: [candidate, failed])
         let session = ImportReviewSession(title: "Review import", context: context)
 
         session.discardRemaining()
         let itemsAtDiscard = session.items
         await session.resolveCandidate(itemID: candidate.id, candidate: candidate.candidates[0])
-        session.useProposedMetadata(itemID: proposal.id)
         await session.retry(itemID: failed.id)
 
         XCTAssertTrue(context.candidateCalls.isEmpty)
-        XCTAssertTrue(context.proposalCalls.isEmpty)
         XCTAssertTrue(context.retryCalls.isEmpty)
         XCTAssertEqual(session.items, itemsAtDiscard)
     }
@@ -180,7 +202,9 @@ private final class FakeImportReviewContext: ImportReviewContext {
     let items: [ImportReviewItem]
     var nextReport = ImportReviewCommitReport(succeededIDs: [], failures: [:])
     var resolvedItem: ImportReviewItem?
+    var proposedItem: ImportReviewItem?
     var discardCalls: [Set<UUID>] = []
+    private(set) var commitCalls: [Set<UUID>] = []
     private(set) var candidateCalls: [UUID] = []
     private(set) var proposalCalls: [UUID] = []
     private(set) var retryCalls: [UUID] = []
@@ -190,7 +214,8 @@ private final class FakeImportReviewContext: ImportReviewContext {
     }
 
     func commit(selectedIDs: Set<UUID>) async -> ImportReviewCommitReport {
-        nextReport
+        commitCalls.append(selectedIDs)
+        return nextReport
     }
 
     func resolveCandidate(itemID: UUID, candidate: MetadataCandidate) async -> ImportReviewItem {
@@ -200,7 +225,7 @@ private final class FakeImportReviewContext: ImportReviewContext {
 
     func useProposedMetadata(itemID: UUID) -> ImportReviewItem {
         proposalCalls.append(itemID)
-        return item(id: itemID)
+        return proposedItem ?? item(id: itemID)
     }
 
     func retry(itemID: UUID) async -> ImportReviewItem {

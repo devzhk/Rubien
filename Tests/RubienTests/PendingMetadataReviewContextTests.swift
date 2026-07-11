@@ -129,6 +129,59 @@ final class PendingMetadataReviewContextTests: XCTestCase {
         XCTAssertEqual(try database.fetchPendingMetadataIntakes().count, 1)
     }
 
+    func testSelectedProposalConfirmsTheExistingDurableIntake() async throws {
+        let database = try makeDatabase()
+        let candidate = MetadataCandidate(
+            source: .translationServer,
+            title: "Sparse candidate",
+            score: 0.8
+        )
+        let intake = try saveIntake(
+            database,
+            title: "Original",
+            candidates: [candidate]
+        )
+        let context = PendingMetadataReviewContext(
+            database: database,
+            intakes: [intake],
+            candidateResolver: { _, _, _ in
+                .seedOnly(
+                    IntakeEnvelope(
+                        seed: nil,
+                        fallbackReference: Reference(title: "Usable proposal"),
+                        message: "No authoritative match"
+                    )
+                )
+            }
+        )
+        let session = ImportReviewSession(title: "Pending", context: context)
+        let itemID = context.items[0].id
+
+        await session.resolveCandidate(itemID: itemID, candidate: candidate)
+
+        XCTAssertEqual(session.items[0].readiness, .needsProposal)
+        XCTAssertTrue(session.selectedIDs.isEmpty)
+        XCTAssertEqual(try database.fetchPendingMetadataIntakes().map(\.id), [intake.id])
+
+        session.setSelected(true, itemID: itemID)
+        await session.confirmSelected()
+
+        XCTAssertTrue(session.items.isEmpty)
+        XCTAssertTrue(try database.fetchPendingMetadataIntakes().isEmpty)
+        let imported = try database.fetchAllReferences()
+        XCTAssertEqual(imported.count, 1)
+        XCTAssertEqual(imported[0].title, "Usable proposal")
+        XCTAssertEqual(imported[0].verificationStatus, .verifiedManual)
+
+        let intakeID = try XCTUnwrap(intake.id)
+        let storedSnapshot = try await database.dbWriter.read { db in
+            try MetadataIntake.fetchOne(db, id: intakeID)
+        }
+        let stored = try XCTUnwrap(storedSnapshot)
+        XCTAssertEqual(stored.verificationStatus, .verifiedManual)
+        XCTAssertEqual(stored.linkedReferenceId, imported[0].id)
+    }
+
     func testRetryRefreshesTheExistingDurableIntakeWithoutCreatingAnotherRow() async throws {
         let database = try makeDatabase()
         let intake = try saveIntake(database, title: "Original")

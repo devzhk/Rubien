@@ -98,18 +98,11 @@ struct ImportReviewSheet: View {
                     .controlSize(.small)
             } else {
                 switch item.readiness {
-                case .ready:
+                case .ready, .needsProposal:
                     EmptyView()
                 case .needsCandidate:
                     Button(String(localized: "Choose match…", bundle: .module)) {
                         candidateContext = CandidateContext(id: item.id)
-                    }
-                    .buttonStyle(SLSecondaryButtonStyle())
-                    .controlSize(.small)
-                    .disabled(session.isBusy)
-                case .needsProposal:
-                    Button(String(localized: "Use proposed metadata", bundle: .module)) {
-                        session.useProposedMetadata(itemID: item.id)
                     }
                     .buttonStyle(SLSecondaryButtonStyle())
                     .controlSize(.small)

@@ -152,7 +152,7 @@ final class PDFImportReviewContextTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: source.temporaryDirectoryURL!.path))
     }
 
-    func testUseProposedMetadataStagesManualVerificationWithoutPersistence() throws {
+    func testSelectedProposedMetadataIsManuallyVerifiedAndCommitted() async throws {
         let database = try AppDatabase(DatabaseQueue(path: ":memory:"))
         let source = try makeRemoteSource(named: "proposal.pdf")
         let resolution = MetadataResolutionResult.seedOnly(
@@ -171,12 +171,17 @@ final class PDFImportReviewContextTests: XCTestCase {
         )
 
         XCTAssertEqual(context.items[0].readiness, .needsProposal)
-        let updated = context.useProposedMetadata(itemID: context.items[0].id)
+        let session = ImportReviewSession(title: "Review PDFs", context: context)
+        XCTAssertTrue(session.selectedIDs.isEmpty)
 
-        XCTAssertEqual(updated.readiness, .ready)
-        XCTAssertEqual(updated.reference?.verificationStatus, .verifiedManual)
-        XCTAssertEqual(try database.referenceCount(), 0)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: source.temporaryDirectoryURL!.path))
+        session.setSelected(true, itemID: context.items[0].id)
+        await session.confirmSelected()
+
+        XCTAssertTrue(session.items.isEmpty)
+        let imported = try database.fetchAllReferences()
+        XCTAssertEqual(imported.count, 1)
+        XCTAssertEqual(imported[0].verificationStatus, .verifiedManual)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: source.temporaryDirectoryURL!.path))
     }
 
     func testBlockedAndRejectedResultsExposeEveryUsableRecoveryPath() throws {
