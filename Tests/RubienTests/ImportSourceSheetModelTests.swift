@@ -50,5 +50,21 @@ final class ImportSourceSheetModelTests: XCTestCase {
         ])
         XCTAssertEqual(state.stagedSelectionSummary, .count(2))
     }
+
+    func testSubmissionRequiresSourceAndIdleState() {
+        var state = ImportSourceSheetState()
+        XCTAssertFalse(state.canSubmit(isAcquiring: false))
+
+        state.setTypedInput("/tmp/paper.pdf")
+        XCTAssertTrue(state.canSubmit(isAcquiring: false))
+        XCTAssertFalse(state.canSubmit(isAcquiring: true))
+
+        state.setStagedURLs([
+            URL(fileURLWithPath: "/tmp/one.pdf"),
+            URL(fileURLWithPath: "/tmp/two.md"),
+        ])
+        XCTAssertTrue(state.canSubmit(isAcquiring: false))
+        XCTAssertFalse(state.canSubmit(isAcquiring: true))
+    }
 }
 #endif

@@ -24,6 +24,10 @@ struct ImportSourceSheetState {
         normalizedTypedInput != nil || !stagedURLs.isEmpty
     }
 
+    func canSubmit(isAcquiring: Bool) -> Bool {
+        canImport && !isAcquiring
+    }
+
     var normalizedTypedInput: String? {
         let trimmed = typedInput.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
@@ -125,7 +129,8 @@ struct ImportSourceSheet: View {
                     beginImport()
                 }
                 .buttonStyle(SLPrimaryButtonStyle())
-                .disabled(!state.canImport || isAcquiring)
+                .keyboardShortcut(.defaultAction)
+                .disabled(!state.canSubmit(isAcquiring: isAcquiring))
             }
         }
         .padding(20)
@@ -162,7 +167,7 @@ struct ImportSourceSheet: View {
     }
 
     private func beginImport() {
-        guard state.canImport else { return }
+        guard state.canSubmit(isAcquiring: isAcquiring) else { return }
 
         Task { @MainActor in
             isAcquiring = true
