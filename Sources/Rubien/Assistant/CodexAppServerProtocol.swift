@@ -312,6 +312,47 @@ struct PendingCodexApproval {
     let availableDecisions: [String]
 }
 
+// MARK: - Model catalog wire types (model/list — model auto-discovery)
+
+/// One reasoning-effort level a model supports, from `supportedReasoningEfforts`.
+struct CodexEffortInfo: Sendable, Equatable {
+    let value: String
+    let label: String
+    let description: String?
+
+    /// Display label for an effort slug, matching the static list's style
+    /// ("xhigh" → "xHigh"); unknown future tiers just capitalize.
+    static func label(for value: String) -> String {
+        value == "xhigh" ? "xHigh" : value.capitalized
+    }
+}
+
+/// One model the installed codex reports via `model/list` (spec §2.1). `isDefault`
+/// is cosmetic only — it is rollout-state volatile and does NOT reflect the user's
+/// `~/.codex` config (verified: config said terra, isDefault said gpt-5.5).
+struct CodexModelInfo: Sendable, Equatable, Identifiable {
+    let id: String
+    let displayName: String
+    let description: String?
+    let efforts: [CodexEffortInfo]
+    let defaultEffort: String?
+    let isDefault: Bool
+    let hidden: Bool
+}
+
+/// A `model/list` fetch outcome. Three provider-level states: `nil` (backend has no
+/// discovery — Claude), `fetchedOK == false` (discovery attempted, failed → degraded
+/// picker), `fetchedOK == true` (live list).
+struct CodexCatalog: Sendable, Equatable {
+    var models: [CodexModelInfo]
+    var fetchedOK: Bool
+
+    static let unavailable = CodexCatalog(models: [], fetchedOK: false)
+
+    /// The picker-facing list (`hidden` entries dropped).
+    var visibleModels: [CodexModelInfo] { models.filter { !$0.hidden } }
+}
+
 enum CodexAppServerProtocol {
 
     /// Classify one inbound line, or `nil` if it isn't a JSON object. A frame with an
@@ -447,6 +488,12 @@ enum CodexAppServerProtocol {
                 params: ["threadId": threadId, "turnId": turnId])
     }
 
+    /// The installed codex's own model catalog (local, fast, not auth-gated —
+    /// verified back to codex 0.142.5; spec §2.1). Params are empty by design.
+    static func modelList(requestID: Int) -> String {
+        request(id: requestID, method: "model/list", params: [:])
+    }
+
     // MARK: - History decoders (thread/list · thread/search · thread/read → 3b-4)
 
     static let previewLimit = 240
@@ -528,6 +575,44 @@ enum CodexAppServerProtocol {
             preview: collapse(thread["preview"] as? String ?? "", limit: previewLimit),
             date: Date(timeIntervalSince1970: TimeInterval(epoch)),
             matchSnippet: snippet.map { collapse($0, limit: snippetLimit) })
+    }
+
+    /// `model/list` result → decoded catalog entries. Tolerant: unknown fields are
+    /// ignored, a missing `displayName` falls back to the slug, missing efforts
+    /// decode as empty (the UI then offers the universal fallback four), and an
+    /// entry without a usable id is dropped.
+    static func decodeModelList(_ result: [String: Any]) -> [CodexModelInfo] {
+        let data = result["data"] as? [[String: Any]] ?? []
+        return data.compactMap { entry in
+            let slug = (entry["id"] as? String) ?? (entry["model"] as? String)
+            guard let id = slug, !id.isEmpty else { return nil }
+            let efforts = (entry["supportedReasoningEfforts"] as? [[String: Any]] ?? [])
+                .compactMap { effort -> CodexEffortInfo? in
+                    guard let value = effort["reasoningEffort"] as? String, !value.isEmpty else { return nil }
+                    return CodexEffortInfo(
+                        value: value,
+                        label: CodexEffortInfo.label(for: value),
+                        description: effort["description"] as? String)
+                }
+            let displayName = (entry["displayName"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            return CodexModelInfo(
+                id: id,
+                displayName: displayName ?? id,
+                description: entry["description"] as? String,
+                efforts: efforts,
+                defaultEffort: (entry["defaultReasoningEffort"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+                isDefault: entry["isDefault"] as? Bool ?? false,
+                hidden: entry["hidden"] as? Bool ?? false)
+        }
+    }
+
+    /// The model a `thread/start` / `thread/resume` response reports as RESOLVED for
+    /// the thread — present even when the request omitted `model` (a transient
+    /// unseeded turn; codex then applies its own config-chain fallback — spec §2.2).
+    /// Optional: older servers may not report it.
+    static func resolvedModel(fromThreadResponse result: [String: Any]) -> String? {
+        guard let model = result["model"] as? String, !model.isEmpty else { return nil }
+        return model
     }
 
     private static func transcriptRow(_ item: [String: Any], seq: Int) -> ChatRenderMessage? {

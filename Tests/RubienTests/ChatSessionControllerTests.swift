@@ -46,6 +46,38 @@ final class ChatSessionControllerTests: XCTestCase {
         while !condition() && n < ticks { await Task.yield(); n += 1 }
     }
 
+    /// Snapshot the two Codex default-pref keys and return a restorer, so a test
+    /// exercising `selectModel`/`selectEffort` persistence can't leak into others
+    /// (matches the inline save/restore idiom the switchProvider tests use for
+    /// `assistantProviderKey`). Call as `let restore = …; defer { restore() }`.
+    private func restoreCodexPrefsAfter() -> () -> Void {
+        let d = UserDefaults.standard
+        let mKey = RubienPreferences.assistantCodexModelKey
+        let eKey = RubienPreferences.assistantCodexEffortKey
+        let m = d.object(forKey: mKey)
+        let e = d.object(forKey: eKey)
+        return {
+            if let m { d.set(m, forKey: mKey) } else { d.removeObject(forKey: mKey) }
+            if let e { d.set(e, forKey: eKey) } else { d.removeObject(forKey: eKey) }
+        }
+    }
+
+    /// A fresh Codex controller with the given model/effort seed and no catalog —
+    /// tests that need a catalog call `setCatalog` on the returned provider first.
+    private func makeCodexControllerRaw(
+        modelOverride: String?, effortOverride: String?
+    ) -> (ChatSessionController, MockAgentProvider) {
+        let codex = MockAgentProvider(
+            kind: .codex, availability: .installed(version: "t", path: "/fake/codex"))
+        let controller = ChatSessionController(
+            provider: codex, transcript: SpyTranscriptSink(),
+            reference: ChatReference(id: 1, title: "T", authors: ""),
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"), gate: AssistantTurnGate(),
+            webAccess: true, modelOverride: modelOverride, effortOverride: effortOverride,
+            autoApprove: false, codexSandbox: .readOnly)
+        return (controller, codex)
+    }
+
     // MARK: Event mapping (direct)
 
     func testSessionStartedCapturesAndRotatesID() {
@@ -1009,6 +1041,410 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertFalse(controller.isResponding)
         XCTAssertFalse(controller.hasMessages)
     }
+
+    // MARK: Model auto-discovery (catalog + selection)
+
+    private func makeCodexController(
+        catalog: CodexCatalog?,
+        defaults: ((AgentProviderKind) -> AssistantConversationDefaults)? = nil
+    ) -> (ChatSessionController, MockAgentProvider) {
+        let codex = MockAgentProvider(
+            kind: .codex, availability: .installed(version: "t", path: "/fake/codex"))
+        codex.setCatalog(catalog)
+        let controller = ChatSessionController(
+            provider: codex, transcript: SpyTranscriptSink(),
+            reference: ChatReference(id: 1, title: "T", authors: ""),
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"), gate: AssistantTurnGate(),
+            webAccess: true, modelOverride: nil, effortOverride: "medium",
+            autoApprove: false, codexSandbox: .readOnly,
+            defaultsProvider: defaults)
+        return (controller, codex)
+    }
+
+    func testRefreshCodexCatalogPopulatesVisibleModels() async {
+        let terra = CodexModelInfo(
+            id: "gpt-5.6-terra", displayName: "GPT-5.6-Terra", description: nil,
+            efforts: [CodexEffortInfo(value: "low", label: "Low", description: nil),
+                      CodexEffortInfo(value: "ultra", label: "Ultra", description: nil)],
+            defaultEffort: "medium", isDefault: false, hidden: false)
+        let ghost = CodexModelInfo(
+            id: "ghost", displayName: "Ghost", description: nil,
+            efforts: [], defaultEffort: nil, isDefault: false, hidden: true)
+        let (controller, _) = makeCodexController(
+            catalog: CodexCatalog(models: [terra, ghost], fetchedOK: true))
+
+        controller.refreshCodexCatalog()
+        await waitUntil { !controller.codexModels.isEmpty }
+
+        XCTAssertEqual(controller.codexModels.map(\.id), ["gpt-5.6-terra"], "hidden models dropped")
+        // The unset conversation seeds onto the first discovered model, which then
+        // governs the effort list (no separate `.modelResolved` needed anymore).
+        XCTAssertEqual(controller.modelOverride, "gpt-5.6-terra",
+                       "discovery seeds the first model when none is pinned")
+        XCTAssertEqual(controller.governingCodexModel?.id, "gpt-5.6-terra",
+                       "the seeded model governs the effort list")
+    }
+
+    func testCatalogFailureLeavesModelsEmpty() async {
+        let (controller, _) = makeCodexController(catalog: .unavailable)
+        controller.refreshCodexCatalog()
+        // Degrades to the empty list — the picker then shows only a pin (if any) and
+        // nothing is seeded, which works on ANY codex (spec §4.7).
+        try? await Task.sleep(for: .milliseconds(100))
+        XCTAssertTrue(controller.codexModels.isEmpty)
+        XCTAssertNil(controller.modelOverride, "no catalog ⇒ nothing to seed")
+    }
+
+    // MARK: Seed + remember (concrete-model default UX)
+
+    /// Discovery seeds a pref-less conversation onto the first concrete model and
+    /// its default effort once the catalog lands (the "First available" behavior).
+    func testCatalogLoadSeedsFirstModelWhenUnset() async {
+        let first = CodexModelInfo(
+            id: "gpt-5.6-terra", displayName: "Terra", description: nil,
+            efforts: [CodexEffortInfo(value: "low", label: "Low", description: nil),
+                      CodexEffortInfo(value: "medium", label: "Medium", description: nil)],
+            defaultEffort: "medium", isDefault: false, hidden: false)
+        let second = CodexModelInfo(
+            id: "gpt-5.6-sol", displayName: "Sol", description: nil,
+            efforts: [], defaultEffort: "low", isDefault: true, hidden: false)
+        let (controller, codex) = makeCodexControllerRaw(modelOverride: nil, effortOverride: nil)
+        codex.setCatalog(CodexCatalog(models: [first, second], fetchedOK: true))
+
+        controller.refreshCodexCatalog()
+        await waitUntil { controller.modelOverride != nil }
+
+        XCTAssertEqual(controller.modelOverride, "gpt-5.6-terra",
+                       "an unset conversation seeds to the first discovered model")
+        XCTAssertEqual(controller.effortOverride, "medium",
+                       "effort seeds to the seeded model's default")
+    }
+
+    /// A set pin (a remembered pick already loaded into the conversation) is NOT
+    /// clobbered by the first-model seed when the catalog lands.
+    func testCatalogLoadDoesNotOverrideAPinnedModel() async {
+        let first = CodexModelInfo(
+            id: "gpt-5.6-terra", displayName: "Terra", description: nil,
+            efforts: [], defaultEffort: "medium", isDefault: false, hidden: false)
+        let sol = CodexModelInfo(
+            id: "gpt-5.6-sol", displayName: "Sol", description: nil,
+            efforts: [], defaultEffort: "low", isDefault: true, hidden: false)
+        let (controller, codex) = makeCodexControllerRaw(
+            modelOverride: "gpt-5.6-sol", effortOverride: "low")
+        codex.setCatalog(CodexCatalog(models: [first, sol], fetchedOK: true))
+
+        controller.refreshCodexCatalog()
+        await waitUntil { !controller.codexModels.isEmpty }
+
+        XCTAssertEqual(controller.modelOverride, "gpt-5.6-sol",
+                       "a set pin (remembered pick) is not overwritten by the first-model seed")
+    }
+
+    /// The gap the "New conversation" button left: a never-picked user (nil model
+    /// default) who clicks New conversation once the catalog is ALREADY loaded must be
+    /// re-seeded onto a concrete model synchronously — not dropped to a blank picker
+    /// until some later fetch. `newConversation` re-reads a nil-model default, so the
+    /// tail `seedCodexModelIfUnset()` is what closes it.
+    func testNewConversationSeedsFirstModelWhenCatalogLoaded() async {
+        let first = CodexModelInfo(
+            id: "gpt-5.6-terra", displayName: "Terra", description: nil,
+            efforts: [CodexEffortInfo(value: "low", label: "Low", description: nil),
+                      CodexEffortInfo(value: "medium", label: "Medium", description: nil)],
+            defaultEffort: "medium", isDefault: false, hidden: false)
+        let second = CodexModelInfo(
+            id: "gpt-5.6-sol", displayName: "Sol", description: nil,
+            efforts: [], defaultEffort: "low", isDefault: true, hidden: false)
+        // A never-picked user: Settings hands back a nil model (no remembered pick).
+        let nilModelDefaults: (AgentProviderKind) -> AssistantConversationDefaults = { _ in
+            AssistantConversationDefaults(model: nil, effort: nil, webAccess: true, autoApprove: false)
+        }
+        let (controller, _) = makeCodexController(
+            catalog: CodexCatalog(models: [first, second], fetchedOK: true),
+            defaults: nilModelDefaults)
+
+        // The catalog lands and seeds the first model (the existing fetch behavior).
+        controller.refreshCodexCatalog()
+        await waitUntil { controller.modelOverride != nil }
+        XCTAssertEqual(controller.modelOverride, "gpt-5.6-terra", "the initial catalog fetch seeds")
+
+        // Simulate the never-picked New-conversation state: the catalog is already
+        // loaded but nothing is pinned. Without the tail seed in `newConversation` this
+        // would stay nil (a blank picker) — the discriminator for this fix.
+        controller.modelOverride = nil
+        controller.newConversation()
+
+        XCTAssertEqual(controller.modelOverride, "gpt-5.6-terra",
+                       "New conversation re-seeds the first model synchronously when the catalog is loaded")
+        XCTAssertEqual(controller.effortOverride, "medium",
+                       "effort seeds to the seeded model's default too")
+    }
+
+    /// Picking a Codex model persists it as the remembered default; a Claude pick
+    /// is a live per-conversation choice and must NOT touch the Codex pref.
+    func testSelectModelPersistsPick() {
+        let restore = restoreCodexPrefsAfter()
+        defer { restore() }
+        let (controller, _) = makeCodexControllerRaw(modelOverride: nil, effortOverride: "medium")
+
+        controller.selectModel("gpt-5.6-sol")
+
+        XCTAssertEqual(controller.modelOverride, "gpt-5.6-sol")
+        XCTAssertEqual(RubienPreferences.assistantCodexModel, "gpt-5.6-sol",
+                       "picking a Codex model remembers it as the default")
+
+        // Claude model picks are live per-conversation — not remembered in the Codex pref.
+        let before = RubienPreferences.assistantCodexModel
+        let claude = ChatSessionController(
+            provider: MockAgentProvider(kind: .claude), transcript: SpyTranscriptSink(),
+            reference: ChatReference(id: 1, title: "T", authors: ""),
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"), gate: AssistantTurnGate())
+        claude.selectModel("sonnet")
+        XCTAssertEqual(claude.modelOverride, "sonnet")
+        XCTAssertEqual(RubienPreferences.assistantCodexModel, before,
+                       "a Claude model pick must not touch the Codex default")
+    }
+
+    /// Picking a Codex effort persists it; a Claude effort pick must not.
+    func testSelectEffortPersistsPick() {
+        let restore = restoreCodexPrefsAfter()
+        defer { restore() }
+        let (controller, _) = makeCodexControllerRaw(modelOverride: nil, effortOverride: "medium")
+
+        controller.selectEffort("high")
+
+        XCTAssertEqual(controller.effortOverride, "high")
+        XCTAssertEqual(RubienPreferences.assistantCodexEffort, "high",
+                       "picking a Codex effort remembers it as the default")
+
+        // Claude effort is a live per-conversation choice — not remembered here.
+        let before = RubienPreferences.assistantCodexEffort
+        let claude = ChatSessionController(
+            provider: MockAgentProvider(kind: .claude), transcript: SpyTranscriptSink(),
+            reference: ChatReference(id: 1, title: "T", authors: ""),
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"), gate: AssistantTurnGate())
+        claude.selectEffort("low")
+        XCTAssertEqual(claude.effortOverride, "low")
+        XCTAssertEqual(RubienPreferences.assistantCodexEffort, before,
+                       "a Claude effort pick must not touch the Codex default")
+    }
+
+    func testSelectModelSnapsEffortToModelDefault() async {
+        let restore = restoreCodexPrefsAfter()
+        defer { restore() }
+        let alpha = CodexModelInfo(
+            id: "gpt-5.6-alpha", displayName: "Alpha", description: nil,
+            efforts: [CodexEffortInfo(value: "low", label: "Low", description: nil),
+                      CodexEffortInfo(value: "xhigh", label: "xHigh", description: nil)],
+            defaultEffort: "xhigh", isDefault: false, hidden: false)
+        let sol = CodexModelInfo(
+            id: "gpt-5.6-sol", displayName: "GPT-5.6-Sol", description: nil,
+            efforts: [CodexEffortInfo(value: "low", label: "Low", description: nil)],
+            defaultEffort: "low", isDefault: false, hidden: false)
+        let (controller, _) = makeCodexController(
+            catalog: CodexCatalog(models: [alpha, sol], fetchedOK: true))
+        controller.refreshCodexCatalog()
+        await waitUntil { !controller.codexModels.isEmpty }
+        // Discovery seeded the first model (alpha); pick the OTHER model and confirm
+        // effort snaps to ITS default.
+        controller.effortOverride = "xhigh"
+
+        controller.selectModel("gpt-5.6-sol")
+
+        XCTAssertEqual(controller.modelOverride, "gpt-5.6-sol")
+        XCTAssertEqual(controller.effortOverride, "low",
+                       "an explicit pick snaps effort to the model's defaultReasoningEffort (spec §3)")
+        XCTAssertEqual(RubienPreferences.assistantCodexModel, "gpt-5.6-sol", "the pick is remembered")
+    }
+
+    /// A model offering the full effort ladder EXCEPT `ultra` — the shape that makes
+    /// a persisted `ultra` (valid for sol/terra) unsupported once luna governs.
+    private func makeLuna() -> CodexModelInfo {
+        CodexModelInfo(
+            id: "luna", displayName: "Luna", description: nil,
+            efforts: [CodexEffortInfo(value: "low", label: "Low", description: nil),
+                      CodexEffortInfo(value: "medium", label: "Medium", description: nil),
+                      CodexEffortInfo(value: "high", label: "High", description: nil),
+                      CodexEffortInfo(value: "xhigh", label: "xHigh", description: nil),
+                      CodexEffortInfo(value: "max", label: "Max", description: nil)],
+            defaultEffort: "medium", isDefault: false, hidden: false)
+    }
+
+    /// When the resolved codex-default model becomes known (`.modelResolved`), an
+    /// effort the model can't accept is snapped to its default — codex's app-server
+    /// rejects an unsupported effort on turn/start. A still-valid effort is untouched.
+    func testModelResolvedSnapsUnsupportedEffort() async {
+        let luna = makeLuna()
+        let (controller, _) = makeCodexController(
+            catalog: CodexCatalog(models: [luna], fetchedOK: true))
+        controller.refreshCodexCatalog()
+        await waitUntil { !controller.codexModels.isEmpty }
+
+        // `ultra` persisted for another model; luna lacks it → snap to luna's default.
+        controller.effortOverride = "ultra"
+        controller.handle(.modelResolved(model: "luna"), gen: controller.generation)
+        XCTAssertEqual(controller.effortOverride, "medium",
+                       "an unsupported effort snaps to the resolved model's default")
+
+        // A supported effort is NOT overridden.
+        controller.effortOverride = "high"
+        controller.handle(.modelResolved(model: "luna"), gen: controller.generation)
+        XCTAssertEqual(controller.effortOverride, "high", "a valid effort is left alone")
+    }
+
+    /// The other entry point: a PINNED model whose efforts are unknown until the
+    /// catalog loads. Once it does, an unsupported persisted effort is snapped.
+    func testCatalogLoadSnapsUnsupportedEffortForPinnedModel() async {
+        let luna = makeLuna()
+        let (controller, _) = makeCodexController(
+            catalog: CodexCatalog(models: [luna], fetchedOK: true))
+        controller.modelOverride = "luna"    // pinned — governs the effort list
+        controller.effortOverride = "ultra"  // persisted for another model; luna lacks it
+
+        controller.refreshCodexCatalog()
+        await waitUntil { !controller.codexModels.isEmpty }
+
+        XCTAssertEqual(controller.effortOverride, "medium",
+                       "the catalog load snaps a pinned model's unsupported effort to its default")
+    }
+
+    /// The Codex model is THREAD-scoped (spec §2.3): changing it once the
+    /// conversation has content starts a fresh conversation — preserving the pick
+    /// AND the live conversation's own settings. A `defaultsProvider` with
+    /// CONFLICTING values proves the reset does not re-apply Settings defaults
+    /// the way `newConversation()` would (plan-review #3).
+    func testCodexModelChangeMidConversationStartsNewConversationPreservingSettings() async {
+        let restore = restoreCodexPrefsAfter()
+        defer { restore() }
+        let conflictingDefaults: (AgentProviderKind) -> AssistantConversationDefaults = { _ in
+            AssistantConversationDefaults(model: nil, effort: "medium",
+                                          webAccess: true, autoApprove: false)
+        }
+        let (controller, codex) = makeCodexController(
+            catalog: .unavailable, defaults: conflictingDefaults)
+        controller.webAccess = false
+        controller.autoApprove = true
+        controller.effortOverride = "xhigh"
+        await waitUntil { controller.canSendWithCurrentAvailability }
+        controller.send("hi")
+        await codex.waitUntilStreaming()
+        codex.emit(.sessionStarted(sessionID: "TH-1"))
+        codex.finishStream()
+        await controller.turnTask?.value
+        XCTAssertTrue(controller.hasMessages)
+        XCTAssertEqual(controller.liveSessionID, "TH-1")
+        let genBefore = controller.generation
+
+        controller.selectModel("gpt-5.6-sol")
+
+        XCTAssertEqual(controller.modelOverride, "gpt-5.6-sol", "the pick survives the reset")
+        XCTAssertNil(controller.liveSessionID, "a fresh conversation — the old thread's model was fixed")
+        XCTAssertGreaterThan(controller.generation, genBefore)
+        XCTAssertTrue(controller.hasMessages, "the pane shows the reset notice, not the quick-start page")
+        // The LIVE conversation's choices survive — this is NOT a provider switch,
+        // so the conflicting Settings defaults must NOT have been re-applied.
+        XCTAssertFalse(controller.webAccess)
+        XCTAssertTrue(controller.autoApprove)
+        XCTAssertEqual(controller.effortOverride, "xhigh",
+                       "catalog empty ⇒ no defaultEffort known ⇒ effort preserved")
+        // Re-selecting the SAME model is a no-op (no gratuitous reset).
+        let genAfter = controller.generation
+        controller.selectModel("gpt-5.6-sol")
+        XCTAssertEqual(controller.generation, genAfter)
+    }
+
+    func testClaudeModelChangeMidConversationKeepsConversation() async {
+        let claude = MockAgentProvider(kind: .claude)
+        let controller = ChatSessionController(
+            provider: claude, transcript: SpyTranscriptSink(),
+            reference: ChatReference(id: 1, title: "T", authors: ""),
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"), gate: AssistantTurnGate(),
+            webAccess: true, modelOverride: "opus", effortOverride: "high",
+            autoApprove: false, codexSandbox: .readOnly)
+        await waitUntil { controller.canSendWithCurrentAvailability }
+        controller.send("hi")
+        await claude.waitUntilStreaming()
+        claude.emit(.sessionStarted(sessionID: "S-1"))
+        claude.finishStream()
+        await controller.turnTask?.value
+
+        controller.selectModel("sonnet")
+
+        XCTAssertEqual(controller.modelOverride, "sonnet")
+        XCTAssertEqual(controller.liveSessionID, "S-1", "Claude models switch per turn — same conversation")
+        XCTAssertTrue(controller.hasMessages)
+    }
+
+    func testResolvedModelClearedOnNewConversationAndCatalogClearedOnSwitchToClaude() async {
+        let claude = MockAgentProvider(kind: .claude)
+        let (controller, _) = makeCodexControllerWithFactory(claude: claude)
+        controller.handle(.modelResolved(model: "gpt-5.6-terra"), gen: controller.generation)
+        XCTAssertEqual(controller.resolvedModel, "gpt-5.6-terra")
+
+        controller.newConversation()
+        XCTAssertNil(controller.resolvedModel, "a fresh thread's resolution is unknown until thread/start")
+
+        controller.refreshCodexCatalog()
+        await waitUntil { !controller.codexModels.isEmpty }
+        controller.switchProvider(to: .claude)
+        XCTAssertTrue(controller.codexModels.isEmpty, "the catalog is Codex state; cleared on switch")
+    }
+
+    /// The `catalogFetchToken` analog of `testSwitchProviderDropsStaleProbeFromOutgoingBackend`:
+    /// a codex model-list fetch parked mid-flight when a switch to Claude bumps the
+    /// token must be dropped on return, not repopulate `codexModels` once Claude is
+    /// the live backend.
+    func testRefreshCodexCatalogDropsStaleFetchAfterProviderSwitch() async {
+        let savedProvider = UserDefaults.standard.object(forKey: RubienPreferences.assistantProviderKey)
+        defer {
+            if let savedProvider {
+                UserDefaults.standard.set(savedProvider, forKey: RubienPreferences.assistantProviderKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: RubienPreferences.assistantProviderKey)
+            }
+        }
+        let claude = MockAgentProvider(kind: .claude)
+        let (controller, codex) = makeCodexControllerWithFactory(claude: claude)
+        codex.holdCatalog()  // the pre-switch codex fetch will land late
+
+        // Start the slow codex catalog fetch and park it mid-flight, holding the
+        // pre-switch token.
+        controller.refreshCodexCatalog()
+        await codex.waitUntilCatalogProbing()
+
+        // Switch to Claude: catalogFetchToken bumps, and refreshCodexCatalog's
+        // Claude-side call synchronously clears codexModels (Claude has no catalog).
+        controller.switchProvider(to: .claude)
+        XCTAssertEqual(controller.providerKind, .claude)
+
+        // Let the stale codex fetch finally return — it must be dropped by the
+        // token guard, not overwrite codexModels now that Claude is live.
+        codex.releaseCatalog()
+        try? await Task.sleep(for: .milliseconds(100))
+
+        XCTAssertTrue(
+            controller.codexModels.isEmpty,
+            "a stale catalog fetch from the outgoing codex backend must not repopulate codexModels")
+    }
+
+    /// Controller wired with a factory so switchProvider works (mirrors the
+    /// existing switch test's shape at line ~392).
+    private func makeCodexControllerWithFactory(
+        claude: MockAgentProvider
+    ) -> (ChatSessionController, MockAgentProvider) {
+        let codex = MockAgentProvider(kind: .codex)
+        codex.setCatalog(CodexCatalog(
+            models: [CodexModelInfo(id: "m", displayName: "M", description: nil,
+                                    efforts: [], defaultEffort: nil, isDefault: false, hidden: false)],
+            fetchedOK: true))
+        let controller = ChatSessionController(
+            provider: codex, transcript: SpyTranscriptSink(),
+            reference: ChatReference(id: 1, title: "T", authors: ""),
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"), gate: AssistantTurnGate(),
+            webAccess: true, modelOverride: nil, effortOverride: "medium",
+            autoApprove: false, codexSandbox: .readOnly,
+            providerFactory: { kind in kind == .claude ? claude : codex })
+        return (controller, codex)
+    }
 }
 
 // MARK: - Test doubles
@@ -1033,6 +1469,58 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
     private var _searches: [(query: String, limit: Int, referenceID: Int64?)] = []
     private var _searchResults: [AgentSessionSummary] = []
     private var _recentsCalls: [(limit: Int, referenceID: Int64?)] = []
+    private var _catalog: CodexCatalog?
+    private var _catalogHold = false
+    private var _catalogReleaseWaiters: [CheckedContinuation<Void, Never>] = []
+    private var _catalogProbeWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func setCatalog(_ catalog: CodexCatalog?) {
+        lock.lock(); defer { lock.unlock() }; _catalog = catalog
+    }
+
+    func availableModels() async -> CodexCatalog? {
+        // Park when held so a test can interleave a provider switch before this
+        // fetch returns (mirrors the availability-hold pattern below).
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if _catalogHold {
+                _catalogReleaseWaiters.append(cont)
+                let probeWaiters = _catalogProbeWaiters
+                _catalogProbeWaiters = []
+                lock.unlock()
+                for waiter in probeWaiters { waiter.resume() }
+            } else {
+                lock.unlock()
+                cont.resume()
+            }
+        }
+        lock.lock(); defer { lock.unlock() }; return _catalog
+    }
+
+    /// Make `availableModels` block until `releaseCatalog()`.
+    func holdCatalog() {
+        lock.lock(); defer { lock.unlock() }; _catalogHold = true
+    }
+
+    func releaseCatalog() {
+        lock.lock()
+        _catalogHold = false
+        let waiters = _catalogReleaseWaiters
+        _catalogReleaseWaiters = []
+        lock.unlock()
+        for waiter in waiters { waiter.resume() }
+    }
+
+    /// Await until a held `availableModels()` call has entered and parked.
+    func waitUntilCatalogProbing() async {
+        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if !_catalogReleaseWaiters.isEmpty {
+                lock.unlock(); c.resume(); return
+            }
+            _catalogProbeWaiters.append(c); lock.unlock()
+        }
+    }
 
     init(kind: AgentProviderKind = .claude,
          availability: AgentAvailability = .installed(version: "test", path: "/fake/claude")) {
