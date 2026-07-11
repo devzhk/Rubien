@@ -28,8 +28,10 @@ final class CodexProvider: AgentProvider {
     let kind: AgentProviderKind = .codex
 
     private let connection: CodexAppServerConnection
+    private let executableOverride: String?
 
     init(executableOverride: String? = nil, contentChannel: MCPContentChannel? = nil) {
+        self.executableOverride = executableOverride
         self.connection = CodexAppServerConnection(
             executableOverride: executableOverride, contentChannel: contentChannel)
     }
@@ -86,6 +88,28 @@ final class CodexProvider: AgentProvider {
 
     func sessionTranscript(sessionID: String, workspaceURL: URL) async -> [ChatRenderMessage] {
         await connection.readTranscript(threadID: sessionID, workspaceURL: workspaceURL)
+    }
+
+    /// The installed codex's own model catalog (memoized per binary — one probe
+    /// spawn per launch; spec §4.1). Feeds pickers only.
+    func availableModels() async -> CodexCatalog? {
+        await CodexModelCatalog.shared.catalog(executableOverride: executableOverride)
+    }
+
+    /// Well-known codex install dirs — shared by the live connection AND
+    /// `CodexModelCatalog`'s catalog probe, so a picker asking "what can Codex
+    /// run?" resolves the SAME binary a turn will actually spawn (§5.5).
+    static func resolveExecutable(override: String?) -> String? {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return AgentBinaryProbe.resolveExecutable(
+            override: override,
+            candidates: [
+                "\(home)/.npm-global/bin/codex",
+                "/opt/homebrew/bin/codex",
+                "/usr/local/bin/codex",
+                "\(home)/.local/bin/codex",
+            ],
+            binaryName: "codex")
     }
 }
 
@@ -303,6 +327,7 @@ private actor CodexAppServerConnection {
         //    History pick; `thread/start` a fresh conversation.
         do {
             let threadID: String
+            var resolvedModel: String?
             if let resume = request.resumeSessionID, !resume.isEmpty {
                 if srv.activeThreadID == resume {
                     threadID = resume   // already live in this server — just turn/start
@@ -311,6 +336,7 @@ private actor CodexAppServerConnection {
                         CodexAppServerProtocol.threadResume(requestID: id, threadId: resume)
                     }
                     threadID = Self.threadID(fromThreadResponse: result) ?? resume
+                    resolvedModel = CodexAppServerProtocol.resolvedModel(fromThreadResponse: result)
                 }
             } else {
                 let result = try await sendRequest(srv, method: "thread/start") { id in
@@ -327,6 +353,7 @@ private actor CodexAppServerConnection {
                     return
                 }
                 threadID = id
+                resolvedModel = CodexAppServerProtocol.resolvedModel(fromThreadResponse: result)
             }
             guard stillCurrent(active) else { return }
             srv.activeThreadID = threadID
@@ -334,6 +361,11 @@ private actor CodexAppServerConnection {
             // The controller re-captures the session id from every turn (D5); codex's
             // thread id is stable, so re-emitting is an idempotent no-op there.
             continuation.yield(.sessionStarted(sessionID: threadID))
+            // The RESOLVED model (spec §2.2): what this thread actually runs —
+            // codex's own config resolution when the request omitted `model`.
+            if let resolvedModel {
+                continuation.yield(.modelResolved(model: resolvedModel))
+            }
 
             // 3. The turn itself. Events stream via route(); `turnID` is set by route
             //    from the AUTHORITATIVE response (keyed on `turnStartRequestID`) before
@@ -499,7 +531,7 @@ private actor CodexAppServerConnection {
             killServer(srv)
         }
 
-        guard let executable = Self.resolveExecutable(override: executableOverride) else {
+        guard let executable = CodexProvider.resolveExecutable(override: executableOverride) else {
             throw AgentProviderError.executableNotFound(executableOverride ?? "codex")
         }
         let arguments = CodexInvocation.arguments(
@@ -895,7 +927,7 @@ private actor CodexAppServerConnection {
             environment = CodexInvocation.environment(
                 binaryDirectory: (path as NSString).deletingLastPathComponent)
         } else {
-            guard let resolved = Self.resolveExecutable(override: executableOverride) else {
+            guard let resolved = CodexProvider.resolveExecutable(override: executableOverride) else {
                 return .notFound(
                     reason: "Codex CLI wasn’t found. Install Codex or set the binary path in Settings → Assistant, then recheck.")
             }
@@ -918,20 +950,6 @@ private actor CodexAppServerConnection {
                 reason: "Codex is installed but not signed in. Run codex login in Terminal, then recheck.")
         }
         return .installed(version: version, path: path)
-    }
-
-    /// Well-known codex install dirs; resolution control flow is shared (§5.5).
-    static func resolveExecutable(override: String?) -> String? {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return AgentBinaryProbe.resolveExecutable(
-            override: override,
-            candidates: [
-                "\(home)/.npm-global/bin/codex",
-                "/opt/homebrew/bin/codex",
-                "/usr/local/bin/codex",
-                "\(home)/.local/bin/codex",
-            ],
-            binaryName: "codex")
     }
 
     // MARK: Response helpers

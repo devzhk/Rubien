@@ -20,9 +20,9 @@ workspace; tests rewrite the file between sends). It:
 
 Config keys (all optional): deltas[], assistantText (supports "{threadStarts}"),
 usageLast{...}, approval{reason,command,availableDecisions[]}, unknownRequest(bool),
-hang(bool), exitAfterTurnStart(int). History (3b-4): threads[] (thread/list data),
-searchHits[] (thread/search data, each {thread,snippet}), transcript{turns:[…]}
-(thread/read). All three also record their request params for assertion.
+hang(bool), exitAfterTurnStart(int), models[] / modelListError (model/list).
+History (3b-4): threads[] (thread/list data), searchHits[] (thread/search data,
+each {thread,snippet}), transcript{turns:[…]} (thread/read). All record params.
 """
 import json
 import os
@@ -77,6 +77,21 @@ def load_config():
             return json.load(handle)
     except Exception:
         return {}
+
+
+def _seed_model_list_requests():
+    """`model/list` probes are SHORT-LIVED — one fresh process per fetch, unlike
+    the long-lived turn server the rest of OBSERVED tracks within a single
+    process's lifetime — so the in-memory counter above would reset to 0 on
+    every spawn. Seed it from the previous process's observed file (same cwd)
+    so a test spanning multiple probe spawns (forceReload) can assert a
+    cumulative request count."""
+    try:
+        with open("fake-codex-observed.json") as handle:
+            prior = json.load(handle)
+        OBSERVED["modelListRequests"] = prior.get("modelListRequests", 0)
+    except Exception:
+        pass
 
 
 def read_message():
@@ -324,6 +339,38 @@ class Server:
                         ]},
                     ]})
                 respond(req_id, {"thread": thread})
+            elif method == "model/list":
+                # Model auto-discovery. Config `models` overrides the default set;
+                # `modelListError: true` answers with a JSON-RPC error (old-codex /
+                # failure path); `modelListDelayMs` delays the response (in-flight
+                # race tests). Request count recorded for memoization assertions.
+                cfg = load_config()
+                record(modelListRequests=OBSERVED.get("modelListRequests", 0) + 1)
+                if cfg.get("modelListDelayMs"):
+                    time.sleep(int(cfg["modelListDelayMs"]) / 1000.0)
+                if cfg.get("modelListError"):
+                    emit({"jsonrpc": "2.0", "id": req_id,
+                          "error": {"code": -32601, "message": "Method not found"}})
+                else:
+                    respond(req_id, {"data": cfg.get("models", [
+                        {"id": "fake-default", "displayName": "Fake Default", "hidden": False,
+                         "isDefault": True, "defaultReasoningEffort": "medium",
+                         "description": "The fake default model.",
+                         "supportedReasoningEfforts": [
+                             {"reasoningEffort": "low", "description": "Fast"},
+                             {"reasoningEffort": "medium", "description": "Balanced"},
+                             {"reasoningEffort": "high", "description": "Deep"},
+                         ]},
+                        {"id": "fake-frontier", "displayName": "Fake Frontier", "hidden": False,
+                         "isDefault": False, "defaultReasoningEffort": "low",
+                         "supportedReasoningEfforts": [
+                             {"reasoningEffort": "low", "description": "Fast"},
+                             {"reasoningEffort": "max", "description": "Maximum"},
+                             {"reasoningEffort": "ultra", "description": "Delegating"},
+                         ]},
+                        {"id": "fake-hidden", "displayName": "Fake Hidden", "hidden": True,
+                         "isDefault": False},
+                    ])})
             elif req_id is not None:
                 respond(req_id, {})
 
@@ -341,6 +388,7 @@ def main():
         _atomic_write_json("fake-codex-argv.json", sys.argv)
     except OSError:
         pass
+    _seed_model_list_requests()
     record(pid=os.getpid())
     return Server().serve() or 0
 

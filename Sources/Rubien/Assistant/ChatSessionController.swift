@@ -94,6 +94,17 @@ final class ChatSessionController: ObservableObject {
     /// passage must still re-focus, which an equality-based observer on
     /// `stagedSelection` would miss. Never reset (its absolute value is meaningless).
     @Published private(set) var composerFocusRequest = 0
+    /// The model codex reports the live thread actually runs (`.modelResolved`,
+    /// spec §4.5). Now that a fresh conversation seeds a concrete `modelOverride`,
+    /// this is a fallback signal only — it still backstops `governingCodexModel`
+    /// when no model is pinned. Cleared with the conversation.
+    @Published private(set) var resolvedModel: String?
+    /// The installed codex's discovered models (non-hidden), feeding the model
+    /// picker AND the fresh-conversation seed (`refreshCodexCatalog` adopts
+    /// `.first` when no model is pinned). Empty until `refreshCodexCatalog()`
+    /// resolves — the picker then shows only a pin, if any, until discovery lands
+    /// (spec §4.7). Claude conversations keep this empty (static lists).
+    @Published private(set) var codexModels: [CodexModelInfo] = []
     /// The conversation's model, applied per turn (`--model`). Claude aliases:
     /// `fable` / `opus` / `sonnet` / `haiku`. The sidebar always shows a concrete
     /// model (no "CLI default" state); `nil` remains valid programmatically and
@@ -109,7 +120,7 @@ final class ChatSessionController: ObservableObject {
     @Published var autoApprove = false
     /// The Codex OS-sandbox mode carried on every turn (D6). Ignored by Claude
     /// (which uses the control protocol, not an OS sandbox). A per-conversation
-    /// choice, seeded from the Codex default and reset on a provider switch.
+    /// choice, seeded from the Codex sandbox default and reset on a provider switch.
     @Published var codexSandbox: CodexSandbox
     /// The active backend, published so the composer picker + provider-aware model
     /// list re-render when a switch swaps the underlying provider (Phase 3b-3).
@@ -171,6 +182,10 @@ final class ChatSessionController: ObservableObject {
     /// newer probe or `switchProvider` advanced the token across the `await`, so a slow
     /// probe of a previously-selected backend can't overwrite the current one's state.
     private var availabilityProbeToken = 0
+    /// Supersession token for `refreshCodexCatalog` (same pattern as
+    /// `availabilityProbeToken`): a slow fetch kicked before a provider switch
+    /// must not repopulate the new backend's (cleared) model list.
+    private var catalogFetchToken = 0
 
     init(
         provider: any AgentProvider,
@@ -348,6 +363,7 @@ final class ChatSessionController: ObservableObject {
         busyElsewhere = false
         pendingApprovals.removeAll()
         stagedSelection = nil
+        resolvedModel = nil
     }
 
     /// Start a fresh conversation: reset, drop the session identity, and adopt the
@@ -366,6 +382,10 @@ final class ChatSessionController: ObservableObject {
             autoApprove = defaults.autoApprove
             codexSandbox = defaults.codexSandbox
         }
+        // A never-picked Codex user (nil model default) would otherwise drop to a
+        // blank picker here; seed a concrete model when the catalog is already loaded.
+        // No-op when it isn't — the in-flight fetch seeds later, same as today.
+        seedCodexModelIfUnset()
     }
 
     /// Switch this conversation's backend runtime (composer picker, Phase 3b-3).
@@ -395,6 +415,7 @@ final class ChatSessionController: ObservableObject {
         availabilityProbeToken += 1
         RubienPreferences.assistantProvider = kind
         newConversation()
+        refreshCodexCatalog()
         Task { await recheckAvailability() }
     }
 
@@ -492,6 +513,115 @@ final class ChatSessionController: ObservableObject {
         availability = result
     }
 
+    /// The model whose effort list governs the picker (spec §4.6): the pinned
+    /// model, else the resolved codex-default model once a thread reported it.
+    var governingCodexModel: CodexModelInfo? {
+        guard let id = modelOverride ?? resolvedModel else { return nil }
+        return codexModels.first { $0.id == id }
+    }
+
+    /// Kick (or re-kick) the model-catalog fetch for the live backend. Codex only —
+    /// for Claude this clears the list. Never blocks a turn (spec §4.1); a result
+    /// arriving after a provider switch is dropped by the token.
+    func refreshCodexCatalog() {
+        catalogFetchToken += 1
+        let token = catalogFetchToken
+        guard providerKind == .codex else {
+            codexModels = []
+            return
+        }
+        let catalogProvider = provider
+        Task { [weak self] in
+            let catalog = await catalogProvider.availableModels()
+            guard let self, token == self.catalogFetchToken else { return }
+            self.codexModels = catalog?.visibleModels ?? []
+            self.seedCodexModelIfUnset()  // seed an unset conversation onto a concrete model
+            self.ensureEffortSupported()  // a pinned/seeded model's efforts are now known
+        }
+    }
+
+    /// The model picker's setter. On Codex a pick is REMEMBERED as the default for
+    /// the next conversation (`assistantCodexModel`), and the model is THREAD-scoped
+    /// (`thread/start` only — spec §2.3): changing it once the conversation has
+    /// content starts a FRESH conversation that PRESERVES the live web/approval/
+    /// effort/sandbox choices — deliberately NOT `newConversation()`, which
+    /// re-applies Settings defaults and would silently flip the user's live
+    /// toggles (plan-review #3) — and notes the reset in the pane (spec §4.6,
+    /// the `resume()` notice precedent). Claude switches live (per-turn `--model`)
+    /// and is NOT remembered here (its default lives in Settings). An explicit pick
+    /// snaps effort to the model's own default when the catalog knows it (spec §3);
+    /// a nil id (transient pre-seed / programmatic only) leaves effort alone.
+    func selectModel(_ id: String?) {
+        guard id != modelOverride else { return }
+        if providerKind == .codex {
+            RubienPreferences.assistantCodexModel = id  // remember the pick as the default
+        }
+        if providerKind == .codex, hasMessages {
+            resetConversationState()
+            liveSessionID = nil
+            seedSent = false
+            modelOverride = id
+            snapEffortToModelDefault(id)
+            hasMessages = true
+            renderNotice("_New conversation — Codex applies a model change to a fresh conversation._")
+            return
+        }
+        modelOverride = id
+        snapEffortToModelDefault(id)
+    }
+
+    /// The effort picker's setter. Sets the conversation's effort and, on Codex,
+    /// REMEMBERS it as the default for the next conversation (`assistantCodexEffort`;
+    /// an empty string is the pref's `medium` fallback, so a nil/empty pick is fine).
+    /// Claude effort is a live per-conversation choice (its default lives in
+    /// Settings), so it is not persisted here. Minimal by design — no reset, no snap
+    /// (effort rides per-turn).
+    func selectEffort(_ value: String?) {
+        effortOverride = value
+        if providerKind == .codex {
+            RubienPreferences.assistantCodexEffort = value ?? ""
+        }
+    }
+
+    /// Seed a fresh/never-picked Codex conversation onto a concrete model (the first
+    /// discovered one) + its default effort, once the catalog is known. No-op if a
+    /// model is already chosen (a remembered pick or an in-flight pin) or the catalog
+    /// hasn't loaded. The seed is NOT persisted — only an explicit pick writes
+    /// `assistantCodexModel`. Called from the catalog fetch AND from `newConversation`
+    /// so the "New conversation" button doesn't drop a never-picked user to a blank
+    /// picker (spec §4.6).
+    private func seedCodexModelIfUnset() {
+        guard providerKind == .codex, modelOverride == nil, let first = codexModels.first else { return }
+        modelOverride = first.id
+        if effortOverride == nil { effortOverride = first.defaultEffort }
+    }
+
+    /// An explicit model pick adopts that model's `defaultReasoningEffort` when
+    /// the catalog knows it (spec §3); an unknown model or a nil id (transient
+    /// pre-seed / programmatic) leaves the effort alone.
+    private func snapEffortToModelDefault(_ id: String?) {
+        guard providerKind == .codex, let id,
+              let model = codexModels.first(where: { $0.id == id }),
+              let defaultEffort = model.defaultEffort else { return }
+        effortOverride = defaultEffort
+    }
+
+    /// Snap the conversation's effort to one the GOVERNING codex model supports, but
+    /// ONLY when the current value is unsupported — never overriding a still-valid
+    /// choice. codex's app-server REJECTS an unsupported `effort` on turn/start with a
+    /// JSON-RPC error before the turn runs, so an effort persisted for one model
+    /// (e.g. `ultra`) must not ride into one that lacks it. No-op for Claude, an
+    /// unknown/absent governing model, or a model advertising no efforts.
+    private func ensureEffortSupported() {
+        guard providerKind == .codex,
+              let governing = governingCodexModel,
+              !governing.efforts.isEmpty,
+              let current = effortOverride,
+              !governing.efforts.contains(where: { $0.value == current })
+        else { return }
+        effortOverride = governing.defaultEffort ?? governing.efforts.first?.value
+    }
+
     // MARK: Event mapping (internal for testing)
 
     func handle(_ event: AgentEvent, gen: Int) {
@@ -500,6 +630,9 @@ final class ChatSessionController: ObservableObject {
         case .sessionStarted(let id):
             liveSessionID = id
             seedSent = true  // the seed-bearing process started → the seed was delivered
+        case .modelResolved(let model):
+            resolvedModel = model
+            ensureEffortSupported()  // the governing model is now known — snap a stale effort
         case .assistantDelta(let text):
             transcript.appendDelta(text)  // streaming-only; the commit is what's logged
         case .assistantMessageCompleted(let text):

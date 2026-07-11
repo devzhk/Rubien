@@ -40,6 +40,7 @@ struct ChatSidebarView: View {
         .frame(minWidth: 300)
         .task { await session.recheckAvailability() }
         .onAppear {
+            session.refreshCodexCatalog()
             renderer.setTheme(colorScheme == .dark ? .dark : .light)
             // Re-mounting the pane created a fresh (empty) WebView — restore the
             // conversation from the controller's in-memory render log.
@@ -528,30 +529,47 @@ struct ChatSidebarView: View {
 
     // MARK: Model + effort selector (maps to `--model` / `--effort`)
 
-    // Derived from the shared source of truth (AssistantModelOptions) so the
-    // sidebar and Settings ▸ Assistant can't offer different models/efforts. Keyed
-    // on the LIVE backend (Claude and Codex accept disjoint slugs), so a provider
-    // switch re-renders the lists. The picker tags are `String?` because
-    // `session.modelOverride` is optional (nil omits the flag), so the non-optional
-    // shared values are lifted to Optional.
+    // Claude: the static descriptor lists (verified CLI aliases — spec §2.4).
+    // Codex: DISCOVERED rows — the installed codex's own models (concrete slugs
+    // only; a fresh conversation seeds one), with any unknown pin kept visible
+    // (spec §4.6). Tags are `String?` only to share the ForEach type with Claude.
     private var modelChoices: [(label: String, value: String?)] {
-        AssistantModelOptions.models(for: session.providerKind)
-            .map { (label: $0.label, value: Optional($0.value)) }
+        switch session.providerKind {
+        case .claude:
+            return AssistantModelOptions.models(for: .claude)
+                .map { (label: $0.label, value: Optional($0.value)) }
+        case .codex:
+            return AssistantModelOptions.codexModelRows(
+                models: session.codexModels,
+                pinned: session.modelOverride)
+        }
     }
     private var effortChoices: [(label: String, value: String?)] {
-        AssistantModelOptions.efforts(for: session.providerKind)
-            .map { (label: $0.label, value: Optional($0.value)) }
+        switch session.providerKind {
+        case .claude:
+            return AssistantModelOptions.efforts(for: .claude)
+                .map { (label: $0.label, value: Optional($0.value)) }
+        case .codex:
+            return AssistantModelOptions.codexEffortRows(
+                governing: session.governingCodexModel,
+                includingCurrent: session.effortOverride)
+                .map { (label: $0.label, value: Optional($0.value)) }
+        }
     }
 
     private var modelPicker: some View {
         Menu {
-            Picker("Model", selection: $session.modelOverride) {
+            Picker("Model", selection: Binding(
+                get: { session.modelOverride },
+                set: { session.selectModel($0) })) {
                 ForEach(modelChoices, id: \.value) { choice in
                     Text(choice.label).tag(choice.value)
                 }
             }
             .pickerStyle(.inline)
-            Picker("Effort", selection: $session.effortOverride) {
+            Picker("Effort", selection: Binding(
+                get: { session.effortOverride },
+                set: { session.selectEffort($0) })) {
                 ForEach(effortChoices, id: \.value) { choice in
                     Text(choice.label).tag(choice.value)
                 }
@@ -578,11 +596,18 @@ struct ChatSidebarView: View {
         )
         .onHover { modelMenuHovered = $0 }
         .animation(.easeOut(duration: 0.12), value: modelMenuHovered)
-        .help("Model and reasoning effort for this conversation")
+        .help("Model and reasoning effort for this conversation — on Codex, changing the model starts a new conversation")
     }
 
     private var modelLabel: String {
-        AssistantModelOptions.modelLabel(for: session.modelOverride, kind: session.providerKind)
+        if session.providerKind == .codex {
+            // The current model's display name (from the catalog), else its raw
+            // slug, else a neutral placeholder for the transient pre-seed window
+            // before discovery lands and seeds a concrete model.
+            guard let current = session.modelOverride else { return "Codex" }
+            return session.codexModels.first { $0.id == current }?.displayName ?? current
+        }
+        return AssistantModelOptions.modelLabel(for: session.modelOverride, kind: session.providerKind)
     }
 
     /// The gray effort word beside the model ("**Opus** High").

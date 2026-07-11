@@ -37,6 +37,15 @@ struct RubienSettingsView: View {
     @State private var defaultProvider: AgentProviderKind = .claude
     @State private var defaultModel = "opus"
     @State private var defaultEffort = "high"
+    /// The installed codex's discovered models for the Settings pickers (visible
+    /// entries only). Loaded on appear; Recheck force-reloads. Empty while pending
+    /// or when discovery failed — the pickers then degrade per spec §4.7.
+    @State private var codexCatalogModels: [CodexModelInfo] = []
+    /// Monotonic load token mirroring `codexProbeGeneration`: only the latest
+    /// `loadCodexCatalog` result is applied, so an overlapping load (the on-appear
+    /// fetch racing a Recheck, or a fast Reset→Choose) can't be overwritten by a
+    /// stale one landing late.
+    @State private var codexCatalogLoadGeneration = 0
     @State private var defaultCodexSandbox: CodexSandbox = .readOnly
     @State private var defaultWebAccess = true
     @State private var defaultAutoApprove = false
@@ -253,6 +262,7 @@ struct RubienSettingsView: View {
             seedModelEffortMirrors(for: defaultProvider)
             if claudeAvailability == nil { recheckClaude() }
             if codexAvailability == nil { recheckCodex() }
+            loadCodexCatalog()
         }
         // Persist each mirror to the (non-observable) prefs when the user changes it.
         // Switching the default backend re-seeds the model/effort mirrors from that
@@ -261,7 +271,22 @@ struct RubienSettingsView: View {
             RubienPreferences.assistantProvider = value
             seedModelEffortMirrors(for: value)
         }
-        .onChange(of: defaultModel) { _, value in setDefaultModel(value) }
+        .onChange(of: defaultModel) { _, value in
+            // Detect a USER pick vs a mirror RE-SEED (pane appear / backend
+            // switch): a seed sets the mirror to the stored pref, so value ==
+            // pref there. Snapping on seeds would rewrite the stored effort on
+            // mere pane-open — the guard makes the spec-§3 effort snap (an
+            // explicit model pick adopts the model's own default effort;
+            // plan-review #4) fire on real picks only. Compare BEFORE
+            // setDefaultModel persists the new value.
+            let isCodexUserPick = defaultProvider == .codex
+                && value != (RubienPreferences.assistantCodexModel ?? "")
+            setDefaultModel(value)
+            if isCodexUserPick,
+               let snapped = codexCatalogModels.first(where: { $0.id == value })?.defaultEffort {
+                defaultEffort = snapped
+            }
+        }
         .onChange(of: defaultEffort) { _, value in setDefaultEffort(value) }
         .onChange(of: defaultCodexSandbox) { _, value in RubienPreferences.assistantCodexSandbox = value }
         .onChange(of: defaultWebAccess) { _, value in RubienPreferences.assistantWebAccess = value }
@@ -276,16 +301,47 @@ struct RubienSettingsView: View {
             defaultModel = RubienPreferences.assistantModel
             defaultEffort = RubienPreferences.assistantEffort
         case .codex:
-            defaultModel = RubienPreferences.assistantCodexModel
+            defaultModel = RubienPreferences.assistantCodexModel ?? ""
             defaultEffort = RubienPreferences.assistantCodexEffort
         }
     }
 
+    /// Codex model rows for the Settings picker: a leading "First available" reset
+    /// row (mapped to the mirror's "" sentinel → clears the remembered default, so a
+    /// fresh conversation re-seeds from the first discovered model) followed by the
+    /// shared builder's CONCRETE model rows. The current raw selection stays visible
+    /// while the catalog loads (spec finding #6) — the builder's keep-pin row
+    /// guarantees the Picker never loses its selection, so no phantom `.onChange`
+    /// write can fire during load.
+    private var settingsCodexModelRows: [(label: String, value: String)] {
+        var rows: [(label: String, value: String)] = [
+            (label: String(localized: "First available", bundle: .module), value: "")
+        ]
+        rows += AssistantModelOptions.codexModelRows(
+            models: codexCatalogModels,
+            pinned: defaultModel.isEmpty ? nil : defaultModel)
+            .map { (label: $0.label, value: $0.value ?? "") }
+        return rows
+    }
+
+    /// Effort rows follow the pinned default model when it's in the catalog, else
+    /// the universal four. Includes the current selection even if unlisted (an
+    /// unlisted stored effort must not blank the control or trigger a write).
+    private var settingsCodexEffortRows: [(label: String, value: String)] {
+        let governing = codexCatalogModels.first { $0.id == defaultModel }
+        return AssistantModelOptions.codexEffortRows(
+            governing: governing,
+            includingCurrent: defaultEffort.isEmpty ? nil : defaultEffort)
+    }
+
     /// Route a model-mirror change back to the CURRENTLY-selected backend's pref.
+    /// For Codex, "" is the "First available" sentinel → nil (the pref key is
+    /// removed, clearing the remembered default so a fresh conversation re-seeds
+    /// from the first discovered model — spec §4.4).
     private func setDefaultModel(_ value: String) {
         switch defaultProvider {
         case .claude: RubienPreferences.assistantModel = value
-        case .codex: RubienPreferences.assistantCodexModel = value
+        case .codex: RubienPreferences.assistantCodexModel = value.isEmpty ? nil : value
         }
     }
 
@@ -332,19 +388,32 @@ struct RubienSettingsView: View {
                 Text(String(localized: "Backend", bundle: .module))
             }
 
-            // Model/effort are the SELECTED backend's — Claude and Codex accept
-            // disjoint slugs, so the lists (and the mirrors) switch with the backend.
+            // Model/effort are the SELECTED backend's. Claude: static verified
+            // aliases. Codex: discovered rows — "" is the mirror's "First available"
+            // sentinel (UI-layer only; the pref stores nil — spec §4.4).
             Picker(selection: $defaultModel) {
-                ForEach(AssistantModelOptions.models(for: defaultProvider), id: \.value) {
-                    Text($0.label).tag($0.value)
+                if defaultProvider == .codex {
+                    ForEach(settingsCodexModelRows, id: \.value) {
+                        Text($0.label).tag($0.value)
+                    }
+                } else {
+                    ForEach(AssistantModelOptions.models(for: .claude), id: \.value) {
+                        Text($0.label).tag($0.value)
+                    }
                 }
             } label: {
                 Text(String(localized: "Model", bundle: .module))
             }
 
             Picker(selection: $defaultEffort) {
-                ForEach(AssistantModelOptions.efforts(for: defaultProvider), id: \.value) {
-                    Text($0.label).tag($0.value)
+                if defaultProvider == .codex {
+                    ForEach(settingsCodexEffortRows, id: \.value) {
+                        Text($0.label).tag($0.value)
+                    }
+                } else {
+                    ForEach(AssistantModelOptions.efforts(for: .claude), id: \.value) {
+                        Text($0.label).tag($0.value)
+                    }
                 }
             } label: {
                 Text(String(localized: "Reasoning effort", bundle: .module))
@@ -537,6 +606,7 @@ struct RubienSettingsView: View {
 
     /// Codex's parallel probe (its own generation token + binary override).
     private func recheckCodex() {
+        loadCodexCatalog(forceReload: true)
         codexProbeGeneration += 1
         let generation = codexProbeGeneration
         isProbingCodex = true
@@ -546,6 +616,21 @@ struct RubienSettingsView: View {
             guard generation == codexProbeGeneration else { return }  // superseded by a newer probe
             codexAvailability = availability
             isProbingCodex = false
+        }
+    }
+
+    /// Fetch the codex model catalog for the Settings pickers. `forceReload`
+    /// (Recheck / binary-path change) drops the shared memo first.
+    private func loadCodexCatalog(forceReload: Bool = false) {
+        codexCatalogLoadGeneration += 1
+        let generation = codexCatalogLoadGeneration
+        let override = RubienPreferences.assistantCodexBinaryPath
+        Task { @MainActor in
+            let models = await CodexModelCatalog.shared
+                .catalog(executableOverride: override, forceReload: forceReload)
+                .visibleModels
+            guard generation == codexCatalogLoadGeneration else { return }  // superseded by a newer load
+            codexCatalogModels = models
         }
     }
 
