@@ -4,8 +4,44 @@ import SwiftUI
 import RubienCore
 
 enum BatchImportPresentation {
+    enum CompletionRoute: Equatable {
+        case awaitVerifiedSingleConfirmation
+        case deliverImmediately
+    }
+
     static func shouldReview(requestedInputCount: Int) -> Bool {
         requestedInputCount > 1
+    }
+
+    static func completionRoute(
+        requestedInputCount: Int,
+        results: [MetadataResolutionResult]
+    ) -> CompletionRoute {
+        guard requestedInputCount == 1,
+              results.count == 1,
+              case .verified = results[0]
+        else {
+            return .deliverImmediately
+        }
+        return .awaitVerifiedSingleConfirmation
+    }
+}
+
+@MainActor
+final class BatchImportDeliveryGate {
+    private var generation = 0
+
+    func begin() -> Int {
+        generation += 1
+        return generation
+    }
+
+    func cancel() {
+        generation += 1
+    }
+
+    func shouldDeliver(_ token: Int) -> Bool {
+        token == generation
     }
 }
 
@@ -20,6 +56,10 @@ struct BatchImportView: View {
     @State private var progress = 0
     @State private var total = 0
     @State private var statusMessage: String?
+    @State private var preparedForConfirmation: [PreparedMetadataImport] = []
+    @State private var pendingDeliveryToken: Int?
+    @State private var resolutionTask: Task<Void, Never>?
+    @State private var deliveryGate = BatchImportDeliveryGate()
 
     struct ImportResult: Identifiable {
         enum Outcome {
@@ -41,15 +81,29 @@ struct BatchImportView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Button(String(localized: "common.cancel", bundle: .module)) { dismiss() }
+                Button(String(localized: "common.cancel", bundle: .module)) {
+                    cancelResolutionAndDismiss()
+                }
                     .keyboardShortcut(.cancelAction)
                 Spacer()
                 Text("batchImport.title", bundle: .module)
                     .font(.headline)
                 Spacer()
-                Button(String(localized: "batchImport.button.start", bundle: .module)) { startBatchFetch() }
+                if preparedForConfirmation.isEmpty {
+                    Button(String(localized: "batchImport.button.start", bundle: .module)) { startBatchFetch() }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(identifiers.isEmpty || isProcessing || !results.isEmpty)
+                } else {
+                    Button(
+                        String(
+                            format: String(localized: "Import %d to library", bundle: .module),
+                            preparedForConfirmation.count
+                        )
+                    ) {
+                        deliverVerifiedSingle()
+                    }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(identifiers.isEmpty || isProcessing || !results.isEmpty)
+                }
             }
             .padding()
 
@@ -185,6 +239,10 @@ struct BatchImportView: View {
             }
         }
         .frame(width: 680, height: 540)
+        .interactiveDismissDisabled(isProcessing)
+        .onDisappear {
+            cancelResolution()
+        }
     }
 
     private var identifiers: [String] {
@@ -199,11 +257,15 @@ struct BatchImportView: View {
         total = inputs.count
         progress = 0
         results = []
+        preparedForConfirmation = []
+        pendingDeliveryToken = nil
         isProcessing = !inputs.isEmpty
 
         guard isProcessing else { return }
 
-        Task { @MainActor in
+        resolutionTask?.cancel()
+        let deliveryToken = deliveryGate.begin()
+        resolutionTask = Task { @MainActor in
             let maxConcurrency = 3
             var prepared = Array<PreparedMetadataImport?>(repeating: nil, count: inputs.count)
 
@@ -226,6 +288,10 @@ struct BatchImportView: View {
 
                 // Process results as they arrive, enqueue more work
                 for await (index, identifier, result) in group {
+                    guard !Task.isCancelled, deliveryGate.shouldDeliver(deliveryToken) else {
+                        group.cancelAll()
+                        return
+                    }
                     prepared[index] = PreparedMetadataImport(input: identifier, result: result)
                     switch result {
                     case .verified(let envelope):
@@ -252,11 +318,51 @@ struct BatchImportView: View {
                 }
             }
 
+            guard !Task.isCancelled, deliveryGate.shouldDeliver(deliveryToken) else { return }
+            let completed = prepared.compactMap { $0 }
             isProcessing = false
             statusMessage = nil
-            onPrepared(prepared.compactMap { $0 })
-            dismiss()
+            resolutionTask = nil
+
+            switch BatchImportPresentation.completionRoute(
+                requestedInputCount: inputs.count,
+                results: completed.map(\.result)
+            ) {
+            case .awaitVerifiedSingleConfirmation:
+                preparedForConfirmation = completed
+                pendingDeliveryToken = deliveryToken
+            case .deliverImmediately:
+                onPrepared(completed)
+                dismiss()
+            }
         }
+    }
+
+    private func deliverVerifiedSingle() {
+        guard let pendingDeliveryToken,
+              deliveryGate.shouldDeliver(pendingDeliveryToken),
+              !preparedForConfirmation.isEmpty
+        else { return }
+
+        let prepared = preparedForConfirmation
+        preparedForConfirmation = []
+        self.pendingDeliveryToken = nil
+        onPrepared(prepared)
+        dismiss()
+    }
+
+    private func cancelResolutionAndDismiss() {
+        cancelResolution()
+        dismiss()
+    }
+
+    private func cancelResolution() {
+        deliveryGate.cancel()
+        resolutionTask?.cancel()
+        resolutionTask = nil
+        isProcessing = false
+        preparedForConfirmation = []
+        pendingDeliveryToken = nil
     }
 
     private func appendResult(identifier: String, outcome: ImportResult.Outcome) {

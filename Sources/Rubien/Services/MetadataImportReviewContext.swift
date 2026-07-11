@@ -16,25 +16,36 @@ struct PreparedMetadataImport: Identifiable, Sendable {
 
 @MainActor
 final class MetadataImportReviewContext: ImportReviewContext {
+    typealias Committer = ([Reference], AppDatabase) throws -> Void
+
     let items: [ImportReviewItem]
 
     private let database: AppDatabase
     private let resolver: MetadataResolver
+    private let orderedIDs: [UUID]
+    private let committer: Committer
     private var entriesByID: [UUID: PreparedMetadataImport]
 
     init(
         database: AppDatabase,
         resolver: MetadataResolver? = nil,
-        entries: [PreparedMetadataImport]
+        entries: [PreparedMetadataImport],
+        committer: @escaping Committer = { references, database in
+            _ = try database.batchImportReferences(references, mergePolicy: .standard)
+        }
     ) {
         self.database = database
         self.resolver = resolver ?? MetadataResolver()
+        self.orderedIDs = entries.map(\.id)
+        self.committer = committer
         self.entriesByID = Dictionary(uniqueKeysWithValues: entries.map { ($0.id, $0) })
         self.items = entries.map(Self.makeItem)
     }
 
     func commit(selectedIDs: Set<UUID>) async -> ImportReviewCommitReport {
-        let selected = selectedIDs.compactMap { entriesByID[$0] }
+        let selected = orderedIDs.compactMap { id in
+            selectedIDs.contains(id) ? entriesByID[id] : nil
+        }
         let references = selected.compactMap { entry -> Reference? in
             guard case .verified(let envelope) = entry.result else { return nil }
             return envelope.reference
@@ -49,7 +60,7 @@ final class MetadataImportReviewContext: ImportReviewContext {
         }
 
         do {
-            _ = try database.batchImportReferences(references, mergePolicy: .standard)
+            try committer(references, database)
             for id in selectedIDs {
                 entriesByID.removeValue(forKey: id)
             }

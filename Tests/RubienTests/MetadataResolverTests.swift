@@ -11,6 +11,54 @@ final class MetadataResolverTests: XCTestCase {
         XCTAssertTrue(BatchImportPresentation.shouldReview(requestedInputCount: 8))
     }
 
+    func testVerifiedSingleLineWaitsForExplicitImportConfirmation() {
+        let result = MetadataResolutionResult.verified(
+            VerifiedEnvelope(
+                reference: Reference(title: "Verified"),
+                evidence: EvidenceBundle(
+                    source: .translationServer,
+                    fetchMode: .manual
+                )
+            )
+        )
+
+        XCTAssertEqual(
+            BatchImportPresentation.completionRoute(
+                requestedInputCount: 1,
+                results: [result]
+            ),
+            .awaitVerifiedSingleConfirmation
+        )
+    }
+
+    func testUnresolvedSingleLineKeepsImmediatePendingRoute() {
+        let result = MetadataResolutionResult.seedOnly(
+            IntakeEnvelope(seed: nil, fallbackReference: nil, message: "No match")
+        )
+
+        XCTAssertEqual(
+            BatchImportPresentation.completionRoute(
+                requestedInputCount: 1,
+                results: [result]
+            ),
+            .deliverImmediately
+        )
+    }
+
+    @MainActor
+    func testCancelDuringResolutionRejectsLateBatchAndNextPresentationCanDeliver() {
+        let gate = BatchImportDeliveryGate()
+        let cancelledPresentation = gate.begin()
+
+        gate.cancel()
+
+        XCTAssertFalse(gate.shouldDeliver(cancelledPresentation))
+
+        let laterPresentation = gate.begin()
+        XCTAssertTrue(gate.shouldDeliver(laterPresentation))
+        XCTAssertFalse(gate.shouldDeliver(cancelledPresentation))
+    }
+
     func testManualCandidateSelectionPromotesRejectedResultToVerifiedManual() {
         let evidence = EvidenceBundle(
             source: .translationServer,

@@ -148,6 +148,51 @@ final class MetadataImportReviewContextTests: XCTestCase {
         XCTAssertTrue(try database.fetchPendingMetadataIntakes().isEmpty)
     }
 
+    func testSelectedRowsCommitInInitiatingEntryOrder() async throws {
+        let database = try makeDatabase()
+        let entries = ["First", "Second", "Third"].map {
+            PreparedMetadataImport(input: $0, result: verifiedResult(title: $0))
+        }
+        var committedTitles: [String] = []
+        let context = MetadataImportReviewContext(
+            database: database,
+            entries: entries,
+            committer: { references, _ in
+                committedTitles = references.map(\.title)
+            }
+        )
+
+        _ = await context.commit(selectedIDs: [entries[2].id, entries[0].id])
+
+        XCTAssertEqual(committedTitles, ["First", "Third"])
+    }
+
+    func testAtomicCommitFailureRollsBackEverySelectedReference() async throws {
+        let database = try makeDatabase()
+        try await database.dbWriter.write { db in
+            try db.execute(sql: """
+                CREATE TRIGGER fail_metadata_batch
+                BEFORE INSERT ON reference
+                WHEN NEW.title = 'Second'
+                BEGIN
+                    SELECT RAISE(ABORT, 'injected metadata batch failure');
+                END
+                """)
+        }
+        let entries = ["First", "Second", "Third"].map {
+            PreparedMetadataImport(input: $0, result: verifiedResult(title: $0))
+        }
+        let context = MetadataImportReviewContext(database: database, entries: entries)
+        let selected = Set(entries.map(\.id))
+
+        let report = await context.commit(selectedIDs: selected)
+
+        XCTAssertTrue(report.succeededIDs.isEmpty)
+        XCTAssertEqual(Set(report.failures.keys), selected)
+        XCTAssertEqual(Set(report.failures.values).count, 1)
+        XCTAssertEqual(try database.referenceCount(), 0)
+    }
+
     private func makeDatabase() throws -> AppDatabase {
         try AppDatabase(DatabaseQueue(path: ":memory:"))
     }
