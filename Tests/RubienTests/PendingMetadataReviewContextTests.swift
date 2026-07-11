@@ -6,7 +6,7 @@ import XCTest
 
 @MainActor
 final class PendingMetadataReviewContextTests: XCTestCase {
-    func testDirectlyConfirmableRowsStartSelectedAndCandidateChoiceDoesNotPersist() async throws {
+    func testDurableProposalStartsUnselectedAndCandidateChoiceDoesNotPersist() async throws {
         let database = try makeDatabase()
         let ready = try saveIntake(database, title: "Ready")
         let candidate = MetadataCandidate(
@@ -42,8 +42,8 @@ final class PendingMetadataReviewContextTests: XCTestCase {
         )
         let session = ImportReviewSession(title: "Pending", context: context)
 
-        XCTAssertEqual(session.selectedIDs, [context.items[0].id])
-        XCTAssertEqual(context.items.map(\.readiness), [.ready, .needsCandidate])
+        XCTAssertTrue(session.selectedIDs.isEmpty)
+        XCTAssertEqual(context.items.map(\.readiness), [.needsProposal, .needsCandidate])
 
         let updated = await context.resolveCandidate(
             itemID: context.items[1].id,

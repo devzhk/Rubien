@@ -231,7 +231,7 @@ final class PendingMetadataReviewContext: ImportReviewContext {
         } else if !entry.intake.decodedCandidates.isEmpty {
             readiness = .needsCandidate
         } else if Self.hasUsableTitle(projection.reference) {
-            readiness = .ready
+            readiness = .needsProposal
         } else {
             readiness = entry.intake.verificationStatus == .rejectedAmbiguous ? .failed : .blocked
         }
