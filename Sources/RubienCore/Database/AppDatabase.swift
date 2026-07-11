@@ -1806,22 +1806,60 @@ extension AppDatabase {
         _ intake: MetadataIntake,
         reviewedBy: String?
     ) throws -> Reference {
-        guard var reference = intake.bestAvailableReference else {
+        try confirmMetadataIntake(
+            intake,
+            stagedReference: nil,
+            evidence: nil,
+            reviewedBy: reviewedBy
+        )
+    }
+
+    /// Confirms one durable intake using either its stored snapshot or a
+    /// candidate/proposal that the review UI staged in memory. The intake row
+    /// remains as verified audit history; only pending fetches stop returning
+    /// it after this transaction succeeds.
+    public func confirmMetadataIntake(
+        _ intake: MetadataIntake,
+        stagedReference: Reference?,
+        evidence: EvidenceBundle?,
+        reviewedBy: String?
+    ) throws -> Reference {
+        guard let intakeID = intake.id else {
             throw NSError(
                 domain: "Rubien.MetadataIntake",
                 code: 1,
-                userInfo: [NSLocalizedDescriptionKey: "Pending intake has no metadata snapshot to confirm."]
+                userInfo: [NSLocalizedDescriptionKey: "Pending intake has not been saved."]
             )
         }
 
-        reference = MetadataVerifier.manuallyVerified(reference, reviewedBy: reviewedBy)
+        return try dbWriter.write { db in
+            guard var storedIntake = try MetadataIntake.fetchOne(db, id: intakeID),
+                  !storedIntake.verificationStatus.isLibraryReady else {
+                throw NSError(
+                    domain: "Rubien.MetadataIntake",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Pending intake is no longer available for confirmation."]
+                )
+            }
+            guard var reference = stagedReference ?? storedIntake.bestAvailableReference,
+                  reference.title.rubien_nilIfBlank != nil else {
+                throw NSError(
+                    domain: "Rubien.MetadataIntake",
+                    code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "Pending intake has no usable metadata snapshot to confirm."]
+                )
+            }
 
-        try dbWriter.write { db in
+            reference = MetadataVerifier.manuallyVerified(
+                reference,
+                evidence: evidence,
+                reviewedBy: reviewedBy
+            )
             try normalizeForDirectLibrarySave(&reference)
             try ensureLibraryReady(reference)
             try saveResolvedReference(
                 &reference,
-                linkedReferenceId: intake.linkedReferenceId,
+                linkedReferenceId: storedIntake.linkedReferenceId,
                 db: db
             )
 
@@ -1829,7 +1867,7 @@ extension AppDatabase {
             // table still keeps its own pdfPath column — that's its handoff
             // medium during candidate review; we promote it to the cache when
             // the user confirms.
-            if let pdfPath = intake.pdfPath?.rubien_nilIfBlank,
+            if let pdfPath = storedIntake.pdfPath?.rubien_nilIfBlank,
                let savedId = reference.id {
                 try attachPDFInTransaction(
                     referenceId: savedId,
@@ -1838,17 +1876,23 @@ extension AppDatabase {
                 )
             }
 
-            if var storedIntake = try MetadataIntake.fetchOne(db, id: intake.id) {
-                storedIntake.verificationStatus = .verifiedManual
-                storedIntake.linkedReferenceId = reference.id
-                storedIntake.currentReferenceJSON = MetadataVerificationCodec.encodeToJSONString(reference)
-                storedIntake.updatedAt = Date()
-                storedIntake.statusMessage = "Manually confirmed and added to library"
-                try storedIntake.save(db)
-            }
-        }
+            storedIntake.verificationStatus = .verifiedManual
+            storedIntake.linkedReferenceId = reference.id
+            storedIntake.currentReferenceJSON = MetadataVerificationCodec.encodeToJSONString(reference)
+            storedIntake.evidenceBundleHash = evidence?.bundleHash ?? reference.evidenceBundleHash
+            storedIntake.updatedAt = Date()
+            storedIntake.statusMessage = "Manually confirmed and added to library"
+            try storedIntake.save(db)
 
-        return reference
+            try upsertEvidence(
+                bundle: evidence,
+                intakeId: intakeID,
+                referenceId: reference.id,
+                db: db
+            )
+
+            return reference
+        }
     }
 
     /// Result ordering for `fetchReferences`. The live library feed is chronological;

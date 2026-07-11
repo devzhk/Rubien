@@ -4,6 +4,7 @@ import RubienCore
 
 struct ImportReviewSheet: View {
     @ObservedObject var session: ImportReviewSession
+    var onDelete: ((UUID) -> Bool)? = nil
 
     @Environment(\.dismiss) private var dismiss
     @State private var candidateContext: CandidateContext?
@@ -91,33 +92,60 @@ struct ImportReviewSheet: View {
 
     @ViewBuilder
     private func rowAction(_ item: ImportReviewItem) -> some View {
-        if item.isWorking {
-            ProgressView()
-                .controlSize(.small)
-        } else {
-            switch item.readiness {
-            case .ready:
-                EmptyView()
-            case .needsCandidate:
-                Button(String(localized: "Choose match…", bundle: .module)) {
-                    candidateContext = CandidateContext(id: item.id)
+        HStack(spacing: 8) {
+            if item.isWorking {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                switch item.readiness {
+                case .ready:
+                    EmptyView()
+                case .needsCandidate:
+                    Button(String(localized: "Choose match…", bundle: .module)) {
+                        candidateContext = CandidateContext(id: item.id)
+                    }
+                    .buttonStyle(SLSecondaryButtonStyle())
+                    .controlSize(.small)
+                    .disabled(session.isBusy)
+                case .needsProposal:
+                    Button(String(localized: "Use proposed metadata", bundle: .module)) {
+                        session.useProposedMetadata(itemID: item.id)
+                    }
+                    .buttonStyle(SLSecondaryButtonStyle())
+                    .controlSize(.small)
+                    .disabled(session.isBusy)
+                case .blocked, .failed:
+                    if onDelete == nil {
+                        Button(String(localized: "pendingQueue.button.retry", bundle: .module)) {
+                            Task { await session.retry(itemID: item.id) }
+                        }
+                        .buttonStyle(SLSecondaryButtonStyle())
+                        .controlSize(.small)
+                        .disabled(session.isBusy)
+                    }
                 }
-                .buttonStyle(SLSecondaryButtonStyle())
-                .controlSize(.small)
-                .disabled(session.isBusy)
-            case .needsProposal:
-                Button(String(localized: "Use proposed metadata", bundle: .module)) {
-                    session.useProposedMetadata(itemID: item.id)
+            }
+
+            if let onDelete {
+                Menu {
+                    Button(String(localized: "pendingQueue.button.retry", bundle: .module)) {
+                        Task { await session.retry(itemID: item.id) }
+                    }
+                    Divider()
+                    Button(
+                        String(localized: "pendingQueue.button.delete", bundle: .module),
+                        role: .destructive
+                    ) {
+                        if onDelete(item.id) {
+                            session.removeItem(itemID: item.id)
+                        }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .foregroundStyle(.secondary)
                 }
-                .buttonStyle(SLSecondaryButtonStyle())
-                .controlSize(.small)
-                .disabled(session.isBusy)
-            case .blocked, .failed:
-                Button(String(localized: "pendingQueue.button.retry", bundle: .module)) {
-                    Task { await session.retry(itemID: item.id) }
-                }
-                .buttonStyle(SLSecondaryButtonStyle())
-                .controlSize(.small)
+                .menuStyle(.borderlessButton)
+                .fixedSize()
                 .disabled(session.isBusy)
             }
         }

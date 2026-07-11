@@ -610,21 +610,15 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
-    func confirmPendingMetadataIntake(_ intake: MetadataIntake, reviewedBy: String = "manual-queue") -> Reference? {
-        do {
-            return try db.confirmMetadataIntake(intake, reviewedBy: reviewedBy)
-        } catch {
-            errorMessage = "Manual verification failed: \(error.localizedDescription)"
-            return nil
-        }
-    }
-
-    func deletePendingMetadataIntake(_ intake: MetadataIntake) {
-        guard let id = intake.id else { return }
+    @discardableResult
+    func deletePendingMetadataIntake(_ intake: MetadataIntake) -> Bool {
+        guard let id = intake.id else { return false }
         do {
             try db.deleteMetadataIntake(id: id)
+            return true
         } catch {
             errorMessage = "Delete failed: \(error.localizedDescription)"
+            return false
         }
     }
 
@@ -1326,25 +1320,11 @@ struct ContentView: View {
             pendingMetadataReviewIDs = nil
         }) {
             PendingMetadataQueueView(
+                database: viewModel.db,
                 intakes: pendingMetadataIntakesForReview,
                 resolver: metadataResolver,
-                onPersistResult: { result, intake in
-                    queueResolutionResult(
-                        result,
-                        options: MetadataPersistenceOptions(
-                            sourceKind: intake.sourceKind,
-                            originalInput: intake.originalInput,
-                            preferredPDFPath: intake.pdfPath,
-                            linkedReferenceId: intake.linkedReferenceId,
-                            existingIntakeId: intake.id
-                        ),
-                        successMessage: nil
-                    )
-                },
-                onConfirmManual: { intake in
-                    if let reference = viewModel.confirmPendingMetadataIntake(intake) {
-                        selectedId = reference.id
-                    }
+                onConfirmed: { reference in
+                    selectedId = reference.id
                 },
                 onDelete: { intake in
                     viewModel.deletePendingMetadataIntake(intake)

@@ -397,6 +397,81 @@ final class AppDatabaseTests: XCTestCase {
         XCTAssertEqual(refreshed.verificationStatus, .verifiedManual)
     }
 
+    func testConfirmMetadataIntakeUsesStagedReferenceAndRetainsVerifiedAuditRow() throws {
+        let db = try makeDatabase()
+        let fallback = Reference(title: "Fallback")
+        var intake = MetadataIntake(
+            sourceKind: .importedPDF,
+            verificationStatus: .candidate,
+            title: fallback.title,
+            pdfPath: "PDFs/staged.pdf",
+            fallbackReferenceJSON: MetadataVerificationCodec.encodeToJSONString(fallback)
+        )
+        try db.saveMetadataIntake(&intake)
+        let staged = Reference(
+            title: "Chosen candidate",
+            authors: [AuthorName(given: "Ada", family: "Lovelace")]
+        )
+        let evidence = makeEvidence(
+            recordKey: "candidate:chosen",
+            sourceURL: "https://example.com/chosen",
+            fetchMode: .manual
+        )
+
+        let reference = try db.confirmMetadataIntake(
+            intake,
+            stagedReference: staged,
+            evidence: evidence,
+            reviewedBy: "candidate-selection"
+        )
+
+        XCTAssertEqual(reference.title, "Chosen candidate")
+        XCTAssertEqual(reference.reviewedBy, "candidate-selection")
+        XCTAssertTrue(try db.fetchPendingMetadataIntakes().isEmpty)
+        XCTAssertEqual(try db.pdfFilename(for: try XCTUnwrap(reference.id)), "PDFs/staged.pdf")
+
+        let intakeID = try XCTUnwrap(intake.id)
+        let stored = try XCTUnwrap(try db.dbWriter.read { database in
+            try MetadataIntake.fetchOne(database, id: intakeID)
+        })
+        XCTAssertEqual(stored.verificationStatus, .verifiedManual)
+        XCTAssertEqual(stored.linkedReferenceId, reference.id)
+        XCTAssertEqual(stored.decodedCurrentReference?.title, "Chosen candidate")
+        XCTAssertEqual(stored.evidenceBundleHash, evidence.bundleHash)
+        let storedEvidence = try db.dbWriter.read { database in
+            try MetadataEvidence
+                .filter(MetadataEvidence.Columns.intakeId == intakeID)
+                .fetchOne(database)
+        }
+        XCTAssertEqual(storedEvidence?.referenceId, reference.id)
+        XCTAssertEqual(storedEvidence?.decodedBundle?.bundleHash, evidence.bundleHash)
+        XCTAssertEqual(storedEvidence?.decodedBundle?.recordKey, evidence.recordKey)
+    }
+
+    func testConfirmMetadataIntakeRejectsMissingDurableIntakeWithoutWritingReference() throws {
+        let db = try makeDatabase()
+        let missing = MetadataIntake(
+            id: 404,
+            sourceKind: .manualEntry,
+            verificationStatus: .candidate,
+            title: "Missing",
+            fallbackReferenceJSON: MetadataVerificationCodec.encodeToJSONString(
+                Reference(title: "Missing")
+            )
+        )
+
+        XCTAssertThrowsError(
+            try db.confirmMetadataIntake(
+                missing,
+                stagedReference: Reference(title: "Should not be written"),
+                evidence: nil,
+                reviewedBy: "candidate-selection"
+            )
+        )
+        XCTAssertEqual(try db.referenceCount(), 0)
+        XCTAssertTrue(try db.fetchPendingMetadataIntakes().isEmpty)
+    }
+
     // MARK: - Fetch All
 
     func testFetchAllReferences() throws {

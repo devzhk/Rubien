@@ -162,6 +162,15 @@ final class ImportReviewSession: ObservableObject, Identifiable {
         context.discard(remainingIDs: Set(items.map(\.id)))
     }
 
+    /// Removes a durable queue row after an explicit Delete action. This is
+    /// intentionally separate from discard, which must preserve unselected
+    /// pending metadata when the sheet closes.
+    func removeItem(itemID: UUID) {
+        guard !isBusy, !didDiscard else { return }
+        items.removeAll { $0.id == itemID }
+        selectedIDs.remove(itemID)
+    }
+
     private func beginRowAction(itemID: UUID) -> Bool {
         guard !isBusy,
               !didDiscard,
