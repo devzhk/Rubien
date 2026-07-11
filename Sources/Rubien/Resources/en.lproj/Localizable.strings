@@ -71,6 +71,18 @@
 "pendingQueue.button.delete" = "Remove";
 "pendingQueue.notice.title" = "Needs review";
 
+// MARK: - Batch import review
+
+"%d selected" = "%d selected";
+"Select all ready" = "Select all ready";
+"Select none" = "Select none";
+"Confirm %d selected" = "Confirm %d selected";
+"Choose match…" = "Choose match…";
+"Use proposed metadata" = "Use proposed metadata";
+"Select import item" = "Select import item";
+"Deselect import item" = "Deselect import item";
+"Choose the metadata match for this import. Nothing is saved until you confirm the selected batch." = "Choose the metadata match for this import. Nothing is saved until you confirm the selected batch.";
+
 // MARK: - Content view / main shell
 
 "content.toolbar.add" = "Add";
