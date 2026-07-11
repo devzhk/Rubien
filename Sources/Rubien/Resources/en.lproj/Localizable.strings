@@ -44,6 +44,16 @@
 "batchImport.result.queued" = "Queued for review";
 "batchImport.result.failed" = "Failed";
 
+// MARK: - Import source sheet
+
+"importSourceSheet.title" = "Import PDF/Markdown";
+"importSourceSheet.field.placeholder" = "Paste a file path or a URL to a PDF/Markdown file";
+"importSourceSheet.button.choose" = "Choose…";
+"importSourceSheet.button.import" = "Import";
+"importSourceSheet.selection.multiple" = "%d files selected";
+"importSourceSheet.status.preparing" = "Preparing import…";
+"importSourceSheet.error.acquisition" = "Unable to prepare import: %@";
+
 // MARK: - Metadata candidate picker
 
 "candidatePicker.title" = "Choose a match";
@@ -60,6 +70,21 @@
 "pendingQueue.button.confirm" = "Confirm manually";
 "pendingQueue.button.delete" = "Remove";
 "pendingQueue.notice.title" = "Needs review";
+
+// MARK: - Batch import review
+
+"%d selected" = "%d selected";
+"Select all importable" = "Select all importable";
+"Select none" = "Select none";
+"Confirm %d selected" = "Confirm %d selected";
+"Choose match…" = "Choose match…";
+"Review file import" = "Review file import";
+"Could not read this Markdown file." = "Could not read this Markdown file.";
+"zoteroImport.attachmentNotFound" = "PDF not found: %@";
+"Use selected match" = "Use selected match";
+"Select import item" = "Select import item";
+"Deselect import item" = "Deselect import item";
+"Choose the metadata match for this import. Nothing is saved until you confirm the selected batch." = "Choose the metadata match for this import. Nothing is saved until you confirm the selected batch.";
 
 // MARK: - Content view / main shell
 
@@ -131,3 +156,4 @@
 "Edit authors" = "Edit authors";
 "Edit abstract" = "Edit abstract";
 "Edit notes" = "Edit notes";
+"importReview.error.proposalAcceptance" = "Unable to accept the proposed metadata.";

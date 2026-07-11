@@ -48,7 +48,7 @@ Linux needs system deps first — see [Linux CLI](../README.md#linux-cli). For d
 | `update` | Update fields on an existing reference |
 | `delete` | Delete references by ID |
 | `cite` | Generate formatted citations |
-| `import` | Import from a BibTeX, RIS, or Markdown file, or a Zotero / Markdown folder |
+| `import` | Import from a BibTeX, RIS, Markdown, or PDF file; a direct PDF/Markdown URL; or a Zotero / Markdown folder |
 | `export` | Export references as JSON, BibTeX, or RIS |
 | `properties` | List or manage property definitions, options, and per-reference values (covers tags via the built-in `Tags` property) |
 | `annotations` | List PDF annotations for a reference |
@@ -253,7 +253,7 @@ rubien-cli cite 42 43 --style ieee --format bibliography
 
 ## import
 
-Import references from a BibTeX (`.bib`), RIS (`.ris`), or Markdown (`.md`) file; or from a Zotero "Export Collection… with files" folder or a folder of Markdown files. Use `"-"` to read from stdin (pass `--format`).
+Import references from a BibTeX (`.bib`), RIS (`.ris`), Markdown (`.md` / `.markdown`), or PDF (`.pdf`) file; from a direct HTTP(S) PDF/Markdown file URL; or from a Zotero "Export Collection… with files" folder or a folder of Markdown files. Use `"-"` to read from stdin (pass `--format`).
 
 ```bash
 rubien-cli import references.bib
@@ -262,6 +262,11 @@ cat paper.ris | rubien-cli import - --format ris
 # Markdown note or Obsidian Web Clipper file
 rubien-cli import "Solving OPSD.md"
 cat note.md | rubien-cli import - --format md
+
+# Local PDF or a direct PDF/Markdown URL
+rubien-cli import ./papers/attention-is-all-you-need.pdf
+rubien-cli import https://arxiv.org/pdf/1706.03762.pdf
+rubien-cli import https://example.com/notes/reading-list.markdown
 
 # Zotero folder (a directory containing one .bib plus files/NNN/*.pdf)
 rubien-cli import ~/Downloads/RL
@@ -274,12 +279,25 @@ rubien-cli import ~/Obsidian/Clippings --property Tags --value reading-list
 
 | Argument / Option | Type | Description |
 |---|---|---|
-| `file` | String (required) | File path, folder path, or `"-"` for stdin |
-| `--format` | String | Format hint: `bib`, `ris`, or `md`. Required for stdin; also forces folder routing (see below) |
+| `file` | String (required) | Local file/folder path, direct HTTP(S) URL with a `.pdf`, `.md`, or `.markdown` path extension, or `"-"` for stdin |
+| `--format` | String | Format hint: `bib`, `ris`, or `md`. Required for stdin; also forces folder routing (see below). It cannot override a direct URL's extension. |
 | `--property` | String | Folder import only: property name to stamp (default `Tags`) |
 | `--value` | String | Folder import only: value to stamp (default: folder basename) |
 
-File size limit (single-file, and per file inside a folder): 50 MB; input must be UTF-8. When reading from stdin, `--format` is required.
+Text-file size limit (single-file, and per file inside a folder): 50 MB; text input must be UTF-8. When reading from stdin, `--format` is required.
+
+### PDF files and direct URLs
+
+Local PDF paths may be relative to the current working directory. A direct URL must use `http` or `https` and have a `.pdf`, `.md`, or `.markdown` path extension; Rubien validates the response before importing it. Public GitHub `/blob/` file links are converted to GitHub's raw download before normal validation; private or authenticated links may still fail because Rubien does not add GitHub credentials. PDF responses require a 2xx status and PDF magic bytes; `application/pdf` is accepted, as is `application/octet-stream` for a `.pdf` URL. Markdown responses require a compatible text content type, valid UTF-8, and a 50 MB maximum.
+
+PDFs enter the same metadata verification pipeline as the app. A completed import reports the normal count/file fields plus `status: "imported"`; an unresolved result is retained in the pending-metadata queue and reports `status: "queued"` with `intakeId`:
+
+```json
+{"file":"./paper.pdf","imported":"1","status":"imported"}
+{"file":"https://example.com/paper.pdf","imported":"1","status":"queued","intakeId":42}
+```
+
+Acquisition and validation errors exit non-zero and write the standard JSON error envelope to stderr, for example `{"error":"Unsupported import file type: .html"}`. URL downloads are temporary and are removed after the import completes or fails.
 
 ### Markdown files
 

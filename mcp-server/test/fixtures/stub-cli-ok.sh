@@ -1,2 +1,2 @@
 #!/bin/sh
-echo '{"version":"0.1.7","build":8}'
+echo '{"version":"0.2.3","build":19}'

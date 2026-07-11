@@ -6,6 +6,7 @@ struct MetadataCandidatePickerView: View {
     var title: String = String(localized: "candidatePicker.title", bundle: .module)
     var message: String = String(localized: "candidatePicker.subtitle", bundle: .module)
     var skipLabel: String = String(localized: "candidatePicker.button.skip", bundle: .module)
+    var confirmLabel: String = String(localized: "Import selected", bundle: .module)
     let candidates: [MetadataCandidate]
     var assessmentByCandidateID: [MetadataCandidate.ID: ManualCandidateImportAssessment] = [:]
     let onImportSelected: (MetadataCandidate) -> Void
@@ -140,7 +141,7 @@ struct MetadataCandidatePickerView: View {
 
                 Button(skipLabel, action: onSkip)
 
-                Button(String(localized: "Import selected", bundle: .module)) {
+                Button(confirmLabel) {
                     guard let selectedCandidate else { return }
                     onImportSelected(selectedCandidate)
                 }

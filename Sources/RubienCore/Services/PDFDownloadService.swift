@@ -45,24 +45,39 @@ public enum PDFDownloadService {
         throw DownloadError.noIdentifier
     }
 
-    public static func download(from remote: URL, suggestedFilename: String) async throws -> String {
-        let (tempURL, response) = try await URLSession.shared.download(from: remote)
+    /// Downloads and validates a PDF into a caller-owned temporary directory.
+    /// The returned file is never placed in Rubien's permanent PDF storage.
+    public static func downloadTemporary(
+        from remote: URL,
+        suggestedFilename: String,
+        destinationDirectory: URL,
+        session: URLSession = .shared
+    ) async throws -> URL {
+        let (tempURL, response) = try await session.download(from: remote)
 
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             try? FileManager.default.removeItem(at: tempURL)
             throw DownloadError.httpFailure(http.statusCode)
         }
 
-        // Content-Type must claim PDF. The previous OR-on-pathExtension shortcut
-        // let bioRxiv withdrawal pages (HTML served at `.full.pdf` with 200) save
-        // as fake PDFs. URLSession.shared.download transparently handles
-        // Content-Encoding (gzip/br), so the downloaded body is already decoded.
-        // Media types are case-insensitive per RFC 7231 §3.1.1.1; lowercase
-        // before matching so `Application/PDF` and friends aren't rejected.
-        let contentType = (response as? HTTPURLResponse)?
+        // Content-Type must identify PDF, or be the generic binary type from
+        // a `.pdf` endpoint (as GitHub raw files do); it still must pass the PDF
+        // magic-byte check below. This avoids the former OR-on-pathExtension
+        // shortcut, which let bioRxiv withdrawal pages (HTML served at
+        // `.full.pdf` with 200) save as fake PDFs. URLSession.shared.download
+        // transparently handles Content-Encoding (gzip/br), so the downloaded
+        // body is already decoded. Media types are case-insensitive per RFC
+        // 7231 §3.1.1.1; normalize the media type (not its parameters) so
+        // lookalikes such as `application/pdf-malformed` cannot pass.
+        let mediaType = (response as? HTTPURLResponse)?
             .value(forHTTPHeaderField: "Content-Type")?
+            .split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false)
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased() ?? ""
-        if !contentType.contains("application/pdf") {
+        let isGenericPDFDownload = mediaType == "application/octet-stream"
+            && remote.pathExtension.caseInsensitiveCompare("pdf") == .orderedSame
+        guard mediaType == "application/pdf" || isGenericPDFDownload else {
             try? FileManager.default.removeItem(at: tempURL)
             throw DownloadError.notAPDF
         }
@@ -75,19 +90,47 @@ public enum PDFDownloadService {
             throw DownloadError.notAPDF
         }
 
+        let destinationURL = destinationDirectory.appendingPathComponent(
+            temporaryFilename(from: suggestedFilename)
+        )
+        do {
+            try FileManager.default.createDirectory(
+                at: destinationDirectory,
+                withIntermediateDirectories: true
+            )
+            try FileManager.default.moveItem(at: tempURL, to: destinationURL)
+            return destinationURL
+        } catch {
+            try? FileManager.default.removeItem(at: tempURL)
+            throw DownloadError.writeFailed(error)
+        }
+    }
+
+    public static func download(from remote: URL, suggestedFilename: String) async throws -> String {
+        let fileManager = FileManager.default
+        let stagingDirectory = fileManager.temporaryDirectory
+            .appendingPathComponent("RubienPDFDownload-\(UUID().uuidString)", isDirectory: true)
+
+        defer { try? fileManager.removeItem(at: stagingDirectory) }
+
+        let tempURL = try await downloadTemporary(
+            from: remote,
+            suggestedFilename: suggestedFilename,
+            destinationDirectory: stagingDirectory
+        )
+
         let sanitized = suggestedFilename
             .replacingOccurrences(of: #"[^a-zA-Z0-9._-]"#, with: "_", options: .regularExpression)
         let fileName = "\(UUID().uuidString)_\(sanitized).pdf"
         let destURL = AppDatabase.pdfStorageURL.appendingPathComponent(fileName)
 
         do {
-            try FileManager.default.createDirectory(
+            try fileManager.createDirectory(
                 at: AppDatabase.pdfStorageURL,
                 withIntermediateDirectories: true
             )
-            try FileManager.default.moveItem(at: tempURL, to: destURL)
+            try fileManager.moveItem(at: tempURL, to: destURL)
         } catch {
-            try? FileManager.default.removeItem(at: tempURL)
             throw DownloadError.writeFailed(error)
         }
 
@@ -144,6 +187,13 @@ public enum PDFDownloadService {
         defer { try? handle.close() }
         let head = (try? handle.read(upToCount: 4)) ?? Data()
         return head == Data([0x25, 0x50, 0x44, 0x46]) // %PDF
+    }
+
+    /// Keep the caller's basename for temporary files while preventing a
+    /// caller-supplied path from escaping the requested destination directory.
+    private static func temporaryFilename(from suggestedFilename: String) -> String {
+        let basename = (suggestedFilename as NSString).lastPathComponent
+        return basename.isEmpty || basename == "." || basename == "/" ? "download.pdf" : basename
     }
 
     // MARK: - Internal (testable)

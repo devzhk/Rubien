@@ -1,6 +1,32 @@
 import Foundation
 import RubienCore
 
+public struct ZoteroFolderImportPlan: Sendable {
+    public struct Entry: Identifiable, Sendable {
+        public let id: UUID
+        public let sourceIndex: Int
+        public let reference: Reference
+        public let attachmentPaths: [String]
+        public let rejectedAttachmentPaths: [String]
+        public let missingAttachmentPaths: [String]
+
+        fileprivate init(sourceIndex: Int, entry: BibTeXEntry, folderURL: URL) {
+            self.id = UUID()
+            self.sourceIndex = sourceIndex
+            self.reference = entry.reference
+            self.attachmentPaths = entry.attachmentPaths
+            self.rejectedAttachmentPaths = entry.rejectedAttachmentPaths
+            self.missingAttachmentPaths = entry.attachmentPaths.filter {
+                !FileManager.default.fileExists(atPath: folderURL.appendingPathComponent($0).path)
+            }
+        }
+    }
+
+    public let folderURL: URL
+    public let propertyTarget: ZoteroImportPropertyTarget?
+    public let entries: [Entry]
+}
+
 /// Imports a Zotero "Export Collection… with files" folder into Rubien:
 /// parses the bundled `.bib`, copies referenced PDFs into the PDF store,
 /// inserts/merges the references, and optionally stamps a property value
@@ -35,6 +61,19 @@ public enum ZoteroFolderImporter {
         db: AppDatabase,
         propertyTarget: ZoteroImportPropertyTarget?
     ) throws -> Result {
+        let plan = try prepareFolder(at: folderURL, db: db, propertyTarget: propertyTarget)
+        return try commit(
+            plan: plan,
+            selectedEntryIDs: Set(plan.entries.map(\.id)),
+            db: db
+        )
+    }
+
+    public static func prepareFolder(
+        at folderURL: URL,
+        db: AppDatabase,
+        propertyTarget: ZoteroImportPropertyTarget?
+    ) throws -> ZoteroFolderImportPlan {
 #if canImport(Darwin)
         let accessing = folderURL.startAccessingSecurityScopedResource()
         defer { if accessing { folderURL.stopAccessingSecurityScopedResource() } }
@@ -48,14 +87,39 @@ public enum ZoteroFolderImporter {
             throw Error.bibReadFailed(bibURL, underlying: error)
         }
 
-        // Fail fast on a bad property target BEFORE we start copying PDFs —
-        // otherwise e.g. `--property Year` throws `unsupportedPropertyType` from
-        // inside the write transaction and leaves orphan files on disk.
-        if let target = propertyTarget {
-            try db.validatePropertyTarget(target)
+        // Preserve the immediate import's error ordering while still rejecting
+        // a bad target before review begins or any PDFs can be copied.
+        if let propertyTarget {
+            try db.validatePropertyTarget(propertyTarget)
         }
 
         let entries = BibTeXImporter.parseWithAttachments(content)
+        return ZoteroFolderImportPlan(
+            folderURL: folderURL,
+            propertyTarget: propertyTarget,
+            entries: entries.enumerated().map { index, entry in
+                ZoteroFolderImportPlan.Entry(
+                    sourceIndex: index,
+                    entry: entry,
+                    folderURL: folderURL
+                )
+            }
+        )
+    }
+
+    public static func commit(
+        plan: ZoteroFolderImportPlan,
+        selectedEntryIDs: Set<UUID>,
+        db: AppDatabase
+    ) throws -> Result {
+#if canImport(Darwin)
+        let accessing = plan.folderURL.startAccessingSecurityScopedResource()
+        defer { if accessing { plan.folderURL.stopAccessingSecurityScopedResource() } }
+#endif
+
+        let entries = plan.entries
+            .filter { selectedEntryIDs.contains($0.id) }
+            .sorted { $0.sourceIndex < $1.sourceIndex }
         guard !entries.isEmpty else {
             return Result(imported: 0, attached: 0, missingPDFs: [], duplicatesSkipped: 0)
         }
@@ -98,7 +162,7 @@ public enum ZoteroFolderImporter {
 
             var copiedThisRow: String? = nil
             if shouldCopy, let relPath = entry.attachmentPaths.first {
-                let sourceURL = folderURL.appendingPathComponent(relPath)
+                let sourceURL = plan.folderURL.appendingPathComponent(relPath)
                 if FileManager.default.fileExists(atPath: sourceURL.path) {
                     do {
                         let stored = try PDFService.importPDF(from: sourceURL)
@@ -126,7 +190,7 @@ public enum ZoteroFolderImporter {
         do {
             outcome = try db.batchImportReferences(
                 prepared,
-                stamping: propertyTarget,
+                stamping: plan.propertyTarget,
                 pdfFilenames: copiedFilenames
             )
         } catch {

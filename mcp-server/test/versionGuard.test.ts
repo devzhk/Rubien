@@ -7,10 +7,11 @@ describe("evaluateCliVersion", () => {
     expect(r.ok).toBe(true);
   });
 
-  it("rejects a build below the floor with a remediation message", () => {
-    const r = evaluateCliVersion({ version: "0.1.6", build: MIN_CLI_BUILD - 1 }, MIN_CLI_BUILD);
+  it("rejects build 18 because it predates direct URL imports", () => {
+    const r = evaluateCliVersion({ version: "0.2.3", build: 18 }, MIN_CLI_BUILD);
     expect(r.ok).toBe(false);
-    expect(r.message).toContain(String(MIN_CLI_BUILD));
+    expect(r.message).toContain("build 18");
+    expect(r.message).toContain(">= 19");
     expect(r.message).toMatch(/Update Rubien\.app|download a newer rubien-cli/i);
   });
 

@@ -36,6 +36,16 @@ describe("rubien_import", () => {
     expect(schema).not.toContain("Zotero folder only");
   });
 
+  it("advertises absolute paths or direct HTTP(S) URLs for PDF and Markdown imports", async () => {
+    const client = await connectedClient();
+    const tools = await client.listTools();
+    const importTool = tools.tools.find((t) => t.name === "rubien_import");
+    expect(importTool).toBeDefined();
+    const schema = JSON.stringify(importTool!.inputSchema);
+    expect(schema).toContain("HTTP(S) URL");
+    expect(schema).toContain(".pdf");
+  });
+
   it("forwards format/property/value to the CLI", async () => {
     const client = await connectedClient();
     await client.callTool({
@@ -49,6 +59,21 @@ describe("rubien_import", () => {
     });
     expect(vi.mocked(runCliAsTool)).toHaveBeenCalledWith(
       ["import", "/tmp/Clippings", "--format", "md", "--property", "Tags", "--value", "Clippings"],
+      expect.anything(),
+    );
+  });
+
+  it("forwards a direct HTTPS PDF URL verbatim to the CLI", async () => {
+    const client = await connectedClient();
+    const source = "https://example.com/papers/direct-source.pdf";
+
+    await client.callTool({
+      name: "rubien_import",
+      arguments: { file: source },
+    });
+
+    expect(vi.mocked(runCliAsTool)).toHaveBeenLastCalledWith(
+      ["import", source],
       expect.anything(),
     );
   });

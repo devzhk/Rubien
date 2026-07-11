@@ -936,13 +936,13 @@ struct Cite: ParsableCommand {
     }
 }
 
-struct Import: ParsableCommand {
+struct Import: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "import",
-        abstract: "Import references from a BibTeX/RIS/Markdown file, a Zotero or markdown folder (use '-' for stdin)"
+        abstract: "Import references from BibTeX/RIS/Markdown files, PDFs, folders, or direct HTTP(S) file URLs (use '-' for stdin)"
     )
 
-    @Argument(help: "Path to a .bib, .ris, or .md file, a Zotero export folder (containing a .bib + files/ tree), or '-' to read from stdin")
+    @Argument(help: "Path to a .bib, .ris, .md, or .pdf file; a Zotero export folder; a direct HTTP(S) URL with a .pdf, .md, or .markdown path extension; or '-' to read from stdin")
     var file: String
 
     @Option(name: .long, help: "Format hint when reading from stdin: bib, ris, md")
@@ -954,9 +954,9 @@ struct Import: ParsableCommand {
     @Option(name: .long, help: "When importing a Zotero or markdown folder: value to stamp on the property (default: folder basename)")
     var value: String?
 
-    func run() throws {
+    func run() async throws {
         // Folder path → route by contents (spec §5).
-        if file != "-" {
+        if file != "-", Self.hasURLScheme(file) == false {
             var isDir: ObjCBool = false
             if FileManager.default.fileExists(atPath: file, isDirectory: &isDir), isDir.boolValue {
                 let folderURL = URL(fileURLWithPath: file)
@@ -1006,6 +1006,14 @@ struct Import: ParsableCommand {
                     throw ExitCode.failure
                 }
             }
+        }
+
+        // PDFs and direct file URLs share the validated source-acquisition
+        // path. URL classification happens before `--format` is considered,
+        // so a format hint can never turn an arbitrary URL into an import.
+        if Self.shouldMaterializeImportSource(file, format: format) {
+            try await runMaterializedSourceImport()
+            return
         }
 
         // File or stdin → existing BibTeX/RIS path.
@@ -1063,6 +1071,131 @@ struct Import: ParsableCommand {
         let count = try AppDatabase.shared.batchImportReferences(refs, mergePolicy: mergePolicy).count
         notifyLibraryChanged()
         printJSON(["imported": "\(count)", "file": file])
+    }
+
+    private struct PDFImportOutput: Encodable {
+        let imported: String
+        let file: String
+        let status: String
+        let intakeId: Int64?
+    }
+
+    /// Tests whether the argument is intended as a URL without treating it as
+    /// a local path. Only explicit `scheme://` syntax counts: a bare `scheme:`
+    /// prefix would misroute legal POSIX filenames whose relative form starts
+    /// with `name:` (`notes:2026.md` parses as scheme "notes"). Unsupported
+    /// `scheme://` inputs still deliberately take the materializer route so
+    /// users receive its clear JSON error rather than a local-path failure.
+    private static func hasURLScheme(_ input: String) -> Bool {
+        guard let scheme = URL(string: input)?.scheme else { return false }
+        return input.prefix(scheme.count + 3).lowercased() == scheme.lowercased() + "://"
+    }
+
+    /// Local Markdown remains compatible with its existing `--format` file
+    /// override. Direct URLs always use their validated extension-derived kind
+    /// and therefore cannot be reclassified by `--format`.
+    private static func shouldMaterializeImportSource(_ input: String, format: String?) -> Bool {
+        guard input != "-" else { return false }
+        if hasURLScheme(input) { return true }
+
+        let ext = URL(fileURLWithPath: input).pathExtension.lowercased()
+        switch ext {
+        case "pdf":
+            return true
+        case "md", "markdown":
+            guard let format else { return true }
+            return ["md", "markdown"].contains(format.lowercased())
+        default:
+            return false
+        }
+    }
+
+    private func runMaterializedSourceImport() async throws {
+        let workingDirectory = URL(
+            fileURLWithPath: FileManager.default.currentDirectoryPath,
+            isDirectory: true
+        )
+        let source: MaterializedImportSource
+        do {
+            source = try await ImportSourceMaterializer.materialize(
+                file,
+                localPathPolicy: .resolveRelative(to: workingDirectory)
+            )
+        } catch {
+            printJSONError(error.localizedDescription)
+            throw ExitCode.failure
+        }
+        defer { source.cleanup() }
+
+        switch source.kind {
+        case .markdown:
+            try runMaterializedMarkdownImport(source)
+        case .pdf:
+            try await runMaterializedPDFImport(source)
+        }
+    }
+
+    private func runMaterializedMarkdownImport(_ source: MaterializedImportSource) throws {
+        let content: String
+        do {
+            content = try String(contentsOf: source.fileURL, encoding: .utf8)
+        } catch {
+            printJSONError("Cannot read \(source.fileURL.lastPathComponent): \(error.localizedDescription)")
+            throw ExitCode.failure
+        }
+
+        do {
+            let reference = MarkdownImporter.parse(
+                content,
+                filename: source.fileURL.deletingPathExtension().lastPathComponent
+            )
+            let count = try AppDatabase.shared.batchImportReferences(
+                [reference],
+                mergePolicy: .markdownFillOnly
+            ).count
+            notifyLibraryChanged()
+            // Preserve the legacy Markdown envelope, including the caller's
+            // original relative path or URL rather than the temporary file.
+            printJSON(["imported": "\(count)", "file": file])
+        } catch let error as ExitCode {
+            throw error
+        } catch {
+            printJSONError("Failed to import \(source.fileURL.lastPathComponent): \(error.localizedDescription)")
+            throw ExitCode.failure
+        }
+    }
+
+    private func runMaterializedPDFImport(_ source: MaterializedImportSource) async throws {
+        do {
+            let outcome = try await PDFImportCoordinator.importPDF(
+                from: source.fileURL,
+                database: AppDatabase.shared
+            )
+            outcome.postImportNotifications(
+                libraryChanged: notifyLibraryChanged,
+                uploadQueueChanged: PDFUploadQueueBroadcaster.postChangeNotification
+            )
+
+            switch outcome {
+            case .imported:
+                printJSON(PDFImportOutput(
+                    imported: "1",
+                    file: file,
+                    status: "imported",
+                    intakeId: nil
+                ))
+            case .queued(let intake):
+                printJSON(PDFImportOutput(
+                    imported: "1",
+                    file: file,
+                    status: "queued",
+                    intakeId: intake.id
+                ))
+            }
+        } catch {
+            printJSONError("Failed to import PDF \(source.fileURL.lastPathComponent): \(error.localizedDescription)")
+            throw ExitCode.failure
+        }
     }
 
     private func runZoteroFolderImport(folderPath: String) throws {
