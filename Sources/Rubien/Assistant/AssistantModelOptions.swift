@@ -118,22 +118,18 @@ enum AssistantModelOptions {
 
     // MARK: Codex dynamic picker rows (shared by the sidebar and Settings — spec §4.6)
 
-    /// The Codex model picker's rows. Row 0 is always "Codex default" (`value: nil`
-    /// — send no model; codex resolves its own config), suffixed with the resolved
-    /// model's name when known AND the default is the active pick. A `pinned` slug
-    /// absent from the catalog stays visible/selectable (finding #6) — with a
-    /// warning suffix once the catalog has actually loaded, bare while it's pending.
+    /// The Codex model picker's rows — CONCRETE discovered models only (no leading
+    /// "Codex default" row: a fresh conversation seeds a real model, spec §4.6). A
+    /// `pinned` slug absent from the catalog stays visible/selectable (finding #6) —
+    /// with a warning suffix once the catalog has actually loaded, bare while it's
+    /// still pending (empty `models`). Values are `String?` only to share the
+    /// ForEach tag type with Claude's rows; every row here carries a concrete slug.
     static func codexModelRows(
-        models: [CodexModelInfo], pinned: String?, resolvedModel: String?
+        models: [CodexModelInfo], pinned: String?
     ) -> [(label: String, value: String?)] {
-        var rows: [(label: String, value: String?)] = []
-        if pinned == nil, let resolvedModel {
-            let name = models.first { $0.id == resolvedModel }?.displayName ?? resolvedModel
-            rows.append((label: "Codex default (\(name))", value: nil))
-        } else {
-            rows.append((label: "Codex default", value: nil))
+        var rows: [(label: String, value: String?)] = models.map {
+            (label: $0.displayName, value: Optional($0.id))
         }
-        rows += models.map { (label: $0.displayName, value: Optional($0.id)) }
         if let pinned, !models.contains(where: { $0.id == pinned }) {
             let label = models.isEmpty ? pinned : "\(pinned) — not offered by this codex"
             rows.append((label: label, value: pinned))

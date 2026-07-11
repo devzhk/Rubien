@@ -254,11 +254,12 @@ enum RubienPreferences {
         set { UserDefaults.standard.set(newValue.rawValue, forKey: assistantProviderKey) }
     }
 
-    /// Default Codex model slug for new conversations — RAW (spec §4.4).
-    /// nil/absent = "Codex default": no `model` is sent on `thread/start`; the
-    /// installed codex resolves its own config chain (profile → config.toml →
-    /// builtin). A stored slug is a user pin, sent verbatim; validity is the
-    /// catalog-aware picker's job, never a silent rewrite here.
+    /// Default Codex model slug for new conversations — RAW (spec §4.4). A stored
+    /// slug is the user's REMEMBERED last pick (the composer persists every model
+    /// choice here) and is sent verbatim; validity is the catalog-aware picker's
+    /// job, never a silent rewrite here. nil/absent ⇒ a fresh conversation SEEDS
+    /// its model from the first discovered model once the catalog loads (the seed
+    /// itself is not persisted — only an explicit pick writes here).
     static let assistantCodexModelKey = "Rubien.assistant.codex.model"
 
     static var assistantCodexModel: String? {

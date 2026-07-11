@@ -46,6 +46,38 @@ final class ChatSessionControllerTests: XCTestCase {
         while !condition() && n < ticks { await Task.yield(); n += 1 }
     }
 
+    /// Snapshot the two Codex default-pref keys and return a restorer, so a test
+    /// exercising `selectModel`/`selectEffort` persistence can't leak into others
+    /// (matches the inline save/restore idiom the switchProvider tests use for
+    /// `assistantProviderKey`). Call as `let restore = …; defer { restore() }`.
+    private func restoreCodexPrefsAfter() -> () -> Void {
+        let d = UserDefaults.standard
+        let mKey = RubienPreferences.assistantCodexModelKey
+        let eKey = RubienPreferences.assistantCodexEffortKey
+        let m = d.object(forKey: mKey)
+        let e = d.object(forKey: eKey)
+        return {
+            if let m { d.set(m, forKey: mKey) } else { d.removeObject(forKey: mKey) }
+            if let e { d.set(e, forKey: eKey) } else { d.removeObject(forKey: eKey) }
+        }
+    }
+
+    /// A fresh Codex controller with the given model/effort seed and no catalog —
+    /// tests that need a catalog call `setCatalog` on the returned provider first.
+    private func makeCodexControllerRaw(
+        modelOverride: String?, effortOverride: String?
+    ) -> (ChatSessionController, MockAgentProvider) {
+        let codex = MockAgentProvider(
+            kind: .codex, availability: .installed(version: "t", path: "/fake/codex"))
+        let controller = ChatSessionController(
+            provider: codex, transcript: SpyTranscriptSink(),
+            reference: ChatReference(id: 1, title: "T", authors: ""),
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"), gate: AssistantTurnGate(),
+            webAccess: true, modelOverride: modelOverride, effortOverride: effortOverride,
+            autoApprove: false, codexSandbox: .readOnly)
+        return (controller, codex)
+    }
+
     // MARK: Event mapping (direct)
 
     func testSessionStartedCapturesAndRotatesID() {
@@ -1045,30 +1077,136 @@ final class ChatSessionControllerTests: XCTestCase {
         await waitUntil { !controller.codexModels.isEmpty }
 
         XCTAssertEqual(controller.codexModels.map(\.id), ["gpt-5.6-terra"], "hidden models dropped")
-        XCTAssertNil(controller.governingCodexModel, "no pin, no resolved model yet")
-        controller.handle(.modelResolved(model: "gpt-5.6-terra"), gen: controller.generation)
+        // The unset conversation seeds onto the first discovered model, which then
+        // governs the effort list (no separate `.modelResolved` needed anymore).
+        XCTAssertEqual(controller.modelOverride, "gpt-5.6-terra",
+                       "discovery seeds the first model when none is pinned")
         XCTAssertEqual(controller.governingCodexModel?.id, "gpt-5.6-terra",
-                       "the resolved default governs the effort list")
+                       "the seeded model governs the effort list")
     }
 
     func testCatalogFailureLeavesModelsEmpty() async {
         let (controller, _) = makeCodexController(catalog: .unavailable)
         controller.refreshCodexCatalog()
-        // Degrades to the empty list — the picker then shows only "Codex default"
-        // (+ any pin), which works on ANY codex (spec §4.7).
+        // Degrades to the empty list — the picker then shows only a pin (if any) and
+        // nothing is seeded, which works on ANY codex (spec §4.7).
         try? await Task.sleep(for: .milliseconds(100))
         XCTAssertTrue(controller.codexModels.isEmpty)
+        XCTAssertNil(controller.modelOverride, "no catalog ⇒ nothing to seed")
+    }
+
+    // MARK: Seed + remember (concrete-model default UX)
+
+    /// Discovery seeds a pref-less conversation onto the first concrete model and
+    /// its default effort once the catalog lands (the "First available" behavior).
+    func testCatalogLoadSeedsFirstModelWhenUnset() async {
+        let first = CodexModelInfo(
+            id: "gpt-5.6-terra", displayName: "Terra", description: nil,
+            efforts: [CodexEffortInfo(value: "low", label: "Low", description: nil),
+                      CodexEffortInfo(value: "medium", label: "Medium", description: nil)],
+            defaultEffort: "medium", isDefault: false, hidden: false)
+        let second = CodexModelInfo(
+            id: "gpt-5.6-sol", displayName: "Sol", description: nil,
+            efforts: [], defaultEffort: "low", isDefault: true, hidden: false)
+        let (controller, codex) = makeCodexControllerRaw(modelOverride: nil, effortOverride: nil)
+        codex.setCatalog(CodexCatalog(models: [first, second], fetchedOK: true))
+
+        controller.refreshCodexCatalog()
+        await waitUntil { controller.modelOverride != nil }
+
+        XCTAssertEqual(controller.modelOverride, "gpt-5.6-terra",
+                       "an unset conversation seeds to the first discovered model")
+        XCTAssertEqual(controller.effortOverride, "medium",
+                       "effort seeds to the seeded model's default")
+    }
+
+    /// A set pin (a remembered pick already loaded into the conversation) is NOT
+    /// clobbered by the first-model seed when the catalog lands.
+    func testCatalogLoadDoesNotOverrideAPinnedModel() async {
+        let first = CodexModelInfo(
+            id: "gpt-5.6-terra", displayName: "Terra", description: nil,
+            efforts: [], defaultEffort: "medium", isDefault: false, hidden: false)
+        let sol = CodexModelInfo(
+            id: "gpt-5.6-sol", displayName: "Sol", description: nil,
+            efforts: [], defaultEffort: "low", isDefault: true, hidden: false)
+        let (controller, codex) = makeCodexControllerRaw(
+            modelOverride: "gpt-5.6-sol", effortOverride: "low")
+        codex.setCatalog(CodexCatalog(models: [first, sol], fetchedOK: true))
+
+        controller.refreshCodexCatalog()
+        await waitUntil { !controller.codexModels.isEmpty }
+
+        XCTAssertEqual(controller.modelOverride, "gpt-5.6-sol",
+                       "a set pin (remembered pick) is not overwritten by the first-model seed")
+    }
+
+    /// Picking a Codex model persists it as the remembered default; a Claude pick
+    /// is a live per-conversation choice and must NOT touch the Codex pref.
+    func testSelectModelPersistsPick() {
+        let restore = restoreCodexPrefsAfter()
+        defer { restore() }
+        let (controller, _) = makeCodexControllerRaw(modelOverride: nil, effortOverride: "medium")
+
+        controller.selectModel("gpt-5.6-sol")
+
+        XCTAssertEqual(controller.modelOverride, "gpt-5.6-sol")
+        XCTAssertEqual(RubienPreferences.assistantCodexModel, "gpt-5.6-sol",
+                       "picking a Codex model remembers it as the default")
+
+        // Claude model picks are live per-conversation — not remembered in the Codex pref.
+        let before = RubienPreferences.assistantCodexModel
+        let claude = ChatSessionController(
+            provider: MockAgentProvider(kind: .claude), transcript: SpyTranscriptSink(),
+            reference: ChatReference(id: 1, title: "T", authors: ""),
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"), gate: AssistantTurnGate())
+        claude.selectModel("sonnet")
+        XCTAssertEqual(claude.modelOverride, "sonnet")
+        XCTAssertEqual(RubienPreferences.assistantCodexModel, before,
+                       "a Claude model pick must not touch the Codex default")
+    }
+
+    /// Picking a Codex effort persists it; a Claude effort pick must not.
+    func testSelectEffortPersistsPick() {
+        let restore = restoreCodexPrefsAfter()
+        defer { restore() }
+        let (controller, _) = makeCodexControllerRaw(modelOverride: nil, effortOverride: "medium")
+
+        controller.selectEffort("high")
+
+        XCTAssertEqual(controller.effortOverride, "high")
+        XCTAssertEqual(RubienPreferences.assistantCodexEffort, "high",
+                       "picking a Codex effort remembers it as the default")
+
+        // Claude effort is a live per-conversation choice — not remembered here.
+        let before = RubienPreferences.assistantCodexEffort
+        let claude = ChatSessionController(
+            provider: MockAgentProvider(kind: .claude), transcript: SpyTranscriptSink(),
+            reference: ChatReference(id: 1, title: "T", authors: ""),
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"), gate: AssistantTurnGate())
+        claude.selectEffort("low")
+        XCTAssertEqual(claude.effortOverride, "low")
+        XCTAssertEqual(RubienPreferences.assistantCodexEffort, before,
+                       "a Claude effort pick must not touch the Codex default")
     }
 
     func testSelectModelSnapsEffortToModelDefault() async {
+        let restore = restoreCodexPrefsAfter()
+        defer { restore() }
+        let alpha = CodexModelInfo(
+            id: "gpt-5.6-alpha", displayName: "Alpha", description: nil,
+            efforts: [CodexEffortInfo(value: "low", label: "Low", description: nil),
+                      CodexEffortInfo(value: "xhigh", label: "xHigh", description: nil)],
+            defaultEffort: "xhigh", isDefault: false, hidden: false)
         let sol = CodexModelInfo(
             id: "gpt-5.6-sol", displayName: "GPT-5.6-Sol", description: nil,
             efforts: [CodexEffortInfo(value: "low", label: "Low", description: nil)],
             defaultEffort: "low", isDefault: false, hidden: false)
         let (controller, _) = makeCodexController(
-            catalog: CodexCatalog(models: [sol], fetchedOK: true))
+            catalog: CodexCatalog(models: [alpha, sol], fetchedOK: true))
         controller.refreshCodexCatalog()
         await waitUntil { !controller.codexModels.isEmpty }
+        // Discovery seeded the first model (alpha); pick the OTHER model and confirm
+        // effort snaps to ITS default.
         controller.effortOverride = "xhigh"
 
         controller.selectModel("gpt-5.6-sol")
@@ -1076,10 +1214,7 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertEqual(controller.modelOverride, "gpt-5.6-sol")
         XCTAssertEqual(controller.effortOverride, "low",
                        "an explicit pick snaps effort to the model's defaultReasoningEffort (spec §3)")
-        // Picking Codex default (nil) leaves effort alone.
-        controller.selectModel(nil)
-        XCTAssertNil(controller.modelOverride)
-        XCTAssertEqual(controller.effortOverride, "low")
+        XCTAssertEqual(RubienPreferences.assistantCodexModel, "gpt-5.6-sol", "the pick is remembered")
     }
 
     /// A model offering the full effort ladder EXCEPT `ultra` — the shape that makes
@@ -1139,6 +1274,8 @@ final class ChatSessionControllerTests: XCTestCase {
     /// CONFLICTING values proves the reset does not re-apply Settings defaults
     /// the way `newConversation()` would (plan-review #3).
     func testCodexModelChangeMidConversationStartsNewConversationPreservingSettings() async {
+        let restore = restoreCodexPrefsAfter()
+        defer { restore() }
         let conflictingDefaults: (AgentProviderKind) -> AssistantConversationDefaults = { _ in
             AssistantConversationDefaults(model: nil, effort: "medium",
                                           webAccess: true, autoApprove: false)

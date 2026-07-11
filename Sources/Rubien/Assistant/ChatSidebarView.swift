@@ -530,10 +530,9 @@ struct ChatSidebarView: View {
     // MARK: Model + effort selector (maps to `--model` / `--effort`)
 
     // Claude: the static descriptor lists (verified CLI aliases — spec §2.4).
-    // Codex: DISCOVERED rows — "Codex default" first (nil ⇒ send no model; codex
-    // resolves its own config), then the installed codex's own models, with any
-    // unknown pin kept visible (spec §4.6). The picker tags are `String?` because
-    // nil is a real, selectable value on Codex.
+    // Codex: DISCOVERED rows — the installed codex's own models (concrete slugs
+    // only; a fresh conversation seeds one), with any unknown pin kept visible
+    // (spec §4.6). Tags are `String?` only to share the ForEach type with Claude.
     private var modelChoices: [(label: String, value: String?)] {
         switch session.providerKind {
         case .claude:
@@ -542,8 +541,7 @@ struct ChatSidebarView: View {
         case .codex:
             return AssistantModelOptions.codexModelRows(
                 models: session.codexModels,
-                pinned: session.modelOverride,
-                resolvedModel: session.resolvedModel)
+                pinned: session.modelOverride)
         }
     }
     private var effortChoices: [(label: String, value: String?)] {
@@ -569,7 +567,9 @@ struct ChatSidebarView: View {
                 }
             }
             .pickerStyle(.inline)
-            Picker("Effort", selection: $session.effortOverride) {
+            Picker("Effort", selection: Binding(
+                get: { session.effortOverride },
+                set: { session.selectEffort($0) })) {
                 ForEach(effortChoices, id: \.value) { choice in
                     Text(choice.label).tag(choice.value)
                 }
@@ -601,12 +601,11 @@ struct ChatSidebarView: View {
 
     private var modelLabel: String {
         if session.providerKind == .codex {
-            let display = { (id: String) in
-                session.codexModels.first { $0.id == id }?.displayName ?? id
-            }
-            if let pinned = session.modelOverride { return display(pinned) }
-            if let resolved = session.resolvedModel { return display(resolved) }
-            return "Codex default"
+            // The current model's display name (from the catalog), else its raw
+            // slug, else a neutral placeholder for the transient pre-seed window
+            // before discovery lands and seeds a concrete model.
+            guard let current = session.modelOverride else { return "Codex" }
+            return session.codexModels.first { $0.id == current }?.displayName ?? current
         }
         return AssistantModelOptions.modelLabel(for: session.modelOverride, kind: session.providerKind)
     }

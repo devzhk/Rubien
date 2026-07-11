@@ -306,17 +306,22 @@ struct RubienSettingsView: View {
         }
     }
 
-    /// Codex model rows for the Settings picker: the shared builder's rows with the
-    /// nil ("Codex default") tag mapped to the mirror's "" sentinel. The current
-    /// raw selection stays visible while the catalog loads (spec finding #6) —
-    /// the builder's keep-pin row guarantees the Picker never loses its selection,
-    /// so no phantom `.onChange` write can fire during load.
+    /// Codex model rows for the Settings picker: a leading "First available" reset
+    /// row (mapped to the mirror's "" sentinel → clears the remembered default, so a
+    /// fresh conversation re-seeds from the first discovered model) followed by the
+    /// shared builder's CONCRETE model rows. The current raw selection stays visible
+    /// while the catalog loads (spec finding #6) — the builder's keep-pin row
+    /// guarantees the Picker never loses its selection, so no phantom `.onChange`
+    /// write can fire during load.
     private var settingsCodexModelRows: [(label: String, value: String)] {
-        AssistantModelOptions.codexModelRows(
+        var rows: [(label: String, value: String)] = [
+            (label: String(localized: "First available", bundle: .module), value: "")
+        ]
+        rows += AssistantModelOptions.codexModelRows(
             models: codexCatalogModels,
-            pinned: defaultModel.isEmpty ? nil : defaultModel,
-            resolvedModel: nil)
+            pinned: defaultModel.isEmpty ? nil : defaultModel)
             .map { (label: $0.label, value: $0.value ?? "") }
+        return rows
     }
 
     /// Effort rows follow the pinned default model when it's in the catalog, else
@@ -330,8 +335,9 @@ struct RubienSettingsView: View {
     }
 
     /// Route a model-mirror change back to the CURRENTLY-selected backend's pref.
-    /// For Codex, "" is the "Codex default" sentinel → nil (the pref key is
-    /// removed; no slug is ever persisted for the default — spec §4.4).
+    /// For Codex, "" is the "First available" sentinel → nil (the pref key is
+    /// removed, clearing the remembered default so a fresh conversation re-seeds
+    /// from the first discovered model — spec §4.4).
     private func setDefaultModel(_ value: String) {
         switch defaultProvider {
         case .claude: RubienPreferences.assistantModel = value
@@ -383,7 +389,7 @@ struct RubienSettingsView: View {
             }
 
             // Model/effort are the SELECTED backend's. Claude: static verified
-            // aliases. Codex: discovered rows — "" is the mirror's "Codex default"
+            // aliases. Codex: discovered rows — "" is the mirror's "First available"
             // sentinel (UI-layer only; the pref stores nil — spec §4.4).
             Picker(selection: $defaultModel) {
                 if defaultProvider == .codex {
