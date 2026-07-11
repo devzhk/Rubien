@@ -60,20 +60,24 @@ public enum PDFDownloadService {
             throw DownloadError.httpFailure(http.statusCode)
         }
 
-        // Content-Type must claim PDF. The previous OR-on-pathExtension shortcut
-        // let bioRxiv withdrawal pages (HTML served at `.full.pdf` with 200) save
-        // as fake PDFs. URLSession.shared.download transparently handles
-        // Content-Encoding (gzip/br), so the downloaded body is already decoded.
-        // Media types are case-insensitive per RFC 7231 §3.1.1.1; normalize
-        // the media type (not its parameters) so lookalikes such as
-        // `application/pdf-malformed` cannot pass this validation.
+        // Content-Type must identify PDF, or be the generic binary type from
+        // a `.pdf` endpoint (as GitHub raw files do); it still must pass the PDF
+        // magic-byte check below. This avoids the former OR-on-pathExtension
+        // shortcut, which let bioRxiv withdrawal pages (HTML served at
+        // `.full.pdf` with 200) save as fake PDFs. URLSession.shared.download
+        // transparently handles Content-Encoding (gzip/br), so the downloaded
+        // body is already decoded. Media types are case-insensitive per RFC
+        // 7231 §3.1.1.1; normalize the media type (not its parameters) so
+        // lookalikes such as `application/pdf-malformed` cannot pass.
         let mediaType = (response as? HTTPURLResponse)?
             .value(forHTTPHeaderField: "Content-Type")?
             .split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false)
             .first?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased() ?? ""
-        if mediaType != "application/pdf" {
+        let isGenericPDFDownload = mediaType == "application/octet-stream"
+            && remote.pathExtension.caseInsensitiveCompare("pdf") == .orderedSame
+        guard mediaType == "application/pdf" || isGenericPDFDownload else {
             try? FileManager.default.removeItem(at: tempURL)
             throw DownloadError.notAPDF
         }

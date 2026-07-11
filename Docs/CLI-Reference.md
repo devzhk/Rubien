@@ -288,7 +288,7 @@ Text-file size limit (single-file, and per file inside a folder): 50 MB; text in
 
 ### PDF files and direct URLs
 
-Local PDF paths may be relative to the current working directory. A direct URL must use `http` or `https` and have a `.pdf`, `.md`, or `.markdown` path extension; Rubien validates the response before importing it. PDF responses require a 2xx status, `application/pdf` content type, and PDF magic bytes. Markdown responses require a compatible text content type, valid UTF-8, and a 50 MB maximum.
+Local PDF paths may be relative to the current working directory. A direct URL must use `http` or `https` and have a `.pdf`, `.md`, or `.markdown` path extension; Rubien validates the response before importing it. PDF responses require a 2xx status and PDF magic bytes; `application/pdf` is accepted, as is `application/octet-stream` for a `.pdf` URL. Markdown responses require a compatible text content type, valid UTF-8, and a 50 MB maximum.
 
 PDFs enter the same metadata verification pipeline as the app. A completed import reports the normal count/file fields plus `status: "imported"`; an unresolved result is retained in the pending-metadata queue and reports `status: "queued"` with `intakeId`:
 

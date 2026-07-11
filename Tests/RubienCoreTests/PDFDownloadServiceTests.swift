@@ -151,6 +151,27 @@ final class PDFDownloadServiceTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: downloadedURL), expectedData)
     }
 
+    func testDownloadTemporaryAcceptsGenericBinaryPDFMediaTypeWhenMagicIsValid() async throws {
+        let remoteURL = "https://example.test/papers/github-hosted.pdf"
+        let expectedData = Data("%PDF-1.7\\ngeneric binary PDF".utf8)
+        ImportSourceURLProtocol.stub(
+            remoteURL,
+            contentType: "application/octet-stream",
+            data: expectedData
+        )
+        let destinationDirectory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: destinationDirectory) }
+
+        let downloadedURL = try await PDFDownloadService.downloadTemporary(
+            from: URL(string: remoteURL)!,
+            suggestedFilename: "github-hosted.pdf",
+            destinationDirectory: destinationDirectory,
+            session: ImportSourceURLProtocol.makeSession()
+        )
+
+        XCTAssertEqual(try Data(contentsOf: downloadedURL), expectedData)
+    }
+
     func testDownloadTemporaryRejectsInvalidContentType() async throws {
         let remoteURL = "https://example.test/papers/html.pdf"
         ImportSourceURLProtocol.stub(
@@ -173,6 +194,38 @@ final class PDFDownloadServiceTests: XCTestCase {
             remoteURL,
             contentType: "application/pdf-malformed",
             data: Data("%PDF-1.7\nlookalike".utf8)
+        )
+        let destinationDirectory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: destinationDirectory) }
+
+        await assertNotAPDF(
+            remoteURL: remoteURL,
+            destinationDirectory: destinationDirectory
+        )
+    }
+
+    func testDownloadTemporaryRejectsGenericBinaryResponseWithoutPDFMagic() async throws {
+        let remoteURL = "https://example.test/papers/not-really.pdf"
+        ImportSourceURLProtocol.stub(
+            remoteURL,
+            contentType: "application/octet-stream",
+            data: Data("not a PDF".utf8)
+        )
+        let destinationDirectory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: destinationDirectory) }
+
+        await assertNotAPDF(
+            remoteURL: remoteURL,
+            destinationDirectory: destinationDirectory
+        )
+    }
+
+    func testDownloadTemporaryRejectsGenericBinaryResponseWithoutPDFURLPath() async throws {
+        let remoteURL = "https://example.test/papers/download"
+        ImportSourceURLProtocol.stub(
+            remoteURL,
+            contentType: "application/octet-stream",
+            data: Data("%PDF-1.7\\ngeneric download".utf8)
         )
         let destinationDirectory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: destinationDirectory) }
