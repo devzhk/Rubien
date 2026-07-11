@@ -14,18 +14,30 @@ enum ImportSourceSheetSelectionSummary: Equatable {
 struct ImportSourceSheetState {
     private(set) var typedInput: String
     private(set) var stagedURLs: [URL]
+    private(set) var isAcquiring: Bool
 
     init(typedInput: String = "", stagedURLs: [URL] = []) {
         self.typedInput = typedInput
         self.stagedURLs = stagedURLs
+        self.isAcquiring = false
     }
 
     var canImport: Bool {
         normalizedTypedInput != nil || !stagedURLs.isEmpty
     }
 
-    func canSubmit(isAcquiring: Bool) -> Bool {
+    var canSubmit: Bool {
         canImport && !isAcquiring
+    }
+
+    mutating func beginSubmission() -> Bool {
+        guard canSubmit else { return false }
+        isAcquiring = true
+        return true
+    }
+
+    mutating func finishSubmission() {
+        isAcquiring = false
     }
 
     var normalizedTypedInput: String? {
@@ -59,7 +71,6 @@ struct ImportSourceSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var state = ImportSourceSheetState()
     @State private var acquisitionError: String?
-    @State private var isAcquiring = false
 
     let onImport: ([MaterializedImportSource]) -> Void
 
@@ -79,14 +90,14 @@ struct ImportSourceSheet: View {
                 )
             )
             .textFieldStyle(.roundedBorder)
-            .disabled(isAcquiring)
+            .disabled(state.isAcquiring)
 
             HStack(spacing: 10) {
                 Button(String(localized: "importSourceSheet.button.choose", bundle: .module)) {
                     chooseFiles()
                 }
                 .buttonStyle(SLSecondaryButtonStyle())
-                .disabled(isAcquiring)
+                .disabled(state.isAcquiring)
 
                 if let summary = state.stagedSelectionSummary {
                     stagedSelectionLabel(summary)
@@ -94,7 +105,7 @@ struct ImportSourceSheet: View {
 
                 Spacer(minLength: 0)
 
-                if isAcquiring {
+                if state.isAcquiring {
                     ProgressView()
                         .controlSize(.small)
                     Text(String(localized: "importSourceSheet.status.preparing", bundle: .module))
@@ -123,19 +134,19 @@ struct ImportSourceSheet: View {
                     dismiss()
                 }
                 .buttonStyle(SLSecondaryButtonStyle())
-                .disabled(isAcquiring)
+                .disabled(state.isAcquiring)
 
                 Button(String(localized: "importSourceSheet.button.import", bundle: .module)) {
                     beginImport()
                 }
                 .buttonStyle(SLPrimaryButtonStyle())
                 .keyboardShortcut(.defaultAction)
-                .disabled(!state.canSubmit(isAcquiring: isAcquiring))
+                .disabled(!state.canSubmit)
             }
         }
         .padding(20)
         .frame(width: 520, alignment: .leading)
-        .interactiveDismissDisabled(isAcquiring)
+        .interactiveDismissDisabled(state.isAcquiring)
     }
 
     @ViewBuilder
@@ -167,19 +178,17 @@ struct ImportSourceSheet: View {
     }
 
     private func beginImport() {
-        guard state.canSubmit(isAcquiring: isAcquiring) else { return }
+        guard state.beginSubmission() else { return }
+        acquisitionError = nil
 
         Task { @MainActor in
-            isAcquiring = true
-            acquisitionError = nil
-
             do {
                 let sources = try await materializeSources()
-                isAcquiring = false
+                state.finishSubmission()
                 onImport(sources)
                 dismiss()
             } catch {
-                isAcquiring = false
+                state.finishSubmission()
                 acquisitionError = error.localizedDescription
             }
         }
