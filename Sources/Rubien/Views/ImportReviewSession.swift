@@ -73,6 +73,11 @@ final class ImportReviewSession: ObservableObject, Identifiable {
     @Published private(set) var items: [ImportReviewItem]
     @Published private(set) var selectedIDs: Set<UUID>
     @Published private(set) var isCommitting = false
+    @Published private var activeRowIDs: Set<UUID> = []
+
+    var isBusy: Bool {
+        isCommitting || !activeRowIDs.isEmpty
+    }
 
     private let context: any ImportReviewContext
     private var didDiscard = false
@@ -103,7 +108,7 @@ final class ImportReviewSession: ObservableObject, Identifiable {
 
     func confirmSelected() async {
         let selection = selectedIDs.intersection(items.filter(\.isSelectable).map(\.id))
-        guard !selection.isEmpty, !isCommitting else { return }
+        guard !selection.isEmpty, !isBusy, !didDiscard else { return }
 
         isCommitting = true
         for id in selection {
@@ -132,27 +137,49 @@ final class ImportReviewSession: ObservableObject, Identifiable {
     }
 
     func resolveCandidate(itemID: UUID, candidate: MetadataCandidate) async {
-        guard !isCommitting else { return }
-        updateItem(id: itemID) { $0.isWorking = true }
+        guard beginRowAction(itemID: itemID) else { return }
         let updated = await context.resolveCandidate(itemID: itemID, candidate: candidate)
-        replaceItem(updated)
+        finishRowAction(itemID: itemID, updated: updated)
     }
 
     func useProposedMetadata(itemID: UUID) {
-        guard !isCommitting else { return }
-        replaceItem(context.useProposedMetadata(itemID: itemID))
+        guard beginRowAction(itemID: itemID) else { return }
+        finishRowAction(
+            itemID: itemID,
+            updated: context.useProposedMetadata(itemID: itemID)
+        )
     }
 
     func retry(itemID: UUID) async {
-        guard !isCommitting else { return }
-        updateItem(id: itemID) { $0.isWorking = true }
-        replaceItem(await context.retry(itemID: itemID))
+        guard beginRowAction(itemID: itemID) else { return }
+        let updated = await context.retry(itemID: itemID)
+        finishRowAction(itemID: itemID, updated: updated)
     }
 
     func discardRemaining() {
         guard !didDiscard else { return }
         didDiscard = true
         context.discard(remainingIDs: Set(items.map(\.id)))
+    }
+
+    private func beginRowAction(itemID: UUID) -> Bool {
+        guard !isBusy,
+              !didDiscard,
+              items.contains(where: { $0.id == itemID && !$0.isWorking })
+        else { return false }
+
+        activeRowIDs.insert(itemID)
+        updateItem(id: itemID) { $0.isWorking = true }
+        return true
+    }
+
+    private func finishRowAction(itemID: UUID, updated: ImportReviewItem) {
+        activeRowIDs.remove(itemID)
+        guard !didDiscard else { return }
+
+        var completed = updated
+        completed.isWorking = false
+        replaceItem(completed)
     }
 
     private func replaceItem(_ updated: ImportReviewItem) {

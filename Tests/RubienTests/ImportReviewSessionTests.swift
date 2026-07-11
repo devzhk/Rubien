@@ -70,6 +70,58 @@ final class ImportReviewSessionTests: XCTestCase {
         XCTAssertEqual(session.selectedIDs, [candidate.id])
     }
 
+    func testSuspendedRetryIsDeduplicatedAndCannotMutateAfterDiscard() async {
+        let failed = makeItem(title: "Failed", readiness: .failed)
+        let context = SuspendingImportReviewContext(items: [failed])
+        let session = ImportReviewSession(title: "Review import", context: context)
+
+        XCTAssertFalse(session.isBusy)
+        let firstRetry = Task { await session.retry(itemID: failed.id) }
+        while context.retryCalls.isEmpty {
+            await Task.yield()
+        }
+        XCTAssertTrue(session.isBusy)
+
+        let duplicateRetry = Task { await session.retry(itemID: failed.id) }
+        await Task.yield()
+
+        XCTAssertEqual(context.retryCalls, [failed.id])
+
+        session.discardRemaining()
+        let itemsAtDiscard = session.items
+        context.resumeRetries(
+            with: makeItem(id: failed.id, title: "Late replacement", readiness: .ready)
+        )
+        await firstRetry.value
+        await duplicateRetry.value
+
+        XCTAssertEqual(session.items, itemsAtDiscard)
+        XCTAssertFalse(session.isBusy)
+    }
+
+    func testDiscardRejectsEveryRowAction() async {
+        let candidate = makeItem(
+            title: "Candidate",
+            readiness: .needsCandidate,
+            candidates: [MetadataCandidate(source: .translationServer, title: "Match", score: 0.9)]
+        )
+        let proposal = makeItem(title: "Proposal", readiness: .needsProposal)
+        let failed = makeItem(title: "Failed", readiness: .failed)
+        let context = FakeImportReviewContext(items: [candidate, proposal, failed])
+        let session = ImportReviewSession(title: "Review import", context: context)
+
+        session.discardRemaining()
+        let itemsAtDiscard = session.items
+        await session.resolveCandidate(itemID: candidate.id, candidate: candidate.candidates[0])
+        session.useProposedMetadata(itemID: proposal.id)
+        await session.retry(itemID: failed.id)
+
+        XCTAssertTrue(context.candidateCalls.isEmpty)
+        XCTAssertTrue(context.proposalCalls.isEmpty)
+        XCTAssertTrue(context.retryCalls.isEmpty)
+        XCTAssertEqual(session.items, itemsAtDiscard)
+    }
+
     private func makeItem(
         id: UUID = UUID(),
         title: String,
@@ -92,11 +144,46 @@ final class ImportReviewSessionTests: XCTestCase {
 }
 
 @MainActor
+private final class SuspendingImportReviewContext: ImportReviewContext {
+    let items: [ImportReviewItem]
+    private(set) var retryCalls: [UUID] = []
+    private var retryContinuations: [CheckedContinuation<ImportReviewItem, Never>] = []
+
+    init(items: [ImportReviewItem]) {
+        self.items = items
+    }
+
+    func commit(selectedIDs: Set<UUID>) async -> ImportReviewCommitReport {
+        ImportReviewCommitReport(succeededIDs: [], failures: [:])
+    }
+
+    func retry(itemID: UUID) async -> ImportReviewItem {
+        retryCalls.append(itemID)
+        return await withCheckedContinuation { continuation in
+            retryContinuations.append(continuation)
+        }
+    }
+
+    func discard(remainingIDs: Set<UUID>) {}
+
+    func resumeRetries(with item: ImportReviewItem) {
+        let continuations = retryContinuations
+        retryContinuations.removeAll()
+        for continuation in continuations {
+            continuation.resume(returning: item)
+        }
+    }
+}
+
+@MainActor
 private final class FakeImportReviewContext: ImportReviewContext {
     let items: [ImportReviewItem]
     var nextReport = ImportReviewCommitReport(succeededIDs: [], failures: [:])
     var resolvedItem: ImportReviewItem?
     var discardCalls: [Set<UUID>] = []
+    private(set) var candidateCalls: [UUID] = []
+    private(set) var proposalCalls: [UUID] = []
+    private(set) var retryCalls: [UUID] = []
 
     init(items: [ImportReviewItem]) {
         self.items = items
@@ -107,15 +194,18 @@ private final class FakeImportReviewContext: ImportReviewContext {
     }
 
     func resolveCandidate(itemID: UUID, candidate: MetadataCandidate) async -> ImportReviewItem {
-        resolvedItem ?? item(id: itemID)
+        candidateCalls.append(itemID)
+        return resolvedItem ?? item(id: itemID)
     }
 
     func useProposedMetadata(itemID: UUID) -> ImportReviewItem {
-        item(id: itemID)
+        proposalCalls.append(itemID)
+        return item(id: itemID)
     }
 
     func retry(itemID: UUID) async -> ImportReviewItem {
-        item(id: itemID)
+        retryCalls.append(itemID)
+        return item(id: itemID)
     }
 
     func discard(remainingIDs: Set<UUID>) {

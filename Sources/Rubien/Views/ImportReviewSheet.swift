@@ -28,7 +28,7 @@ struct ImportReviewSheet: View {
             .navigationTitle(session.title)
         }
         .frame(minWidth: 760, minHeight: 520)
-        .interactiveDismissDisabled(session.isCommitting)
+        .interactiveDismissDisabled(session.isBusy)
         .onDisappear { session.discardRemaining() }
         .sheet(item: $candidateContext) { context in
             if let item = session.items.first(where: { $0.id == context.id }) {
@@ -48,7 +48,7 @@ struct ImportReviewSheet: View {
                     .foregroundStyle(item.isSelectable ? Color.accentColor : Color.secondary.opacity(0.45))
             }
             .buttonStyle(.plain)
-            .disabled(!item.isSelectable || session.isCommitting)
+            .disabled(!item.isSelectable || session.isBusy)
             .accessibilityLabel(
                 session.selectedIDs.contains(item.id)
                     ? String(localized: "Deselect import item", bundle: .module)
@@ -104,21 +104,21 @@ struct ImportReviewSheet: View {
                 }
                 .buttonStyle(SLSecondaryButtonStyle())
                 .controlSize(.small)
-                .disabled(session.isCommitting)
+                .disabled(session.isBusy)
             case .needsProposal:
                 Button(String(localized: "Use proposed metadata", bundle: .module)) {
                     session.useProposedMetadata(itemID: item.id)
                 }
                 .buttonStyle(SLSecondaryButtonStyle())
                 .controlSize(.small)
-                .disabled(session.isCommitting)
+                .disabled(session.isBusy)
             case .blocked, .failed:
                 Button(String(localized: "pendingQueue.button.retry", bundle: .module)) {
                     Task { await session.retry(itemID: item.id) }
                 }
                 .buttonStyle(SLSecondaryButtonStyle())
                 .controlSize(.small)
-                .disabled(session.isCommitting)
+                .disabled(session.isBusy)
             }
         }
     }
@@ -133,11 +133,13 @@ struct ImportReviewSheet: View {
                 session.selectAllReady()
             }
             .buttonStyle(SLSecondaryButtonStyle())
+            .disabled(session.isBusy)
 
             Button(String(localized: "Select none", bundle: .module)) {
                 session.selectNone()
             }
             .buttonStyle(SLSecondaryButtonStyle())
+            .disabled(session.isBusy)
 
             Spacer()
 
@@ -147,7 +149,7 @@ struct ImportReviewSheet: View {
             }
             .buttonStyle(SLSecondaryButtonStyle())
             .keyboardShortcut(.cancelAction)
-            .disabled(session.isCommitting)
+            .disabled(session.isBusy)
 
             Button(
                 String(
@@ -164,7 +166,7 @@ struct ImportReviewSheet: View {
             }
             .buttonStyle(SLPrimaryButtonStyle())
             .keyboardShortcut(.defaultAction)
-            .disabled(session.selectedIDs.isEmpty || session.isCommitting)
+            .disabled(session.selectedIDs.isEmpty || session.isBusy)
         }
     }
 
