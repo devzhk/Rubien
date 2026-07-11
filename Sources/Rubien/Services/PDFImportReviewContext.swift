@@ -195,6 +195,14 @@ final class PDFImportReviewContext: ImportReviewContext {
             )
         case .blocked(let envelope):
             let reference = envelope.currentReference ?? envelope.fallbackReference
+            let readiness: ImportReviewItem.Readiness
+            if !envelope.candidates.isEmpty {
+                readiness = .needsCandidate
+            } else if reference?.title.rubien_nilIfBlank != nil {
+                readiness = .needsProposal
+            } else {
+                readiness = .blocked
+            }
             return ImportReviewItem(
                 id: id,
                 title: displayTitle(reference, sourceLabel: sourceLabel),
@@ -202,7 +210,7 @@ final class PDFImportReviewContext: ImportReviewContext {
                 message: envelope.message,
                 reference: reference,
                 candidates: envelope.candidates,
-                readiness: .blocked,
+                readiness: readiness,
                 commitError: nil,
                 isWorking: false
             )
@@ -215,7 +223,7 @@ final class PDFImportReviewContext: ImportReviewContext {
                 message: envelope.message,
                 reference: reference,
                 candidates: [],
-                readiness: .failed,
+                readiness: reference?.title.rubien_nilIfBlank == nil ? .failed : .needsProposal,
                 commitError: nil,
                 isWorking: false
             )

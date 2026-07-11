@@ -61,7 +61,7 @@ final class PendingMetadataReviewContextTests: XCTestCase {
         let first = try saveIntake(database, title: "First")
         let second = try saveIntake(database, title: "Second")
         let third = try saveIntake(database, title: "Third")
-        var attempts: [String] = []
+        let attempts = LockedArray<String>()
         let context = PendingMetadataReviewContext(
             database: database,
             intakes: [first, second, third],
@@ -82,7 +82,7 @@ final class PendingMetadataReviewContextTests: XCTestCase {
 
         let report = await context.commit(selectedIDs: selected)
 
-        XCTAssertEqual(attempts, ["First", "Third"])
+        XCTAssertEqual(attempts.values, ["First", "Third"])
         XCTAssertEqual(report.succeededIDs, [context.items[0].id])
         XCTAssertEqual(Set(report.failures.keys), [context.items[2].id])
         XCTAssertEqual(try database.fetchAllReferences().map(\.title), ["First"])
@@ -163,6 +163,60 @@ final class PendingMetadataReviewContextTests: XCTestCase {
         XCTAssertEqual(try database.referenceCount(), 0)
     }
 
+    func testBlankTitleSnapshotIsNotDirectlyConfirmable() throws {
+        let database = try makeDatabase()
+        let intake = try saveIntake(database, title: "   ")
+        let context = PendingMetadataReviewContext(database: database, intakes: [intake])
+
+        XCTAssertEqual(context.items.map(\.readiness), [.blocked])
+        XCTAssertTrue(context.items.allSatisfy { !$0.isSelectable })
+    }
+
+    func testBlankTitleVerifiedCandidateResolutionRemainsBlocked() async throws {
+        let database = try makeDatabase()
+        let candidate = MetadataCandidate(source: .translationServer, title: "Candidate", score: 0.8)
+        let intake = try saveIntake(database, title: "Original", candidates: [candidate])
+        let context = PendingMetadataReviewContext(
+            database: database,
+            intakes: [intake],
+            candidateResolver: { _, _, _ in
+                .verified(
+                    VerifiedEnvelope(
+                        reference: Reference(title: "   "),
+                        evidence: EvidenceBundle(source: .translationServer, fetchMode: .manual)
+                    )
+                )
+            }
+        )
+
+        let updated = await context.resolveCandidate(itemID: context.items[0].id, candidate: candidate)
+
+        XCTAssertEqual(updated.readiness, .blocked)
+        XCTAssertFalse(updated.isSelectable)
+    }
+
+    func testPendingContextRunsEachSerialCommitOffMainThread() async throws {
+        let database = try makeDatabase()
+        let intake = try saveIntake(database, title: "Background")
+        let context = PendingMetadataReviewContext(
+            database: database,
+            intakes: [intake],
+            committer: { intake, staged, evidence, reviewedBy, database in
+                XCTAssertFalse(Thread.isMainThread)
+                return try database.confirmMetadataIntake(
+                    intake,
+                    stagedReference: staged,
+                    evidence: evidence,
+                    reviewedBy: reviewedBy
+                )
+            }
+        )
+
+        let report = await context.commit(selectedIDs: [context.items[0].id])
+
+        XCTAssertEqual(report.succeededIDs, [context.items[0].id])
+    }
+
     private func makeDatabase() throws -> AppDatabase {
         try AppDatabase(DatabaseQueue(path: ":memory:"))
     }
@@ -186,6 +240,17 @@ final class PendingMetadataReviewContextTests: XCTestCase {
 
     private enum TestError: Error {
         case injected
+    }
+}
+
+private final class LockedArray<Element>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [Element] = []
+
+    var values: [Element] { lock.withLock { storage } }
+
+    func append(_ element: Element) {
+        lock.withLock { storage.append(element) }
     }
 }
 #endif

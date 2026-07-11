@@ -78,6 +78,24 @@ enum FileImportReviewPresentation {
     }
 }
 
+/// Holds a prepared handoff while its initiating sheet animates away. SwiftUI
+/// cannot reliably present a second sheet from the same host until the first
+/// sheet's `onDismiss` has run.
+struct ImportReviewSheetHandoff<Payload> {
+    private var payload: Payload?
+
+    var hasPendingPayload: Bool { payload != nil }
+
+    mutating func stage(_ payload: Payload) {
+        self.payload = payload
+    }
+
+    mutating func takeAfterDismiss() -> Payload? {
+        defer { payload = nil }
+        return payload
+    }
+}
+
 /// Reads and parses Markdown sources without occupying the main actor. This
 /// worker never receives a database, so preparation cannot persist anything.
 enum MarkdownImportWorker {
@@ -848,6 +866,7 @@ struct ContentView: View {
     @State private var showBatchImport = false
     @State private var preparedMetadataImportsAfterBatchDismiss: [PreparedMetadataImport]?
     @State private var showImportSourceSheet = false
+    @State private var fileImportHandoff = ImportReviewSheetHandoff<[MaterializedImportSource]>()
     @State private var importReviewSession: ImportReviewSession?
     /// Monotonic token owned by `importFilesWithMetadata`. Each batch captures
     /// its value; the batch's own auto-clear timer only wipes `importProgress`
@@ -855,6 +874,7 @@ struct ContentView: View {
     /// a newer (fast markdown-only) batch's summary toast.
     @State private var importGeneration = 0
     @State private var pendingZoteroImportFolder: PendingZoteroImport?
+    @State private var zoteroImportHandoff = ImportReviewSheetHandoff<PreparedZoteroImport>()
     @State private var showPendingMetadataQueue = false
     @State private var scopedPendingMetadataIntakes: [MetadataIntake]?
     @State private var pendingQueueNotice: PendingQueueNotice?
@@ -878,6 +898,11 @@ struct ContentView: View {
     private struct PendingZoteroImport: Identifiable {
         let id = UUID()
         let url: URL
+    }
+
+    private struct PreparedZoteroImport {
+        let folderURL: URL
+        let target: ZoteroImportPropertyTarget
     }
 
     /// Per-file result of a single PDF import, surfaced to the batch
@@ -1255,23 +1280,41 @@ struct ContentView: View {
                 onPrepared: { entries in
                     preparedMetadataImportsAfterBatchDismiss = entries
                     showBatchImport = false
+                },
+                onQueueResult: { result, input in
+                    queueResolutionResult(
+                        result,
+                        options: MetadataPersistenceOptions(
+                            sourceKind: .batchIdentifier,
+                            originalInput: input
+                        ),
+                        successMessage: String(localized: "Queued for review", bundle: .module)
+                    )
                 }
             )
         }
-        .sheet(isPresented: $showImportSourceSheet) {
+        .sheet(isPresented: $showImportSourceSheet, onDismiss: {
+            guard let sources = fileImportHandoff.takeAfterDismiss() else { return }
+            importFilesWithMetadata(sources)
+        }) {
             ImportSourceSheet { sources in
-                importFilesWithMetadata(sources)
+                fileImportHandoff.stage(sources)
             }
         }
         .sheet(item: $importReviewSession) { session in
             ImportReviewSheet(session: session)
         }
-        .sheet(item: $pendingZoteroImportFolder) { pending in
+        .sheet(item: $pendingZoteroImportFolder, onDismiss: {
+            guard let prepared = zoteroImportHandoff.takeAfterDismiss() else { return }
+            prepareZoteroFolderImport(from: prepared.folderURL, target: prepared.target)
+        }) { pending in
             ZoteroImportSheet(
                 folderURL: pending.url,
                 db: viewModel.db,
                 onConfirm: { target in
-                    prepareZoteroFolderImport(from: pending.url, target: target)
+                    zoteroImportHandoff.stage(
+                        PreparedZoteroImport(folderURL: pending.url, target: target)
+                    )
                 },
                 onCancel: {}
             )
@@ -1587,7 +1630,11 @@ struct ContentView: View {
                     viewModel.importProgress = nil
                     importReviewSession = ImportReviewSession(
                         title: String(localized: "Review Zotero Import", bundle: .module),
-                        context: ZoteroImportReviewContext(database: database, plan: plan)
+                        context: ZoteroImportReviewContext(
+                            database: database,
+                            plan: plan,
+                            onCompleted: { result in finishZoteroFolderImport(result) }
+                        )
                     )
                     return
                 }

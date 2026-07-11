@@ -82,6 +82,7 @@
 "Could not read this Markdown file." = "Could not read this Markdown file.";
 "zoteroImport.attachmentNotFound" = "PDF not found: %@";
 "Use proposed metadata" = "Use proposed metadata";
+"Use selected match" = "Use selected match";
 "Select import item" = "Select import item";
 "Deselect import item" = "Deselect import item";
 "Choose the metadata match for this import. Nothing is saved until you confirm the selected batch." = "Choose the metadata match for this import. Nothing is saved until you confirm the selected batch.";

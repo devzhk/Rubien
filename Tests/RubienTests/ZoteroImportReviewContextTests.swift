@@ -111,6 +111,39 @@ final class ZoteroImportReviewContextTests: XCTestCase {
         XCTAssertEqual(try database.referenceCount(), 0)
     }
 
+    func testContextSurfacesRuntimeMissingPDFFromSuccessfulCommit() async throws {
+        let database = try makeDatabase()
+        let folder = try makeFolder(
+            bibtex: """
+            @article{a, title = {First}}
+            @article{b, title = {Second}}
+            """
+        )
+        let plan = try ZoteroFolderImporter.prepareFolder(
+            at: folder,
+            db: database,
+            propertyTarget: nil
+        )
+        var completion: ZoteroFolderImporter.Result?
+        let expected = ZoteroFolderImporter.Result(
+            imported: 2,
+            attached: 0,
+            missingPDFs: ["files/missing.pdf"],
+            duplicatesSkipped: 0
+        )
+        let context = ZoteroImportReviewContext(
+            database: database,
+            plan: plan,
+            committer: { _, _, _ in expected },
+            onCompleted: { completion = $0 }
+        )
+
+        let report = await context.commit(selectedIDs: Set(context.items.map(\.id)))
+
+        XCTAssertEqual(report.succeededIDs, Set(context.items.map(\.id)))
+        XCTAssertEqual(completion, expected)
+    }
+
     func testReviewThresholdUsesPreparedEntryCount() {
         XCTAssertFalse(ZoteroImportReviewPresentation.shouldReview(entryCount: 0))
         XCTAssertFalse(ZoteroImportReviewPresentation.shouldReview(entryCount: 1))

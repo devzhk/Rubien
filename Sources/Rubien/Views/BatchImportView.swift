@@ -6,6 +6,7 @@ import RubienCore
 enum BatchImportPresentation {
     enum CompletionRoute: Equatable {
         case awaitVerifiedSingleConfirmation
+        case persistQueuedSingleInPlace
         case deliverImmediately
     }
 
@@ -17,13 +18,13 @@ enum BatchImportPresentation {
         requestedInputCount: Int,
         results: [MetadataResolutionResult]
     ) -> CompletionRoute {
-        guard requestedInputCount == 1,
-              results.count == 1,
-              case .verified = results[0]
-        else {
+        guard requestedInputCount == 1, results.count == 1 else {
             return .deliverImmediately
         }
-        return .awaitVerifiedSingleConfirmation
+        if case .verified = results[0] {
+            return .awaitVerifiedSingleConfirmation
+        }
+        return .persistQueuedSingleInPlace
     }
 }
 
@@ -48,6 +49,7 @@ final class BatchImportDeliveryGate {
 struct BatchImportView: View {
     let resolver: MetadataResolver
     let onPrepared: ([PreparedMetadataImport]) -> Void
+    let onQueueResult: (MetadataResolutionResult, String) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var inputText = ""
@@ -331,6 +333,9 @@ struct BatchImportView: View {
             case .awaitVerifiedSingleConfirmation:
                 preparedForConfirmation = completed
                 pendingDeliveryToken = deliveryToken
+            case .persistQueuedSingleInPlace:
+                guard let entry = completed.first else { return }
+                onQueueResult(entry.result, entry.input)
             case .deliverImmediately:
                 onPrepared(completed)
                 dismiss()

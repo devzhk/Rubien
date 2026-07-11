@@ -48,7 +48,7 @@ struct ImportReviewSheet: View {
                     .font(.system(size: 17, weight: .medium))
                     .foregroundStyle(item.isSelectable ? Color.accentColor : Color.secondary.opacity(0.45))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(ImportReviewCheckboxButtonStyle())
             .disabled(!item.isSelectable || session.isBusy)
             .accessibilityLabel(
                 session.selectedIDs.contains(item.id)
@@ -203,6 +203,7 @@ struct ImportReviewSheet: View {
             title: String(localized: "candidatePicker.title", bundle: .module),
             message: String(localized: "Choose the metadata match for this import. Nothing is saved until you confirm the selected batch.", bundle: .module),
             skipLabel: String(localized: "common.cancel", bundle: .module),
+            confirmLabel: String(localized: "Use selected match", bundle: .module),
             candidates: item.candidates,
             onImportSelected: { candidate in
                 candidateContext = nil

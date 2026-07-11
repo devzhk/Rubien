@@ -1,7 +1,7 @@
 # Selected Batch Import Review — Design
 
 - **Date:** 2026-07-10
-- **Status:** Awaiting written-spec review
+- **Status:** Implemented and verified
 - **Review:** Independent design review completed; its findings are folded in.
 - **Scope:** macOS app batch-import workflows. `rubien-cli` and MCP remain
 non-interactive and retain their current immediate-import contracts.

@@ -16,7 +16,7 @@ struct PreparedMetadataImport: Identifiable, Sendable {
 
 @MainActor
 final class MetadataImportReviewContext: ImportReviewContext {
-    typealias Committer = ([Reference], AppDatabase) throws -> Void
+    typealias Committer = @Sendable ([Reference], AppDatabase) throws -> Void
 
     let items: [ImportReviewItem]
 
@@ -59,17 +59,28 @@ final class MetadataImportReviewContext: ImportReviewContext {
             )
         }
 
-        do {
-            try committer(references, database)
+        let database = database
+        let committer = committer
+        let result = await Task.detached(priority: .userInitiated) {
+            do {
+                try committer(references, database)
+                return DetachedMetadataCommitResult.success
+            } catch {
+                return DetachedMetadataCommitResult.failure(error.localizedDescription)
+            }
+        }.value
+
+        switch result {
+        case .success:
             for id in selectedIDs {
                 entriesByID.removeValue(forKey: id)
             }
             return ImportReviewCommitReport(succeededIDs: selectedIDs, failures: [:])
-        } catch {
+        case .failure(let message):
             return ImportReviewCommitReport(
                 succeededIDs: [],
                 failures: Dictionary(
-                    uniqueKeysWithValues: selectedIDs.map { ($0, error.localizedDescription) }
+                    uniqueKeysWithValues: selectedIDs.map { ($0, message) }
                 )
             )
         }
@@ -223,5 +234,10 @@ final class MetadataImportReviewContext: ImportReviewContext {
             )
         }
     }
+}
+
+private enum DetachedMetadataCommitResult: Sendable {
+    case success
+    case failure(String)
 }
 #endif

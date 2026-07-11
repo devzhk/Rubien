@@ -153,18 +153,35 @@ final class MetadataImportReviewContextTests: XCTestCase {
         let entries = ["First", "Second", "Third"].map {
             PreparedMetadataImport(input: $0, result: verifiedResult(title: $0))
         }
-        var committedTitles: [String] = []
+        let committedTitles = LockedArray<String>()
         let context = MetadataImportReviewContext(
             database: database,
             entries: entries,
             committer: { references, _ in
-                committedTitles = references.map(\.title)
+                committedTitles.append(contentsOf: references.map(\.title))
             }
         )
 
         _ = await context.commit(selectedIDs: [entries[2].id, entries[0].id])
 
-        XCTAssertEqual(committedTitles, ["First", "Third"])
+        XCTAssertEqual(committedTitles.values, ["First", "Third"])
+    }
+
+    func testMetadataContextRunsAtomicCommitOffMainThread() async throws {
+        let database = try makeDatabase()
+        let entry = PreparedMetadataImport(input: "Background", result: verifiedResult(title: "Background"))
+        let context = MetadataImportReviewContext(
+            database: database,
+            entries: [entry],
+            committer: { references, database in
+                XCTAssertFalse(Thread.isMainThread)
+                _ = try database.batchImportReferences(references, mergePolicy: .standard)
+            }
+        )
+
+        let report = await context.commit(selectedIDs: [entry.id])
+
+        XCTAssertEqual(report.succeededIDs, [entry.id])
     }
 
     func testAtomicCommitFailureRollsBackEverySelectedReference() async throws {
@@ -217,6 +234,17 @@ final class MetadataImportReviewContextTests: XCTestCase {
             score: 0.9,
             workKind: .journalArticle
         )
+    }
+}
+
+private final class LockedArray<Element>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [Element] = []
+
+    var values: [Element] { lock.withLock { storage } }
+
+    func append(contentsOf elements: [Element]) {
+        lock.withLock { storage.append(contentsOf: elements) }
     }
 }
 #endif

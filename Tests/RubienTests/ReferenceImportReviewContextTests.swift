@@ -55,6 +55,24 @@ final class ReferenceImportReviewContextTests: XCTestCase {
         XCTAssertEqual(try database.referenceCount(), 0)
     }
 
+    func testReferenceContextRunsAtomicCommitOffMainThread() async throws {
+        let database = try makeDatabase()
+        let entry = PreparedReferenceImport(reference: Reference(title: "Background"), sourceLabel: "test")
+        let context = ReferenceImportReviewContext(
+            database: database,
+            entries: [entry],
+            mergePolicy: .standard,
+            committer: { references, mergePolicy, database in
+                XCTAssertFalse(Thread.isMainThread)
+                _ = try database.batchImportReferences(references, mergePolicy: mergePolicy)
+            }
+        )
+
+        let report = await context.commit(selectedIDs: [entry.id])
+
+        XCTAssertEqual(report.succeededIDs, [entry.id])
+    }
+
     private func makeDatabase() throws -> AppDatabase {
         try AppDatabase(DatabaseQueue(path: ":memory:"))
     }

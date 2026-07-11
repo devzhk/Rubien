@@ -179,6 +179,66 @@ final class PDFImportReviewContextTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: source.temporaryDirectoryURL!.path))
     }
 
+    func testBlockedAndRejectedResultsExposeEveryUsableRecoveryPath() throws {
+        let database = try AppDatabase(DatabaseQueue(path: ":memory:"))
+        let sources = try [
+            makeRemoteSource(named: "blocked-candidate.pdf"),
+            makeRemoteSource(named: "blocked-proposal.pdf"),
+            makeRemoteSource(named: "blocked-empty.pdf"),
+            makeRemoteSource(named: "rejected-proposal.pdf"),
+            makeRemoteSource(named: "rejected-empty.pdf"),
+        ]
+        let candidate = MetadataCandidate(
+            source: .translationServer,
+            title: "Candidate",
+            score: 0.8
+        )
+        let results: [MetadataResolutionResult] = [
+            .blocked(BlockedEnvelope(
+                seed: nil,
+                fallbackReference: Reference(title: "Fallback"),
+                candidates: [candidate],
+                reason: .verificationRequired,
+                message: "Choose"
+            )),
+            .blocked(BlockedEnvelope(
+                seed: nil,
+                fallbackReference: Reference(title: "Proposal"),
+                reason: .verificationRequired,
+                message: "Confirm"
+            )),
+            .blocked(BlockedEnvelope(
+                seed: nil,
+                fallbackReference: nil,
+                reason: .verificationRequired,
+                message: "Blocked"
+            )),
+            .rejected(RejectedEnvelope(
+                seed: nil,
+                fallbackReference: Reference(title: "Rejected proposal"),
+                reason: .insufficientEvidence,
+                message: "Confirm"
+            )),
+            .rejected(RejectedEnvelope(
+                seed: nil,
+                fallbackReference: nil,
+                reason: .insufficientEvidence,
+                message: "Rejected"
+            )),
+        ]
+        let context = PDFImportReviewContext(
+            database: database,
+            entries: zip(sources, results).map { source, result in
+                (PreparedPDFImport(sourceURL: source.fileURL, resolution: result), source)
+            }
+        )
+
+        XCTAssertEqual(
+            context.items.map(\.readiness),
+            [.needsCandidate, .needsProposal, .blocked, .needsProposal, .failed]
+        )
+    }
+
     func testCompositeRoutesSelectionsAndRetainsFailedSibling() async {
         let first = RecordingReviewContext(title: "Markdown")
         let second = RecordingReviewContext(title: "PDF")

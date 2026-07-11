@@ -22,6 +22,7 @@ final class ZoteroImportReviewContext: ImportReviewContext {
     private let database: AppDatabase
     private let plan: ZoteroFolderImportPlan
     private let committer: Committer
+    private let onCompleted: (ZoteroFolderImporter.Result) -> Void
 
     init(
         database: AppDatabase,
@@ -32,11 +33,13 @@ final class ZoteroImportReviewContext: ImportReviewContext {
                 selectedEntryIDs: selectedIDs,
                 db: database
             )
-        }
+        },
+        onCompleted: @escaping (ZoteroFolderImporter.Result) -> Void = { _ in }
     ) {
         self.database = database
         self.plan = plan
         self.committer = committer
+        self.onCompleted = onCompleted
         self.items = plan.entries.map { entry in
             let attachmentProblems = entry.rejectedAttachmentPaths + entry.missingAttachmentPaths
             let attachmentMessage = String(
@@ -73,15 +76,17 @@ final class ZoteroImportReviewContext: ImportReviewContext {
         let committer = committer
         let result = await Task.detached(priority: .userInitiated) {
             do {
-                _ = try committer(plan, validIDs, database)
-                return DetachedZoteroCommitResult.success
+                return DetachedZoteroCommitResult.success(
+                    try committer(plan, validIDs, database)
+                )
             } catch {
                 return DetachedZoteroCommitResult.failure(error.localizedDescription)
             }
         }.value
 
         switch result {
-        case .success:
+        case .success(let completion):
+            onCompleted(completion)
             return ImportReviewCommitReport(succeededIDs: validIDs, failures: [:])
         case .failure(let message):
             return ImportReviewCommitReport(
@@ -97,7 +102,7 @@ final class ZoteroImportReviewContext: ImportReviewContext {
 }
 
 private enum DetachedZoteroCommitResult: Sendable {
-    case success
+    case success(ZoteroFolderImporter.Result)
     case failure(String)
 }
 #endif

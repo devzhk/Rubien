@@ -31,7 +31,7 @@ final class MetadataResolverTests: XCTestCase {
         )
     }
 
-    func testUnresolvedSingleLineKeepsImmediatePendingRoute() {
+    func testUnresolvedSingleLinePersistsInPlaceWithoutDismissingInitiatingSheet() {
         let result = MetadataResolutionResult.seedOnly(
             IntakeEnvelope(seed: nil, fallbackReference: nil, message: "No match")
         )
@@ -41,7 +41,7 @@ final class MetadataResolverTests: XCTestCase {
                 requestedInputCount: 1,
                 results: [result]
             ),
-            .deliverImmediately
+            .persistQueuedSingleInPlace
         )
     }
 

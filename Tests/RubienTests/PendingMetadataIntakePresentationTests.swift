@@ -4,6 +4,17 @@ import XCTest
 @testable import RubienCore
 
 final class PendingMetadataIntakePresentationTests: XCTestCase {
+    func testInitiatingSheetHandoffReleasesPayloadOnlyOnceAfterDismiss() {
+        var handoff = ImportReviewSheetHandoff<String>()
+
+        handoff.stage("prepared review")
+
+        XCTAssertTrue(handoff.hasPendingPayload)
+        XCTAssertEqual(handoff.takeAfterDismiss(), "prepared review")
+        XCTAssertFalse(handoff.hasPendingPayload)
+        XCTAssertNil(handoff.takeAfterDismiss())
+    }
+
     func testSingleQueuedIntakeOpensReviewImmediately() {
         XCTAssertEqual(
             PendingMetadataReviewScope.forQueuedIntakeIDs([7]),

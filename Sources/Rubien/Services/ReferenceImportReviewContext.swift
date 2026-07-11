@@ -16,20 +16,27 @@ struct PreparedReferenceImport: Identifiable, Sendable {
 
 @MainActor
 final class ReferenceImportReviewContext: ImportReviewContext {
+    typealias Committer = @Sendable ([Reference], ImportMergePolicy, AppDatabase) throws -> Void
+
     let items: [ImportReviewItem]
 
     private let database: AppDatabase
     private let entries: [PreparedReferenceImport]
     private let mergePolicy: ImportMergePolicy
+    private let committer: Committer
 
     init(
         database: AppDatabase,
         entries: [PreparedReferenceImport],
-        mergePolicy: ImportMergePolicy
+        mergePolicy: ImportMergePolicy,
+        committer: @escaping Committer = { references, mergePolicy, database in
+            _ = try database.batchImportReferences(references, mergePolicy: mergePolicy)
+        }
     ) {
         self.database = database
         self.entries = entries
         self.mergePolicy = mergePolicy
+        self.committer = committer
         self.items = entries.map { entry in
             ImportReviewItem(
                 id: entry.id,
@@ -47,14 +54,23 @@ final class ReferenceImportReviewContext: ImportReviewContext {
 
     func commit(selectedIDs: Set<UUID>) async -> ImportReviewCommitReport {
         let selected = entries.filter { selectedIDs.contains($0.id) }
-        do {
-            _ = try database.batchImportReferences(
-                selected.map(\.reference),
-                mergePolicy: mergePolicy
-            )
+        let references = selected.map(\.reference)
+        let mergePolicy = mergePolicy
+        let database = database
+        let committer = committer
+        let result = await Task.detached(priority: .userInitiated) {
+            do {
+                try committer(references, mergePolicy, database)
+                return DetachedReferenceCommitResult.success
+            } catch {
+                return DetachedReferenceCommitResult.failure(error.localizedDescription)
+            }
+        }.value
+
+        switch result {
+        case .success:
             return ImportReviewCommitReport(succeededIDs: selectedIDs, failures: [:])
-        } catch {
-            let message = error.localizedDescription
+        case .failure(let message):
             return ImportReviewCommitReport(
                 succeededIDs: [],
                 failures: Dictionary(
@@ -65,5 +81,10 @@ final class ReferenceImportReviewContext: ImportReviewContext {
     }
 
     func discard(remainingIDs: Set<UUID>) {}
+}
+
+private enum DetachedReferenceCommitResult: Sendable {
+    case success
+    case failure(String)
 }
 #endif

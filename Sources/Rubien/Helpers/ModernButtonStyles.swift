@@ -48,6 +48,37 @@ struct SLSecondaryButtonStyle: ButtonStyle {
     }
 }
 
+/// Compact hover and pressed treatment for square selection controls.
+struct ImportReviewCheckboxButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        ImportReviewCheckboxButtonBody(configuration: configuration)
+    }
+}
+
+private struct ImportReviewCheckboxButtonBody: View {
+    let configuration: ButtonStyleConfiguration
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovered = false
+
+    var body: some View {
+        configuration.label
+            .padding(5)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(
+                        configuration.isPressed
+                            ? Color.primary.opacity(0.14)
+                            : (isHovered ? Color.primary.opacity(0.08) : .clear)
+                    )
+            )
+            .scaleEffect(configuration.isPressed ? 0.92 : 1)
+            .opacity(isEnabled ? 1 : 0.45)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .animation(.easeOut(duration: 0.12), value: isHovered)
+            .onHover { isHovered = $0 }
+    }
+}
+
 private struct SLSecondaryButtonBody: View {
     let configuration: ButtonStyleConfiguration
     @Environment(\.isEnabled) private var isEnabled

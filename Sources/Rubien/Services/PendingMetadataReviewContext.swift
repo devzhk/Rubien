@@ -10,7 +10,7 @@ final class PendingMetadataReviewContext: ImportReviewContext {
         MetadataResolutionSeed?
     ) async -> MetadataResolutionResult
     typealias RetryResolver = (MetadataIntake) async -> MetadataResolutionResult
-    typealias Committer = (
+    typealias Committer = @Sendable (
         MetadataIntake,
         Reference?,
         EvidenceBundle?,
@@ -81,19 +81,29 @@ final class PendingMetadataReviewContext: ImportReviewContext {
 
         for id in orderedIDs where selectedIDs.contains(id) {
             guard let entry = entriesByID[id] else { continue }
-            do {
-                let reference = try committer(
-                    entry.intake,
-                    entry.stagedReference,
-                    entry.stagedEvidence,
-                    entry.stagedReference == nil ? "manual-queue" : "candidate-selection",
-                    database
-                )
+            let database = database
+            let committer = committer
+            let reviewedBy = entry.stagedReference == nil ? "manual-queue" : "candidate-selection"
+            let result = await Task.detached(priority: .userInitiated) {
+                do {
+                    return DetachedPendingCommitResult.success(try committer(
+                        entry.intake,
+                        entry.stagedReference,
+                        entry.stagedEvidence,
+                        reviewedBy,
+                        database
+                    ))
+                } catch {
+                    return DetachedPendingCommitResult.failure(error.localizedDescription)
+                }
+            }.value
+            switch result {
+            case .success(let reference):
                 onConfirmed?(reference)
                 succeeded.insert(id)
                 entriesByID.removeValue(forKey: id)
-            } catch {
-                failures[id] = error.localizedDescription
+            case .failure(let message):
+                failures[id] = message
             }
         }
 
@@ -117,7 +127,8 @@ final class PendingMetadataReviewContext: ImportReviewContext {
 
     func useProposedMetadata(itemID: UUID) -> ImportReviewItem {
         guard var entry = entriesByID[itemID],
-              let reference = Self.project(entry).reference else {
+              let reference = Self.project(entry).reference,
+              Self.hasUsableTitle(reference) else {
             return item(id: itemID)
         }
         let evidence = Self.project(entry).evidence
@@ -140,16 +151,17 @@ final class PendingMetadataReviewContext: ImportReviewContext {
             stage(result, in: &entry)
         } else {
             do {
-                let persisted = try database.persistMetadataResolution(
-                    result,
-                    options: MetadataPersistenceOptions(
-                        sourceKind: entry.intake.sourceKind,
-                        originalInput: entry.intake.originalInput,
-                        preferredPDFPath: entry.intake.pdfPath,
-                        linkedReferenceId: entry.intake.linkedReferenceId,
-                        existingIntakeId: entry.intake.id
-                    )
+                let options = MetadataPersistenceOptions(
+                    sourceKind: entry.intake.sourceKind,
+                    originalInput: entry.intake.originalInput,
+                    preferredPDFPath: entry.intake.pdfPath,
+                    linkedReferenceId: entry.intake.linkedReferenceId,
+                    existingIntakeId: entry.intake.id
                 )
+                let database = database
+                let persisted = try await Task.detached(priority: .userInitiated) {
+                    try database.persistMetadataResolution(result, options: options)
+                }.value
                 if case .intake(let refreshed) = persisted {
                     entry.intake = refreshed
                 }
@@ -197,28 +209,28 @@ final class PendingMetadataReviewContext: ImportReviewContext {
     private static func makeItem(id: UUID, entry: Entry) -> ImportReviewItem {
         let projection = project(entry)
         let readiness: ImportReviewItem.Readiness
-        if entry.stagedReference != nil {
-            readiness = .ready
+        if let stagedReference = entry.stagedReference {
+            readiness = Self.hasUsableTitle(stagedReference) ? .ready : .blocked
         } else if let result = entry.stagedResult {
             switch result {
             case .verified:
-                readiness = .ready
+                readiness = Self.hasUsableTitle(projection.reference) ? .ready : .blocked
             case .candidate(let envelope):
                 readiness = envelope.candidates.isEmpty
-                    ? (projection.reference == nil ? .blocked : .needsProposal)
+                    ? (Self.hasUsableTitle(projection.reference) ? .needsProposal : .blocked)
                     : .needsCandidate
             case .blocked(let envelope):
                 readiness = envelope.candidates.isEmpty
-                    ? (projection.reference == nil ? .blocked : .needsProposal)
+                    ? (Self.hasUsableTitle(projection.reference) ? .needsProposal : .blocked)
                     : .needsCandidate
             case .seedOnly:
-                readiness = projection.reference == nil ? .blocked : .needsProposal
+                readiness = Self.hasUsableTitle(projection.reference) ? .needsProposal : .blocked
             case .rejected:
-                readiness = projection.reference == nil ? .failed : .needsProposal
+                readiness = Self.hasUsableTitle(projection.reference) ? .needsProposal : .failed
             }
         } else if !entry.intake.decodedCandidates.isEmpty {
             readiness = .needsCandidate
-        } else if projection.reference != nil {
+        } else if Self.hasUsableTitle(projection.reference) {
             readiness = .ready
         } else {
             readiness = entry.intake.verificationStatus == .rejectedAmbiguous ? .failed : .blocked
@@ -242,6 +254,10 @@ final class PendingMetadataReviewContext: ImportReviewContext {
             commitError: nil,
             isWorking: false
         )
+    }
+
+    private static func hasUsableTitle(_ reference: Reference?) -> Bool {
+        reference?.title.rubien_nilIfBlank != nil
     }
 
     private static func project(
@@ -296,5 +312,10 @@ final class PendingMetadataReviewContext: ImportReviewContext {
             )
         }
     }
+}
+
+private enum DetachedPendingCommitResult: Sendable {
+    case success(Reference)
+    case failure(String)
 }
 #endif
