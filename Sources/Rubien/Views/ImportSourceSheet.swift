@@ -57,11 +57,15 @@ struct ImportSourceSheetState {
     }
 
     mutating func setTypedInput(_ input: String) {
+        guard !isAcquiring else { return }
         typedInput = input
-        stagedURLs = []
+        if input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            stagedURLs = []
+        }
     }
 
     mutating func setStagedURLs(_ urls: [URL]) {
+        guard !isAcquiring else { return }
         stagedURLs = urls
         typedInput = ""
     }

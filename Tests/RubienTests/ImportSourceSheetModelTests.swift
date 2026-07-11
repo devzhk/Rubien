@@ -78,5 +78,26 @@ final class ImportSourceSheetModelTests: XCTestCase {
         XCTAssertFalse(state.isAcquiring)
         XCTAssertTrue(state.beginSubmission())
     }
+
+    func testEmptyTextCommitPreservesPickerSelectionAndLatchedInputCannotMutate() {
+        let selectedURLs = [
+            URL(fileURLWithPath: "/tmp/one.pdf"),
+            URL(fileURLWithPath: "/tmp/two.md"),
+        ]
+        var state = ImportSourceSheetState(stagedURLs: selectedURLs)
+
+        // SwiftUI commits the text field's existing empty value before firing
+        // the default button action for Return.
+        state.setTypedInput("")
+
+        XCTAssertEqual(state.stagedURLs, selectedURLs)
+        XCTAssertTrue(state.beginSubmission())
+
+        state.setTypedInput("/tmp/replacement.pdf")
+        state.setStagedURLs([URL(fileURLWithPath: "/tmp/replacement.md")])
+
+        XCTAssertEqual(state.stagedURLs, selectedURLs)
+        XCTAssertTrue(state.typedInput.isEmpty)
+    }
 }
 #endif

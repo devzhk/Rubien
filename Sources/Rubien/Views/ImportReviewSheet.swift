@@ -150,7 +150,7 @@ struct ImportReviewSheet: View {
                 .font(.callout.weight(.medium))
                 .foregroundStyle(.secondary)
 
-            Button(String(localized: "Select all ready", bundle: .module)) {
+            Button(String(localized: "Select all importable", bundle: .module)) {
                 session.selectAllReady()
             }
             .buttonStyle(SLSecondaryButtonStyle())

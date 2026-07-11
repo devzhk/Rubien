@@ -74,7 +74,7 @@
 // MARK: - Batch import review
 
 "%d selected" = "%d selected";
-"Select all ready" = "Select all ready";
+"Select all importable" = "Select all importable";
 "Select none" = "Select none";
 "Confirm %d selected" = "Confirm %d selected";
 "Choose match…" = "Choose match…";
