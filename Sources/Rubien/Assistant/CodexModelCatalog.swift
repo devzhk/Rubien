@@ -8,8 +8,9 @@ import RubienCore
 // Fetches the installed codex's OWN model list via a short-lived `codex app-server`
 // (`initialize → initialized → model/list`; verified back to codex 0.142.5 — spec
 // §2.1) and memoizes it per resolved binary path. The catalog feeds PICKERS ONLY:
-// no turn ever waits on it (spec §4.1) — "Codex default" sends no model at all, and
-// a pinned slug is sent verbatim, so a turn racing this fetch is already correct.
+// no turn ever waits on it (spec §4.1) — a transient unseeded turn omits the model
+// (codex then applies its own config-chain fallback) and a pinned/seeded slug is sent
+// verbatim, so a turn racing this fetch is already correct.
 //
 // Correctness internals (spec review finding #9): concurrent callers join one
 // in-flight Task per path; a generation token invalidates on forceReload / path

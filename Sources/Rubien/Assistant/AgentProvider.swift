@@ -117,8 +117,8 @@ enum AgentEvent: Sendable, Equatable {
     case sessionStarted(sessionID: String)
     /// The model the runtime RESOLVED for this conversation — reported by codex's
     /// `thread/start`/`thread/resume` response, including (especially) when the
-    /// request omitted `model` ("Codex default": codex applies its own config
-    /// chain — spec §2.2). Claude never emits this.
+    /// request omitted `model` (a transient unseeded turn: codex applies its own
+    /// config chain — spec §2.2). Claude never emits this.
     case modelResolved(model: String)
     /// A streamed partial-text chunk (from `--include-partial-messages`).
     case assistantDelta(text: String)

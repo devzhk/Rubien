@@ -607,8 +607,9 @@ enum CodexAppServerProtocol {
     }
 
     /// The model a `thread/start` / `thread/resume` response reports as RESOLVED for
-    /// the thread — present even when the request omitted `model` (Codex default;
-    /// spec §2.2). Optional: older servers may not report it.
+    /// the thread — present even when the request omitted `model` (a transient
+    /// unseeded turn; codex then applies its own config-chain fallback — spec §2.2).
+    /// Optional: older servers may not report it.
     static func resolvedModel(fromThreadResponse result: [String: Any]) -> String? {
         guard let model = result["model"] as? String, !model.isEmpty else { return nil }
         return model

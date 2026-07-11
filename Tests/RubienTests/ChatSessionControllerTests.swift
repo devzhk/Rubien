@@ -1140,6 +1140,45 @@ final class ChatSessionControllerTests: XCTestCase {
                        "a set pin (remembered pick) is not overwritten by the first-model seed")
     }
 
+    /// The gap the "New conversation" button left: a never-picked user (nil model
+    /// default) who clicks New conversation once the catalog is ALREADY loaded must be
+    /// re-seeded onto a concrete model synchronously — not dropped to a blank picker
+    /// until some later fetch. `newConversation` re-reads a nil-model default, so the
+    /// tail `seedCodexModelIfUnset()` is what closes it.
+    func testNewConversationSeedsFirstModelWhenCatalogLoaded() async {
+        let first = CodexModelInfo(
+            id: "gpt-5.6-terra", displayName: "Terra", description: nil,
+            efforts: [CodexEffortInfo(value: "low", label: "Low", description: nil),
+                      CodexEffortInfo(value: "medium", label: "Medium", description: nil)],
+            defaultEffort: "medium", isDefault: false, hidden: false)
+        let second = CodexModelInfo(
+            id: "gpt-5.6-sol", displayName: "Sol", description: nil,
+            efforts: [], defaultEffort: "low", isDefault: true, hidden: false)
+        // A never-picked user: Settings hands back a nil model (no remembered pick).
+        let nilModelDefaults: (AgentProviderKind) -> AssistantConversationDefaults = { _ in
+            AssistantConversationDefaults(model: nil, effort: nil, webAccess: true, autoApprove: false)
+        }
+        let (controller, _) = makeCodexController(
+            catalog: CodexCatalog(models: [first, second], fetchedOK: true),
+            defaults: nilModelDefaults)
+
+        // The catalog lands and seeds the first model (the existing fetch behavior).
+        controller.refreshCodexCatalog()
+        await waitUntil { controller.modelOverride != nil }
+        XCTAssertEqual(controller.modelOverride, "gpt-5.6-terra", "the initial catalog fetch seeds")
+
+        // Simulate the never-picked New-conversation state: the catalog is already
+        // loaded but nothing is pinned. Without the tail seed in `newConversation` this
+        // would stay nil (a blank picker) — the discriminator for this fix.
+        controller.modelOverride = nil
+        controller.newConversation()
+
+        XCTAssertEqual(controller.modelOverride, "gpt-5.6-terra",
+                       "New conversation re-seeds the first model synchronously when the catalog is loaded")
+        XCTAssertEqual(controller.effortOverride, "medium",
+                       "effort seeds to the seeded model's default too")
+    }
+
     /// Picking a Codex model persists it as the remembered default; a Claude pick
     /// is a live per-conversation choice and must NOT touch the Codex pref.
     func testSelectModelPersistsPick() {

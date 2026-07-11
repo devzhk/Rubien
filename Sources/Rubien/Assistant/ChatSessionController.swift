@@ -120,7 +120,7 @@ final class ChatSessionController: ObservableObject {
     @Published var autoApprove = false
     /// The Codex OS-sandbox mode carried on every turn (D6). Ignored by Claude
     /// (which uses the control protocol, not an OS sandbox). A per-conversation
-    /// choice, seeded from the Codex default and reset on a provider switch.
+    /// choice, seeded from the Codex sandbox default and reset on a provider switch.
     @Published var codexSandbox: CodexSandbox
     /// The active backend, published so the composer picker + provider-aware model
     /// list re-render when a switch swaps the underlying provider (Phase 3b-3).
@@ -382,6 +382,10 @@ final class ChatSessionController: ObservableObject {
             autoApprove = defaults.autoApprove
             codexSandbox = defaults.codexSandbox
         }
+        // A never-picked Codex user (nil model default) would otherwise drop to a
+        // blank picker here; seed a concrete model when the catalog is already loaded.
+        // No-op when it isn't — the in-flight fetch seeds later, same as today.
+        seedCodexModelIfUnset()
     }
 
     /// Switch this conversation's backend runtime (composer picker, Phase 3b-3).
@@ -531,17 +535,7 @@ final class ChatSessionController: ObservableObject {
             let catalog = await catalogProvider.availableModels()
             guard let self, token == self.catalogFetchToken else { return }
             self.codexModels = catalog?.visibleModels ?? []
-            // Seed an unset conversation onto a CONCRETE model once discovery lands:
-            // no model pinned (`modelOverride == nil` — e.g. no remembered pick) →
-            // adopt the first discovered model, and its default effort when effort is
-            // likewise unset. A set pin (remembered pick / live choice) is left
-            // untouched (spec §4.6). The seed is NOT persisted — only an explicit
-            // pick writes `assistantCodexModel`.
-            if self.providerKind == .codex, self.modelOverride == nil,
-               let first = self.codexModels.first {
-                self.modelOverride = first.id
-                if self.effortOverride == nil { self.effortOverride = first.defaultEffort }
-            }
+            self.seedCodexModelIfUnset()  // seed an unset conversation onto a concrete model
             self.ensureEffortSupported()  // a pinned/seeded model's efforts are now known
         }
     }
@@ -587,6 +581,19 @@ final class ChatSessionController: ObservableObject {
         if providerKind == .codex {
             RubienPreferences.assistantCodexEffort = value ?? ""
         }
+    }
+
+    /// Seed a fresh/never-picked Codex conversation onto a concrete model (the first
+    /// discovered one) + its default effort, once the catalog is known. No-op if a
+    /// model is already chosen (a remembered pick or an in-flight pin) or the catalog
+    /// hasn't loaded. The seed is NOT persisted — only an explicit pick writes
+    /// `assistantCodexModel`. Called from the catalog fetch AND from `newConversation`
+    /// so the "New conversation" button doesn't drop a never-picked user to a blank
+    /// picker (spec §4.6).
+    private func seedCodexModelIfUnset() {
+        guard providerKind == .codex, modelOverride == nil, let first = codexModels.first else { return }
+        modelOverride = first.id
+        if effortOverride == nil { effortOverride = first.defaultEffort }
     }
 
     /// An explicit model pick adopts that model's `defaultReasoningEffort` when
