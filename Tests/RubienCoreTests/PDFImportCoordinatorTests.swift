@@ -21,6 +21,48 @@ final class PDFImportCoordinatorTests: XCTestCase {
         try super.tearDownWithError()
     }
 
+    func testPreparePDFDoesNotCopyOrPersist() async throws {
+        let database = try makeDatabase()
+        let sourceURL = try makeSourcePDF()
+        let before = Set(
+            try FileManager.default.contentsOfDirectory(atPath: AppDatabase.pdfStorageURL.path)
+        )
+
+        _ = await PDFImportCoordinator.preparePDF(
+            from: sourceURL,
+            resolver: { _, _ in self.verifiedResolution() }
+        )
+
+        XCTAssertEqual(try database.referenceCount(), 0)
+        XCTAssertEqual(
+            Set(try FileManager.default.contentsOfDirectory(atPath: AppDatabase.pdfStorageURL.path)),
+            before
+        )
+    }
+
+    func testCommitPreparedPDFPersistsOnlyAfterConfirmation() async throws {
+        let database = try makeDatabase()
+        let sourceURL = try makeSourcePDF()
+        let prepared = await PDFImportCoordinator.preparePDF(
+            from: sourceURL,
+            resolver: { _, _ in self.verifiedResolution() }
+        )
+
+        XCTAssertEqual(try database.referenceCount(), 0)
+
+        let outcome = try PDFImportCoordinator.commitPreparedPDF(prepared, database: database)
+        guard case .imported(let reference) = outcome else {
+            return XCTFail("A verified prepared PDF should import after confirmation")
+        }
+        let referenceID = try XCTUnwrap(reference.id)
+        let copiedPath = try XCTUnwrap(try database.pdfFilename(for: referenceID))
+        copiedPDFPaths.append(copiedPath)
+
+        XCTAssertEqual(try database.referenceCount(), 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: PDFService.pdfURL(for: copiedPath).path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sourceURL.path))
+    }
+
     func testImportPDFPersistsVerifiedReferenceAndAttachesCopiedPDF() async throws {
         let database = try makeDatabase()
         let sourceURL = try makeSourcePDF()

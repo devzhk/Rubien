@@ -61,7 +61,21 @@ struct SearchQuery {
 /// Side-effect-free result of reading and parsing Markdown sources.
 struct MarkdownImportPreparationResult: Sendable {
     let entries: [PreparedReferenceImport]
-    let unreadableFilenames: [String]
+    let sourcesByEntryID: [UUID: MaterializedImportSource]
+    let unreadableSources: [MaterializedImportSource]
+
+    var unreadableFilenames: [String] {
+        unreadableSources.map { $0.fileURL.lastPathComponent }
+    }
+}
+
+enum FileImportReviewPresentation {
+    static func shouldReview(
+        requestedSourceCount: Int,
+        preparedItemCount _: Int
+    ) -> Bool {
+        requestedSourceCount > 1
+    }
 }
 
 /// Reads and parses Markdown sources without occupying the main actor. This
@@ -72,28 +86,30 @@ enum MarkdownImportWorker {
     ) async -> MarkdownImportPreparationResult {
         await Task.detached(priority: .userInitiated) {
             var entries: [PreparedReferenceImport] = []
-            var unreadableFilenames: [String] = []
+            var sourcesByEntryID: [UUID: MaterializedImportSource] = [:]
+            var unreadableSources: [MaterializedImportSource] = []
 
             for source in sources {
                 let url = source.fileURL
                 guard let content = try? String(contentsOf: url, encoding: .utf8) else {
-                    unreadableFilenames.append(url.lastPathComponent)
+                    unreadableSources.append(source)
                     continue
                 }
-                entries.append(
-                    PreparedReferenceImport(
-                        reference: MarkdownImporter.parse(
-                            content,
-                            filename: url.deletingPathExtension().lastPathComponent
-                        ),
-                        sourceLabel: url.lastPathComponent
-                    )
+                let entry = PreparedReferenceImport(
+                    reference: MarkdownImporter.parse(
+                        content,
+                        filename: url.deletingPathExtension().lastPathComponent
+                    ),
+                    sourceLabel: url.lastPathComponent
                 )
+                entries.append(entry)
+                sourcesByEntryID[entry.id] = source
             }
 
             return MarkdownImportPreparationResult(
                 entries: entries,
-                unreadableFilenames: unreadableFilenames
+                sourcesByEntryID: sourcesByEntryID,
+                unreadableSources: unreadableSources
             )
         }.value
     }
@@ -1566,6 +1582,103 @@ struct ContentView: View {
             sources.forEach { $0.cleanup() }
             return
         }
+
+        if FileImportReviewPresentation.shouldReview(
+            requestedSourceCount: sources.count,
+            preparedItemCount: sources.count
+        ) {
+            prepareFileImportReview(sources)
+            return
+        }
+
+        importFilesImmediately(sources)
+    }
+
+    private func prepareFileImportReview(_ sources: [MaterializedImportSource]) {
+        let markdownSources = sources.filter { $0.kind == .markdown }
+        let pdfSources = sources.filter { $0.kind == .pdf }
+
+        viewModel.isImporting = true
+        viewModel.importProgress = String(localized: "Reading file…", bundle: .module)
+
+        Task { @MainActor in
+            let markdownPreparation = await prepareMarkdownSources(markdownSources)
+            var preparedPDFs: [PDFImportReviewContext.Entry] = []
+            for (index, source) in pdfSources.enumerated() {
+                if pdfSources.count > 1 {
+                    viewModel.importProgress = "\(source.fileURL.lastPathComponent) (\(index + 1)/\(pdfSources.count))…"
+                }
+                let prepared = await PDFImportCoordinator.preparePDF(
+                    from: source.fileURL,
+                    resolver: { [metadataResolver] url, extracted in
+                        await metadataResolver.resolveImportedPDF(url: url, extracted: extracted)
+                    }
+                )
+                preparedPDFs.append((prepared: prepared, source: source))
+            }
+
+            var children: [any ImportReviewContext] = []
+            var ownedSources = markdownPreparation.sourcesByEntryID
+            var failedItems: [ImportReviewItem] = []
+
+            if !markdownPreparation.entries.isEmpty {
+                children.append(
+                    ReferenceImportReviewContext(
+                        database: viewModel.db,
+                        entries: markdownPreparation.entries,
+                        mergePolicy: .markdownFillOnly
+                    )
+                )
+            }
+
+            for source in markdownPreparation.unreadableSources {
+                let id = UUID()
+                failedItems.append(
+                    ImportReviewItem(
+                        id: id,
+                        title: source.fileURL.lastPathComponent,
+                        subtitle: nil,
+                        message: String(localized: "Could not read this Markdown file.", bundle: .module),
+                        reference: nil,
+                        candidates: [],
+                        readiness: .failed,
+                        commitError: nil,
+                        isWorking: false
+                    )
+                )
+                ownedSources[id] = source
+            }
+
+            if !preparedPDFs.isEmpty {
+                children.append(
+                    PDFImportReviewContext(
+                        database: viewModel.db,
+                        entries: preparedPDFs,
+                        resolver: metadataResolver,
+                        onImported: { reference in
+                            selectedId = reference.id
+                            let coordinator = syncCoordinator
+                            Task { await coordinator?.kickPDFUploadDrainer() }
+                        }
+                    )
+                )
+            }
+
+            let context = CompositeImportReviewContext(
+                children: children,
+                additionalItems: failedItems,
+                ownedSources: ownedSources
+            )
+            viewModel.isImporting = false
+            viewModel.importProgress = nil
+            importReviewSession = ImportReviewSession(
+                title: String(localized: "Review file import", bundle: .module),
+                context: context
+            )
+        }
+    }
+
+    private func importFilesImmediately(_ sources: [MaterializedImportSource]) {
 
         let markdownSources = sources.filter { $0.kind == .markdown }
         let pdfSources = sources.filter { $0.kind == .pdf }

@@ -78,6 +78,8 @@
 "Select none" = "Select none";
 "Confirm %d selected" = "Confirm %d selected";
 "Choose match…" = "Choose match…";
+"Review file import" = "Review file import";
+"Could not read this Markdown file." = "Could not read this Markdown file.";
 "Use proposed metadata" = "Use proposed metadata";
 "Select import item" = "Select import item";
 "Deselect import item" = "Deselect import item";

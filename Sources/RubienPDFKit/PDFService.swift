@@ -4,6 +4,12 @@ import RubienCore
 public enum PDFService {
     /// Import PDF file to app storage, returns relative path
     public static func importPDF(from sourceURL: URL) throws -> String {
+        try copyImportedPDF(from: sourceURL)
+    }
+
+    /// Copies an imported PDF into library storage without extracting metadata
+    /// or creating a database row.
+    public static func copyImportedPDF(from sourceURL: URL) throws -> String {
         let storageDir = AppDatabase.pdfStorageURL
         let fileName = "\(UUID().uuidString)_\(sourceURL.lastPathComponent)"
         let destURL = storageDir.appendingPathComponent(fileName)
@@ -473,11 +479,7 @@ public enum PDFService {
 #endif
 
         let meta = extractMetadata(from: sourceURL)
-
-        let storageDir = AppDatabase.pdfStorageURL
-        let fileName = "\(UUID().uuidString)_\(sourceURL.lastPathComponent)"
-        let destURL = storageDir.appendingPathComponent(fileName)
-        try FileManager.default.copyItem(at: sourceURL, to: destURL)
+        let fileName = try copyImportedPDF(from: sourceURL)
 
         let ref = Reference(
             title: meta.title ?? sourceURL.deletingPathExtension().lastPathComponent,

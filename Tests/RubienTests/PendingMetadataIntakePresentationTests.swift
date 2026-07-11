@@ -20,5 +20,23 @@ final class PendingMetadataIntakePresentationTests: XCTestCase {
     func testNoQueuedIntakesDoesNotOpenReview() {
         XCTAssertNil(PendingMetadataReviewScope.forQueuedIntakeIDs([]))
     }
+
+    func testMultipleRequestedFilesOpenReviewEvenWhenOnlyOnePrepares() {
+        XCTAssertTrue(
+            FileImportReviewPresentation.shouldReview(
+                requestedSourceCount: 2,
+                preparedItemCount: 1
+            )
+        )
+    }
+
+    func testTrueSingleFileImportStaysImmediate() {
+        XCTAssertFalse(
+            FileImportReviewPresentation.shouldReview(
+                requestedSourceCount: 1,
+                preparedItemCount: 1
+            )
+        )
+    }
 }
 #endif
