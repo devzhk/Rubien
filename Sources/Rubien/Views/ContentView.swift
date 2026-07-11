@@ -188,6 +188,29 @@ enum PendingMetadataReviewScope: Equatable {
     }
 }
 
+enum PendingMetadataIntakePresentation {
+    /// A newly-created batch already owns the exact durable intake snapshots
+    /// it should review. Prefer those over the asynchronously observed global
+    /// queue so the sheet cannot initialize empty and remain stale.
+    static func intakesForReview(
+        observedPending: [MetadataIntake],
+        scopedPending: [MetadataIntake]?
+    ) -> [MetadataIntake] {
+        scopedPending ?? observedPending
+    }
+
+    static func scopedIntakes(from queuedIntakes: [MetadataIntake]) -> [MetadataIntake]? {
+        guard let scope = PendingMetadataReviewScope.forQueuedIntakeIDs(
+            queuedIntakes.compactMap(\.id)
+        ), case let .queuedImport(ids) = scope else {
+            return nil
+        }
+        return ids.compactMap { id in
+            queuedIntakes.first { $0.id == id }
+        }
+    }
+}
+
 @MainActor
 final class LibraryViewModel: ObservableObject {
     /// The current page of references returned by the database-level query.
@@ -833,7 +856,7 @@ struct ContentView: View {
     @State private var importGeneration = 0
     @State private var pendingZoteroImportFolder: PendingZoteroImport?
     @State private var showPendingMetadataQueue = false
-    @State private var pendingMetadataReviewIDs: [Int64]?
+    @State private var scopedPendingMetadataIntakes: [MetadataIntake]?
     @State private var pendingQueueNotice: PendingQueueNotice?
     @State private var columnVisibility = NavigationSplitViewVisibility.all
     @State private var selectedId: Int64?
@@ -876,12 +899,10 @@ struct ContentView: View {
     }
 
     private var pendingMetadataIntakesForReview: [MetadataIntake] {
-        guard let reviewIDs = pendingMetadataReviewIDs else {
-            return viewModel.pendingMetadataIntakes
-        }
-        return reviewIDs.compactMap { id in
-            viewModel.pendingMetadataIntakes.first { $0.id == id }
-        }
+        PendingMetadataIntakePresentation.intakesForReview(
+            observedPending: viewModel.pendingMetadataIntakes,
+            scopedPending: scopedPendingMetadataIntakes
+        )
     }
 
     /// The leading toolbar's flat buttons, in order: Properties, Search, the
@@ -964,7 +985,7 @@ struct ContentView: View {
 
             if !viewModel.pendingMetadataIntakes.isEmpty {
                 Button {
-                    pendingMetadataReviewIDs = nil
+                    scopedPendingMetadataIntakes = nil
                     showPendingMetadataQueue = true
                 } label: {
                     HStack(spacing: 6) {
@@ -1317,7 +1338,7 @@ struct ContentView: View {
             )
         }
         .sheet(isPresented: $showPendingMetadataQueue, onDismiss: {
-            pendingMetadataReviewIDs = nil
+            scopedPendingMetadataIntakes = nil
         }) {
             PendingMetadataQueueView(
                 database: viewModel.db,
@@ -1359,7 +1380,7 @@ struct ContentView: View {
                     HStack {
                         Button(String(localized: "Open pending queue", bundle: .module)) {
                             pendingQueueNotice = nil
-                            pendingMetadataReviewIDs = nil
+                            scopedPendingMetadataIntakes = nil
                             showPendingMetadataQueue = true
                         }
                         .buttonStyle(SLPrimaryButtonStyle())
@@ -1771,13 +1792,9 @@ struct ContentView: View {
             viewModel.isImporting = false
             viewModel.importProgress = summary.isEmpty ? nil : summary.joined(separator: " · ")
             if !queuedIntakes.isEmpty {
-                if let scope = PendingMetadataReviewScope.forQueuedIntakeIDs(
-                    queuedIntakes.compactMap(\.id)
-                ), case let .queuedImport(ids) = scope {
-                    pendingMetadataReviewIDs = ids
-                } else {
-                    pendingMetadataReviewIDs = nil
-                }
+                scopedPendingMetadataIntakes = PendingMetadataIntakePresentation.scopedIntakes(
+                    from: queuedIntakes
+                )
                 pendingQueueNotice = nil
                 showPendingMetadataQueue = true
             }
