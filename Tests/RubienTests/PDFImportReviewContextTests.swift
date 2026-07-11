@@ -39,6 +39,28 @@ final class PDFImportReviewContextTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: source.temporaryDirectoryURL!.path))
     }
 
+    func testPDFCommitRunsOffMainThread() async throws {
+        let database = try AppDatabase(DatabaseQueue(path: ":memory:"))
+        let source = try makeRemoteSource(named: "background.pdf")
+        let prepared = PreparedPDFImport(
+            sourceURL: source.fileURL,
+            resolution: verifiedResolution(title: "Background PDF")
+        )
+        let context = PDFImportReviewContext(
+            database: database,
+            entries: [(prepared: prepared, source: source)],
+            committer: { prepared, database in
+                XCTAssertFalse(Thread.isMainThread, "PDF copying and persistence must not block the main thread")
+                return try PDFImportCoordinator.commitPreparedPDF(prepared, database: database)
+            }
+        )
+
+        let report = await context.commit(selectedIDs: [context.items[0].id])
+
+        XCTAssertEqual(report.succeededIDs, [context.items[0].id])
+        XCTAssertEqual(try database.referenceCount(), 1)
+    }
+
     func testDiscardCleansUnselectedTemporarySourceWithoutPersisting() throws {
         let database = try AppDatabase(DatabaseQueue(path: ":memory:"))
         let source = try makeRemoteSource(named: "unselected.pdf")
@@ -184,6 +206,70 @@ final class PDFImportReviewContextTests: XCTestCase {
         XCTAssertTrue(composite.items.contains(where: { $0.id == failed.id }))
     }
 
+    func testUnreadableMarkdownRetryBecomesReadyWithoutPersisting() async throws {
+        let database = try AppDatabase(DatabaseQueue(path: ":memory:"))
+        let source = try makeRemoteMarkdownSource(named: "retry.md", content: nil)
+        let context = MarkdownImportRetryContext(database: database, sources: [source])
+
+        XCTAssertEqual(context.items.map(\.readiness), [.failed])
+        try Data("# Retry succeeded".utf8).write(to: source.fileURL)
+
+        let updated = await context.retry(itemID: context.items[0].id)
+
+        XCTAssertEqual(updated.readiness, .ready)
+        XCTAssertEqual(updated.reference?.title, "Retry succeeded")
+        XCTAssertEqual(try database.referenceCount(), 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: source.temporaryDirectoryURL!.path))
+
+        let report = await context.commit(selectedIDs: [updated.id])
+
+        XCTAssertEqual(report.succeededIDs, [updated.id])
+        XCTAssertEqual(try database.referenceCount(), 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: source.temporaryDirectoryURL!.path))
+    }
+
+    func testMixedMarkdownPreparationReviewCommitAndDiscardLifecycle() async throws {
+        let database = try AppDatabase(DatabaseQueue(path: ":memory:"))
+        let readySource = try makeRemoteMarkdownSource(
+            named: "ready.md",
+            content: "# Ready markdown"
+        )
+        let failedSource = try makeRemoteMarkdownSource(named: "failed.md", content: nil)
+        let preparation = await MarkdownImportWorker.prepareSources([readySource, failedSource])
+
+        XCTAssertEqual(preparation.entries.count, 1)
+        XCTAssertEqual(preparation.unreadableSources.map(\.fileURL), [failedSource.fileURL])
+
+        let readyContext = ReferenceImportReviewContext(
+            database: database,
+            entries: preparation.entries,
+            mergePolicy: .markdownFillOnly
+        )
+        let failedContext = MarkdownImportRetryContext(
+            database: database,
+            sources: preparation.unreadableSources
+        )
+        let composite = CompositeImportReviewContext(
+            children: [readyContext, failedContext],
+            ownedSources: preparation.sourcesByEntryID
+        )
+        let readyItem = try XCTUnwrap(composite.items.first(where: { $0.readiness == .ready }))
+        let failedItem = try XCTUnwrap(composite.items.first(where: { $0.readiness == .failed }))
+
+        XCTAssertEqual(try database.referenceCount(), 0)
+        XCTAssertEqual(composite.items.count, 2)
+
+        let report = await composite.commit(selectedIDs: [readyItem.id])
+
+        XCTAssertEqual(report.succeededIDs, [readyItem.id])
+        XCTAssertEqual(try database.referenceCount(), 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: readySource.temporaryDirectoryURL!.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: failedSource.temporaryDirectoryURL!.path))
+
+        composite.discard(remainingIDs: [failedItem.id])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: failedSource.temporaryDirectoryURL!.path))
+    }
+
     private func makeRemoteSource(named filename: String) throws -> MaterializedImportSource {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("PDFImportReviewContextTests-\(UUID().uuidString)", isDirectory: true)
@@ -200,6 +286,26 @@ final class PDFImportReviewContextTests: XCTestCase {
             input: "https://example.com/\(filename)",
             fileURL: fileURL,
             kind: .pdf,
+            temporaryDirectoryURL: directory
+        )
+    }
+
+    private func makeRemoteMarkdownSource(
+        named filename: String,
+        content: String?
+    ) throws -> MaterializedImportSource {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PDFImportReviewContextTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        cleanupURLs.append(directory)
+        let fileURL = directory.appendingPathComponent(filename)
+        if let content {
+            try Data(content.utf8).write(to: fileURL)
+        }
+        return MaterializedImportSource(
+            input: "https://example.com/\(filename)",
+            fileURL: fileURL,
+            kind: .markdown,
             temporaryDirectoryURL: directory
         )
     }

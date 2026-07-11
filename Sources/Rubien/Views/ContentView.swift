@@ -1618,8 +1618,7 @@ struct ContentView: View {
             }
 
             var children: [any ImportReviewContext] = []
-            var ownedSources = markdownPreparation.sourcesByEntryID
-            var failedItems: [ImportReviewItem] = []
+            let ownedSources = markdownPreparation.sourcesByEntryID
 
             if !markdownPreparation.entries.isEmpty {
                 children.append(
@@ -1631,22 +1630,13 @@ struct ContentView: View {
                 )
             }
 
-            for source in markdownPreparation.unreadableSources {
-                let id = UUID()
-                failedItems.append(
-                    ImportReviewItem(
-                        id: id,
-                        title: source.fileURL.lastPathComponent,
-                        subtitle: nil,
-                        message: String(localized: "Could not read this Markdown file.", bundle: .module),
-                        reference: nil,
-                        candidates: [],
-                        readiness: .failed,
-                        commitError: nil,
-                        isWorking: false
+            if !markdownPreparation.unreadableSources.isEmpty {
+                children.append(
+                    MarkdownImportRetryContext(
+                        database: viewModel.db,
+                        sources: markdownPreparation.unreadableSources
                     )
                 )
-                ownedSources[id] = source
             }
 
             if !preparedPDFs.isEmpty {
@@ -1666,7 +1656,6 @@ struct ContentView: View {
 
             let context = CompositeImportReviewContext(
                 children: children,
-                additionalItems: failedItems,
                 ownedSources: ownedSources
             )
             viewModel.isImporting = false

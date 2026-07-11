@@ -54,11 +54,14 @@ public enum PDFImportCoordinator {
         from sourceURL: URL,
         resolver: @escaping Resolver = ImportedPDFMetadataResolver.resolve
     ) async -> PreparedPDFImport {
+        let extracted: PDFService.ExtractedMetadata
 #if canImport(Darwin)
         let accessing = sourceURL.startAccessingSecurityScopedResource()
-        defer { if accessing { sourceURL.stopAccessingSecurityScopedResource() } }
+        extracted = PDFService.extractMetadata(from: sourceURL)
+        if accessing { sourceURL.stopAccessingSecurityScopedResource() }
+#else
+        extracted = PDFService.extractMetadata(from: sourceURL)
 #endif
-        let extracted = PDFService.extractMetadata(from: sourceURL)
         let resolution = await resolver(sourceURL, extracted)
         return PreparedPDFImport(sourceURL: sourceURL, resolution: resolution)
     }

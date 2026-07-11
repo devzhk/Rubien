@@ -6,6 +6,7 @@ import RubienPDFKit
 @MainActor
 final class PDFImportReviewContext: ImportReviewContext {
     typealias Entry = (prepared: PreparedPDFImport, source: MaterializedImportSource)
+    typealias Committer = @Sendable (PreparedPDFImport, AppDatabase) throws -> PDFImportOutcome
 
     let items: [ImportReviewItem]
 
@@ -17,17 +18,22 @@ final class PDFImportReviewContext: ImportReviewContext {
     private let database: AppDatabase
     private let resolver: MetadataResolver
     private let onImported: (Reference) -> Void
+    private let committer: Committer
     private var payloads: [UUID: Payload]
 
     init(
         database: AppDatabase,
         entries: [Entry],
         resolver: MetadataResolver? = nil,
-        onImported: @escaping (Reference) -> Void = { _ in }
+        onImported: @escaping (Reference) -> Void = { _ in },
+        committer: @escaping Committer = { prepared, database in
+            try PDFImportCoordinator.commitPreparedPDF(prepared, database: database)
+        }
     ) {
         self.database = database
         self.resolver = resolver ?? MetadataResolver()
         self.onImported = onImported
+        self.committer = committer
 
         var payloads: [UUID: Payload] = [:]
         var items: [ImportReviewItem] = []
@@ -51,11 +57,20 @@ final class PDFImportReviewContext: ImportReviewContext {
                 continue
             }
 
-            do {
-                let outcome = try PDFImportCoordinator.commitPreparedPDF(
-                    payload.prepared,
-                    database: database
-                )
+            let database = database
+            let committer = committer
+            let commitResult = await Task.detached(priority: .userInitiated) {
+                do {
+                    return DetachedPDFCommitResult.success(
+                        try committer(payload.prepared, database)
+                    )
+                } catch {
+                    return DetachedPDFCommitResult.failure(error.localizedDescription)
+                }
+            }.value
+
+            switch commitResult {
+            case .success(let outcome):
                 switch outcome {
                 case .imported(let reference):
                     succeeded.insert(item.id)
@@ -65,8 +80,8 @@ final class PDFImportReviewContext: ImportReviewContext {
                 case .queued:
                     failures[item.id] = "Metadata must be confirmed before importing this PDF."
                 }
-            } catch {
-                failures[item.id] = error.localizedDescription
+            case .failure(let message):
+                failures[item.id] = message
             }
         }
 
@@ -227,5 +242,10 @@ final class PDFImportReviewContext: ImportReviewContext {
             return (envelope.seed, envelope.currentReference ?? envelope.fallbackReference, envelope.evidence)
         }
     }
+}
+
+private enum DetachedPDFCommitResult: Sendable {
+    case success(PDFImportOutcome)
+    case failure(String)
 }
 #endif
