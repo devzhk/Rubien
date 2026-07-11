@@ -829,6 +829,7 @@ struct ContentView: View {
     @State private var showWebImport = false
     @State private var showAddByIdentifier = false
     @State private var showBatchImport = false
+    @State private var preparedMetadataImportsAfterBatchDismiss: [PreparedMetadataImport]?
     @State private var showImportSourceSheet = false
     @State private var importReviewSession: ImportReviewSession?
     /// Monotonic token owned by `importFilesWithMetadata`. Each batch captures
@@ -1229,21 +1230,16 @@ struct ContentView: View {
                 }
             )
         }
-        .sheet(isPresented: $showBatchImport) {
+        .sheet(isPresented: $showBatchImport, onDismiss: {
+            guard let entries = preparedMetadataImportsAfterBatchDismiss else { return }
+            preparedMetadataImportsAfterBatchDismiss = nil
+            handlePreparedMetadataImports(entries)
+        }) {
             BatchImportView(
                 resolver: metadataResolver,
-                onImport: { refs in
-                viewModel.batchImportReferences(refs)
-                },
-                onQueueResult: { result, input in
-                    queueResolutionResult(
-                        result,
-                        options: MetadataPersistenceOptions(
-                            sourceKind: .batchIdentifier,
-                            originalInput: input
-                        ),
-                        successMessage: String(localized: "Queued for review", bundle: .module)
-                    )
+                onPrepared: { entries in
+                    preparedMetadataImportsAfterBatchDismiss = entries
+                    showBatchImport = false
                 }
             )
         }
@@ -1471,6 +1467,38 @@ struct ContentView: View {
         prepareStandardReferenceImport(
             from: url,
             format: .ris
+        )
+    }
+
+    private func handlePreparedMetadataImports(_ entries: [PreparedMetadataImport]) {
+        guard !entries.isEmpty else { return }
+
+        guard BatchImportPresentation.shouldReview(requestedInputCount: entries.count) else {
+            let entry = entries[0]
+            switch entry.result {
+            case .verified(let envelope):
+                viewModel.batchImportReferences([envelope.reference])
+            case .candidate, .blocked, .seedOnly, .rejected:
+                queueResolutionResult(
+                    entry.result,
+                    options: MetadataPersistenceOptions(
+                        sourceKind: .batchIdentifier,
+                        originalInput: entry.input
+                    ),
+                    successMessage: String(localized: "Queued for review", bundle: .module)
+                )
+            }
+            return
+        }
+
+        let context = MetadataImportReviewContext(
+            database: viewModel.db,
+            resolver: metadataResolver,
+            entries: entries
+        )
+        importReviewSession = ImportReviewSession(
+            title: String(localized: "Review identifier import", bundle: .module),
+            context: context
         )
     }
 

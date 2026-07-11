@@ -3,10 +3,15 @@ import AppKit
 import SwiftUI
 import RubienCore
 
+enum BatchImportPresentation {
+    static func shouldReview(requestedInputCount: Int) -> Bool {
+        requestedInputCount > 1
+    }
+}
+
 struct BatchImportView: View {
     let resolver: MetadataResolver
-    let onImport: ([Reference]) -> Void
-    let onQueueResult: (MetadataResolutionResult, String) -> Void
+    let onPrepared: ([PreparedMetadataImport]) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var inputText = ""
@@ -14,8 +19,6 @@ struct BatchImportView: View {
     @State private var results: [ImportResult] = []
     @State private var progress = 0
     @State private var total = 0
-    @State private var queuedInputs: [String] = []
-    @State private var currentIndex = 0
     @State private var statusMessage: String?
 
     struct ImportResult: Identifiable {
@@ -44,23 +47,9 @@ struct BatchImportView: View {
                 Text("batchImport.title", bundle: .module)
                     .font(.headline)
                 Spacer()
-                if !results.isEmpty {
-                    let importedCount = results.filter(\.isSuccess).count
-                    Button(String(format: String(localized: "Import %d to library", bundle: .module), importedCount)) {
-                        let refs = results.compactMap { result -> Reference? in
-                            if case .imported(let ref) = result.outcome { return ref }
-                            return nil
-                        }
-                        onImport(refs)
-                        dismiss()
-                    }
+                Button(String(localized: "batchImport.button.start", bundle: .module)) { startBatchFetch() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(results.filter(\.isSuccess).isEmpty)
-                } else {
-                    Button(String(localized: "batchImport.button.start", bundle: .module)) { startBatchFetch() }
-                        .keyboardShortcut(.defaultAction)
-                        .disabled(identifiers.isEmpty || isProcessing)
-                }
+                    .disabled(identifiers.isEmpty || isProcessing || !results.isEmpty)
             }
             .padding()
 
@@ -206,57 +195,58 @@ struct BatchImportView: View {
     }
 
     private func startBatchFetch() {
-        queuedInputs = identifiers
-        total = queuedInputs.count
+        let inputs = identifiers
+        total = inputs.count
         progress = 0
-        currentIndex = 0
         results = []
-        isProcessing = !queuedInputs.isEmpty
+        isProcessing = !inputs.isEmpty
 
         guard isProcessing else { return }
 
         Task { @MainActor in
             let maxConcurrency = 3
-            let inputs = queuedInputs
+            var prepared = Array<PreparedMetadataImport?>(repeating: nil, count: inputs.count)
 
-            await withTaskGroup(of: (String, MetadataResolutionResult).self) { group in
+            await withTaskGroup(of: (Int, String, MetadataResolutionResult).self) { group in
                 var nextIndex = 0
 
                 // Seed initial batch
                 while nextIndex < min(maxConcurrency, inputs.count) {
-                    let identifier = inputs[nextIndex]
+                    let index = nextIndex
+                    let identifier = inputs[index]
                     nextIndex += 1
                     group.addTask {
                         let outcome = await resolver.resolveManualEntry(identifier)
                         let result = outcome.result
                         // Note: outcome.preferredPDFURL is intentionally discarded — batch import
                         // doesn't auto-download URL-derived PDFs.
-                        return (identifier, result)
+                        return (index, identifier, result)
                     }
                 }
 
                 // Process results as they arrive, enqueue more work
-                for await (identifier, result) in group {
+                for await (index, identifier, result) in group {
+                    prepared[index] = PreparedMetadataImport(input: identifier, result: result)
                     switch result {
                     case .verified(let envelope):
                         appendResult(identifier: identifier, outcome: .imported(envelope.reference))
                     case .candidate, .blocked, .seedOnly, .rejected:
-                        onQueueResult(result, identifier)
                         appendResult(
                             identifier: identifier,
-                            outcome: .queued(String(localized: "Queued for review", bundle: .module))
+                            outcome: .queued(String(localized: "Ready for review", bundle: .module))
                         )
                     }
 
                     if nextIndex < inputs.count {
-                        let nextIdentifier = inputs[nextIndex]
+                        let nextIndexToResolve = nextIndex
+                        let nextIdentifier = inputs[nextIndexToResolve]
                         nextIndex += 1
                         group.addTask {
                             let outcome = await resolver.resolveManualEntry(nextIdentifier)
                             let result = outcome.result
                             // Note: outcome.preferredPDFURL is intentionally discarded — batch import
                             // doesn't auto-download URL-derived PDFs.
-                            return (nextIdentifier, result)
+                            return (nextIndexToResolve, nextIdentifier, result)
                         }
                     }
                 }
@@ -264,6 +254,8 @@ struct BatchImportView: View {
 
             isProcessing = false
             statusMessage = nil
+            onPrepared(prepared.compactMap { $0 })
+            dismiss()
         }
     }
 

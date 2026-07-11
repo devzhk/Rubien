@@ -4,6 +4,13 @@ import XCTest
 @testable import RubienCore
 
 final class MetadataResolverTests: XCTestCase {
+    func testBatchImportReviewThresholdUsesRequestedLineCount() {
+        XCTAssertFalse(BatchImportPresentation.shouldReview(requestedInputCount: 0))
+        XCTAssertFalse(BatchImportPresentation.shouldReview(requestedInputCount: 1))
+        XCTAssertTrue(BatchImportPresentation.shouldReview(requestedInputCount: 2))
+        XCTAssertTrue(BatchImportPresentation.shouldReview(requestedInputCount: 8))
+    }
+
     func testManualCandidateSelectionPromotesRejectedResultToVerifiedManual() {
         let evidence = EvidenceBundle(
             source: .translationServer,
