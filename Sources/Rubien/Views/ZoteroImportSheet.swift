@@ -4,7 +4,8 @@ import RubienCore
 
 /// Pre-import sheet for "Import Zotero Folder…". Lets the user pick which property
 /// to stamp with the folder name and edit the stamped value. On confirm, hands off
-/// a `ZoteroImportPropertyTarget` to the caller.
+/// a `ZoteroImportPropertyTarget` to the caller before the folder is prepared.
+/// Multi-entry exports continue into the shared selected-entry review sheet.
 struct ZoteroImportSheet: View {
     let folderURL: URL
     let db: AppDatabase

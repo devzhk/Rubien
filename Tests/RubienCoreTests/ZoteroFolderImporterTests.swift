@@ -417,6 +417,109 @@ final class ZoteroFolderImporterTests: XCTestCase {
         XCTAssertEqual(after.subtracting(before).count, 1, "Exactly one new PDF, none orphaned")
     }
 
+    func testPrepareFolderDoesNotWriteReferencesOrCopyPDFs() throws {
+        let db = try makeDatabase()
+        let folder = try makeFakeZoteroFolder(
+            name: "PlanOnly",
+            bibtex: "@article{a, title = {Planned}, file = {PDF:files/1/a.pdf:application/pdf}}",
+            pdfs: ["files/1/a.pdf": Data("planned-pdf".utf8)]
+        )
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        let storeURL = AppDatabase.pdfStorageURL
+        let before = Set((try? FileManager.default.contentsOfDirectory(atPath: storeURL.path)) ?? [])
+
+        let plan = try ZoteroFolderImporter.prepareFolder(
+            at: folder,
+            db: db,
+            propertyTarget: nil
+        )
+
+        XCTAssertEqual(plan.entries.count, 1)
+        XCTAssertEqual(plan.entries[0].reference.title, "Planned")
+        XCTAssertEqual(try db.referenceCount(), 0)
+        let after = Set((try? FileManager.default.contentsOfDirectory(atPath: storeURL.path)) ?? [])
+        XCTAssertEqual(after, before)
+    }
+
+    func testCommitImportsAndStampsOnlySelectedEntries() throws {
+        let db = try makeDatabase()
+        let folder = try makeFakeZoteroFolder(
+            name: "Selected",
+            bibtex: """
+            @article{a, title = {First}, doi = {10.1/first}, file = {PDF:files/1/a.pdf:application/pdf}}
+            @article{b, title = {Second}, doi = {10.1/second}, file = {PDF:files/2/b.pdf:application/pdf}}
+            """,
+            pdfs: [
+                "files/1/a.pdf": Data("first-pdf".utf8),
+                "files/2/b.pdf": Data("second-pdf".utf8),
+            ]
+        )
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        let tags = try XCTUnwrap(db.findPropertyDefinition(byName: "Tags"))
+        let target = ZoteroImportPropertyTarget(propertyId: tags.id!, value: "Selected")
+        let plan = try ZoteroFolderImporter.prepareFolder(at: folder, db: db, propertyTarget: target)
+
+        let result = try ZoteroFolderImporter.commit(
+            plan: plan,
+            selectedEntryIDs: [plan.entries[1].id],
+            db: db
+        )
+
+        XCTAssertEqual(result.imported, 1)
+        XCTAssertEqual(result.attached, 1)
+        let reference = try XCTUnwrap(db.fetchAllReferences().first)
+        XCTAssertEqual(reference.title, "Second")
+        XCTAssertEqual(try db.fetchTags(forReference: reference.id!).map(\.name), ["Selected"])
+        copiedPDFPaths.append(try XCTUnwrap(try cachedFilename(for: reference, db: db)))
+    }
+
+    func testSelectedLaterDuplicateStillReceivesPDFAndLaterCommitReclassifies() throws {
+        let db = try makeDatabase()
+        let folder = try makeFakeZoteroFolder(
+            name: "ReviewedDuplicates",
+            bibtex: """
+            @article{a, title = {Earlier}, doi = {10.1/reviewed-dup}, file = {PDF:files/1/a.pdf:application/pdf}}
+            @article{b, title = {Later}, doi = {10.1/reviewed-dup}, file = {PDF:files/2/b.pdf:application/pdf}}
+            @article{c, title = {Latest}, doi = {10.1/reviewed-dup}, file = {PDF:files/3/c.pdf:application/pdf}}
+            """,
+            pdfs: [
+                "files/1/a.pdf": Data("earlier-pdf".utf8),
+                "files/2/b.pdf": Data("later-pdf".utf8),
+                "files/3/c.pdf": Data("latest-pdf".utf8),
+            ]
+        )
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+        let plan = try ZoteroFolderImporter.prepareFolder(at: folder, db: db, propertyTarget: nil)
+        XCTAssertEqual(try db.referenceCount(), 0)
+
+        let firstResult = try ZoteroFolderImporter.commit(
+            plan: plan,
+            selectedEntryIDs: [plan.entries[2].id, plan.entries[1].id],
+            db: db
+        )
+
+        XCTAssertEqual(firstResult.imported, 2)
+        XCTAssertEqual(firstResult.attached, 1)
+        XCTAssertEqual(firstResult.duplicatesSkipped, 1)
+        var reference = try XCTUnwrap(db.fetchAllReferences().first)
+        let stored = try XCTUnwrap(try cachedFilename(for: reference, db: db))
+        copiedPDFPaths.append(stored)
+        XCTAssertEqual(try Data(contentsOf: PDFService.pdfURL(for: stored)), Data("later-pdf".utf8))
+
+        let secondResult = try ZoteroFolderImporter.commit(
+            plan: plan,
+            selectedEntryIDs: [plan.entries[0].id],
+            db: db
+        )
+
+        XCTAssertEqual(secondResult.imported, 1)
+        XCTAssertEqual(secondResult.attached, 0)
+        XCTAssertEqual(secondResult.duplicatesSkipped, 1)
+        XCTAssertEqual(try db.fetchAllReferences().count, 1)
+        reference = try XCTUnwrap(db.fetchAllReferences().first)
+        XCTAssertEqual(try cachedFilename(for: reference, db: db), stored)
+    }
+
     func testBatchedDedupAcrossManyEntries() throws {
         let db = try makeDatabase()
         // Seed three existing references — one matches incoming by DOI, one by ISBN,

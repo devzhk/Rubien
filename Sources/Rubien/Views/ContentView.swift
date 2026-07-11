@@ -812,43 +812,6 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
-    func importZoteroFolder(from url: URL, target: ZoteroImportPropertyTarget?) {
-        isImporting = true
-        importProgress = String(localized: "Reading folder…", bundle: .module)
-
-        Task.detached { [weak self] in
-            guard let self else { return }
-            do {
-                let result = try ZoteroFolderImporter.importFolder(
-                    at: url,
-                    db: self.db,
-                    propertyTarget: target
-                )
-                await MainActor.run {
-                    let fmt = String(localized: "Imported %d entries", bundle: .module)
-                    var msg = String(format: fmt, result.imported)
-                    if result.attached > 0 {
-                        msg += " • \(result.attached) PDF\(result.attached == 1 ? "" : "s") attached"
-                    }
-                    if !result.missingPDFs.isEmpty {
-                        msg += " • \(result.missingPDFs.count) missing"
-                    }
-                    self.importProgress = msg
-                    self.isImporting = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-                        self.importProgress = nil
-                    }
-                }
-            } catch {
-                await MainActor.run {
-                    let fmt = String(localized: "content.import.error.generic", bundle: .module)
-                    self.importProgress = String(format: fmt, error.localizedDescription)
-                    self.isImporting = false
-                }
-            }
-        }
-    }
-
 }
 
 struct ContentView: View {
@@ -1297,7 +1260,7 @@ struct ContentView: View {
                 folderURL: pending.url,
                 db: viewModel.db,
                 onConfirm: { target in
-                    viewModel.importZoteroFolder(from: pending.url, target: target)
+                    prepareZoteroFolderImport(from: pending.url, target: target)
                 },
                 onCancel: {}
             )
@@ -1569,6 +1532,68 @@ struct ContentView: View {
     private func pickZoteroFolder() {
         guard let url = OpenPanelPicker.pickZoteroFolder() else { return }
         pendingZoteroImportFolder = PendingZoteroImport(url: url)
+    }
+
+    private func prepareZoteroFolderImport(
+        from url: URL,
+        target: ZoteroImportPropertyTarget
+    ) {
+        guard !viewModel.isImporting else { return }
+        viewModel.isImporting = true
+        viewModel.importProgress = String(localized: "Reading folder…", bundle: .module)
+        let database = viewModel.db
+
+        Task { @MainActor in
+            do {
+                let plan = try await Task.detached(priority: .userInitiated) {
+                    try ZoteroFolderImporter.prepareFolder(
+                        at: url,
+                        db: database,
+                        propertyTarget: target
+                    )
+                }.value
+
+                if ZoteroImportReviewPresentation.shouldReview(entryCount: plan.entries.count) {
+                    viewModel.isImporting = false
+                    viewModel.importProgress = nil
+                    importReviewSession = ImportReviewSession(
+                        title: String(localized: "Review Zotero Import", bundle: .module),
+                        context: ZoteroImportReviewContext(database: database, plan: plan)
+                    )
+                    return
+                }
+
+                let selectedIDs = Set(plan.entries.map(\.id))
+                let result = try await Task.detached(priority: .userInitiated) {
+                    try ZoteroFolderImporter.commit(
+                        plan: plan,
+                        selectedEntryIDs: selectedIDs,
+                        db: database
+                    )
+                }.value
+                finishZoteroFolderImport(result)
+            } catch {
+                let fmt = String(localized: "content.import.error.generic", bundle: .module)
+                viewModel.importProgress = String(format: fmt, error.localizedDescription)
+                viewModel.isImporting = false
+            }
+        }
+    }
+
+    private func finishZoteroFolderImport(_ result: ZoteroFolderImporter.Result) {
+        let fmt = String(localized: "Imported %d entries", bundle: .module)
+        var message = String(format: fmt, result.imported)
+        if result.attached > 0 {
+            message += " • \(result.attached) PDF\(result.attached == 1 ? "" : "s") attached"
+        }
+        if !result.missingPDFs.isEmpty {
+            message += " • \(result.missingPDFs.count) missing"
+        }
+        viewModel.importProgress = message
+        viewModel.isImporting = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            viewModel.importProgress = nil
+        }
     }
 
     /// Batch coordinator for materialized PDF/Markdown sources. It owns every
