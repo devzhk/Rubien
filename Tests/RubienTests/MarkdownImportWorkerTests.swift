@@ -21,33 +21,32 @@ final class MarkdownImportWorkerTests: XCTestCase {
         try super.tearDownWithError()
     }
 
-    func testImportsMarkdownFillOnlyAndReportsUnreadableSource() async throws {
+    func testMarkdownPreparationDoesNotWriteBeforeCommit() async throws {
         let database = try AppDatabase(DatabaseQueue())
-        var curated = Reference(
-            title: "Curated title",
-            url: "https://example.com/worker",
-            referenceType: .webpage
-        )
-        _ = try database.saveReference(&curated)
-        let curatedID = try XCTUnwrap(curated.id)
-
-        let readableURL = temporaryDirectory.appendingPathComponent("clip.md")
+        let firstURL = temporaryDirectory.appendingPathComponent("first.md")
         try Data("""
         ---
-        source: https://example.com/worker
-        description: Filled from Markdown
+        source: https://example.com/first
         ---
-        # Incoming title
+        # First
 
         Body
-        """.utf8).write(to: readableURL)
+        """.utf8).write(to: firstURL)
+        let secondURL = temporaryDirectory.appendingPathComponent("second.md")
+        try Data("# Second".utf8).write(to: secondURL)
         let missingURL = temporaryDirectory.appendingPathComponent("missing.md")
 
-        let result = await MarkdownImportWorker.importSources(
+        let result = await MarkdownImportWorker.prepareSources(
             [
                 MaterializedImportSource(
-                    input: readableURL.path,
-                    fileURL: readableURL,
+                    input: firstURL.path,
+                    fileURL: firstURL,
+                    kind: .markdown,
+                    temporaryDirectoryURL: nil
+                ),
+                MaterializedImportSource(
+                    input: secondURL.path,
+                    fileURL: secondURL,
                     kind: .markdown,
                     temporaryDirectoryURL: nil
                 ),
@@ -57,18 +56,13 @@ final class MarkdownImportWorkerTests: XCTestCase {
                     kind: .markdown,
                     temporaryDirectoryURL: nil
                 ),
-            ],
-            database: database
+            ]
         )
 
-        XCTAssertEqual(result.importedCount, 1)
-        XCTAssertEqual(result.importedIDs, [curatedID])
+        XCTAssertEqual(result.entries.map(\.reference.title), ["First", "Second"])
+        XCTAssertEqual(result.entries.map(\.sourceLabel), ["first.md", "second.md"])
         XCTAssertEqual(result.unreadableFilenames, ["missing.md"])
-        XCTAssertNil(result.errorDescription)
-
-        let merged = try XCTUnwrap(database.fetchReferences(ids: [curatedID]).first)
-        XCTAssertEqual(merged.title, "Curated title")
-        XCTAssertEqual(merged.abstract, "Filled from Markdown")
+        XCTAssertEqual(try database.referenceCount(), 0)
     }
 }
 #endif

@@ -58,25 +58,20 @@ struct SearchQuery {
     }
 }
 
-/// Sendable result of the non-UI portion of a Markdown source import.
-/// ContentView turns this into UI state only after the worker returns.
-struct MarkdownImportWorkerResult: Sendable {
-    let importedCount: Int?
-    let importedIDs: [Int64]
+/// Side-effect-free result of reading and parsing Markdown sources.
+struct MarkdownImportPreparationResult: Sendable {
+    let entries: [PreparedReferenceImport]
     let unreadableFilenames: [String]
-    let errorDescription: String?
 }
 
-/// Reads, parses, and persists Markdown sources without occupying the main
-/// actor. Security-scoped access remains owned by ContentView because it must
-/// stay active for the duration of this worker and be stopped on the UI actor.
+/// Reads and parses Markdown sources without occupying the main actor. This
+/// worker never receives a database, so preparation cannot persist anything.
 enum MarkdownImportWorker {
-    static func importSources(
-        _ sources: [MaterializedImportSource],
-        database: AppDatabase
-    ) async -> MarkdownImportWorkerResult {
+    static func prepareSources(
+        _ sources: [MaterializedImportSource]
+    ) async -> MarkdownImportPreparationResult {
         await Task.detached(priority: .userInitiated) {
-            var references: [Reference] = []
+            var entries: [PreparedReferenceImport] = []
             var unreadableFilenames: [String] = []
 
             for source in sources {
@@ -85,41 +80,81 @@ enum MarkdownImportWorker {
                     unreadableFilenames.append(url.lastPathComponent)
                     continue
                 }
-                references.append(MarkdownImporter.parse(
-                    content,
-                    filename: url.deletingPathExtension().lastPathComponent
-                ))
-            }
-
-            guard !references.isEmpty else {
-                return MarkdownImportWorkerResult(
-                    importedCount: nil,
-                    importedIDs: [],
-                    unreadableFilenames: unreadableFilenames,
-                    errorDescription: nil
+                entries.append(
+                    PreparedReferenceImport(
+                        reference: MarkdownImporter.parse(
+                            content,
+                            filename: url.deletingPathExtension().lastPathComponent
+                        ),
+                        sourceLabel: url.lastPathComponent
+                    )
                 )
             }
 
-            do {
-                let result = try database.batchImportReferences(
-                    references,
-                    mergePolicy: .markdownFillOnly
-                )
-                return MarkdownImportWorkerResult(
-                    importedCount: result.count,
-                    importedIDs: result.ids,
-                    unreadableFilenames: unreadableFilenames,
-                    errorDescription: nil
-                )
-            } catch {
-                return MarkdownImportWorkerResult(
-                    importedCount: nil,
-                    importedIDs: [],
-                    unreadableFilenames: unreadableFilenames,
-                    errorDescription: error.localizedDescription
-                )
+            return MarkdownImportPreparationResult(
+                entries: entries,
+                unreadableFilenames: unreadableFilenames
+            )
+        }.value
+    }
+}
+
+/// Reads and parses standard reference files without touching the library.
+enum StandardReferenceImportWorker {
+    static func prepareBibTeX(from url: URL) async throws -> [PreparedReferenceImport] {
+        try await Task.detached(priority: .userInitiated) {
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+
+            let content = try String(contentsOf: url, encoding: .utf8)
+            return BibTeXImporter.parse(content).map {
+                PreparedReferenceImport(reference: $0, sourceLabel: url.lastPathComponent)
             }
         }.value
+    }
+
+    static func prepareRIS(from url: URL) async throws -> [PreparedReferenceImport] {
+        try await Task.detached(priority: .userInitiated) {
+            let accessing = url.startAccessingSecurityScopedResource()
+            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+
+            let content = try String(contentsOf: url, encoding: .utf8)
+            return RISImporter.parse(content).map {
+                PreparedReferenceImport(reference: $0, sourceLabel: url.lastPathComponent)
+            }
+        }.value
+    }
+}
+
+private enum StandardReferenceImportFormat: Sendable {
+    case bibTeX
+    case ris
+
+    var parsingProgress: String {
+        switch self {
+        case .bibTeX:
+            String(localized: "Parsing BibTeX…", bundle: .module)
+        case .ris:
+            String(localized: "Parsing RIS…", bundle: .module)
+        }
+    }
+
+    var reviewTitle: String {
+        switch self {
+        case .bibTeX:
+            String(localized: "Review BibTeX import", bundle: .module)
+        case .ris:
+            String(localized: "Review RIS import", bundle: .module)
+        }
+    }
+
+    func prepare(from url: URL) async throws -> [PreparedReferenceImport] {
+        switch self {
+        case .bibTeX:
+            try await StandardReferenceImportWorker.prepareBibTeX(from: url)
+        case .ris:
+            try await StandardReferenceImportWorker.prepareRIS(from: url)
+        }
     }
 }
 
@@ -761,46 +796,6 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
-    func importBibTeX(from url: URL) {
-        isImporting = true
-        importProgress = String(localized: "Reading file…", bundle: .module)
-
-        Task.detached { [weak self] in
-            guard let self else { return }
-            let accessing = url.startAccessingSecurityScopedResource()
-            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-
-            do {
-                let content = try String(contentsOf: url, encoding: .utf8)
-                await MainActor.run {
-                    self.importProgress = String(localized: "Parsing BibTeX…", bundle: .module)
-                }
-
-                let refs = BibTeXImporter.parse(content)
-                await MainActor.run {
-                    let fmt = String(localized: "Importing %d entries…", bundle: .module)
-                    self.importProgress = String(format: fmt, refs.count)
-                }
-
-                let count = try self.db.batchImportReferences(refs)
-                await MainActor.run {
-                    let fmt = String(localized: "Imported %d entries", bundle: .module)
-                    self.importProgress = String(format: fmt, count)
-                    self.isImporting = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                        self.importProgress = nil
-                    }
-                }
-            } catch {
-                await MainActor.run {
-                    let fmt = String(localized: "content.import.error.generic", bundle: .module)
-                    self.importProgress = String(format: fmt, error.localizedDescription)
-                    self.isImporting = false
-                }
-            }
-        }
-    }
-
     func importZoteroFolder(from url: URL, target: ZoteroImportPropertyTarget?) {
         isImporting = true
         importProgress = String(localized: "Reading folder…", bundle: .module)
@@ -838,45 +833,6 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
-    func importRIS(from url: URL) {
-        isImporting = true
-        importProgress = String(localized: "Reading file…", bundle: .module)
-
-        Task.detached { [weak self] in
-            guard let self else { return }
-            let accessing = url.startAccessingSecurityScopedResource()
-            defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-
-            do {
-                let content = try String(contentsOf: url, encoding: .utf8)
-                await MainActor.run {
-                    self.importProgress = String(localized: "Parsing RIS…", bundle: .module)
-                }
-
-                let refs = RISImporter.parse(content)
-                await MainActor.run {
-                    let fmt = String(localized: "Importing %d entries…", bundle: .module)
-                    self.importProgress = String(format: fmt, refs.count)
-                }
-
-                let count = try self.db.batchImportReferences(refs)
-                await MainActor.run {
-                    let fmt = String(localized: "Imported %d entries", bundle: .module)
-                    self.importProgress = String(format: fmt, count)
-                    self.isImporting = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                        self.importProgress = nil
-                    }
-                }
-            } catch {
-                await MainActor.run {
-                    let fmt = String(localized: "content.import.error.generic", bundle: .module)
-                    self.importProgress = String(format: fmt, error.localizedDescription)
-                    self.isImporting = false
-                }
-            }
-        }
-    }
 }
 
 struct ContentView: View {
@@ -895,6 +851,7 @@ struct ContentView: View {
     @State private var showAddByIdentifier = false
     @State private var showBatchImport = false
     @State private var showImportSourceSheet = false
+    @State private var importReviewSession: ImportReviewSession?
     /// Monotonic token owned by `importFilesWithMetadata`. Each batch captures
     /// its value; the batch's own auto-clear timer only wipes `importProgress`
     /// if it still matches, so a stale timer from an earlier batch can't erase
@@ -1316,6 +1273,9 @@ struct ContentView: View {
                 importFilesWithMetadata(sources)
             }
         }
+        .sheet(item: $importReviewSession) { session in
+            ImportReviewSheet(session: session)
+        }
         .sheet(item: $pendingZoteroImportFolder) { pending in
             ZoteroImportSheet(
                 folderURL: pending.url,
@@ -1501,7 +1461,10 @@ struct ContentView: View {
 
     private func importBibTeX() {
         guard let url = OpenPanelPicker.pickBibTeXFile() else { return }
-        viewModel.importBibTeX(from: url)
+        prepareStandardReferenceImport(
+            from: url,
+            format: .bibTeX
+        )
     }
 
     private func revealReference(_ reference: Reference) {
@@ -1526,7 +1489,65 @@ struct ContentView: View {
 
     private func importRIS() {
         guard let url = OpenPanelPicker.pickRISFile() else { return }
-        viewModel.importRIS(from: url)
+        prepareStandardReferenceImport(
+            from: url,
+            format: .ris
+        )
+    }
+
+    private func prepareStandardReferenceImport(
+        from url: URL,
+        format: StandardReferenceImportFormat
+    ) {
+        viewModel.isImporting = true
+        viewModel.importProgress = String(localized: "Reading file…", bundle: .module)
+
+        Task { @MainActor in
+            do {
+                viewModel.importProgress = format.parsingProgress
+                let entries = try await format.prepare(from: url)
+
+                guard entries.count > 1 else {
+                    let fmt = String(localized: "Importing %d entries…", bundle: .module)
+                    viewModel.importProgress = String(format: fmt, entries.count)
+                    let database = viewModel.db
+                    let references = entries.map(\.reference)
+                    let result = try await Task.detached(priority: .userInitiated) {
+                        try database.batchImportReferences(
+                            references,
+                            mergePolicy: .standard
+                        )
+                    }.value
+                    finishStandardReferenceImport(count: result.count)
+                    return
+                }
+
+                viewModel.isImporting = false
+                viewModel.importProgress = nil
+                let context = ReferenceImportReviewContext(
+                    database: viewModel.db,
+                    entries: entries,
+                    mergePolicy: .standard
+                )
+                importReviewSession = ImportReviewSession(
+                    title: format.reviewTitle,
+                    context: context
+                )
+            } catch {
+                let fmt = String(localized: "content.import.error.generic", bundle: .module)
+                viewModel.importProgress = String(format: fmt, error.localizedDescription)
+                viewModel.isImporting = false
+            }
+        }
+    }
+
+    private func finishStandardReferenceImport(count: Int) {
+        let fmt = String(localized: "Imported %d entries", bundle: .module)
+        viewModel.importProgress = String(format: fmt, count)
+        viewModel.isImporting = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            viewModel.importProgress = nil
+        }
     }
 
     private func pickZoteroFolder() {
@@ -1567,24 +1588,33 @@ struct ContentView: View {
             var summary: [String] = []
             var queuedIntakes: [MetadataIntake] = []
 
-            // Markdown: validated by ImportSourceMaterializer, then parsed and
-            // persisted with the existing fill-only merge behavior.
+            // Markdown: validated by ImportSourceMaterializer, then prepared
+            // without side effects before the existing fill-only commit.
             if !markdownSources.isEmpty {
-                let result = await importMarkdownSources(markdownSources)
-                if let count = result.importedCount {
-                    selectedId = result.importedIDs.last
-                    let fmt = String(localized: "Imported %d markdown file(s)", bundle: .module)
-                    summary.append(String(format: fmt, count))
+                let preparation = await prepareMarkdownSources(markdownSources)
+                if !preparation.entries.isEmpty {
+                    do {
+                        let database = viewModel.db
+                        let references = preparation.entries.map(\.reference)
+                        let result = try await Task.detached(priority: .userInitiated) {
+                            try database.batchImportReferences(
+                                references,
+                                mergePolicy: .markdownFillOnly
+                            )
+                        }.value
+                        selectedId = result.ids.last
+                        let fmt = String(localized: "Imported %d markdown file(s)", bundle: .module)
+                        summary.append(String(format: fmt, result.count))
+                    } catch {
+                        summary.append("Markdown import failed: \(error.localizedDescription)")
+                    }
                     // No explicit reload: the list refreshes via observation,
-                    // same as viewModel.importBibTeX(from:).
+                    // same as standard reference imports.
                 }
-                if let errorDescription = result.errorDescription {
-                    summary.append("Markdown import failed: \(errorDescription)")
-                }
-                if !result.unreadableFilenames.isEmpty {
+                if !preparation.unreadableFilenames.isEmpty {
                     summary.append(
                         String(format: String(localized: "Could not read: %@", bundle: .module),
-                               result.unreadableFilenames.joined(separator: ", "))
+                               preparation.unreadableFilenames.joined(separator: ", "))
                     )
                 }
             }
@@ -1629,7 +1659,7 @@ struct ContentView: View {
                 pendingQueueNotice = nil
                 showPendingMetadataQueue = true
             }
-            // Auto-clear the toast like viewModel.importBibTeX(from:) does.
+            // Auto-clear the toast like the standard reference imports do.
             // Only clear if this is still the latest batch — a newer batch bumps
             // importGeneration, so a stale timer here becomes a no-op and can't
             // wipe the newer batch's summary.
@@ -1646,9 +1676,9 @@ struct ContentView: View {
     /// Security-scoped URLs must remain accessible while the detached worker
     /// reads them. Both acquisition and release occur on the main actor.
     @MainActor
-    private func importMarkdownSources(
+    private func prepareMarkdownSources(
         _ sources: [MaterializedImportSource]
-    ) async -> MarkdownImportWorkerResult {
+    ) async -> MarkdownImportPreparationResult {
         var securityScopedURLs: [URL] = []
         for source in sources where source.temporaryDirectoryURL == nil {
             let url = source.fileURL
@@ -1659,7 +1689,7 @@ struct ContentView: View {
         defer {
             securityScopedURLs.forEach { $0.stopAccessingSecurityScopedResource() }
         }
-        return await MarkdownImportWorker.importSources(sources, database: viewModel.db)
+        return await MarkdownImportWorker.prepareSources(sources)
     }
 
     /// Uses the shared PDF coordinator for resolution and persistence, then
