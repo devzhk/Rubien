@@ -316,6 +316,54 @@ final class ImportSourceMaterializerTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: temporaryDirectoryURL.path))
     }
 
+    func testGitHubBlobPDFRequestsRawDownloadAndPreservesInput() async throws {
+        let input = "https://github.com/acme/research/blob/main/paper.pdf?raw=0&download=1"
+        let requestedRawURL = "https://github.com/acme/research/blob/main/paper.pdf?download=1&raw=1"
+        ImportSourceURLProtocol.stub(
+            requestedRawURL,
+            contentType: "application/octet-stream",
+            data: Data("%PDF-1.7\nGitHub raw".utf8)
+        )
+
+        let materialized = try await ImportSourceMaterializer.materialize(
+            input,
+            localPathPolicy: .requireAbsolute,
+            session: ImportSourceURLProtocol.makeSession()
+        )
+
+        XCTAssertEqual(materialized.input, input)
+        XCTAssertEqual(materialized.kind, .pdf)
+        XCTAssertEqual(try Data(contentsOf: materialized.fileURL), Data("%PDF-1.7\nGitHub raw".utf8))
+
+        let temporaryDirectoryURL = try XCTUnwrap(materialized.temporaryDirectoryURL)
+        materialized.cleanup()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: temporaryDirectoryURL.path))
+    }
+
+    func testGitHubBlobMarkdownRequestsRawDownloadAndPreservesInput() async throws {
+        let input = "https://github.com/acme/research/blob/feature/docs/notes/reading-list.md"
+        let requestedRawURL = "https://github.com/acme/research/blob/feature/docs/notes/reading-list.md?raw=1"
+        ImportSourceURLProtocol.stub(
+            requestedRawURL,
+            contentType: "text/plain",
+            data: Data("# GitHub raw note".utf8)
+        )
+
+        let materialized = try await ImportSourceMaterializer.materialize(
+            input,
+            localPathPolicy: .requireAbsolute,
+            session: ImportSourceURLProtocol.makeSession()
+        )
+
+        XCTAssertEqual(materialized.input, input)
+        XCTAssertEqual(materialized.kind, .markdown)
+        XCTAssertEqual(try String(contentsOf: materialized.fileURL, encoding: .utf8), "# GitHub raw note")
+
+        let temporaryDirectoryURL = try XCTUnwrap(materialized.temporaryDirectoryURL)
+        materialized.cleanup()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: temporaryDirectoryURL.path))
+    }
+
     func testRemoteMarkdownRejectsDecodedTraversalFilenameWithoutEscapingOwnedDirectory() async {
         let escapedName = "escaped-\(UUID().uuidString).md"
         let remoteURL = "https://example.test/%2E%2E%2F\(escapedName)"

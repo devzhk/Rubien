@@ -133,9 +133,10 @@ public enum ImportSourceMaterializer {
             guard candidateURL.host != nil else {
                 throw MaterializationError.invalidHTTPURL
             }
+            let normalizedURL = normalizeGitHubBlobURL(candidateURL)
             return try await materializeRemote(
                 input: trimmedInput,
-                url: candidateURL,
+                url: normalizedURL,
                 session: session
             )
         }
@@ -262,6 +263,27 @@ public enum ImportSourceMaterializer {
         default:
             throw MaterializationError.unsupportedExtension(ext)
         }
+    }
+
+    private static func normalizeGitHubBlobURL(_ url: URL) -> URL {
+        guard url.host?.lowercased() == "github.com" else {
+            return url
+        }
+
+        let pathComponents = url.pathComponents.filter { $0 != "/" }
+        guard pathComponents.count >= 5, pathComponents[2] == "blob" else {
+            return url
+        }
+
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return url
+        }
+
+        var queryItems = components.queryItems ?? []
+        queryItems.removeAll { $0.name.caseInsensitiveCompare("raw") == .orderedSame }
+        queryItems.append(URLQueryItem(name: "raw", value: "1"))
+        components.queryItems = queryItems
+        return components.url ?? url
     }
 
     private static func downloadMarkdown(
