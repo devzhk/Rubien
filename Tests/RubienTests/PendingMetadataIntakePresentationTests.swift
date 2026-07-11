@@ -1,45 +1,24 @@
 #if os(macOS)
-import Foundation
 import XCTest
 @testable import Rubien
-@testable import RubienCore
 
 final class PendingMetadataIntakePresentationTests: XCTestCase {
-    func testSinglePDFOpensPendingReviewImmediately() {
+    func testSingleQueuedIntakeOpensReviewImmediately() {
         XCTAssertEqual(
-            PendingMetadataIntakePresentation.forImportedSources([
-                source(kind: .pdf, name: "paper.pdf")
-            ]),
-            .reviewImmediately
+            PendingMetadataReviewScope.forQueuedIntakeIDs([7]),
+            .queuedImport([7])
         )
     }
 
-    func testMultipleSourcesKeepPendingNotice() {
+    func testMultipleQueuedIntakesOpenOneScopedReview() {
         XCTAssertEqual(
-            PendingMetadataIntakePresentation.forImportedSources([
-                source(kind: .pdf, name: "one.pdf"),
-                source(kind: .pdf, name: "two.pdf"),
-            ]),
-            .showNotice
+            PendingMetadataReviewScope.forQueuedIntakeIDs([7, 11, 7]),
+            .queuedImport([7, 11])
         )
     }
 
-    func testSingleMarkdownSourceKeepsPendingNotice() {
-        XCTAssertEqual(
-            PendingMetadataIntakePresentation.forImportedSources([
-                source(kind: .markdown, name: "note.md")
-            ]),
-            .showNotice
-        )
-    }
-
-    private func source(kind: ImportSourceKind, name: String) -> MaterializedImportSource {
-        MaterializedImportSource(
-            input: "/tmp/\(name)",
-            fileURL: URL(fileURLWithPath: "/tmp/\(name)"),
-            kind: kind,
-            temporaryDirectoryURL: nil
-        )
+    func testNoQueuedIntakesDoesNotOpenReview() {
+        XCTAssertNil(PendingMetadataReviewScope.forQueuedIntakeIDs([]))
     }
 }
 #endif

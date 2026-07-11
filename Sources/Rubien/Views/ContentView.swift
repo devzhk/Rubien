@@ -123,17 +123,17 @@ enum MarkdownImportWorker {
     }
 }
 
-/// Determines whether a metadata intake from the PDF import flow should be
-/// surfaced for immediate review or retained as a batch-style notice.
-enum PendingMetadataIntakePresentation: Equatable {
-    case reviewImmediately
-    case showNotice
+/// The pending metadata rows created by one PDF import batch. Keeping this
+/// scope separate from the durable global queue lets a batch open review
+/// immediately without mixing in unrelated older work.
+enum PendingMetadataReviewScope: Equatable {
+    case queuedImport([Int64])
 
-    static func forImportedSources(_ sources: [MaterializedImportSource]) -> Self {
-        guard sources.count == 1, sources[0].kind == .pdf else {
-            return .showNotice
-        }
-        return .reviewImmediately
+    static func forQueuedIntakeIDs(_ intakeIDs: [Int64]) -> Self? {
+        var seen = Set<Int64>()
+        let uniqueIDs = intakeIDs.filter { seen.insert($0).inserted }
+        guard !uniqueIDs.isEmpty else { return nil }
+        return .queuedImport(uniqueIDs)
     }
 }
 
@@ -902,6 +902,7 @@ struct ContentView: View {
     @State private var importGeneration = 0
     @State private var pendingZoteroImportFolder: PendingZoteroImport?
     @State private var showPendingMetadataQueue = false
+    @State private var pendingMetadataReviewIDs: [Int64]?
     @State private var pendingQueueNotice: PendingQueueNotice?
     @State private var columnVisibility = NavigationSplitViewVisibility.all
     @State private var selectedId: Int64?
@@ -941,6 +942,15 @@ struct ContentView: View {
     private var selectedReference: Reference? {
         guard let selectedId else { return nil }
         return viewModel.filteredReferences.first { $0.id == selectedId }
+    }
+
+    private var pendingMetadataIntakesForReview: [MetadataIntake] {
+        guard let reviewIDs = pendingMetadataReviewIDs else {
+            return viewModel.pendingMetadataIntakes
+        }
+        return reviewIDs.compactMap { id in
+            viewModel.pendingMetadataIntakes.first { $0.id == id }
+        }
     }
 
     /// The leading toolbar's flat buttons, in order: Properties, Search, the
@@ -1023,6 +1033,7 @@ struct ContentView: View {
 
             if !viewModel.pendingMetadataIntakes.isEmpty {
                 Button {
+                    pendingMetadataReviewIDs = nil
                     showPendingMetadataQueue = true
                 } label: {
                     HStack(spacing: 6) {
@@ -1376,9 +1387,11 @@ struct ContentView: View {
                 }
             )
         }
-        .sheet(isPresented: $showPendingMetadataQueue) {
+        .sheet(isPresented: $showPendingMetadataQueue, onDismiss: {
+            pendingMetadataReviewIDs = nil
+        }) {
             PendingMetadataQueueView(
-                intakes: viewModel.pendingMetadataIntakes,
+                intakes: pendingMetadataIntakesForReview,
                 resolver: metadataResolver,
                 onPersistResult: { result, intake in
                     queueResolutionResult(
@@ -1431,6 +1444,7 @@ struct ContentView: View {
                     HStack {
                         Button(String(localized: "Open pending queue", bundle: .module)) {
                             pendingQueueNotice = nil
+                            pendingMetadataReviewIDs = nil
                             showPendingMetadataQueue = true
                         }
                         .buttonStyle(SLPrimaryButtonStyle())
@@ -1534,8 +1548,6 @@ struct ContentView: View {
 
         let markdownSources = sources.filter { $0.kind == .markdown }
         let pdfSources = sources.filter { $0.kind == .pdf }
-        let pendingIntakePresentation = PendingMetadataIntakePresentation
-            .forImportedSources(sources)
 
         // Claim a fresh generation so this batch's auto-clear timer only wipes
         // its own summary (see the closure at the end of the Task).
@@ -1553,7 +1565,7 @@ struct ContentView: View {
             defer { sources.forEach { $0.cleanup() } }
 
             var summary: [String] = []
-            var firstIntake: MetadataIntake?
+            var queuedIntakes: [MetadataIntake] = []
 
             // Markdown: validated by ImportSourceMaterializer, then parsed and
             // persisted with the existing fill-only merge behavior.
@@ -1597,11 +1609,8 @@ struct ContentView: View {
                     let fmt = String(localized: "Imported: %@", bundle: .module)
                     summary.append(String(format: fmt, title))
                 case .queued(let intake):
-                    if firstIntake == nil { firstIntake = intake }
-                    let message = pendingIntakePresentation == .reviewImmediately
-                        ? String(localized: "Couldn't auto-verify — review metadata to finish", bundle: .module)
-                        : String(localized: "Couldn't auto-verify — added to the pending queue", bundle: .module)
-                    summary.append(message)
+                    queuedIntakes.append(intake)
+                    summary.append(String(localized: "Couldn't auto-verify — review metadata to finish", bundle: .module))
                 case .failed(let message):
                     summary.append(message)
                 }
@@ -1609,14 +1618,16 @@ struct ContentView: View {
 
             viewModel.isImporting = false
             viewModel.importProgress = summary.isEmpty ? nil : summary.joined(separator: " · ")
-            if let intake = firstIntake {
-                switch pendingIntakePresentation {
-                case .reviewImmediately:
-                    pendingQueueNotice = nil
-                    showPendingMetadataQueue = true
-                case .showNotice:
-                    showPendingQueueNotice(for: intake, message: nil)
+            if !queuedIntakes.isEmpty {
+                if let scope = PendingMetadataReviewScope.forQueuedIntakeIDs(
+                    queuedIntakes.compactMap(\.id)
+                ), case let .queuedImport(ids) = scope {
+                    pendingMetadataReviewIDs = ids
+                } else {
+                    pendingMetadataReviewIDs = nil
                 }
+                pendingQueueNotice = nil
+                showPendingMetadataQueue = true
             }
             // Auto-clear the toast like viewModel.importBibTeX(from:) does.
             // Only clear if this is still the latest batch — a newer batch bumps
