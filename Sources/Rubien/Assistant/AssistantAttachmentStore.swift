@@ -118,10 +118,21 @@ actor AssistantAttachmentStore {
         id: UUID = UUID(),
         conversationID: UUID
     ) throws -> ChatAttachment {
-        _ = data
-        _ = id
-        _ = conversationID
-        throw AssistantAttachmentStoreError.imageDecode(suggestedName)
+        let normalized = try AssistantImageNormalizer.normalize(
+            data,
+            displayName: suggestedName
+        )
+        return try write(
+            data: normalized.data,
+            displayName: suggestedName,
+            kind: .image,
+            mediaType: normalized.mediaType,
+            sourceIdentity: "clipboard:\(UUID().uuidString)",
+            pathExtension: normalized.pathExtension,
+            conversationID: conversationID,
+            id: id,
+            thumbnailDataURL: normalized.thumbnailDataURL
+        )
     }
 
     func removePending(_ attachments: [ChatAttachment]) {
@@ -258,9 +269,21 @@ actor AssistantAttachmentStore {
         id: UUID,
         conversationID: UUID
     ) throws -> ChatAttachment {
-        _ = id
-        _ = conversationID
-        throw AssistantAttachmentStoreError.imageDecode(sourceURL.lastPathComponent)
+        let normalized = try AssistantImageNormalizer.normalize(
+            try read(sourceURL),
+            displayName: sourceURL.lastPathComponent
+        )
+        return try write(
+            data: normalized.data,
+            displayName: sourceURL.lastPathComponent,
+            kind: .image,
+            mediaType: normalized.mediaType,
+            sourceIdentity: sourceURL.standardizedFileURL.path,
+            pathExtension: normalized.pathExtension,
+            conversationID: conversationID,
+            id: id,
+            thumbnailDataURL: normalized.thumbnailDataURL
+        )
     }
 
     private func read(_ sourceURL: URL) throws -> Data {

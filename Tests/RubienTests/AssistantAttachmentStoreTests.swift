@@ -1,5 +1,8 @@
 #if os(macOS)
+import CoreGraphics
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 import XCTest
 @testable import Rubien
 
@@ -220,18 +223,248 @@ final class AssistantAttachmentStoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: second.stagedURL.path))
     }
 
-    func testImageEntryPointUsesFinalStubErrorUntilTaskThree() async throws {
+    func testLargeOpaqueImageStagesAsBoundedJPEG() async throws {
+        let source = workspace.appendingPathComponent("large.tiff")
+        let original = try makeImageData(
+            width: 4_000,
+            height: 2_000,
+            alpha: false,
+            type: .tiff
+        )
+        try original.write(to: source)
+        let attachment = try await store.stageFile(source, conversationID: UUID())
+
+        XCTAssertEqual(attachment.kind, .image)
+        XCTAssertEqual(attachment.mediaType, "image/jpeg")
+        XCTAssertEqual(attachment.stagedURL.pathExtension, "jpg")
+        XCTAssertLessThanOrEqual(
+            attachment.byteCount,
+            Int64(AssistantImageNormalizer.maxBytes)
+        )
+        let imageSource = try XCTUnwrap(
+            CGImageSourceCreateWithURL(attachment.stagedURL as CFURL, nil)
+        )
+        let properties = try XCTUnwrap(
+            CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any]
+        )
+        XCTAssertLessThanOrEqual(
+            properties[kCGImagePropertyPixelWidth] as? Int ?? .max,
+            AssistantImageNormalizer.maxPixelSize
+        )
+        XCTAssertLessThanOrEqual(
+            properties[kCGImagePropertyPixelHeight] as? Int ?? .max,
+            AssistantImageNormalizer.maxPixelSize
+        )
+        XCTAssertEqual(try Data(contentsOf: source), original)
+    }
+
+    func testPastedTransparentImageUsesPNGAndCallerIdentity() async throws {
+        let data = try makeImageData(width: 64, height: 64, alpha: true, type: .png)
         let id = UUID()
-        let error = await XCTAssertThrowsErrorAsync(
+        let attachment = try await store.stageImageData(
+            data,
+            suggestedName: "clipboard.png",
+            id: id,
+            conversationID: UUID()
+        )
+
+        XCTAssertEqual(attachment.id, id)
+        XCTAssertEqual(attachment.kind, .image)
+        XCTAssertEqual(attachment.mediaType, "image/png")
+        XCTAssertEqual(attachment.stagedURL.pathExtension, "png")
+        XCTAssertTrue(attachment.stagedURL.lastPathComponent.hasPrefix(id.uuidString + "-"))
+        XCTAssertTrue(attachment.sourceIdentity.hasPrefix("clipboard:"))
+    }
+
+    func testTransparentImageFallsBackToWhiteCompositedJPEGWhenPNGIsTooLarge() throws {
+        let data = try makeNoisyTransparentImageData(width: 512, height: 512)
+        let png = try AssistantImageNormalizer.normalize(
+            data,
+            displayName: "noise.png",
+            maxPixelSize: 512,
+            maxBytes: 10 * 1_024 * 1_024
+        )
+        XCTAssertEqual(png.mediaType, "image/png")
+
+        let fallback = try AssistantImageNormalizer.normalize(
+            data,
+            displayName: "noise.png",
+            maxPixelSize: 512,
+            maxBytes: png.data.count / 2
+        )
+        XCTAssertEqual(fallback.mediaType, "image/jpeg")
+        XCTAssertLessThanOrEqual(fallback.data.count, png.data.count / 2)
+        XCTAssertTrue(fallback.thumbnailDataURL.hasPrefix("data:image/jpeg;base64,"))
+    }
+
+    func testImageNormalizationHonorsOrientationAndBoundsThumbnail() throws {
+        let data = try makeImageData(
+            width: 120,
+            height: 60,
+            alpha: false,
+            type: .jpeg,
+            orientation: 6
+        )
+        let normalized = try AssistantImageNormalizer.normalize(
+            data,
+            displayName: "rotated.jpg"
+        )
+
+        XCTAssertEqual(normalized.width, 60)
+        XCTAssertEqual(normalized.height, 120)
+        XCTAssertTrue(normalized.thumbnailDataURL.hasPrefix("data:image/jpeg;base64,"))
+        let thumbnail = try decodeDataURL(normalized.thumbnailDataURL)
+        let source = try XCTUnwrap(CGImageSourceCreateWithData(thumbnail as CFData, nil))
+        let properties = try XCTUnwrap(
+            CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        )
+        XCTAssertLessThanOrEqual(properties[kCGImagePropertyPixelWidth] as? Int ?? .max, 160)
+        XCTAssertLessThanOrEqual(properties[kCGImagePropertyPixelHeight] as? Int ?? .max, 160)
+    }
+
+    func testInvalidAndImpossibleImageFailsLocallyWithFilename() async throws {
+        let invalidError = await XCTAssertThrowsErrorAsync(
             try await store.stageImageData(
-                Data(),
-                suggestedName: "photo.png",
-                id: id,
+                Data("not image".utf8),
+                suggestedName: "bad.png",
                 conversationID: UUID()
             )
         )
-        XCTAssertEqual(error as? AssistantAttachmentStoreError, .imageDecode("photo.png"))
+        XCTAssertEqual(
+            invalidError as? AssistantAttachmentStoreError,
+            .imageDecode("bad.png")
+        )
+
+        XCTAssertThrowsError(
+            try AssistantImageNormalizer.normalize(
+                try makeImageData(width: 512, height: 512, alpha: false, type: .png),
+                displayName: "x.png",
+                maxPixelSize: 16,
+                maxBytes: 8
+            )
+        ) { error in
+            XCTAssertEqual(error as? AssistantAttachmentStoreError, .imageEncode("x.png"))
+        }
     }
+}
+
+private func makeImageData(
+    width: Int,
+    height: Int,
+    alpha: Bool,
+    type: UTType,
+    orientation: Int? = nil
+) throws -> Data {
+    let colorSpace = try XCTUnwrap(CGColorSpace(name: CGColorSpace.sRGB))
+    let alphaInfo: CGImageAlphaInfo = alpha ? .premultipliedLast : .noneSkipLast
+    let context = try XCTUnwrap(
+        CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: colorSpace,
+            bitmapInfo: alphaInfo.rawValue
+        )
+    )
+    context.setFillColor(
+        CGColor(
+            colorSpace: colorSpace,
+            components: alpha ? [0.15, 0.35, 0.75, 0.45] : [0.15, 0.35, 0.75, 1]
+        )!
+    )
+    context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+    context.setFillColor(
+        CGColor(
+            colorSpace: colorSpace,
+            components: alpha ? [0.9, 0.2, 0.1, 0.7] : [0.9, 0.2, 0.1, 1]
+        )!
+    )
+    context.fill(
+        CGRect(
+            x: width / 5,
+            y: height / 4,
+            width: max(width / 2, 1),
+            height: max(height / 3, 1)
+        )
+    )
+
+    let image = try XCTUnwrap(context.makeImage())
+    let data = NSMutableData()
+    let destination = try XCTUnwrap(
+        CGImageDestinationCreateWithData(data, type.identifier as CFString, 1, nil)
+    )
+    let properties = orientation.map {
+        [kCGImagePropertyOrientation: $0] as CFDictionary
+    }
+    CGImageDestinationAddImage(destination, image, properties)
+    guard CGImageDestinationFinalize(destination) else {
+        throw ImageFixtureError.encode
+    }
+    return data as Data
+}
+
+private func decodeDataURL(_ value: String) throws -> Data {
+    guard
+        let comma = value.firstIndex(of: ","),
+        let data = Data(base64Encoded: String(value[value.index(after: comma)...]))
+    else {
+        throw ImageFixtureError.invalidDataURL
+    }
+    return data
+}
+
+private func makeNoisyTransparentImageData(width: Int, height: Int) throws -> Data {
+    var state: UInt32 = 0x6d2b_79f5
+    var pixels = [UInt8](repeating: 0, count: width * height * 4)
+    for offset in stride(from: 0, to: pixels.count, by: 4) {
+        state = 1_664_525 &* state &+ 1_013_904_223
+        let alpha = UInt8(truncatingIfNeeded: 128 + (state >> 25))
+        for component in 0..<3 {
+            state = 1_664_525 &* state &+ 1_013_904_223
+            let value = UInt8(truncatingIfNeeded: state >> 24)
+            pixels[offset + component] = UInt8(
+                UInt16(value) * UInt16(alpha) / UInt16(UInt8.max)
+            )
+        }
+        pixels[offset + 3] = alpha
+    }
+
+    let colorSpace = try XCTUnwrap(CGColorSpace(name: CGColorSpace.sRGB))
+    let provider = try XCTUnwrap(CGDataProvider(data: Data(pixels) as CFData))
+    let bitmapInfo = CGBitmapInfo.byteOrder32Big.union(
+        CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+    )
+    let image = try XCTUnwrap(
+        CGImage(
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: width * 4,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo,
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        )
+    )
+    let data = NSMutableData()
+    let destination = try XCTUnwrap(
+        CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil)
+    )
+    CGImageDestinationAddImage(destination, image, nil)
+    guard CGImageDestinationFinalize(destination) else {
+        throw ImageFixtureError.encode
+    }
+    return data as Data
+}
+
+private enum ImageFixtureError: Error {
+    case encode
+    case invalidDataURL
 }
 
 private final class RehomeFailureFileManager: FileManager {
