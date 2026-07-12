@@ -87,7 +87,7 @@ so an agent always sees that another body exists and can flip with `source`.
 |---|---|---|
 | `id` (required) | — | reference id |
 | `source` | both | `"pdf"` \| `"web"`; overrides PDF-wins precedence |
-| `maxChars` | both | default 50 000; unified bound **1–500 000 enforced in the MCP schema for both kinds** (a deliberate unification — today only the PDF tool caps at 500 000; the web tool is uncapped at the MCP layer); the CLI validates `> 0` as today. PDF truncates at page boundaries and always returns at least the first selected page, so returned characters can exceed `maxChars` when a single page does (existing `PDFExtractor` behavior, now documented); web truncates at the character boundary |
+| `maxChars` | both | default 50 000; unified bound **1–500 000 enforced in the CLI** (single source of truth; the Node zod schema repeats the bound, the Swift catalog advertises it — a deliberate unification: today only the PDF tool caps at 500 000 and the web tool is uncapped). PDF truncates at page boundaries and always returns at least the first selected page, so returned characters can exceed `maxChars` when a single page does (existing `PDFExtractor` behavior, now documented); web truncates at the character boundary |
 | `pages` | PDF only | range string `"1-3,8-10"`, `"12-"` — exactly `pdf text --pages` |
 | `sections` | PDF only | repeatable title substrings — exactly `pdf text --section`; still mutually exclusive with `pages`; still errors `no-outline` when the PDF has no outline |
 | `start` | web only | character offset, default 0 — exactly `web get --start`; past end-of-content returns `content:""`, `truncated:false` |
@@ -149,7 +149,7 @@ Web-source response (= `WebGetOutput` + `source`/`available`):
 | `pages` + `sections` together | error (existing rule, kept) | n/a |
 | `sections` on outline-less PDF | `no-outline` error (existing, passes through) | n/a |
 | `start` past end of web body | success, `content:""`, `truncated:false` (existing) | n/a |
-| `maxChars` out of bounds | MCP schema rejects outside 1–500 000; CLI rejects `<= 0` | n/a |
+| `maxChars` out of bounds | CLI rejects outside 1–500 000 (Node zod schema repeats the bound) | n/a |
 | Invalid `--source` value | argument-parse error (enum) | same |
 
 ## 9. Testing
