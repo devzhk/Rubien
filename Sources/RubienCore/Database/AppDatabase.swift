@@ -23,6 +23,31 @@ package enum ImportClassification: Equatable {
     case intraBatchDuplicate
 }
 
+/// Minimal reference projection for Assistant `@paper` search results and
+/// provider context. It deliberately cannot carry abstract/notes/webContent.
+public struct ReferenceMentionCandidate: Sendable, Equatable {
+    public let id: Int64
+    public let title: String
+    public let authors: [AuthorName]
+    public let referenceType: ReferenceType
+    public let doi: String?
+
+    fileprivate init(row: Row) {
+        id = row["id"]
+        title = row["title"]
+        let rawAuthors: String = row["authors"]
+        if let data = rawAuthors.data(using: .utf8),
+           let decoded = try? JSONDecoder().decode([AuthorName].self, from: data) {
+            authors = decoded
+        } else {
+            authors = AuthorName.parseList(rawAuthors)
+        }
+        let rawType: String = row["referenceType"]
+        referenceType = ReferenceType(rawValue: rawType) ?? .other
+        doi = row["doi"]
+    }
+}
+
 public final class AppDatabase: Sendable {
     /// Bumped whenever a new migration is registered. Surfaced in
     /// `rubien-cli sync status` JSON for diagnostics.
@@ -1591,6 +1616,50 @@ extension AppDatabase {
         }
     }
 
+    /// Narrow, cancellable title search for the Assistant's `@paper` popover.
+    /// Unlike the general library search, this projects only the metadata sent in
+    /// a mention and uses the maintained FTS title column instead of scanning full
+    /// `Reference` rows (which may contain large web/PDF-derived text fields).
+    public func searchReferenceMentions(
+        query: String,
+        limit: Int = 8
+    ) async throws -> [ReferenceMentionCandidate] {
+        guard limit > 0 else { return [] }
+        let tokens = sanitizedReferenceSearchTokens(query)
+        return try await dbWriter.read { db in
+            try Task.checkCancellation()
+            let rows: [Row]
+            if tokens.isEmpty {
+                rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT id, title, authors, referenceType, doi
+                        FROM reference
+                        ORDER BY dateAdded DESC, id DESC
+                        LIMIT ?
+                        """,
+                    arguments: [limit]
+                )
+            } else {
+                let match = tokens.map { "title:\"\($0)\" *" }.joined(separator: " AND ")
+                rows = try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT r.id, r.title, r.authors, r.referenceType, r.doi
+                        FROM referenceFts
+                        JOIN reference AS r ON r.id = referenceFts.rowid
+                        WHERE referenceFts MATCH ?
+                        ORDER BY bm25(referenceFts) ASC, r.dateAdded DESC, r.id DESC
+                        LIMIT ?
+                        """,
+                    arguments: [match, limit]
+                )
+            }
+            try Task.checkCancellation()
+            return rows.map(ReferenceMentionCandidate.init(row:))
+        }
+    }
+
     /// Batch import — uses single transaction for maximum speed
     /// 10,000 records in ~200ms on Apple Silicon
     public func batchImportReferences(_ references: [Reference]) throws -> Int {
@@ -2812,6 +2881,22 @@ fileprivate func sanitizedFTSFields(_ raw: [String]) -> [String] {
     return out
 }
 
+/// Shared token sanitizer for every internal FTS query builder. Quoting and
+/// grouping syntax is stripped so user text can only contribute literal terms.
+fileprivate func sanitizedReferenceSearchTokens(_ raw: String) -> [String] {
+    raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        .components(separatedBy: .whitespacesAndNewlines)
+        .filter { !$0.isEmpty }
+        .map { token in
+            token
+                .replacingOccurrences(of: "\"", with: "")
+                .replacingOccurrences(of: "*", with: "")
+                .replacingOccurrences(of: "(", with: "")
+                .replacingOccurrences(of: ")", with: "")
+        }
+        .filter { !$0.isEmpty }
+}
+
 extension AppDatabase {
     /// Wraps a fetch closure in a publisher that emits on:
     /// - in-process commits (via `ValueObservation` on `dbWriter`)
@@ -2883,18 +2968,7 @@ extension AppDatabase {
         selectedColumns: [any SQLSelectable]? = nil,
         orderBy: ReferenceOrdering = .dateAddedDescending
     ) throws -> [Reference] {
-        let sanitizedKeywordTokens = filter.keyword
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
-            .map { token in
-                token
-                    .replacingOccurrences(of: "\"", with: "")
-                    .replacingOccurrences(of: "*", with: "")
-                    .replacingOccurrences(of: "(", with: "")
-                    .replacingOccurrences(of: ")", with: "")
-            }
-            .filter { !$0.isEmpty }
+        let sanitizedKeywordTokens = sanitizedReferenceSearchTokens(filter.keyword)
 
         // ── 1. Build base request from scope ──────────────────────────────
         var request: QueryInterfaceRequest<Reference>

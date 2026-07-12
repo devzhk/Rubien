@@ -19,7 +19,11 @@ enum ReaderChatSession {
     /// settings. `transcript` is the reader's own renderer (also held as a separate
     /// `@StateObject`), so it's injected rather than created here.
     @MainActor
-    static func make(reference: Reference, transcript: ChatTranscriptController) -> ChatSessionController {
+    static func make(
+        reference: Reference,
+        transcript: ChatTranscriptController,
+        database: AppDatabase = .shared
+    ) -> ChatSessionController {
         // The read-only MCP content channel (Phase 2b) is shared by both backends, so
         // whichever runtime is active reads THIS document through Rubien's own tools.
         let contentChannel = MCPContentChannel.resolveBundled()
@@ -78,7 +82,22 @@ enum ReaderChatSession {
             autoApprove: initial.autoApprove,
             codexSandbox: initial.codexSandbox,
             providerFactory: providerFactory,
-            defaultsProvider: defaultsProvider)
+            defaultsProvider: defaultsProvider,
+            mentionSearch: { query, limit in
+                let candidates = (try? await database.searchReferenceMentions(
+                    query: query,
+                    limit: limit
+                )) ?? []
+                return candidates.map {
+                    ChatReference(
+                        id: $0.id,
+                        title: $0.title,
+                        authors: $0.authors.displayString,
+                        referenceType: $0.referenceType.rawValue,
+                        doi: $0.doi
+                    )
+                }
+            })
     }
 }
 #endif

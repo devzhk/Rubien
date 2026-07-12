@@ -130,6 +130,102 @@ final class ChatSessionControllerTests: XCTestCase {
         }
     }
 
+    // MARK: Paper mentions
+
+    func testMentionSearchExcludesCurrentReferenceDeduplicatesAndLimits() async {
+        let provider = MockAgentProvider()
+        let sink = SpyTranscriptSink()
+        let candidates = [
+            ChatReference(id: 1, title: "Current", authors: ""),
+            ChatReference(id: 2, title: "BERT", authors: "Devlin"),
+            ChatReference(id: 2, title: "BERT duplicate", authors: "Devlin"),
+            ChatReference(id: 3, title: "RoBERTa", authors: "Liu"),
+            ChatReference(id: 4, title: "T5", authors: "Raffel"),
+        ]
+        let controller = ChatSessionController(
+            provider: provider,
+            transcript: sink,
+            reference: ChatReference(id: 1, title: "Current", authors: ""),
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"),
+            initialAvailability: .installed(version: "test", path: "/fake/claude"),
+            mentionSearch: { query, limit in
+                XCTAssertEqual(query, "bert")
+                XCTAssertEqual(limit, 3)
+                return candidates
+            }
+        )
+
+        let results = await controller.searchMentionableReferences("  bert  ", limit: 2)
+        XCTAssertEqual(results.map(\.id), [2, 3])
+    }
+
+    func testSendKeepsVisibleMentionAndAddsProviderOnlyReferenceContext() async throws {
+        let provider = MockAgentProvider()
+        let sink = SpyTranscriptSink()
+        let controller = makeController(provider: provider, sink: sink)
+        let bert = ChatReference(
+            id: 42,
+            title: "BERT",
+            authors: "Devlin et al."
+        )
+
+        controller.send(
+            "Compare @BERT with this paper",
+            mentionedReferences: [PaperMentionSelection(reference: bert, range: 8..<13)]
+        )
+        let task = controller.turnTask
+        await provider.waitUntilStreaming()
+        let request = try XCTUnwrap(provider.lastRequest)
+        XCTAssertTrue(request.prompt.contains(#""id":42"#))
+        XCTAssertTrue(request.prompt.contains("mentionedReferences"))
+
+        provider.finishStream()
+        await task?.value
+        let visible = try XCTUnwrap(sink.calls.compactMap {
+            if case .addUserMessage(let text) = $0 { return text }
+            return nil
+        }.first)
+        XCTAssertEqual(visible, "Compare @BERT with this paper")
+        XCTAssertFalse(visible.contains("mentionedReferences"))
+    }
+
+    func testSendOmitsContextForMentionWhoseTokenWasDeleted() async {
+        let provider = MockAgentProvider()
+        let controller = makeController(provider: provider, sink: SpyTranscriptSink())
+        let bert = ChatReference(id: 42, title: "BERT", authors: "Devlin et al.")
+
+        controller.send(
+            "Compare the papers",
+            mentionedReferences: [PaperMentionSelection(reference: bert, range: 8..<13)]
+        )
+        let task = controller.turnTask
+        await provider.waitUntilStreaming()
+        XCTAssertFalse(provider.lastRequest?.prompt.contains("mentionedReferences") == true)
+        provider.finishStream()
+        await task?.value
+    }
+
+    func testSendValidatesRepeatedTitleMentionsBeforeTrimmingLeadingWhitespace() async throws {
+        let provider = MockAgentProvider()
+        let controller = makeController(provider: provider, sink: SpyTranscriptSink())
+        let first = ChatReference(id: 41, title: "Same", authors: "First")
+        let second = ChatReference(id: 42, title: "Same", authors: "Second")
+        let raw = "  @Same vs @Same"
+
+        controller.send(raw, mentionedReferences: [
+            PaperMentionSelection(reference: first, range: 2..<7),
+            PaperMentionSelection(reference: second, range: 11..<16),
+        ])
+        let task = controller.turnTask
+        await provider.waitUntilStreaming()
+        let prompt = try XCTUnwrap(provider.lastRequest?.prompt)
+        XCTAssertTrue(prompt.contains(#""id":41"#))
+        XCTAssertTrue(prompt.contains(#""id":42"#))
+        XCTAssertTrue(prompt.hasPrefix("@Same vs @Same"))
+        provider.finishStream()
+        await task?.value
+    }
+
     /// A fresh Codex controller with the given model/effort seed and no catalog —
     /// tests that need a catalog call `setCatalog` on the returned provider first.
     private func makeCodexControllerRaw(

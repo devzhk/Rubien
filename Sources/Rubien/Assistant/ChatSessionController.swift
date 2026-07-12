@@ -53,6 +53,8 @@ struct AssistantConversationDefaults: Equatable {
 @MainActor
 final class ChatSessionController: ObservableObject {
 
+    typealias MentionSearch = @Sendable (_ query: String, _ limit: Int) async -> [ChatReference]
+
     /// A pending Claude approval (control protocol). The view shows a native card
     /// for the FIRST queued approval above the composer.
     struct PendingApproval: Equatable {
@@ -148,6 +150,7 @@ final class ChatSessionController: ObservableObject {
     private let reference: ChatReference
     private let workspaceURL: URL
     private let attachmentStore: AssistantAttachmentStore
+    private let mentionSearch: MentionSearch
     /// Re-reads the user's Assistant defaults (Settings) when a fresh conversation
     /// starts, so changing a default + hitting "New conversation" adopts it without
     /// reopening the window. Takes the CURRENT backend kind so it returns that
@@ -245,7 +248,8 @@ final class ChatSessionController: ObservableObject {
         providerFactory: ((AgentProviderKind) -> any AgentProvider)? = nil,
         defaultsProvider: ((AgentProviderKind) -> AssistantConversationDefaults)? = nil,
         initialAvailability: AgentAvailability? = nil,
-        attachmentStore: AssistantAttachmentStore? = nil
+        attachmentStore: AssistantAttachmentStore? = nil,
+        mentionSearch: @escaping MentionSearch = { _, _ in [] }
     ) {
         self.provider = provider
         self.providerKind = provider.kind
@@ -253,6 +257,7 @@ final class ChatSessionController: ObservableObject {
         self.reference = reference
         self.workspaceURL = workspaceURL
         self.attachmentStore = attachmentStore ?? AssistantAttachmentStore(workspaceURL: workspaceURL)
+        self.mentionSearch = mentionSearch
         self.gate = gate
         self.webAccess = webAccess
         self.modelOverride = modelOverride
@@ -449,7 +454,13 @@ final class ChatSessionController: ObservableObject {
     }
 
     /// Send a user turn. No-ops when neither text nor a ready attachment is present.
-    func send(_ rawText: String) {
+    func send(_ rawText: String, mentionedReferences: [PaperMentionSelection] = []) {
+        // Ranges belong to the composer snapshot, before user-facing whitespace
+        // normalization. Validate identity first; trimming can shift every token.
+        let mentions = PaperMentions.selectionsStillPresent(
+            in: rawText,
+            from: mentionedReferences
+        ).map(\.reference)
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard canSend(draft: text) else { return }
 
@@ -465,7 +476,9 @@ final class ChatSessionController: ObservableObject {
         let attachments = pendingAttachments
         let visible = composeUserMessage(text)
         let providerPrompt = AssistantAttachmentManifest.providerPrompt(
-            visibleText: visible, attachments: attachments)
+            visibleText: visible,
+            attachments: attachments,
+            mentionedReferences: mentions)
         let request = AgentTurnRequest(
             workspaceURL: workspaceURL,
             resumeSessionID: resumeID,
@@ -529,6 +542,18 @@ final class ChatSessionController: ObservableObject {
             await self.gate.release(provider: kind, sessionID: resumeID)
             self.finalize(gen: gen)
         }
+    }
+
+    /// Searches the user's library for the composer's `@paper` popover. The
+    /// injected production closure performs SQLite work off-main; keeping the
+    /// controller database-agnostic preserves the test/debug composition roots.
+    func searchMentionableReferences(_ rawQuery: String, limit: Int = 8) async -> [ChatReference] {
+        let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidates = await mentionSearch(query, limit + 1)
+        var seen = Set<Int64>()
+        return candidates.filter {
+            $0.id > 0 && $0.id != reference.id && seen.insert($0.id).inserted
+        }.prefix(limit).map { $0 }
     }
 
     /// Stage a reader selection as a quoted chip and ask the composer to focus

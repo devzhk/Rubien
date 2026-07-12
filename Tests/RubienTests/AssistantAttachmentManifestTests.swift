@@ -119,6 +119,54 @@ final class AssistantAttachmentManifestTests: XCTestCase {
         XCTAssertEqual(parsedAttachmentOnly.attachments.map(\.byteCount), [0])
     }
 
+    func testMentionContextCarriesStableIDsButRestoresOnlyVisibleText() throws {
+        let prompt = AssistantAttachmentManifest.providerPrompt(
+            visibleText: "Compare @BERT with this paper",
+            attachments: [],
+            mentionedReferences: [
+                ChatReference(
+                    id: 42,
+                    title: "BERT: Pre-training of Deep Bidirectional Transformers",
+                    authors: "Devlin et al.",
+                    referenceType: "Journal Article",
+                    doi: "10.18653/v1/N19-1423"
+                ),
+            ]
+        )
+
+        XCTAssertTrue(prompt.contains(#""mentionedReferences""#))
+        XCTAssertTrue(prompt.contains(#""id":42"#))
+        XCTAssertTrue(prompt.contains(#""referenceType":"Journal Article""#))
+        XCTAssertTrue(prompt.contains(#""doi":"10.18653/v1/N19-1423""#))
+        XCTAssertTrue(prompt.contains("rubien_get") || prompt.contains("Rubien tools"))
+
+        let parsed = AssistantAttachmentManifest.parse(prompt, managedRoot: root)
+        XCTAssertEqual(parsed.visibleText, "Compare @BERT with this paper")
+        XCTAssertTrue(parsed.attachments.isEmpty)
+        XCTAssertFalse(parsed.visibleText.contains("mentionedReferences"))
+    }
+
+    func testMentionContextDeduplicatesAndCapsBeforeRoundTripWithAttachments() {
+        let references = (1...21).map {
+            ChatReference(id: Int64($0), title: "Paper \($0)", authors: "Author \($0)")
+        }
+        let prompt = AssistantAttachmentManifest.providerPrompt(
+            visibleText: "Compare many papers",
+            attachments: [attachment()],
+            mentionedReferences: references + [references[0], ChatReference(
+                id: -1, title: "Invalid", authors: "Nobody")]
+        )
+
+        XCTAssertTrue(prompt.contains(#""id":20"#))
+        XCTAssertFalse(prompt.contains(#""id":21"#))
+        XCTAssertEqual(prompt.components(separatedBy: #""id":1,"#).count - 1, 1)
+
+        let parsed = AssistantAttachmentManifest.parse(prompt, managedRoot: root)
+        XCTAssertEqual(parsed.visibleText, "Compare many papers")
+        XCTAssertEqual(parsed.attachments.map(\.displayName), ["notes \"α\".md"])
+        XCTAssertFalse(parsed.visibleText.contains("rubien-attachments-v2"))
+    }
+
     func testLegacyV1ManifestStillRestoresWithoutExposingItsPath() throws {
         let legacy = try manifest(prefix: "Review", visibleText: "Review")
 
