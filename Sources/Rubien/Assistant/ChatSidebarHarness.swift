@@ -9,23 +9,84 @@ import SwiftUI
 struct ChatSidebarHarnessView: View {
     @StateObject private var renderer: ChatTranscriptController
     @StateObject private var session: ChatSessionController
+    @State private var appearance: ColorSchemePreference = .system
+    @State private var didStageAttachmentPreviews = false
 
     init() {
         let renderer = ChatTranscriptController()
-        _renderer = StateObject(wrappedValue: renderer)
-        _session = StateObject(wrappedValue: ChatSessionController(
+        let workspace = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Rubien-Assistant-Sidebar-Harness", isDirectory: true)
+        try? FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        let session = ChatSessionController(
             provider: ScriptedAgentProvider(),
             transcript: renderer,
-            reference: ChatReference(id: 1, title: "Attention Is All You Need", authors: "Vaswani et al."),
-            workspaceURL: FileManager.default.temporaryDirectory))
+            reference: ChatReference(
+                id: 1,
+                title: "Attention Is All You Need",
+                authors: "Vaswani et al."),
+            workspaceURL: workspace)
+        _renderer = StateObject(wrappedValue: renderer)
+        _session = StateObject(wrappedValue: session)
     }
 
     var body: some View {
-        ChatSidebarView(session: session, renderer: renderer, onClose: {
-            // In the reader this collapses the pane; in the harness, close the window.
-            NSApp.keyWindow?.performClose(nil)
-        })
+        VStack(spacing: 0) {
+            Picker("Appearance", selection: $appearance) {
+                ForEach(ColorSchemePreference.allCases, id: \.self) { appearance in
+                    Text(appearance.localizedTitle).tag(appearance)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(8)
+            Divider()
+            ChatSidebarView(session: session, renderer: renderer, onClose: {
+                // In the reader this collapses the pane; in the harness, close the window.
+                NSApp.keyWindow?.performClose(nil)
+            })
+        }
+        .background(HarnessWindowAppearance(appearance: appearance.nsAppearance))
         .frame(minWidth: 340, minHeight: 520)
+        .task {
+            guard !didStageAttachmentPreviews else { return }
+            didStageAttachmentPreviews = true
+            stageAttachmentPreviews()
+        }
+    }
+
+    /// Stage after SwiftUI installs the StateObject. Starting the controller worker
+    /// from `init` can precede view installation and leave the debug-only previews
+    /// unobservable even though the harness window opens successfully.
+    private func stageAttachmentPreviews() {
+        let workspace = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Rubien-Assistant-Sidebar-Harness", isDirectory: true)
+        let noteURL = workspace.appendingPathComponent("Harness Context.md")
+        try? Data("# Harness context\nA staged Markdown attachment.".utf8).write(to: noteURL)
+        session.stageAttachments([noteURL])
+        if let imageData = Data(base64Encoded: Self.previewPNGBase64) {
+            session.stagePastedImage(imageData, suggestedName: "Architecture Preview.png")
+        }
+    }
+
+    /// A tiny valid PNG fixture; the production normalizer expands it into its
+    /// regular bounded thumbnail path, exercising the same preview code as a paste.
+    private static let previewPNGBase64 =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+}
+
+/// Apply the harness override at the same AppKit presentation boundary Rubien uses
+/// for its real windows. In particular, assigning `nil` reliably restores inherited
+/// System appearance after a light/dark override; `.preferredColorScheme(nil)` can
+/// leave an already-hosted independent window on its previous explicit scheme.
+private struct HarnessWindowAppearance: NSViewRepresentable {
+    let appearance: NSAppearance?
+
+    func makeNSView(context: Context) -> NSView { NSView(frame: .zero) }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            nsView.window?.appearance = appearance
+        }
     }
 }
 

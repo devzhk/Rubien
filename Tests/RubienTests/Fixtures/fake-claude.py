@@ -92,6 +92,11 @@ def main():
                 continue
             kind = obj.get("type")
             if kind == "user":
+                try:
+                    with open("fake-claude-user.json", "w") as user_handle:
+                        json.dump(obj, user_handle)
+                except OSError:
+                    pass
                 user_received.set()
             elif kind == "control_response":
                 inner = (obj.get("response") or {}).get("response") or {}

@@ -46,6 +46,74 @@ final class ChatSessionControllerTests: XCTestCase {
         while !condition() && n < ticks { await Task.yield(); n += 1 }
     }
 
+    private struct AttachmentFixture {
+        let root: URL
+        let workspace: URL
+        let source: URL
+        let store: AssistantAttachmentStore
+        let controller: ChatSessionController
+        let provider: MockAgentProvider
+        let sink: SpyTranscriptSink
+        let alternateProvider: MockAgentProvider?
+    }
+
+    private func makeAttachmentController(
+        gate: AssistantTurnGate = AssistantTurnGate(),
+        withProviderFactory: Bool = false,
+        fileManager: FileManager = .default
+    ) throws -> AttachmentFixture {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Rubien-controller-attachments-\(UUID().uuidString)", isDirectory: true)
+        let workspace = root.appendingPathComponent("workspace", isDirectory: true)
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent("notes.md")
+        try Data("# Notes\nUseful context".utf8).write(to: source)
+
+        let provider = MockAgentProvider(kind: .claude)
+        let alternate = withProviderFactory ? MockAgentProvider(kind: .codex) : nil
+        let sink = SpyTranscriptSink()
+        let store = AssistantAttachmentStore(
+            workspaceURL: workspace,
+            fileManager: fileManager
+        )
+        let controller = ChatSessionController(
+            provider: provider,
+            transcript: sink,
+            reference: ChatReference(id: 1, title: "Attention", authors: "Vaswani et al."),
+            workspaceURL: workspace,
+            gate: gate,
+            providerFactory: withProviderFactory ? { kind in
+                kind == .codex ? alternate! : provider
+            } : nil,
+            initialAvailability: .installed(version: "test", path: "/fake/claude"),
+            attachmentStore: store
+        )
+        return AttachmentFixture(
+            root: root,
+            workspace: workspace,
+            source: source,
+            store: store,
+            controller: controller,
+            provider: provider,
+            sink: sink,
+            alternateProvider: alternate
+        )
+    }
+
+    private func managedRegularFiles(in root: URL) -> [URL] {
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey]
+        ) else { return [] }
+        return enumerator.compactMap { item in
+            guard
+                let url = item as? URL,
+                (try? url.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+            else { return nil }
+            return url
+        }
+    }
+
     /// Snapshot the two Codex default-pref keys and return a restorer, so a test
     /// exercising `selectModel`/`selectEffort` persistence can't leak into others
     /// (matches the inline save/restore idiom the switchProvider tests use for
@@ -1426,6 +1494,381 @@ final class ChatSessionControllerTests: XCTestCase {
             "a stale catalog fetch from the outgoing codex backend must not repopulate codexModels")
     }
 
+    // MARK: Assistant attachments
+
+    func testCanSendRequiresReadyContentAndNoStaging() async throws {
+        let fixture = try makeAttachmentController()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        XCTAssertFalse(fixture.controller.canSend(draft: "   "))
+        XCTAssertTrue(fixture.controller.canSend(draft: "hello"))
+        fixture.controller.stageAttachments([fixture.source])
+        XCTAssertFalse(
+            fixture.controller.canSend(draft: "hello"),
+            "staging blocks an accidental partial send")
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+        XCTAssertTrue(
+            fixture.controller.canSend(draft: ""),
+            "ready attachment permits attachment-only send")
+    }
+
+    func testRemovingPendingAttachmentDeletesItAndDisablesEmptySend() async throws {
+        let fixture = try makeAttachmentController()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        fixture.controller.stageAttachments([fixture.source])
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+        let pending = try XCTUnwrap(fixture.controller.pendingAttachments.first)
+        fixture.controller.removePendingAttachment(id: pending.id)
+        await waitUntil({
+            !FileManager.default.fileExists(atPath: pending.stagedURL.path)
+        }, ticks: 5_000)
+        XCTAssertFalse(fixture.controller.canSend(draft: ""))
+    }
+
+    func testAttachmentOnlyTurnUsesHiddenFallbackAndStructuredVisibleRow() async throws {
+        let fixture = try makeAttachmentController()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        fixture.controller.stageAttachments([fixture.source])
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+        XCTAssertTrue(fixture.controller.canSend(draft: ""))
+
+        fixture.controller.send("")
+        let task = fixture.controller.turnTask
+        await fixture.provider.waitUntilStreaming()
+        XCTAssertTrue(fixture.provider.lastRequest?.prompt.contains("Inspect the attached files.") == true)
+        XCTAssertEqual(fixture.provider.lastRequest?.attachments.count, 1)
+        fixture.provider.finishStream()
+        await task?.value
+
+        let payload = try XCTUnwrap(fixture.sink.calls.compactMap {
+            if case .addUserPayload(let payload) = $0 { return payload }
+            return nil
+        }.first)
+        XCTAssertEqual(payload.body, "", "the synthetic fallback is never visible")
+        XCTAssertEqual(payload.attachments.map(\.displayName), [fixture.source.lastPathComponent])
+        XCTAssertTrue(fixture.controller.pendingAttachments.isEmpty)
+    }
+
+    func testBusyGateKeepsPendingAttachmentForRetry() async throws {
+        let gate = AssistantTurnGate()
+        let firstProvider = MockAgentProvider()
+        let first = makeController(provider: firstProvider, sink: SpyTranscriptSink(), gate: gate)
+        let second = try makeAttachmentController(gate: gate)
+        defer { try? FileManager.default.removeItem(at: second.root) }
+        let summary = AgentSessionSummary(
+            id: "shared", preview: "Shared session", date: Date(timeIntervalSince1970: 0))
+        first.resume(summary)
+        second.controller.resume(summary)
+        await first.resumeTask?.value
+        await second.controller.resumeTask?.value
+
+        first.send("hold")
+        await firstProvider.waitUntilStreaming()
+        second.controller.stageAttachments([second.source])
+        await waitUntil({ !second.controller.isStagingAttachments }, ticks: 5_000)
+        second.controller.send("")
+        let refusedTask = second.controller.turnTask
+        await refusedTask?.value
+
+        XCTAssertTrue(second.provider.requests.isEmpty)
+        XCTAssertEqual(second.controller.pendingAttachments.count, 1)
+        XCTAssertTrue(second.controller.busyElsewhere)
+        firstProvider.finishStream()
+        await first.turnTask?.value
+    }
+
+    func testAttachmentMutationIsFrozenWhileTurnAwaitsAdmission() async throws {
+        let fixture = try makeAttachmentController()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let second = fixture.root.appendingPathComponent("later.txt")
+        try Data("later".utf8).write(to: second)
+
+        fixture.controller.stageAttachments([fixture.source])
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+        let captured = try XCTUnwrap(fixture.controller.pendingAttachments.first)
+
+        fixture.controller.send("")
+        fixture.controller.removePendingAttachment(id: captured.id)
+        fixture.controller.stageAttachments([second])
+
+        XCTAssertEqual(fixture.controller.pendingAttachments.map(\.id), [captured.id])
+        XCTAssertTrue(fixture.controller.stagingAttachments.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: captured.stagedURL.path))
+
+        await fixture.provider.waitUntilStreaming()
+        XCTAssertEqual(fixture.provider.lastRequest?.attachments.map(\.id), [captured.id])
+        fixture.provider.finishStream()
+        await fixture.controller.turnTask?.value
+        XCTAssertTrue(fixture.controller.pendingAttachments.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: captured.stagedURL.path))
+    }
+
+    func testNewConversationDeletesPendingWhileProviderSwitchRehomesIt() async throws {
+        let savedProvider = UserDefaults.standard.object(forKey: RubienPreferences.assistantProviderKey)
+        defer {
+            if let savedProvider {
+                UserDefaults.standard.set(savedProvider, forKey: RubienPreferences.assistantProviderKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: RubienPreferences.assistantProviderKey)
+            }
+        }
+        let fixture = try makeAttachmentController(withProviderFactory: true)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        fixture.controller.stageAttachments([fixture.source])
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+        let oldPath = try XCTUnwrap(fixture.controller.pendingAttachments.first?.stagedURL)
+
+        fixture.controller.switchProvider(to: .codex)
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+        let movedPath = try XCTUnwrap(fixture.controller.pendingAttachments.first?.stagedURL)
+        XCTAssertNotEqual(oldPath, movedPath)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: oldPath.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: movedPath.path))
+
+        fixture.controller.newConversation()
+        await waitUntil({ !FileManager.default.fileExists(atPath: movedPath.path) }, ticks: 5_000)
+        XCTAssertTrue(fixture.controller.pendingAttachments.isEmpty)
+    }
+
+    func testCodexModelChangeMidConversationRehomesPendingAttachments() async throws {
+        let restore = restoreCodexPrefsAfter()
+        defer { restore() }
+        let savedProvider = UserDefaults.standard.object(forKey: RubienPreferences.assistantProviderKey)
+        defer {
+            if let savedProvider {
+                UserDefaults.standard.set(savedProvider, forKey: RubienPreferences.assistantProviderKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: RubienPreferences.assistantProviderKey)
+            }
+        }
+        let fixture = try makeAttachmentController(withProviderFactory: true)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        // Model-change resets are Codex-only: move the conversation there, then give
+        // the thread content so `selectModel` takes its reset branch.
+        fixture.controller.switchProvider(to: .codex)
+        let codex = try XCTUnwrap(fixture.alternateProvider)
+        fixture.controller.send("hi")
+        await codex.waitUntilStreaming()
+        codex.emit(.sessionStarted(sessionID: "TH-1"))
+        codex.finishStream()
+        await fixture.controller.turnTask?.value
+        XCTAssertTrue(fixture.controller.hasMessages)
+
+        fixture.controller.stageAttachments([fixture.source])
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+        let attachmentID = try XCTUnwrap(fixture.controller.pendingAttachments.first?.id)
+        let oldPath = try XCTUnwrap(fixture.controller.pendingAttachments.first?.stagedURL)
+
+        fixture.controller.selectModel("gpt-test-2")
+
+        XCTAssertEqual(fixture.controller.modelOverride, "gpt-test-2")
+        XCTAssertNil(fixture.controller.liveSessionID, "model change starts a fresh conversation")
+        // The rehome starts synchronously; a competing pick during it is ignored,
+        // mirroring switchProvider's staging guard.
+        XCTAssertTrue(fixture.controller.isRehomingAttachments)
+        fixture.controller.selectModel("gpt-test-3")
+        XCTAssertEqual(fixture.controller.modelOverride, "gpt-test-2",
+                       "a pick during rehome is ignored — mirrors switchProvider")
+
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+        XCTAssertEqual(fixture.controller.pendingAttachments.map(\.id), [attachmentID],
+                       "pending attachments survive a Codex model change")
+        let movedPath = try XCTUnwrap(fixture.controller.pendingAttachments.first?.stagedURL)
+        XCTAssertNotEqual(oldPath, movedPath, "rehomed into the fresh conversation's directory")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: oldPath.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: movedPath.path))
+    }
+
+    func testAttachmentMutationIsFrozenDuringProviderRehome() async throws {
+        let fixture = try makeAttachmentController(withProviderFactory: true)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let second = fixture.root.appendingPathComponent("later.txt")
+        try Data("later".utf8).write(to: second)
+
+        fixture.controller.stageAttachments([fixture.source])
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+        let capturedID = try XCTUnwrap(fixture.controller.pendingAttachments.first?.id)
+
+        fixture.controller.switchProvider(to: .codex)
+        XCTAssertTrue(fixture.controller.isRehomingAttachments)
+        fixture.controller.removePendingAttachment(id: capturedID)
+        fixture.controller.stageAttachments([second])
+
+        XCTAssertEqual(fixture.controller.pendingAttachments.map(\.id), [capturedID])
+        XCTAssertTrue(fixture.controller.stagingAttachments.isEmpty)
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+        XCTAssertEqual(fixture.controller.pendingAttachments.map(\.id), [capturedID])
+    }
+
+    func testFailedProviderRehomeBlocksSendUntilPendingAttachmentIsRemoved() async throws {
+        let fixture = try makeAttachmentController(withProviderFactory: true)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        fixture.controller.stageAttachments([fixture.source])
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+        let pending = try XCTUnwrap(fixture.controller.pendingAttachments.first)
+        try FileManager.default.removeItem(at: pending.stagedURL)
+
+        fixture.controller.switchProvider(to: .codex)
+        await waitUntil({ !fixture.controller.isRehomingAttachments }, ticks: 5_000)
+
+        XCTAssertTrue(fixture.controller.hasAttachmentRehomeFailure)
+        XCTAssertFalse(fixture.controller.canSend(draft: "question"))
+        XCTAssertEqual(fixture.controller.pendingAttachments.map(\.id), [pending.id])
+        XCTAssertTrue(fixture.controller.attachmentIssues.contains {
+            $0.displayName == "Attachments"
+        })
+
+        fixture.controller.removePendingAttachment(id: pending.id)
+        XCTAssertFalse(fixture.controller.hasAttachmentRehomeFailure)
+        XCTAssertTrue(fixture.controller.canSend(draft: "question"))
+    }
+
+    func testRehomeRecoveryKeepsControllerOwnershipAndCanRetryThenRemove() async throws {
+        let fileManager = ControllerRehomeRecoveryFileManager()
+        let fixture = try makeAttachmentController(
+            withProviderFactory: true,
+            fileManager: fileManager
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let second = fixture.root.appendingPathComponent("second.txt")
+        try Data("second".utf8).write(to: second)
+
+        fixture.controller.stageAttachments([fixture.source, second])
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+        fileManager.armCleanupAndRestorationFailure()
+
+        fixture.controller.switchProvider(to: .codex)
+        await waitUntil({ !fixture.controller.isRehomingAttachments }, ticks: 5_000)
+
+        XCTAssertTrue(fixture.controller.hasAttachmentRehomeFailure)
+        let recovered = fixture.controller.pendingAttachments
+        XCTAssertEqual(recovered.count, 2)
+        XCTAssertTrue(recovered.allSatisfy {
+            FileManager.default.fileExists(atPath: $0.stagedURL.path)
+        })
+        XCTAssertEqual(Set(recovered.map { $0.stagedURL.deletingLastPathComponent() }).count, 1)
+
+        fixture.controller.clearAttachmentIssues()
+        await waitUntil({ !fixture.controller.isRehomingAttachments }, ticks: 5_000)
+        XCTAssertFalse(fixture.controller.hasAttachmentRehomeFailure)
+        XCTAssertEqual(fixture.controller.pendingAttachments, recovered)
+
+        for attachment in recovered {
+            fixture.controller.removePendingAttachment(id: attachment.id)
+        }
+        await waitUntil({
+            recovered.allSatisfy {
+                !FileManager.default.fileExists(atPath: $0.stagedURL.path)
+            }
+        }, ticks: 5_000)
+        XCTAssertTrue(fixture.controller.pendingAttachments.isEmpty)
+    }
+
+    func testTeardownDeletesUnsentPendingAttachments() async throws {
+        let fixture = try makeAttachmentController()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        fixture.controller.stageAttachments([fixture.source])
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+        let stagedURL = try XCTUnwrap(fixture.controller.pendingAttachments.first?.stagedURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stagedURL.path))
+
+        fixture.controller.teardown()
+        await waitUntil({
+            !FileManager.default.fileExists(atPath: stagedURL.path)
+        }, ticks: 5_000)
+
+        XCTAssertTrue(fixture.controller.pendingAttachments.isEmpty)
+        XCTAssertFalse(fixture.controller.hasAttachmentRehomeFailure)
+    }
+
+    func testDuplicateSourceIsRejectedAndBatchKeepsValidSiblings() async throws {
+        let fixture = try makeAttachmentController()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let second = fixture.root.appendingPathComponent("second.txt")
+        let unsupported = fixture.root.appendingPathComponent("paper.pdf")
+        let duplicateLink = fixture.root.appendingPathComponent("same-notes.md")
+        try Data("second".utf8).write(to: second)
+        try Data("not a pdf".utf8).write(to: unsupported)
+        try FileManager.default.linkItem(at: fixture.source, to: duplicateLink)
+
+        fixture.controller.stageAttachments([fixture.source, duplicateLink, unsupported, second])
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+
+        XCTAssertEqual(
+            Set(fixture.controller.pendingAttachments.map(\.displayName)),
+            Set([fixture.source.lastPathComponent, second.lastPathComponent]))
+        XCTAssertEqual(fixture.controller.attachmentIssues.count, 2)
+        XCTAssertTrue(fixture.controller.attachmentIssues.contains { $0.displayName == duplicateLink.lastPathComponent })
+        XCTAssertTrue(fixture.controller.attachmentIssues.contains { $0.displayName == unsupported.lastPathComponent })
+    }
+
+    func testAttachmentCapAdmitsOnlyTenItems() async throws {
+        let fixture = try makeAttachmentController()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let sources = try (0..<11).map { index -> URL in
+            let url = fixture.root.appendingPathComponent("source-\(index).txt")
+            try Data("\(index)".utf8).write(to: url)
+            return url
+        }
+
+        fixture.controller.stageAttachments(sources)
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+
+        XCTAssertEqual(fixture.controller.pendingAttachments.count, 10)
+        XCTAssertEqual(fixture.controller.attachmentIssues.count, 1)
+        XCTAssertEqual(fixture.controller.attachmentIssues.first?.displayName, "source-10.txt")
+    }
+
+    func testNewConversationDropsStaleStagingCompletionAndOutput() async throws {
+        let fixture = try makeAttachmentController()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        fixture.controller.stageAttachments([fixture.source])
+        XCTAssertEqual(fixture.controller.stagingAttachments.count, 1, "staging is published synchronously")
+        fixture.controller.newConversation()
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+        for _ in 0..<50 { await Task.yield() }
+
+        XCTAssertTrue(fixture.controller.pendingAttachments.isEmpty)
+        XCTAssertTrue(fixture.controller.stagingAttachments.isEmpty)
+        XCTAssertTrue(managedRegularFiles(in: fixture.store.managedRoot).isEmpty)
+    }
+
+    func testRemovingStagingRowCancelsPublicationAndDeletesLateOutput() async throws {
+        let fixture = try makeAttachmentController()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        fixture.controller.stageAttachments([fixture.source])
+        let id = try XCTUnwrap(fixture.controller.stagingAttachments.first?.id)
+        fixture.controller.removePendingAttachment(id: id)
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+        for _ in 0..<50 { await Task.yield() }
+
+        XCTAssertTrue(fixture.controller.pendingAttachments.isEmpty)
+        XCTAssertTrue(managedRegularFiles(in: fixture.store.managedRoot).isEmpty)
+    }
+
+    func testProviderSwitchIsIgnoredWhileAttachmentIsStaging() throws {
+        let fixture = try makeAttachmentController(withProviderFactory: true)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        fixture.controller.stageAttachments([fixture.source])
+        XCTAssertTrue(fixture.controller.isStagingAttachments)
+        fixture.controller.switchProvider(to: .codex)
+
+        XCTAssertEqual(fixture.controller.providerKind, .claude)
+    }
+
+    func testCombinedImageByteLimitIncludesExactBoundary() {
+        let limit: Int64 = 20 * 1_024 * 1_024
+        XCTAssertTrue(ChatSessionController.acceptsImageBytes(existing: limit - 1, adding: 1))
+        XCTAssertFalse(ChatSessionController.acceptsImageBytes(existing: limit, adding: 1))
+    }
+
     /// Controller wired with a factory so switchProvider works (mirrors the
     /// existing switch test's shape at line ~392).
     private func makeCodexControllerWithFactory(
@@ -1448,6 +1891,43 @@ final class ChatSessionControllerTests: XCTestCase {
 }
 
 // MARK: - Test doubles
+
+private final class ControllerRehomeRecoveryFileManager: FileManager {
+    private var armed = false
+    private var sourceDirectory: URL?
+    private var originalRemovalCalls = 0
+    private var didFailOriginalRemoval = false
+
+    func armCleanupAndRestorationFailure() {
+        armed = true
+    }
+
+    override func removeItem(at url: URL) throws {
+        if armed {
+            let parent = url.deletingLastPathComponent().standardizedFileURL
+            if sourceDirectory == nil {
+                sourceDirectory = parent
+            }
+            if parent == sourceDirectory {
+                originalRemovalCalls += 1
+                if originalRemovalCalls == 2 {
+                    didFailOriginalRemoval = true
+                    throw InjectedFailure()
+                }
+            }
+        }
+        try super.removeItem(at: url)
+    }
+
+    override func copyItem(at srcURL: URL, to dstURL: URL) throws {
+        if armed, didFailOriginalRemoval {
+            throw InjectedFailure()
+        }
+        try super.copyItem(at: srcURL, to: dstURL)
+    }
+
+    private struct InjectedFailure: Error {}
+}
 
 /// A provider whose event stream the test drives explicitly. Thread-safe via a lock
 /// (`send` is a nonisolated protocol requirement).
@@ -1686,6 +2166,7 @@ final class SpyTranscriptSink: ChatTranscriptSink {
         case reset
         case loadTranscript([ChatRenderMessage])
         case addUserMessage(String)
+        case addUserPayload(ChatUserMessagePayload)
         case appendDelta(String)
         case commitAssistantMessage(String)
         case addToolChip(String, String?, ToolChipStatus)
@@ -1698,6 +2179,7 @@ final class SpyTranscriptSink: ChatTranscriptSink {
     func reset() { calls.append(.reset) }
     func loadTranscript(_ messages: [ChatRenderMessage]) { calls.append(.loadTranscript(messages)) }
     func addUserMessage(_ markdown: String) { calls.append(.addUserMessage(markdown)) }
+    func addUserMessage(_ payload: ChatUserMessagePayload) { calls.append(.addUserPayload(payload)) }
     func appendDelta(_ text: String) { calls.append(.appendDelta(text)) }
     func commitAssistantMessage(_ markdown: String) { calls.append(.commitAssistantMessage(markdown)) }
     func addToolChip(name: String, detail: String?, status: ToolChipStatus) {

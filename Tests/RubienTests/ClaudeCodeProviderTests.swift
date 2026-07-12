@@ -118,6 +118,64 @@ final class ClaudeCodeProviderTests: XCTestCase {
         XCTAssertTrue(events.containsTurnCompleted)
     }
 
+    func testImageAttachmentIsSentBeforePromptAsBase64Content() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["assistantText": "ok"], into: workspace)
+        let imageURL = workspace.appendingPathComponent("figure.png")
+        let imageData = Data([0x89, 0x50, 0x4E, 0x47])
+        try imageData.write(to: imageURL)
+        let image = ChatAttachment(
+            id: UUID(), displayName: "figure.png", kind: .image,
+            stagedURL: imageURL, mediaType: "image/png",
+            byteCount: Int64(imageData.count), sourceIdentity: "figure")
+        let textURL = workspace.appendingPathComponent("notes.txt")
+        try Data("notes".utf8).write(to: textURL)
+        let text = ChatAttachment(
+            id: UUID(), displayName: "notes.txt", kind: .text,
+            stagedURL: textURL, mediaType: "text/plain",
+            byteCount: 5, sourceIdentity: "notes")
+        let provider = ClaudeCodeProvider(executableOverride: fakeCLIPath)
+
+        _ = try await collectAllEvents(provider.send(turn: turn(
+            workspace: workspace, prompt: "What is shown?", attachments: [image, text])))
+
+        let data = try Data(contentsOf: workspace.appendingPathComponent("fake-claude-user.json"))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let message = try XCTUnwrap(object["message"] as? [String: Any])
+        let content = try XCTUnwrap(message["content"] as? [[String: Any]])
+        XCTAssertEqual(content.map { $0["type"] as? String }, ["image", "text"])
+        let source = try XCTUnwrap(content[0]["source"] as? [String: Any])
+        XCTAssertEqual(source["media_type"] as? String, "image/png")
+        XCTAssertEqual(source["data"] as? String, imageData.base64EncodedString())
+        XCTAssertEqual(content[1]["text"] as? String, "What is shown?")
+    }
+
+    func testUnreadableImageFailsBeforeSpawningClaude() async throws {
+        let workspace = try makeWorkspace()
+        let missingURL = workspace.appendingPathComponent("missing.png")
+        let image = ChatAttachment(
+            id: UUID(), displayName: "missing.png", kind: .image,
+            stagedURL: missingURL, mediaType: "image/png", byteCount: 4,
+            sourceIdentity: "missing")
+        let provider = ClaudeCodeProvider(executableOverride: fakeCLIPath)
+
+        do {
+            for try await _ in provider.send(turn: turn(
+                workspace: workspace, attachments: [image])) {}
+            XCTFail("expected an unreadable attachment error")
+        } catch let error as AgentProviderError {
+            XCTAssertEqual(error, .attachmentUnreadable("missing.png"))
+            XCTAssertEqual(
+                error.localizedDescription,
+                "The attachment missing.png could not be read before sending.")
+        }
+
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: workspace.appendingPathComponent("fake-claude-argv.json").path))
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: workspace.appendingPathComponent("fake-claude-user.json").path))
+    }
+
     // MARK: MCP content channel (Phase 2b-ii)
 
     func testContentChannelInjectsMCPConfigIntoSpawnedArgv() async throws {
@@ -502,8 +560,10 @@ final class ClaudeCodeProviderTests: XCTestCase {
         return cli
     }
 
-    private func turn(workspace: URL, prompt: String = "hello") -> AgentTurnRequest {
-        AgentTurnRequest(workspaceURL: workspace, prompt: prompt)
+    private func turn(
+        workspace: URL, prompt: String = "hello", attachments: [ChatAttachment] = []
+    ) -> AgentTurnRequest {
+        AgentTurnRequest(workspaceURL: workspace, prompt: prompt, attachments: attachments)
     }
 
     private func readGrandchildPID(in workspace: URL) throws -> pid_t {

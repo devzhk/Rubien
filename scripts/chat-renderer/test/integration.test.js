@@ -63,6 +63,51 @@ test('user message renders markdown + KaTeX immediately', async () => {
   assert.ok(u.querySelectorAll('.katex').length >= 2, 'both formulas typeset')
 })
 
+test('user attachment payload renders safe chips and unavailable state', async () => {
+  const { R, T } = await boot()
+  R.addUserMessage({ body: '', attachments: [
+    { id: '1', displayName: '<img onerror=alert(1)>.md', kind: 'text', byteCount: 42, isAvailable: true,
+      path: '/Users/researcher/private-notes.md' },
+    { id: '2', displayName: 'gone.png', kind: 'image', byteCount: 99, isAvailable: false },
+  ] })
+  await tick()
+  const bubble = T().querySelector('.chat-msg-user .chat-bubble')
+  assert.equal(bubble.querySelectorAll('.chat-attachment').length, 2)
+  assert.match(bubble.textContent, /<img onerror=alert\(1\)>\.md/)
+  assert.match(bubble.textContent, /File unavailable/)
+  assert.equal(bubble.querySelectorAll('[onerror]').length, 0)
+  assert.doesNotMatch(bubble.textContent, /private-notes|\/Users\//)
+})
+
+test('user attachment rendering is identical after restore and only allows png/jpeg thumbnails', async () => {
+  const payload = {
+    body: 'See **these**',
+    attachments: [
+      { id: '1', displayName: 'ok.png', kind: 'image', byteCount: 12, isAvailable: true,
+        thumbnailDataURL: 'data:image/png;base64,AA==' },
+      { id: '2', displayName: 'bad.svg', kind: 'image', byteCount: 34, isAvailable: true,
+        thumbnailDataURL: 'data:image/svg+xml;base64,PHN2Zz4=' },
+      { id: '3', displayName: 'ok.jpeg', kind: 'image', byteCount: 56, isAvailable: true,
+        thumbnailDataURL: 'data:image/jpeg;base64,AA==' },
+    ],
+  }
+
+  const live = await boot()
+  live.R.addUserMessage(payload)
+  await tick()
+  const liveBubble = live.T().querySelector('.chat-msg-user .chat-bubble')
+  assert.equal(liveBubble.querySelectorAll('.chat-attachment-thumbnail').length, 2)
+  assert.equal(liveBubble.querySelector('.chat-attachment-thumbnail').getAttribute('src'),
+    'data:image/png;base64,AA==')
+
+  const restored = await boot()
+  restored.R.loadTranscript([{ role: 'user', body: payload.body, attachments: payload.attachments, seq: 0 }])
+  await tick()
+  const restoredBubble = restored.T().querySelector('.chat-msg-user .chat-bubble')
+  assert.equal(restoredBubble.innerHTML, liveBubble.innerHTML)
+  assert.doesNotMatch(restoredBubble.innerHTML, /svg\+xml|PHN2Zz4=/)
+})
+
 test('KaTeX runs on commit, never during streaming', async () => {
   const { R, T } = await boot()
   R.beginAssistantMessage()

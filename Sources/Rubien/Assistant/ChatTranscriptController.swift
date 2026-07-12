@@ -66,6 +66,11 @@ final class ChatTranscriptController: ObservableObject {
         evaluateOrEnqueue(ChatTranscriptJS.addUserMessage(markdown))
     }
 
+    /// Append a user message with safe, local-only attachment presentation.
+    func addUserMessage(_ payload: ChatUserMessagePayload) {
+        evaluateOrEnqueue(ChatTranscriptJS.addUserMessage(payload))
+    }
+
     /// Open a fresh assistant bubble to stream into.
     func beginAssistantMessage() {
         evaluateOrEnqueue(ChatTranscriptJS.beginAssistantMessage())

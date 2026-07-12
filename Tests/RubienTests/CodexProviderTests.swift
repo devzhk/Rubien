@@ -195,6 +195,35 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertTrue(argv.containsPair("-c", "tools.web_search=false"))
     }
 
+    func testTurnStartSendsOrderedLocalImagesAndIgnoresTextAttachments() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["assistantText": "ok"], into: workspace)
+        let first = ChatAttachment(
+            id: UUID(), displayName: "a.png", kind: .image,
+            stagedURL: workspace.appendingPathComponent("a.png"), mediaType: "image/png",
+            byteCount: 1, sourceIdentity: "a")
+        let text = ChatAttachment(
+            id: UUID(), displayName: "notes.md", kind: .text,
+            stagedURL: workspace.appendingPathComponent("notes.md"), mediaType: "text/markdown",
+            byteCount: 1, sourceIdentity: "notes")
+        let second = ChatAttachment(
+            id: UUID(), displayName: "b.jpg", kind: .image,
+            stagedURL: workspace.appendingPathComponent("b.jpg"), mediaType: "image/jpeg",
+            byteCount: 1, sourceIdentity: "b")
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        _ = try await collectAllEvents(provider.send(turn: turn(
+            workspace: workspace, prompt: "compare", attachments: [first, text, second])))
+
+        let params = try XCTUnwrap(try readObserved(in: workspace)["lastTurnParams"] as? [String: Any])
+        let input = try XCTUnwrap(params["input"] as? [[String: Any]])
+        XCTAssertEqual(input.map { $0["type"] as? String }, ["text", "localImage", "localImage"])
+        XCTAssertEqual(input[0]["text"] as? String, "compare")
+        XCTAssertEqual(input[1]["path"] as? String, first.stagedURL.path)
+        XCTAssertEqual(input[2]["path"] as? String, second.stagedURL.path)
+    }
+
     // MARK: Long-lived server + thread reuse (the point of app-server)
 
     func testServerAndThreadReusedAcrossTurns() async throws {
@@ -502,7 +531,14 @@ final class CodexProviderTests: XCTestCase {
 
     func testRecentSessionsListsThreadsScopedToTheWorkspace() async throws {
         let workspace = try makeWorkspace()
-        try writeConfig([:], into: workspace)
+        try writeConfig(["transcripts": [
+            "TH-A": ["turns": [["items": [[
+                "type": "userMessage", "content": [["type": "text", "text": "First conversation"]],
+            ]]]]],
+            "TH-B": ["turns": [["items": [[
+                "type": "userMessage", "content": [["type": "text", "text": "Second conversation"]],
+            ]]]]],
+        ]], into: workspace)
         let provider = CodexProvider(executableOverride: fakeServerPath)
         defer { provider.shutdown() }
 
@@ -518,14 +554,19 @@ final class CodexProviderTests: XCTestCase {
         let observed = try readObserved(in: workspace)
         let params = try XCTUnwrap(observed["threadListParams"] as? [String: Any])
         XCTAssertEqual(params["cwd"] as? String, workspace.path)
-        XCTAssertEqual(params["limit"] as? Int, 10)
+        XCTAssertEqual(params["limit"] as? Int, 50)
         let sourceKinds = try XCTUnwrap(params["sourceKinds"] as? [String])
         XCTAssertTrue(sourceKinds.contains("appServer"))
     }
 
     func testSearchSessionsReturnsHitsWithSnippets() async throws {
         let workspace = try makeWorkspace()
-        try writeConfig([:], into: workspace)
+        try writeConfig(["transcripts": [
+            "TH-9": ["turns": [["items": [
+                ["type": "userMessage", "content": [["type": "text", "text": "Conversation opener"]]],
+                ["type": "agentMessage", "text": "…the matching   text…"],
+            ]]]],
+        ]], into: workspace)
         let provider = CodexProvider(executableOverride: fakeServerPath)
         defer { provider.shutdown() }
 
@@ -548,6 +589,10 @@ final class CodexProviderTests: XCTestCase {
              "snippet": "hit"],
             ["thread": ["id": "foreign", "preview": "Theirs", "updatedAt": 1_700_000_300, "cwd": "/some/other/ws"],
              "snippet": "hit"],
+        ], "transcripts": [
+            "local": ["turns": [["items": [[
+                "type": "userMessage", "content": [["type": "text", "text": "local hit"]],
+            ]]]]],
         ]], into: workspace)
         let provider = CodexProvider(executableOverride: fakeServerPath)
         defer { provider.shutdown() }
@@ -570,10 +615,175 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertThrowsError(try readObserved(in: workspace))
     }
 
+    func testRecentSessionsDeriveGeneralAndScopedPreviewFromVisibleTranscript() async throws {
+        let workspace = try makeWorkspace()
+        let fixture = try attachmentOnlyHistoryFixture(
+            in: workspace, threadID: "TH-PRIVATE", referenceID: 42
+        )
+        try writeConfig([
+            "threads": [[
+                "id": fixture.threadID,
+                "preview": fixture.providerPrompt,
+                "updatedAt": 1_700_000_300,
+                "turns": [],
+            ]],
+            "transcripts": [fixture.threadID: fixture.transcript],
+        ], into: workspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        let general = await provider.recentSessions(workspaceURL: workspace, limit: 10)
+        let scoped = await provider.recentSessions(
+            workspaceURL: workspace, limit: 10, referenceID: 42
+        )
+
+        for summary in general + scoped {
+            XCTAssertEqual(summary.preview, "Attached: figure.png")
+            XCTAssertFalse(summary.preview.contains("rubien-attachments-v2"))
+            XCTAssertFalse(summary.preview.contains(fixture.stagedPath))
+        }
+        XCTAssertEqual(general.map(\.id), [fixture.threadID])
+        XCTAssertEqual(scoped.map(\.id), [fixture.threadID])
+        let restored = await provider.sessionTranscript(
+            sessionID: fixture.threadID,
+            workspaceURL: workspace
+        )
+        XCTAssertEqual(restored.first?.attachments.map(\.displayName), ["figure.png"])
+        try FileManager.default.removeItem(atPath: fixture.stagedPath)
+        let unavailable = await provider.sessionTranscript(
+            sessionID: fixture.threadID,
+            workspaceURL: workspace
+        )
+        XCTAssertEqual(unavailable.first?.attachments.first?.isAvailable, false)
+        let observed = try readObserved(in: workspace)
+        XCTAssertEqual(
+            try XCTUnwrap(observed["threadReadIds"] as? [String]),
+            Array(repeating: fixture.threadID, count: 4),
+            "attachment rows are re-read so local availability cannot go stale"
+        )
+    }
+
+    func testRecentSessionsOverfetchesPastAnEmptyNewestThread() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "threads": [
+                ["id": "EMPTY", "preview": "", "updatedAt": 1_700_000_300],
+                ["id": "VALID", "preview": "Older valid thread", "updatedAt": 1_700_000_200],
+            ],
+            "transcripts": ["EMPTY": [:]],
+        ], into: workspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        let recent = await provider.recentSessions(workspaceURL: workspace, limit: 1)
+
+        XCTAssertEqual(recent.map(\.id), ["VALID"])
+        let params = try XCTUnwrap(
+            try readObserved(in: workspace)["threadListParams"] as? [String: Any]
+        )
+        XCTAssertEqual(params["limit"] as? Int, 5)
+    }
+
+    func testHistoryEvictsTextCacheWhenThreadGainsAnAttachment() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "threads": [[
+                "id": "TH-CHANGES",
+                "preview": "Plain",
+                "updatedAt": 1_700_000_100,
+            ]],
+            "transcripts": [
+                "TH-CHANGES": ["turns": [["items": [[
+                    "type": "userMessage",
+                    "content": [["type": "text", "text": "Plain"]],
+                ]]]]],
+            ],
+        ], into: workspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+        let initial = await provider.recentSessions(workspaceURL: workspace, limit: 5)
+        XCTAssertEqual(initial.first?.preview, "Plain")
+
+        let fixture = try attachmentOnlyHistoryFixture(
+            in: workspace,
+            threadID: "TH-CHANGES",
+            referenceID: 42
+        )
+        try writeConfig([
+            "threads": [[
+                "id": fixture.threadID,
+                "preview": fixture.providerPrompt,
+                "updatedAt": 1_700_000_200,
+            ]],
+            "transcripts": [fixture.threadID: fixture.transcript],
+        ], into: workspace)
+
+        _ = await provider.recentSessions(workspaceURL: workspace, limit: 5)
+        let rows = await provider.sessionTranscript(
+            sessionID: fixture.threadID,
+            workspaceURL: workspace
+        )
+
+        XCTAssertEqual(rows.first?.attachments.map(\.displayName), ["figure.png"])
+    }
+
+    func testSearchSessionsIndexesOnlyVisibleTranscriptForGeneralAndScopedResults() async throws {
+        let workspace = try makeWorkspace()
+        let fixture = try attachmentOnlyHistoryFixture(
+            in: workspace, threadID: "TH-PRIVATE", referenceID: 42
+        )
+        try writeConfig([
+            "searchHits": [[
+                "thread": [
+                    "id": fixture.threadID,
+                    "preview": fixture.providerPrompt,
+                    "updatedAt": 1_700_000_300,
+                    "cwd": workspace.path,
+                    "turns": [],
+                ],
+                "snippet": fixture.providerPrompt,
+            ]],
+            "transcripts": [fixture.threadID: fixture.transcript],
+        ], into: workspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        let general = await provider.searchSessions(
+            query: "figure.png", workspaceURL: workspace, limit: 10
+        )
+        let scoped = await provider.searchSessions(
+            query: "figure.png", workspaceURL: workspace, limit: 10, referenceID: 42
+        )
+        let delimiterHits = await provider.searchSessions(
+            query: "rubien-attachments-v2", workspaceURL: workspace, limit: 10
+        )
+        let pathHits = await provider.searchSessions(
+            query: fixture.stagedPath, workspaceURL: workspace, limit: 10, referenceID: 42
+        )
+
+        for summary in general + scoped {
+            XCTAssertEqual(summary.preview, "Attached: figure.png")
+            XCTAssertEqual(summary.matchSnippet, "Attached: figure.png")
+        }
+        XCTAssertEqual(general.map(\.id), [fixture.threadID])
+        XCTAssertEqual(scoped.map(\.id), [fixture.threadID])
+        XCTAssertTrue(delimiterHits.isEmpty, "the private manifest delimiter is not searchable")
+        XCTAssertTrue(pathHits.isEmpty, "the staged absolute path is not searchable")
+        let observed = try readObserved(in: workspace)
+        XCTAssertEqual(
+            try XCTUnwrap(observed["threadReadIds"] as? [String]),
+            Array(repeating: fixture.threadID, count: 4),
+            "attachment searches re-read local availability"
+        )
+    }
+
     /// A minimal per-thread transcript whose only item is one rubien tool call
     /// addressing `refID` — the scoped-filter fixtures.
-    private func rubienThread(refID: Int) -> [String: Any] {
+    private func rubienThread(refID: Int, text: String? = nil) -> [String: Any] {
         ["turns": [["items": [
+            ["type": "userMessage", "content": [[
+                "type": "text", "text": text ?? "About reference \(refID)",
+            ]]],
             ["type": "mcpToolCall", "server": "rubien", "tool": "rubien_get",
              "status": "completed", "arguments": ["id": refID]],
         ]]]]
@@ -603,8 +813,9 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertEqual(scoped.map(\.id), ["TH-A", "TH-C"], "only the reference's threads, order kept")
 
         let observed = try readObserved(in: workspace)
-        XCTAssertEqual(try XCTUnwrap(observed["threadReadIds"] as? [String]),
-                       ["TH-A", "TH-B", "TH-C"], "every candidate was read for attribution")
+        let readIDs = try XCTUnwrap(observed["threadReadIds"] as? [String])
+        XCTAssertEqual(Set(readIDs), ["TH-A", "TH-B", "TH-C"])
+        XCTAssertEqual(readIDs.count, 3, "every candidate was read for attribution")
         // The over-fetched list request (candidates beyond `limit` may be needed
         // after filtering).
         let params = try XCTUnwrap(observed["threadListParams"] as? [String: Any])
@@ -657,8 +868,9 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertEqual(second.map(\.id), ["TH-A"], "cache hit returns the same attribution")
 
         let observed = try readObserved(in: workspace)
-        XCTAssertEqual(try XCTUnwrap(observed["threadReadIds"] as? [String]),
-                       ["TH-A", "TH-B"], "the rerun issued NO additional thread/reads")
+        let readIDs = try XCTUnwrap(observed["threadReadIds"] as? [String])
+        XCTAssertEqual(Set(readIDs), ["TH-A", "TH-B"])
+        XCTAssertEqual(readIDs.count, 2, "the rerun issued NO additional thread/reads")
     }
 
     func testScopedSearchFiltersHitsByReference() async throws {
@@ -671,8 +883,8 @@ final class CodexProviderTests: XCTestCase {
                             "cwd": workspace.path, "turns": []], "snippet": "hit"],
             ],
             "transcripts": [
-                "S-42": rubienThread(refID: 42),
-                "S-7": rubienThread(refID: 7),
+                "S-42": rubienThread(refID: 42, text: "hit"),
+                "S-7": rubienThread(refID: 7, text: "hit"),
             ],
         ], into: workspace)
         let provider = CodexProvider(executableOverride: fakeServerPath)
@@ -706,6 +918,98 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertEqual(params["threadId"] as? String, "TH-7")
         XCTAssertEqual(params["includeTurns"] as? Bool, true)
         XCTAssertEqual(observed["threadResumes"] as? Int, 0, "thread/read must not resume the thread")
+    }
+
+    func testSessionTranscriptSuppliesManagedRootForAttachmentRestoration() async throws {
+        let workspace = try makeWorkspace()
+        let id = UUID()
+        let directory = workspace
+            .appendingPathComponent(AssistantAttachmentStore.relativeRoot, isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let stagedURL = directory.appendingPathComponent("\(id.uuidString)-notes.md")
+        try Data("notes".utf8).write(to: stagedURL)
+        let attachment = ChatAttachment(
+            id: id,
+            displayName: "notes.md",
+            kind: .text,
+            stagedURL: stagedURL,
+            mediaType: "text/markdown",
+            byteCount: 5,
+            sourceIdentity: "/original/notes.md"
+        )
+        let prompt = AssistantAttachmentManifest.providerPrompt(
+            visibleText: "Review this", attachments: [attachment]
+        )
+        try writeConfig([
+            "transcripts": [
+                "TH-ATTACHED": ["turns": [["items": [[
+                    "type": "userMessage",
+                    "content": [["type": "text", "text": prompt]],
+                ]]]]],
+            ],
+        ], into: workspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        let rows = await provider.sessionTranscript(sessionID: "TH-ATTACHED", workspaceURL: workspace)
+
+        XCTAssertEqual(rows.first?.body, "Review this")
+        XCTAssertEqual(rows.first?.attachments.map(\.displayName), ["notes.md"])
+    }
+
+    func testSessionTranscriptUsesCanonicalManagedRootForSymlinkedWorkspace() async throws {
+        let root = try makeWorkspace()
+        let realWorkspace = root.appendingPathComponent("real", isDirectory: true)
+        let linkedWorkspace = root.appendingPathComponent("linked", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: realWorkspace,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createSymbolicLink(
+            at: linkedWorkspace,
+            withDestinationURL: realWorkspace
+        )
+
+        let id = UUID()
+        let directory = AssistantAttachmentStore.managedRootURL(
+            for: linkedWorkspace
+        ).appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let stagedURL = directory.appendingPathComponent("\(id.uuidString)-notes.md")
+        try Data("notes".utf8).write(to: stagedURL)
+        let attachment = ChatAttachment(
+            id: id,
+            displayName: "notes.md",
+            kind: .text,
+            stagedURL: stagedURL,
+            mediaType: "text/markdown",
+            byteCount: 5,
+            sourceIdentity: "/original/notes.md"
+        )
+        let prompt = AssistantAttachmentManifest.providerPrompt(
+            visibleText: "Review this",
+            attachments: [attachment]
+        )
+        try writeConfig([
+            "transcripts": [
+                "TH-LINKED": ["turns": [["items": [[
+                    "type": "userMessage",
+                    "content": [["type": "text", "text": prompt]],
+                ]]]]],
+            ],
+        ], into: linkedWorkspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        let rows = await provider.sessionTranscript(
+            sessionID: "TH-LINKED",
+            workspaceURL: linkedWorkspace
+        )
+
+        XCTAssertEqual(rows.first?.body, "Review this")
+        XCTAssertEqual(rows.first?.attachments.map(\.displayName), ["notes.md"])
+        XCTAssertFalse(rows.first?.body.contains("rubien-attachments-v2") == true)
     }
 
     func testHistoryReusesTheLiveServerAcrossQueryAndTurn() async throws {
@@ -754,6 +1058,50 @@ final class CodexProviderTests: XCTestCase {
 
     // MARK: Harness plumbing
 
+    private func attachmentOnlyHistoryFixture(
+        in workspace: URL,
+        threadID: String,
+        referenceID: Int
+    ) throws -> (
+        threadID: String,
+        providerPrompt: String,
+        stagedPath: String,
+        transcript: [String: Any]
+    ) {
+        let id = UUID()
+        let directory = workspace
+            .appendingPathComponent(AssistantAttachmentStore.relativeRoot, isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let stagedURL = directory.appendingPathComponent("\(id.uuidString)-figure.png")
+        try Data([0x89, 0x50, 0x4E, 0x47]).write(to: stagedURL)
+        let attachment = ChatAttachment(
+            id: id,
+            displayName: "figure.png",
+            kind: .image,
+            stagedURL: stagedURL,
+            mediaType: "image/png",
+            byteCount: 4,
+            sourceIdentity: "/original/figure.png"
+        )
+        let prompt = AssistantAttachmentManifest.providerPrompt(
+            visibleText: "", attachments: [attachment]
+        )
+        return (
+            threadID,
+            prompt,
+            stagedURL.path,
+            ["turns": [["items": [
+                ["type": "userMessage", "content": [
+                    ["type": "text", "text": prompt],
+                    ["type": "localImage", "path": stagedURL.path],
+                ]],
+                ["type": "mcpToolCall", "server": "rubien", "tool": "rubien_get",
+                 "status": "completed", "arguments": ["id": referenceID]],
+            ]]]]
+        )
+    }
+
     private var fakeServerPath: String {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -797,11 +1145,12 @@ final class CodexProviderTests: XCTestCase {
     }
 
     private func turn(
-        workspace: URL, prompt: String = "hello", resume: String? = nil, webAccess: Bool = true
+        workspace: URL, prompt: String = "hello", resume: String? = nil,
+        webAccess: Bool = true, attachments: [ChatAttachment] = []
     ) -> AgentTurnRequest {
         AgentTurnRequest(
             workspaceURL: workspace, resumeSessionID: resume, prompt: prompt,
-            webAccess: webAccess)
+            attachments: attachments, webAccess: webAccess)
     }
 
     private func readSpawnedArgv(in workspace: URL) throws -> [String] {

@@ -41,6 +41,30 @@ final class CodexAppServerProtocolTests: XCTestCase {
         (try? JSONSerialization.jsonObject(with: Data(string.utf8))) as? [String: Any] ?? [:]
     }
 
+    private func makeStagedAttachment(
+        in workspace: URL,
+        name: String,
+        kind: ChatAttachmentKind = .image
+    ) throws -> ChatAttachment {
+        let id = UUID()
+        let directory = workspace
+            .appendingPathComponent(AssistantAttachmentStore.relativeRoot, isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("\(id.uuidString)-\(name)")
+        let data = Data(kind == .image ? [0x89, 0x50, 0x4E, 0x47] : Array("notes".utf8))
+        try data.write(to: url)
+        return ChatAttachment(
+            id: id,
+            displayName: name,
+            kind: kind,
+            stagedURL: url,
+            mediaType: kind == .image ? "image/png" : "text/markdown",
+            byteCount: Int64(data.count),
+            sourceIdentity: "/original/\(name)"
+        )
+    }
+
     // MARK: Happy-path stream
 
     func testBasicStreamProducesExactEventSequence() throws {
@@ -290,14 +314,21 @@ final class CodexAppServerProtocolTests: XCTestCase {
         XCTAssertEqual(resume["threadId"] as? String, "t1")
     }
 
-    func testTurnStartCarriesTextInputAndEffort() {
-        let obj = json(CodexAppServerProtocol.turnStart(requestID: 3, threadId: "t", prompt: "hi", effort: "medium"))
+    func testTurnStartCarriesTextThenLocalImagesAndEffort() {
+        let obj = json(CodexAppServerProtocol.turnStart(
+            requestID: 3,
+            threadId: "t",
+            inputs: [.text("hi"), .localImage(path: "/ws/a.png"),
+                     .localImage(path: "/ws/b.jpg")],
+            effort: "medium"))
         let params = try! XCTUnwrap(obj["params"] as? [String: Any])
         XCTAssertEqual(params["threadId"] as? String, "t")
         XCTAssertEqual(params["effort"] as? String, "medium")
-        let input = params["input"] as? [[String: Any]]
-        XCTAssertEqual(input?.first?["type"] as? String, "text")
-        XCTAssertEqual(input?.first?["text"] as? String, "hi")
+        let input = (params["input"] as? [[String: Any]]) ?? []
+        XCTAssertEqual(input.map { $0["type"] as? String }, ["text", "localImage", "localImage"])
+        XCTAssertEqual(input.first?["text"] as? String, "hi")
+        XCTAssertEqual(input[1]["path"] as? String, "/ws/a.png")
+        XCTAssertEqual(input[2]["path"] as? String, "/ws/b.jpg")
     }
 
     func testThreadListIncludesAppServerSourceKind() {
@@ -382,6 +413,129 @@ final class CodexAppServerProtocolTests: XCTestCase {
         XCTAssertEqual(rows.map(\.role), [.user, .assistant])
         XCTAssertEqual(rows[0].body, "part one\n\npart two")
         XCTAssertEqual(rows[1].body, "answer")
+    }
+
+
+    func testHistoryManifestRestoresAttachmentAndHidesInternalPrompt() throws {
+        let workspace = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-history-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let attachment = try makeStagedAttachment(in: workspace, name: "figure.png")
+        let prompt = AssistantAttachmentManifest.providerPrompt(
+            visibleText: "", attachments: [attachment]
+        )
+        let result: [String: Any] = ["thread": ["turns": [["items": [[
+            "type": "userMessage", "content": [
+                ["type": "text", "text": prompt],
+                ["type": "localImage", "path": attachment.stagedURL.path],
+            ],
+        ]]]]]]
+        let managedRoot = workspace.appendingPathComponent(AssistantAttachmentStore.relativeRoot)
+
+        var rows = CodexAppServerProtocol.decodeThreadTranscript(
+            result, managedAttachmentsRoot: managedRoot
+        )
+        XCTAssertEqual(rows.first?.body, "")
+        XCTAssertEqual(rows.first?.attachments.map(\.displayName), ["figure.png"])
+        XCTAssertEqual(rows.first?.attachments.first?.isAvailable, true)
+
+        try FileManager.default.removeItem(at: attachment.stagedURL)
+        rows = CodexAppServerProtocol.decodeThreadTranscript(result, managedAttachmentsRoot: managedRoot)
+        XCTAssertEqual(rows.first?.attachments.first?.isAvailable, false)
+    }
+
+    func testVisibleHistorySummaryUsesAttachmentFallbackAndNeverRawServerText() throws {
+        let workspace = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-history-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let attachment = try makeStagedAttachment(in: workspace, name: "figure.png")
+        let prompt = AssistantAttachmentManifest.providerPrompt(
+            visibleText: "", attachments: [attachment]
+        )
+        let result: [String: Any] = ["thread": ["turns": [["items": [[
+            "type": "userMessage", "content": [["type": "text", "text": prompt]],
+        ]]]]]]
+        let rows = CodexAppServerProtocol.decodeThreadTranscript(
+            result,
+            managedAttachmentsRoot: workspace.appendingPathComponent(
+                AssistantAttachmentStore.relativeRoot, isDirectory: true
+            )
+        )
+        let raw = AgentSessionSummary(
+            id: "thread", preview: prompt, date: Date(timeIntervalSince1970: 123),
+            matchSnippet: prompt
+        )
+
+        let recent = CodexAppServerProtocol.visibleSessionSummary(from: raw, rows: rows)
+        let filenameHit = CodexAppServerProtocol.visibleSessionSummary(
+            from: raw, rows: rows, matching: "figure.png"
+        )
+        let delimiterHit = CodexAppServerProtocol.visibleSessionSummary(
+            from: raw, rows: rows, matching: "rubien-attachments-v2"
+        )
+        let pathHit = CodexAppServerProtocol.visibleSessionSummary(
+            from: raw, rows: rows, matching: attachment.stagedURL.path
+        )
+
+        XCTAssertEqual(recent?.preview, "Attached: figure.png")
+        XCTAssertNil(recent?.matchSnippet)
+        XCTAssertEqual(filenameHit?.preview, "Attached: figure.png")
+        XCTAssertEqual(filenameHit?.matchSnippet, "Attached: figure.png")
+        XCTAssertNil(delimiterHit)
+        XCTAssertNil(pathHit)
+    }
+
+    func testVisibleHistorySummarySearchesAssistantRowsButKeepsUserPreview() {
+        let raw = AgentSessionSummary(
+            id: "thread", preview: "raw", date: Date(timeIntervalSince1970: 123),
+            matchSnippet: "raw snippet"
+        )
+        let rows = [
+            ChatRenderMessage(role: .user, body: "Visible question", seq: 0),
+            ChatRenderMessage(role: .assistant, body: "The transformer answer", seq: 1),
+            ChatRenderMessage(role: .tool, body: "transformer hidden tool payload", seq: 2),
+        ]
+
+        let hit = CodexAppServerProtocol.visibleSessionSummary(
+            from: raw, rows: rows, matching: "transformer"
+        )
+
+        XCTAssertEqual(hit?.preview, "Visible question")
+        XCTAssertEqual(hit?.matchSnippet, "The transformer answer")
+    }
+
+    func testUnsafeHistoryManifestRemainsVisibleWhenRootIsSupplied() throws {
+        let workspace = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-history-\(UUID().uuidString)", isDirectory: true)
+        let id = UUID()
+        let outside = ChatAttachment(
+            id: id,
+            displayName: "outside.md",
+            kind: .text,
+            stagedURL: URL(fileURLWithPath: "/tmp/\(id.uuidString)-outside.md"),
+            mediaType: "text/markdown",
+            byteCount: 1,
+            sourceIdentity: "/tmp/outside.md"
+        )
+        let prompt = AssistantAttachmentManifest.providerPrompt(
+            visibleText: "Unsafe", attachments: [outside]
+        )
+        let result: [String: Any] = ["thread": ["turns": [["items": [[
+            "type": "userMessage", "content": [["type": "text", "text": prompt]],
+        ]]]]]]
+
+        let rows = CodexAppServerProtocol.decodeThreadTranscript(
+            result,
+            managedAttachmentsRoot: workspace.appendingPathComponent(AssistantAttachmentStore.relativeRoot)
+        )
+        XCTAssertEqual(rows.first?.body, prompt)
+        XCTAssertTrue(rows.first?.attachments.isEmpty == true)
+        let raw = AgentSessionSummary(
+            id: "unsafe", preview: "server preview", date: Date(timeIntervalSince1970: 123)
+        )
+        let summary = CodexAppServerProtocol.visibleSessionSummary(from: raw, rows: rows)
+        XCTAssertTrue(summary?.preview.contains("rubien-attachments-v2") == true,
+                      "an unsafe manifest stays visible instead of being partially trusted")
     }
 
     func testToolChipStatusClassifierIsSharedAndComplete() {

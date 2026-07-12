@@ -35,8 +35,16 @@ enum TurnStatus: String, Codable, Sendable, Equatable {
     case denied
 }
 
+/// One user-authored transcript message, including local-only attachment
+/// presentation metadata. The provider-facing staged paths never cross this
+/// rendering boundary.
+struct ChatUserMessagePayload: Codable, Sendable, Equatable {
+    let body: String
+    let attachments: [ChatAttachmentPresentation]
+}
+
 /// One persisted/rendered transcript message, matching the JS `loadTranscript`
-/// element shape `{role, body, turnStatus, seq}`.
+/// element shape `{role, body, turnStatus, seq, attachments}`.
 ///
 /// - `body`: markdown (user/assistant/notice) or a JSON string `{name,detail,status}`
 ///   for `tool` rows (the restore-path analogue of a live `addToolChip`).
@@ -49,12 +57,40 @@ struct ChatRenderMessage: Codable, Sendable, Equatable {
     let body: String
     let turnStatus: TurnStatus?
     let seq: Int
+    let attachments: [ChatAttachmentPresentation]
 
-    init(role: ChatRole, body: String, turnStatus: TurnStatus? = nil, seq: Int) {
+    init(
+        role: ChatRole,
+        body: String,
+        turnStatus: TurnStatus? = nil,
+        seq: Int,
+        attachments: [ChatAttachmentPresentation] = []
+    ) {
         self.role = role
         self.body = body
         self.turnStatus = turnStatus
         self.seq = seq
+        self.attachments = attachments
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case role
+        case body
+        case turnStatus
+        case seq
+        case attachments
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        role = try container.decode(ChatRole.self, forKey: .role)
+        body = try container.decode(String.self, forKey: .body)
+        turnStatus = try container.decodeIfPresent(TurnStatus.self, forKey: .turnStatus)
+        seq = try container.decode(Int.self, forKey: .seq)
+        attachments = try container.decodeIfPresent(
+            [ChatAttachmentPresentation].self,
+            forKey: .attachments
+        ) ?? []
     }
 }
 

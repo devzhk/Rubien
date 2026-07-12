@@ -214,6 +214,77 @@ function renderFull(bodyEl, markdown, runKaTeX) {
   if (runKaTeX) typeset(bodyEl)
 }
 
+function normalizeUserPayload(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return {
+      body: String(value.body ?? ''),
+      attachments: Array.isArray(value.attachments) ? value.attachments : [],
+    }
+  }
+  return { body: String(value ?? ''), attachments: [] }
+}
+
+function formatAttachmentBytes(value) {
+  const bytes = Number(value)
+  if (!Number.isFinite(bytes) || bytes < 0) return ''
+  if (bytes < 1024) return `${Math.round(bytes)} B`
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function makeAttachment(attachment) {
+  const kind = attachment?.kind === 'image' ? 'image' : 'text'
+  const isAvailable = attachment?.isAvailable === true
+  const root = document.createElement('div')
+  root.className = `chat-attachment chat-attachment-${kind}`
+  if (!isAvailable) root.classList.add('chat-attachment-unavailable')
+
+  const thumbnail = String(attachment?.thumbnailDataURL ?? '')
+  if (kind === 'image' && /^data:image\/(?:png|jpeg);base64,[A-Za-z0-9+/]+={0,2}$/.test(thumbnail)) {
+    const image = document.createElement('img')
+    image.className = 'chat-attachment-thumbnail'
+    image.src = thumbnail
+    image.alt = ''
+    root.appendChild(image)
+  } else {
+    const icon = document.createElement('span')
+    icon.className = 'chat-attachment-icon'
+    icon.textContent = kind === 'image' ? 'Image' : 'Text'
+    root.appendChild(icon)
+  }
+
+  const details = document.createElement('span')
+  details.className = 'chat-attachment-details'
+  const name = document.createElement('span')
+  name.className = 'chat-attachment-name'
+  name.textContent = String(attachment?.displayName ?? 'Attachment')
+  details.appendChild(name)
+
+  const meta = document.createElement('span')
+  meta.className = 'chat-attachment-meta'
+  meta.textContent = isAvailable
+    ? formatAttachmentBytes(attachment?.byteCount)
+    : 'File unavailable'
+  details.appendChild(meta)
+  root.appendChild(details)
+  return root
+}
+
+function renderUserPayload(value) {
+  const payload = normalizeUserPayload(value)
+  const bubble = makeBubble('user')
+  renderFull(bubble.body, payload.body, /* runKaTeX */ true)
+  if (payload.attachments.length > 0) {
+    const list = document.createElement('div')
+    list.className = 'chat-attachments'
+    for (const attachment of payload.attachments) {
+      list.appendChild(makeAttachment(attachment))
+    }
+    bubble.body.appendChild(list)
+  }
+  return bubble
+}
+
 function cancelPendingRender() {
   if (rafHandle != null) {
     cancelAnimationFrame(rafHandle)
@@ -258,9 +329,10 @@ function appendRecord(m) {
     return
   }
   // user | assistant (default)
-  const uiRole = role === 'user' ? 'user' : 'assistant'
-  const bubble = makeBubble(uiRole)
-  renderFull(bubble.body, m?.body ?? '', /* runKaTeX */ true)
+  const bubble = role === 'user'
+    ? renderUserPayload({ body: m?.body ?? '', attachments: m?.attachments })
+    : makeBubble('assistant')
+  if (role !== 'user') renderFull(bubble.body, m?.body ?? '', /* runKaTeX */ true)
   applyTurnStatus(bubble.root, m?.turnStatus)
   transcript.appendChild(bubble.root)
 }
@@ -289,9 +361,8 @@ const RubienChat = {
     jumpToLatest()
   },
 
-  addUserMessage(markdown) {
-    const bubble = makeBubble('user')
-    renderFull(bubble.body, String(markdown ?? ''), /* runKaTeX */ true)
+  addUserMessage(payload) {
+    const bubble = renderUserPayload(payload)
     transcript.appendChild(bubble.root)
     // The user just sent this — always show it and resume following.
     jumpToLatest()

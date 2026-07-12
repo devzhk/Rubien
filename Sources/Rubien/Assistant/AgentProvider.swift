@@ -41,6 +41,9 @@ struct AgentTurnRequest: Sendable, Equatable {
     /// The user's message text. Delivered as a stream-json `user` message on stdin
     /// (never argv — avoids ARG_MAX/quoting; §4.2).
     let prompt: String
+    /// Local, staged attachments for this turn. Providers translate these into their
+    /// native image/file inputs; the default keeps every text-only call site stable.
+    let attachments: [ChatAttachment]
     /// The one-line reference seed naming the reference id (D4). First turn only
     /// (`nil` on resume — `--resume` carries it forward). Applied as Claude's
     /// `--append-system-prompt`.
@@ -60,6 +63,7 @@ struct AgentTurnRequest: Sendable, Equatable {
         workspaceURL: URL,
         resumeSessionID: String? = nil,
         prompt: String,
+        attachments: [ChatAttachment] = [],
         seed: String? = nil,
         webAccess: Bool = true,
         codexSandbox: CodexSandbox = .readOnly,
@@ -69,6 +73,7 @@ struct AgentTurnRequest: Sendable, Equatable {
         self.workspaceURL = workspaceURL
         self.resumeSessionID = resumeSessionID
         self.prompt = prompt
+        self.attachments = attachments
         self.seed = seed
         self.webAccess = webAccess
         self.codexSandbox = codexSandbox
@@ -371,9 +376,23 @@ extension AgentProvider {
 
 /// Errors thrown *into* a turn's event stream (vs. `providerNotice`, which is a
 /// surfaced-as-content soft error). A hard failure to even start the process.
-enum AgentProviderError: Error, Equatable, Sendable {
+enum AgentProviderError: LocalizedError, Equatable, Sendable {
     /// No runnable binary at the override/discovered path.
     case executableNotFound(String)
     /// `posix_spawn` itself failed.
     case spawnFailed(code: Int32)
+    /// A staged attachment vanished, became unreadable, or no longer has a
+    /// provider-supported representation before the turn could start.
+    case attachmentUnreadable(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .executableNotFound(let path):
+            return "The assistant executable \(path) could not be found."
+        case .spawnFailed(let code):
+            return "The assistant process could not be started (error \(code))."
+        case .attachmentUnreadable(let name):
+            return "The attachment \(name) could not be read before sending."
+        }
+    }
 }
