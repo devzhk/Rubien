@@ -79,7 +79,7 @@ test('KaTeX runs on commit, never during streaming', async () => {
 
 test('tool chips + notices render with status variants', async () => {
   const { R, T } = await boot()
-  R.addToolChip({ name: 'rubien_pdf_text', detail: 'pages 1-3', status: 'started' })
+  R.addToolChip({ name: 'rubien_read_text', detail: 'pages 1-3', status: 'started' })
   R.addToolChip({ name: 'rubien_get', detail: null, status: 'completed' })
   R.addToolChip({ name: 'Write', detail: 'notes.md', status: 'denied' })
   R.addNotice('Rate limit reached.')
@@ -89,7 +89,7 @@ test('tool chips + notices render with status variants', async () => {
   assert.ok(T().querySelector('.chat-tool-completed'))
   assert.ok(T().querySelector('.chat-tool-denied'))
   assert.ok(T().querySelector('.chat-notice'))
-  assert.match(T().querySelector('.chat-tool-name').textContent, /rubien_pdf_text/)
+  assert.match(T().querySelector('.chat-tool-name').textContent, /rubien_read_text/)
 })
 
 test('hostile message content is fully inert', async () => {

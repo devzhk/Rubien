@@ -350,6 +350,24 @@ final class MCPServerTests: XCTestCase {
         XCTAssertTrue(((pdf["content"] as? [[String: Any]])?.first?["text"] as? String ?? "").lowercased().contains("pdf"))
     }
 
+    func testReadTextEmptyPagesTreatedAsAbsent() throws {
+        try skipIfBinaryMissing()
+        // Two-catalog parity: the Node server drops an empty `pages` string
+        // (`Boolean("")` is false), so this catalog must too. A metadata-only
+        // ref with pages:"" therefore routes to the neither-available branch
+        // ("no readable content"), NOT the pdf-unavailable branch ("source
+        // \"pdf\" is not readable") that a stray `--pages ""` would trigger.
+        let id = try seedTitle("Empty pages routing")
+        let responses = try runMCP([toolCall(id: 1, name: "rubien_read_text", arguments: ["id": id, "pages": ""])])
+        let result = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
+        XCTAssertEqual(result["isError"] as? Bool, true)
+        let text = ((result["content"] as? [[String: Any]])?.first?["text"] as? String ?? "").lowercased()
+        XCTAssertTrue(text.contains("no readable content"),
+                      "empty pages must be dropped (route to neither-branch); got: \(text)")
+        XCTAssertFalse(text.contains("source \"pdf\""),
+                       "empty pages must not imply a pdf source; got: \(text)")
+    }
+
     // MARK: - PDF tools (need a rendered page → macOS/PDFKit)
 
     #if os(macOS)

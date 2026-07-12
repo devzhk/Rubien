@@ -191,7 +191,11 @@ enum MCPToolCatalog {
             guard let id = try mcpInt(args, "id") else {
                 throw MCPToolError.invalidArguments("Missing required argument: id")
             }
-            let pages = try mcpString(args, "pages")
+            // Match the Node catalog (read.ts): an empty `pages` string is
+            // treated as absent (Node's `Boolean(args.pages)` is false for ""),
+            // so it neither implies a PDF source nor emits `--pages ""`. Without
+            // this coalesce the two servers route `pages:""` differently.
+            let pages = (try mcpString(args, "pages")).flatMap { $0.isEmpty ? nil : $0 }
             let sections = try mcpStringArray(args, "sections")
             let start = try mcpInt(args, "start")
             if pages != nil, let sections, !sections.isEmpty {

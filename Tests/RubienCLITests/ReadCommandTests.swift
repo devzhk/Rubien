@@ -297,9 +297,20 @@ final class ReadCommandTests: XCTestCase {
         let r = try runCLI(["read", "text", "--help"])
         XCTAssertEqual(r.exitCode, 0)
         let out = r.stdout + r.stderr
-        for flag in ["--pages", "--section", "--start", "--source"] {
+        for flag in ["--pages", "--section", "--start", "--source", "--max-chars"] {
             XCTAssertTrue(out.contains(flag), "read text --help must document \(flag); got:\n\(out)")
         }
+    }
+
+    func testReadTextExplicitSourceWebWithoutWebContentErrors() throws {
+        try skipIfBinaryMissing()
+        // Symmetric to the forced-pdf-unavailable path: an explicit --source web
+        // on a ref with no web content hits the web guard, not the neither-branch.
+        let id = try addReference()
+        let result = try runCLI(["read", "text", "\(id)", "--source", "web"])
+        XCTAssertNotEqual(result.exitCode, 0)
+        XCTAssertTrue(stderrError(result).contains("no web content"), stderrError(result))
+        XCTAssertTrue(stderrError(result).contains("not readable"), stderrError(result))
     }
 
     // MARK: read text — PDF routing (needs a real PDF; PDFKit-gated like existing tests)
