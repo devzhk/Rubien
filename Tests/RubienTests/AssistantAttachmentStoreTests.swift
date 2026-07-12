@@ -172,6 +172,54 @@ final class AssistantAttachmentStoreTests: XCTestCase {
         }
     }
 
+    func testRehomeRetryReconcilesStaleDestinationAfterCleanupFailure() async throws {
+        let failingFileManager = CommitCleanupFailureFileManager()
+        let failingStore = AssistantAttachmentStore(
+            workspaceURL: workspace,
+            fileManager: failingFileManager
+        )
+        let sourceConversation = UUID()
+        let destinationConversation = UUID()
+        let firstSource = workspace.appendingPathComponent("retry-first.txt")
+        let secondSource = workspace.appendingPathComponent("retry-second.txt")
+        try Data("first".utf8).write(to: firstSource)
+        try Data("second".utf8).write(to: secondSource)
+        let first = try await failingStore.stageFile(
+            firstSource,
+            conversationID: sourceConversation
+        )
+        let second = try await failingStore.stageFile(
+            secondSource,
+            conversationID: sourceConversation
+        )
+
+        _ = await XCTAssertThrowsErrorAsync(
+            try await failingStore.rehomePending(
+                [first, second],
+                to: destinationConversation
+            )
+        )
+
+        let staleDestination = failingStore.managedRoot
+            .appendingPathComponent(destinationConversation.uuidString, isDirectory: true)
+            .appendingPathComponent(first.stagedURL.lastPathComponent)
+        XCTAssertEqual(try Data(contentsOf: staleDestination), Data("first".utf8))
+        XCTAssertEqual(try Data(contentsOf: first.stagedURL), Data("first".utf8))
+        XCTAssertEqual(try Data(contentsOf: second.stagedURL), Data("second".utf8))
+
+        let retryStore = AssistantAttachmentStore(workspaceURL: workspace)
+        let moved = try await retryStore.rehomePending(
+            [first, second],
+            to: destinationConversation
+        )
+
+        XCTAssertEqual(moved.map(\.id), [first.id, second.id])
+        XCTAssertEqual(try Data(contentsOf: moved[0].stagedURL), Data("first".utf8))
+        XCTAssertEqual(try Data(contentsOf: moved[1].stagedURL), Data("second".utf8))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: first.stagedURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: second.stagedURL.path))
+    }
+
     func testImageEntryPointUsesFinalStubErrorUntilTaskThree() async throws {
         let id = UUID()
         let error = await XCTAssertThrowsErrorAsync(
@@ -215,6 +263,32 @@ private final class RehomeFailureFileManager: FileManager {
             throw InjectedFailure()
         }
         try super.moveItem(at: srcURL, to: dstURL)
+    }
+
+    private struct InjectedFailure: Error {}
+}
+
+private final class CommitCleanupFailureFileManager: FileManager {
+    private var moveCalls = 0
+    private var didFailDestinationCleanup = false
+
+    override func moveItem(at srcURL: URL, to dstURL: URL) throws {
+        moveCalls += 1
+        if moveCalls == 2 {
+            throw InjectedFailure()
+        }
+        try super.moveItem(at: srcURL, to: dstURL)
+    }
+
+    override func removeItem(at URL: URL) throws {
+        if
+            !didFailDestinationCleanup,
+            !URL.lastPathComponent.hasPrefix(".rehome-")
+        {
+            didFailDestinationCleanup = true
+            throw InjectedFailure()
+        }
+        try super.removeItem(at: URL)
     }
 
     private struct InjectedFailure: Error {}

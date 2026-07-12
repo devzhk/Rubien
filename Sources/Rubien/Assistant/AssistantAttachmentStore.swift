@@ -142,19 +142,66 @@ actor AssistantAttachmentStore {
             withIntermediateDirectories: true
         )
 
+        let planned = attachments.map { attachment in
+            (
+                attachment: attachment,
+                destination: destinationDirectory
+                    .appendingPathComponent(attachment.stagedURL.lastPathComponent)
+            )
+        }
+        let alreadyHomed = planned.allSatisfy {
+            $0.attachment.stagedURL.standardizedFileURL == $0.destination.standardizedFileURL
+        }
+
+        var attachmentIDs = Set<UUID>()
+        for item in planned {
+            guard
+                attachmentIDs.insert(item.attachment.id).inserted,
+                item.attachment.stagedURL.lastPathComponent
+                    .hasPrefix(item.attachment.id.uuidString + "-")
+            else {
+                throw AssistantAttachmentStoreError.unreadable(item.attachment.displayName)
+            }
+            let values: URLResourceValues
+            do {
+                values = try item.attachment.stagedURL.resourceValues(forKeys: [
+                    .isRegularFileKey,
+                    .isReadableKey,
+                ])
+            } catch {
+                throw AssistantAttachmentStoreError.unreadable(item.attachment.displayName)
+            }
+            guard values.isRegularFile == true, values.isReadable == true else {
+                throw AssistantAttachmentStoreError.unreadable(item.attachment.displayName)
+            }
+        }
+        if alreadyHomed { return attachments }
+        if let invalid = planned.first(where: {
+            $0.attachment.stagedURL.standardizedFileURL
+                == $0.destination.standardizedFileURL
+        }) {
+            throw AssistantAttachmentStoreError.unreadable(invalid.attachment.displayName)
+        }
+
+        // A prior failed commit may have left one of these deterministic, ID-derived
+        // destinations behind. Originals have all been verified and remain authoritative,
+        // so stale destinations can be reconciled before this attempt prepares any copies.
+        // If removal fails, throwing here leaves every original untouched for a later retry.
+        for item in planned where fileManager.fileExists(atPath: item.destination.path) {
+            try fileManager.removeItem(at: item.destination)
+        }
+
         var prepared: [(original: URL, temporary: URL, destination: URL)] = []
         prepared.reserveCapacity(attachments.count)
 
         do {
-            for attachment in attachments {
-                let destination = destinationDirectory
-                    .appendingPathComponent(attachment.stagedURL.lastPathComponent)
+            for item in planned {
                 let temporary = destinationDirectory
                     .appendingPathComponent(".rehome-\(UUID().uuidString)")
                 // Prepare complete copies under transaction-private names while every
                 // caller-visible original remains untouched.
-                prepared.append((attachment.stagedURL, temporary, destination))
-                try fileManager.copyItem(at: attachment.stagedURL, to: temporary)
+                prepared.append((item.attachment.stagedURL, temporary, item.destination))
+                try fileManager.copyItem(at: item.attachment.stagedURL, to: temporary)
             }
         } catch {
             // Originals were never moved. Cleanup failures can leave only private
