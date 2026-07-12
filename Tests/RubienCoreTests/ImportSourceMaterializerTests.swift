@@ -412,6 +412,12 @@ final class ImportSourceMaterializerTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: escapedURL.path))
     }
 
+    // Darwin-only: this test forces a URLProtocol client callback after
+    // stopLoading() to prove production ignores it. swift-corelibs
+    // FoundationNetworking (Linux) fatal-errors on such late callbacks
+    // (TaskRegistry "task not in registry"), so the scenario is unexercisable
+    // there — guarded with this file's canImport(Network) Mac-only convention.
+    #if canImport(Network)
     func testDelayedProtocolCallbacksAfterCancellationDoNotResumeMaterialization() async throws {
         // Darwin buffers custom URLProtocol body delivery until it finishes,
         // so this isolates the forced stale-callback race. The loopback test
@@ -456,6 +462,7 @@ final class ImportSourceMaterializerTests: XCTestCase {
             XCTAssertTrue(error is CancellationError, "Expected CancellationError, got: \(error)")
         }
     }
+    #endif
 
     #if canImport(Network)
     func testCancellingStreamedRemoteMarkdownRemovesTemporarySource() async throws {
