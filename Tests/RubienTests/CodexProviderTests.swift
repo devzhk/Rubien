@@ -195,6 +195,35 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertTrue(argv.containsPair("-c", "tools.web_search=false"))
     }
 
+    func testTurnStartSendsOrderedLocalImagesAndIgnoresTextAttachments() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["assistantText": "ok"], into: workspace)
+        let first = ChatAttachment(
+            id: UUID(), displayName: "a.png", kind: .image,
+            stagedURL: workspace.appendingPathComponent("a.png"), mediaType: "image/png",
+            byteCount: 1, sourceIdentity: "a")
+        let text = ChatAttachment(
+            id: UUID(), displayName: "notes.md", kind: .text,
+            stagedURL: workspace.appendingPathComponent("notes.md"), mediaType: "text/markdown",
+            byteCount: 1, sourceIdentity: "notes")
+        let second = ChatAttachment(
+            id: UUID(), displayName: "b.jpg", kind: .image,
+            stagedURL: workspace.appendingPathComponent("b.jpg"), mediaType: "image/jpeg",
+            byteCount: 1, sourceIdentity: "b")
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        _ = try await collectAllEvents(provider.send(turn: turn(
+            workspace: workspace, prompt: "compare", attachments: [first, text, second])))
+
+        let params = try XCTUnwrap(try readObserved(in: workspace)["lastTurnParams"] as? [String: Any])
+        let input = try XCTUnwrap(params["input"] as? [[String: Any]])
+        XCTAssertEqual(input.map { $0["type"] as? String }, ["text", "localImage", "localImage"])
+        XCTAssertEqual(input[0]["text"] as? String, "compare")
+        XCTAssertEqual(input[1]["path"] as? String, first.stagedURL.path)
+        XCTAssertEqual(input[2]["path"] as? String, second.stagedURL.path)
+    }
+
     // MARK: Long-lived server + thread reuse (the point of app-server)
 
     func testServerAndThreadReusedAcrossTurns() async throws {
@@ -797,11 +826,12 @@ final class CodexProviderTests: XCTestCase {
     }
 
     private func turn(
-        workspace: URL, prompt: String = "hello", resume: String? = nil, webAccess: Bool = true
+        workspace: URL, prompt: String = "hello", resume: String? = nil,
+        webAccess: Bool = true, attachments: [ChatAttachment] = []
     ) -> AgentTurnRequest {
         AgentTurnRequest(
             workspaceURL: workspace, resumeSessionID: resume, prompt: prompt,
-            webAccess: webAccess)
+            attachments: attachments, webAccess: webAccess)
     }
 
     private func readSpawnedArgv(in workspace: URL) throws -> [String] {

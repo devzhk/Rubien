@@ -376,9 +376,23 @@ extension AgentProvider {
 
 /// Errors thrown *into* a turn's event stream (vs. `providerNotice`, which is a
 /// surfaced-as-content soft error). A hard failure to even start the process.
-enum AgentProviderError: Error, Equatable, Sendable {
+enum AgentProviderError: LocalizedError, Equatable, Sendable {
     /// No runnable binary at the override/discovered path.
     case executableNotFound(String)
     /// `posix_spawn` itself failed.
     case spawnFailed(code: Int32)
+    /// A staged attachment vanished, became unreadable, or no longer has a
+    /// provider-supported representation before the turn could start.
+    case attachmentUnreadable(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .executableNotFound(let path):
+            return "The assistant executable \(path) could not be found."
+        case .spawnFailed(let code):
+            return "The assistant process could not be started (error \(code))."
+        case .attachmentUnreadable(let name):
+            return "The attachment \(name) could not be read before sending."
+        }
+    }
 }

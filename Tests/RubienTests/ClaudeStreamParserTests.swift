@@ -170,6 +170,22 @@ final class ClaudeStreamParserTests: XCTestCase {
         XCTAssertEqual(content.first?["text"] as? String, "quotes \" and \n newline")
     }
 
+    func testUserMessagePlacesImagesBeforeText() throws {
+        let line = ClaudeControlProtocol.userMessage(
+            prompt: "What is shown?",
+            images: [ClaudeImageInput(mediaType: "image/png", base64Data: "AA==")])
+        let object = try decode(line)
+        let message = try XCTUnwrap(object["message"] as? [String: Any])
+        let content = try XCTUnwrap(message["content"] as? [[String: Any]])
+
+        XCTAssertEqual(content.map { $0["type"] as? String }, ["image", "text"])
+        let source = try XCTUnwrap(content[0]["source"] as? [String: Any])
+        XCTAssertEqual(source["type"] as? String, "base64")
+        XCTAssertEqual(source["media_type"] as? String, "image/png")
+        XCTAssertEqual(source["data"] as? String, "AA==")
+        XCTAssertEqual(content[1]["text"] as? String, "What is shown?")
+    }
+
     // MARK: Helpers
 
     private func decode(_ line: String) throws -> [String: Any] {

@@ -198,6 +198,17 @@ private actor ClaudeTurnEngine {
             abandon(existing)
         }
 
+        let images: [ClaudeImageInput]
+        switch Self.imageInputs(from: request.attachments) {
+        case .success(let inputs):
+            images = inputs
+        case .failure(let error):
+            continuation.finish(throwing: error)
+            return
+        }
+        let userMessage = ClaudeControlProtocol.userMessage(
+            prompt: request.prompt, images: images)
+
         guard let executable = Self.resolveExecutable(override: executableOverride) else {
             continuation.finish(throwing: AgentProviderError.executableNotFound(
                 executableOverride ?? "claude"))
@@ -232,7 +243,26 @@ private actor ClaudeTurnEngine {
         // The control protocol handshake, then the prompt — both on stdin, which
         // stays open (it is also the approval bus) until the result / cancel.
         process.writeLine(ClaudeControlProtocol.initializeRequest(requestID: UUID().uuidString))
-        process.writeLine(ClaudeControlProtocol.userMessage(prompt: request.prompt))
+        process.writeLine(userMessage)
+    }
+
+    /// Materialize all native image blocks before any process is spawned or stdin
+    /// bytes are written. Text attachments remain path-backed in Rubien's manifest.
+    private static func imageInputs(
+        from attachments: [ChatAttachment]
+    ) -> Result<[ClaudeImageInput], AgentProviderError> {
+        var inputs: [ClaudeImageInput] = []
+        for attachment in attachments where attachment.kind == .image {
+            guard attachment.mediaType == "image/png" || attachment.mediaType == "image/jpeg",
+                  let data = try? Data(contentsOf: attachment.stagedURL)
+            else {
+                return .failure(.attachmentUnreadable(attachment.displayName))
+            }
+            inputs.append(ClaudeImageInput(
+                mediaType: attachment.mediaType,
+                base64Data: data.base64EncodedString()))
+        }
+        return .success(inputs)
     }
 
     /// Feed one stdout line into the turn. Stale lines (from a superseded/killed

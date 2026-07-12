@@ -14,6 +14,11 @@ import Foundation
 // `tool_result` can complete the right chip; this keeps `parse` deterministic over
 // a line *sequence* without any external effects.
 
+struct ClaudeImageInput: Sendable, Equatable {
+    let mediaType: String
+    let base64Data: String
+}
+
 struct ClaudeStreamParser {
 
     /// tool_use_id → tool name, so a `tool_result` (which carries only the id) can
@@ -236,11 +241,24 @@ enum ClaudeControlProtocol {
     }
 
     /// A stream-json `user` message carrying the prompt (delivered on stdin, §4.2).
-    static func userMessage(prompt: String) -> String {
-        encode([
+    static func userMessage(prompt: String, images: [ClaudeImageInput] = []) -> String {
+        let imageBlocks: [[String: Any]] = images.map { image in
+            [
+                "type": "image",
+                "source": [
+                    "type": "base64",
+                    "media_type": image.mediaType,
+                    "data": image.base64Data,
+                ],
+            ]
+        }
+        return encode([
             "type": "user",
             "session_id": "",
-            "message": ["role": "user", "content": [["type": "text", "text": prompt]]],
+            "message": [
+                "role": "user",
+                "content": imageBlocks + [["type": "text", "text": prompt]],
+            ],
             "parent_tool_use_id": NSNull(),
         ])
     }

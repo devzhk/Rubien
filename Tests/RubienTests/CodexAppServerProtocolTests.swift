@@ -290,14 +290,18 @@ final class CodexAppServerProtocolTests: XCTestCase {
         XCTAssertEqual(resume["threadId"] as? String, "t1")
     }
 
-    func testTurnStartCarriesTextInputAndEffort() {
-        let obj = json(CodexAppServerProtocol.turnStart(requestID: 3, threadId: "t", prompt: "hi", effort: "medium"))
+    func testTurnStartCarriesTextThenLocalImagesAndEffort() {
+        let obj = json(CodexAppServerProtocol.turnStart(
+            requestID: 3, threadId: "t", prompt: "hi",
+            imagePaths: ["/ws/a.png", "/ws/b.jpg"], effort: "medium"))
         let params = try! XCTUnwrap(obj["params"] as? [String: Any])
         XCTAssertEqual(params["threadId"] as? String, "t")
         XCTAssertEqual(params["effort"] as? String, "medium")
-        let input = params["input"] as? [[String: Any]]
-        XCTAssertEqual(input?.first?["type"] as? String, "text")
-        XCTAssertEqual(input?.first?["text"] as? String, "hi")
+        let input = (params["input"] as? [[String: Any]]) ?? []
+        XCTAssertEqual(input.map { $0["type"] as? String }, ["text", "localImage", "localImage"])
+        XCTAssertEqual(input.first?["text"] as? String, "hi")
+        XCTAssertEqual(input[1]["path"] as? String, "/ws/a.png")
+        XCTAssertEqual(input[2]["path"] as? String, "/ws/b.jpg")
     }
 
     func testThreadListIncludesAppServerSourceKind() {

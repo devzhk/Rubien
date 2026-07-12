@@ -442,10 +442,16 @@ enum CodexAppServerProtocol {
         return request(id: requestID, method: "thread/start", params: params)
     }
 
-    static func turnStart(requestID: Int, threadId: String, prompt: String, effort: String?) -> String {
+    static func turnStart(
+        requestID: Int, threadId: String, prompt: String,
+        imagePaths: [String] = [], effort: String?
+    ) -> String {
+        let input: [[String: Any]] = [
+            ["type": "text", "text": prompt, "text_elements": []]
+        ] + imagePaths.map { ["type": "localImage", "path": $0] }
         var params: [String: Any] = [
             "threadId": threadId,
-            "input": [["type": "text", "text": prompt, "text_elements": []]],
+            "input": input,
         ]
         if let effort, !effort.isEmpty { params["effort"] = effort }
         return request(id: requestID, method: "turn/start", params: params)

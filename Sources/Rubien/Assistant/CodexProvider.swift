@@ -375,7 +375,11 @@ private actor CodexAppServerConnection {
                 active.turnStartRequestID = id
                 return CodexAppServerProtocol.turnStart(
                     requestID: id, threadId: threadID,
-                    prompt: request.prompt, effort: request.effortOverride)
+                    prompt: request.prompt,
+                    imagePaths: request.attachments.compactMap {
+                        $0.kind == .image ? $0.stagedURL.path : nil
+                    },
+                    effort: request.effortOverride)
             }
             // `turn/start` HAS been sent — a turn now runs server-side whatever happened
             // to the stream meanwhile. `route` set `turnID` already; fall back to the
