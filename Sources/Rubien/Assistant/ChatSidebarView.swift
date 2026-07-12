@@ -959,7 +959,7 @@ struct ChatSidebarView: View {
                 .popover(
                     isPresented: mentionPopoverPresented,
                     attachmentAnchor: .rect(.bounds),
-                    arrowEdge: .bottom
+                    arrowEdge: .top
                 ) {
                     mentionSearchPopover
                 }
@@ -1087,11 +1087,19 @@ struct ChatSidebarView: View {
                     }
                     .padding(4)
                 }
-                .frame(maxHeight: 240)
+                // A ScrollView has no intrinsic height. A bare maxHeight lets the
+                // popover stay at the tiny size it had while search was loading,
+                // leaving only a sliver of the results visible.
+                .frame(height: min(
+                    CGFloat(mentionResults.count) * Self.mentionResultRowHeight + 8,
+                    280
+                ))
             }
         }
         .frame(width: 330)
     }
+
+    private static let mentionResultRowHeight: CGFloat = 58
 
     private func mentionResultRow(_ reference: ChatReference, selected: Bool) -> some View {
         HStack(alignment: .top, spacing: 8) {
@@ -1113,8 +1121,8 @@ struct ChatSidebarView: View {
             }
             Spacer(minLength: 0)
         }
+        .frame(height: Self.mentionResultRowHeight)
         .padding(.horizontal, 7)
-        .padding(.vertical, 6)
         .background(
             RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .fill(selected ? Color.accentColor.opacity(0.11) : Color.clear)
