@@ -313,6 +313,12 @@ final class ImportSourceMaterializerTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: sourceURL.path))
     }
 
+    // The remote-import tests below drive ImportSourceURLProtocol; its normal
+    // client callbacks (urlProtocolDidFinishLoading) crash swift-corelibs
+    // FoundationNetworking on Linux (TaskRegistry "task not in registry"), a
+    // known limitation of custom URLProtocol support there. Darwin-only via the
+    // file's canImport(Network) convention; the local-path tests stay on Linux.
+    #if canImport(Network)
     func testRemotePlainTextMarkdownUsesOriginalFilenameAndCleansUp() async throws {
         let remoteURL = "https://example.test/notes/research-note.md"
         ImportSourceURLProtocol.stub(
@@ -411,6 +417,7 @@ final class ImportSourceMaterializerTests: XCTestCase {
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: escapedURL.path))
     }
+    #endif
 
     // Darwin-only: this test forces a URLProtocol client callback after
     // stopLoading() to prove production ignores it. swift-corelibs
@@ -534,6 +541,7 @@ final class ImportSourceMaterializerTests: XCTestCase {
     }
     #endif
 
+    #if canImport(Network)
     func testRemotePDFUsesOriginalFilenameAndCleansUp() async throws {
         let remoteURL = "https://example.test/papers/method.pdf"
         ImportSourceURLProtocol.stub(
@@ -639,6 +647,7 @@ final class ImportSourceMaterializerTests: XCTestCase {
     func testUnsupportedExtensionIsRejectedWithLocalizedDescription() async {
         await assertLocalizedMaterializationError(for: "https://example.test/notes/unsupported.txt")
     }
+    #endif
 
     func testNonRegularLocalPathIsRejectedWithLocalizedDescription() async throws {
         let directoryURL = temporaryRoot.appendingPathComponent("directory.md", isDirectory: true)
