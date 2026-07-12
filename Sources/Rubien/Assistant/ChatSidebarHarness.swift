@@ -7,26 +7,75 @@ import SwiftUI
 /// **Debug ▸ Assistant Sidebar Harness** (`swift run Rubien`). Also exercises the exact
 /// `@StateObject` init-wiring the web reader uses (renderer shared as the session's sink).
 struct ChatSidebarHarnessView: View {
+    private enum HarnessAppearance: String, CaseIterable, Identifiable {
+        case system = "System"
+        case light = "Light"
+        case dark = "Dark"
+
+        var id: Self { self }
+        var colorScheme: ColorScheme? {
+            switch self {
+            case .system: nil
+            case .light: .light
+            case .dark: .dark
+            }
+        }
+    }
+
     @StateObject private var renderer: ChatTranscriptController
     @StateObject private var session: ChatSessionController
+    @State private var appearance: HarnessAppearance = .system
 
     init() {
         let renderer = ChatTranscriptController()
-        _renderer = StateObject(wrappedValue: renderer)
-        _session = StateObject(wrappedValue: ChatSessionController(
+        let workspace = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Rubien-Assistant-Sidebar-Harness", isDirectory: true)
+        try? FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        let session = ChatSessionController(
             provider: ScriptedAgentProvider(),
             transcript: renderer,
-            reference: ChatReference(id: 1, title: "Attention Is All You Need", authors: "Vaswani et al."),
-            workspaceURL: FileManager.default.temporaryDirectory))
+            reference: ChatReference(
+                id: 1,
+                title: "Attention Is All You Need",
+                authors: "Vaswani et al."),
+            workspaceURL: workspace)
+        _renderer = StateObject(wrappedValue: renderer)
+        _session = StateObject(wrappedValue: session)
+
+        // Keep a ready text chip and an image thumbnail in the debug composer so
+        // light/dark layout can be inspected without signing in to an agent CLI.
+        let noteURL = workspace.appendingPathComponent("Harness Context.md")
+        try? Data("# Harness context\nA staged Markdown attachment.".utf8).write(to: noteURL)
+        session.stageAttachments([noteURL])
+        if let imageData = Data(base64Encoded: Self.previewPNGBase64) {
+            session.stagePastedImage(imageData, suggestedName: "Architecture Preview.png")
+        }
     }
 
     var body: some View {
-        ChatSidebarView(session: session, renderer: renderer, onClose: {
-            // In the reader this collapses the pane; in the harness, close the window.
-            NSApp.keyWindow?.performClose(nil)
-        })
+        VStack(spacing: 0) {
+            Picker("Appearance", selection: $appearance) {
+                ForEach(HarnessAppearance.allCases) { appearance in
+                    Text(appearance.rawValue).tag(appearance)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(8)
+            Divider()
+            ChatSidebarView(session: session, renderer: renderer, onClose: {
+                // In the reader this collapses the pane; in the harness, close the window.
+                NSApp.keyWindow?.performClose(nil)
+            })
+        }
+        .preferredColorScheme(appearance.colorScheme)
         .frame(minWidth: 340, minHeight: 520)
     }
+
+    /// A tiny valid PNG fixture; the production normalizer expands it into its
+    /// regular bounded thumbnail path, exercising the same preview code as a paste.
+    private static let previewPNGBase64 =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 }
 
 /// Streams a canned answer (session id → tool chip → deltas → commit) so the sidebar's

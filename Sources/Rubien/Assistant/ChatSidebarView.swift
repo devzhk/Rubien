@@ -1,5 +1,6 @@
 #if os(macOS)
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - Chat sidebar (Phase 2c)
 //
@@ -28,6 +29,7 @@ struct ChatSidebarView: View {
     @State private var providerMenuHovered = false
     @State private var plusMenuHovered = false
     @State private var approvalMenuHovered = false
+    @State private var isDropTargeted = false
     @FocusState private var composerFocused: Bool
     @Environment(\.colorScheme) private var colorScheme
 
@@ -96,7 +98,7 @@ struct ChatSidebarView: View {
     /// top, then the Web-search toggle with a checkmark reflecting `webAccess`.
     private var plusMenu: some View {
         Menu {
-            Button {} label: {
+            Button(action: chooseAttachments) {
                 Label {
                     Text("Add files or photos")
                 } icon: {
@@ -104,7 +106,7 @@ struct ChatSidebarView: View {
                         .font(.system(size: 14, weight: .regular))
                 }
             }
-            .disabled(true)  // attachments arrive in a later phase
+            .disabled(session.isResponding || session.isRehomingAttachments)
             Divider()
             Toggle(isOn: $session.webAccess) {
                 Label {
@@ -419,7 +421,16 @@ struct ChatSidebarView: View {
     /// soft continuous corners, hairline border (the popovers' clean idiom).
     private var composerBox: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if !session.stagingAttachments.isEmpty
+                || !session.pendingAttachments.isEmpty
+                || !session.attachmentIssues.isEmpty
+            {
+                pendingAttachmentTray
+            }
             composerEditor
+            Text("Add images, Markdown, or text files")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.tertiary)
             HStack(spacing: 8) {
                 plusMenu
                 approvalPicker
@@ -436,8 +447,208 @@ struct ChatSidebarView: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                .stroke(
+                    isDropTargeted ? Color.accentColor : Color.primary.opacity(0.12),
+                    lineWidth: isDropTargeted ? 1.5 : 1)
         )
+        .dropDestination(for: URL.self) { urls, _ in
+            session.stageAttachments(urls)
+            return !urls.isEmpty
+        } isTargeted: { isDropTargeted = $0 }
+        .onPasteCommand(of: [.fileURL, .image], perform: handlePaste)
+    }
+
+    // MARK: Attachments
+
+    private var pendingAttachmentTray: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if !session.stagingAttachments.isEmpty || !session.pendingAttachments.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(session.stagingAttachments) { attachment in
+                            stagingAttachmentRow(attachment)
+                        }
+                        ForEach(session.pendingAttachments) { attachment in
+                            readyAttachmentRow(attachment)
+                        }
+                    }
+                }
+            }
+            ForEach(session.attachmentIssues) { issue in
+                attachmentIssueRow(issue)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func stagingAttachmentRow(_ attachment: StagingChatAttachment) -> some View {
+        HStack(spacing: 8) {
+            attachmentIcon(for: attachment.displayName)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(attachment.displayName)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                HStack(spacing: 5) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityLabel("Preparing \(attachment.displayName)")
+                    Text("Preparing…")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 4)
+            removeAttachmentButton(id: attachment.id, displayName: attachment.displayName)
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 5)
+        .frame(width: 190, alignment: .leading)
+        .background(attachmentRowBackground)
+    }
+
+    private func readyAttachmentRow(_ attachment: ChatAttachment) -> some View {
+        HStack(spacing: 8) {
+            attachmentPreview(attachment)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(attachment.displayName)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(ByteCountFormatter.string(
+                    fromByteCount: attachment.byteCount,
+                    countStyle: .file))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 4)
+            removeAttachmentButton(id: attachment.id, displayName: attachment.displayName)
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 5)
+        .frame(width: 190, alignment: .leading)
+        .background(attachmentRowBackground)
+    }
+
+    private func attachmentIssueRow(_ issue: ChatAttachmentIssue) -> some View {
+        HStack(alignment: .top, spacing: 7) {
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(.red)
+                .padding(.top, 1)
+            Text("\(issue.displayName): \(issue.message)")
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 4)
+            Button(action: session.clearAttachmentIssues) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .semibold))
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss attachment issues")
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 4)
+    }
+
+    private var attachmentRowBackground: some View {
+        RoundedRectangle(cornerRadius: 6, style: .continuous)
+            .fill(Color.primary.opacity(0.045))
+    }
+
+    @ViewBuilder private func attachmentPreview(_ attachment: ChatAttachment) -> some View {
+        if let image = thumbnailImage(from: attachment.thumbnailDataURL) {
+            Image(nsImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 28, height: 28)
+                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                .accessibilityHidden(true)
+        } else {
+            attachmentIcon(for: attachment.displayName, kind: attachment.kind)
+        }
+    }
+
+    private func attachmentIcon(
+        for displayName: String,
+        kind: ChatAttachmentKind? = nil
+    ) -> some View {
+        let isImage = kind == .image || ["png", "jpg", "jpeg", "gif", "heic", "webp", "tif", "tiff"]
+            .contains((displayName as NSString).pathExtension.lowercased())
+        return Image(systemName: isImage ? "photo" : "doc.text")
+            .font(.system(size: 14, weight: .medium))
+            .foregroundStyle(Color.primary.opacity(0.65))
+            .frame(width: 28, height: 28)
+            .background(
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(Color.primary.opacity(0.05)))
+            .accessibilityHidden(true)
+    }
+
+    private func removeAttachmentButton(id: UUID, displayName: String) -> some View {
+        Button {
+            session.removePendingAttachment(id: id)
+        } label: {
+            Image(systemName: "xmark")
+                .font(.system(size: 9, weight: .semibold))
+                .frame(width: 20, height: 20)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Remove \(displayName)")
+    }
+
+    private func thumbnailImage(from dataURL: String?) -> NSImage? {
+        guard
+            let dataURL,
+            let comma = dataURL.firstIndex(of: ","),
+            let data = Data(base64Encoded: String(dataURL[dataURL.index(after: comma)...]))
+        else { return nil }
+        return NSImage(data: data)
+    }
+
+    private func chooseAttachments() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.image] + ["md", "markdown", "txt"].compactMap {
+            UTType(filenameExtension: $0)
+        }
+        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
+        guard panel.runModal() == .OK else { return }
+        session.stageAttachments(panel.urls)
+    }
+
+    private func handlePaste(_ providers: [NSItemProvider]) {
+        for provider in providers {
+            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) { item, _ in
+                    let url = (item as? URL)
+                        ?? (item as? NSURL).map { $0 as URL }
+                        ?? (item as? Data).map {
+                            NSURL(
+                                absoluteURLWithDataRepresentation: $0,
+                                relativeTo: nil) as URL
+                        }
+                    guard let url else { return }
+                    Task { @MainActor in session.stageAttachments([url]) }
+                }
+                continue
+            }
+
+            guard let identifier = provider.registeredTypeIdentifiers.first(where: {
+                UTType($0)?.conforms(to: .image) == true
+            }) else { continue }
+            provider.loadDataRepresentation(forTypeIdentifier: identifier) { data, _ in
+                guard let data else { return }
+                Task { @MainActor in
+                    session.stagePastedImage(data, suggestedName: "Pasted Image.png")
+                }
+            }
+        }
     }
 
     // MARK: Approval mode switch (Ask ⟷ Auto)
@@ -507,7 +718,7 @@ struct ChatSidebarView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .disabled(session.isResponding)
+        .disabled(session.isResponding || session.isStagingAttachments)
         .background(
             RoundedRectangle(cornerRadius: 5, style: .continuous)
                 .fill(providerMenuHovered ? Color.primary.opacity(0.06) : Color.clear)
@@ -672,9 +883,7 @@ struct ChatSidebarView: View {
                     // and keypad-Enter adds .numericPad.
                     let chord = press.modifiers.subtracting([.capsLock, .numericPad])
                     guard chord == .command else { return .ignored }
-                    guard !session.isResponding,
-                          session.canSendWithCurrentAvailability,
-                          !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    guard session.canSend(draft: draft)
                     else { return .handled }  // consume the chord; never a newline
                     sendDraft()
                     return .handled
@@ -705,8 +914,7 @@ struct ChatSidebarView: View {
             .buttonStyle(.plain)
             .help("Stop")
         } else {
-            let isEmpty = draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            let canSend = !isEmpty && session.canSendWithCurrentAvailability
+            let canSend = session.canSend(draft: draft)
             Button {
                 sendDraft()
             } label: {
@@ -722,7 +930,7 @@ struct ChatSidebarView: View {
             // owner of ⌘↩ (a key EQUIVALENT on the button is the loose-matching
             // pass that made ⇧↩ send by accident).
             .disabled(!canSend)
-            .help(session.canSendWithCurrentAvailability ? "Send (⌘↩)" : "Finish assistant setup to send")
+            .help(canSend ? "Send (⌘↩)" : "Enter a message or add an attachment")
         }
     }
 
@@ -745,7 +953,7 @@ struct ChatSidebarView: View {
     }
 
     private func sendDraft() {
-        guard session.canSendWithCurrentAvailability else {
+        guard session.canSend(draft: draft) else {
             composerFocused = true
             return
         }

@@ -1492,6 +1492,36 @@ final class ChatSessionControllerTests: XCTestCase {
 
     // MARK: Assistant attachments
 
+    func testCanSendRequiresReadyContentAndNoStaging() async throws {
+        let fixture = try makeAttachmentController()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        XCTAssertFalse(fixture.controller.canSend(draft: "   "))
+        XCTAssertTrue(fixture.controller.canSend(draft: "hello"))
+        fixture.controller.stageAttachments([fixture.source])
+        XCTAssertFalse(
+            fixture.controller.canSend(draft: "hello"),
+            "staging blocks an accidental partial send")
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+        XCTAssertTrue(
+            fixture.controller.canSend(draft: ""),
+            "ready attachment permits attachment-only send")
+    }
+
+    func testRemovingPendingAttachmentDeletesItAndDisablesEmptySend() async throws {
+        let fixture = try makeAttachmentController()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        fixture.controller.stageAttachments([fixture.source])
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+        let pending = try XCTUnwrap(fixture.controller.pendingAttachments.first)
+        fixture.controller.removePendingAttachment(id: pending.id)
+        await waitUntil({
+            !FileManager.default.fileExists(atPath: pending.stagedURL.path)
+        }, ticks: 5_000)
+        XCTAssertFalse(fixture.controller.canSend(draft: ""))
+    }
+
     func testAttachmentOnlyTurnUsesHiddenFallbackAndStructuredVisibleRow() async throws {
         let fixture = try makeAttachmentController()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
