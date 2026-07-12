@@ -25,7 +25,8 @@ final class ClaudeSessionStoreTests: XCTestCase {
     private func makeStore() throws -> (store: ClaudeSessionStore, root: URL, workspace: URL, dir: URL) {
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("claude-store-\(UUID().uuidString)", isDirectory: true)
-        let workspace = URL(fileURLWithPath: "/Users/test/Documents/Rubien Assistant", isDirectory: true)
+        let workspace = root.appendingPathComponent("Rubien Assistant", isDirectory: true)
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
         let dir = root.appendingPathComponent(
             ClaudeSessionStore.projectDirName(forWorkspacePath: workspace.path), isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -43,6 +44,40 @@ final class ClaudeSessionStoreTests: XCTestCase {
 
     private func userLine(cwd: String, content: String) -> String {
         #"{"type":"user","cwd":"\#(cwd)","message":{"role":"user","content":"\#(content)"}}"#
+    }
+
+    private func userLineJSON(cwd: String, content: String) throws -> String {
+        let object: [String: Any] = [
+            "type": "user",
+            "cwd": cwd,
+            "message": ["role": "user", "content": content],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        return try XCTUnwrap(String(data: data, encoding: .utf8))
+    }
+
+    private func makeStagedAttachment(
+        in workspace: URL,
+        name: String,
+        kind: ChatAttachmentKind = .text
+    ) throws -> ChatAttachment {
+        let id = UUID()
+        let directory = workspace
+            .appendingPathComponent(AssistantAttachmentStore.relativeRoot, isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("\(id.uuidString)-\(name)")
+        let data = Data(kind == .image ? [0x89, 0x50, 0x4E, 0x47] : Array("notes".utf8))
+        try data.write(to: url)
+        return ChatAttachment(
+            id: id,
+            displayName: name,
+            kind: kind,
+            stagedURL: url,
+            mediaType: kind == .image ? "image/png" : "text/markdown",
+            byteCount: Int64(data.count),
+            sourceIdentity: "/original/\(name)"
+        )
     }
 
     func testRecentSessionsReturnsNewestFirstWithPreviewAndID() throws {
@@ -155,6 +190,102 @@ final class ClaudeSessionStoreTests: XCTestCase {
     func testFullTranscriptIsEmptyForAMissingSession() throws {
         let (store, _, workspace, _) = try makeStore()
         XCTAssertTrue(store.fullTranscript(sessionID: "nope", workspaceURL: workspace).isEmpty)
+    }
+
+    func testHistoryManifestRestoresAttachmentAndHidesInternalPrompt() throws {
+        let (store, _, workspace, dir) = try makeStore()
+        let attachment = try makeStagedAttachment(in: workspace, name: "notes.md")
+        let prompt = AssistantAttachmentManifest.providerPrompt(
+            base: "Compare these",
+            visibleText: "Compare these",
+            attachments: [attachment]
+        )
+        let sessionURL = try writeSession(
+            "attached",
+            lines: [try userLineJSON(cwd: workspace.path, content: prompt)],
+            mtime: Date(timeIntervalSince1970: 1_000),
+            in: dir
+        )
+
+        let rows = store.fullTranscript(sessionID: "attached", workspaceURL: workspace)
+        XCTAssertEqual(rows.first?.role, .user)
+        XCTAssertEqual(rows.first?.body, "Compare these")
+        XCTAssertEqual(rows.first?.attachments.map(\.displayName), ["notes.md"])
+        XCTAssertEqual(rows.first?.attachments.first?.isAvailable, true)
+        XCTAssertFalse(rows.first?.body.contains("rubien-attachments-v1") == true)
+        XCTAssertEqual(
+            store.summarize(fileURL: sessionURL, expectedCWD: workspace.path)?.preview,
+            "Compare these"
+        )
+        XCTAssertTrue(
+            store.searchSessions(query: "rubien-attachments-v1", workspaceURL: workspace, limit: 25).isEmpty,
+            "the private manifest must not be searchable"
+        )
+        XCTAssertTrue(
+            store.searchSessions(query: attachment.stagedURL.path, workspaceURL: workspace, limit: 25).isEmpty,
+            "managed paths must not be searchable"
+        )
+    }
+
+    func testAttachmentOnlyHistoryUsesSummaryAndSearchFallbackWhileBodyStaysEmpty() throws {
+        let (store, _, workspace, dir) = try makeStore()
+        let attachment = try makeStagedAttachment(in: workspace, name: "figure.png", kind: .image)
+        let prompt = AssistantAttachmentManifest.providerPrompt(
+            base: "Inspect the attached files.",
+            visibleText: "",
+            attachments: [attachment]
+        )
+        let sessionURL = try writeSession(
+            "image-only",
+            lines: [try userLineJSON(cwd: workspace.path, content: prompt)],
+            mtime: Date(timeIntervalSince1970: 1_000),
+            in: dir
+        )
+
+        let row = try XCTUnwrap(store.fullTranscript(sessionID: "image-only", workspaceURL: workspace).first)
+        XCTAssertEqual(row.body, "")
+        XCTAssertEqual(row.attachments.map(\.displayName), ["figure.png"])
+        XCTAssertEqual(row.attachments.first?.kind, .image)
+        XCTAssertEqual(
+            store.summarize(fileURL: sessionURL, expectedCWD: workspace.path)?.preview,
+            "Attached: figure.png"
+        )
+        let hits = store.searchSessions(query: "figure.png", workspaceURL: workspace, limit: 25)
+        XCTAssertEqual(hits.map(\.id), ["image-only"])
+        XCTAssertEqual(hits.first?.matchSnippet, "Attached: figure.png")
+
+        try FileManager.default.removeItem(at: attachment.stagedURL)
+        let restored = try XCTUnwrap(store.fullTranscript(sessionID: "image-only", workspaceURL: workspace).first)
+        XCTAssertEqual(restored.attachments.first?.isAvailable, false)
+    }
+
+    func testOutsideRootManifestRemainsEntirelyVisible() throws {
+        let (store, _, workspace, dir) = try makeStore()
+        let id = UUID()
+        let outside = ChatAttachment(
+            id: id,
+            displayName: "outside.md",
+            kind: .text,
+            stagedURL: URL(fileURLWithPath: "/tmp/\(id.uuidString)-outside.md"),
+            mediaType: "text/markdown",
+            byteCount: 1,
+            sourceIdentity: "/tmp/outside.md"
+        )
+        let prompt = AssistantAttachmentManifest.providerPrompt(
+            base: "Unsafe",
+            visibleText: "Unsafe",
+            attachments: [outside]
+        )
+        try writeSession(
+            "outside",
+            lines: [try userLineJSON(cwd: workspace.path, content: prompt)],
+            mtime: Date(timeIntervalSince1970: 1_000),
+            in: dir
+        )
+
+        let row = try XCTUnwrap(store.fullTranscript(sessionID: "outside", workspaceURL: workspace).first)
+        XCTAssertEqual(row.body, prompt)
+        XCTAssertTrue(row.attachments.isEmpty)
     }
 
     func testSidechainRowsAreSkippedByTranscriptAndPreview() throws {

@@ -529,10 +529,17 @@ enum CodexAppServerProtocol {
     /// Walks the items in order, mirroring the LIVE event mapping: userMessage →
     /// user row, agentMessage → assistant row, tool items → a completed (or denied)
     /// chip; reasoning/plan/other items render nothing, as they do live.
-    static func decodeThreadTranscript(_ result: [String: Any]) -> [ChatRenderMessage] {
+    static func decodeThreadTranscript(
+        _ result: [String: Any],
+        managedAttachmentsRoot: URL? = nil
+    ) -> [ChatRenderMessage] {
         var rows: [ChatRenderMessage] = []
         for item in threadItems(result) {
-            if let row = transcriptRow(item, seq: rows.count) { rows.append(row) }
+            if let row = transcriptRow(
+                item, seq: rows.count, managedAttachmentsRoot: managedAttachmentsRoot
+            ) {
+                rows.append(row)
+            }
         }
         return rows
     }
@@ -621,11 +628,27 @@ enum CodexAppServerProtocol {
         return model
     }
 
-    private static func transcriptRow(_ item: [String: Any], seq: Int) -> ChatRenderMessage? {
+    private static func transcriptRow(
+        _ item: [String: Any],
+        seq: Int,
+        managedAttachmentsRoot: URL?
+    ) -> ChatRenderMessage? {
         switch item["type"] as? String {
         case "userMessage":
             let text = joinedText(item["content"])
-            return text.isEmpty ? nil : ChatRenderMessage(role: .user, body: text, seq: seq)
+            guard let managedAttachmentsRoot else {
+                return text.isEmpty ? nil : ChatRenderMessage(role: .user, body: text, seq: seq)
+            }
+            let parsed = AssistantAttachmentManifest.parse(
+                text, managedRoot: managedAttachmentsRoot
+            )
+            guard !parsed.visibleText.isEmpty || !parsed.attachments.isEmpty else { return nil }
+            return ChatRenderMessage(
+                role: .user,
+                body: parsed.visibleText,
+                seq: seq,
+                attachments: parsed.attachments
+            )
         case "agentMessage":
             let text = (item["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             return text.isEmpty ? nil : ChatRenderMessage(role: .assistant, body: text, seq: seq)

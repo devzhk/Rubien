@@ -894,7 +894,14 @@ private actor CodexAppServerConnection {
         await query(
             workspaceURL: workspaceURL, method: "thread/read",
             build: { CodexAppServerProtocol.threadRead(requestID: $0, threadId: threadID) },
-            decode: CodexAppServerProtocol.decodeThreadTranscript)
+            decode: {
+                CodexAppServerProtocol.decodeThreadTranscript(
+                    $0,
+                    managedAttachmentsRoot: workspaceURL.appendingPathComponent(
+                        AssistantAttachmentStore.relativeRoot, isDirectory: true
+                    )
+                )
+            })
     }
 
     /// One-shot read: ensure a live server (reuse ANY running one — a read doesn't use

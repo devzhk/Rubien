@@ -41,6 +41,30 @@ final class CodexAppServerProtocolTests: XCTestCase {
         (try? JSONSerialization.jsonObject(with: Data(string.utf8))) as? [String: Any] ?? [:]
     }
 
+    private func makeStagedAttachment(
+        in workspace: URL,
+        name: String,
+        kind: ChatAttachmentKind = .image
+    ) throws -> ChatAttachment {
+        let id = UUID()
+        let directory = workspace
+            .appendingPathComponent(AssistantAttachmentStore.relativeRoot, isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent("\(id.uuidString)-\(name)")
+        let data = Data(kind == .image ? [0x89, 0x50, 0x4E, 0x47] : Array("notes".utf8))
+        try data.write(to: url)
+        return ChatAttachment(
+            id: id,
+            displayName: name,
+            kind: kind,
+            stagedURL: url,
+            mediaType: kind == .image ? "image/png" : "text/markdown",
+            byteCount: Int64(data.count),
+            sourceIdentity: "/original/\(name)"
+        )
+    }
+
     // MARK: Happy-path stream
 
     func testBasicStreamProducesExactEventSequence() throws {
@@ -386,6 +410,63 @@ final class CodexAppServerProtocolTests: XCTestCase {
         XCTAssertEqual(rows.map(\.role), [.user, .assistant])
         XCTAssertEqual(rows[0].body, "part one\n\npart two")
         XCTAssertEqual(rows[1].body, "answer")
+    }
+
+
+    func testHistoryManifestRestoresAttachmentAndHidesInternalPrompt() throws {
+        let workspace = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-history-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        let attachment = try makeStagedAttachment(in: workspace, name: "figure.png")
+        let prompt = AssistantAttachmentManifest.providerPrompt(
+            base: "Inspect the attached files.", visibleText: "", attachments: [attachment]
+        )
+        let result: [String: Any] = ["thread": ["turns": [["items": [[
+            "type": "userMessage", "content": [
+                ["type": "text", "text": prompt],
+                ["type": "localImage", "path": attachment.stagedURL.path],
+            ],
+        ]]]]]]
+        let managedRoot = workspace.appendingPathComponent(AssistantAttachmentStore.relativeRoot)
+
+        var rows = CodexAppServerProtocol.decodeThreadTranscript(
+            result, managedAttachmentsRoot: managedRoot
+        )
+        XCTAssertEqual(rows.first?.body, "")
+        XCTAssertEqual(rows.first?.attachments.map(\.displayName), ["figure.png"])
+        XCTAssertEqual(rows.first?.attachments.first?.isAvailable, true)
+
+        try FileManager.default.removeItem(at: attachment.stagedURL)
+        rows = CodexAppServerProtocol.decodeThreadTranscript(result, managedAttachmentsRoot: managedRoot)
+        XCTAssertEqual(rows.first?.attachments.first?.isAvailable, false)
+    }
+
+    func testUnsafeHistoryManifestRemainsVisibleWhenRootIsSupplied() throws {
+        let workspace = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-history-\(UUID().uuidString)", isDirectory: true)
+        let id = UUID()
+        let outside = ChatAttachment(
+            id: id,
+            displayName: "outside.md",
+            kind: .text,
+            stagedURL: URL(fileURLWithPath: "/tmp/\(id.uuidString)-outside.md"),
+            mediaType: "text/markdown",
+            byteCount: 1,
+            sourceIdentity: "/tmp/outside.md"
+        )
+        let prompt = AssistantAttachmentManifest.providerPrompt(
+            base: "Unsafe", visibleText: "Unsafe", attachments: [outside]
+        )
+        let result: [String: Any] = ["thread": ["turns": [["items": [[
+            "type": "userMessage", "content": [["type": "text", "text": prompt]],
+        ]]]]]]
+
+        let rows = CodexAppServerProtocol.decodeThreadTranscript(
+            result,
+            managedAttachmentsRoot: workspace.appendingPathComponent(AssistantAttachmentStore.relativeRoot)
+        )
+        XCTAssertEqual(rows.first?.body, prompt)
+        XCTAssertTrue(rows.first?.attachments.isEmpty == true)
     }
 
     func testToolChipStatusClassifierIsSharedAndComplete() {

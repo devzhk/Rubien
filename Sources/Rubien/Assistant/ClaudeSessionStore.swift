@@ -84,6 +84,8 @@ struct ClaudeSessionStore {
         guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else { return nil }
         guard let date = (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
         else { return nil }
+        let managedRoot = URL(fileURLWithPath: expectedCWD, isDirectory: true)
+            .appendingPathComponent(AssistantAttachmentStore.relativeRoot, isDirectory: true)
 
         var preview: String?
         var cwdMatches = false
@@ -94,7 +96,9 @@ struct ClaudeSessionStore {
                obj["type"] as? String == "user",
                obj["isMeta"] as? Bool != true,  // skip Claude's internal/meta entries (command caveats etc.)
                obj["isSidechain"] as? Bool != true,  // and subagent-internal rows
-               let text = Self.firstUserText(obj) {
+               let text = Self.firstUserText(
+                   obj, managedRoot: managedRoot, fileManager: fileManager
+               ) {
                 preview = text
             }
             if preview != nil, cwdMatches { break }
@@ -117,10 +121,18 @@ struct ClaudeSessionStore {
     func fullTranscript(sessionID: String, workspaceURL: URL) -> [ChatRenderMessage] {
         let fileURL = projectDir(for: workspaceURL).appendingPathComponent("\(sessionID).jsonl")
         guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else { return [] }
+        let managedRoot = workspaceURL
+            .appendingPathComponent(AssistantAttachmentStore.relativeRoot, isDirectory: true)
 
         var rows: [ChatRenderMessage] = []
-        func append(_ role: ChatRole, _ body: String) {
-            rows.append(ChatRenderMessage(role: role, body: body, seq: rows.count))
+        func append(
+            _ role: ChatRole,
+            _ body: String,
+            attachments: [ChatAttachmentPresentation] = []
+        ) {
+            rows.append(ChatRenderMessage(
+                role: role, body: body, seq: rows.count, attachments: attachments
+            ))
         }
         for line in content.split(separator: "\n", omittingEmptySubsequences: true) {
             guard let obj = Self.parseLine(line),
@@ -128,8 +140,13 @@ struct ClaudeSessionStore {
             else { continue }
             switch entry.type {
             case "user":
-                if let text = Self.messageText(entry.message), !text.isEmpty {
-                    append(.user, text)
+                if let text = Self.messageText(entry.message) {
+                    let parsed = AssistantAttachmentManifest.parse(
+                        text, managedRoot: managedRoot, fileManager: fileManager
+                    )
+                    if !parsed.visibleText.isEmpty || !parsed.attachments.isEmpty {
+                        append(.user, parsed.visibleText, attachments: parsed.attachments)
+                    }
                 }
             case "assistant":
                 if let text = Self.messageText(entry.message), !text.isEmpty {
@@ -178,6 +195,8 @@ struct ClaudeSessionStore {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, limit > 0 else { return [] }
         var hits: [AgentSessionSummary] = []
+        let managedRoot = workspaceURL
+            .appendingPathComponent(AssistantAttachmentStore.relativeRoot, isDirectory: true)
         for url in sessionFilesNewestFirst(for: workspaceURL) {
             if hits.count >= limit { break }
             // A superseded search (the user kept typing) is cancelled by the
@@ -185,7 +204,9 @@ struct ClaudeSessionStore {
             if Task.isCancelled { return hits }
             // Snippet first: most files won't match, and the reference scan +
             // `summarize` (further reads) then run only for actual text hits.
-            guard let snippet = firstMatchSnippet(fileURL: url, query: trimmed) else { continue }
+            guard let snippet = firstMatchSnippet(
+                fileURL: url, query: trimmed, managedRoot: managedRoot
+            ) else { continue }
             if let referenceID, !sessionReferences(fileURL: url, referenceID: referenceID) { continue }
             guard var hit = summarize(fileURL: url, expectedCWD: workspaceURL.path) else { continue }
             hit.matchSnippet = snippet
@@ -238,14 +259,23 @@ struct ClaudeSessionStore {
 
     /// Scan one session file for `query` in its visible text; a snippet around the
     /// first match, or nil when the session doesn't match.
-    private func firstMatchSnippet(fileURL: URL, query: String) -> String? {
+    private func firstMatchSnippet(fileURL: URL, query: String, managedRoot: URL) -> String? {
         guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else { return nil }
         for line in content.split(separator: "\n", omittingEmptySubsequences: true) {
             guard line.utf8.count <= maxSearchedLineBytes else { continue }
             guard let obj = Self.parseLine(line),
                   let entry = Self.conversationEntry(obj),
-                  let text = Self.messageText(entry.message)
+                  let rawText = Self.messageText(entry.message)
             else { continue }
+            let text: String
+            if entry.type == "user" {
+                let parsed = AssistantAttachmentManifest.parse(
+                    rawText, managedRoot: managedRoot, fileManager: fileManager
+                )
+                text = Self.historyText(for: parsed)
+            } else {
+                text = rawText
+            }
             if let snippet = Self.snippet(around: query, in: text) {
                 return snippet
             }
@@ -283,12 +313,29 @@ struct ClaudeSessionStore {
 
     /// Extract the visible text of a `type:"user"` entry, collapsed and truncated
     /// for a one-glance preview. Tool-result-only turns produce no text → nil.
-    private static func firstUserText(_ obj: [String: Any]) -> String? {
+    private static func firstUserText(
+        _ obj: [String: Any],
+        managedRoot: URL,
+        fileManager: FileManager
+    ) -> String? {
         guard let message = obj["message"] as? [String: Any],
               let raw = messageText(message) else { return nil }
-        let collapsed = collapseWhitespace(raw)
+        let parsed = AssistantAttachmentManifest.parse(
+            raw, managedRoot: managedRoot, fileManager: fileManager
+        )
+        let collapsed = collapseWhitespace(historyText(for: parsed))
         guard !collapsed.isEmpty else { return nil }
         return collapsed.count > 140 ? String(collapsed.prefix(140)) + "…" : collapsed
+    }
+
+    /// The text History may preview and index for a parsed user turn. A turn with
+    /// visible prose keeps that prose; an attachment-only turn gets a local-only,
+    /// path-free fallback so it remains discoverable without exposing the manifest.
+    private static func historyText(for parsed: ParsedAttachmentMessage) -> String {
+        guard parsed.visibleText.isEmpty, !parsed.attachments.isEmpty else {
+            return parsed.visibleText
+        }
+        return "Attached: " + parsed.attachments.map(\.displayName).joined(separator: ", ")
     }
 
     /// Runs of any whitespace (incl. newlines) become single spaces — the
