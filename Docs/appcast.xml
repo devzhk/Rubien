@@ -290,5 +290,25 @@ Also in 0.2.1:
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.3.0</title>
+            <description><![CDATA[Attach files to the assistant — add images and Markdown/text files to a chat message (file picker, drag-and-drop, or paste) in both readers. Images reach Claude and Codex natively, attachments survive History resume, and staged files stay in your Assistant workspace — nothing enters your library or sync.
+
+Also in 0.3.0:
+• Import overhaul — a staged import flow with review-before-commit for PDFs, Markdown files, Zotero folders, and DOI/arXiv identifiers; imported Markdown reads like web content in the reader.
+• Agent full-text search — a new grep tool (rubien_grep_text; CLI: rubien-cli grep) searches inside PDF and web body text, page-anchored on PDFs and offset-anchored on web content.
+• Unified read tools (breaking) — rubien_read_text and rubien_read_annotations replace the four kind-specific PDF/web tools (CLI: read text / read annotations). rubien-mcp-server 0.1.x does not work with this build — update to rubien-mcp-server@0.2.0.
+• Codex model auto-discovery — the assistant model picker lists what your installed codex actually offers, with per-model reasoning efforts.]]></description>
+            <pubDate>Sun, 12 Jul 2026 21:35:02 +0000</pubDate>
+            <sparkle:version>21</sparkle:version>
+            <sparkle:shortVersionString>0.3.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.3.0/Rubien-0.3.0.dmg"
+                sparkle:edSignature="BAH6kmf9uHLox5vy8WzHci19uxr8rDYvYoGarXUF0NnHgDqt/IOi7namcW9sis0Ccf3czU+uEoE3y3SRfNq1CA=="
+                length="18867398"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
