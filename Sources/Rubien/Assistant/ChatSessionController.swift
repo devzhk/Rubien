@@ -295,14 +295,17 @@ final class ChatSessionController: ObservableObject {
     }
 
     func stageAttachments(_ urls: [URL]) {
+        guard !isResponding, !isRehomingAttachments else { return }
         enqueueAttachments(urls.map { .file($0) })
     }
 
     func stagePastedImage(_ data: Data, suggestedName: String) {
+        guard !isResponding, !isRehomingAttachments else { return }
         enqueueAttachments([.imageData(data, suggestedName: suggestedName)])
     }
 
     func removePendingAttachment(id: UUID) {
+        guard !isResponding, !isRehomingAttachments else { return }
         if let attachment = pendingAttachments.first(where: { $0.id == id }) {
             pendingAttachments.removeAll { $0.id == id }
             Task { await attachmentStore.removePending([attachment]) }
@@ -310,8 +313,11 @@ final class ChatSessionController: ObservableObject {
         if stagingAttachments.contains(where: { $0.id == id }) {
             stagingAttachments.removeAll { $0.id == id }
             stagingSourceIdentities[id] = nil
+            let wasQueued = attachmentQueue.contains { $0.id == id }
             attachmentQueue.removeAll { $0.id == id }
-            cancelledAttachmentIDs.insert(id)
+            if !wasQueued {
+                cancelledAttachmentIDs.insert(id)
+            }
         }
     }
 
@@ -399,6 +405,7 @@ final class ChatSessionController: ObservableObject {
                     .reduce(Int64(0)) { $0 + $1.byteCount }
                 guard Self.acceptsImageBytes(existing: existing, adding: attachment.byteCount) else {
                     await attachmentStore.removePending([attachment])
+                    guard request.generation == attachmentGeneration else { return }
                     attachmentIssues.append(ChatAttachmentIssue(
                         displayName: attachment.displayName,
                         message: "Images can total up to 20 MB per turn."
@@ -619,6 +626,7 @@ final class ChatSessionController: ObservableObject {
                 if self.attachmentTaskToken == token {
                     self.attachmentTask = nil
                     self.attachmentTaskToken = nil
+                    self.startAttachmentWorkerIfNeeded()
                 }
             }
         }

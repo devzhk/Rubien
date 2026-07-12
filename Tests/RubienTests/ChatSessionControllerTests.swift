@@ -1545,6 +1545,32 @@ final class ChatSessionControllerTests: XCTestCase {
         await first.turnTask?.value
     }
 
+    func testAttachmentMutationIsFrozenWhileTurnAwaitsAdmission() async throws {
+        let fixture = try makeAttachmentController()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let second = fixture.root.appendingPathComponent("later.txt")
+        try Data("later".utf8).write(to: second)
+
+        fixture.controller.stageAttachments([fixture.source])
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+        let captured = try XCTUnwrap(fixture.controller.pendingAttachments.first)
+
+        fixture.controller.send("")
+        fixture.controller.removePendingAttachment(id: captured.id)
+        fixture.controller.stageAttachments([second])
+
+        XCTAssertEqual(fixture.controller.pendingAttachments.map(\.id), [captured.id])
+        XCTAssertTrue(fixture.controller.stagingAttachments.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: captured.stagedURL.path))
+
+        await fixture.provider.waitUntilStreaming()
+        XCTAssertEqual(fixture.provider.lastRequest?.attachments.map(\.id), [captured.id])
+        fixture.provider.finishStream()
+        await fixture.controller.turnTask?.value
+        XCTAssertTrue(fixture.controller.pendingAttachments.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: captured.stagedURL.path))
+    }
+
     func testNewConversationDeletesPendingWhileProviderSwitchRehomesIt() async throws {
         let savedProvider = UserDefaults.standard.object(forKey: RubienPreferences.assistantProviderKey)
         defer {
@@ -1570,6 +1596,27 @@ final class ChatSessionControllerTests: XCTestCase {
         fixture.controller.newConversation()
         await waitUntil({ !FileManager.default.fileExists(atPath: movedPath.path) }, ticks: 5_000)
         XCTAssertTrue(fixture.controller.pendingAttachments.isEmpty)
+    }
+
+    func testAttachmentMutationIsFrozenDuringProviderRehome() async throws {
+        let fixture = try makeAttachmentController(withProviderFactory: true)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let second = fixture.root.appendingPathComponent("later.txt")
+        try Data("later".utf8).write(to: second)
+
+        fixture.controller.stageAttachments([fixture.source])
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+        let capturedID = try XCTUnwrap(fixture.controller.pendingAttachments.first?.id)
+
+        fixture.controller.switchProvider(to: .codex)
+        XCTAssertTrue(fixture.controller.isRehomingAttachments)
+        fixture.controller.removePendingAttachment(id: capturedID)
+        fixture.controller.stageAttachments([second])
+
+        XCTAssertEqual(fixture.controller.pendingAttachments.map(\.id), [capturedID])
+        XCTAssertTrue(fixture.controller.stagingAttachments.isEmpty)
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+        XCTAssertEqual(fixture.controller.pendingAttachments.map(\.id), [capturedID])
     }
 
     func testDuplicateSourceIsRejectedAndBatchKeepsValidSiblings() async throws {
