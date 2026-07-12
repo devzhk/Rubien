@@ -62,12 +62,14 @@ Every response carries `source` and `available` (ordered `["pdf","web"]`). Neith
 | `regex` | both | treat `query` as a regex; compile failure → `invalid-regex` error |
 | `source` | both | `pdf` \| `web`; overrides selection rules |
 | `contextChars` | both | snippet window width, default 160 (≈80 per side, trimmed to whitespace), bounds 1–2000 enforced in the CLI (zod repeats the bound; Swift catalog advertises it — the `maxChars` precedent) |
-| `pages` | PDF only | restrict search scope, e.g. `1-3,8-10` — reuses the `read text --pages` range parser |
+| `pages` | PDF only | restrict search scope, e.g. `1-3,8-10` — reuses the `read text --pages` range parser. **Empty-string pinning (feature-1 parity rule):** both MCP catalogs treat `pages:""` as absent (neither implies pdf nor emits the flag); the CLI treats a supplied empty `--pages ""` as PDF-implying with full-document scope, matching `read text` |
 | `maxPages` | PDF only | cap returned page-hits, default 30, bounds 1–200 |
 | `snippetsPerPage` | PDF only | default 3, bounds 1–20 |
 | `maxMatches` | web only | cap returned match *entries* (post-merge clusters, §5), default 20, bounds 1–200 |
 
 Matching is **case-insensitive** on both paths (regex can scope case back on with inline `(?-i:…)`).
+
+**Occurrence semantics (both paths, literal and regex):** matches are **non-overlapping, leftmost-first** — after a match, scanning resumes at its end (standard find-next semantics), so `"aa"` in `"aaa"` counts 1, not 2. **Zero-width matches are discarded entirely**: they never produce entries or counts, and enumeration advances one grapheme past each so it cannot loop; a pattern that matches only the empty string (`^`, `$`, `\b`, `a?` against no `a`) yields `totalMatches: 0`, not a match per position.
 
 ### Envelopes (the `read_text` pattern: per-source shape + `source`/`available`)
 
@@ -79,15 +81,15 @@ PDF source:
   "pageCount": 12, "hasTextLayer": true,
   "totalMatches": 5, "totalMatchingPages": 2, "truncated": false,
   "pages": [
-    { "page": 4, "sectionPath": ["3 Main Results"], "matchCount": 2,
+    { "page": 4, "sectionPath": ["3 Main Results"], "matchCount": 2, "snippetsTruncated": false,
       "snippets": ["… we now state the main result. Theorem 1 (Convergence). Let f be …"] },
-    { "page": 7, "sectionPath": ["3 Main Results", "3.2 Proof of Theorem 1"], "matchCount": 3,
+    { "page": 7, "sectionPath": ["3 Main Results", "3.2 Proof of Theorem 1"], "matchCount": 3, "snippetsTruncated": false,
       "snippets": ["… Proof of Theorem 1. By the lemma above …"] }
   ] }
 ```
 
 - Pages ascend in document order; `page` is 1-indexed; `sectionPath` is outermost→deepest, `[]` when no outline covers the page (normal, not an error).
-- `totalMatches` / `totalMatchingPages` are counted across ALL matching pages in scope **before** the `maxPages` cut; `truncated` ⇔ `totalMatchingPages > pages.count`. `matchCount` is per-page occurrences before the snippet cap.
+- `totalMatches` / `totalMatchingPages` are counted across ALL matching pages in scope **before** the `maxPages` cut; `truncated` ⇔ `totalMatchingPages > pages.count`. `matchCount` is per-page occurrences before the snippet cap; `snippetsTruncated` (per page) is true when `snippetsPerPage` dropped merged windows, so cap-driven omission is distinguishable from window merging.
 - PDF snippets are drawn from **normalized** text (§6) — not byte-identical to `read text` output; page numbers, not offsets, are the PDF anchor.
 
 Web source:
@@ -95,15 +97,15 @@ Web source:
 ```json
 { "id": 7, "source": "web", "available": ["web"],
   "query": "theorem", "isRegex": false,
-  "contentLength": 84213, "totalMatches": 3, "truncated": false,
+  "contentLength": 84213, "totalMatches": 3, "totalEntries": 2, "truncated": false,
   "matches": [
-    { "start": 18342, "matchCount": 1, "snippet": "… we now state the theorem …" }
+    { "start": 18342, "matchCount": 2, "snippet": "… we now state the theorem …" }
   ] }
 ```
 
-- `start` is the exact offset of the entry's first match in the **raw decoded body**, in the same grapheme-count coordinates `read text` already uses for `start`/`contentLength`/`returnedChars` — so `read text <id> --start <start-N> --max-chars M` drills straight in. Pin as the coordinate contract; the integration test (§9) enforces it end to end.
+- `start` is the exact offset of the entry's first match in the **raw decoded body**, in the same grapheme-count coordinates `read text` already uses for `start`/`contentLength`/`returnedChars` — so `read text <id> --start <start-N> --max-chars M` drills straight in. **Invariant:** every returned range lies on `Character` (grapheme) boundaries and `start == body.distance(from: body.startIndex, to: range.lowerBound)`; the matcher must not surface sub-Character indices from any semantic mode. The integration test (§9) enforces the contract end to end, including combining marks and emoji.
 - **Merge rule:** each match gets a window of ≈`contextChars/2` per side (clamped to the body); overlapping/adjacent windows merge into one entry whose `start` is the cluster's first match offset and `matchCount` the cluster's matches; the snippet spans the merged window, whitespace-collapsed for display and ellipsized at trimmed-to-whitespace edges. Entries ascend by `start`.
-- `maxMatches` caps **entries** (clusters); `totalMatches` counts raw matches pre-merge; `truncated` ⇔ entries were dropped by the cap.
+- **Counts:** `totalMatches` = raw (pre-merge) matches; `totalEntries` = merged clusters **before** the `maxMatches` cut; `maxMatches` caps returned entries; `truncated` ⇔ `totalEntries > matches.count`. Truncation is thus visible in counts on both paths (`totalEntries` is the web analog of PDF's `totalMatchingPages`).
 - `contentLength` mirrors `read text`'s field (total decoded body length) so the caller can window sensibly.
 
 ## 6. Matchers
@@ -128,11 +130,11 @@ Because matching and snippet extraction both operate on the normalized string, t
 
 Case-insensitive matching over the **raw decoded body** — the exact string `read text` serves. No normalization: the reader-extraction pipeline (Defuddle/Readability) already emits clean text, and skipping it is what makes offsets exact and free. `^`/`$` anchor the whole body; `\n` is matchable (the body is raw). HTML-format bodies (`contentFormat:"html"`, the rare case) are grepped as-is — matches may land in markup; offsets stay `read text`-consistent, which beats tag-stripping that would desynchronize the two tools. Documented in the tool description.
 
-**Regex engine (both paths):** Swift native `Regex` (Swift 6, Linux-capable), matching and slicing on `String.Index` — never integer/UTF-16 offsets (multi-byte correctness). Guard **zero-length matches** (`^`, `\b`, greedy-optional patterns): advance at least one grapheme after an empty match; a pattern that matches empty everywhere is a no-op, not a match-per-position.
+**Regex engine (both paths):** Swift native `Regex` (Swift 6, Linux-capable), matching and slicing on `String.Index` — never integer/UTF-16 offsets (multi-byte correctness). Occurrence and zero-width semantics are pinned in §5 (non-overlapping leftmost-first; zero-width matches discarded).
 
 ### Placement (refines the June draft's ambiguity)
 
-The normalizer + literal/regex matcher + snippet-windowing live in **RubienCore** (new `Sources/RubienCore/Services/BodyTextMatcher.swift` or similar), because pure-logic unit tests must run on Linux CI and `RubienPDFKitTests` is Mac-only (poppler test-bundle linking hang). `PDFExtractor.search(...)` (RubienPDFKit) does per-page extraction + section mapping and calls the shared matcher; the CLI `Grep` subcommand does probe → route → matcher → envelope, with the web path calling the matcher directly on the decoded body.
+The normalizer + literal/regex matcher + snippet-windowing live in **RubienCore** (new `Sources/RubienCore/Services/BodyTextMatcher.swift` or similar), because pure-logic unit tests must run on Linux CI and `RubienPDFKitTests` is Mac-only (poppler test-bundle linking hang). Dependency direction verified against `Package.swift`: `RubienPDFKit` already depends on `RubienCore` (and `PDFExtractor.swift` already imports it), so `PDFExtractor.search` calling the shared matcher introduces no cycle. (Note: CLAUDE.md's architecture blurb states the dependency backwards; fixed alongside this spec.) `PDFExtractor.search(...)` (RubienPDFKit) does per-page extraction + section mapping and calls the shared matcher; the CLI `Grep` subcommand does probe → route → matcher → envelope, with the web path calling the matcher directly on the decoded body.
 
 ## 7. Error handling
 
@@ -145,6 +147,7 @@ The normalizer + literal/regex matcher + snippet-windowing live in **RubienCore*
 | Explicit `source` contradicts a kind-scoped param | error incl. requested source + `available` (post-probe, `read text` pattern) |
 | Empty / whitespace-only query | validation error |
 | Invalid regex (`--regex`) | `invalid-regex` error |
+| PDF extraction failure post-probe (encrypted / cannot-open / invalid or out-of-range `--pages`) | pass through the existing structured `PDFExtractor.ExtractError` envelope via `emitPDFExtractError`, exactly as `read text` does — no new error shapes |
 | Scanned PDF / no text layer | **success**: `hasTextLayer:false`, `pages:[]`, `totalMatches:0` — description tells the agent to fall back to `rubien_pdf_page_image` |
 | Text present, term absent | **success**: empty hits, `totalMatches:0` (both sources) |
 | PDF without outline | **success**: `sectionPath:[]` per hit (grep never needs the outline; unlike `read text --section`'s `no-outline` error, which is a selection failure) |
@@ -156,9 +159,9 @@ New CLI subcommand the new server tool depends on ⇒ `BUILD.txt` 20 → **21**,
 
 ## 9. Testing
 
-- **BodyTextMatcher unit tests (RubienCoreTests — run on Linux CI):** NFKC ligature fold; soft-hyphen strip; hyphenation join incl. the documented `non-\nlinear` false-join and `exam- ple` miss; whitespace collapse; zero-length-regex guard; regex-`ﬁ`-doesn't-match-`fi`; case-insensitivity both paths; web-path exactness — offsets in grapheme coordinates (multi-byte/emoji fixture), window merge/adjacency, `maxMatches` entry cap + `totalMatches` pre-merge counting, snippet trim/ellipsis.
-- **CLI contract tests (RubienCLITests, ReadCommandTests patterns + seeding helpers):** routing matrix (pdf-only / web-only / both + PDF-wins + `--source web` flip / param-implied / mixed-family error / contradiction error / neither / missing ref); web happy path with seeded body asserting exact `start` values; **the coordinate integration test**: grep a seeded web body, feed the returned `start` into `read text --start`, assert the window contains the match; bounds validation for all four capped params; empty-query and invalid-regex errors.
-- **Mac-gated PDF acceptance (`#if canImport(PDFKit)`):** fixture-driven — page numbers, `matchCount`, `totalMatchingPages`, `truncated` (force with `--max-pages 1`), `--pages` scoping, `--regex`, no-match-with-text-layer. `sectionPath` assertions need an outlined fixture; `linear-3pages-text.pdf` has no outline, so either add a small outlined fixture or assert `sectionPath == []` on the existing one and cover section mapping in RubienPDFKitTests' existing outline coverage (decide in the plan).
+- **BodyTextMatcher unit tests (RubienCoreTests — run on Linux CI):** NFKC ligature fold; soft-hyphen strip; hyphenation join incl. the documented `non-\nlinear` false-join and `exam- ple` miss; whitespace collapse; non-overlapping leftmost-first occurrence counting (`"aa"` in `"aaa"` = 1); zero-width discard for `^`, `$`, `\b`, and an optional-empty pattern, each independently; regex-`ﬁ`-doesn't-match-`fi`; case-insensitivity both paths; web-path exactness — grapheme-boundary offsets with multi-byte, emoji, **and decomposed combining-mark** fixtures asserting `start == body.distance(from:to:)`, window merge/adjacency, `maxMatches` entry cap + `totalMatches`/`totalEntries` counting + `truncated`, snippet trim/ellipsis, per-page `snippetsTruncated`.
+- **CLI contract tests (RubienCLITests, ReadCommandTests patterns + seeding helpers):** routing matrix (pdf-only / web-only / both + PDF-wins + `--source web` flip / param-implied / mixed-family error / contradiction error / neither / missing ref); web happy path with seeded body asserting exact `start` values; **the coordinate integration test**: grep a seeded web body, feed the returned `start` into `read text --start`, assert the window contains the match — run twice, once on a markdown body and once on a seeded **HTML-format body with the match inside markup**, so the raw-HTML offset compatibility is pinned too; bounds validation for all four capped params; empty-query and invalid-regex errors.
+- **Mac-gated PDF acceptance (`#if canImport(PDFKit)`):** fixture-driven — page numbers, `matchCount`, `totalMatchingPages`, `truncated` (force with `--max-pages 1`), `--pages` scoping incl. an **out-of-range/invalid range → ExtractError pass-through** case, `--regex`, no-match-with-text-layer, and a **scanned/no-text-layer fixture → success with `hasTextLayer:false`, empty pages**. `sectionPath` assertions need an outlined fixture; `linear-3pages-text.pdf` has no outline, so either add a small outlined fixture or assert `sectionPath == []` on the existing one at the grep boundary and cover section mapping in RubienPDFKitTests' existing outline coverage (decide in the plan).
 - **MCP layers:** `MCPServerTests` (catalog entry, required args, argv construction incl. both param families, mutual-exclusion pre-checks mirroring Node) + vitest (registration, zod mirrors for both envelopes in `schemas.ts` + `schemas.test.ts` pinning, e2e tool-list).
 - **Linux backend acceptance:** via `scripts/run-linux-parity-tests.sh`, same DTO shape, best-effort comparable results (looser than byte-equality).
 

@@ -57,8 +57,8 @@ It's an SPM bug around stale state, not something you broke.
 
 Five Swift targets in `Package.swift`:
 
-- **`RubienPDFKit`** (library) — cross-platform PDF facade with Darwin (PDFKit) and Linux (poppler-glib) backends. Hosts `PDFExtractor`, `PDFService`, `ZoteroFolderImporter`. The Mac app's reader still uses PDFKit directly; the facade is for the headless extract/render path. Read `Docs/Linux-PDF-Backend.md` before touching `Sources/RubienPDFKit/Linux/`.
-- **`RubienCore`** (library) — everything usable without AppKit: GRDB models, migrations, metadata resolvers, BibTeX/RIS importers, citation engines. Depends on `RubienPDFKit`. Only target the CLI/tests depend on directly.
+- **`RubienPDFKit`** (library) — cross-platform PDF facade with Darwin (PDFKit) and Linux (poppler-glib) backends. Hosts `PDFExtractor`, `PDFService`, `ZoteroFolderImporter`. Depends on `RubienCore`. The Mac app's reader still uses PDFKit directly; the facade is for the headless extract/render path. Read `Docs/Linux-PDF-Backend.md` before touching `Sources/RubienPDFKit/Linux/`.
+- **`RubienCore`** (library) — everything usable without AppKit: GRDB models, migrations, metadata resolvers, BibTeX/RIS importers, citation engines. Depends on no other Rubien target (it is the root library; `RubienPDFKit` depends on *it*, not vice versa).
 - **`RubienSync`** (library, Mac-only) — CloudKit mapping + `CKSyncEngine`. CLI does not link it.
 - **`Rubien`** (app executable, Mac-only) — SwiftUI views, readers.
 - **`RubienCLI`** (executable, `rubien-cli`) — 18 subcommands on Mac, 17 on Linux (no `sync`).
