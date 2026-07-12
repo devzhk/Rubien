@@ -552,6 +552,10 @@ character-boundary truncation; `start` past end returns `content: ""`):
   "returnedChars": 50000, "truncated": true, "annotationCount": 3 }
 ```
 
+When `--section` is used, `selection` echoes `mode: "section"` plus
+`requested` (the substrings you passed), `matchedSections`, and `unmatched`
+so you can tell which titles resolved.
+
 Errors: unknown reference; neither source readable (message names the PDF
 state: not attached / not materialized on this device / file missing on
 disk); a requested or param-implied source that is unavailable; mixed
@@ -564,7 +568,7 @@ One JSON array, PDF and web-clip annotations merged; each item carries
 `source: "pdf" | "web"`. PDF items add `pageIndex` and `selectedText`; web
 items add the W3C TextQuoteSelector triple (`anchorText`, `prefixText`,
 `suffixText`) that locates the highlight inside the `read text` web body.
-All items carry `type`, `color`, `noteText`, `dateCreated`, `dateModified`.
+All items carry `id`, `type`, `color`, `noteText`, `dateCreated`, `dateModified`.
 Ordered PDF-first by page, then web by creation date. Missing reference or
 no annotations → `[]` (exit 0, not an error). `--source pdf|web` filters.
 
