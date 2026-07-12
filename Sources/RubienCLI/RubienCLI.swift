@@ -29,6 +29,7 @@ struct RubienCLI: AsyncParsableCommand {
             Cite.self,
             Import.self,
             Read.self,
+            Grep.self,
             Properties.self,
             Styles.self,
             Version.self,
@@ -2482,6 +2483,202 @@ struct ReadAnnotations: ParsableCommand {
             }
         }
         printJSON(items)
+    }
+}
+
+// MARK: - grep (kind-agnostic body-text search)
+
+struct GrepPdfOutput: Encodable {
+    let id: Int64
+    let source: String
+    let available: [String]
+    let query: String
+    let isRegex: Bool
+    let pageCount: Int
+    let hasTextLayer: Bool
+    let totalMatches: Int
+    let totalMatchingPages: Int
+    let truncated: Bool
+    let pages: [PDFExtractor.PageSearchHit]
+}
+
+struct GrepWebMatch: Encodable {
+    let start: Int
+    let matchCount: Int
+    let snippet: String
+}
+
+struct GrepWebOutput: Encodable {
+    let id: Int64
+    let source: String
+    let available: [String]
+    let query: String
+    let isRegex: Bool
+    let contentLength: Int
+    let totalMatches: Int
+    let totalEntries: Int
+    let truncated: Bool
+    let matches: [GrepWebMatch]
+}
+
+struct Grep: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "grep",
+        abstract: "Find where a phrase or regex occurs in a reference's body text (PDF pages or web offsets)"
+    )
+
+    @Argument(help: "Reference ID")
+    var id: Int64
+
+    @Argument(help: "Literal phrase (default) or regex (--regex). Case-insensitive.")
+    var query: String
+
+    @Flag(name: .customLong("regex"), help: "Treat the query as a regular expression")
+    var isRegex: Bool = false
+
+    @Option(name: .customLong("source"),
+            help: "Force a source: pdf or web (default: pdf-scoped flags imply pdf, --max-matches implies web, else PDF wins)")
+    var source: ReadSource?
+
+    @Option(name: .customLong("context-chars"),
+            help: "Snippet window width (default 160)")
+    var contextChars: Int?
+
+    @Option(name: .customLong("pages"),
+            help: "PDF page range scope, e.g. 1-3,8-10. Implies a PDF source.")
+    var pages: String?
+
+    @Option(name: .customLong("max-pages"),
+            help: "Cap returned PDF page-hits (default 30). Implies a PDF source.")
+    var maxPages: Int?
+
+    @Option(name: .customLong("snippets-per-page"),
+            help: "Cap snippets per PDF page (default 3). Implies a PDF source.")
+    var snippetsPerPage: Int?
+
+    @Option(name: .customLong("max-matches"),
+            help: "Cap returned web match entries (default 20). Implies a web source.")
+    var maxMatches: Int?
+
+    func run() throws {
+        func requireBounds(_ value: Int?, _ flag: String, _ range: ClosedRange<Int>) throws {
+            if let value, !range.contains(value) {
+                printJSONError("\(flag) must be between \(range.lowerBound) and \(range.upperBound)")
+                throw ExitCode.failure
+            }
+        }
+        try requireBounds(contextChars, "--context-chars", 1...2_000)
+        try requireBounds(maxPages, "--max-pages", 1...200)
+        try requireBounds(snippetsPerPage, "--snippets-per-page", 1...20)
+        try requireBounds(maxMatches, "--max-matches", 1...200)
+
+        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            printJSONError("query must not be empty")
+            throw ExitCode.failure
+        }
+        // Validate a regex up front so the error beats routing (spec §7).
+        if isRegex {
+            do { _ = try BodyTextQuery.compile(query, isRegex: true) }
+            catch {
+                printJSONError("invalid-regex: \(error)")
+                throw ExitCode.failure
+            }
+        }
+
+        let pdfParamsGiven = pages != nil || maxPages != nil || snippetsPerPage != nil
+        let webParamsGiven = maxMatches != nil
+        if pdfParamsGiven && webParamsGiven {
+            printJSONError("--pages/--max-pages/--snippets-per-page and --max-matches are mutually exclusive (PDF vs web scoping)")
+            throw ExitCode.failure
+        }
+
+        guard let ref = try AppDatabase.shared.fetchReferences(ids: [id]).first else {
+            printJSONError("Reference \(id) not found")
+            throw ExitCode.failure
+        }
+        let avail = try resolveSources(for: ref)
+        let availJSON = "[" + avail.available.map { "\"\($0)\"" }.joined(separator: ",") + "]"
+
+        if let source {
+            if source == .web && pdfParamsGiven {
+                printJSONError("--pages/--max-pages/--snippets-per-page require a PDF source (requested source: web); available: \(availJSON)")
+                throw ExitCode.failure
+            }
+            if source == .pdf && webParamsGiven {
+                printJSONError("--max-matches requires a web source (requested source: pdf); available: \(availJSON)")
+                throw ExitCode.failure
+            }
+        }
+
+        let resolved: ReadSource
+        if let source {
+            resolved = source
+        } else if pdfParamsGiven {
+            resolved = .pdf
+        } else if webParamsGiven {
+            resolved = .web
+        } else if avail.pdfState == .available {
+            resolved = .pdf
+        } else if avail.web != nil {
+            resolved = .web
+        } else {
+            printJSONError("Reference \(id) has no readable content (pdf: \(pdfStateDescription(avail.pdfState)); web: none)")
+            throw ExitCode.failure
+        }
+
+        switch resolved {
+        case .pdf:
+            guard let url = avail.pdfURL else {
+                printJSONError("source \"pdf\" is not readable (pdf: \(pdfStateDescription(avail.pdfState))); available: \(availJSON)")
+                throw ExitCode.failure
+            }
+            do {
+                let result = try PDFExtractor.search(
+                    at: url, query: query, isRegex: isRegex,
+                    pagesString: pages,
+                    maxPages: maxPages ?? 30,
+                    snippetsPerPage: snippetsPerPage ?? 3,
+                    contextChars: contextChars ?? 160
+                )
+                printJSON(GrepPdfOutput(
+                    id: id, source: "pdf", available: avail.available,
+                    query: query, isRegex: isRegex,
+                    pageCount: result.pageCount, hasTextLayer: result.hasTextLayer,
+                    totalMatches: result.totalMatches,
+                    totalMatchingPages: result.totalMatchingPages,
+                    truncated: result.truncated, pages: result.pages
+                ))
+            } catch let e as PDFExtractor.ExtractError {
+                emitPDFExtractError(e)
+                throw ExitCode.failure
+            }
+        case .web:
+            guard let decoded = avail.web else {
+                printJSONError("source \"web\" is not readable (reference \(id) has no web content); available: \(availJSON)")
+                throw ExitCode.failure
+            }
+            let body = decoded.body
+            let compiled: BodyTextQuery
+            do { compiled = try BodyTextQuery.compile(query, isRegex: isRegex) }
+            catch {
+                printJSONError("invalid-regex: \(error)")
+                throw ExitCode.failure
+            }
+            let ranges = BodyTextMatcher.matches(in: body, query: compiled)
+            let clusters = BodyTextMatcher.clusters(in: body, ranges: ranges,
+                                                    contextChars: contextChars ?? 160)
+            let cap = maxMatches ?? 20
+            let kept = Array(clusters.prefix(cap))
+            printJSON(GrepWebOutput(
+                id: id, source: "web", available: avail.available,
+                query: query, isRegex: isRegex,
+                contentLength: body.count,
+                totalMatches: ranges.count,
+                totalEntries: clusters.count,
+                truncated: clusters.count > kept.count,
+                matches: kept.map { GrepWebMatch(start: $0.start, matchCount: $0.matchCount, snippet: $0.snippet) }
+            ))
+        }
     }
 }
 
