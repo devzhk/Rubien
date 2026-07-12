@@ -7,24 +7,10 @@ import SwiftUI
 /// **Debug ▸ Assistant Sidebar Harness** (`swift run Rubien`). Also exercises the exact
 /// `@StateObject` init-wiring the web reader uses (renderer shared as the session's sink).
 struct ChatSidebarHarnessView: View {
-    private enum HarnessAppearance: String, CaseIterable, Identifiable {
-        case system = "System"
-        case light = "Light"
-        case dark = "Dark"
-
-        var id: Self { self }
-        var colorScheme: ColorScheme? {
-            switch self {
-            case .system: nil
-            case .light: .light
-            case .dark: .dark
-            }
-        }
-    }
-
     @StateObject private var renderer: ChatTranscriptController
     @StateObject private var session: ChatSessionController
-    @State private var appearance: HarnessAppearance = .system
+    @State private var appearance: ColorSchemePreference = .system
+    @State private var didStageAttachmentPreviews = false
 
     init() {
         let renderer = ChatTranscriptController()
@@ -41,22 +27,13 @@ struct ChatSidebarHarnessView: View {
             workspaceURL: workspace)
         _renderer = StateObject(wrappedValue: renderer)
         _session = StateObject(wrappedValue: session)
-
-        // Keep a ready text chip and an image thumbnail in the debug composer so
-        // light/dark layout can be inspected without signing in to an agent CLI.
-        let noteURL = workspace.appendingPathComponent("Harness Context.md")
-        try? Data("# Harness context\nA staged Markdown attachment.".utf8).write(to: noteURL)
-        session.stageAttachments([noteURL])
-        if let imageData = Data(base64Encoded: Self.previewPNGBase64) {
-            session.stagePastedImage(imageData, suggestedName: "Architecture Preview.png")
-        }
     }
 
     var body: some View {
         VStack(spacing: 0) {
             Picker("Appearance", selection: $appearance) {
-                ForEach(HarnessAppearance.allCases) { appearance in
-                    Text(appearance.rawValue).tag(appearance)
+                ForEach(ColorSchemePreference.allCases, id: \.self) { appearance in
+                    Text(appearance.localizedTitle).tag(appearance)
                 }
             }
             .pickerStyle(.segmented)
@@ -68,14 +45,49 @@ struct ChatSidebarHarnessView: View {
                 NSApp.keyWindow?.performClose(nil)
             })
         }
-        .preferredColorScheme(appearance.colorScheme)
+        .background(HarnessWindowAppearance(appearance: appearance.nsAppearance))
         .frame(minWidth: 340, minHeight: 520)
+        .task {
+            guard !didStageAttachmentPreviews else { return }
+            didStageAttachmentPreviews = true
+            stageAttachmentPreviews()
+        }
+    }
+
+    /// Stage after SwiftUI installs the StateObject. Starting the controller worker
+    /// from `init` can precede view installation and leave the debug-only previews
+    /// unobservable even though the harness window opens successfully.
+    private func stageAttachmentPreviews() {
+        let workspace = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Rubien-Assistant-Sidebar-Harness", isDirectory: true)
+        let noteURL = workspace.appendingPathComponent("Harness Context.md")
+        try? Data("# Harness context\nA staged Markdown attachment.".utf8).write(to: noteURL)
+        session.stageAttachments([noteURL])
+        if let imageData = Data(base64Encoded: Self.previewPNGBase64) {
+            session.stagePastedImage(imageData, suggestedName: "Architecture Preview.png")
+        }
     }
 
     /// A tiny valid PNG fixture; the production normalizer expands it into its
     /// regular bounded thumbnail path, exercising the same preview code as a paste.
     private static let previewPNGBase64 =
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+}
+
+/// Apply the harness override at the same AppKit presentation boundary Rubien uses
+/// for its real windows. In particular, assigning `nil` reliably restores inherited
+/// System appearance after a light/dark override; `.preferredColorScheme(nil)` can
+/// leave an already-hosted independent window on its previous explicit scheme.
+private struct HarnessWindowAppearance: NSViewRepresentable {
+    let appearance: NSAppearance?
+
+    func makeNSView(context: Context) -> NSView { NSView(frame: .zero) }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            nsView.window?.appearance = appearance
+        }
+    }
 }
 
 /// Streams a canned answer (session id → tool chip → deltas → commit) so the sidebar's
