@@ -6,6 +6,9 @@ import {
   CitationDocxCCOutput,
   DatabaseViewDTO,
   StyleDTO,
+  ReadTextPdfOutput,
+  ReadTextWebOutput,
+  ReadAnnotationItem,
 } from "../src/schemas.js";
 
 /**
@@ -177,5 +180,159 @@ describe("zod schemas", () => {
       citationKind: "in-text",
     };
     expect(() => StyleDTO.parse(s)).not.toThrow();
+  });
+
+  it("accepts ReadTextPdfOutput with a page-mode selection", () => {
+    // Mirrors `read text --pages 1-3` on a PDF source. SelectionEcho's nil
+    // optionals (matchedSections/unmatched) are absent, per the header comment.
+    const out = {
+      id: 7,
+      source: "pdf",
+      available: ["pdf", "web"],
+      pageCount: 12,
+      selection: { mode: "page", pages: "1-3", requested: ["1-3"] },
+      pages: [{ index: 1, text: "Page one body", sectionPath: ["Introduction"] }],
+      truncated: false,
+      hasTextLayer: true,
+    };
+    expect(() => ReadTextPdfOutput.parse(out)).not.toThrow();
+  });
+
+  it("rejects ReadTextPdfOutput missing `available`", () => {
+    // `available` is always emitted (the probe result); a drift that dropped it
+    // would silently hide which sources are readable.
+    const missingAvailable = {
+      id: 7,
+      source: "pdf",
+      pageCount: 12,
+      selection: { mode: "all" },
+      pages: [],
+      truncated: false,
+      hasTextLayer: true,
+    };
+    expect(() => ReadTextPdfOutput.parse(missingAvailable)).toThrow();
+  });
+
+  it("rejects ReadTextPdfOutput with source `web`", () => {
+    // The pdf mirror pins its discriminant literal — a web payload must fail it.
+    const wrongSource = {
+      id: 7,
+      source: "web",
+      available: ["pdf"],
+      pageCount: 12,
+      selection: { mode: "all" },
+      pages: [],
+      truncated: false,
+      hasTextLayer: true,
+    };
+    expect(() => ReadTextPdfOutput.parse(wrongSource)).toThrow();
+  });
+
+  it("accepts ReadTextWebOutput with url/siteName present", () => {
+    const out = {
+      id: 9,
+      source: "web",
+      available: ["web"],
+      url: "https://example.com/post",
+      siteName: "example.com",
+      contentFormat: "markdown",
+      content: "# Title\n\nBody",
+      contentLength: 13,
+      start: 0,
+      returnedChars: 13,
+      truncated: false,
+      annotationCount: 2,
+    };
+    expect(() => ReadTextWebOutput.parse(out)).not.toThrow();
+  });
+
+  it("accepts ReadTextWebOutput with url/siteName omitted", () => {
+    // Swift-Optional contract: a web clip with no url/siteName omits the keys.
+    const out = {
+      id: 9,
+      source: "web",
+      available: ["web"],
+      contentFormat: "html",
+      content: "<p>fragment</p>",
+      contentLength: 15,
+      start: 0,
+      returnedChars: 15,
+      truncated: false,
+      annotationCount: 0,
+    };
+    expect(() => ReadTextWebOutput.parse(out)).not.toThrow();
+  });
+
+  it("rejects ReadTextWebOutput with an out-of-enum contentFormat", () => {
+    const badFormat = {
+      id: 9,
+      source: "web",
+      available: ["web"],
+      contentFormat: "text", // <-- only markdown | html are valid
+      content: "body",
+      contentLength: 4,
+      start: 0,
+      returnedChars: 4,
+      truncated: false,
+      annotationCount: 0,
+    };
+    expect(() => ReadTextWebOutput.parse(badFormat)).toThrow();
+  });
+
+  it("accepts a pdf-source ReadAnnotationItem", () => {
+    // pdf items carry pageIndex + selectedText; web-only anchors are absent.
+    const item = {
+      source: "pdf",
+      id: 3,
+      type: "highlight",
+      color: "#FFFF00",
+      noteText: "important",
+      dateCreated: "2026-04-24T10:00:00.000Z",
+      dateModified: "2026-04-24T10:00:00.000Z",
+      pageIndex: 4,
+      selectedText: "the quoted passage",
+    };
+    expect(() => ReadAnnotationItem.parse(item)).not.toThrow();
+  });
+
+  it("accepts a web-source ReadAnnotationItem with a TextQuoteSelector", () => {
+    // web items carry prefix/anchor/suffix; noteText + pdf anchors are absent.
+    const item = {
+      source: "web",
+      id: 5,
+      type: "highlight",
+      color: "#00FF00",
+      dateCreated: "2026-04-24T10:00:00.000Z",
+      dateModified: "2026-04-24T10:00:00.000Z",
+      anchorText: "the highlighted string",
+      prefixText: "just ",
+      suffixText: " here",
+    };
+    expect(() => ReadAnnotationItem.parse(item)).not.toThrow();
+  });
+
+  it("rejects a ReadAnnotationItem with an out-of-enum source", () => {
+    const badSource = {
+      source: "epub", // <-- only pdf | web are valid
+      id: 5,
+      type: "highlight",
+      color: "#00FF00",
+      dateCreated: "2026-04-24T10:00:00.000Z",
+      dateModified: "2026-04-24T10:00:00.000Z",
+    };
+    expect(() => ReadAnnotationItem.parse(badSource)).toThrow();
+  });
+
+  it("rejects a ReadAnnotationItem missing dateModified", () => {
+    // Both date fields are non-optional Date in Swift — always emitted.
+    const missingDate = {
+      source: "pdf",
+      id: 3,
+      type: "underline",
+      color: "#FFFF00",
+      dateCreated: "2026-04-24T10:00:00.000Z",
+      pageIndex: 1,
+    };
+    expect(() => ReadAnnotationItem.parse(missingDate)).toThrow();
   });
 });

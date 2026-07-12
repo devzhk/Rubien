@@ -43,7 +43,7 @@ describe.skipIf(!existsSync(distIndex))("startup version guard", () => {
     const r = await runServer({ RUBIEN_CLI: join(fixtures, "stub-cli-old.sh") });
     expect(r.started).toBe(false);
     expect(r.exitCode).not.toBe(0);
-    expect(r.stderr).toContain("needs build >= 19");
+    expect(r.stderr).toContain("needs build >= 20");
   }, 10_000);
 
   it("refuses to start against a CLI with no version subcommand", async () => {
@@ -62,7 +62,7 @@ describe.skipIf(!existsSync(distIndex))("startup version guard", () => {
     );
     expect(r.started).toBe(false);
     expect(r.exitCode).not.toBe(0);
-    expect(r.stderr).toContain("needs build >= 19");
+    expect(r.stderr).toContain("needs build >= 20");
   }, 10_000);
 
   it("aborts the probe against a hanging CLI within ~6s (5s timeout → null path)", async () => {

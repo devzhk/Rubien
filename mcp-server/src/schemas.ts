@@ -152,14 +152,62 @@ export const DatabaseViewDTO = z.object({
 });
 export type DatabaseViewDTO = z.infer<typeof DatabaseViewDTO>;
 
-export const AnnotationDTO = z.object({
+// Unified read-tool output mirrors (RubienCLI `read text` / `read annotations`).
+// Superseded the permissive AnnotationDTO, which was retired alongside the
+// kind-specific rubien_web_* / rubien_annotations_list tools.
+export const ReadTextPdfOutput = z.object({
+  id: z.number().int(),
+  source: z.literal("pdf"),
+  available: z.array(z.enum(["pdf", "web"])),
+  pageCount: z.number().int(),
+  selection: z.object({
+    mode: z.string(),
+    pages: z.string().optional(),
+    requested: z.array(z.string()).optional(),
+    matchedSections: z.array(z.string()).optional(),
+    unmatched: z.array(z.string()).optional(),
+  }),
+  pages: z.array(z.object({
+    index: z.number().int(),
+    text: z.string(),
+    sectionPath: z.array(z.string()),
+  })),
+  truncated: z.boolean(),
+  hasTextLayer: z.boolean(),
+});
+export type ReadTextPdfOutput = z.infer<typeof ReadTextPdfOutput>;
+
+export const ReadTextWebOutput = z.object({
+  id: z.number().int(),
+  source: z.literal("web"),
+  available: z.array(z.enum(["pdf", "web"])),
+  url: z.string().optional(),
+  siteName: z.string().optional(),
+  contentFormat: z.enum(["markdown", "html"]),
+  content: z.string(),
+  contentLength: z.number().int(),
+  start: z.number().int(),
+  returnedChars: z.number().int(),
+  truncated: z.boolean(),
+  annotationCount: z.number().int(),
+});
+export type ReadTextWebOutput = z.infer<typeof ReadTextWebOutput>;
+
+export const ReadAnnotationItem = z.object({
+  source: z.enum(["pdf", "web"]),
   id: z.number().int(),
   type: z.string(),
-  color: z.string().optional(),
+  color: z.string(),
+  noteText: z.string().optional(),
+  dateCreated: isoDateString,
+  dateModified: isoDateString,
   pageIndex: z.number().int().optional(),
   selectedText: z.string().optional(),
-  noteText: z.string().optional(),
+  anchorText: z.string().optional(),
+  prefixText: z.string().optional(),
+  suffixText: z.string().optional(),
 });
+export type ReadAnnotationItem = z.infer<typeof ReadAnnotationItem>;
 
 export const StyleDTO = z.object({
   id: z.string(),

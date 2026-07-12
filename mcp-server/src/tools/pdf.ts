@@ -19,73 +19,13 @@ export function registerPdfTools(server: McpServer): void {
     {
       title: "Probe PDF metadata + outline",
       description:
-        "Return page count, hasTextLayer (sampled across first/middle/last page), file size, isEncrypted, documentTitle, and the flattened outline `sections` (or null when the PDF has no outline). Each section carries title, level (1=top), startPage, and endPage; parent ranges span their descendants. Call this before `rubien_pdf_text` so you know whether to use sections or page ranges.",
+        "Return page count, hasTextLayer (sampled across first/middle/last page), file size, isEncrypted, documentTitle, and the flattened outline `sections` (or null when the PDF has no outline). Each section carries title, level (1=top), startPage, and endPage; parent ranges span their descendants. Call this before `rubien_read_text` when you plan to select by `sections` or page ranges.",
       inputSchema: {
         id: z.number().int().describe("Reference ID"),
       },
       annotations: { readOnlyHint: true },
     },
     async ({ id }) => runCliAsTool(["pdf", "info", String(id)]),
-  );
-
-  server.registerTool(
-    "rubien_pdf_text",
-    {
-      title: "Extract text from a PDF",
-      description:
-        "Extract page-keyed text from a reference's attached PDF. Two mutually-exclusive selection modes: `pages` (e.g. '1-3' or '1-3,8-10') or `sections` (array of section title substrings; case-insensitive). When neither is provided the whole document is returned (subject to maxChars). Each returned page carries `text` and `sectionPath` (breadcrumb of containing sections). Errors with `no-outline` when `sections` is requested but the PDF has no outline — fall back to `pages` in that case.",
-      inputSchema: {
-        id: z.number().int().describe("Reference ID"),
-        pages: z
-          .string()
-          .optional()
-          .describe(
-            "Page range string, e.g. '1-3' or '1-3,8-10' or '12-'. Mutually exclusive with `sections`.",
-          ),
-        sections: z
-          .array(z.string().min(1))
-          .optional()
-          .describe(
-            "Section title substrings (case-insensitive, repeatable). Mutually exclusive with `pages`. Use after `rubien_pdf_info` confirms `sections != null`.",
-          ),
-        maxChars: z
-          .number()
-          .int()
-          .positive()
-          .max(500_000)
-          .optional()
-          .describe(
-            "Cap total returned characters (default 50000). Truncation is at page boundary.",
-          ),
-      },
-      annotations: { readOnlyHint: true },
-    },
-    async (args) => {
-      if (args.pages && args.sections && args.sections.length > 0) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({
-                error: "pages-and-sections-mutually-exclusive",
-              }),
-            },
-          ],
-          isError: true,
-        };
-      }
-      const cliArgs: string[] = ["pdf", "text", String(args.id)];
-      if (args.pages) cliArgs.push("--pages", args.pages);
-      if (args.sections) {
-        for (const s of args.sections) cliArgs.push("--section", s);
-      }
-      cliArgs.push(
-        ...flagsFromOptions({
-          "--max-chars": args.maxChars,
-        }),
-      );
-      return runCliAsTool(cliArgs);
-    },
   );
 
   server.registerTool(
