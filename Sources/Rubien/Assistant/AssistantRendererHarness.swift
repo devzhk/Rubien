@@ -77,7 +77,7 @@ struct AssistantRendererHarnessView: View {
     /// 3. Tool chips in each status.
     private func runToolChips() {
         streamTask?.cancel()
-        controller.addToolChip(name: "rubien_pdf_text", detail: "pages 1–3", status: .started)
+        controller.addToolChip(name: "rubien_read_text", detail: "pages 1–3", status: .started)
         controller.addToolChip(name: "rubien_search", detail: "\"attention is all you need\"", status: .completed)
         controller.addToolChip(name: "Write", detail: "notes.md — blocked by sandbox", status: .denied)
     }
@@ -131,7 +131,7 @@ struct AssistantRendererHarnessView: View {
         ChatRenderMessage(
             role: .tool,
             body: ChatTranscriptJS.encodeArg(
-                ToolChipPayload(name: "rubien_pdf_text", detail: "pages 3–5", status: .completed)
+                ToolChipPayload(name: "rubien_read_text", detail: "pages 3–5", status: .completed)
             ),
             seq: 2
         ),
