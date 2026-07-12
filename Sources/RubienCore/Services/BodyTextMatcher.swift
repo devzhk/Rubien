@@ -118,16 +118,20 @@ public enum BodyTextMatcher {
         guard !ranges.isEmpty else { return [] }
         let half = max(1, contextChars / 2)
 
-        struct Window { var lo: String.Index; var hi: String.Index; var first: String.Index; var count: Int }
+        // `first`/`end` bound the cluster's matched span (first match's start,
+        // last match's end). Trimming may shave context OUTSIDE [first, end) but
+        // must never cut INTO a match.
+        struct Window { var lo: String.Index; var hi: String.Index; var first: String.Index; var end: String.Index; var count: Int }
         var windows: [Window] = []
         for r in ranges {
             let lo = text.index(r.lowerBound, offsetBy: -half, limitedBy: text.startIndex) ?? text.startIndex
             let hi = text.index(r.upperBound, offsetBy: half, limitedBy: text.endIndex) ?? text.endIndex
             if let last = windows.last, lo <= last.hi {
                 windows[windows.count - 1].hi = max(last.hi, hi)
+                windows[windows.count - 1].end = max(last.end, r.upperBound)
                 windows[windows.count - 1].count += 1
             } else {
-                windows.append(Window(lo: lo, hi: hi, first: r.lowerBound, count: r.isEmpty ? 0 : 1))
+                windows.append(Window(lo: lo, hi: hi, first: r.lowerBound, end: r.upperBound, count: r.isEmpty ? 0 : 1))
             }
         }
 
@@ -136,16 +140,19 @@ public enum BodyTextMatcher {
             var hi = w.hi
             let trimmedLeading = lo > text.startIndex
             let trimmedTrailing = hi < text.endIndex
-            // Trim to whitespace boundaries so words aren't cut — but never past
-            // the first match (leading) or the window's own lo (trailing).
+            // Trim context to whitespace boundaries so words aren't cut — but
+            // never into the matched span: leading stops at the first match's
+            // start (`w.first`), trailing at the last match's end (`w.end`).
+            // Guarding trailing on `w.end` (not `lo`) keeps a multi-word or
+            // whitespace-spanning match whole even when its trailing context is
+            // one unbroken token.
             if trimmedLeading {
                 while lo < w.first, !text[lo].isWhitespace { lo = text.index(after: lo) }
             }
             if trimmedTrailing {
-                while hi > lo, !text[text.index(before: hi)].isWhitespace {
+                while hi > w.end, !text[text.index(before: hi)].isWhitespace {
                     hi = text.index(before: hi)
                 }
-                if hi == lo { hi = w.hi }  // single unbroken token — keep the raw window
             }
             var body = String(text[lo..<hi])
             // Display-only whitespace collapse (offsets are already captured).

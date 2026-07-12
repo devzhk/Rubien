@@ -128,6 +128,29 @@ final class BodyTextMatcherTests: XCTestCase {
         XCTAssertTrue(c[0].snippet.contains("needle"))
     }
 
+    func testClusterPreservesMultiWordLiteralMatch() {
+        // Trailing context ("zzz…") is one unbroken token, so a naive trailing
+        // trim that only guards the window start would retreat into the match
+        // and drop "bar". The full match must survive.
+        let body = "aaaa foo barzzzzzzzzzzzz"
+        let ranges = BodyTextMatcher.matches(in: body, query: literal("foo bar"))
+        XCTAssertEqual(ranges.count, 1)
+        let c = BodyTextMatcher.clusters(in: body, ranges: ranges, contextChars: 12)
+        XCTAssertEqual(c.count, 1)
+        XCTAssertTrue(c[0].snippet.contains("foo bar"),
+                      "multi-word match must survive trimming; got: \(c[0].snippet)")
+    }
+
+    func testClusterPreservesRegexMatchSpanningWhitespace() throws {
+        let body = "xxxx alpha betayyyyyyyyyyyy"
+        let ranges = BodyTextMatcher.matches(in: body, query: try regex("alpha\\s+beta"))
+        XCTAssertEqual(ranges.count, 1)
+        let c = BodyTextMatcher.clusters(in: body, ranges: ranges, contextChars: 12)
+        XCTAssertEqual(c.count, 1)
+        XCTAssertTrue(c[0].snippet.contains("alpha beta"),
+                      "regex match spanning whitespace must survive trimming; got: \(c[0].snippet)")
+    }
+
     func testSnippetAtBodyEdgesHasNoEllipsis() {
         let body = "needle tail"
         let ranges = BodyTextMatcher.matches(in: body, query: literal("needle"))

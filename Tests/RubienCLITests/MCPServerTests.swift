@@ -157,7 +157,7 @@ final class MCPServerTests: XCTestCase {
         XCTAssertNotNil((result["capabilities"] as? [String: Any])?["tools"], "must advertise tools capability")
     }
 
-    func testToolsListAdvertisesTheSevenReadTools() throws {
+    func testToolsListAdvertisesTheEightReadTools() throws {
         try skipIfBinaryMissing()
         let responses = try runMCP([req(id: 1, method: "tools/list")])
         let result = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
@@ -372,7 +372,7 @@ final class MCPServerTests: XCTestCase {
 
     func testGrepTextRequiredArgs() throws {
         try skipIfBinaryMissing()
-        // `required(_:)` in testToolsListAdvertisesTheSevenReadTools is a LOCAL
+        // `required(_:)` in testToolsListAdvertisesTheEightReadTools is a LOCAL
         // function; do the lookup locally here.
         let responses = try runMCP([req(id: 1, method: "tools/list")])
         let tools = try XCTUnwrap(

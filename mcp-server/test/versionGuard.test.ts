@@ -7,7 +7,7 @@ describe("evaluateCliVersion", () => {
     expect(r.ok).toBe(true);
   });
 
-  it("rejects build 18 because it predates the unified read subcommands", () => {
+  it("rejects build 18 because it predates the grep subcommand (build 21 floor)", () => {
     const r = evaluateCliVersion({ version: "0.2.3", build: 18 }, MIN_CLI_BUILD);
     expect(r.ok).toBe(false);
     expect(r.message).toContain("build 18");
