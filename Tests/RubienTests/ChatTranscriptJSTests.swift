@@ -107,6 +107,32 @@ final class ChatTranscriptJSTests: XCTestCase {
         XCTAssertEqual(ChatTranscriptJS.loadTranscript([]), "window.RubienChat.loadTranscript([])")
     }
 
+    func testStructuredUserPayloadAndLegacyDecode() throws {
+        let attachment = ChatAttachmentPresentation(
+            id: UUID(),
+            displayName: "figure.png",
+            kind: .image,
+            byteCount: 123,
+            isAvailable: true,
+            thumbnailDataURL: "data:image/png;base64,AA=="
+        )
+        let payload = ChatUserMessagePayload(body: "Look", attachments: [attachment])
+        let arg = try extractArgument(
+            from: ChatTranscriptJS.addUserMessage(payload),
+            fn: "addUserMessage"
+        )
+        XCTAssertEqual(
+            try JSONDecoder().decode(ChatUserMessagePayload.self, from: Data(arg.utf8)),
+            payload
+        )
+
+        let legacy = #"{"role":"user","body":"old","seq":0}"#
+        XCTAssertEqual(
+            try JSONDecoder().decode(ChatRenderMessage.self, from: Data(legacy.utf8)).attachments,
+            []
+        )
+    }
+
     // MARK: - Model Codable round-trips
 
     func testChatRenderMessageRoundTrip() throws {

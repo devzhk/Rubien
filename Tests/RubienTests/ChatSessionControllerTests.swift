@@ -1686,6 +1686,7 @@ final class SpyTranscriptSink: ChatTranscriptSink {
         case reset
         case loadTranscript([ChatRenderMessage])
         case addUserMessage(String)
+        case addUserPayload(ChatUserMessagePayload)
         case appendDelta(String)
         case commitAssistantMessage(String)
         case addToolChip(String, String?, ToolChipStatus)
@@ -1698,6 +1699,7 @@ final class SpyTranscriptSink: ChatTranscriptSink {
     func reset() { calls.append(.reset) }
     func loadTranscript(_ messages: [ChatRenderMessage]) { calls.append(.loadTranscript(messages)) }
     func addUserMessage(_ markdown: String) { calls.append(.addUserMessage(markdown)) }
+    func addUserMessage(_ payload: ChatUserMessagePayload) { calls.append(.addUserPayload(payload)) }
     func appendDelta(_ text: String) { calls.append(.appendDelta(text)) }
     func commitAssistantMessage(_ markdown: String) { calls.append(.commitAssistantMessage(markdown)) }
     func addToolChip(name: String, detail: String?, status: ToolChipStatus) {

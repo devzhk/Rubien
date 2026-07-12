@@ -13,6 +13,7 @@ protocol ChatTranscriptSink: AnyObject {
     func reset()
     func loadTranscript(_ messages: [ChatRenderMessage])
     func addUserMessage(_ markdown: String)
+    func addUserMessage(_ payload: ChatUserMessagePayload)
     // Deliberately NO beginAssistantMessage: the renderer opens the bubble
     // lazily on the first delta/commit, so rows land in true chronological
     // order (an eagerly pre-opened bubble rendered the answer ABOVE the tool

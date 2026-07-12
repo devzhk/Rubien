@@ -25,7 +25,12 @@ enum ChatTranscriptJS {
         jsCall("loadTranscript", [encodeArg(messages)])
     }
 
-    /// `addUserMessage(markdown)`.
+    /// `addUserMessage(payload)` — structured body plus attachment presentation.
+    static func addUserMessage(_ payload: ChatUserMessagePayload) -> String {
+        jsCall("addUserMessage", [encodeArg(payload)])
+    }
+
+    /// `addUserMessage(markdown)` — retained as the exact legacy string call.
     static func addUserMessage(_ markdown: String) -> String {
         jsCall("addUserMessage", [encodeArg(markdown)])
     }
