@@ -100,7 +100,7 @@ The old shapes are reused verbatim per kind, plus the two new routing fields. PD
 
 ```json
 { "id": 42, "source": "pdf", "available": ["pdf", "web"],
-  "pageCount": 12, "selection": { "mode": "pages", "pages": "1-3" },
+  "pageCount": 12, "selection": { "mode": "page", "pages": "1-3" },
   "pages": [ { "index": 1, "text": "…", "sectionPath": ["1 Introduction"] } ],
   "truncated": false, "hasTextLayer": true }
 ```

@@ -158,6 +158,7 @@ let package = Package(
             name: "RubienCLITests",
             dependencies: [
                 .target(name: "RubienSync", condition: .when(platforms: [.macOS])),
+                .product(name: "GRDB", package: "GRDB.swift"),
             ],
             path: "Tests/RubienCLITests"
         ),

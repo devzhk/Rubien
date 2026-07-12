@@ -41,9 +41,9 @@ private final class ScriptedAgentProvider: AgentProvider, @unchecked Sendable {
         AsyncThrowingStream { continuation in
             let task = Task {
                 continuation.yield(.sessionStarted(sessionID: "demo-session"))
-                continuation.yield(.toolUseStarted(name: "rubien_pdf_text", detail: "pages 1–3"))
+                continuation.yield(.toolUseStarted(name: "rubien_read_text", detail: "pages 1–3"))
                 try? await Task.sleep(nanoseconds: 250_000_000)
-                continuation.yield(.toolUseCompleted(name: "rubien_pdf_text"))
+                continuation.yield(.toolUseCompleted(name: "rubien_read_text"))
                 let answer = """
                 Here is a streamed answer with inline math \\(E=mc^2\\) and a display:
 

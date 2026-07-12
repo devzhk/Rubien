@@ -51,18 +51,16 @@ Linux needs system deps first — see [Linux CLI](../README.md#linux-cli). For d
 | `import` | Import from a BibTeX, RIS, Markdown, or PDF file; a direct PDF/Markdown URL; or a Zotero / Markdown folder |
 | `export` | Export references as JSON, BibTeX, or RIS |
 | `properties` | List or manage property definitions, options, and per-reference values (covers tags via the built-in `Tags` property) |
-| `annotations` | List PDF annotations for a reference |
+| `read text` | Read a reference's body text — its attached PDF or clipped web page — routed by what it has |
+| `read annotations` | List a reference's annotations, PDF and web merged (each item source-tagged) |
 | `styles` | List available citation styles |
 | `version` | Print the CLI marketing version and monotonic build number as JSON (`{"build":8,"version":"0.1.7"}`); the MCP server's version guard requires `build >= MIN_CLI_BUILD` |
 | `self-update` | (Linux) Download the latest signed release and replace `rubien-cli` in place after verifying an ed25519 signature; `--check` reports `{current, latest, updateAvailable}` as JSON and changes nothing. On macOS it is a no-op (Rubien.app/Sparkle manages the bundled CLI). |
 | `views` | Manage database views |
 | `pdf info` | Probe PDF: page count, text-layer flag, and outline-derived sections |
-| `pdf text` | Extract text from a reference's PDF by page range or section title |
 | `pdf page-image` | Render a PDF page as a base64-encoded JPEG/PNG |
 | `pdf status` | Show PDF cache + upload-queue state for a reference (JSON only) |
 | `pdf download` | Fetch the open-access PDF for a reference and attach it (skip-if-attached; `--force` to replace) |
-| `web get` | Read the extracted body of a clipped web reference |
-| `web annotations` | List web-page annotations for a reference |
 | `mcp` | Run a Model Context Protocol server over stdio, exposing the read APIs as MCP tools (the in-app Assistant content channel; a Node-free replacement for `rubien-mcp-server`). Mac **and** Linux. |
 | `sync status` | Inspect iCloud sync state (JSON only). **Mac-only** — Linux builds omit this subcommand entirely. |
 
@@ -513,19 +511,66 @@ Create/rename/show/hide/add-option/rename-option/delete-option: single `Property
 
 ---
 
-## annotations
+## read
 
-List PDF annotations for a reference. PDF references only — for web-page annotations, use `web annotations`.
+Read a reference's body text or annotations without knowing whether it is a
+PDF or a clipped web page. `read` routes by what the reference has:
 
-```bash
-rubien-cli annotations 42
+```
+rubien-cli read text <id> [--pages <range>] [--section <title>]...
+                          [--start <offset>] [--max-chars <n>] [--source pdf|web]
+rubien-cli read annotations <id> [--source pdf|web]
 ```
 
-| Argument | Type | Description |
-|---|---|---|
-| `referenceId` | Int64 (required) | Reference ID |
+Source selection for `read text`, in order: an explicit `--source` wins;
+otherwise `--pages`/`--section` imply `pdf` and `--start` implies `web`;
+otherwise PDF wins when the reference has both. Every response reports
+`source` (what was read) and `available` (what could be read now, ordered
+`["pdf","web"]`). A PDF that is attached in the library but not materialized
+on this device is not readable — the error says so (see `pdf status`).
 
-**Output:** JSON array of `{id, type, color, pageIndex, selectedText, noteText}`.
+### read text
+
+PDF-source response (page-keyed; `--pages`/`--section` select, mutually
+exclusive; `--max-chars` truncates at page boundaries, always returning at
+least one page):
+
+```json
+{ "id": 42, "source": "pdf", "available": ["pdf", "web"],
+  "pageCount": 12, "selection": { "mode": "page", "pages": "1-3" },
+  "pages": [ { "index": 1, "text": "…", "sectionPath": ["1 Introduction"] } ],
+  "truncated": false, "hasTextLayer": true }
+```
+
+Web-source response (one flat body window; `--start`/`--max-chars` paginate,
+character-boundary truncation; `start` past end returns `content: ""`):
+
+```json
+{ "id": 7, "source": "web", "available": ["web"],
+  "url": "https://…", "siteName": "…", "contentFormat": "markdown",
+  "content": "…", "contentLength": 84213, "start": 0,
+  "returnedChars": 50000, "truncated": true, "annotationCount": 3 }
+```
+
+When `--section` is used, `selection` echoes `mode: "section"` plus
+`requested` (the substrings you passed), `matchedSections`, and `unmatched`
+so you can tell which titles resolved.
+
+Errors: unknown reference; neither source readable (message names the PDF
+state: not attached / not materialized on this device / file missing on
+disk); a requested or param-implied source that is unavailable; mixed
+addressing (`--pages`/`--section` with `--start`); `--section` on a PDF
+without an outline (`no-outline` — fall back to `--pages`).
+
+### read annotations
+
+One JSON array, PDF and web-clip annotations merged; each item carries
+`source: "pdf" | "web"`. PDF items add `pageIndex` and `selectedText`; web
+items add the W3C TextQuoteSelector triple (`anchorText`, `prefixText`,
+`suffixText`) that locates the highlight inside the `read text` web body.
+All items carry `id`, `type`, `color`, `noteText`, `dateCreated`, `dateModified`.
+Ordered PDF-first by page, then web by creation date. Missing reference or
+no annotations → `[]` (exit 0, not an error). `--source pdf|web` filters.
 
 ---
 
@@ -754,14 +799,15 @@ Listing and create/rename emit a `DatabaseViewDTO`:
 
 ## pdf
 
-Inspect, fetch, and extract content from a reference's attached PDF. The
-read subcommands (`info` / `text` / `page-image`) operate on the local
-file resolved via `AppDatabase.pdfFilename(for:)` (the per-device
-`pdfCache` row's `localFilename`, joined to the library's PDF storage
-directory). Text extraction is text-layer only (no OCR); scanned /
-image-only PDFs return `hasTextLayer: false` and you should fall back to
-`pdf page-image`. `pdf download` mutates: it fetches the open-access PDF
-and attaches it to the reference.
+Inspect, fetch, and render a reference's attached PDF. The read subcommands
+(`info` / `page-image`) operate on the local file resolved via
+`AppDatabase.pdfFilename(for:)` (the per-device `pdfCache` row's
+`localFilename`, joined to the library's PDF storage directory). Body-text
+extraction lives in the kind-agnostic `read text` (PDF page/section selection
+is text-layer only, no OCR); `pdf info`'s `hasTextLayer` flag marks scanned /
+image-only PDFs (`false`), for which you fall back to `pdf page-image`.
+`pdf download` mutates: it fetches the open-access PDF and attaches it to the
+reference.
 
 ### pdf info
 
@@ -800,55 +846,6 @@ rubien-cli pdf info 42
 
 `sections` is `null` when the PDF has no outline at all — fall back to
 `--pages` ranges in that case.
-
-### pdf text
-
-Extract page-keyed text. Two mutually-exclusive selection modes:
-
-- `--pages <range>` — explicit page numbers (e.g. `1-3`, `1-3,8-10`, `12-`).
-- `--section <title>` — case-insensitive substring match against the
-  outline (repeatable; multiple flags union their ranges). Errors with
-  `{"error":"no-outline"}` when the PDF has no outline.
-
-```bash
-rubien-cli pdf text 42 --pages 1-3
-rubien-cli pdf text 42 --section Introduction --section Conclusion
-rubien-cli pdf text 42 --section "Related Work" --max-chars 20000
-```
-
-| Argument / Option | Type | Default | Description |
-|---|---|---|---|
-| `id` | Int64 (required) | — | Reference ID |
-| `--pages` | String | (all pages) | Page range, e.g. `1-3,8-10`. Mutually exclusive with `--section`. |
-| `--section` | String (repeatable) | — | Section title substring (case-insensitive). Mutually exclusive with `--pages`. |
-| `--max-chars` | Int | 50000 | Cap total returned characters. Truncates at page boundary; first page always included. |
-
-**Output:**
-
-```json
-{
-  "id": 42,
-  "pageCount": 14,
-  "selection": {
-    "mode": "section",
-    "requested": ["Related Work", "Conclusion"],
-    "matchedSections": ["2 Related Work", "5 Conclusion"],
-    "unmatched": []
-  },
-  "pages": [
-    { "index": 3, "text": "...", "sectionPath": ["2 Related Work", "2.1 Transformers"] },
-    { "index": 4, "text": "...", "sectionPath": ["2 Related Work", "2.2 Attention"] },
-    { "index": 13, "text": "...", "sectionPath": ["5 Conclusion"] },
-    { "index": 14, "text": "...", "sectionPath": ["5 Conclusion"] }
-  ],
-  "truncated": false,
-  "hasTextLayer": true
-}
-```
-
-`sectionPath` is the breadcrumb of containing sections (shallowest →
-deepest); when several siblings share a page, the deepest/later one wins.
-A page outside the outline gets `sectionPath: []`.
 
 ### pdf page-image
 
@@ -988,102 +985,6 @@ for the next app launch.
 
 ---
 
-## web
-
-Read the extracted text and annotations of a clipped web reference.
-Mirrors the `pdf` family for PDF references. Read-only — neither
-subcommand fetches anything from the network; both surface what the
-in-app WebReader has already extracted into the library.
-
-```bash
-rubien-cli web get 42
-rubien-cli web get 42 --max-chars 5000 --start 0
-rubien-cli web annotations 42
-```
-
-### web get
-
-Returns the decoded body of `reference.webContent` along with `url`,
-`siteName`, and an `annotationCount` so an agent can decide whether to
-follow up with `web annotations`. The body is paginated by character
-offset.
-
-| Argument / Option | Type | Default | Description |
-|---|---|---|---|
-| `id` | Int64 (required) | — | Reference ID |
-| `--max-chars` | Int | 50000 | Cap returned characters (must be > 0) |
-| `--start` | Int | 0 | Character offset into the decoded body (must be >= 0) |
-
-**Output:**
-
-```json
-{
-  "id": 599,
-  "url": "https://thinkingmachines.ai/blog/on-policy-distillation/",
-  "siteName": "thinkingmachines.ai",
-  "contentFormat": "html",
-  "content": "<figure>...</figure><div>...</div>",
-  "contentLength": 61273,
-  "start": 0,
-  "returnedChars": 50000,
-  "truncated": true,
-  "annotationCount": 3
-}
-```
-
-- `contentFormat` is `"markdown"` (most pages — Defuddle/Readability
-  output) or `"html"` (a small subset where the clipper preserved
-  markup; the leading `<!-- rubien:web-content:html -->` sentinel that
-  marks these in storage is stripped before output). Treat HTML output
-  as a fragment, not a complete document.
-- `contentLength` is the total decoded body length. Loop with `--start`
-  bumped by `returnedChars` to read past the cap.
-- `--start` past end-of-content returns `{ "content": "",
-  "returnedChars": 0, "truncated": false }` (success, not error) so
-  pagination loops terminate cleanly.
-
-**Errors (stderr `{"error": "..."}`, exit 1):**
-- Reference not found.
-- Reference exists but has no web content (e.g. a PDF-only reference).
-- Invalid `--max-chars` (<= 0) or `--start` (< 0).
-
-### web annotations
-
-Returns highlights, underlines, and anchored notes the user has made on
-a clipped web reference.
-
-| Argument | Type | Description |
-|---|---|---|
-| `referenceId` | Int64 (required) | Reference ID |
-
-**Output:** JSON array of
-
-```json
-{
-  "id": 7,
-  "type": "highlight",
-  "color": "#FFDE59",
-  "noteText": "user's attached note, if any",
-  "anchorText": "...",
-  "prefixText": "... (text immediately before the anchor) ...",
-  "suffixText": "... (text immediately after the anchor) ...",
-  "dateCreated": "2026-04-22T10:14:00.000Z",
-  "dateModified": "2026-04-22T10:14:00.000Z"
-}
-```
-
-- `anchorText` is the highlighted string itself — what the in-app
-  sidebar displays — and also the locator used to find the highlight
-  inside the body returned by `web get`.
-- `prefixText` / `anchorText` / `suffixText` form a W3C
-  TextQuoteSelector: `prefixText` and `suffixText` disambiguate when
-  `anchorText` appears more than once on the page.
-- Empty array (not error) when the reference has no web annotations or
-  the reference ID doesn't exist — same convention as the PDF
-  `annotations` subcommand.
-
----
-
 ## mcp
 
 Run a **Model Context Protocol (MCP) server over stdio**, exposing Rubien's
@@ -1117,8 +1018,8 @@ Notifications (`notifications/initialized`, etc.) get no response. Unknown
 methods return error `-32601`; unknown tools return `-32602`. Diagnostics go to
 stderr; stdout carries only protocol messages.
 
-**Tools** (all `readOnlyHint: true`) — the read tools from the four content
-families, each mapping to the identical subcommand documented above:
+**Tools** (all `readOnlyHint: true`) — the read-only tools, each mapping to
+the identical subcommand documented above:
 
 | Tool | Backing subcommand |
 |---|---|
@@ -1126,11 +1027,9 @@ families, each mapping to the identical subcommand documented above:
 | `rubien_list` | `list` |
 | `rubien_get` | `get` |
 | `rubien_pdf_info` | `pdf info` |
-| `rubien_pdf_text` | `pdf text` |
 | `rubien_pdf_page_image` | `pdf page-image` (returned as an MCP `image` content block + a text metadata block) |
-| `rubien_annotations_list` | `annotations` |
-| `rubien_web_get` | `web get` |
-| `rubien_web_annotations` | `web annotations` |
+| `rubien_read_text` | `read text` |
+| `rubien_read_annotations` | `read annotations` |
 
 **Errors.** A tool whose backing command exits non-zero (e.g. a missing
 reference, a reference with no attached PDF) returns a normal result with
@@ -1240,7 +1139,7 @@ All commands that return references use this structure:
 
 `readCount` is the count of distinct reading sessions. Each reader open bumps the counter at most once per ~10-minute window (so quick-toggle flows don't inflate it). Always present in JSON; `0` for references that haven't been opened. Sort or filter by it via `"readCount"`.
 
-`siteName` is the source-site name for a clipped web reference (e.g. `"arxiv.org"`, `"thinkingmachines.ai"`). Omitted entirely (not `null`) for references that aren't web clips. `webContent` (the extracted body) is **not** included in this DTO — fetch it via `rubien-cli web get <id>` to keep `list`/`search`/`export` payloads predictable in size.
+`siteName` is the source-site name for a clipped web reference (e.g. `"arxiv.org"`, `"thinkingmachines.ai"`). Omitted entirely (not `null`) for references that aren't web clips. `webContent` (the extracted body) is **not** included in this DTO — fetch it via `rubien-cli read text <id>` to keep `list`/`search`/`export` payloads predictable in size.
 
 ---
 

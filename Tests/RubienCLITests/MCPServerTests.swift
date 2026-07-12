@@ -42,12 +42,12 @@ final class MCPServerTests: XCTestCase {
         }
     }
 
-    // The 9 read-only content tools the native server must advertise, mirroring
+    // The 7 read-only content tools the native server must advertise, mirroring
     // the read tools in mcp-server/src/tools/*.ts.
     private let expectedToolNames: Set<String> = [
         "rubien_search", "rubien_list", "rubien_get",
-        "rubien_pdf_info", "rubien_pdf_text", "rubien_pdf_page_image",
-        "rubien_annotations_list", "rubien_web_get", "rubien_web_annotations",
+        "rubien_pdf_info", "rubien_pdf_page_image",
+        "rubien_read_text", "rubien_read_annotations",
     ]
 
     // MARK: - Process helpers
@@ -157,7 +157,7 @@ final class MCPServerTests: XCTestCase {
         XCTAssertNotNil((result["capabilities"] as? [String: Any])?["tools"], "must advertise tools capability")
     }
 
-    func testToolsListAdvertisesTheNineReadTools() throws {
+    func testToolsListAdvertisesTheSevenReadTools() throws {
         try skipIfBinaryMissing()
         let responses = try runMCP([req(id: 1, method: "tools/list")])
         let result = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
@@ -184,7 +184,8 @@ final class MCPServerTests: XCTestCase {
         }
         XCTAssertEqual(Set(required("rubien_pdf_page_image")), ["id", "page"])
         XCTAssertEqual(required("rubien_search"), ["query"])
-        XCTAssertEqual(required("rubien_annotations_list"), ["referenceId"])
+        XCTAssertEqual(required("rubien_read_annotations"), ["id"])
+        XCTAssertEqual(required("rubien_read_text"), ["id"])
         XCTAssertEqual(required("rubien_list"), [])
     }
 
@@ -229,7 +230,7 @@ final class MCPServerTests: XCTestCase {
             toolCall(id: 1, name: "rubien_get", arguments: ["id": true]),
             toolCall(id: 2, name: "rubien_get", arguments: ["id": "5"]),
             toolCall(id: 3, name: "rubien_search", arguments: ["query": 5]),
-            toolCall(id: 4, name: "rubien_pdf_text", arguments: ["id": 1, "maxChars": 1.5]),
+            toolCall(id: 4, name: "rubien_read_text", arguments: ["id": 1, "maxChars": 1.5]),
         ])
         for id in 1...4 {
             let result = try XCTUnwrap(response(responses, id: id)?["result"] as? [String: Any], "id \(id)")
@@ -237,11 +238,24 @@ final class MCPServerTests: XCTestCase {
         }
     }
 
-    func testPdfTextPagesAndSectionsAreMutuallyExclusive() throws {
+    func testReadTextPagesAndSectionsAreMutuallyExclusive() throws {
         try skipIfBinaryMissing()
         // The exclusivity check happens before spawning, so it needs no PDF.
         let responses = try runMCP([
-            toolCall(id: 1, name: "rubien_pdf_text", arguments: ["id": 1, "pages": "1-3", "sections": ["Intro"]]),
+            toolCall(id: 1, name: "rubien_read_text", arguments: ["id": 1, "pages": "1-3", "sections": ["Intro"]]),
+        ])
+        let result = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
+        XCTAssertEqual(result["isError"] as? Bool, true)
+        let text = try XCTUnwrap((result["content"] as? [[String: Any]])?.first?["text"] as? String)
+        XCTAssertTrue(text.lowercased().contains("mutually exclusive"), "got: \(text)")
+    }
+
+    func testReadTextPagesAndStartAreMutuallyExclusive() throws {
+        try skipIfBinaryMissing()
+        // pages (PDF addressing) and start (web addressing) can't combine; the
+        // check runs before spawning, so it needs no attached content.
+        let responses = try runMCP([
+            toolCall(id: 1, name: "rubien_read_text", arguments: ["id": 1, "pages": "1", "start": 0]),
         ])
         let result = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
         XCTAssertEqual(result["isError"] as? Bool, true)
@@ -301,7 +315,7 @@ final class MCPServerTests: XCTestCase {
     func testAnnotationsListEmptyIsSuccessNotError() throws {
         try skipIfBinaryMissing()
         let id = try seedTitle("No Annotations Here")
-        let responses = try runMCP([toolCall(id: 1, name: "rubien_annotations_list", arguments: ["referenceId": id])])
+        let responses = try runMCP([toolCall(id: 1, name: "rubien_read_annotations", arguments: ["id": id])])
         let result = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
         XCTAssertNil(result["isError"], "an empty annotation list is success, not an error")
         let text = try XCTUnwrap((result["content"] as? [[String: Any]])?.first?["text"] as? String)
@@ -321,19 +335,37 @@ final class MCPServerTests: XCTestCase {
     func testCLIErrorSurfacesAsIsError() throws {
         try skipIfBinaryMissing()
         let id = try seedTitle("Metadata-only reference")
-        // A metadata-only reference has no web content → the CLI exits non-zero
-        // with {"error":...} → the server maps it to an isError tool result.
+        // A metadata-only reference has no readable content → the CLI exits
+        // non-zero with {"error":...} → the server maps it to an isError result.
         let responses = try runMCP([
-            toolCall(id: 1, name: "rubien_web_get", arguments: ["referenceId": id]),
+            toolCall(id: 1, name: "rubien_read_text", arguments: ["id": id]),
             toolCall(id: 2, name: "rubien_pdf_info", arguments: ["id": id]),
         ])
-        let web = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
-        XCTAssertEqual(web["isError"] as? Bool, true)
-        XCTAssertTrue(((web["content"] as? [[String: Any]])?.first?["text"] as? String ?? "").lowercased().contains("web content"))
+        let read = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
+        XCTAssertEqual(read["isError"] as? Bool, true)
+        XCTAssertTrue(((read["content"] as? [[String: Any]])?.first?["text"] as? String ?? "").lowercased().contains("no readable content"))
 
         let pdf = try XCTUnwrap(response(responses, id: 2)?["result"] as? [String: Any])
         XCTAssertEqual(pdf["isError"] as? Bool, true)
         XCTAssertTrue(((pdf["content"] as? [[String: Any]])?.first?["text"] as? String ?? "").lowercased().contains("pdf"))
+    }
+
+    func testReadTextEmptyPagesTreatedAsAbsent() throws {
+        try skipIfBinaryMissing()
+        // Two-catalog parity: the Node server drops an empty `pages` string
+        // (`Boolean("")` is false), so this catalog must too. A metadata-only
+        // ref with pages:"" therefore routes to the neither-available branch
+        // ("no readable content"), NOT the pdf-unavailable branch ("source
+        // \"pdf\" is not readable") that a stray `--pages ""` would trigger.
+        let id = try seedTitle("Empty pages routing")
+        let responses = try runMCP([toolCall(id: 1, name: "rubien_read_text", arguments: ["id": id, "pages": ""])])
+        let result = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
+        XCTAssertEqual(result["isError"] as? Bool, true)
+        let text = ((result["content"] as? [[String: Any]])?.first?["text"] as? String ?? "").lowercased()
+        XCTAssertTrue(text.contains("no readable content"),
+                      "empty pages must be dropped (route to neither-branch); got: \(text)")
+        XCTAssertFalse(text.contains("source \"pdf\""),
+                       "empty pages must not imply a pdf source; got: \(text)")
     }
 
     // MARK: - PDF tools (need a rendered page → macOS/PDFKit)
@@ -380,7 +412,7 @@ final class MCPServerTests: XCTestCase {
 
         let responses = try runMCP([
             toolCall(id: 1, name: "rubien_pdf_info", arguments: ["id": id]),
-            toolCall(id: 2, name: "rubien_pdf_text", arguments: ["id": id, "pages": "1"]),
+            toolCall(id: 2, name: "rubien_read_text", arguments: ["id": id, "pages": "1"]),
             toolCall(id: 3, name: "rubien_pdf_page_image", arguments: ["id": id, "page": 1]),
         ])
 
@@ -391,12 +423,14 @@ final class MCPServerTests: XCTestCase {
         let info = try JSONSerialization.jsonObject(with: Data(infoText.utf8)) as? [String: Any]
         XCTAssertEqual((info?["pageCount"] as? NSNumber)?.intValue, 3)
 
-        // pdf_text → at least one page of text.
+        // read_text on a PDF ref → page-keyed body, source-tagged pdf.
         let textResult = try XCTUnwrap(response(responses, id: 2)?["result"] as? [String: Any])
         XCTAssertNil(textResult["isError"])
         let textText = try XCTUnwrap((textResult["content"] as? [[String: Any]])?.first?["text"] as? String)
         let textObj = try JSONSerialization.jsonObject(with: Data(textText.utf8)) as? [String: Any]
         XCTAssertNotNil(textObj?["pages"] as? [Any])
+        XCTAssertEqual(textObj?["source"] as? String, "pdf")
+        XCTAssertEqual(textObj?["available"] as? [String], ["pdf"])
 
         // pdf_page_image → TWO content blocks: text meta + an image block.
         let imgResult = try XCTUnwrap(response(responses, id: 3)?["result"] as? [String: Any])

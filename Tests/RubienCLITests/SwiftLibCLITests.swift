@@ -444,84 +444,13 @@ final class RubienCLITests: XCTestCase {
     }
 #endif // canImport(PDFKit)
 
-    // MARK: - Web subcommand
+    // MARK: - Reference DTO web fields
     //
-    // Like the PDF download tests above, the happy path requires a known
-    // web-clipped reference in the live dev library and can't be set up via
-    // the CLI alone (`webContent` has no `add`/`update` flag — it's written
-    // only by the in-app WebReader). The tests below cover the error
-    // envelopes and the DTO-shape contract instead.
-
-    func testWebGetReferenceNotFound() throws {
-        try skipIfBinaryMissing()
-        let result = try runCLI(["web", "get", "999999999"])
-        XCTAssertNotEqual(result.exitCode, 0,
-                          "web get for a missing reference should fail")
-        let errJson = try JSONSerialization.jsonObject(with: Data(result.stderr.utf8)) as? [String: Any]
-        let message = errJson?["error"] as? String ?? ""
-        XCTAssertTrue(message.contains("not found"),
-                      "stderr error did not say 'not found'; got: \(message)")
-    }
-
-    func testWebGetReferenceWithoutWebContent() throws {
-        try skipIfBinaryMissing()
-
-        // Manual-entry references have no webContent — exercises the
-        // "row exists but webContent is NULL" branch that `fetchWebContent`
-        // can't distinguish on its own.
-        let addResult = try runCLI(["add", "--title", "NoWeb \(UUID().uuidString)"])
-        XCTAssertEqual(addResult.exitCode, 0)
-        let addJson = try JSONSerialization.jsonObject(with: Data(addResult.stdout.utf8)) as? [String: Any]
-        let refDict = addJson?["reference"] as? [String: Any]
-        guard let refId = refDict?["id"] as? Int64 ?? (refDict?["id"] as? Int).map(Int64.init) else {
-            XCTFail("Add envelope should contain reference.id")
-            return
-        }
-        defer { _ = try? runCLI(["delete", "\(refId)", "--force"]) }
-
-        let result = try runCLI(["web", "get", "\(refId)"])
-        XCTAssertNotEqual(result.exitCode, 0,
-                          "web get on a reference with no webContent should fail")
-        let errJson = try JSONSerialization.jsonObject(with: Data(result.stderr.utf8)) as? [String: Any]
-        let message = errJson?["error"] as? String ?? ""
-        XCTAssertTrue(message.contains("no web content"),
-                      "stderr error did not say 'no web content'; got: \(message)")
-    }
-
-    func testWebGetRejectsInvalidMaxChars() throws {
-        try skipIfBinaryMissing()
-        let result = try runCLI(["web", "get", "1", "--max-chars", "0"])
-        XCTAssertNotEqual(result.exitCode, 0)
-        let errJson = try JSONSerialization.jsonObject(with: Data(result.stderr.utf8)) as? [String: Any]
-        let message = errJson?["error"] as? String ?? ""
-        XCTAssertTrue(message.contains("--max-chars"),
-                      "stderr error did not name --max-chars; got: \(message)")
-    }
-
-    func testWebGetRejectsNegativeStart() throws {
-        try skipIfBinaryMissing()
-        // swift-argument-parser treats `-1` as a separate flag token, so the
-        // `--start=-1` form is the only way to pass a negative integer
-        // through the parser into our explicit `>= 0` check.
-        let result = try runCLI(["web", "get", "1", "--start=-1"])
-        XCTAssertNotEqual(result.exitCode, 0)
-        let errJson = try JSONSerialization.jsonObject(with: Data(result.stderr.utf8)) as? [String: Any]
-        let message = errJson?["error"] as? String ?? ""
-        XCTAssertTrue(message.contains("--start"),
-                      "stderr error did not name --start; got: \(message)")
-    }
-
-    func testWebAnnotationsEmptyForNonexistentReference() throws {
-        try skipIfBinaryMissing()
-        // Matches the PDF `annotations` subcommand: missing IDs are not
-        // errors; they just return [].
-        let result = try runCLI(["web", "annotations", "999999999"])
-        XCTAssertEqual(result.exitCode, 0)
-        let arr = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [Any]
-        XCTAssertNotNil(arr, "web annotations should return a JSON array")
-        XCTAssertEqual(arr?.count ?? -1, 0,
-                       "web annotations on a nonexistent reference should be []")
-    }
+    // The kind-specific `web get` / `web annotations` subcommands were removed
+    // (superseded by `read text` / `read annotations`, covered in
+    // ReadCommandTests). `webContent`/`siteName` still have no CLI write path
+    // (set only by the in-app WebReader), so the reachable contract left here
+    // is the reference DTO's handling of a nil web field.
 
     func testReferenceDTOOmitsSiteNameWhenNil() throws {
         try skipIfBinaryMissing()

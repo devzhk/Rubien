@@ -28,15 +28,14 @@ struct RubienCLI: AsyncParsableCommand {
             Delete.self,
             Cite.self,
             Import.self,
+            Read.self,
             Properties.self,
-            Annotations.self,
             Styles.self,
             Version.self,
             SelfUpdate.self,
             Export.self,
             Views.self,
             Pdf.self,
-            Web.self,
             MCPCommand.self,
         ]
 #if os(macOS)
@@ -1825,36 +1824,6 @@ struct Properties: ParsableCommand {
     }
 }
 
-struct Annotations: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "List PDF annotations for a reference")
-
-    @Argument(help: "Reference ID")
-    var referenceId: Int64
-
-    func run() throws {
-        let annotations = try AppDatabase.shared.fetchAnnotations(referenceId: referenceId)
-        struct AnnotationDTO: Encodable {
-            let id: Int64?
-            let type: String
-            let color: String
-            let pageIndex: Int
-            let selectedText: String?
-            let noteText: String?
-        }
-        let dtos = annotations.map { a in
-            AnnotationDTO(
-                id: a.id,
-                type: a.type.rawValue,
-                color: a.color,
-                pageIndex: a.pageIndex,
-                selectedText: a.selectedText,
-                noteText: a.noteText
-            )
-        }
-        printJSON(dtos)
-    }
-}
-
 struct Version: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Print the CLI marketing version and monotonic build number as JSON")
@@ -2161,7 +2130,7 @@ struct Pdf: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "pdf",
         abstract: "Inspect and extract content from a reference's attached PDF",
-        subcommands: [PdfInfo.self, PdfText.self, PdfPageImage.self, PdfStatus.self, PdfDownload.self]
+        subcommands: [PdfInfo.self, PdfPageImage.self, PdfStatus.self, PdfDownload.self]
     )
 }
 
@@ -2215,6 +2184,307 @@ private func runPdfSubcommand<Result: Encodable>(
     }
 }
 
+// MARK: - read (kind-agnostic body/annotation reads)
+
+enum PDFSourceState: String {
+    case notAttached, notMaterialized, missingFile, available
+}
+
+func pdfStateDescription(_ state: PDFSourceState) -> String {
+    switch state {
+    case .notAttached: return "no PDF attached"
+    case .notMaterialized: return "PDF attached but not materialized on this device (see 'pdf status')"
+    case .missingFile: return "PDF materialized but its file is missing on disk"
+    case .available: return "available"
+    }
+}
+
+struct SourceAvailability {
+    let pdfState: PDFSourceState
+    let pdfURL: URL?                             // non-nil iff pdfState == .available
+    let web: Reference.DecodedWebContent?        // non-nil iff web is readable
+    var available: [String] {
+        var out: [String] = []
+        if pdfState == .available { out.append("pdf") }
+        if web != nil { out.append("web") }
+        return out
+    }
+}
+
+/// Resolve which body sources a reference can serve right now. Four-state PDF
+/// (spec §4): pdfFilename(for:) alone can't distinguish attached-not-materialized
+/// from never-attached, so read the pdfCache row like `pdf status` does.
+func resolveSources(for ref: Reference) throws -> SourceAvailability {
+    var pdfState = PDFSourceState.notAttached
+    var pdfURL: URL? = nil
+    if let refId = ref.id, let status = try AppDatabase.shared.pdfCacheStatus(for: refId) {
+        if status.materializedAt == nil {
+            pdfState = .notMaterialized
+        } else {
+            let url = PDFService.pdfURL(for: status.localFilename)
+            if FileManager.default.fileExists(atPath: url.path) {
+                pdfState = .available
+                pdfURL = url
+            } else {
+                pdfState = .missingFile
+            }
+        }
+    }
+    return SourceAvailability(pdfState: pdfState, pdfURL: pdfURL, web: ref.decodedWebContent)
+}
+
+enum ReadSource: String, ExpressibleByArgument, CaseIterable {
+    case pdf, web
+}
+
+struct Read: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "read",
+        abstract: "Read a reference's body text or annotations, whichever kind it is (PDF or web clip)",
+        subcommands: [ReadText.self, ReadAnnotations.self]
+    )
+}
+
+struct ReadTextPdfOutput: Encodable {
+    let id: Int64
+    let source: String
+    let available: [String]
+    let pageCount: Int
+    let selection: PDFExtractor.SelectionEcho
+    let pages: [PDFExtractor.PageContent]
+    let truncated: Bool
+    let hasTextLayer: Bool
+}
+
+struct ReadTextWebOutput: Encodable {
+    let id: Int64
+    let source: String
+    let available: [String]
+    let url: String?
+    let siteName: String?
+    let contentFormat: String
+    let content: String
+    let contentLength: Int
+    let start: Int
+    let returnedChars: Int
+    let truncated: Bool
+    let annotationCount: Int
+}
+
+struct ReadText: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "text",
+        abstract: "Read the body text of a reference (PDF pages/sections or web body window)"
+    )
+
+    @Argument(help: "Reference ID")
+    var id: Int64
+
+    @Option(name: .customLong("pages"),
+            help: "PDF page range: e.g. 1-3, 1-3,8-10, 12-. Implies a PDF source.")
+    var pages: String?
+
+    @Option(name: .customLong("section"), parsing: .singleValue,
+            help: "PDF section title substring (case-insensitive, repeatable). Implies a PDF source.")
+    var sections: [String] = []
+
+    @Option(name: .customLong("start"),
+            help: "Character offset into the web body (default 0). Implies a web source.")
+    var start: Int?
+
+    @Option(name: .customLong("max-chars"),
+            help: "Cap total returned characters (default 50000)")
+    var maxChars: Int = 50_000
+
+    @Option(name: .customLong("source"),
+            help: "Force a source: pdf or web (default: pages/sections imply pdf, start implies web, else PDF wins)")
+    var source: ReadSource?
+
+    func run() throws {
+        guard maxChars > 0, maxChars <= 500_000 else {
+            printJSONError("--max-chars must be between 1 and 500000")
+            throw ExitCode.failure
+        }
+        if let start, start < 0 {
+            printJSONError("--start must be >= 0")
+            throw ExitCode.failure
+        }
+        let pdfParamsGiven = pages != nil || !sections.isEmpty
+        let webParamsGiven = start != nil
+        if pages != nil && !sections.isEmpty {
+            printJSONError("--pages and --section are mutually exclusive")
+            throw ExitCode.failure
+        }
+        if pdfParamsGiven && webParamsGiven {
+            printJSONError("--pages/--section and --start are mutually exclusive (PDF vs web addressing)")
+            throw ExitCode.failure
+        }
+
+        guard let ref = try AppDatabase.shared.fetchReferences(ids: [id]).first else {
+            printJSONError("Reference \(id) not found")
+            throw ExitCode.failure
+        }
+        let avail = try resolveSources(for: ref)
+        let availJSON = "[" + avail.available.map { "\"\($0)\"" }.joined(separator: ",") + "]"
+
+        // Explicit-source contradictions report AFTER the probe so the error can
+        // carry real availability (spec §5: requested source + available + state).
+        if let source {
+            if source == .web && pdfParamsGiven {
+                printJSONError("--pages/--section require a PDF source (requested source: web); available: \(availJSON)")
+                throw ExitCode.failure
+            }
+            if source == .pdf && webParamsGiven {
+                printJSONError("--start requires a web source (requested source: pdf); available: \(availJSON)")
+                throw ExitCode.failure
+            }
+        }
+
+        let resolved: ReadSource
+        if let source {
+            resolved = source
+        } else if pdfParamsGiven {
+            resolved = .pdf
+        } else if webParamsGiven {
+            resolved = .web
+        } else if avail.pdfState == .available {
+            resolved = .pdf
+        } else if avail.web != nil {
+            resolved = .web
+        } else {
+            printJSONError("Reference \(id) has no readable content (pdf: \(pdfStateDescription(avail.pdfState)); web: none)")
+            throw ExitCode.failure
+        }
+
+        switch resolved {
+        case .pdf:
+            guard let url = avail.pdfURL else {
+                printJSONError("source \"pdf\" is not readable (pdf: \(pdfStateDescription(avail.pdfState))); available: \(availJSON)")
+                throw ExitCode.failure
+            }
+            let selection: PDFExtractor.Selection
+            if !sections.isEmpty {
+                selection = .sections(sections)
+            } else if let pages, !pages.isEmpty {
+                selection = .pagesString(pages)
+            } else {
+                selection = .allPages
+            }
+            do {
+                let result = try PDFExtractor.extractText(at: url, selection: selection, maxChars: maxChars)
+                printJSON(ReadTextPdfOutput(
+                    id: id, source: "pdf", available: avail.available,
+                    pageCount: result.pageCount, selection: result.selection,
+                    pages: result.pages, truncated: result.truncated,
+                    hasTextLayer: result.hasTextLayer
+                ))
+            } catch let e as PDFExtractor.ExtractError {
+                emitPDFExtractError(e)
+                throw ExitCode.failure
+            }
+        case .web:
+            guard let decoded = avail.web else {
+                printJSONError("source \"web\" is not readable (reference \(id) has no web content); available: \(availJSON)")
+                throw ExitCode.failure
+            }
+            let body = decoded.body
+            let total = body.count
+            let offset = start ?? 0
+            let slice: String
+            let returned: Int
+            let truncated: Bool
+            if offset >= total {
+                slice = ""; returned = 0; truncated = false
+            } else {
+                let startIdx = body.index(body.startIndex, offsetBy: offset)
+                let remaining = total - offset
+                let take = min(maxChars, remaining)
+                let endIdx = body.index(startIdx, offsetBy: take)
+                slice = String(body[startIdx..<endIdx])
+                returned = take
+                truncated = take < remaining
+            }
+            let annotationCount = (try? AppDatabase.shared.webAnnotationCount(referenceId: id)) ?? 0
+            printJSON(ReadTextWebOutput(
+                id: id, source: "web", available: avail.available,
+                url: ref.url, siteName: ref.siteName,
+                contentFormat: decoded.format.rawValue,
+                content: slice, contentLength: total, start: offset,
+                returnedChars: returned, truncated: truncated,
+                annotationCount: annotationCount
+            ))
+        }
+    }
+}
+
+/// Union DTO for both annotation kinds. `id` is non-optional by contract
+/// (fetched rows always have rowids; the zod mirror requires it). Kind-foreign
+/// optionals are OMITTED from JSON, not null — synthesized Encodable encodes
+/// optionals via encodeIfPresent (the same behavior ReferenceDTO.lastReadAt
+/// documents and relies on).
+struct ReadAnnotationItem: Encodable {
+    let source: String
+    let id: Int64
+    let type: String
+    let color: String
+    let noteText: String?
+    let dateCreated: Date
+    let dateModified: Date
+    // pdf-only anchors
+    let pageIndex: Int?
+    let selectedText: String?
+    // web-only anchors
+    let anchorText: String?
+    let prefixText: String?
+    let suffixText: String?
+}
+
+struct ReadAnnotations: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "annotations",
+        abstract: "List a reference's annotations, PDF and web merged (source-tagged)"
+    )
+
+    @Argument(help: "Reference ID")
+    var id: Int64
+
+    @Option(name: .customLong("source"), help: "Filter to one kind: pdf or web")
+    var source: ReadSource?
+
+    func run() throws {
+        var items: [ReadAnnotationItem] = []
+        // .compactMap drops a nil-id row (impossible for fetched records) rather
+        // than inventing an id or crashing.
+        if source != .web {
+            let pdf = (try AppDatabase.shared.fetchAnnotations(referenceId: id))
+                .sorted { ($0.pageIndex, $0.id ?? 0) < ($1.pageIndex, $1.id ?? 0) }
+            items += pdf.compactMap { a in
+                guard let rowId = a.id else { return nil }
+                return ReadAnnotationItem(
+                    source: "pdf", id: rowId, type: a.type.rawValue, color: a.color,
+                    noteText: a.noteText, dateCreated: a.dateCreated, dateModified: a.dateModified,
+                    pageIndex: a.pageIndex, selectedText: a.selectedText,
+                    anchorText: nil, prefixText: nil, suffixText: nil
+                )
+            }
+        }
+        if source != .pdf {
+            let web = (try AppDatabase.shared.fetchWebAnnotations(referenceId: id))
+                .sorted { ($0.dateCreated, $0.id ?? 0) < ($1.dateCreated, $1.id ?? 0) }
+            items += web.compactMap { a in
+                guard let rowId = a.id else { return nil }
+                return ReadAnnotationItem(
+                    source: "web", id: rowId, type: a.type.rawValue, color: a.color,
+                    noteText: a.noteText, dateCreated: a.dateCreated, dateModified: a.dateModified,
+                    pageIndex: nil, selectedText: nil,
+                    anchorText: a.anchorText, prefixText: a.prefixText, suffixText: a.suffixText
+                )
+            }
+        }
+        printJSON(items)
+    }
+}
+
 struct PdfInfoOutput: Encodable {
     let id: Int64
     let pageCount: Int
@@ -2245,70 +2515,6 @@ struct PdfInfo: ParsableCommand {
                 isEncrypted: info.isEncrypted,
                 documentTitle: info.documentTitle,
                 sections: info.sections
-            )
-        }
-    }
-}
-
-struct PdfTextOutput: Encodable {
-    let id: Int64
-    let pageCount: Int
-    let selection: PDFExtractor.SelectionEcho
-    let pages: [PDFExtractor.PageContent]
-    let truncated: Bool
-    let hasTextLayer: Bool
-}
-
-struct PdfText: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "text",
-        abstract: "Extract text from a reference's PDF by page range or section title"
-    )
-
-    @Argument(help: "Reference ID")
-    var id: Int64
-
-    @Option(
-        name: .customLong("pages"),
-        help: "Page range: e.g. 1-3, 1-3,8-10, 12-. Mutually exclusive with --section."
-    )
-    var pages: String?
-
-    @Option(
-        name: .customLong("section"),
-        parsing: .singleValue,
-        help: "Section title (case-insensitive substring match against the outline). Repeatable. Mutually exclusive with --pages."
-    )
-    var sections: [String] = []
-
-    @Option(
-        name: .customLong("max-chars"),
-        help: "Cap total returned characters (default 50000)"
-    )
-    var maxChars: Int = 50_000
-
-    func run() throws {
-        if pages != nil && !sections.isEmpty {
-            printJSONError("--pages and --section are mutually exclusive")
-            throw ExitCode.failure
-        }
-        try runPdfSubcommand(referenceId: id) { url in
-            let selection: PDFExtractor.Selection
-            if !sections.isEmpty {
-                selection = .sections(sections)
-            } else if let pages, !pages.isEmpty {
-                selection = .pagesString(pages)
-            } else {
-                selection = .allPages
-            }
-            let result = try PDFExtractor.extractText(at: url, selection: selection, maxChars: maxChars)
-            return PdfTextOutput(
-                id: id,
-                pageCount: result.pageCount,
-                selection: result.selection,
-                pages: result.pages,
-                truncated: result.truncated,
-                hasTextLayer: result.hasTextLayer
             )
         }
     }
@@ -2539,150 +2745,5 @@ struct PdfDownload: AsyncParsableCommand {
             id: id, ok: true,
             action: existing != nil ? .replaced : .downloaded,
             filename: filename))
-    }
-}
-
-// MARK: - Web
-
-struct Web: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "web",
-        abstract: "Read the extracted text and annotations of a clipped web reference",
-        subcommands: [WebGet.self, WebAnnotations.self]
-    )
-}
-
-struct WebGetOutput: Encodable {
-    let id: Int64
-    let url: String?
-    let siteName: String?
-    let contentFormat: String
-    let content: String
-    let contentLength: Int
-    let start: Int
-    let returnedChars: Int
-    let truncated: Bool
-    let annotationCount: Int
-}
-
-struct WebGet: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "get",
-        abstract: "Read the extracted body of a clipped web reference"
-    )
-
-    @Argument(help: "Reference ID")
-    var id: Int64
-
-    @Option(
-        name: .customLong("max-chars"),
-        help: "Cap total returned characters (default 50000)"
-    )
-    var maxChars: Int = 50_000
-
-    @Option(
-        name: .customLong("start"),
-        help: "Character offset into the decoded body (default 0)"
-    )
-    var start: Int = 0
-
-    func run() throws {
-        guard maxChars > 0 else {
-            printJSONError("--max-chars must be > 0")
-            throw ExitCode.failure
-        }
-        guard start >= 0 else {
-            printJSONError("--start must be >= 0")
-            throw ExitCode.failure
-        }
-
-        // fetchReferences (not fetchWebContent) so missing-row and NULL-webContent
-        // are distinguishable, and url + siteName come along for free.
-        guard let ref = try AppDatabase.shared.fetchReferences(ids: [id]).first else {
-            printJSONError("Reference \(id) not found")
-            throw ExitCode.failure
-        }
-
-        guard let decoded = ref.decodedWebContent else {
-            printJSONError("Reference \(id) has no web content")
-            throw ExitCode.failure
-        }
-
-        let body = decoded.body
-        let total = body.count
-
-        // start past end-of-content is success with empty content, so agent
-        // pagination loops terminate cleanly.
-        let slice: String
-        let returned: Int
-        let truncated: Bool
-        if start >= total {
-            slice = ""
-            returned = 0
-            truncated = false
-        } else {
-            let startIdx = body.index(body.startIndex, offsetBy: start)
-            let remaining = total - start
-            let take = min(maxChars, remaining)
-            let endIdx = body.index(startIdx, offsetBy: take)
-            slice = String(body[startIdx..<endIdx])
-            returned = take
-            truncated = take < remaining
-        }
-
-        let annotationCount = (try? AppDatabase.shared.webAnnotationCount(referenceId: id)) ?? 0
-
-        printJSON(WebGetOutput(
-            id: id,
-            url: ref.url,
-            siteName: ref.siteName,
-            contentFormat: decoded.format.rawValue,
-            content: slice,
-            contentLength: total,
-            start: start,
-            returnedChars: returned,
-            truncated: truncated,
-            annotationCount: annotationCount
-        ))
-    }
-}
-
-struct WebAnnotationDTO: Encodable {
-    let id: Int64?
-    let type: String
-    let color: String
-    let noteText: String?
-    let anchorText: String
-    let prefixText: String?
-    let suffixText: String?
-    let dateCreated: Date
-    let dateModified: Date
-}
-
-struct WebAnnotations: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "annotations",
-        abstract: "List web-page annotations for a reference"
-    )
-
-    @Argument(help: "Reference ID")
-    var referenceId: Int64
-
-    func run() throws {
-        let records = try AppDatabase.shared.fetchWebAnnotations(referenceId: referenceId)
-        let dtos = records.map { a in
-            WebAnnotationDTO(
-                id: a.id,
-                type: a.type.rawValue,
-                color: a.color,
-                noteText: a.noteText,
-                anchorText: a.anchorText,
-                prefixText: a.prefixText,
-                suffixText: a.suffixText,
-                dateCreated: a.dateCreated,
-                dateModified: a.dateModified
-            )
-        }
-        printJSON(dtos)
     }
 }

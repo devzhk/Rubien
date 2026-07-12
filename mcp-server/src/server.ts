@@ -4,14 +4,13 @@ import { registerCitationTools } from "./tools/citations.js";
 import { registerIOTools } from "./tools/io.js";
 import { registerPropertyTools } from "./tools/properties.js";
 import { registerViewTools } from "./tools/views.js";
-import { registerAnnotationTools } from "./tools/annotations.js";
 import { registerSyncTools } from "./tools/sync.js";
 import { registerPdfTools } from "./tools/pdf.js";
-import { registerWebTools } from "./tools/web.js";
+import { registerReadTools } from "./tools/read.js";
 
 export const SERVER_INFO = {
   name: "rubien-mcp-server",
-  version: "0.1.2",
+  version: "0.2.0",
 } as const;
 
 export function buildServer(): McpServer {
@@ -27,9 +26,8 @@ export function buildServer(): McpServer {
   // rubien_tags_* tool family was retired — see properties.ts.
   registerPropertyTools(server);
   registerViewTools(server);
-  registerAnnotationTools(server);
   registerPdfTools(server);
-  registerWebTools(server);
+  registerReadTools(server);
   registerSyncTools(server);
 
   return server;
