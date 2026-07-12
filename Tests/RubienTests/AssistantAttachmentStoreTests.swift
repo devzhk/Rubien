@@ -80,7 +80,7 @@ final class AssistantAttachmentStoreTests: XCTestCase {
         XCTAssertEqual(boundaryAttachment.mediaType, "text/plain")
     }
 
-    func testRejectsDirectoriesAndSymbolicLinksBeforeReading() async throws {
+    func testRejectsDirectoriesPackagesAndSymbolicLinksBeforeReading() async throws {
         let directory = workspace.appendingPathComponent("folder.txt", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         let directoryError = await XCTAssertThrowsErrorAsync(
@@ -89,6 +89,16 @@ final class AssistantAttachmentStoreTests: XCTestCase {
         XCTAssertEqual(
             directoryError as? AssistantAttachmentStoreError,
             .notRegularFile("folder.txt")
+        )
+
+        let package = workspace.appendingPathComponent("Example.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: package, withIntermediateDirectories: false)
+        let packageError = await XCTAssertThrowsErrorAsync(
+            try await store.stageFile(package, conversationID: UUID())
+        )
+        XCTAssertEqual(
+            packageError as? AssistantAttachmentStoreError,
+            .notRegularFile("Example.app")
         )
 
         let target = workspace.appendingPathComponent("target.txt")
@@ -136,30 +146,30 @@ final class AssistantAttachmentStoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: moved[0].stagedURL.path))
     }
 
-    func testFailedRehomeRollsBackAlreadyMovedFiles() async throws {
-        let conversation = UUID()
-        let source = workspace.appendingPathComponent("first.txt")
-        try Data("first".utf8).write(to: source)
-        let first = try await store.stageFile(source, conversationID: conversation)
-        let missingID = UUID()
-        let missingURL = first.stagedURL.deletingLastPathComponent()
-            .appendingPathComponent("\(missingID.uuidString)-missing.txt")
-        let missing = ChatAttachment(
-            id: missingID,
-            displayName: "missing.txt",
-            kind: .text,
-            stagedURL: missingURL,
-            mediaType: "text/plain",
-            byteCount: 7,
-            sourceIdentity: "/missing.txt"
-        )
+    func testFailedRehomeLeavesEveryOriginalReadableAfterPreparationOrCommit() async throws {
+        for failurePhase in RehomeFailureFileManager.FailurePhase.allCases {
+            let failingFileManager = RehomeFailureFileManager(failurePhase: failurePhase)
+            let store = AssistantAttachmentStore(
+                workspaceURL: workspace,
+                fileManager: failingFileManager
+            )
+            let conversation = UUID()
+            let prefix = String(describing: failurePhase)
+            let firstSource = workspace.appendingPathComponent("\(prefix)-first.txt")
+            let secondSource = workspace.appendingPathComponent("\(prefix)-second.txt")
+            try Data("first".utf8).write(to: firstSource)
+            try Data("second".utf8).write(to: secondSource)
+            let first = try await store.stageFile(firstSource, conversationID: conversation)
+            let second = try await store.stageFile(secondSource, conversationID: conversation)
 
-        _ = await XCTAssertThrowsErrorAsync(
-            try await store.rehomePending([first, missing], to: UUID())
-        )
+            _ = await XCTAssertThrowsErrorAsync(
+                try await store.rehomePending([first, second], to: UUID())
+            )
 
-        XCTAssertTrue(FileManager.default.fileExists(atPath: first.stagedURL.path))
-        XCTAssertEqual(try Data(contentsOf: first.stagedURL), Data("first".utf8))
+            XCTAssertEqual(failingFileManager.preparationCalls, 2)
+            XCTAssertEqual(try Data(contentsOf: first.stagedURL), Data("first".utf8))
+            XCTAssertEqual(try Data(contentsOf: second.stagedURL), Data("second".utf8))
+        }
     }
 
     func testImageEntryPointUsesFinalStubErrorUntilTaskThree() async throws {
@@ -174,6 +184,40 @@ final class AssistantAttachmentStoreTests: XCTestCase {
         )
         XCTAssertEqual(error as? AssistantAttachmentStoreError, .imageDecode("photo.png"))
     }
+}
+
+private final class RehomeFailureFileManager: FileManager {
+    enum FailurePhase: CaseIterable {
+        case preparation
+        case commit
+    }
+
+    private let failurePhase: FailurePhase
+    private(set) var preparationCalls = 0
+    private var moveCalls = 0
+
+    init(failurePhase: FailurePhase) {
+        self.failurePhase = failurePhase
+        super.init()
+    }
+
+    override func copyItem(at srcURL: URL, to dstURL: URL) throws {
+        preparationCalls += 1
+        if failurePhase == .preparation, preparationCalls == 2 {
+            throw InjectedFailure()
+        }
+        try super.copyItem(at: srcURL, to: dstURL)
+    }
+
+    override func moveItem(at srcURL: URL, to dstURL: URL) throws {
+        moveCalls += 1
+        if failurePhase == .commit, moveCalls == 2 {
+            throw InjectedFailure()
+        }
+        try super.moveItem(at: srcURL, to: dstURL)
+    }
+
+    private struct InjectedFailure: Error {}
 }
 
 @discardableResult

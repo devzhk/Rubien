@@ -142,29 +142,62 @@ actor AssistantAttachmentStore {
             withIntermediateDirectories: true
         )
 
-        var moves: [(original: URL, destination: URL)] = []
-        moves.reserveCapacity(attachments.count)
+        var prepared: [(original: URL, temporary: URL, destination: URL)] = []
+        prepared.reserveCapacity(attachments.count)
 
         do {
             for attachment in attachments {
                 let destination = destinationDirectory
                     .appendingPathComponent(attachment.stagedURL.lastPathComponent)
-                try fileManager.moveItem(at: attachment.stagedURL, to: destination)
-                moves.append((attachment.stagedURL, destination))
+                let temporary = destinationDirectory
+                    .appendingPathComponent(".rehome-\(UUID().uuidString)")
+                // Prepare complete copies under transaction-private names while every
+                // caller-visible original remains untouched.
+                prepared.append((attachment.stagedURL, temporary, destination))
+                try fileManager.copyItem(at: attachment.stagedURL, to: temporary)
             }
         } catch {
-            for move in moves.reversed() {
-                try? fileManager.moveItem(at: move.destination, to: move.original)
+            // Originals were never moved. Cleanup failures can leave only private
+            // temporary copies; every URL held by the caller remains usable.
+            for item in prepared.reversed() {
+                try? fileManager.removeItem(at: item.temporary)
             }
             throw error
         }
 
-        return zip(attachments, moves).map { attachment, move in
+        var committed: [(original: URL, destination: URL)] = []
+        committed.reserveCapacity(prepared.count)
+        do {
+            for item in prepared {
+                // These renames stay within one conversation directory and are atomic on
+                // the underlying volume.
+                try fileManager.moveItem(at: item.temporary, to: item.destination)
+                committed.append((item.original, item.destination))
+            }
+        } catch {
+            // Even if cleanup itself is interrupted, originals are still authoritative and
+            // readable. At worst, transaction-private or destination duplicates remain.
+            for item in prepared {
+                try? fileManager.removeItem(at: item.temporary)
+            }
+            for item in committed.reversed() {
+                try? fileManager.removeItem(at: item.destination)
+            }
+            throw error
+        }
+
+        // The batch is committed once every destination exists. Failing to unlink an old
+        // path leaves a harmless duplicate, but every returned destination remains complete.
+        for item in prepared {
+            try? fileManager.removeItem(at: item.original)
+        }
+
+        return zip(attachments, committed).map { attachment, item in
             ChatAttachment(
                 id: attachment.id,
                 displayName: attachment.displayName,
                 kind: attachment.kind,
-                stagedURL: move.destination,
+                stagedURL: item.destination,
                 mediaType: attachment.mediaType,
                 byteCount: attachment.byteCount,
                 sourceIdentity: attachment.sourceIdentity,
