@@ -47,6 +47,17 @@ claude mcp add rubien -- npx -y rubien-mcp-server
 
 **macOS PATH gotcha:** Claude Desktop launches servers with launchd's minimal `PATH`, not your shell's. If `npx` isn't found, set `"command"` to its absolute path (`which npx` → e.g. `/opt/homebrew/bin/npx`). Affects every npx-based server; Claude Code is unaffected. No `.dxt` one-click package yet.
 
+### Upgrading
+
+The `npx -y rubien-mcp-server` install is **unpinned**, so there is nothing to reinstall — `npx` resolves the latest published version each time the client spawns the server. Upgrade in this order:
+
+1. **Update Rubien first** — Sparkle on Mac (Rubien → Settings → Check Now), `rubien-cli self-update` on Linux. The server needs the new `rubien-cli`.
+2. **Restart your MCP client** — quit/reopen Claude Desktop, or start a new Claude Code session. The respawned server is the latest release.
+
+The pairing is guarded in one direction: a new server against a too-old Rubien **exits at startup with an update instruction** (`MIN_CLI_BUILD`), so a half-upgrade fails fast instead of half-working. The other direction is why upgrading matters — an old server against a new Rubien breaks at tool-call time when it shells subcommands that no longer exist (0.1.x vs Rubien ≥ 0.3.0; those versions are deprecated on npm for this reason).
+
+If a stale `npx` cache ever keeps serving an old version after a restart, clear it (`rm -rf ~/.npm/_npx`) or pin `rubien-mcp-server@latest` in the config. HTTP mode (below) runs as a long-lived process you started yourself — it does not auto-upgrade; restart it after updating Rubien.
+
 ## claude.ai web (remote MCP server)
 
 claude.ai connects to rubien as a **remote MCP server** over Streamable HTTP — it can't spawn a local process. It's the *same npm package* in HTTP mode: the server still runs on your Mac (where the library and `rubien-cli` live), and claude.ai reaches it through a Cloudflare Tunnel, with a bearer token to keep strangers out.

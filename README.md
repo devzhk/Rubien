@@ -29,6 +29,8 @@ claude mcp add rubien -- npx -y rubien-mcp-server
 
 It wraps `rubien-cli` (bundled inside Rubien.app on macOS; a prebuilt binary on Linux — see below). See [`mcp-server/README.md`](mcp-server/README.md) for HTTP mode, the startup version guard, and the full tool catalog.
 
+**Upgrading:** the install above is unpinned, so the server upgrades itself — update Rubien first (Sparkle on Mac, `rubien-cli self-update` on Linux), then restart your MCP client and `npx` fetches the latest release. A version guard pairs the two: a new server refuses a too-old Rubien at startup with an update instruction, and old servers (0.1.x) are deprecated on npm because they don't work with Rubien ≥ 0.3.0. Details in [`mcp-server/README.md`](mcp-server/README.md#upgrading).
+
 ## Supported sources
 
 Rubien adds references from:
