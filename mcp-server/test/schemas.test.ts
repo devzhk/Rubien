@@ -9,6 +9,8 @@ import {
   ReadTextPdfOutput,
   ReadTextWebOutput,
   ReadAnnotationItem,
+  GrepTextPdfOutput,
+  GrepTextWebOutput,
 } from "../src/schemas.js";
 
 /**
@@ -334,5 +336,113 @@ describe("zod schemas", () => {
       pageIndex: 1,
     };
     expect(() => ReadAnnotationItem.parse(missingDate)).toThrow();
+  });
+
+  it("accepts GrepTextPdfOutput with page-grouped hits", () => {
+    // Mirrors `grep <id> <query>` routed to a PDF source. Each page hit carries
+    // snippetsTruncated (the per-page snippet cap) alongside its snippets.
+    const out = {
+      id: 7,
+      source: "pdf",
+      available: ["pdf", "web"],
+      query: "transformer",
+      isRegex: false,
+      pageCount: 12,
+      hasTextLayer: true,
+      totalMatches: 5,
+      totalMatchingPages: 2,
+      truncated: false,
+      pages: [
+        {
+          page: 3,
+          sectionPath: ["Introduction"],
+          matchCount: 3,
+          snippetsTruncated: true,
+          snippets: ["…the transformer architecture…"],
+        },
+      ],
+    };
+    expect(() => GrepTextPdfOutput.parse(out)).not.toThrow();
+  });
+
+  it("rejects GrepTextPdfOutput with a page hit missing snippetsTruncated", () => {
+    // snippetsTruncated is non-optional (Bool) in PageSearchHit — always emitted.
+    const out = {
+      id: 7,
+      source: "pdf",
+      available: ["pdf"],
+      query: "transformer",
+      isRegex: false,
+      pageCount: 12,
+      hasTextLayer: true,
+      totalMatches: 1,
+      totalMatchingPages: 1,
+      truncated: false,
+      pages: [
+        {
+          page: 3,
+          sectionPath: [],
+          matchCount: 1,
+          snippets: ["…hit…"], // <-- snippetsTruncated missing
+        },
+      ],
+    };
+    expect(() => GrepTextPdfOutput.parse(out)).toThrow();
+  });
+
+  it("rejects GrepTextPdfOutput with source `web`", () => {
+    // The pdf mirror pins its discriminant literal — a web payload must fail it.
+    const wrongSource = {
+      id: 7,
+      source: "web",
+      available: ["pdf"],
+      query: "x",
+      isRegex: false,
+      pageCount: 1,
+      hasTextLayer: true,
+      totalMatches: 0,
+      totalMatchingPages: 0,
+      truncated: false,
+      pages: [],
+    };
+    expect(() => GrepTextPdfOutput.parse(wrongSource)).toThrow();
+  });
+
+  it("accepts GrepTextWebOutput with offset-anchored matches", () => {
+    // Mirrors `grep <id> <query>` routed to a web source. `start` is a
+    // character offset into the body — the same coordinate as read_text's start.
+    const out = {
+      id: 9,
+      source: "web",
+      available: ["web"],
+      query: "distillation",
+      isRegex: false,
+      contentLength: 4200,
+      totalMatches: 3,
+      totalEntries: 3,
+      truncated: false,
+      matches: [
+        { start: 0, matchCount: 1, snippet: "On-policy distillation…" },
+        { start: 1840, matchCount: 2, snippet: "…the distillation loss…" },
+      ],
+    };
+    expect(() => GrepTextWebOutput.parse(out)).not.toThrow();
+  });
+
+  it("rejects GrepTextWebOutput with a negative match start", () => {
+    // `start` is a non-negative character offset — a negative value is invalid.
+    const badStart = {
+      id: 9,
+      source: "web",
+      available: ["web"],
+      query: "x",
+      isRegex: false,
+      contentLength: 100,
+      totalMatches: 1,
+      totalEntries: 1,
+      truncated: false,
+      matches: [{ start: -1, matchCount: 1, snippet: "…hit…" }],
+    };
+    expect(() => GrepTextWebOutput.parse(badStart)).toThrow();
   });
 });

@@ -71,6 +71,7 @@ describe.skipIf(skipReason !== null)("e2e stdio JSON-RPC", () => {
         expect(toolNames).toContain("rubien_sync_status");
         expect(toolNames).toContain("rubien_read_text");
         expect(toolNames).toContain("rubien_read_annotations");
+        expect(toolNames).toContain("rubien_grep_text");
         expect(toolNames).not.toContain("rubien_pdf_text");
         // Sanity-check destructiveHint on delete.
         const deleteTool = (toolsResult.result.tools as Array<{

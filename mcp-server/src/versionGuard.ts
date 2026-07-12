@@ -1,10 +1,10 @@
 /**
  * The minimum rubien-cli build this server requires. Equals the release build
- * that first shipped the unified `read` subcommands. Bump only when a future
- * server release genuinely needs a newer CLI feature; the released CLI's build
- * must always be >= this value.
+ * that first shipped `grep`. Bump only when a future server release genuinely
+ * needs a newer CLI feature; the released CLI's build must always be >= this
+ * value.
  */
-export const MIN_CLI_BUILD = 20;
+export const MIN_CLI_BUILD = 21;
 
 export interface CliVersion {
   version: string;
