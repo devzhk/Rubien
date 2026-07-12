@@ -53,6 +53,7 @@ Linux needs system deps first — see [Linux CLI](../README.md#linux-cli). For d
 | `properties` | List or manage property definitions, options, and per-reference values (covers tags via the built-in `Tags` property) |
 | `read text` | Read a reference's body text — its attached PDF or clipped web page — routed by what it has |
 | `read annotations` | List a reference's annotations, PDF and web merged (each item source-tagged) |
+| `grep` | Find where a reference's body text says something — PDF pages or web offsets — without retrieving the body (the lookup half of `read`) |
 | `styles` | List available citation styles |
 | `version` | Print the CLI marketing version and monotonic build number as JSON (`{"build":8,"version":"0.1.7"}`); the MCP server's version guard requires `build >= MIN_CLI_BUILD` |
 | `self-update` | (Linux) Download the latest signed release and replace `rubien-cli` in place after verifying an ed25519 signature; `--check` reports `{current, latest, updateAvailable}` as JSON and changes nothing. On macOS it is a no-op (Rubien.app/Sparkle manages the bundled CLI). |
@@ -574,6 +575,62 @@ no annotations → `[]` (exit 0, not an error). `--source pdf|web` filters.
 
 ---
 
+## grep
+
+Find **where** a reference's body text says something — without retrieving the
+body. The lookup half of the `read` workflow: grep locates, `read text`
+retrieves.
+
+```
+rubien-cli grep <id> "<query>" [--regex] [--source pdf|web] [--context-chars N]
+    [--pages <range>] [--max-pages N] [--snippets-per-page N]   # PDF-scoped
+    [--max-matches N]                                            # web-scoped
+```
+
+Source selection mirrors `read`: explicit `--source` wins; PDF-scoped flags
+imply `pdf` and `--max-matches` implies `web`; otherwise PDF wins when the
+reference has both. Matching is case-insensitive (`--regex` for regular
+expressions; `(?-i:…)` restores case sensitivity). Matches are
+non-overlapping, leftmost-first; zero-width regex matches are discarded.
+
+PDF-source response — hits anchor to **pages** (follow up with
+`read text --pages`); snippets come from normalized extracted text:
+
+```json
+{ "id": 42, "source": "pdf", "available": ["pdf"],
+  "query": "theorem", "isRegex": false,
+  "pageCount": 12, "hasTextLayer": true,
+  "totalMatches": 5, "totalMatchingPages": 2, "truncated": false,
+  "pages": [ { "page": 4, "sectionPath": ["3 Main Results"], "matchCount": 2,
+               "snippetsTruncated": false, "snippets": ["…"] } ] }
+```
+
+`totalMatches`/`totalMatchingPages` are counted before the `--max-pages` cut.
+A scanned PDF (no text layer) returns success with `hasTextLayer: false` and
+no hits — fall back to `pdf page-image`.
+
+Web-source response — hits anchor to **exact character offsets** into the raw
+body, in the same coordinates `read text --start` consumes:
+
+```json
+{ "id": 7, "source": "web", "available": ["web"],
+  "query": "theorem", "isRegex": false,
+  "contentLength": 84213, "totalMatches": 3, "totalEntries": 2, "truncated": false,
+  "matches": [ { "start": 18342, "matchCount": 2,
+                 "snippet": "… we now state the theorem …" } ] }
+```
+
+Nearby matches merge into one entry (`matchCount` counts the cluster;
+`start` is the first match's offset). `--max-matches` caps entries;
+`totalEntries` counts clusters before the cap.
+
+Errors: unknown reference; neither source readable; a requested or implied
+source that is unavailable; PDF-scoped flags mixed with `--max-matches`;
+empty query; `invalid-regex`; PDF extraction failures pass through the
+`pdf`-family error envelope (`encrypted`, `invalid-page-range: …`).
+
+---
+
 ## styles
 
 List available citation styles.
@@ -1030,6 +1087,7 @@ the identical subcommand documented above:
 | `rubien_pdf_page_image` | `pdf page-image` (returned as an MCP `image` content block + a text metadata block) |
 | `rubien_read_text` | `read text` |
 | `rubien_read_annotations` | `read annotations` |
+| `rubien_grep_text` | `grep` |
 
 **Errors.** A tool whose backing command exits non-zero (e.g. a missing
 reference, a reference with no attached PDF) returns a normal result with
