@@ -1632,6 +1632,55 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertTrue(fixture.controller.pendingAttachments.isEmpty)
     }
 
+    func testCodexModelChangeMidConversationRehomesPendingAttachments() async throws {
+        let restore = restoreCodexPrefsAfter()
+        defer { restore() }
+        let savedProvider = UserDefaults.standard.object(forKey: RubienPreferences.assistantProviderKey)
+        defer {
+            if let savedProvider {
+                UserDefaults.standard.set(savedProvider, forKey: RubienPreferences.assistantProviderKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: RubienPreferences.assistantProviderKey)
+            }
+        }
+        let fixture = try makeAttachmentController(withProviderFactory: true)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        // Model-change resets are Codex-only: move the conversation there, then give
+        // the thread content so `selectModel` takes its reset branch.
+        fixture.controller.switchProvider(to: .codex)
+        let codex = try XCTUnwrap(fixture.alternateProvider)
+        fixture.controller.send("hi")
+        await codex.waitUntilStreaming()
+        codex.emit(.sessionStarted(sessionID: "TH-1"))
+        codex.finishStream()
+        await fixture.controller.turnTask?.value
+        XCTAssertTrue(fixture.controller.hasMessages)
+
+        fixture.controller.stageAttachments([fixture.source])
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+        let attachmentID = try XCTUnwrap(fixture.controller.pendingAttachments.first?.id)
+        let oldPath = try XCTUnwrap(fixture.controller.pendingAttachments.first?.stagedURL)
+
+        fixture.controller.selectModel("gpt-test-2")
+
+        XCTAssertEqual(fixture.controller.modelOverride, "gpt-test-2")
+        XCTAssertNil(fixture.controller.liveSessionID, "model change starts a fresh conversation")
+        // The rehome starts synchronously; a competing pick during it is ignored,
+        // mirroring switchProvider's staging guard.
+        XCTAssertTrue(fixture.controller.isRehomingAttachments)
+        fixture.controller.selectModel("gpt-test-3")
+        XCTAssertEqual(fixture.controller.modelOverride, "gpt-test-2",
+                       "a pick during rehome is ignored — mirrors switchProvider")
+
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+        XCTAssertEqual(fixture.controller.pendingAttachments.map(\.id), [attachmentID],
+                       "pending attachments survive a Codex model change")
+        let movedPath = try XCTUnwrap(fixture.controller.pendingAttachments.first?.stagedURL)
+        XCTAssertNotEqual(oldPath, movedPath, "rehomed into the fresh conversation's directory")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: oldPath.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: movedPath.path))
+    }
+
     func testAttachmentMutationIsFrozenDuringProviderRehome() async throws {
         let fixture = try makeAttachmentController(withProviderFactory: true)
         defer { try? FileManager.default.removeItem(at: fixture.root) }

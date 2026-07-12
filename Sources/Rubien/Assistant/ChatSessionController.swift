@@ -888,17 +888,20 @@ final class ChatSessionController: ObservableObject {
     /// effort/sandbox choices — deliberately NOT `newConversation()`, which
     /// re-applies Settings defaults and would silently flip the user's live
     /// toggles (plan-review #3) — and notes the reset in the pane (spec §4.6,
-    /// the `resume()` notice precedent). Claude switches live (per-turn `--model`)
+    /// the `resume()` notice precedent). Pending attachments are preserved and
+    /// rehomed exactly like `switchProvider` — the reset is implicit, and only an
+    /// explicit "New conversation" (or resume, which also clears the draft)
+    /// discards them — and, also like `switchProvider`, a pick is ignored while
+    /// staging/rehome is unsettled. Claude switches live (per-turn `--model`)
     /// and is NOT remembered here (its default lives in Settings). An explicit pick
     /// snaps effort to the model's own default when the catalog knows it (spec §3);
     /// a nil id (transient pre-seed / programmatic only) leaves effort alone.
     func selectModel(_ id: String?) {
         guard id != modelOverride else { return }
-        if providerKind == .codex {
-            RubienPreferences.assistantCodexModel = id  // remember the pick as the default
-        }
         if providerKind == .codex, hasMessages {
-            resetConversationState(attachments: .discard)
+            guard !isStagingAttachments, !hasAttachmentRehomeFailure else { return }
+            RubienPreferences.assistantCodexModel = id  // remember the pick as the default
+            resetConversationState(attachments: .preserveAndRehome)
             liveSessionID = nil
             seedSent = false
             modelOverride = id
@@ -906,6 +909,9 @@ final class ChatSessionController: ObservableObject {
             hasMessages = true
             renderNotice("_New conversation — Codex applies a model change to a fresh conversation._")
             return
+        }
+        if providerKind == .codex {
+            RubienPreferences.assistantCodexModel = id  // remember the pick as the default
         }
         modelOverride = id
         snapEffortToModelDefault(id)
