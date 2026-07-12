@@ -136,6 +136,16 @@ final class BodyTextMatcherTests: XCTestCase {
         XCTAssertEqual(starts("alpha beta", try regex("a?l")), [0])
     }
 
+    func testRegexLigaturePatternDoesNotMatchFoldedText() throws {
+        // The PDF path folds page text via NFKC but never folds the PATTERN
+        // (spec §6): a literal ﬁ in a regex won't match the folded "fi".
+        XCTAssertEqual(BodyTextMatcher.matches(in: "final text", query: try regex("ﬁnal")).count, 0)
+        // whereas the literal path normalizes the query too — at the PDF call
+        // site (PDFExtractor.search normalizes literal queries); at matcher
+        // level a pre-normalized needle matches:
+        XCTAssertEqual(starts("final text", literal(BodyTextMatcher.normalize("ﬁnal"))), [0])
+    }
+
     func testInvalidRegexThrows() {
         XCTAssertThrowsError(try BodyTextQuery.compile("([unclosed", isRegex: true)) { err in
             guard case BodyTextQueryError.invalidRegex = err else {
@@ -408,11 +418,34 @@ git commit -m "feat(core): BodyTextMatcher — shared grep matcher with pinned o
     }
 
     func testSearchSectionPathOnOutlinedFixture() throws {
+        // Fixture pages contain "Section page N" / "Content on page N"
+        // (scripts/generate-pdf-fixtures.swift:139) — query a word that exists.
         let r = try PDFExtractor.search(
-            at: fixtureURL("outline-2level-5sections"), query: "the", isRegex: false,
+            at: fixtureURL("outline-2level-5sections"), query: "content", isRegex: false,
             pagesString: nil, maxPages: 30, snippetsPerPage: 3, contextChars: 160)
+        XCTAssertFalse(r.pages.isEmpty, "query 'content' must hit the fixture body text")
         XCTAssertTrue(r.pages.contains { !$0.sectionPath.isEmpty },
                       "outlined fixture should yield section breadcrumbs")
+    }
+
+    func testSearchRegexAndNoMatchWithTextLayer() throws {
+        let rx = try PDFExtractor.search(
+            at: fixtureURL("linear-3pages-text"), query: "pa+ge", isRegex: true,
+            pagesString: nil, maxPages: 30, snippetsPerPage: 3, contextChars: 160)
+        XCTAssertGreaterThan(rx.totalMatches, 0, "regex must hit 'page' text")
+        let none = try PDFExtractor.search(
+            at: fixtureURL("linear-3pages-text"), query: "zzzqqqxxx", isRegex: false,
+            pagesString: nil, maxPages: 30, snippetsPerPage: 3, contextChars: 160)
+        XCTAssertTrue(none.hasTextLayer, "text layer present even with zero hits")
+        XCTAssertEqual(none.totalMatches, 0)
+        XCTAssertTrue(none.pages.isEmpty)
+    }
+
+    func testSearchCaseInsensitiveThroughAPI() throws {
+        let upper = try PDFExtractor.search(
+            at: fixtureURL("linear-3pages-text"), query: "PAGE", isRegex: false,
+            pagesString: nil, maxPages: 30, snippetsPerPage: 3, contextChars: 160)
+        XCTAssertGreaterThan(upper.totalMatches, 0, "literal matching is case-insensitive")
     }
 
     func testSearchMaxPagesTruncationCountsBeforeCut() throws {
@@ -424,7 +457,7 @@ git commit -m "feat(core): BodyTextMatcher — shared grep matcher with pinned o
         XCTAssertTrue(r.truncated)
     }
 
-    func testSearchPagesScopeAndInvalidRange() throws {
+    func testSearchPagesScopeAndInvalidAndOutOfRange() throws {
         let scoped = try PDFExtractor.search(
             at: fixtureURL("linear-3pages-text"), query: "page", isRegex: false,
             pagesString: "2", maxPages: 30, snippetsPerPage: 3, contextChars: 160)
@@ -434,6 +467,15 @@ git commit -m "feat(core): BodyTextMatcher — shared grep matcher with pinned o
             pagesString: "abc", maxPages: 30, snippetsPerPage: 3, contextChars: 160)) { error in
             guard case PDFExtractor.ExtractError.invalidPageRange = error else {
                 return XCTFail("expected invalidPageRange, got \(error)")
+            }
+        }
+        // Spec §7: a wholly out-of-range scope errors rather than silently
+        // returning empty (parsePageRange accepts "999"; pagesInRanges drops it).
+        XCTAssertThrowsError(try PDFExtractor.search(
+            at: fixtureURL("linear-3pages-text"), query: "page", isRegex: false,
+            pagesString: "999", maxPages: 30, snippetsPerPage: 3, contextChars: 160)) { error in
+            guard case PDFExtractor.ExtractError.pageOutOfRange = error else {
+                return XCTFail("expected pageOutOfRange, got \(error)")
             }
         }
     }
@@ -453,15 +495,6 @@ git commit -m "feat(core): BodyTextMatcher — shared grep matcher with pinned o
             pagesString: nil, maxPages: 30, snippetsPerPage: 3, contextChars: 160))
     }
 
-    func testSearchNormalizationFindsHyphenBrokenWord() throws {
-        // Behavioral pin on the normalize pipeline THROUGH the search API:
-        // regex "linear" must match even if a backend broke it as "lin-\near".
-        // (linear-3pages-text contains the word "linear" in its title text.)
-        let r = try PDFExtractor.search(
-            at: fixtureURL("linear-3pages-text"), query: "linear", isRegex: false,
-            pagesString: nil, maxPages: 30, snippetsPerPage: 3, contextChars: 160)
-        XCTAssertGreaterThanOrEqual(r.totalMatches, 0)  // must not throw; count asserted loosely
-    }
 ```
 
 - [ ] **Step 2: Run to verify failure.**
@@ -513,6 +546,12 @@ Expected: compile FAILURE (`search` doesn't exist).
         if let raw = pagesString, !raw.isEmpty {
             let ranges = try parsePageRange(raw, pageCount: pageCount)
             candidatePages = pagesInRanges(ranges, pageCount: pageCount)
+            // parsePageRange accepts "999" and pagesInRanges then drops it —
+            // a wholly out-of-range scope must error, not silently return
+            // empty (spec §7).
+            if candidatePages.isEmpty {
+                throw ExtractError.pageOutOfRange(ranges.first?.lowerBound ?? 0)
+            }
         } else {
             candidatePages = Array(1...max(1, pageCount))
         }
@@ -530,8 +569,8 @@ Expected: compile FAILURE (`search` doesn't exist).
         for p in candidatePages {
             guard let page = doc.page(at: p - 1) else { continue }
             let rawText = page.extractedText() ?? ""
-            if !rawText.isEmpty { anyText = true }
             let norm = BodyTextMatcher.normalize(rawText)
+            if !norm.isEmpty { anyText = true }  // normalized ⇒ trimmed: whitespace-only pages don't count
             let ranges = BodyTextMatcher.matches(in: norm, query: compiled)
             guard !ranges.isEmpty else { continue }
             totalMatchingPages += 1
@@ -565,6 +604,8 @@ Expected: compile FAILURE (`search` doesn't exist).
 
 Run: `swift test --filter 'RubienPDFKitTests\..*'` then `swift test --filter 'RubienCoreTests\..*'`
 Expected: PASS / PASS.
+
+- [ ] **Step 4b: Linux parity note (spec §9).** Read `scripts/run-linux-parity-tests.sh` once: if it runs the whole `RubienPDFKitTests` target (expected), the new search tests ride along automatically — state that in your report; if it enumerates test classes/methods, add the new ones. Do not attempt to run it (requires a Linux environment).
 
 - [ ] **Step 5: Commit.**
 
@@ -776,6 +817,9 @@ git commit -m "feat(pdfkit): PDFExtractor.search — page-anchored grep over nor
         let result = try runCLI(["grep", "\(id)", "page", "--pages", "abc"])
         XCTAssertNotEqual(result.exitCode, 0)
         XCTAssertTrue(stderrError(result).contains("invalid-page-range"), stderrError(result))
+        let outOfRange = try runCLI(["grep", "\(id)", "page", "--pages", "999"])
+        XCTAssertNotEqual(outOfRange.exitCode, 0)
+        XCTAssertTrue(stderrError(outOfRange).contains("page-out-of-range"), stderrError(outOfRange))
     }
     #endif
 ```
@@ -1114,8 +1158,8 @@ export type GrepTextWebOutput = z.infer<typeof GrepTextWebOutput>;
 
 Pin both in `schemas.test.ts` following the file's existing valid+invalid-sample pattern (e.g. a pdf sample missing `snippetsTruncated` must fail; a web sample with negative `start` must fail).
 
-- [ ] **Step 3: Versions.** `BUILD.txt` → `21`; `./scripts/generate-cli-version.sh`; `versionGuard.ts` `MIN_CLI_BUILD = 21` + comment "Equals the release build that first shipped `grep`."; `stub-cli-ok.sh` build → 21; update the guard tests' pinned numbers (`rg -n '\b20\b' mcp-server/test` and fix the guard-related ones — do NOT touch unrelated 20s).
-- [ ] **Step 4: e2e** — `toolNames` expectation gains `rubien_grep_text`; any stated tool count in tests moves 34→35.
+- [ ] **Step 3: Versions.** FIRST run `npm view rubien-mcp-server version` — expected `0.1.0` (0.2.0 unpublished ⇒ grep absorbs into 0.2.0, no package.json change); if it reports 0.2.0 or later, bump package.json+lock+`SERVER_INFO` to 0.3.0 and say so in your report. Then: `BUILD.txt` → `21`; `./scripts/generate-cli-version.sh`; `versionGuard.ts` `MIN_CLI_BUILD = 21` + comment "Equals the release build that first shipped `grep`."; `stub-cli-ok.sh` build → 21; update the guard tests' pinned numbers (`rg -n '\b20\b' mcp-server/test` and fix the guard-related ones — do NOT touch unrelated 20s).
+- [ ] **Step 4: e2e** — add `expect(toolNames).toContain("rubien_grep_text");` to the spot-check list in `e2e-stdio.test.ts` (~line 63; it is a spot-check list, not an exhaustive array — there is no count to update there).
 - [ ] **Step 5: Run.**
 
 Run: `swift build` (regenerated version file must compile; `.build/debug/rubien-cli version` reports build 21) then `cd mcp-server && npm test`
@@ -1142,12 +1186,55 @@ git commit -m "feat(mcp): rubien_grep_text tool; BUILD 21 + MIN_CLI_BUILD 21"
 - [ ] **Step 1: Failing tests.** `expectedToolNames` gains `rubien_grep_text` (comment 7→8 tools); add:
 
 ```swift
-    func testGrepTextRequiredArgsAndArgv() throws {
+    func testGrepTextRequiredArgs() throws {
         try skipIfBinaryMissing()
+        // NOTE: `required(_:)` in testToolsListAdvertisesTheSevenReadTools is a
+        // LOCAL function — either hoist it to a private class helper (update the
+        // existing call site) or do the lookup locally as here:
         let responses = try runMCP([req(id: 1, method: "tools/list")])
-        // required args
-        // (reuse the file's existing `required(_:)` helper)
-        XCTAssertEqual(required("rubien_grep_text"), ["id", "query"])
+        let tools = try XCTUnwrap(
+            (response(responses, id: 1)?["result"] as? [String: Any])?["tools"] as? [[String: Any]])
+        let grep = try XCTUnwrap(tools.first { ($0["name"] as? String) == "rubien_grep_text" })
+        let requiredArgs = (grep["inputSchema"] as? [String: Any])?["required"] as? [String]
+        XCTAssertEqual(requiredArgs?.sorted(), ["id", "query"])
+    }
+
+    #if os(macOS)
+    func testGrepTextPdfFamilyFlagsForwarded() throws {
+        try skipIfBinaryMissing()
+        // Behavioral proof that regex/pages/maxPages/snippetsPerPage/contextChars
+        // all reach the CLI: a fully-flagged pdf-family call succeeds, scoped to
+        // page 2, via a regex query.
+        let id = try importFixturePDF()
+        let responses = try runMCP([
+            toolCall(id: 1, name: "rubien_grep_text",
+                     arguments: ["id": id, "query": "pa+ge", "regex": true, "pages": "2",
+                                 "maxPages": 5, "snippetsPerPage": 2, "contextChars": 80]),
+        ])
+        let result = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
+        XCTAssertNil(result["isError"], "\(result)")
+        let text = try XCTUnwrap((result["content"] as? [[String: Any]])?.first?["text"] as? String)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+        XCTAssertEqual(json["source"] as? String, "pdf")
+        XCTAssertEqual(json["isRegex"] as? Bool, true)
+        let hits = json["pages"] as? [[String: Any]] ?? []
+        XCTAssertTrue(hits.allSatisfy { ($0["page"] as? NSNumber)?.intValue == 2 }, "\(hits)")
+    }
+    #endif
+
+    func testGrepTextWebFamilyFlagForwarded() throws {
+        try skipIfBinaryMissing()
+        // maxMatches implies web; on a metadata-only ref the web source is
+        // unavailable — the CLI error proves the flag was forwarded + interpreted.
+        let id = try seedTitle("Grep web-family forwarding")
+        let responses = try runMCP([
+            toolCall(id: 1, name: "rubien_grep_text",
+                     arguments: ["id": id, "query": "x", "maxMatches": 3]),
+        ])
+        let result = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
+        XCTAssertEqual(result["isError"] as? Bool, true)
+        let text = ((result["content"] as? [[String: Any]])?.first?["text"] as? String ?? "").lowercased()
+        XCTAssertTrue(text.contains("web"), "error must show the web-implied routing: \(text)")
     }
 
     func testGrepTextMixedScopesRejected() throws {
@@ -1189,7 +1276,7 @@ git commit -m "feat(mcp): rubien_grep_text tool; BUILD 21 + MIN_CLI_BUILD 21"
     }
 ```
 
-Adjust the exact helper spellings (`required`, `seedTitle`, `runMCP`, `toolCall`, `response`) to the file's real ones — read them first.
+Adjust the exact helper spellings (`seedTitle`, `runMCP`, `toolCall`, `response`, `req`, `importFixturePDF`) to the file's real ones — read them first. `mcpBool` already exists (`MCPToolCatalog.swift:292`) — do NOT add a duplicate.
 
 Run: `swift test --filter 'RubienCLITests\.MCPServerTests'` → FAIL (tool absent).
 
