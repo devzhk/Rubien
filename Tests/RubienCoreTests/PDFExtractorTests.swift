@@ -377,7 +377,7 @@ final class PDFExtractorTests: XCTestCase {
         // Many real PDFs (especially books) use top-level container outline
         // entries like "Volume 1" or "Part I" that have no destination of
         // their own — they only group children. Those used to be dropped,
-        // making `pdf text --section "Volume 1"` impossible. The walker now
+        // making `read text --section "Volume 1"` impossible. The walker now
         // backfills the parent's startPage from its first descendant.
         let url = try makeContainerOutlinePDF()
         let info = try PDFExtractor.info(at: url)

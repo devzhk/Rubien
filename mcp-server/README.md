@@ -118,24 +118,24 @@ claude mcp add rubien -- node $(pwd)/dist/index.js        # Claude Code
 
 ## Tool catalog
 
-~36 tools, one per `rubien-cli` subcommand mode, named `rubien_<subject>_<action>`:
+34 tools, one per `rubien-cli` subcommand mode, named `rubien_<subject>_<action>`:
 
 | Surface | Tools |
 |---|---|
 | References | `rubien_search`, `rubien_list`, `rubien_get`, `rubien_add`, `rubien_update`, `rubien_delete` |
 | Citations | `rubien_cite`, `rubien_styles_list` |
 | Import/Export | `rubien_import`, `rubien_export` |
-| PDFs | `rubien_pdf_info`, `rubien_pdf_text`, `rubien_pdf_page_image`, `rubien_pdf_download`, `rubien_annotations_list` |
-| Web clips | `rubien_web_get`, `rubien_web_annotations` |
+| Reading | `rubien_read_text`, `rubien_read_annotations` |
+| PDFs | `rubien_pdf_info`, `rubien_pdf_page_image`, `rubien_pdf_download` |
 | Properties (incl. Tags) | `rubien_properties_list`, `rubien_properties_create`, `rubien_properties_delete`, `rubien_properties_rename`, `rubien_properties_show`, `rubien_properties_hide`, `rubien_properties_add_option`, `rubien_properties_rename_option`, `rubien_properties_delete_option`, `rubien_properties_set`, `rubien_properties_add_values`, `rubien_properties_remove_values`, `rubien_properties_clear` |
 | Saved views | `rubien_views_list`, `rubien_views_create`, `rubien_views_delete`, `rubien_views_rename`, `rubien_views_query` |
 | Sync | `rubien_sync_status` (Mac-only — errors on Linux) |
 
 `rubien_import` accepts an absolute path on the host or a direct HTTP(S) URL with a `.pdf`, `.md`, or `.markdown` path extension. Direct URLs are validated by `rubien-cli` before import; stdin (`"-"`) is intentionally unavailable through MCP.
 
-PDF tools: `rubien_pdf_info` (page count + outline), `rubien_pdf_text` (by page range or section), `rubien_pdf_page_image` (page → PNG), `rubien_pdf_download` (fetch an open-access PDF and attach it), `rubien_annotations_list` (highlights/underlines/notes on the attached PDF).
+Reading tools operate on any reference without your knowing whether it holds a PDF or a clipped web page. `rubien_read_text` returns the readable body text — the attached PDF or the clipped web page — routed automatically: omit `source` and `pages`/`sections` imply the PDF, `start` implies the web body, else PDF wins when both exist. Every response reports `source` (what was read) and `available` (which sources are readable now). PDF results are page-keyed (`pages[]` items with `text` + `sectionPath`, selected by a `pages` range or `sections` title-substrings); web results are one paginated body window (`content` + `contentLength`, `start`/`maxChars`; `contentFormat` markdown or HTML). `rubien_read_annotations` merges the user's highlights/underlines/anchored notes across both kinds into one array, each item tagged `source`; web items carry a W3C TextQuoteSelector triple (`prefixText`/`anchorText`/`suffixText`) that locates them inside the `rubien_read_text` body. Both are library-only — neither hits the network.
 
-Web-clip tools: `rubien_web_get` returns the extracted body (markdown/HTML, paginated) with `siteName` and `annotationCount`; `rubien_web_annotations` returns highlights as a W3C TextQuoteSelector triple (`prefixText`/`anchorText`/`suffixText`) for locating them in the body. Library-only — neither hits the network.
+PDF tools: `rubien_pdf_info` (page count, `hasTextLayer`, outline sections — call it before selecting `rubien_read_text` by `sections`), `rubien_pdf_page_image` (render a page to an image, for tables/figures/equations), `rubien_pdf_download` (fetch an open-access PDF and attach it).
 
 Destructive tools carry `destructiveHint: true` so Claude Code's permission UI flags them. `rubien_delete` passes `--force`; confirmation happens in the client UI, not a CLI prompt (see `src/tools/references.ts`).
 
