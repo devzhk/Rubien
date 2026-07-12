@@ -1,6 +1,19 @@
 name: CI
 
-on: [push, pull_request]
+# Docs-only changes don't need two Swift runners: markdown edits and the
+# release-time appcast commit are skipped. A push mixing docs with code still
+# runs (paths-ignore only skips when EVERY changed file matches). Safe while
+# main has no required status checks — revisit if branch protection is added,
+# since skipped runs leave required checks permanently pending.
+on:
+  push:
+    paths-ignore:
+      - "**.md"
+      - "Docs/appcast.xml"
+  pull_request:
+    paths-ignore:
+      - "**.md"
+      - "Docs/appcast.xml"
 
 jobs:
   macos:
