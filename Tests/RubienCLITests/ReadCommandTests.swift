@@ -276,6 +276,32 @@ final class ReadCommandTests: XCTestCase {
         XCTAssertEqual(ok.exitCode, 0, ok.stderr)
     }
 
+    /// Negative `--start` is rejected with the `>= 0` guard (parity with the
+    /// removed `web get --start` bound). swift-argument-parser treats a bare
+    /// `-1` as a flag token, so the `--start=-1` form is the reliable way to
+    /// push a negative integer through the parser into the explicit guard.
+    func testReadTextRejectsNegativeStart() throws {
+        try skipIfBinaryMissing()
+        let id = try addReference()
+        try seedWebContent(refId: id, body: "web body")
+        let result = try runCLI(["read", "text", "\(id)", "--start=-1"])
+        XCTAssertNotEqual(result.exitCode, 0)
+        XCTAssertTrue(stderrError(result).contains("--start"), stderrError(result))
+    }
+
+    /// `read text --help` documents every selection flag (parity with the
+    /// removed `pdf text --help` mode-documentation test, extended to cover the
+    /// unified command's web window + explicit source flags).
+    func testReadTextHelpDocumentsSelectionFlags() throws {
+        try skipIfBinaryMissing()
+        let r = try runCLI(["read", "text", "--help"])
+        XCTAssertEqual(r.exitCode, 0)
+        let out = r.stdout + r.stderr
+        for flag in ["--pages", "--section", "--start", "--source"] {
+            XCTAssertTrue(out.contains(flag), "read text --help must document \(flag); got:\n\(out)")
+        }
+    }
+
     // MARK: read text — PDF routing (needs a real PDF; PDFKit-gated like existing tests)
 
     #if canImport(PDFKit)

@@ -72,8 +72,11 @@ final class PdfCommandTests: XCTestCase {
         XCTAssertEqual(r.exitCode, 0)
         let out = r.stdout + r.stderr
         XCTAssertTrue(out.contains("info"))
-        XCTAssertTrue(out.contains("text"))
         XCTAssertTrue(out.contains("page-image"))
+        XCTAssertTrue(out.contains("status"))
+        XCTAssertTrue(out.contains("download"))
+        XCTAssertFalse(out.contains("text"),
+                       "`pdf text` was removed (superseded by `read text`); it must not appear as a pdf subcommand")
     }
 
     // MARK: - pdf info
@@ -97,33 +100,6 @@ final class PdfCommandTests: XCTestCase {
         } else {
             XCTFail("stderr was not valid JSON: \(stderr)")
         }
-    }
-
-    // MARK: - pdf text
-
-    func testPdfTextRejectsBothPagesAndSection() throws {
-        try skipIfBinaryMissing()
-        let r = try runCLI([
-            "pdf", "text", "1",
-            "--pages", "1-2",
-            "--section", "Introduction"
-        ])
-        XCTAssertNotEqual(r.exitCode, 0)
-        let stderr = r.stderr
-        XCTAssertTrue(
-            stderr.contains("mutually exclusive") || stderr.lowercased().contains("error"),
-            "Expected mutual-exclusion error, got: \(stderr)"
-        )
-    }
-
-    func testPdfTextHelpDocumentsBothModes() throws {
-        try skipIfBinaryMissing()
-        let r = try runCLI(["pdf", "text", "--help"])
-        XCTAssertEqual(r.exitCode, 0)
-        let out = r.stdout + r.stderr
-        XCTAssertTrue(out.contains("--pages"))
-        XCTAssertTrue(out.contains("--section"))
-        XCTAssertTrue(out.contains("--max-chars"))
     }
 
     // MARK: - pdf page-image
