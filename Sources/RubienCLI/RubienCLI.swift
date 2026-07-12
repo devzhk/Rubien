@@ -28,6 +28,7 @@ struct RubienCLI: AsyncParsableCommand {
             Delete.self,
             Cite.self,
             Import.self,
+            Read.self,
             Properties.self,
             Annotations.self,
             Styles.self,
@@ -2212,6 +2213,239 @@ private func runPdfSubcommand<Result: Encodable>(
     } catch let e as PDFExtractor.ExtractError {
         emitPDFExtractError(e)
         throw ExitCode.failure
+    }
+}
+
+// MARK: - read (kind-agnostic body/annotation reads)
+
+enum PDFSourceState: String {
+    case notAttached, notMaterialized, missingFile, available
+}
+
+func pdfStateDescription(_ state: PDFSourceState) -> String {
+    switch state {
+    case .notAttached: return "no PDF attached"
+    case .notMaterialized: return "PDF attached but not materialized on this device (see 'pdf status')"
+    case .missingFile: return "PDF materialized but its file is missing on disk"
+    case .available: return "available"
+    }
+}
+
+struct SourceAvailability {
+    let pdfState: PDFSourceState
+    let pdfURL: URL?                             // non-nil iff pdfState == .available
+    let web: Reference.DecodedWebContent?        // non-nil iff web is readable
+    var available: [String] {
+        var out: [String] = []
+        if pdfState == .available { out.append("pdf") }
+        if web != nil { out.append("web") }
+        return out
+    }
+}
+
+/// Resolve which body sources a reference can serve right now. Four-state PDF
+/// (spec §4): pdfFilename(for:) alone can't distinguish attached-not-materialized
+/// from never-attached, so read the pdfCache row like `pdf status` does.
+func resolveSources(for ref: Reference) throws -> SourceAvailability {
+    var pdfState = PDFSourceState.notAttached
+    var pdfURL: URL? = nil
+    if let refId = ref.id, let status = try AppDatabase.shared.pdfCacheStatus(for: refId) {
+        if status.materializedAt == nil {
+            pdfState = .notMaterialized
+        } else {
+            let url = PDFService.pdfURL(for: status.localFilename)
+            if FileManager.default.fileExists(atPath: url.path) {
+                pdfState = .available
+                pdfURL = url
+            } else {
+                pdfState = .missingFile
+            }
+        }
+    }
+    return SourceAvailability(pdfState: pdfState, pdfURL: pdfURL, web: ref.decodedWebContent)
+}
+
+enum ReadSource: String, ExpressibleByArgument, CaseIterable {
+    case pdf, web
+}
+
+struct Read: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "read",
+        abstract: "Read a reference's body text or annotations, whichever kind it is (PDF or web clip)",
+        subcommands: [ReadText.self]
+    )
+}
+
+struct ReadTextPdfOutput: Encodable {
+    let id: Int64
+    let source: String
+    let available: [String]
+    let pageCount: Int
+    let selection: PDFExtractor.SelectionEcho
+    let pages: [PDFExtractor.PageContent]
+    let truncated: Bool
+    let hasTextLayer: Bool
+}
+
+struct ReadTextWebOutput: Encodable {
+    let id: Int64
+    let source: String
+    let available: [String]
+    let url: String?
+    let siteName: String?
+    let contentFormat: String
+    let content: String
+    let contentLength: Int
+    let start: Int
+    let returnedChars: Int
+    let truncated: Bool
+    let annotationCount: Int
+}
+
+struct ReadText: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "text",
+        abstract: "Read the body text of a reference (PDF pages/sections or web body window)"
+    )
+
+    @Argument(help: "Reference ID")
+    var id: Int64
+
+    @Option(name: .customLong("pages"),
+            help: "PDF page range: e.g. 1-3, 1-3,8-10, 12-. Implies a PDF source.")
+    var pages: String?
+
+    @Option(name: .customLong("section"), parsing: .singleValue,
+            help: "PDF section title substring (case-insensitive, repeatable). Implies a PDF source.")
+    var sections: [String] = []
+
+    @Option(name: .customLong("start"),
+            help: "Character offset into the web body (default 0). Implies a web source.")
+    var start: Int?
+
+    @Option(name: .customLong("max-chars"),
+            help: "Cap total returned characters (default 50000)")
+    var maxChars: Int = 50_000
+
+    @Option(name: .customLong("source"),
+            help: "Force a source: pdf or web (default: pages/sections imply pdf, start implies web, else PDF wins)")
+    var source: ReadSource?
+
+    func run() throws {
+        guard maxChars > 0, maxChars <= 500_000 else {
+            printJSONError("--max-chars must be between 1 and 500000")
+            throw ExitCode.failure
+        }
+        if let start, start < 0 {
+            printJSONError("--start must be >= 0")
+            throw ExitCode.failure
+        }
+        let pdfParamsGiven = pages != nil || !sections.isEmpty
+        let webParamsGiven = start != nil
+        if pages != nil && !sections.isEmpty {
+            printJSONError("--pages and --section are mutually exclusive")
+            throw ExitCode.failure
+        }
+        if pdfParamsGiven && webParamsGiven {
+            printJSONError("--pages/--section and --start are mutually exclusive (PDF vs web addressing)")
+            throw ExitCode.failure
+        }
+
+        guard let ref = try AppDatabase.shared.fetchReferences(ids: [id]).first else {
+            printJSONError("Reference \(id) not found")
+            throw ExitCode.failure
+        }
+        let avail = try resolveSources(for: ref)
+        let availJSON = "[" + avail.available.map { "\"\($0)\"" }.joined(separator: ",") + "]"
+
+        // Explicit-source contradictions report AFTER the probe so the error can
+        // carry real availability (spec §5: requested source + available + state).
+        if let source {
+            if source == .web && pdfParamsGiven {
+                printJSONError("--pages/--section require a PDF source (requested source: web); available: \(availJSON)")
+                throw ExitCode.failure
+            }
+            if source == .pdf && webParamsGiven {
+                printJSONError("--start requires a web source (requested source: pdf); available: \(availJSON)")
+                throw ExitCode.failure
+            }
+        }
+
+        let resolved: ReadSource
+        if let source {
+            resolved = source
+        } else if pdfParamsGiven {
+            resolved = .pdf
+        } else if webParamsGiven {
+            resolved = .web
+        } else if avail.pdfState == .available {
+            resolved = .pdf
+        } else if avail.web != nil {
+            resolved = .web
+        } else {
+            printJSONError("Reference \(id) has no readable content (pdf: \(pdfStateDescription(avail.pdfState)); web: none)")
+            throw ExitCode.failure
+        }
+
+        switch resolved {
+        case .pdf:
+            guard let url = avail.pdfURL else {
+                printJSONError("source \"pdf\" is not readable (pdf: \(pdfStateDescription(avail.pdfState))); available: \(availJSON)")
+                throw ExitCode.failure
+            }
+            let selection: PDFExtractor.Selection
+            if !sections.isEmpty {
+                selection = .sections(sections)
+            } else if let pages, !pages.isEmpty {
+                selection = .pagesString(pages)
+            } else {
+                selection = .allPages
+            }
+            do {
+                let result = try PDFExtractor.extractText(at: url, selection: selection, maxChars: maxChars)
+                printJSON(ReadTextPdfOutput(
+                    id: id, source: "pdf", available: avail.available,
+                    pageCount: result.pageCount, selection: result.selection,
+                    pages: result.pages, truncated: result.truncated,
+                    hasTextLayer: result.hasTextLayer
+                ))
+            } catch let e as PDFExtractor.ExtractError {
+                emitPDFExtractError(e)
+                throw ExitCode.failure
+            }
+        case .web:
+            guard let decoded = avail.web else {
+                printJSONError("source \"web\" is not readable (reference \(id) has no web content); available: \(availJSON)")
+                throw ExitCode.failure
+            }
+            let body = decoded.body
+            let total = body.count
+            let offset = start ?? 0
+            let slice: String
+            let returned: Int
+            let truncated: Bool
+            if offset >= total {
+                slice = ""; returned = 0; truncated = false
+            } else {
+                let startIdx = body.index(body.startIndex, offsetBy: offset)
+                let remaining = total - offset
+                let take = min(maxChars, remaining)
+                let endIdx = body.index(startIdx, offsetBy: take)
+                slice = String(body[startIdx..<endIdx])
+                returned = take
+                truncated = take < remaining
+            }
+            let annotationCount = (try? AppDatabase.shared.webAnnotationCount(referenceId: id)) ?? 0
+            printJSON(ReadTextWebOutput(
+                id: id, source: "web", available: avail.available,
+                url: ref.url, siteName: ref.siteName,
+                contentFormat: decoded.format.rawValue,
+                content: slice, contentLength: total, start: offset,
+                returnedChars: returned, truncated: truncated,
+                annotationCount: annotationCount
+            ))
+        }
     }
 }
 
