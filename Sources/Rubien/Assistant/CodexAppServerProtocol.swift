@@ -590,6 +590,48 @@ enum CodexAppServerProtocol {
             matchSnippet: snippet.map { collapse($0, limit: snippetLimit) })
     }
 
+    /// Rebuild the History row from already-sanitized `thread/read` rows. The raw
+    /// `thread.preview` / search snippet are intentionally used only for identity
+    /// and date above: both can echo Rubien's private attachment manifest. A user
+    /// turn with only attachments gets the same path-free fallback as Claude.
+    /// Search considers only the visible user/assistant rows and returns nil when
+    /// the query matched only server-internal text.
+    static func visibleSessionSummary(
+        from raw: AgentSessionSummary,
+        rows: [ChatRenderMessage],
+        matching searchTerm: String? = nil
+    ) -> AgentSessionSummary? {
+        let visibleRows = rows.compactMap { row -> (role: ChatRole, text: String)? in
+            guard row.role == .user || row.role == .assistant else { return nil }
+            let body = collapseWhitespace(row.body)
+            if row.role == .user, body.isEmpty, !row.attachments.isEmpty {
+                return (.user, "Attached: " + row.attachments.map(\.displayName).joined(separator: ", "))
+            }
+            return body.isEmpty ? nil : (row.role, body)
+        }
+        guard let firstUser = visibleRows.first(where: { $0.role == .user })?.text else {
+            return nil
+        }
+
+        let matchedSnippet: String?
+        if let searchTerm {
+            let query = searchTerm.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !query.isEmpty,
+                  let match = visibleRows.lazy.compactMap({ snippet(around: query, in: $0.text) }).first
+            else { return nil }
+            matchedSnippet = collapse(match, limit: snippetLimit)
+        } else {
+            matchedSnippet = nil
+        }
+
+        return AgentSessionSummary(
+            id: raw.id,
+            preview: collapse(firstUser, limit: previewLimit),
+            date: raw.date,
+            matchSnippet: matchedSnippet
+        )
+    }
+
     /// `model/list` result → decoded catalog entries. Tolerant: unknown fields are
     /// ignored, a missing `displayName` falls back to the slug, missing efforts
     /// decode as empty (the UI then offers the universal fallback four), and an
@@ -674,8 +716,27 @@ enum CodexAppServerProtocol {
 
     /// Whitespace-collapse (newlines + runs → single space) + ellipsis-truncate.
     private static func collapse(_ value: String, limit: Int) -> String {
-        let collapsed = value.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        let collapsed = collapseWhitespace(value)
         return collapsed.count > limit ? String(collapsed.prefix(limit - 1)) + "…" : collapsed
+    }
+
+    private static func collapseWhitespace(_ value: String) -> String {
+        value.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    }
+
+    /// A collapsed window around the first case/diacritic-insensitive match. This
+    /// mirrors Claude History's visible-text search and keeps UI highlighting in
+    /// agreement with provider-side filtering.
+    private static func snippet(around query: String, in text: String, context: Int = 40) -> String? {
+        let options: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+        guard let range = text.range(of: query, options: options) else { return nil }
+        let start = text.index(range.lowerBound, offsetBy: -context, limitedBy: text.startIndex)
+            ?? text.startIndex
+        let end = text.index(range.upperBound, offsetBy: context, limitedBy: text.endIndex)
+            ?? text.endIndex
+        return (start > text.startIndex ? "…" : "")
+            + String(text[start..<end])
+            + (end < text.endIndex ? "…" : "")
     }
 
     /// The response answering a server-initiated approval request. `id` is echoed

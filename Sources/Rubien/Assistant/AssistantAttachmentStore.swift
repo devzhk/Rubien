@@ -1,5 +1,4 @@
 import Foundation
-import UniformTypeIdentifiers
 
 enum AssistantAttachmentStoreError: LocalizedError, Equatable {
     case unsupported(String)
@@ -9,6 +8,7 @@ enum AssistantAttachmentStoreError: LocalizedError, Equatable {
     case tooLarge(String)
     case imageDecode(String)
     case imageEncode(String)
+    case writeFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -26,6 +26,8 @@ enum AssistantAttachmentStoreError: LocalizedError, Equatable {
             return "\(name) could not be decoded as an image."
         case .imageEncode(let name):
             return "\(name) could not be encoded within the image attachment limits."
+        case .writeFailed(let name):
+            return "\(name) could not be saved in Rubien's attachment storage."
         }
     }
 }
@@ -37,10 +39,15 @@ actor AssistantAttachmentStore {
     nonisolated let managedRoot: URL
 
     private let fileManager: FileManager
+    private let workspaceRoot: URL
 
     init(workspaceURL: URL, fileManager: FileManager = .default) {
         self.fileManager = fileManager
-        managedRoot = workspaceURL
+        workspaceRoot = workspaceURL
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        managedRoot = workspaceRoot
             .appendingPathComponent(Self.relativeRoot, isDirectory: true)
             .standardizedFileURL
     }
@@ -57,7 +64,6 @@ actor AssistantAttachmentStore {
                 .isRegularFileKey,
                 .isSymbolicLinkKey,
                 .isAliasFileKey,
-                .fileSizeKey,
             ])
         } catch {
             throw AssistantAttachmentStoreError.unreadable(name)
@@ -73,31 +79,33 @@ actor AssistantAttachmentStore {
 
         let pathExtension = sourceURL.pathExtension.lowercased()
         guard ["md", "markdown", "txt"].contains(pathExtension) else {
-            if
-                let type = UTType(filenameExtension: pathExtension),
-                type.conforms(to: .image)
-            {
-                return try stageImageFile(
-                    sourceURL,
-                    id: id,
-                    conversationID: conversationID
-                )
-            }
-            throw AssistantAttachmentStoreError.unsupported(name)
-        }
-
-        guard Int64(values.fileSize ?? 0) <= Self.maxTextBytes else {
-            throw AssistantAttachmentStoreError.tooLarge(name)
+            return try stageImageFile(
+                sourceURL,
+                id: id,
+                conversationID: conversationID
+            )
         }
 
         let data = try read(sourceURL)
         guard Int64(data.count) <= Self.maxTextBytes else {
-            throw AssistantAttachmentStoreError.tooLarge(name)
+            return try stageImageFile(
+                sourceURL,
+                data: data,
+                id: id,
+                conversationID: conversationID,
+                fallbackError: .tooLarge(name)
+            )
         }
 
         let body = data.starts(with: [0xef, 0xbb, 0xbf]) ? data.dropFirst(3) : data[...]
         guard String(data: body, encoding: .utf8) != nil else {
-            throw AssistantAttachmentStoreError.nonUTF8(name)
+            return try stageImageFile(
+                sourceURL,
+                data: data,
+                id: id,
+                conversationID: conversationID,
+                fallbackError: .nonUTF8(name)
+            )
         }
 
         return try write(
@@ -137,7 +145,8 @@ actor AssistantAttachmentStore {
 
     func removePending(_ attachments: [ChatAttachment]) {
         for attachment in attachments {
-            try? fileManager.removeItem(at: attachment.stagedURL)
+            guard isOwnedAttachment(attachment) else { continue }
+            try? removeManagedItem(at: attachment.stagedURL)
         }
     }
 
@@ -148,11 +157,6 @@ actor AssistantAttachmentStore {
         guard !attachments.isEmpty else { return [] }
 
         let destinationDirectory = conversationDirectory(for: conversationID)
-        try fileManager.createDirectory(
-            at: destinationDirectory,
-            withIntermediateDirectories: true
-        )
-
         let planned = attachments.map { attachment in
             (
                 attachment: attachment,
@@ -169,20 +173,9 @@ actor AssistantAttachmentStore {
             guard
                 attachmentIDs.insert(item.attachment.id).inserted,
                 item.attachment.stagedURL.lastPathComponent
-                    .hasPrefix(item.attachment.id.uuidString + "-")
+                    .hasPrefix(item.attachment.id.uuidString + "-"),
+                isOwnedAttachment(item.attachment)
             else {
-                throw AssistantAttachmentStoreError.unreadable(item.attachment.displayName)
-            }
-            let values: URLResourceValues
-            do {
-                values = try item.attachment.stagedURL.resourceValues(forKeys: [
-                    .isRegularFileKey,
-                    .isReadableKey,
-                ])
-            } catch {
-                throw AssistantAttachmentStoreError.unreadable(item.attachment.displayName)
-            }
-            guard values.isRegularFile == true, values.isReadable == true else {
                 throw AssistantAttachmentStoreError.unreadable(item.attachment.displayName)
             }
         }
@@ -194,15 +187,29 @@ actor AssistantAttachmentStore {
             throw AssistantAttachmentStoreError.unreadable(invalid.attachment.displayName)
         }
 
+        try createManagedDirectory(
+            destinationDirectory,
+            displayName: attachments[0].displayName
+        )
+
         // A prior failed commit may have left one of these deterministic, ID-derived
         // destinations behind. Originals have all been verified and remain authoritative,
         // so stale destinations can be reconciled before this attempt prepares any copies.
         // If removal fails, throwing here leaves every original untouched for a later retry.
-        for item in planned where fileManager.fileExists(atPath: item.destination.path) {
-            try fileManager.removeItem(at: item.destination)
+        for item in planned where pathEntryExists(at: item.destination) {
+            do {
+                try removeManagedItem(at: item.destination)
+            } catch {
+                throw AssistantAttachmentStoreError.writeFailed(item.attachment.displayName)
+            }
         }
 
-        var prepared: [(original: URL, temporary: URL, destination: URL)] = []
+        var prepared: [(
+            original: URL,
+            temporary: URL,
+            destination: URL,
+            displayName: String
+        )] = []
         prepared.reserveCapacity(attachments.count)
 
         do {
@@ -211,43 +218,96 @@ actor AssistantAttachmentStore {
                     .appendingPathComponent(".rehome-\(UUID().uuidString)")
                 // Prepare complete copies under transaction-private names while every
                 // caller-visible original remains untouched.
-                prepared.append((item.attachment.stagedURL, temporary, item.destination))
+                prepared.append(
+                    (
+                        item.attachment.stagedURL,
+                        temporary,
+                        item.destination,
+                        item.attachment.displayName
+                    )
+                )
+                do {
+                    try validateManagedPath(
+                        item.attachment.stagedURL,
+                        requireExisting: true
+                    )
+                } catch {
+                    throw AssistantAttachmentStoreError.unreadable(
+                        item.attachment.displayName
+                    )
+                }
+                try validateManagedPath(temporary, requireExisting: false)
                 try fileManager.copyItem(at: item.attachment.stagedURL, to: temporary)
+                try validateManagedPath(temporary, requireExisting: true)
             }
         } catch {
             // Originals were never moved. Cleanup failures can leave only private
             // temporary copies; every URL held by the caller remains usable.
             for item in prepared.reversed() {
-                try? fileManager.removeItem(at: item.temporary)
+                try? removeManagedItem(at: item.temporary)
             }
-            throw error
+            if let attachmentError = error as? AssistantAttachmentStoreError {
+                throw attachmentError
+            }
+            let name = prepared.last?.displayName ?? attachments[0].displayName
+            throw AssistantAttachmentStoreError.writeFailed(name)
         }
 
         var committed: [(original: URL, destination: URL)] = []
         committed.reserveCapacity(prepared.count)
+        var committingName = prepared[0].displayName
         do {
             for item in prepared {
+                committingName = item.displayName
                 // These renames stay within one conversation directory and are atomic on
                 // the underlying volume.
+                try validateManagedPath(item.temporary, requireExisting: true)
+                try validateManagedPath(item.destination, requireExisting: false)
                 try fileManager.moveItem(at: item.temporary, to: item.destination)
                 committed.append((item.original, item.destination))
+                try validateManagedPath(item.destination, requireExisting: true)
             }
         } catch {
             // Even if cleanup itself is interrupted, originals are still authoritative and
             // readable. At worst, transaction-private or destination duplicates remain.
             for item in prepared {
-                try? fileManager.removeItem(at: item.temporary)
+                try? removeManagedItem(at: item.temporary)
             }
             for item in committed.reversed() {
-                try? fileManager.removeItem(at: item.destination)
+                try? removeManagedItem(at: item.destination)
             }
-            throw error
+            throw AssistantAttachmentStoreError.writeFailed(committingName)
         }
 
-        // The batch is committed once every destination exists. Failing to unlink an old
-        // path leaves a harmless duplicate, but every returned destination remains complete.
-        for item in prepared {
-            try? fileManager.removeItem(at: item.original)
+        // Keep caller-held originals authoritative until cleanup succeeds for the whole
+        // batch. If an unlink fails, restore any originals already removed, discard every
+        // committed destination, and throw so callers retain their original attachment set.
+        var removedOriginals: [(original: URL, destination: URL)] = []
+        do {
+            for item in prepared {
+                try removeManagedItem(at: item.original)
+                removedOriginals.append((item.original, item.destination))
+            }
+        } catch {
+            var destinationsToPreserve = Set<URL>()
+            for item in removedOriginals.reversed() where !pathEntryExists(at: item.original) {
+                do {
+                    try validateManagedPath(item.destination, requireExisting: true)
+                    try validateManagedPath(item.original, requireExisting: false)
+                    try fileManager.copyItem(at: item.destination, to: item.original)
+                    try validateManagedPath(item.original, requireExisting: true)
+                } catch {
+                    // The destination remains the only recovery copy if restoration fails.
+                    destinationsToPreserve.insert(item.destination.standardizedFileURL)
+                }
+            }
+            for item in committed.reversed() where
+                !destinationsToPreserve.contains(item.destination.standardizedFileURL)
+            {
+                try? removeManagedItem(at: item.destination)
+            }
+            let failedIndex = min(removedOriginals.count, prepared.count - 1)
+            throw AssistantAttachmentStoreError.writeFailed(prepared[failedIndex].displayName)
         }
 
         return zip(attachments, committed).map { attachment, item in
@@ -266,13 +326,23 @@ actor AssistantAttachmentStore {
 
     private func stageImageFile(
         _ sourceURL: URL,
+        data: Data? = nil,
         id: UUID,
-        conversationID: UUID
+        conversationID: UUID,
+        fallbackError: AssistantAttachmentStoreError? = nil
     ) throws -> ChatAttachment {
-        let normalized = try AssistantImageNormalizer.normalize(
-            try read(sourceURL),
-            displayName: sourceURL.lastPathComponent
-        )
+        let normalized: NormalizedAssistantImage
+        do {
+            normalized = try AssistantImageNormalizer.normalize(
+                data ?? read(sourceURL),
+                displayName: sourceURL.lastPathComponent
+            )
+        } catch let error as AssistantAttachmentStoreError {
+            if case .imageDecode = error, let fallbackError {
+                throw fallbackError
+            }
+            throw error
+        }
         return try write(
             data: normalized.data,
             displayName: sourceURL.lastPathComponent,
@@ -307,10 +377,16 @@ actor AssistantAttachmentStore {
     ) throws -> ChatAttachment {
         let directory = conversationDirectory(for: conversationID)
         do {
-            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-            let filename = "\(id.uuidString)-\(sanitizeBasename(displayName)).\(pathExtension)"
+            try createManagedDirectory(directory, displayName: displayName)
+            let filename = stagedFilename(
+                id: id,
+                displayName: displayName,
+                pathExtension: pathExtension
+            )
             let destination = directory.appendingPathComponent(filename)
+            try validateManagedPath(destination, requireExisting: false)
             try data.write(to: destination, options: .atomic)
+            try validateManagedPath(destination, requireExisting: true)
             return ChatAttachment(
                 id: id,
                 displayName: displayName,
@@ -321,8 +397,10 @@ actor AssistantAttachmentStore {
                 sourceIdentity: sourceIdentity,
                 thumbnailDataURL: thumbnailDataURL
             )
+        } catch let error as AssistantAttachmentStoreError {
+            throw error
         } catch {
-            throw AssistantAttachmentStoreError.unreadable(displayName)
+            throw AssistantAttachmentStoreError.writeFailed(displayName)
         }
     }
 
@@ -348,5 +426,155 @@ actor AssistantAttachmentStore {
         return sanitized.isEmpty || sanitized == "." || sanitized == ".."
             ? "attachment"
             : sanitized
+    }
+
+    private func stagedFilename(
+        id: UUID,
+        displayName: String,
+        pathExtension: String
+    ) -> String {
+        let prefix = id.uuidString + "-"
+        let suffix = pathExtension.isEmpty ? "" : "." + pathExtension
+        let basenameBudget = max(0, 255 - prefix.utf8.count - suffix.utf8.count)
+        let basename = truncateUTF8(sanitizeBasename(displayName), to: basenameBudget)
+        return prefix + basename + suffix
+    }
+
+    private func truncateUTF8(_ value: String, to byteLimit: Int) -> String {
+        var result = ""
+        var byteCount = 0
+        for character in value {
+            let characterBytes = String(character).utf8.count
+            guard byteCount + characterBytes <= byteLimit else { break }
+            result.append(character)
+            byteCount += characterBytes
+        }
+        return result
+    }
+
+    private func createManagedDirectory(_ directory: URL, displayName: String) throws {
+        do {
+            try validateManagedPath(directory, requireExisting: false)
+            try fileManager.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+            try validateManagedPath(directory, requireExisting: true)
+        } catch {
+            throw AssistantAttachmentStoreError.writeFailed(displayName)
+        }
+    }
+
+    private func isOwnedAttachment(_ attachment: ChatAttachment) -> Bool {
+        guard
+            attachment.stagedURL.lastPathComponent
+                .hasPrefix(attachment.id.uuidString + "-")
+        else {
+            return false
+        }
+
+        do {
+            try validateManagedPath(attachment.stagedURL, requireExisting: true)
+            let values = try attachment.stagedURL.resourceValues(forKeys: [
+                .isRegularFileKey,
+                .isReadableKey,
+                .isSymbolicLinkKey,
+                .isAliasFileKey,
+            ])
+            return values.isRegularFile == true
+                && values.isReadable == true
+                && values.isSymbolicLink != true
+                && values.isAliasFile != true
+        } catch {
+            return false
+        }
+    }
+
+    private func removeManagedItem(at url: URL) throws {
+        try validateManagedPath(url, requireExisting: true)
+        try fileManager.removeItem(at: url)
+    }
+
+    private func validateManagedPath(_ url: URL, requireExisting: Bool) throws {
+        let target = url.standardizedFileURL
+        let workspaceComponents = workspaceRoot.pathComponents
+        let managedComponents = managedRoot.pathComponents
+        let targetComponents = target.pathComponents
+
+        guard
+            targetComponents.count >= managedComponents.count,
+            targetComponents.starts(with: managedComponents),
+            managedComponents.starts(with: workspaceComponents)
+        else {
+            throw ManagedPathError.outsideRoot
+        }
+
+        var current = workspaceRoot
+        var encounteredMissingComponent = false
+        for component in targetComponents.dropFirst(workspaceComponents.count) {
+            current.appendPathComponent(component)
+            if isSymbolicLink(at: current) {
+                throw ManagedPathError.symbolicLink
+            }
+            if fileManager.fileExists(atPath: current.path) {
+                if encounteredMissingComponent {
+                    throw ManagedPathError.invalidPath
+                }
+            } else {
+                encounteredMissingComponent = true
+            }
+        }
+
+        if requireExisting, !pathEntryExists(at: target) {
+            throw ManagedPathError.missing
+        }
+
+        let resolvedWorkspace = workspaceRoot
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        guard resolvedWorkspace.pathComponents == workspaceComponents else {
+            throw ManagedPathError.outsideRoot
+        }
+
+        let resolvedTarget = target
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        guard isContained(resolvedTarget, in: resolvedWorkspace) else {
+            throw ManagedPathError.outsideRoot
+        }
+
+        if fileManager.fileExists(atPath: managedRoot.path) {
+            let resolvedManagedRoot = managedRoot
+                .resolvingSymlinksInPath()
+                .standardizedFileURL
+            guard
+                isContained(resolvedManagedRoot, in: resolvedWorkspace),
+                isContained(resolvedTarget, in: resolvedManagedRoot)
+            else {
+                throw ManagedPathError.outsideRoot
+            }
+        }
+    }
+
+    private func isContained(_ candidate: URL, in root: URL) -> Bool {
+        let rootComponents = root.standardizedFileURL.pathComponents
+        let candidateComponents = candidate.standardizedFileURL.pathComponents
+        return candidateComponents.count >= rootComponents.count
+            && candidateComponents.starts(with: rootComponents)
+    }
+
+    private func isSymbolicLink(at url: URL) -> Bool {
+        (try? fileManager.destinationOfSymbolicLink(atPath: url.path)) != nil
+    }
+
+    private func pathEntryExists(at url: URL) -> Bool {
+        fileManager.fileExists(atPath: url.path) || isSymbolicLink(at: url)
+    }
+
+    private enum ManagedPathError: Error {
+        case outsideRoot
+        case symbolicLink
+        case invalidPath
+        case missing
     }
 }

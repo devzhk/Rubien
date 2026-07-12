@@ -1649,6 +1649,48 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertEqual(fixture.controller.pendingAttachments.map(\.id), [capturedID])
     }
 
+    func testFailedProviderRehomeBlocksSendUntilPendingAttachmentIsRemoved() async throws {
+        let fixture = try makeAttachmentController(withProviderFactory: true)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        fixture.controller.stageAttachments([fixture.source])
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+        let pending = try XCTUnwrap(fixture.controller.pendingAttachments.first)
+        try FileManager.default.removeItem(at: pending.stagedURL)
+
+        fixture.controller.switchProvider(to: .codex)
+        await waitUntil({ !fixture.controller.isRehomingAttachments }, ticks: 5_000)
+
+        XCTAssertTrue(fixture.controller.hasAttachmentRehomeFailure)
+        XCTAssertFalse(fixture.controller.canSend(draft: "question"))
+        XCTAssertEqual(fixture.controller.pendingAttachments.map(\.id), [pending.id])
+        XCTAssertTrue(fixture.controller.attachmentIssues.contains {
+            $0.displayName == "Attachments"
+        })
+
+        fixture.controller.removePendingAttachment(id: pending.id)
+        XCTAssertFalse(fixture.controller.hasAttachmentRehomeFailure)
+        XCTAssertTrue(fixture.controller.canSend(draft: "question"))
+    }
+
+    func testTeardownDeletesUnsentPendingAttachments() async throws {
+        let fixture = try makeAttachmentController()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        fixture.controller.stageAttachments([fixture.source])
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+        let stagedURL = try XCTUnwrap(fixture.controller.pendingAttachments.first?.stagedURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stagedURL.path))
+
+        fixture.controller.teardown()
+        await waitUntil({
+            !FileManager.default.fileExists(atPath: stagedURL.path)
+        }, ticks: 5_000)
+
+        XCTAssertTrue(fixture.controller.pendingAttachments.isEmpty)
+        XCTAssertFalse(fixture.controller.hasAttachmentRehomeFailure)
+    }
+
     func testDuplicateSourceIsRejectedAndBatchKeepsValidSiblings() async throws {
         let fixture = try makeAttachmentController()
         defer { try? FileManager.default.removeItem(at: fixture.root) }

@@ -133,6 +133,7 @@ final class ChatSessionController: ObservableObject {
     /// Non-fatal, filename-specific staging failures. Valid siblings remain ready.
     @Published private(set) var attachmentIssues: [ChatAttachmentIssue] = []
     @Published private(set) var isRehomingAttachments = false
+    @Published private(set) var hasAttachmentRehomeFailure = false
 
     // MARK: Collaborators (injected)
     /// The live runtime. Mutable so `switchProvider` can swap it in place (the
@@ -285,6 +286,7 @@ final class ChatSessionController: ObservableObject {
         canSendWithCurrentAvailability
             && !isResponding
             && !isStagingAttachments
+            && !hasAttachmentRehomeFailure
             && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || hasReadyAttachments)
     }
@@ -295,12 +297,12 @@ final class ChatSessionController: ObservableObject {
     }
 
     func stageAttachments(_ urls: [URL]) {
-        guard !isResponding, !isRehomingAttachments else { return }
+        guard !isResponding, !isRehomingAttachments, !hasAttachmentRehomeFailure else { return }
         enqueueAttachments(urls.map { .file($0) })
     }
 
     func stagePastedImage(_ data: Data, suggestedName: String) {
-        guard !isResponding, !isRehomingAttachments else { return }
+        guard !isResponding, !isRehomingAttachments, !hasAttachmentRehomeFailure else { return }
         enqueueAttachments([.imageData(data, suggestedName: suggestedName)])
     }
 
@@ -309,6 +311,10 @@ final class ChatSessionController: ObservableObject {
         if let attachment = pendingAttachments.first(where: { $0.id == id }) {
             pendingAttachments.removeAll { $0.id == id }
             Task { await attachmentStore.removePending([attachment]) }
+            if pendingAttachments.isEmpty, hasAttachmentRehomeFailure {
+                hasAttachmentRehomeFailure = false
+                attachmentIssues.removeAll { $0.displayName == "Attachments" }
+            }
         }
         if stagingAttachments.contains(where: { $0.id == id }) {
             stagingAttachments.removeAll { $0.id == id }
@@ -322,7 +328,22 @@ final class ChatSessionController: ObservableObject {
     }
 
     func clearAttachmentIssues() {
+        if hasAttachmentRehomeFailure {
+            retryPendingAttachmentRehome()
+            return
+        }
         attachmentIssues.removeAll()
+    }
+
+    func retryPendingAttachmentRehome() {
+        guard hasAttachmentRehomeFailure,
+              !pendingAttachments.isEmpty,
+              !isResponding,
+              !isRehomingAttachments else { return }
+        startAttachmentRehome(
+            pendingAttachments,
+            destination: attachmentConversationID,
+            generation: attachmentGeneration)
     }
 
     private func enqueueAttachments(_ inputs: [AttachmentStagingInput]) {
@@ -535,6 +556,21 @@ final class ChatSessionController: ObservableObject {
         // Window close: end the provider entirely (kills a long-lived Codex server;
         // for Claude the default forwards to cancel()).
         provider.shutdown()
+        let capturedAttachments = pendingAttachments
+        attachmentTask?.cancel()
+        attachmentTask = nil
+        attachmentTaskToken = nil
+        attachmentQueue.removeAll()
+        attachmentGeneration += 1
+        attachmentConversationID = UUID()
+        pendingAttachments.removeAll()
+        stagingAttachments.removeAll()
+        stagingSourceIdentities.removeAll()
+        cancelledAttachmentIDs.removeAll()
+        attachmentIssues.removeAll()
+        isRehomingAttachments = false
+        hasAttachmentRehomeFailure = false
+        Task { await attachmentStore.removePending(capturedAttachments) }
     }
 
     /// Re-render the conversation into a freshly-(re)mounted transcript pane from
@@ -592,42 +628,56 @@ final class ChatSessionController: ObservableObject {
             pendingAttachments.removeAll()
             attachmentIssues.removeAll()
             isRehomingAttachments = false
+            hasAttachmentRehomeFailure = false
             Task { await attachmentStore.removePending(capturedAttachments) }
         case .preserveAndRehome:
             guard !capturedAttachments.isEmpty else {
                 isRehomingAttachments = false
+                hasAttachmentRehomeFailure = false
                 return
             }
-            isRehomingAttachments = true
-            let generation = attachmentGeneration
-            let destination = attachmentConversationID
-            let token = UUID()
-            attachmentTaskToken = token
-            attachmentTask = Task { [weak self] in
-                guard let self else { return }
-                do {
-                    let moved = try await self.attachmentStore.rehomePending(
-                        capturedAttachments, to: destination)
-                    guard generation == self.attachmentGeneration else {
-                        await self.attachmentStore.removePending(moved)
-                        return
-                    }
-                    self.pendingAttachments = moved
-                } catch {
-                    if generation == self.attachmentGeneration {
-                        self.attachmentIssues = [ChatAttachmentIssue(
-                            displayName: "Attachments",
-                            message: error.localizedDescription)]
-                    }
+            startAttachmentRehome(
+                capturedAttachments,
+                destination: attachmentConversationID,
+                generation: attachmentGeneration)
+        }
+    }
+
+    private func startAttachmentRehome(
+        _ attachments: [ChatAttachment],
+        destination: UUID,
+        generation: Int
+    ) {
+        isRehomingAttachments = true
+        hasAttachmentRehomeFailure = false
+        attachmentIssues.removeAll { $0.displayName == "Attachments" }
+        let token = UUID()
+        attachmentTaskToken = token
+        attachmentTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let moved = try await self.attachmentStore.rehomePending(
+                    attachments, to: destination)
+                guard generation == self.attachmentGeneration else {
+                    await self.attachmentStore.removePending(moved)
+                    return
                 }
+                self.pendingAttachments = moved
+            } catch {
                 if generation == self.attachmentGeneration {
-                    self.isRehomingAttachments = false
+                    self.hasAttachmentRehomeFailure = true
+                    self.attachmentIssues = [ChatAttachmentIssue(
+                        displayName: "Attachments",
+                        message: "Could not move attachments. Remove them or retry. \(error.localizedDescription)")]
                 }
-                if self.attachmentTaskToken == token {
-                    self.attachmentTask = nil
-                    self.attachmentTaskToken = nil
-                    self.startAttachmentWorkerIfNeeded()
-                }
+            }
+            if generation == self.attachmentGeneration {
+                self.isRehomingAttachments = false
+            }
+            if self.attachmentTaskToken == token {
+                self.attachmentTask = nil
+                self.attachmentTaskToken = nil
+                self.startAttachmentWorkerIfNeeded()
             }
         }
     }
@@ -665,6 +715,7 @@ final class ChatSessionController: ObservableObject {
     /// switch also becomes the default backend for future conversations.
     func switchProvider(to kind: AgentProviderKind) {
         guard !isStagingAttachments,
+              !hasAttachmentRehomeFailure,
               let providerFactory,
               kind != providerKind else { return }
         // Request teardown of the outgoing runtime. `shutdown()` may reap the server

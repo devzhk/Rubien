@@ -531,7 +531,14 @@ final class CodexProviderTests: XCTestCase {
 
     func testRecentSessionsListsThreadsScopedToTheWorkspace() async throws {
         let workspace = try makeWorkspace()
-        try writeConfig([:], into: workspace)
+        try writeConfig(["transcripts": [
+            "TH-A": ["turns": [["items": [[
+                "type": "userMessage", "content": [["type": "text", "text": "First conversation"]],
+            ]]]]],
+            "TH-B": ["turns": [["items": [[
+                "type": "userMessage", "content": [["type": "text", "text": "Second conversation"]],
+            ]]]]],
+        ]], into: workspace)
         let provider = CodexProvider(executableOverride: fakeServerPath)
         defer { provider.shutdown() }
 
@@ -554,7 +561,12 @@ final class CodexProviderTests: XCTestCase {
 
     func testSearchSessionsReturnsHitsWithSnippets() async throws {
         let workspace = try makeWorkspace()
-        try writeConfig([:], into: workspace)
+        try writeConfig(["transcripts": [
+            "TH-9": ["turns": [["items": [
+                ["type": "userMessage", "content": [["type": "text", "text": "Conversation opener"]]],
+                ["type": "agentMessage", "text": "…the matching   text…"],
+            ]]]],
+        ]], into: workspace)
         let provider = CodexProvider(executableOverride: fakeServerPath)
         defer { provider.shutdown() }
 
@@ -577,6 +589,10 @@ final class CodexProviderTests: XCTestCase {
              "snippet": "hit"],
             ["thread": ["id": "foreign", "preview": "Theirs", "updatedAt": 1_700_000_300, "cwd": "/some/other/ws"],
              "snippet": "hit"],
+        ], "transcripts": [
+            "local": ["turns": [["items": [[
+                "type": "userMessage", "content": [["type": "text", "text": "local hit"]],
+            ]]]]],
         ]], into: workspace)
         let provider = CodexProvider(executableOverride: fakeServerPath)
         defer { provider.shutdown() }
@@ -599,10 +615,100 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertThrowsError(try readObserved(in: workspace))
     }
 
+    func testRecentSessionsDeriveGeneralAndScopedPreviewFromVisibleTranscript() async throws {
+        let workspace = try makeWorkspace()
+        let fixture = try attachmentOnlyHistoryFixture(
+            in: workspace, threadID: "TH-PRIVATE", referenceID: 42
+        )
+        try writeConfig([
+            "threads": [[
+                "id": fixture.threadID,
+                "preview": fixture.providerPrompt,
+                "updatedAt": 1_700_000_300,
+                "turns": [],
+            ]],
+            "transcripts": [fixture.threadID: fixture.transcript],
+        ], into: workspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        let general = await provider.recentSessions(workspaceURL: workspace, limit: 10)
+        let scoped = await provider.recentSessions(
+            workspaceURL: workspace, limit: 10, referenceID: 42
+        )
+
+        for summary in general + scoped {
+            XCTAssertEqual(summary.preview, "Attached: figure.png")
+            XCTAssertFalse(summary.preview.contains("rubien-attachments-v1"))
+            XCTAssertFalse(summary.preview.contains(fixture.stagedPath))
+        }
+        XCTAssertEqual(general.map(\.id), [fixture.threadID])
+        XCTAssertEqual(scoped.map(\.id), [fixture.threadID])
+        let observed = try readObserved(in: workspace)
+        XCTAssertEqual(
+            try XCTUnwrap(observed["threadReadIds"] as? [String]),
+            [fixture.threadID],
+            "general and scoped projections share the unchanged thread read"
+        )
+    }
+
+    func testSearchSessionsIndexesOnlyVisibleTranscriptForGeneralAndScopedResults() async throws {
+        let workspace = try makeWorkspace()
+        let fixture = try attachmentOnlyHistoryFixture(
+            in: workspace, threadID: "TH-PRIVATE", referenceID: 42
+        )
+        try writeConfig([
+            "searchHits": [[
+                "thread": [
+                    "id": fixture.threadID,
+                    "preview": fixture.providerPrompt,
+                    "updatedAt": 1_700_000_300,
+                    "cwd": workspace.path,
+                    "turns": [],
+                ],
+                "snippet": fixture.providerPrompt,
+            ]],
+            "transcripts": [fixture.threadID: fixture.transcript],
+        ], into: workspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        let general = await provider.searchSessions(
+            query: "figure.png", workspaceURL: workspace, limit: 10
+        )
+        let scoped = await provider.searchSessions(
+            query: "figure.png", workspaceURL: workspace, limit: 10, referenceID: 42
+        )
+        let delimiterHits = await provider.searchSessions(
+            query: "rubien-attachments-v1", workspaceURL: workspace, limit: 10
+        )
+        let pathHits = await provider.searchSessions(
+            query: fixture.stagedPath, workspaceURL: workspace, limit: 10, referenceID: 42
+        )
+
+        for summary in general + scoped {
+            XCTAssertEqual(summary.preview, "Attached: figure.png")
+            XCTAssertEqual(summary.matchSnippet, "Attached: figure.png")
+        }
+        XCTAssertEqual(general.map(\.id), [fixture.threadID])
+        XCTAssertEqual(scoped.map(\.id), [fixture.threadID])
+        XCTAssertTrue(delimiterHits.isEmpty, "the private manifest delimiter is not searchable")
+        XCTAssertTrue(pathHits.isEmpty, "the staged absolute path is not searchable")
+        let observed = try readObserved(in: workspace)
+        XCTAssertEqual(
+            try XCTUnwrap(observed["threadReadIds"] as? [String]),
+            [fixture.threadID],
+            "successive visible-text searches reuse the unchanged thread read"
+        )
+    }
+
     /// A minimal per-thread transcript whose only item is one rubien tool call
     /// addressing `refID` — the scoped-filter fixtures.
-    private func rubienThread(refID: Int) -> [String: Any] {
+    private func rubienThread(refID: Int, text: String? = nil) -> [String: Any] {
         ["turns": [["items": [
+            ["type": "userMessage", "content": [[
+                "type": "text", "text": text ?? "About reference \(refID)",
+            ]]],
             ["type": "mcpToolCall", "server": "rubien", "tool": "rubien_get",
              "status": "completed", "arguments": ["id": refID]],
         ]]]]
@@ -700,8 +806,8 @@ final class CodexProviderTests: XCTestCase {
                             "cwd": workspace.path, "turns": []], "snippet": "hit"],
             ],
             "transcripts": [
-                "S-42": rubienThread(refID: 42),
-                "S-7": rubienThread(refID: 7),
+                "S-42": rubienThread(refID: 42, text: "hit"),
+                "S-7": rubienThread(refID: 7, text: "hit"),
             ],
         ], into: workspace)
         let provider = CodexProvider(executableOverride: fakeServerPath)
@@ -820,6 +926,50 @@ final class CodexProviderTests: XCTestCase {
     }
 
     // MARK: Harness plumbing
+
+    private func attachmentOnlyHistoryFixture(
+        in workspace: URL,
+        threadID: String,
+        referenceID: Int
+    ) throws -> (
+        threadID: String,
+        providerPrompt: String,
+        stagedPath: String,
+        transcript: [String: Any]
+    ) {
+        let id = UUID()
+        let directory = workspace
+            .appendingPathComponent(AssistantAttachmentStore.relativeRoot, isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let stagedURL = directory.appendingPathComponent("\(id.uuidString)-figure.png")
+        try Data([0x89, 0x50, 0x4E, 0x47]).write(to: stagedURL)
+        let attachment = ChatAttachment(
+            id: id,
+            displayName: "figure.png",
+            kind: .image,
+            stagedURL: stagedURL,
+            mediaType: "image/png",
+            byteCount: 4,
+            sourceIdentity: "/original/figure.png"
+        )
+        let prompt = AssistantAttachmentManifest.providerPrompt(
+            base: "Inspect the attached files.", visibleText: "", attachments: [attachment]
+        )
+        return (
+            threadID,
+            prompt,
+            stagedURL.path,
+            ["turns": [["items": [
+                ["type": "userMessage", "content": [
+                    ["type": "text", "text": prompt],
+                    ["type": "localImage", "path": stagedURL.path],
+                ]],
+                ["type": "mcpToolCall", "server": "rubien", "tool": "rubien_get",
+                 "status": "completed", "arguments": ["id": referenceID]],
+            ]]]]
+        )
+    }
 
     private var fakeServerPath: String {
         URL(fileURLWithPath: #filePath)

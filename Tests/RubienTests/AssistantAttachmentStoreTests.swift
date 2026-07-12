@@ -46,9 +46,8 @@ final class AssistantAttachmentStoreTests: XCTestCase {
         )
     }
 
-    func testRejectsCSVNonUTF8AndOversizedText() async throws {
+    func testRejectsNonUTF8AndOversizedText() async throws {
         let cases: [(String, Data, AssistantAttachmentStoreError)] = [
-            ("x.csv", Data("a,b".utf8), .unsupported("x.csv")),
             ("x.txt", Data([0xff, 0xfe, 0xfd]), .nonUTF8("x.txt")),
             (
                 "large.md",
@@ -65,6 +64,31 @@ final class AssistantAttachmentStoreTests: XCTestCase {
             )
             XCTAssertEqual(error as? AssistantAttachmentStoreError, expectedError)
         }
+    }
+
+    func testProbesNonTextFilesAsImagesRegardlessOfExtension() async throws {
+        let image = try makeImageData(width: 32, height: 24, alpha: false, type: .png)
+
+        for name in ["extensionless", "misleading.data", "misleading.txt"] {
+            let source = workspace.appendingPathComponent(name)
+            try image.write(to: source)
+
+            let attachment = try await store.stageFile(source, conversationID: UUID())
+
+            XCTAssertEqual(attachment.kind, .image)
+            XCTAssertEqual(attachment.mediaType, "image/jpeg")
+            XCTAssertEqual(attachment.stagedURL.pathExtension, "jpg")
+        }
+
+        let unsupported = workspace.appendingPathComponent("not-an-image.csv")
+        try Data("a,b".utf8).write(to: unsupported)
+        let error = await XCTAssertThrowsErrorAsync(
+            try await store.stageFile(unsupported, conversationID: UUID())
+        )
+        XCTAssertEqual(
+            error as? AssistantAttachmentStoreError,
+            .imageDecode("not-an-image.csv")
+        )
     }
 
     func testAcceptsBOMAndExactFiveMiBBoundary() async throws {
@@ -128,6 +152,180 @@ final class AssistantAttachmentStoreTests: XCTestCase {
         XCTAssertTrue(attachment.stagedURL.lastPathComponent.hasPrefix(id.uuidString + "-"))
         XCTAssertFalse(attachment.stagedURL.lastPathComponent.contains("\n"))
         XCTAssertEqual(attachment.sourceIdentity, source.standardizedFileURL.path)
+    }
+
+    func testBoundsASCIIAndUnicodeStagedFilenamesToFilesystemComponentLimit() async throws {
+        let names = [
+            String(repeating: "a", count: 240) + ".txt",
+            String(repeating: "界", count: 80) + ".txt",
+        ]
+
+        for (index, name) in names.enumerated() {
+            let source = workspace.appendingPathComponent(name)
+            try Data("hello".utf8).write(to: source)
+            let id = UUID()
+
+            let attachment = try await store.stageFile(
+                source,
+                id: id,
+                conversationID: UUID()
+            )
+
+            XCTAssertTrue(attachment.stagedURL.lastPathComponent.hasPrefix(id.uuidString + "-"))
+            XCTAssertEqual(attachment.stagedURL.pathExtension, "txt")
+            XCTAssertLessThanOrEqual(attachment.stagedURL.lastPathComponent.utf8.count, 255)
+            if index == 0 {
+                XCTAssertEqual(attachment.stagedURL.lastPathComponent.utf8.count, 255)
+            }
+            XCTAssertEqual(try Data(contentsOf: attachment.stagedURL), Data("hello".utf8))
+        }
+    }
+
+    func testRejectsSymlinkedManagedRootAndConversationBeforeWritingOutsideWorkspace() async throws {
+        let outside = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AssistantAttachmentStoreOutside-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: outside) }
+
+        let source = workspace.appendingPathComponent("safe.txt")
+        try Data("safe".utf8).write(to: source)
+        let rubienDirectory = workspace.appendingPathComponent(".rubien", isDirectory: true)
+        try FileManager.default.createDirectory(at: rubienDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: rubienDirectory.appendingPathComponent("attachments"),
+            withDestinationURL: outside
+        )
+
+        _ = await XCTAssertThrowsErrorAsync(
+            try await store.stageFile(source, conversationID: UUID())
+        )
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: outside.path), [])
+
+        for item in try FileManager.default.contentsOfDirectory(
+            at: outside,
+            includingPropertiesForKeys: nil
+        ) {
+            try FileManager.default.removeItem(at: item)
+        }
+
+        try FileManager.default.removeItem(at: rubienDirectory.appendingPathComponent("attachments"))
+        try FileManager.default.createDirectory(at: store.managedRoot, withIntermediateDirectories: true)
+        let conversationID = UUID()
+        try FileManager.default.createSymbolicLink(
+            at: store.managedRoot.appendingPathComponent(conversationID.uuidString),
+            withDestinationURL: outside
+        )
+
+        _ = await XCTAssertThrowsErrorAsync(
+            try await store.stageFile(source, conversationID: conversationID)
+        )
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: outside.path), [])
+    }
+
+    func testRemoveAndRehomeIgnoreCallerAttachmentsOutsideManagedRoot() async throws {
+        let outside = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AssistantAttachmentStoreOutside-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: outside) }
+
+        let removeID = UUID()
+        let removeURL = outside.appendingPathComponent("\(removeID.uuidString)-remove.txt")
+        try Data("keep".utf8).write(to: removeURL)
+        let removeAttachment = makeAttachment(id: removeID, stagedURL: removeURL)
+
+        await store.removePending([removeAttachment])
+        XCTAssertEqual(try Data(contentsOf: removeURL), Data("keep".utf8))
+
+        let rehomeID = UUID()
+        let rehomeURL = outside.appendingPathComponent("\(rehomeID.uuidString)-rehome.txt")
+        try Data("keep".utf8).write(to: rehomeURL)
+        let rehomeAttachment = makeAttachment(id: rehomeID, stagedURL: rehomeURL)
+
+        _ = await XCTAssertThrowsErrorAsync(
+            try await store.rehomePending([rehomeAttachment], to: UUID())
+        )
+        XCTAssertEqual(try Data(contentsOf: rehomeURL), Data("keep".utf8))
+    }
+
+    func testRemovePendingRejectsSymlinkedManagedRootBeforeDeletingTarget() async throws {
+        let outside = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AssistantAttachmentStoreOutside-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: outside) }
+
+        let rubienDirectory = workspace.appendingPathComponent(".rubien", isDirectory: true)
+        try FileManager.default.createDirectory(at: rubienDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            at: store.managedRoot,
+            withDestinationURL: outside
+        )
+        let id = UUID()
+        let outsideURL = outside.appendingPathComponent("\(id.uuidString)-keep.txt")
+        try Data("keep".utf8).write(to: outsideURL)
+        let attachment = makeAttachment(
+            id: id,
+            stagedURL: store.managedRoot.appendingPathComponent(outsideURL.lastPathComponent)
+        )
+
+        await store.removePending([attachment])
+
+        XCTAssertEqual(try Data(contentsOf: outsideURL), Data("keep".utf8))
+    }
+
+    func testRevalidatesResolvedContainmentAfterCreatingConversationDirectory() async throws {
+        let outside = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AssistantAttachmentStoreOutside-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: outside) }
+        let swappingFileManager = DirectorySymlinkSwapFileManager(outside: outside)
+        let swappingStore = AssistantAttachmentStore(
+            workspaceURL: workspace,
+            fileManager: swappingFileManager
+        )
+        let source = workspace.appendingPathComponent("swap.txt")
+        try Data("safe".utf8).write(to: source)
+
+        let error = await XCTAssertThrowsErrorAsync(
+            try await swappingStore.stageFile(source, conversationID: UUID())
+        )
+
+        XCTAssertEqual(
+            error as? AssistantAttachmentStoreError,
+            .writeFailed("swap.txt")
+        )
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: outside.path), [])
+    }
+
+    func testRehomeRejectsManagedSymlinkWhoseResolvedSourceEscapesRoot() async throws {
+        let outside = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AssistantAttachmentStoreOutside-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: outside) }
+
+        let sourceConversation = UUID()
+        try FileManager.default.createDirectory(at: store.managedRoot, withIntermediateDirectories: true)
+        let sourceDirectory = store.managedRoot
+            .appendingPathComponent(sourceConversation.uuidString, isDirectory: true)
+        try FileManager.default.createSymbolicLink(
+            at: sourceDirectory,
+            withDestinationURL: outside
+        )
+        let id = UUID()
+        let outsideURL = outside.appendingPathComponent("\(id.uuidString)-secret.txt")
+        try Data("secret".utf8).write(to: outsideURL)
+        let stagedURL = sourceDirectory.appendingPathComponent(outsideURL.lastPathComponent)
+        let attachment = makeAttachment(id: id, stagedURL: stagedURL)
+        let destinationConversation = UUID()
+
+        _ = await XCTAssertThrowsErrorAsync(
+            try await store.rehomePending([attachment], to: destinationConversation)
+        )
+
+        XCTAssertEqual(try Data(contentsOf: outsideURL), Data("secret".utf8))
+        let escapedCopy = store.managedRoot
+            .appendingPathComponent(destinationConversation.uuidString)
+            .appendingPathComponent(stagedURL.lastPathComponent)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: escapedCopy.path))
     }
 
     func testRehomeThenRemovePendingPreservesIdentityAndMetadata() async throws {
@@ -221,6 +419,120 @@ final class AssistantAttachmentStoreTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: moved[1].stagedURL), Data("second".utf8))
         XCTAssertFalse(FileManager.default.fileExists(atPath: first.stagedURL.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: second.stagedURL.path))
+    }
+
+    func testOriginalCleanupFailureRollsBackCommittedDestinationsAndKeepsOriginalURLs() async throws {
+        let failingFileManager = OriginalCleanupFailureFileManager()
+        let failingStore = AssistantAttachmentStore(
+            workspaceURL: workspace,
+            fileManager: failingFileManager
+        )
+        let sourceConversation = UUID()
+        let destinationConversation = UUID()
+        let firstSource = workspace.appendingPathComponent("cleanup-first.txt")
+        let secondSource = workspace.appendingPathComponent("cleanup-second.txt")
+        try Data("first".utf8).write(to: firstSource)
+        try Data("second".utf8).write(to: secondSource)
+        let first = try await failingStore.stageFile(firstSource, conversationID: sourceConversation)
+        let second = try await failingStore.stageFile(secondSource, conversationID: sourceConversation)
+        failingFileManager.failOnSecondOriginalRemoval(in: sourceConversation)
+
+        _ = await XCTAssertThrowsErrorAsync(
+            try await failingStore.rehomePending([first, second], to: destinationConversation)
+        )
+
+        XCTAssertEqual(try Data(contentsOf: first.stagedURL), Data("first".utf8))
+        XCTAssertEqual(try Data(contentsOf: second.stagedURL), Data("second".utf8))
+        let destinationDirectory = failingStore.managedRoot
+            .appendingPathComponent(destinationConversation.uuidString)
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: destinationDirectory
+                    .appendingPathComponent(first.stagedURL.lastPathComponent).path
+            )
+        )
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: destinationDirectory
+                    .appendingPathComponent(second.stagedURL.lastPathComponent).path
+            )
+        )
+    }
+
+    func testFailedOriginalRestorationPreservesCommittedRecoveryCopy() async throws {
+        let failingFileManager = OriginalCleanupFailureFileManager(
+            failRestoration: true
+        )
+        let failingStore = AssistantAttachmentStore(
+            workspaceURL: workspace,
+            fileManager: failingFileManager
+        )
+        let sourceConversation = UUID()
+        let destinationConversation = UUID()
+        let firstSource = workspace.appendingPathComponent("restore-first.txt")
+        let secondSource = workspace.appendingPathComponent("restore-second.txt")
+        try Data("first".utf8).write(to: firstSource)
+        try Data("second".utf8).write(to: secondSource)
+        let first = try await failingStore.stageFile(firstSource, conversationID: sourceConversation)
+        let second = try await failingStore.stageFile(secondSource, conversationID: sourceConversation)
+        failingFileManager.failOnSecondOriginalRemoval(in: sourceConversation)
+
+        _ = await XCTAssertThrowsErrorAsync(
+            try await failingStore.rehomePending([first, second], to: destinationConversation)
+        )
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: first.stagedURL.path))
+        XCTAssertEqual(try Data(contentsOf: second.stagedURL), Data("second".utf8))
+        let destinationDirectory = failingStore.managedRoot
+            .appendingPathComponent(destinationConversation.uuidString)
+        let recoveryCopy = destinationDirectory
+            .appendingPathComponent(first.stagedURL.lastPathComponent)
+        XCTAssertEqual(try Data(contentsOf: recoveryCopy), Data("first".utf8))
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: destinationDirectory
+                    .appendingPathComponent(second.stagedURL.lastPathComponent).path
+            )
+        )
+    }
+
+    func testDestinationCreationAndCopyFailuresAreNotReportedAsSourceUnreadable() async throws {
+        let source = workspace.appendingPathComponent("destination.txt")
+        try Data("hello".utf8).write(to: source)
+        let directoryFailureStore = AssistantAttachmentStore(
+            workspaceURL: workspace,
+            fileManager: DirectoryCreationFailureFileManager()
+        )
+
+        let stageError = await XCTAssertThrowsErrorAsync(
+            try await directoryFailureStore.stageFile(source, conversationID: UUID())
+        )
+        XCTAssertNotEqual(
+            stageError as? AssistantAttachmentStoreError,
+            .unreadable("destination.txt")
+        )
+        XCTAssertEqual(
+            stageError as? AssistantAttachmentStoreError,
+            .writeFailed("destination.txt")
+        )
+
+        let staged = try await store.stageFile(source, conversationID: UUID())
+        let copyFailureStore = AssistantAttachmentStore(
+            workspaceURL: workspace,
+            fileManager: CopyFailureFileManager()
+        )
+        let copyError = await XCTAssertThrowsErrorAsync(
+            try await copyFailureStore.rehomePending([staged], to: UUID())
+        )
+        XCTAssertNotEqual(
+            copyError as? AssistantAttachmentStoreError,
+            .unreadable("destination.txt")
+        )
+        XCTAssertEqual(
+            copyError as? AssistantAttachmentStoreError,
+            .writeFailed("destination.txt")
+        )
+        XCTAssertEqual(try Data(contentsOf: staged.stagedURL), Data("hello".utf8))
     }
 
     func testLargeOpaqueImageStagesAsBoundedJPEG() async throws {
@@ -346,6 +658,18 @@ final class AssistantAttachmentStoreTests: XCTestCase {
             XCTAssertEqual(error as? AssistantAttachmentStoreError, .imageEncode("x.png"))
         }
     }
+}
+
+private func makeAttachment(id: UUID, stagedURL: URL) -> ChatAttachment {
+    ChatAttachment(
+        id: id,
+        displayName: stagedURL.lastPathComponent,
+        kind: .text,
+        stagedURL: stagedURL,
+        mediaType: "text/plain",
+        byteCount: 4,
+        sourceIdentity: stagedURL.path
+    )
 }
 
 private func makeImageData(
@@ -525,6 +849,88 @@ private final class CommitCleanupFailureFileManager: FileManager {
     }
 
     private struct InjectedFailure: Error {}
+}
+
+private final class OriginalCleanupFailureFileManager: FileManager {
+    private let failRestoration: Bool
+    private var sourceConversationComponent: String?
+    private var originalRemovalCalls = 0
+    private var didFailOriginalRemoval = false
+
+    init(failRestoration: Bool = false) {
+        self.failRestoration = failRestoration
+        super.init()
+    }
+
+    func failOnSecondOriginalRemoval(in conversationID: UUID) {
+        sourceConversationComponent = conversationID.uuidString
+    }
+
+    override func removeItem(at URL: URL) throws {
+        if URL.deletingLastPathComponent().lastPathComponent == sourceConversationComponent {
+            originalRemovalCalls += 1
+            if originalRemovalCalls == 2 {
+                didFailOriginalRemoval = true
+                throw InjectedFailure()
+            }
+        }
+        try super.removeItem(at: URL)
+    }
+
+    override func copyItem(at srcURL: URL, to dstURL: URL) throws {
+        if failRestoration, didFailOriginalRemoval {
+            throw InjectedFailure()
+        }
+        try super.copyItem(at: srcURL, to: dstURL)
+    }
+
+    private struct InjectedFailure: Error {}
+}
+
+private final class DirectoryCreationFailureFileManager: FileManager {
+    override func createDirectory(
+        at url: URL,
+        withIntermediateDirectories createIntermediates: Bool,
+        attributes: [FileAttributeKey: Any]? = nil
+    ) throws {
+        throw InjectedFailure()
+    }
+
+    private struct InjectedFailure: Error {}
+}
+
+private final class CopyFailureFileManager: FileManager {
+    override func copyItem(at srcURL: URL, to dstURL: URL) throws {
+        throw InjectedFailure()
+    }
+
+    private struct InjectedFailure: Error {}
+}
+
+private final class DirectorySymlinkSwapFileManager: FileManager {
+    private let outside: URL
+    private var didSwap = false
+
+    init(outside: URL) {
+        self.outside = outside
+        super.init()
+    }
+
+    override func createDirectory(
+        at url: URL,
+        withIntermediateDirectories createIntermediates: Bool,
+        attributes: [FileAttributeKey: Any]? = nil
+    ) throws {
+        try super.createDirectory(
+            at: url,
+            withIntermediateDirectories: createIntermediates,
+            attributes: attributes
+        )
+        guard !didSwap, url.lastPathComponent != "attachments" else { return }
+        didSwap = true
+        try super.removeItem(at: url)
+        try super.createSymbolicLink(at: url, withDestinationURL: outside)
+    }
 }
 
 @discardableResult

@@ -106,7 +106,10 @@ struct ChatSidebarView: View {
                         .font(.system(size: 14, weight: .regular))
                 }
             }
-            .disabled(session.isResponding || session.isRehomingAttachments)
+            .disabled(
+                session.isResponding
+                    || session.isRehomingAttachments
+                    || session.hasAttachmentRehomeFailure)
             Divider()
             Toggle(isOn: $session.webAccess) {
                 Label {
@@ -542,13 +545,16 @@ struct ChatSidebarView: View {
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 4)
             Button(action: session.clearAttachmentIssues) {
-                Image(systemName: "xmark")
+                Image(systemName: session.hasAttachmentRehomeFailure ? "arrow.clockwise" : "xmark")
                     .font(.system(size: 9, weight: .semibold))
                     .frame(width: 20, height: 20)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Dismiss attachment issues")
+            .accessibilityLabel(
+                session.hasAttachmentRehomeFailure
+                    ? "Retry moving attachments"
+                    : "Dismiss attachment issues")
         }
         .padding(.horizontal, 7)
         .padding(.vertical, 4)
@@ -718,7 +724,10 @@ struct ChatSidebarView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .disabled(session.isResponding || session.isStagingAttachments)
+        .disabled(
+            session.isResponding
+                || session.isStagingAttachments
+                || session.hasAttachmentRehomeFailure)
         .background(
             RoundedRectangle(cornerRadius: 5, style: .continuous)
                 .fill(providerMenuHovered ? Color.primary.opacity(0.06) : Color.clear)
