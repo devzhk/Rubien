@@ -41,6 +41,9 @@ struct AgentTurnRequest: Sendable, Equatable {
     /// The user's message text. Delivered as a stream-json `user` message on stdin
     /// (never argv — avoids ARG_MAX/quoting; §4.2).
     let prompt: String
+    /// Local, staged attachments for this turn. Providers translate these into their
+    /// native image/file inputs; the default keeps every text-only call site stable.
+    let attachments: [ChatAttachment]
     /// The one-line reference seed naming the reference id (D4). First turn only
     /// (`nil` on resume — `--resume` carries it forward). Applied as Claude's
     /// `--append-system-prompt`.
@@ -60,6 +63,7 @@ struct AgentTurnRequest: Sendable, Equatable {
         workspaceURL: URL,
         resumeSessionID: String? = nil,
         prompt: String,
+        attachments: [ChatAttachment] = [],
         seed: String? = nil,
         webAccess: Bool = true,
         codexSandbox: CodexSandbox = .readOnly,
@@ -69,6 +73,7 @@ struct AgentTurnRequest: Sendable, Equatable {
         self.workspaceURL = workspaceURL
         self.resumeSessionID = resumeSessionID
         self.prompt = prompt
+        self.attachments = attachments
         self.seed = seed
         self.webAccess = webAccess
         self.codexSandbox = codexSandbox

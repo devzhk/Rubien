@@ -126,6 +126,13 @@ final class ChatSessionController: ObservableObject {
     /// The active backend, published so the composer picker + provider-aware model
     /// list re-render when a switch swaps the underlying provider (Phase 3b-3).
     @Published private(set) var providerKind: AgentProviderKind
+    /// Ready, managed copies waiting for the next successfully-admitted turn.
+    @Published private(set) var pendingAttachments: [ChatAttachment] = []
+    /// Rows published synchronously while their source files are validated/copied.
+    @Published private(set) var stagingAttachments: [StagingChatAttachment] = []
+    /// Non-fatal, filename-specific staging failures. Valid siblings remain ready.
+    @Published private(set) var attachmentIssues: [ChatAttachmentIssue] = []
+    @Published private(set) var isRehomingAttachments = false
 
     // MARK: Collaborators (injected)
     /// The live runtime. Mutable so `switchProvider` can swap it in place (the
@@ -139,6 +146,7 @@ final class ChatSessionController: ObservableObject {
     private let gate: AssistantTurnGate
     private let reference: ChatReference
     private let workspaceURL: URL
+    private let attachmentStore: AssistantAttachmentStore
     /// Re-reads the user's Assistant defaults (Settings) when a fresh conversation
     /// starts, so changing a default + hitting "New conversation" adopts it without
     /// reopening the window. Takes the CURRENT backend kind so it returns that
@@ -187,6 +195,40 @@ final class ChatSessionController: ObservableObject {
     /// `availabilityProbeToken`): a slow fetch kicked before a provider switch
     /// must not repopulate the new backend's (cleared) model list.
     private var catalogFetchToken = 0
+    private var attachmentConversationID = UUID()
+    private var attachmentGeneration = 0
+    private var attachmentTask: Task<Void, Never>?
+    private var attachmentTaskToken: UUID?
+    private var cancelledAttachmentIDs: Set<UUID> = []
+    private var stagingSourceIdentities: [UUID: String] = [:]
+    private var attachmentQueue: [AttachmentStagingRequest] = []
+
+    private enum AttachmentStagingInput: Sendable {
+        case file(URL)
+        case imageData(Data, suggestedName: String)
+
+        var displayName: String {
+            switch self {
+            case .file(let url): return url.lastPathComponent
+            case .imageData(_, let suggestedName): return suggestedName
+            }
+        }
+
+        var admissionIdentity: String {
+            switch self {
+            case .file(let url): return url.standardizedFileURL.path
+            case .imageData: return "clipboard:\(UUID().uuidString)"
+            }
+        }
+    }
+
+    private struct AttachmentStagingRequest: Sendable {
+        let id: UUID
+        let input: AttachmentStagingInput
+        let sourceIdentity: String
+        let generation: Int
+        let conversationID: UUID
+    }
 
     init(
         provider: any AgentProvider,
@@ -201,13 +243,15 @@ final class ChatSessionController: ObservableObject {
         codexSandbox: CodexSandbox = .readOnly,
         providerFactory: ((AgentProviderKind) -> any AgentProvider)? = nil,
         defaultsProvider: ((AgentProviderKind) -> AssistantConversationDefaults)? = nil,
-        initialAvailability: AgentAvailability? = nil
+        initialAvailability: AgentAvailability? = nil,
+        attachmentStore: AssistantAttachmentStore? = nil
     ) {
         self.provider = provider
         self.providerKind = provider.kind
         self.transcript = transcript
         self.reference = reference
         self.workspaceURL = workspaceURL
+        self.attachmentStore = attachmentStore ?? AssistantAttachmentStore(workspaceURL: workspaceURL)
         self.gate = gate
         self.webAccess = webAccess
         self.modelOverride = modelOverride
@@ -231,10 +275,154 @@ final class ChatSessionController: ObservableObject {
         availability?.isReady ?? true
     }
 
-    /// Send a user turn. No-ops on empty input or while a turn is already running.
+    var hasReadyAttachments: Bool { !pendingAttachments.isEmpty }
+
+    var isStagingAttachments: Bool {
+        !stagingAttachments.isEmpty || isRehomingAttachments
+    }
+
+    func canSend(draft: String) -> Bool {
+        canSendWithCurrentAvailability
+            && !isResponding
+            && !isStagingAttachments
+            && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || hasReadyAttachments)
+    }
+
+    static func acceptsImageBytes(existing: Int64, adding: Int64) -> Bool {
+        let limit: Int64 = 20 * 1_024 * 1_024
+        return existing >= 0 && adding >= 0 && adding <= limit && existing <= limit - adding
+    }
+
+    func stageAttachments(_ urls: [URL]) {
+        enqueueAttachments(urls.map { .file($0) })
+    }
+
+    func stagePastedImage(_ data: Data, suggestedName: String) {
+        enqueueAttachments([.imageData(data, suggestedName: suggestedName)])
+    }
+
+    func removePendingAttachment(id: UUID) {
+        if let attachment = pendingAttachments.first(where: { $0.id == id }) {
+            pendingAttachments.removeAll { $0.id == id }
+            Task { await attachmentStore.removePending([attachment]) }
+        }
+        if stagingAttachments.contains(where: { $0.id == id }) {
+            stagingAttachments.removeAll { $0.id == id }
+            stagingSourceIdentities[id] = nil
+            attachmentQueue.removeAll { $0.id == id }
+            cancelledAttachmentIDs.insert(id)
+        }
+    }
+
+    func clearAttachmentIssues() {
+        attachmentIssues.removeAll()
+    }
+
+    private func enqueueAttachments(_ inputs: [AttachmentStagingInput]) {
+        var identities = Set(pendingAttachments.map(\.sourceIdentity))
+        identities.formUnion(stagingSourceIdentities.values)
+
+        for input in inputs {
+            let displayName = input.displayName
+            guard pendingAttachments.count + stagingAttachments.count < 10 else {
+                attachmentIssues.append(ChatAttachmentIssue(
+                    displayName: displayName,
+                    message: "You can attach up to 10 files per turn."
+                ))
+                continue
+            }
+            let identity = input.admissionIdentity
+            guard identities.insert(identity).inserted else {
+                attachmentIssues.append(ChatAttachmentIssue(
+                    displayName: displayName,
+                    message: "This file is already attached."
+                ))
+                continue
+            }
+
+            let id = UUID()
+            stagingAttachments.append(StagingChatAttachment(id: id, displayName: displayName))
+            stagingSourceIdentities[id] = identity
+            attachmentQueue.append(AttachmentStagingRequest(
+                id: id,
+                input: input,
+                sourceIdentity: identity,
+                generation: attachmentGeneration,
+                conversationID: attachmentConversationID
+            ))
+        }
+        startAttachmentWorkerIfNeeded()
+    }
+
+    private func startAttachmentWorkerIfNeeded() {
+        guard attachmentTask == nil, !attachmentQueue.isEmpty else { return }
+        let token = UUID()
+        attachmentTaskToken = token
+        attachmentTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled, !self.attachmentQueue.isEmpty {
+                let request = self.attachmentQueue.removeFirst()
+                await self.stageAttachment(request)
+            }
+            if self.attachmentTaskToken == token {
+                self.attachmentTask = nil
+                self.attachmentTaskToken = nil
+            }
+        }
+    }
+
+    private func stageAttachment(_ request: AttachmentStagingRequest) async {
+        do {
+            let attachment: ChatAttachment
+            switch request.input {
+            case .file(let url):
+                attachment = try await attachmentStore.stageFile(
+                    url, id: request.id, conversationID: request.conversationID)
+            case .imageData(let data, let suggestedName):
+                attachment = try await attachmentStore.stageImageData(
+                    data, suggestedName: suggestedName, id: request.id,
+                    conversationID: request.conversationID)
+            }
+
+            stagingAttachments.removeAll { $0.id == request.id }
+            stagingSourceIdentities[request.id] = nil
+            let wasCancelled = cancelledAttachmentIDs.remove(request.id) != nil
+            guard request.generation == attachmentGeneration, !wasCancelled else {
+                await attachmentStore.removePending([attachment])
+                return
+            }
+
+            if attachment.kind == .image {
+                let existing = pendingAttachments
+                    .filter { $0.kind == .image }
+                    .reduce(Int64(0)) { $0 + $1.byteCount }
+                guard Self.acceptsImageBytes(existing: existing, adding: attachment.byteCount) else {
+                    await attachmentStore.removePending([attachment])
+                    attachmentIssues.append(ChatAttachmentIssue(
+                        displayName: attachment.displayName,
+                        message: "Images can total up to 20 MB per turn."
+                    ))
+                    return
+                }
+            }
+            pendingAttachments.append(attachment)
+        } catch {
+            stagingAttachments.removeAll { $0.id == request.id }
+            stagingSourceIdentities[request.id] = nil
+            let wasCancelled = cancelledAttachmentIDs.remove(request.id) != nil
+            guard request.generation == attachmentGeneration, !wasCancelled else { return }
+            attachmentIssues.append(ChatAttachmentIssue(
+                displayName: request.input.displayName,
+                message: error.localizedDescription
+            ))
+        }
+    }
+
+    /// Send a user turn. No-ops when neither text nor a ready attachment is present.
     func send(_ rawText: String) {
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !isResponding, canSendWithCurrentAvailability else { return }
+        guard canSend(draft: text) else { return }
 
         generation += 1
         let gen = generation
@@ -245,11 +433,16 @@ final class ChatSessionController: ObservableObject {
         // The pre-turn id is both the `--resume` target and the gate key; nil for a
         // fresh conversation (unkeyed, always admitted).
         let resumeID = liveSessionID
-        let composed = composeUserMessage(text)
+        let attachments = pendingAttachments
+        let visible = composeUserMessage(text)
+        let base = visible.isEmpty ? "Inspect the attached files." : visible
+        let providerPrompt = AssistantAttachmentManifest.providerPrompt(
+            base: base, visibleText: visible, attachments: attachments)
         let request = AgentTurnRequest(
             workspaceURL: workspaceURL,
             resumeSessionID: resumeID,
-            prompt: composed,
+            prompt: providerPrompt,
+            attachments: attachments,
             seed: seedSent ? nil : AssistantContext.seed(for: reference),
             webAccess: webAccess,
             codexSandbox: codexSandbox,
@@ -281,7 +474,12 @@ final class ChatSessionController: ObservableObject {
                 return
             }
             self.hasMessages = true
-            self.renderUserMessage(composed)
+            let payload = ChatUserMessagePayload(
+                body: visible,
+                attachments: attachments.map(\.presentation))
+            self.renderUserMessage(payload)
+            self.pendingAttachments.removeAll()
+            self.attachmentIssues.removeAll()
             self.stagedSelection = nil
             // NO eager assistant bubble here: the renderer opens one lazily on
             // the first delta. Pre-opening pinned the bubble ABOVE tool chips
@@ -351,7 +549,19 @@ final class ChatSessionController: ObservableObject {
     /// — no slot leak), and clear all transcript + turn UI state. Callers then set the
     /// session-identity fields (`liveSessionID` / `seedSent` / `hasMessages`) and their
     /// own tail (adopt defaults, or render a notice).
-    private func resetConversationState() {
+    private enum PendingAttachmentReset {
+        case discard
+        case preserveAndRehome
+    }
+
+    private func resetConversationState(attachments policy: PendingAttachmentReset) {
+        let capturedAttachments = pendingAttachments
+        attachmentTask?.cancel()
+        attachmentTask = nil
+        attachmentTaskToken = nil
+        attachmentQueue.removeAll()
+        attachmentGeneration += 1
+        attachmentConversationID = UUID()
         provider.cancel()
         generation += 1
         conversationEpoch += 1
@@ -365,6 +575,53 @@ final class ChatSessionController: ObservableObject {
         pendingApprovals.removeAll()
         stagedSelection = nil
         resolvedModel = nil
+
+        stagingAttachments.removeAll()
+        stagingSourceIdentities.removeAll()
+        cancelledAttachmentIDs.removeAll()
+
+        switch policy {
+        case .discard:
+            pendingAttachments.removeAll()
+            attachmentIssues.removeAll()
+            isRehomingAttachments = false
+            Task { await attachmentStore.removePending(capturedAttachments) }
+        case .preserveAndRehome:
+            guard !capturedAttachments.isEmpty else {
+                isRehomingAttachments = false
+                return
+            }
+            isRehomingAttachments = true
+            let generation = attachmentGeneration
+            let destination = attachmentConversationID
+            let token = UUID()
+            attachmentTaskToken = token
+            attachmentTask = Task { [weak self] in
+                guard let self else { return }
+                do {
+                    let moved = try await self.attachmentStore.rehomePending(
+                        capturedAttachments, to: destination)
+                    guard generation == self.attachmentGeneration else {
+                        await self.attachmentStore.removePending(moved)
+                        return
+                    }
+                    self.pendingAttachments = moved
+                } catch {
+                    if generation == self.attachmentGeneration {
+                        self.attachmentIssues = [ChatAttachmentIssue(
+                            displayName: "Attachments",
+                            message: error.localizedDescription)]
+                    }
+                }
+                if generation == self.attachmentGeneration {
+                    self.isRehomingAttachments = false
+                }
+                if self.attachmentTaskToken == token {
+                    self.attachmentTask = nil
+                    self.attachmentTaskToken = nil
+                }
+            }
+        }
     }
 
     /// Start a fresh conversation: reset, drop the session identity, and adopt the
@@ -372,7 +629,7 @@ final class ChatSessionController: ObservableObject {
     /// open takes effect here; a live conversation keeps its own values). Defaults
     /// re-read is a no-op when the provider is unset (tests / DEBUG harness).
     func newConversation() {
-        resetConversationState()
+        resetConversationState(attachments: .discard)
         liveSessionID = nil
         seedSent = false
         hasMessages = false
@@ -399,7 +656,9 @@ final class ChatSessionController: ObservableObject {
     /// (nothing persisted — D5); History can resume a Codex thread later. A real
     /// switch also becomes the default backend for future conversations.
     func switchProvider(to kind: AgentProviderKind) {
-        guard let providerFactory, kind != providerKind else { return }
+        guard !isStagingAttachments,
+              let providerFactory,
+              kind != providerKind else { return }
         // Request teardown of the outgoing runtime. `shutdown()` may reap the server
         // asynchronously, but the old runtime is a separate process on its own pipes —
         // it can't touch the freshly-built provider below, and any in-flight turn's
@@ -415,7 +674,18 @@ final class ChatSessionController: ObservableObject {
         // the wrong backend's availability. The scheduled recheck bumps this again.
         availabilityProbeToken += 1
         RubienPreferences.assistantProvider = kind
-        newConversation()
+        resetConversationState(attachments: .preserveAndRehome)
+        liveSessionID = nil
+        seedSent = false
+        hasMessages = false
+        if let defaults = defaultsProvider?(providerKind) {
+            modelOverride = defaults.model
+            effortOverride = defaults.effort
+            webAccess = defaults.webAccess
+            autoApprove = defaults.autoApprove
+            codexSandbox = defaults.codexSandbox
+        }
+        seedCodexModelIfUnset()
         refreshCodexCatalog()
         Task { await recheckAvailability() }
     }
@@ -446,7 +716,7 @@ final class ChatSessionController: ObservableObject {
     /// The resumed session already carries its seed/context, so `seedSent` is set to
     /// avoid re-seeding. A notice with the preview gives the user their bearings.
     func resume(_ summary: AgentSessionSummary) {
-        resetConversationState()
+        resetConversationState(attachments: .discard)
         liveSessionID = summary.id
         seedSent = true
         hasMessages = true
@@ -476,7 +746,7 @@ final class ChatSessionController: ObservableObject {
             self.renderLog = []
             self.renderSeq = 0
             for row in history + tail {
-                self.appendToLog(row.role, row.body)
+                self.appendToLog(row.role, row.body, attachments: row.attachments)
             }
             self.transcript.reset()
             self.transcript.loadTranscript(self.renderLog)
@@ -558,7 +828,7 @@ final class ChatSessionController: ObservableObject {
             RubienPreferences.assistantCodexModel = id  // remember the pick as the default
         }
         if providerKind == .codex, hasMessages {
-            resetConversationState()
+            resetConversationState(attachments: .discard)
             liveSessionID = nil
             seedSent = false
             modelOverride = id
@@ -668,6 +938,16 @@ final class ChatSessionController: ObservableObject {
         appendToLog(.user, markdown)
     }
 
+    private func renderUserMessage(_ payload: ChatUserMessagePayload) {
+        if payload.attachments.isEmpty {
+            // Preserve the established text-only bridge byte-for-byte.
+            transcript.addUserMessage(payload.body)
+        } else {
+            transcript.addUserMessage(payload)
+        }
+        appendToLog(.user, payload.body, attachments: payload.attachments)
+    }
+
     private func renderNotice(_ markdown: String) {
         transcript.addNotice(markdown)
         appendToLog(.notice, markdown)
@@ -679,8 +959,16 @@ final class ChatSessionController: ObservableObject {
         appendToLog(.tool, ChatTranscriptJS.encodeArg(chip))
     }
 
-    private func appendToLog(_ role: ChatRole, _ body: String) {
-        renderLog.append(ChatRenderMessage(role: role, body: body, seq: renderSeq))
+    private func appendToLog(
+        _ role: ChatRole,
+        _ body: String,
+        attachments: [ChatAttachmentPresentation] = []
+    ) {
+        renderLog.append(ChatRenderMessage(
+            role: role,
+            body: body,
+            seq: renderSeq,
+            attachments: attachments))
         renderSeq += 1
     }
 
