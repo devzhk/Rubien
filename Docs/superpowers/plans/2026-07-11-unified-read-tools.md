@@ -62,7 +62,7 @@
 | missing ref (`read text`) | `Reference <id> not found` |
 | neither available | `has no readable content (pdf: <state description>; web: none)` |
 | requested source unavailable | `source "pdf" is not readable (pdf: <state description>); available: ["web"]` (symmetric for web) |
-| explicit source contradicts param | `--pages/--section require a PDF source (requested source: web)` / `--start requires a web source (requested source: pdf)` |
+| explicit source contradicts param | `--pages/--section require a PDF source (requested source: web); available: [...]` / `--start requires a web source (requested source: pdf); available: [...]` (emitted after the availability probe so `available` is real) |
 | mixed families | `--pages/--section and --start are mutually exclusive` |
 | pages+sections | `--pages and --section are mutually exclusive` (existing text, kept) |
 
@@ -183,13 +183,15 @@ final class ReadCommandTests: XCTestCase {
     }
 
     /// Insert a pdfCache row directly (materializedAt nil ⇒ notMaterialized state).
+    /// contentHash + lastOpenedAt are NOT NULL (AppDatabase v2 migration) — an
+    /// explicit NULL bypasses the column default, so both get real values.
     private func seedPdfCacheRow(refId: Int64, filename: String, materialized: Bool) throws {
         let db = try openTestDB()
         try db.write { db in
             try db.execute(sql: """
                 INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
-                VALUES (?, ?, NULL, 1, ?, NULL)
-                """, arguments: [refId, filename, materialized ? Date() : nil])
+                VALUES (?, ?, 'seed-hash', 1, ?, ?)
+                """, arguments: [refId, filename, materialized ? Date() : nil, Date()])
         }
     }
 
@@ -293,6 +295,22 @@ final class ReadCommandTests: XCTestCase {
         XCTAssertTrue(stderrError(result).contains("missing on disk"), stderrError(result))
     }
 
+    func testReadTextMissingFilePdfFallsBackToWeb() throws {
+        try skipIfBinaryMissing()
+        let id = try addReference()
+        try seedPdfCacheRow(refId: id, filename: "definitely-not-on-disk.pdf", materialized: true)
+        try seedWebContent(refId: id, body: "web wins here")
+        let result = try runCLI(["read", "text", "\(id)"])
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        let json = try stdoutJSON(result)
+        XCTAssertEqual(json["source"] as? String, "web")
+        XCTAssertEqual(json["available"] as? [String], ["web"])
+        let forced = try runCLI(["read", "text", "\(id)", "--source", "pdf"])
+        XCTAssertNotEqual(forced.exitCode, 0)
+        XCTAssertTrue(stderrError(forced).contains("missing on disk"), stderrError(forced))
+        XCTAssertTrue(stderrError(forced).contains("available: [\"web\"]"), stderrError(forced))
+    }
+
     // MARK: read text — param-implied source + validation
 
     func testPagesImpliesPdfOnWebOnlyReferenceErrors() throws {
@@ -322,6 +340,14 @@ final class ReadCommandTests: XCTestCase {
         XCTAssertTrue(stderrError(result).contains("mutually exclusive"), stderrError(result))
     }
 
+    func testPagesAndSectionsMutuallyExclusive() throws {
+        try skipIfBinaryMissing()
+        let id = try addReference()
+        let result = try runCLI(["read", "text", "\(id)", "--pages", "1", "--section", "Intro"])
+        XCTAssertNotEqual(result.exitCode, 0)
+        XCTAssertTrue(stderrError(result).contains("mutually exclusive"), stderrError(result))
+    }
+
     func testExplicitSourceContradictsParamErrors() throws {
         try skipIfBinaryMissing()
         let id = try addReference()
@@ -329,9 +355,11 @@ final class ReadCommandTests: XCTestCase {
         let result = try runCLI(["read", "text", "\(id)", "--source", "web", "--pages", "1"])
         XCTAssertNotEqual(result.exitCode, 0)
         XCTAssertTrue(stderrError(result).contains("require a PDF source"), stderrError(result))
+        XCTAssertTrue(stderrError(result).contains("available: [\"web\"]"), stderrError(result))
         let result2 = try runCLI(["read", "text", "\(id)", "--source", "pdf", "--start", "1"])
         XCTAssertNotEqual(result2.exitCode, 0)
         XCTAssertTrue(stderrError(result2).contains("requires a web source"), stderrError(result2))
+        XCTAssertTrue(stderrError(result2).contains("available: [\"web\"]"), stderrError(result2))
     }
 
     func testMaxCharsRejectsOutOfBounds() throws {
@@ -426,6 +454,27 @@ final class ReadCommandTests: XCTestCase {
         let result = try runCLI(["read", "text", "\(id)", "--section", "Introduction"])
         XCTAssertNotEqual(result.exitCode, 0)
         XCTAssertTrue(stderrError(result).lowercased().contains("outline"), stderrError(result))
+    }
+
+    func testReadTextPdfMaxCharsPageBoundarySemantics() throws {
+        try skipIfBinaryMissing()
+        let id = try importFixturePDF()
+        // Tiny cap: PDF truncation is page-granular and always returns the first
+        // selected page, so the single returned page may EXCEED maxChars (spec §5).
+        let tiny = try runCLI(["read", "text", "\(id)", "--max-chars", "10"])
+        XCTAssertEqual(tiny.exitCode, 0, tiny.stderr)
+        let tinyJson = try stdoutJSON(tiny)
+        let tinyPages = try XCTUnwrap(tinyJson["pages"] as? [[String: Any]])
+        XCTAssertEqual(tinyPages.count, 1)
+        XCTAssertEqual(tinyJson["truncated"] as? Bool, true)
+        XCTAssertGreaterThan((tinyPages[0]["text"] as? String)?.count ?? 0, 10,
+                             "first page should be returned whole even past the cap")
+        // Huge cap: everything fits, no truncation.
+        let full = try runCLI(["read", "text", "\(id)", "--max-chars", "500000"])
+        XCTAssertEqual(full.exitCode, 0, full.stderr)
+        let fullJson = try stdoutJSON(full)
+        XCTAssertEqual((fullJson["pages"] as? [[String: Any]])?.count, 3)
+        XCTAssertEqual(fullJson["truncated"] as? Bool, false)
     }
     #endif
 }
@@ -578,16 +627,6 @@ struct ReadText: ParsableCommand {
             printJSONError("--pages/--section and --start are mutually exclusive (PDF vs web addressing)")
             throw ExitCode.failure
         }
-        if let source {
-            if source == .web && pdfParamsGiven {
-                printJSONError("--pages/--section require a PDF source (requested source: web)")
-                throw ExitCode.failure
-            }
-            if source == .pdf && webParamsGiven {
-                printJSONError("--start requires a web source (requested source: pdf)")
-                throw ExitCode.failure
-            }
-        }
 
         guard let ref = try AppDatabase.shared.fetchReferences(ids: [id]).first else {
             printJSONError("Reference \(id) not found")
@@ -595,6 +634,19 @@ struct ReadText: ParsableCommand {
         }
         let avail = try resolveSources(for: ref)
         let availJSON = "[" + avail.available.map { "\"\($0)\"" }.joined(separator: ",") + "]"
+
+        // Explicit-source contradictions report AFTER the probe so the error can
+        // carry real availability (spec §5: requested source + available + state).
+        if let source {
+            if source == .web && pdfParamsGiven {
+                printJSONError("--pages/--section require a PDF source (requested source: web); available: \(availJSON)")
+                throw ExitCode.failure
+            }
+            if source == .pdf && webParamsGiven {
+                printJSONError("--start requires a web source (requested source: pdf); available: \(availJSON)")
+                throw ExitCode.failure
+            }
+        }
 
         let resolved: ReadSource
         if let source {
@@ -727,14 +779,16 @@ git commit -m "feat(cli): read text — kind-agnostic body reads with 4-state PD
         }
     }
 
+    /// webAnnotation.selectedText is NOT NULL (legacy column; the model mirrors
+    /// anchorText into it) — bind the anchor to both columns.
     private func seedWebAnnotation(refId: Int64, anchor: String, created: Date) throws {
         let db = try openTestDB()
         try db.write { db in
             try db.execute(sql: """
                 INSERT INTO webAnnotation(referenceId, type, selectedText, noteText, color,
                     anchorText, prefixText, suffixText, dateCreated, dateModified)
-                VALUES (?, 'highlight', NULL, NULL, '#FFEB3B', ?, 'before ', ' after', ?, ?)
-                """, arguments: [refId, anchor, created, created])
+                VALUES (?, 'highlight', ?, NULL, '#FFEB3B', ?, 'before ', ' after', ?, ?)
+                """, arguments: [refId, anchor, anchor, created, created])
         }
     }
 
@@ -755,28 +809,33 @@ git commit -m "feat(cli): read text — kind-agnostic body reads with 4-state PD
         let id = try addReference()
         let early = Date(timeIntervalSince1970: 1_000_000)
         let late = Date(timeIntervalSince1970: 2_000_000)
-        try seedPdfAnnotation(refId: id, page: 5, selected: "second pdf", created: early)
-        try seedPdfAnnotation(refId: id, page: 2, selected: "first pdf", created: late)
-        try seedWebAnnotation(refId: id, anchor: "late web", created: late)
-        try seedWebAnnotation(refId: id, anchor: "early web", created: early)
+        // pdf: page-2 pair exercises the (pageIndex, id) tie-break (autoincrement
+        // ids ascend in insertion order); page 5 comes last despite earlier date.
+        try seedPdfAnnotation(refId: id, page: 5, selected: "pdf page5", created: early)
+        try seedPdfAnnotation(refId: id, page: 2, selected: "pdf tie A", created: late)
+        try seedPdfAnnotation(refId: id, page: 2, selected: "pdf tie B", created: late)
+        // web: same-date pair exercises the (dateCreated, id) tie-break.
+        try seedWebAnnotation(refId: id, anchor: "web tie A", created: early)
+        try seedWebAnnotation(refId: id, anchor: "web tie B", created: early)
+        try seedWebAnnotation(refId: id, anchor: "web late", created: late)
         let result = try runCLI(["read", "annotations", "\(id)"])
         XCTAssertEqual(result.exitCode, 0, result.stderr)
         let items = try stdoutArray(result)
-        XCTAssertEqual(items.count, 4)
-        // pdf first sorted by pageIndex, then web sorted by dateCreated
-        XCTAssertEqual(items[0]["source"] as? String, "pdf")
-        XCTAssertEqual((items[0]["pageIndex"] as? NSNumber)?.intValue, 2)
-        XCTAssertEqual(items[0]["selectedText"] as? String, "first pdf")
-        XCTAssertEqual((items[1]["pageIndex"] as? NSNumber)?.intValue, 5)
-        XCTAssertEqual(items[2]["source"] as? String, "web")
-        XCTAssertEqual(items[2]["anchorText"] as? String, "early web")
-        XCTAssertEqual(items[3]["anchorText"] as? String, "late web")
+        XCTAssertEqual(items.count, 6)
+        XCTAssertEqual(items.map { $0["source"] as? String },
+                       ["pdf", "pdf", "pdf", "web", "web", "web"])
+        XCTAssertEqual(items[0]["selectedText"] as? String, "pdf tie A")
+        XCTAssertEqual(items[1]["selectedText"] as? String, "pdf tie B")
+        XCTAssertEqual(items[2]["selectedText"] as? String, "pdf page5")
+        XCTAssertEqual(items[3]["anchorText"] as? String, "web tie A")
+        XCTAssertEqual(items[4]["anchorText"] as? String, "web tie B")
+        XCTAssertEqual(items[5]["anchorText"] as? String, "web late")
         // union fields: kind-foreign anchors are OMITTED, not null
         XCTAssertNil(items[0]["anchorText"])
-        XCTAssertNil(items[2]["pageIndex"])
-        // dates present on both kinds
-        XCTAssertNotNil(items[0]["dateCreated"])
-        XCTAssertNotNil(items[2]["dateCreated"])
+        XCTAssertNil(items[3]["pageIndex"])
+        // ids and dates present on every item
+        XCTAssertTrue(items.allSatisfy { $0["id"] is NSNumber }, "\(items)")
+        XCTAssertTrue(items.allSatisfy { $0["dateCreated"] != nil })
     }
 
     func testReadAnnotationsSourceFilter() throws {
@@ -799,18 +858,23 @@ Expected: FAIL — "Unexpected argument 'annotations'".
 - [ ] **Step 3: Implement.** Next to `ReadText` add:
 
 ```swift
+/// Union DTO for both annotation kinds. `id` is non-optional by contract
+/// (fetched rows always have rowids; the zod mirror requires it). Kind-foreign
+/// optionals are OMITTED from JSON, not null — synthesized Encodable encodes
+/// optionals via encodeIfPresent (the same behavior ReferenceDTO.lastReadAt
+/// documents and relies on).
 struct ReadAnnotationItem: Encodable {
     let source: String
-    let id: Int64?
+    let id: Int64
     let type: String
     let color: String
     let noteText: String?
     let dateCreated: Date
     let dateModified: Date
-    // pdf-only anchors (omitted for web items — synthesized Encodable skips nil)
+    // pdf-only anchors
     let pageIndex: Int?
     let selectedText: String?
-    // web-only anchors (omitted for pdf items)
+    // web-only anchors
     let anchorText: String?
     let prefixText: String?
     let suffixText: String?
@@ -830,12 +894,15 @@ struct ReadAnnotations: ParsableCommand {
 
     func run() throws {
         var items: [ReadAnnotationItem] = []
+        // .compactMap drops a nil-id row (impossible for fetched records) rather
+        // than inventing an id or crashing.
         if source != .web {
             let pdf = (try AppDatabase.shared.fetchAnnotations(referenceId: id))
                 .sorted { ($0.pageIndex, $0.id ?? 0) < ($1.pageIndex, $1.id ?? 0) }
-            items += pdf.map { a in
-                ReadAnnotationItem(
-                    source: "pdf", id: a.id, type: a.type.rawValue, color: a.color,
+            items += pdf.compactMap { a in
+                guard let rowId = a.id else { return nil }
+                return ReadAnnotationItem(
+                    source: "pdf", id: rowId, type: a.type.rawValue, color: a.color,
                     noteText: a.noteText, dateCreated: a.dateCreated, dateModified: a.dateModified,
                     pageIndex: a.pageIndex, selectedText: a.selectedText,
                     anchorText: nil, prefixText: nil, suffixText: nil
@@ -845,9 +912,10 @@ struct ReadAnnotations: ParsableCommand {
         if source != .pdf {
             let web = (try AppDatabase.shared.fetchWebAnnotations(referenceId: id))
                 .sorted { ($0.dateCreated, $0.id ?? 0) < ($1.dateCreated, $1.id ?? 0) }
-            items += web.map { a in
-                ReadAnnotationItem(
-                    source: "web", id: a.id, type: a.type.rawValue, color: a.color,
+            items += web.compactMap { a in
+                guard let rowId = a.id else { return nil }
+                return ReadAnnotationItem(
+                    source: "web", id: rowId, type: a.type.rawValue, color: a.color,
                     noteText: a.noteText, dateCreated: a.dateCreated, dateModified: a.dateModified,
                     pageIndex: nil, selectedText: nil,
                     anchorText: a.anchorText, prefixText: a.prefixText, suffixText: a.suffixText
@@ -1180,9 +1248,10 @@ git commit -m "feat(mcp-cli): native catalog serves rubien_read_text/rubien_read
 
 **Files:**
 - Modify: `Sources/RubienCLI/RubienCLI.swift` — delete: `struct Annotations` (~1828-1856), `struct PdfText` + `PdfTextOutput` (~2253-2315), `struct Web` parent (~2545-2553), `WebGetOutput` + `struct WebGet` (~2555-2648), `WebAnnotationDTO` + `struct WebAnnotations` (~2650-2688); remove `Annotations.self` and `Web.self` from `allSubcommands` (~lines 32, 39) and `PdfText.self` from the `Pdf` subcommand list (~2164).
-- Modify: `Tests/RubienCLITests/SwiftLibCLITests.swift` — delete `testWebGetReferenceNotFound`, `testWebGetReferenceWithoutWebContent`, `testWebGetRejectsInvalidMaxChars`, `testWebGetRejectsNegativeStart`, `testWebAnnotationsEmptyForNonexistentReference` (~455-525) and any test invoking `["annotations", ...]` or `["pdf", "text", ...]` (grep first: `rg -n '"annotations"|"pdf", "text"|"web",' Tests/RubienCLITests/SwiftLibCLITests.swift`).
+- Modify: `Tests/RubienCLITests/SwiftLibCLITests.swift` — delete `testWebGetReferenceNotFound`, `testWebGetReferenceWithoutWebContent`, `testWebGetRejectsInvalidMaxChars`, `testWebGetRejectsNegativeStart`, `testWebAnnotationsEmptyForNonexistentReference` (~455-525) and any test invoking `["annotations", ...]` or `["pdf", "text", ...]` (grep first: `rg -n '"annotations"|"pdf", "text"|"web",' Tests/RubienCLITests/*.swift`).
+- Modify: `Tests/RubienCLITests/PdfCommandTests.swift` — delete `testPdfTextRejectsBothPagesAndSection` (~104) and `testPdfTextHelpDocumentsBothModes` (~119); update `testPdfHelpListsAllSubcommands` (~69) to expect `info`, `page-image`, `status`, `download` and NOT `text`. Its `pdf info`/`page-image`/search tests stay untouched.
 
-Coverage-parity map (spec §9 gate — all already green from Tasks 1–2): WebGet not-found → `testReadTextMissingReference`; without-webContent → `testReadTextNeitherSourceAvailable`; invalid max-chars → `testMaxCharsRejectsNonPositive`; negative start → covered by ReadText's `--start must be >= 0` guard — **add** `testReadTextRejectsNegativeStart` mirroring `testMaxCharsRejectsNonPositive` if Task 1 didn't include it; WebAnnotations-empty → `testReadAnnotationsMissingReferenceIsEmptyArray`.
+Coverage-parity map (spec §9 gate — all already green from Tasks 1–2): WebGet not-found → `testReadTextMissingReference`; without-webContent → `testReadTextNeitherSourceAvailable`; invalid max-chars → `testMaxCharsRejectsOutOfBounds`; negative start → covered by ReadText's `--start must be >= 0` guard — **add** `testReadTextRejectsNegativeStart` mirroring `testMaxCharsRejectsOutOfBounds` if Task 1 didn't include it; WebAnnotations-empty → `testReadAnnotationsMissingReferenceIsEmptyArray`; PdfText pages+sections exclusivity → `testPagesAndSectionsMutuallyExclusive`; PdfText help-documents-modes → **add** `testReadTextHelpDocumentsSelectionFlags` here (run `["read", "text", "--help"]`, assert output contains `--pages`, `--section`, `--start`, `--source`).
 
 - [ ] **Step 1: Delete code + tests as listed.** Keep `resolveReferencePDFURL`/`runPdfSubcommand` (still used by `pdf info`/`page-image`/`download`).
 - [ ] **Step 2: Full verify.**
@@ -1228,7 +1297,10 @@ If a test pins the old seed text (`rg -n "rubien_pdf_text" Tests/`), update its 
 - [ ] **Step 3: Sweep + classify.**
 
 Run: `rg -n "rubien_pdf_text|rubien_web_get|rubien_annotations_list|rubien_web_annotations" --iglob '!Docs/superpowers/**' .` and `rg -n '"web", "get"|"pdf", "text"|pdf text|web annotations' scripts/ Docs/ mcp-server/ Sources/ Tests/`
-Expected after fixes: hits only in `Docs/CLI-Reference.md` + `mcp-server/README.md` (Task 7 territory), historical specs under `Docs/superpowers/`, and test fixtures where the name is opaque payload (`ClaudeSessionStoreTests.swift:269,290`, `CodexAppServerProtocolTests.swift:436` — leave them; they test transcript parsing, not tools). Anything else: fix production/doc sites, list every decision in the task report.
+Expected after fixes: hits only in `Docs/CLI-Reference.md` + `mcp-server/README.md` (Task 7 territory) and `Docs/superpowers/` historical specs. Known classification (verify, then apply):
+- **Migrate** (demo surfaces that display tool names): `ChatSidebarHarness.swift:44-46`, `AssistantRendererHarness.swift:~80` — rename to `rubien_read_text`.
+- **Whitelist** (opaque test payload — the tests exercise transcript/renderer parsing, not tools): `ClaudeSessionStoreTests.swift:269,290`, `CodexAppServerProtocolTests.swift:436`, `ChatSessionControllerTests.swift`, `ChatTranscriptJSTests.swift`, `scripts/chat-renderer/test/integration.test.js:~82`. Leave them unless a rename is a trivial string swap that keeps the test green.
+Anything else found: fix production/doc sites, and list every classification decision in the task report.
 
 - [ ] **Step 4: App-target tests** (Mac-only guarded target):
 
