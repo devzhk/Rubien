@@ -378,4 +378,88 @@ final class ReadCommandTests: XCTestCase {
         XCTAssertEqual(fullJson["truncated"] as? Bool, false)
     }
     #endif
+
+    // MARK: read annotations
+
+    private func seedPdfAnnotation(refId: Int64, page: Int, selected: String, created: Date) throws {
+        let db = try openTestDB()
+        try db.write { db in
+            try db.execute(sql: """
+                INSERT INTO pdfAnnotation(referenceId, type, selectedText, noteText, color,
+                    pageIndex, boundsX, boundsY, boundsWidth, boundsHeight, rectsData,
+                    dateCreated, dateModified)
+                VALUES (?, 'highlight', ?, NULL, '#FFEB3B', ?, 0, 0, 10, 10, '[]', ?, ?)
+                """, arguments: [refId, selected, page, created, created])
+        }
+    }
+
+    /// webAnnotation.selectedText is NOT NULL (legacy column; the model mirrors
+    /// anchorText into it) — bind the anchor to both columns.
+    private func seedWebAnnotation(refId: Int64, anchor: String, created: Date) throws {
+        let db = try openTestDB()
+        try db.write { db in
+            try db.execute(sql: """
+                INSERT INTO webAnnotation(referenceId, type, selectedText, noteText, color,
+                    anchorText, prefixText, suffixText, dateCreated, dateModified)
+                VALUES (?, 'highlight', ?, NULL, '#FFEB3B', ?, 'before ', ' after', ?, ?)
+                """, arguments: [refId, anchor, anchor, created, created])
+        }
+    }
+
+    private func stdoutArray(_ result: (stdout: String, stderr: String, exitCode: Int32)) throws -> [[String: Any]] {
+        try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [[String: Any]],
+                      "stdout was not a JSON array: \(result.stdout)")
+    }
+
+    func testReadAnnotationsMissingReferenceIsEmptyArray() throws {
+        try skipIfBinaryMissing()
+        let result = try runCLI(["read", "annotations", "999999999"])
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        XCTAssertEqual(try stdoutArray(result).count, 0)
+    }
+
+    func testReadAnnotationsMergesBothKindsInOrder() throws {
+        try skipIfBinaryMissing()
+        let id = try addReference()
+        let early = Date(timeIntervalSince1970: 1_000_000)
+        let late = Date(timeIntervalSince1970: 2_000_000)
+        // pdf: page-2 pair exercises the (pageIndex, id) tie-break (autoincrement
+        // ids ascend in insertion order); page 5 comes last despite earlier date.
+        try seedPdfAnnotation(refId: id, page: 5, selected: "pdf page5", created: early)
+        try seedPdfAnnotation(refId: id, page: 2, selected: "pdf tie A", created: late)
+        try seedPdfAnnotation(refId: id, page: 2, selected: "pdf tie B", created: late)
+        // web: same-date pair exercises the (dateCreated, id) tie-break.
+        try seedWebAnnotation(refId: id, anchor: "web tie A", created: early)
+        try seedWebAnnotation(refId: id, anchor: "web tie B", created: early)
+        try seedWebAnnotation(refId: id, anchor: "web late", created: late)
+        let result = try runCLI(["read", "annotations", "\(id)"])
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        let items = try stdoutArray(result)
+        XCTAssertEqual(items.count, 6)
+        XCTAssertEqual(items.map { $0["source"] as? String },
+                       ["pdf", "pdf", "pdf", "web", "web", "web"])
+        XCTAssertEqual(items[0]["selectedText"] as? String, "pdf tie A")
+        XCTAssertEqual(items[1]["selectedText"] as? String, "pdf tie B")
+        XCTAssertEqual(items[2]["selectedText"] as? String, "pdf page5")
+        XCTAssertEqual(items[3]["anchorText"] as? String, "web tie A")
+        XCTAssertEqual(items[4]["anchorText"] as? String, "web tie B")
+        XCTAssertEqual(items[5]["anchorText"] as? String, "web late")
+        // union fields: kind-foreign anchors are OMITTED, not null
+        XCTAssertNil(items[0]["anchorText"])
+        XCTAssertNil(items[3]["pageIndex"])
+        // ids and dates present on every item
+        XCTAssertTrue(items.allSatisfy { $0["id"] is NSNumber }, "\(items)")
+        XCTAssertTrue(items.allSatisfy { $0["dateCreated"] != nil })
+    }
+
+    func testReadAnnotationsSourceFilter() throws {
+        try skipIfBinaryMissing()
+        let id = try addReference()
+        try seedPdfAnnotation(refId: id, page: 1, selected: "pdf one", created: Date())
+        try seedWebAnnotation(refId: id, anchor: "web one", created: Date())
+        let pdfOnly = try runCLI(["read", "annotations", "\(id)", "--source", "pdf"])
+        XCTAssertEqual(try stdoutArray(pdfOnly).map { $0["source"] as? String }, ["pdf"])
+        let webOnly = try runCLI(["read", "annotations", "\(id)", "--source", "web"])
+        XCTAssertEqual(try stdoutArray(webOnly).map { $0["source"] as? String }, ["web"])
+    }
 }

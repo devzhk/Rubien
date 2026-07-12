@@ -2273,7 +2273,7 @@ struct Read: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "read",
         abstract: "Read a reference's body text or annotations, whichever kind it is (PDF or web clip)",
-        subcommands: [ReadText.self]
+        subcommands: [ReadText.self, ReadAnnotations.self]
     )
 }
 
@@ -2446,6 +2446,74 @@ struct ReadText: ParsableCommand {
                 annotationCount: annotationCount
             ))
         }
+    }
+}
+
+/// Union DTO for both annotation kinds. `id` is non-optional by contract
+/// (fetched rows always have rowids; the zod mirror requires it). Kind-foreign
+/// optionals are OMITTED from JSON, not null — synthesized Encodable encodes
+/// optionals via encodeIfPresent (the same behavior ReferenceDTO.lastReadAt
+/// documents and relies on).
+struct ReadAnnotationItem: Encodable {
+    let source: String
+    let id: Int64
+    let type: String
+    let color: String
+    let noteText: String?
+    let dateCreated: Date
+    let dateModified: Date
+    // pdf-only anchors
+    let pageIndex: Int?
+    let selectedText: String?
+    // web-only anchors
+    let anchorText: String?
+    let prefixText: String?
+    let suffixText: String?
+}
+
+struct ReadAnnotations: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "annotations",
+        abstract: "List a reference's annotations, PDF and web merged (source-tagged)"
+    )
+
+    @Argument(help: "Reference ID")
+    var id: Int64
+
+    @Option(name: .customLong("source"), help: "Filter to one kind: pdf or web")
+    var source: ReadSource?
+
+    func run() throws {
+        var items: [ReadAnnotationItem] = []
+        // .compactMap drops a nil-id row (impossible for fetched records) rather
+        // than inventing an id or crashing.
+        if source != .web {
+            let pdf = (try AppDatabase.shared.fetchAnnotations(referenceId: id))
+                .sorted { ($0.pageIndex, $0.id ?? 0) < ($1.pageIndex, $1.id ?? 0) }
+            items += pdf.compactMap { a in
+                guard let rowId = a.id else { return nil }
+                return ReadAnnotationItem(
+                    source: "pdf", id: rowId, type: a.type.rawValue, color: a.color,
+                    noteText: a.noteText, dateCreated: a.dateCreated, dateModified: a.dateModified,
+                    pageIndex: a.pageIndex, selectedText: a.selectedText,
+                    anchorText: nil, prefixText: nil, suffixText: nil
+                )
+            }
+        }
+        if source != .pdf {
+            let web = (try AppDatabase.shared.fetchWebAnnotations(referenceId: id))
+                .sorted { ($0.dateCreated, $0.id ?? 0) < ($1.dateCreated, $1.id ?? 0) }
+            items += web.compactMap { a in
+                guard let rowId = a.id else { return nil }
+                return ReadAnnotationItem(
+                    source: "web", id: rowId, type: a.type.rawValue, color: a.color,
+                    noteText: a.noteText, dateCreated: a.dateCreated, dateModified: a.dateModified,
+                    pageIndex: nil, selectedText: nil,
+                    anchorText: a.anchorText, prefixText: a.prefixText, suffixText: a.suffixText
+                )
+            }
+        }
+        printJSON(items)
     }
 }
 
