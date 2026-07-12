@@ -30,7 +30,11 @@ struct ChatSidebarView: View {
     @State private var plusMenuHovered = false
     @State private var approvalMenuHovered = false
     @State private var isDropTargeted = false
-    @FocusState private var composerFocused: Bool
+    /// Bumped to move first-responder status into the composer editor (see
+    /// `ComposerTextView.focusRequestCount`); a `@FocusState` can't reach into
+    /// the AppKit-backed editor. Distinct from `session.composerFocusRequest`,
+    /// the controller-level signal that feeds this via `focusComposerSoon`.
+    @State private var editorFocusRequests = 0
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
@@ -454,11 +458,13 @@ struct ChatSidebarView: View {
                     isDropTargeted ? Color.accentColor : Color.primary.opacity(0.12),
                     lineWidth: isDropTargeted ? 1.5 : 1)
         )
+        // Catches drops on the box outside the editor (tray, control row, padding);
+        // drops on the editor itself are routed by `ComposerNSTextView`, which sits
+        // in front of this destination in AppKit's hit-testing.
         .dropDestination(for: URL.self) { urls, _ in
             session.stageAttachments(urls)
             return !urls.isEmpty
         } isTargeted: { isDropTargeted = $0 }
-        .onPasteCommand(of: [.fileURL, .image], perform: handlePaste)
     }
 
     // MARK: Attachments
@@ -626,35 +632,6 @@ struct ChatSidebarView: View {
         panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
         guard panel.runModal() == .OK else { return }
         session.stageAttachments(panel.urls)
-    }
-
-    private func handlePaste(_ providers: [NSItemProvider]) {
-        for provider in providers {
-            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
-                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) { item, _ in
-                    let url = (item as? URL)
-                        ?? (item as? NSURL).map { $0 as URL }
-                        ?? (item as? Data).map {
-                            NSURL(
-                                absoluteURLWithDataRepresentation: $0,
-                                relativeTo: nil) as URL
-                        }
-                    guard let url else { return }
-                    Task { @MainActor in session.stageAttachments([url]) }
-                }
-                continue
-            }
-
-            guard let identifier = provider.registeredTypeIdentifiers.first(where: {
-                UTType($0)?.conforms(to: .image) == true
-            }) else { continue }
-            provider.loadDataRepresentation(forTypeIdentifier: identifier) { data, _ in
-                guard let data else { return }
-                Task { @MainActor in
-                    session.stagePastedImage(data, suggestedName: "Pasted Image.png")
-                }
-            }
-        }
     }
 
     // MARK: Approval mode switch (Ask ⟷ Auto)
@@ -875,28 +852,18 @@ struct ChatSidebarView: View {
                     .padding(.leading, 5)
                     .allowsHitTesting(false)
             }
-            TextEditor(text: $draft)
-                .focused($composerFocused)
-                .font(.body)
-                .scrollContentBackground(.hidden)
-                // The composer owns the return key DETERMINISTICALLY. Before this,
-                // send lived on the button as a ⌘↩ key equivalent — and SwiftUI's
-                // loose equivalent matching also fired it for ⇧↩ (undeclared,
-                // version-fragile, and it surprised the user). Now: ⌘↩ sends;
-                // plain ↩ and every other modifier fall through to the text
-                // system (newline) and can never send.
-                .onKeyPress(.return, phases: .down) { press in
-                    // EXACTLY ⌘ — `contains` would also send on ⌘⇧↩/⌘⌥↩. State
-                    // flags are masked out first: caps lock reports as a modifier
-                    // (strict equality would dead-key ⌘↩ for a caps-lock user)
-                    // and keypad-Enter adds .numericPad.
-                    let chord = press.modifiers.subtracting([.capsLock, .numericPad])
-                    guard chord == .command else { return .ignored }
-                    guard session.canSend(draft: draft)
-                    else { return .handled }  // consume the chord; never a newline
-                    sendDraft()
-                    return .handled
-                }
+            // AppKit-backed editor (not a `TextEditor`): it routes pasted/dropped
+            // images and files into the attachment pipeline — a TextEditor's text
+            // view swallows those (image ⌘V no-ops, file drops paste the path) —
+            // and owns ⌘↩-sends-exactly deterministically (see ComposerNSTextView).
+            ComposerTextView(
+                text: $draft,
+                focusRequestCount: editorFocusRequests,
+                onCommandReturn: sendDraft,
+                onAttachFiles: { session.stageAttachments($0) },
+                onAttachImageData: { session.stagePastedImage($0, suggestedName: $1) },
+                onDragTargeted: { isDropTargeted = $0 }
+            )
         }
         // Grow with content up to ~6 lines, then the editor scrolls internally.
         .frame(maxHeight: 120)
@@ -963,23 +930,23 @@ struct ChatSidebarView: View {
 
     private func sendDraft() {
         guard session.canSend(draft: draft) else {
-            composerFocused = true
+            editorFocusRequests += 1
             return
         }
         let text = draft
         draft = ""
         session.send(text)
-        composerFocused = true
+        editorFocusRequests += 1
     }
 
     /// Move keyboard focus into the composer shortly after a selection is staged
-    /// (Selection→Ask, §5.4). A `@FocusState` set in the same runloop as a fresh
-    /// pane mount doesn't take — the `TextEditor` isn't in the responder chain yet
-    /// — so hop a runloop before requesting focus.
+    /// (Selection→Ask, §5.4). A focus request in the same runloop as a fresh pane
+    /// mount doesn't take — the editor isn't in a window yet — so hop a runloop
+    /// before requesting focus.
     private func focusComposerSoon() {
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(50))
-            composerFocused = true
+            editorFocusRequests += 1
         }
     }
 }
