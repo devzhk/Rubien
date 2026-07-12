@@ -32,6 +32,14 @@ TESTS=(
   testRenderJPEGProducesValidImageAtTopQuality
   testRenderPNGProducesValidImage
   testRenderPNGThrowsMaxBytesExceeded
+  testSearchCaseInsensitiveThroughAPI
+  testSearchEncryptedFixtureThrows
+  testSearchFindsTermWithPageAnchors
+  testSearchMaxPagesTruncationCountsBeforeCut
+  testSearchPagesScopeAndInvalidAndOutOfRange
+  testSearchRegexAndNoMatchWithTextLayer
+  testSearchScannedFixtureIsSuccessWithoutTextLayer
+  testSearchSectionPathOnOutlinedFixture
 )
 
 # Build once so per-test invocations are incremental.

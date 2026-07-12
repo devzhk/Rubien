@@ -42,12 +42,12 @@ final class MCPServerTests: XCTestCase {
         }
     }
 
-    // The 7 read-only content tools the native server must advertise, mirroring
+    // The 8 read-only content tools the native server must advertise, mirroring
     // the read tools in mcp-server/src/tools/*.ts.
     private let expectedToolNames: Set<String> = [
         "rubien_search", "rubien_list", "rubien_get",
         "rubien_pdf_info", "rubien_pdf_page_image",
-        "rubien_read_text", "rubien_read_annotations",
+        "rubien_read_text", "rubien_read_annotations", "rubien_grep_text",
     ]
 
     // MARK: - Process helpers
@@ -157,7 +157,7 @@ final class MCPServerTests: XCTestCase {
         XCTAssertNotNil((result["capabilities"] as? [String: Any])?["tools"], "must advertise tools capability")
     }
 
-    func testToolsListAdvertisesTheSevenReadTools() throws {
+    func testToolsListAdvertisesTheEightReadTools() throws {
         try skipIfBinaryMissing()
         let responses = try runMCP([req(id: 1, method: "tools/list")])
         let result = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
@@ -366,6 +366,96 @@ final class MCPServerTests: XCTestCase {
                       "empty pages must be dropped (route to neither-branch); got: \(text)")
         XCTAssertFalse(text.contains("source \"pdf\""),
                        "empty pages must not imply a pdf source; got: \(text)")
+    }
+
+    // MARK: - Grep tool (kind-agnostic body-text search)
+
+    func testGrepTextRequiredArgs() throws {
+        try skipIfBinaryMissing()
+        // `required(_:)` in testToolsListAdvertisesTheEightReadTools is a LOCAL
+        // function; do the lookup locally here.
+        let responses = try runMCP([req(id: 1, method: "tools/list")])
+        let tools = try XCTUnwrap(
+            (response(responses, id: 1)?["result"] as? [String: Any])?["tools"] as? [[String: Any]])
+        let grep = try XCTUnwrap(tools.first { ($0["name"] as? String) == "rubien_grep_text" })
+        let requiredArgs = (grep["inputSchema"] as? [String: Any])?["required"] as? [String]
+        XCTAssertEqual(requiredArgs?.sorted(), ["id", "query"])
+    }
+
+    #if os(macOS)
+    func testGrepTextPdfFamilyFlagsForwarded() throws {
+        try skipIfBinaryMissing()
+        // Behavioral proof that regex/pages/maxPages/snippetsPerPage/contextChars
+        // all reach the CLI: a fully-flagged pdf-family call succeeds, scoped to
+        // page 2, via a regex query.
+        let id = try importFixturePDF()
+        let responses = try runMCP([
+            toolCall(id: 1, name: "rubien_grep_text",
+                     arguments: ["id": id, "query": "pa+ge", "regex": true, "pages": "2",
+                                 "maxPages": 5, "snippetsPerPage": 2, "contextChars": 80]),
+        ])
+        let result = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
+        XCTAssertNil(result["isError"], "\(result)")
+        let text = try XCTUnwrap((result["content"] as? [[String: Any]])?.first?["text"] as? String)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+        XCTAssertEqual(json["source"] as? String, "pdf")
+        XCTAssertEqual(json["isRegex"] as? Bool, true)
+        let hits = json["pages"] as? [[String: Any]] ?? []
+        XCTAssertTrue(hits.allSatisfy { ($0["page"] as? NSNumber)?.intValue == 2 }, "\(hits)")
+    }
+    #endif
+
+    func testGrepTextWebFamilyFlagForwarded() throws {
+        try skipIfBinaryMissing()
+        // maxMatches implies web; on a metadata-only ref the web source is
+        // unavailable — the CLI error proves the flag was forwarded + interpreted.
+        let id = try seedTitle("Grep web-family forwarding")
+        let responses = try runMCP([
+            toolCall(id: 1, name: "rubien_grep_text",
+                     arguments: ["id": id, "query": "x", "maxMatches": 3]),
+        ])
+        let result = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
+        XCTAssertEqual(result["isError"] as? Bool, true)
+        let text = ((result["content"] as? [[String: Any]])?.first?["text"] as? String ?? "").lowercased()
+        XCTAssertTrue(text.contains("web"), "error must show the web-implied routing: \(text)")
+    }
+
+    func testGrepTextMixedScopesRejected() throws {
+        try skipIfBinaryMissing()
+        let responses = try runMCP([
+            toolCall(id: 1, name: "rubien_grep_text",
+                     arguments: ["id": 1, "query": "x", "maxPages": 5, "maxMatches": 5]),
+        ])
+        let result = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
+        XCTAssertEqual(result["isError"] as? Bool, true)
+        let text = (result["content"] as? [[String: Any]])?.first?["text"] as? String ?? ""
+        XCTAssertTrue(text.lowercased().contains("mutually exclusive"), text)
+    }
+
+    func testGrepTextEmptyPagesTreatedAsAbsent() throws {
+        try skipIfBinaryMissing()
+        let id = try seedTitle("Grep empty pages")
+        let responses = try runMCP([
+            toolCall(id: 1, name: "rubien_grep_text", arguments: ["id": id, "query": "x", "pages": ""]),
+        ])
+        let result = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
+        XCTAssertEqual(result["isError"] as? Bool, true)
+        let text = ((result["content"] as? [[String: Any]])?.first?["text"] as? String ?? "").lowercased()
+        XCTAssertTrue(text.contains("no readable content"), text)   // routed to neither-branch, not pdf
+    }
+
+    func testGrepTextWebEndToEnd() throws {
+        try skipIfBinaryMissing()
+        let id = try seedTitle("Grep MCP e2e")
+        // no web-content write path via MCP → this metadata-only ref errors;
+        // the CLI-level GrepCommandTests own the happy path. Assert the error
+        // surfaces as isError with the routing message:
+        let responses = try runMCP([
+            toolCall(id: 1, name: "rubien_grep_text", arguments: ["id": id, "query": "needle"]),
+        ])
+        let result = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
+        XCTAssertEqual(result["isError"] as? Bool, true)
+        XCTAssertTrue((((result["content"] as? [[String: Any]])?.first?["text"] as? String) ?? "").contains("no readable content"))
     }
 
     // MARK: - PDF tools (need a rendered page → macOS/PDFKit)

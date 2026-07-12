@@ -292,6 +292,98 @@ public enum PDFExtractor {
         )
     }
 
+    // MARK: - body-text search (grep)
+
+    public struct PageSearchHit: Sendable, Encodable {
+        public var page: Int
+        public var sectionPath: [String]
+        public var matchCount: Int
+        public var snippetsTruncated: Bool
+        public var snippets: [String]
+    }
+
+    public struct SearchResult: Sendable {
+        public var pageCount: Int
+        public var hasTextLayer: Bool
+        public var totalMatches: Int
+        public var totalMatchingPages: Int
+        public var truncated: Bool
+        public var pages: [PageSearchHit]
+    }
+
+    /// Grep the extracted text layer. Matching runs over NORMALIZED page text
+    /// (BodyTextMatcher.normalize) — page numbers, not offsets, are the anchor.
+    /// The literal query is normalized identically; a regex pattern is not.
+    /// `hasTextLayer` here is exact over the candidate pages (search reads
+    /// every one), unlike `pdf info`'s sampled probe.
+    public static func search(
+        at url: URL,
+        query: String,
+        isRegex: Bool,
+        pagesString: String?,
+        maxPages: Int,
+        snippetsPerPage: Int,
+        contextChars: Int
+    ) throws -> SearchResult {
+        let doc = try openDocument(at: url)
+        let pageCount = doc.pageCount
+        let sections = sections(in: doc)
+
+        let candidatePages: [Int]
+        if let raw = pagesString, !raw.isEmpty {
+            let ranges = try parsePageRange(raw, pageCount: pageCount)
+            candidatePages = pagesInRanges(ranges, pageCount: pageCount)
+            // parsePageRange accepts "999" and pagesInRanges then drops it —
+            // a wholly out-of-range scope must error, not silently return
+            // empty (spec §7).
+            if candidatePages.isEmpty {
+                throw ExtractError.pageOutOfRange(ranges.first?.lowerBound ?? 0)
+            }
+        } else {
+            candidatePages = Array(1...max(1, pageCount))
+        }
+
+        let compiled = try BodyTextQuery.compile(
+            isRegex ? query : BodyTextMatcher.normalize(query),
+            isRegex: isRegex
+        )
+
+        var hits: [PageSearchHit] = []
+        var totalMatches = 0
+        var totalMatchingPages = 0
+        var anyText = false
+
+        for p in candidatePages {
+            guard let page = doc.page(at: p - 1) else { continue }
+            let rawText = page.extractedText() ?? ""
+            let norm = BodyTextMatcher.normalize(rawText)
+            if !norm.isEmpty { anyText = true }  // normalized ⇒ trimmed: whitespace-only pages don't count
+            let ranges = BodyTextMatcher.matches(in: norm, query: compiled)
+            guard !ranges.isEmpty else { continue }
+            totalMatchingPages += 1
+            totalMatches += ranges.count
+            guard hits.count < maxPages else { continue }  // keep counting past the cap
+            let clusters = BodyTextMatcher.clusters(in: norm, ranges: ranges, contextChars: contextChars)
+            let kept = Array(clusters.prefix(snippetsPerPage))
+            hits.append(PageSearchHit(
+                page: p,
+                sectionPath: sections.flatMap { sectionPath(forPage: p, in: $0) } ?? [],
+                matchCount: ranges.count,
+                snippetsTruncated: clusters.count > kept.count,
+                snippets: kept.map(\.snippet)
+            ))
+        }
+
+        return SearchResult(
+            pageCount: pageCount,
+            hasTextLayer: anyText,
+            totalMatches: totalMatches,
+            totalMatchingPages: totalMatchingPages,
+            truncated: totalMatchingPages > hits.count,
+            pages: hits
+        )
+    }
+
     /// Substring (case-insensitive) match of `queries` against `sections[].title`.
     /// Returns the matched sections (deduped, in flat-list order) and the queries that matched no title.
     public static func resolveSections(

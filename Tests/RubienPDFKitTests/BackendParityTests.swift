@@ -193,5 +193,99 @@ final class BackendParityTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - search (grep)
+
+    func testSearchFindsTermWithPageAnchors() throws {
+        let r = try PDFExtractor.search(
+            at: fixtureURL("linear-3pages-text"), query: "page", isRegex: false,
+            pagesString: nil, maxPages: 30, snippetsPerPage: 3, contextChars: 160)
+        XCTAssertEqual(r.pageCount, 3)
+        XCTAssertTrue(r.hasTextLayer)
+        XCTAssertGreaterThan(r.totalMatches, 0)
+        XCTAssertEqual(r.totalMatchingPages, r.pages.count)
+        XCTAssertFalse(r.truncated)
+        XCTAssertEqual(r.pages.map(\.page), r.pages.map(\.page).sorted())
+        XCTAssertTrue(r.pages.allSatisfy { !$0.snippets.isEmpty && $0.matchCount > 0 })
+        XCTAssertTrue(r.pages.allSatisfy { $0.sectionPath.isEmpty })  // fixture has no outline
+    }
+
+    func testSearchSectionPathOnOutlinedFixture() throws {
+        // Fixture pages contain "Section page N" / "Content on page N"
+        // (scripts/generate-pdf-fixtures.swift:139) — query a word that exists.
+        let r = try PDFExtractor.search(
+            at: fixtureURL("outline-2level-5sections"), query: "content", isRegex: false,
+            pagesString: nil, maxPages: 30, snippetsPerPage: 3, contextChars: 160)
+        XCTAssertFalse(r.pages.isEmpty, "query 'content' must hit the fixture body text")
+        XCTAssertTrue(r.pages.contains { !$0.sectionPath.isEmpty },
+                      "outlined fixture should yield section breadcrumbs")
+    }
+
+    func testSearchRegexAndNoMatchWithTextLayer() throws {
+        let rx = try PDFExtractor.search(
+            at: fixtureURL("linear-3pages-text"), query: "pa+ge", isRegex: true,
+            pagesString: nil, maxPages: 30, snippetsPerPage: 3, contextChars: 160)
+        XCTAssertGreaterThan(rx.totalMatches, 0, "regex must hit 'page' text")
+        let none = try PDFExtractor.search(
+            at: fixtureURL("linear-3pages-text"), query: "zzzqqqxxx", isRegex: false,
+            pagesString: nil, maxPages: 30, snippetsPerPage: 3, contextChars: 160)
+        XCTAssertTrue(none.hasTextLayer, "text layer present even with zero hits")
+        XCTAssertEqual(none.totalMatches, 0)
+        XCTAssertTrue(none.pages.isEmpty)
+    }
+
+    func testSearchCaseInsensitiveThroughAPI() throws {
+        let upper = try PDFExtractor.search(
+            at: fixtureURL("linear-3pages-text"), query: "PAGE", isRegex: false,
+            pagesString: nil, maxPages: 30, snippetsPerPage: 3, contextChars: 160)
+        XCTAssertGreaterThan(upper.totalMatches, 0, "literal matching is case-insensitive")
+    }
+
+    func testSearchMaxPagesTruncationCountsBeforeCut() throws {
+        let r = try PDFExtractor.search(
+            at: fixtureURL("linear-3pages-text"), query: "page", isRegex: false,
+            pagesString: nil, maxPages: 1, snippetsPerPage: 3, contextChars: 160)
+        XCTAssertEqual(r.pages.count, 1)
+        XCTAssertGreaterThan(r.totalMatchingPages, 1)
+        XCTAssertTrue(r.truncated)
+    }
+
+    func testSearchPagesScopeAndInvalidAndOutOfRange() throws {
+        let scoped = try PDFExtractor.search(
+            at: fixtureURL("linear-3pages-text"), query: "page", isRegex: false,
+            pagesString: "2", maxPages: 30, snippetsPerPage: 3, contextChars: 160)
+        XCTAssertTrue(scoped.pages.allSatisfy { $0.page == 2 })
+        XCTAssertThrowsError(try PDFExtractor.search(
+            at: fixtureURL("linear-3pages-text"), query: "page", isRegex: false,
+            pagesString: "abc", maxPages: 30, snippetsPerPage: 3, contextChars: 160)) { error in
+            guard case PDFExtractor.ExtractError.invalidPageRange = error else {
+                return XCTFail("expected invalidPageRange, got \(error)")
+            }
+        }
+        // Spec §7: a wholly out-of-range scope errors rather than silently
+        // returning empty (parsePageRange accepts "999"; pagesInRanges drops it).
+        XCTAssertThrowsError(try PDFExtractor.search(
+            at: fixtureURL("linear-3pages-text"), query: "page", isRegex: false,
+            pagesString: "999", maxPages: 30, snippetsPerPage: 3, contextChars: 160)) { error in
+            guard case PDFExtractor.ExtractError.pageOutOfRange = error else {
+                return XCTFail("expected pageOutOfRange, got \(error)")
+            }
+        }
+    }
+
+    func testSearchScannedFixtureIsSuccessWithoutTextLayer() throws {
+        let r = try PDFExtractor.search(
+            at: fixtureURL("scan-only-1page"), query: "anything", isRegex: false,
+            pagesString: nil, maxPages: 30, snippetsPerPage: 3, contextChars: 160)
+        XCTAssertFalse(r.hasTextLayer)
+        XCTAssertEqual(r.totalMatches, 0)
+        XCTAssertTrue(r.pages.isEmpty)
+    }
+
+    func testSearchEncryptedFixtureThrows() throws {
+        XCTAssertThrowsError(try PDFExtractor.search(
+            at: fixtureURL("encrypted-password"), query: "x", isRegex: false,
+            pagesString: nil, maxPages: 30, snippetsPerPage: 3, contextChars: 160))
+    }
 }
 #endif

@@ -209,6 +209,47 @@ export const ReadAnnotationItem = z.object({
 });
 export type ReadAnnotationItem = z.infer<typeof ReadAnnotationItem>;
 
+// Unified grep-tool output mirrors (RubienCLI `grep <id> <query>`). PDF hits are
+// page-grouped (PageSearchHit); web hits carry character offsets (GrepWebMatch).
+export const GrepTextPdfOutput = z.object({
+  id: z.number().int(),
+  source: z.literal("pdf"),
+  available: z.array(z.enum(["pdf", "web"])),
+  query: z.string(),
+  isRegex: z.boolean(),
+  pageCount: z.number().int(),
+  hasTextLayer: z.boolean(),
+  totalMatches: z.number().int(),
+  totalMatchingPages: z.number().int(),
+  truncated: z.boolean(),
+  pages: z.array(z.object({
+    page: z.number().int(),
+    sectionPath: z.array(z.string()),
+    matchCount: z.number().int(),
+    snippetsTruncated: z.boolean(),
+    snippets: z.array(z.string()),
+  })),
+});
+export type GrepTextPdfOutput = z.infer<typeof GrepTextPdfOutput>;
+
+export const GrepTextWebOutput = z.object({
+  id: z.number().int(),
+  source: z.literal("web"),
+  available: z.array(z.enum(["pdf", "web"])),
+  query: z.string(),
+  isRegex: z.boolean(),
+  contentLength: z.number().int(),
+  totalMatches: z.number().int(),
+  totalEntries: z.number().int(),
+  truncated: z.boolean(),
+  matches: z.array(z.object({
+    start: z.number().int().nonnegative(),
+    matchCount: z.number().int(),
+    snippet: z.string(),
+  })),
+});
+export type GrepTextWebOutput = z.infer<typeof GrepTextWebOutput>;
+
 export const StyleDTO = z.object({
   id: z.string(),
   title: z.string(),

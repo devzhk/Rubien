@@ -118,14 +118,14 @@ claude mcp add rubien -- node $(pwd)/dist/index.js        # Claude Code
 
 ## Tool catalog
 
-34 tools, one per `rubien-cli` subcommand mode, named `rubien_<subject>_<action>`:
+35 tools, one per `rubien-cli` subcommand mode, named `rubien_<subject>_<action>`:
 
 | Surface | Tools |
 |---|---|
 | References | `rubien_search`, `rubien_list`, `rubien_get`, `rubien_add`, `rubien_update`, `rubien_delete` |
 | Citations | `rubien_cite`, `rubien_styles_list` |
 | Import/Export | `rubien_import`, `rubien_export` |
-| Reading | `rubien_read_text`, `rubien_read_annotations` |
+| Reading | `rubien_read_text`, `rubien_read_annotations`, `rubien_grep_text` |
 | PDFs | `rubien_pdf_info`, `rubien_pdf_page_image`, `rubien_pdf_download` |
 | Properties (incl. Tags) | `rubien_properties_list`, `rubien_properties_create`, `rubien_properties_delete`, `rubien_properties_rename`, `rubien_properties_show`, `rubien_properties_hide`, `rubien_properties_add_option`, `rubien_properties_rename_option`, `rubien_properties_delete_option`, `rubien_properties_set`, `rubien_properties_add_values`, `rubien_properties_remove_values`, `rubien_properties_clear` |
 | Saved views | `rubien_views_list`, `rubien_views_create`, `rubien_views_delete`, `rubien_views_rename`, `rubien_views_query` |
@@ -133,7 +133,7 @@ claude mcp add rubien -- node $(pwd)/dist/index.js        # Claude Code
 
 `rubien_import` accepts an absolute path on the host or a direct HTTP(S) URL with a `.pdf`, `.md`, or `.markdown` path extension. Direct URLs are validated by `rubien-cli` before import; stdin (`"-"`) is intentionally unavailable through MCP.
 
-Reading tools operate on any reference without your knowing whether it holds a PDF or a clipped web page. `rubien_read_text` returns the readable body text — the attached PDF or the clipped web page — routed automatically: omit `source` and `pages`/`sections` imply the PDF, `start` implies the web body, else PDF wins when both exist. Every response reports `source` (what was read) and `available` (which sources are readable now). PDF results are page-keyed (`pages[]` items with `text` + `sectionPath`, selected by a `pages` range or `sections` title-substrings); web results are one paginated body window (`content` + `contentLength`, `start`/`maxChars`; `contentFormat` markdown or HTML). `rubien_read_annotations` merges the user's highlights/underlines/anchored notes across both kinds into one array, each item tagged `source`; web items carry a W3C TextQuoteSelector triple (`prefixText`/`anchorText`/`suffixText`) that locates them inside the `rubien_read_text` body. Both are library-only — neither hits the network.
+Reading tools operate on any reference without your knowing whether it holds a PDF or a clipped web page. `rubien_read_text` returns the readable body text — the attached PDF or the clipped web page — routed automatically: omit `source` and `pages`/`sections` imply the PDF, `start` implies the web body, else PDF wins when both exist. Every response reports `source` (what was read) and `available` (which sources are readable now). PDF results are page-keyed (`pages[]` items with `text` + `sectionPath`, selected by a `pages` range or `sections` title-substrings); web results are one paginated body window (`content` + `contentLength`, `start`/`maxChars`; `contentFormat` markdown or HTML). `rubien_read_annotations` merges the user's highlights/underlines/anchored notes across both kinds into one array, each item tagged `source`; web items carry a W3C TextQuoteSelector triple (`prefixText`/`anchorText`/`suffixText`) that locates them inside the `rubien_read_text` body. `rubien_grep_text` is the lookup half of the same workflow: it finds *where* a reference's body mentions a phrase or regex — PDF hits grouped by page (`sectionPath` breadcrumbs), web hits as exact character offsets — so you can then pull just those spots with `rubien_read_text` (`pages` for PDF, `start` for web). All three are library-only — none hit the network.
 
 PDF tools: `rubien_pdf_info` (page count, `hasTextLayer`, outline sections — call it before selecting `rubien_read_text` by `sections`), `rubien_pdf_page_image` (render a page to an image, for tables/figures/equations), `rubien_pdf_download` (fetch an open-access PDF and attach it).
 
