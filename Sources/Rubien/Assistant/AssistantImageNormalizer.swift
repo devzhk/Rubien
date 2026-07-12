@@ -26,10 +26,47 @@ enum AssistantImageNormalizer {
         maxPixelSize: Int = maxPixelSize,
         maxBytes: Int = maxBytes
     ) throws -> NormalizedAssistantImage {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else {
+            throw AssistantAttachmentStoreError.imageDecode(displayName)
+        }
+        return try normalize(
+            source,
+            displayName: displayName,
+            maxPixelSize: maxPixelSize,
+            maxBytes: maxBytes
+        )
+    }
+
+    /// URL-backed ImageIO avoids materializing an arbitrarily large selected file
+    /// before we know whether it is an image. ImageIO reads the metadata and decoded
+    /// thumbnail it needs; Rubien only retains the bounded normalized result.
+    static func normalize(
+        fileURL: URL,
+        displayName: String,
+        maxPixelSize: Int = maxPixelSize,
+        maxBytes: Int = maxBytes
+    ) throws -> NormalizedAssistantImage {
+        let options = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithURL(fileURL as CFURL, options) else {
+            throw AssistantAttachmentStoreError.imageDecode(displayName)
+        }
+        return try normalize(
+            source,
+            displayName: displayName,
+            maxPixelSize: maxPixelSize,
+            maxBytes: maxBytes
+        )
+    }
+
+    private static func normalize(
+        _ source: CGImageSource,
+        displayName: String,
+        maxPixelSize: Int,
+        maxBytes: Int
+    ) throws -> NormalizedAssistantImage {
         guard
             maxPixelSize > 0,
             maxBytes > 0,
-            let source = CGImageSourceCreateWithData(data as CFData, nil),
             CGImageSourceGetCount(source) > 0,
             let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
                 as? [CFString: Any],

@@ -881,6 +881,61 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertEqual(rows.first?.attachments.map(\.displayName), ["notes.md"])
     }
 
+    func testSessionTranscriptUsesCanonicalManagedRootForSymlinkedWorkspace() async throws {
+        let root = try makeWorkspace()
+        let realWorkspace = root.appendingPathComponent("real", isDirectory: true)
+        let linkedWorkspace = root.appendingPathComponent("linked", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: realWorkspace,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createSymbolicLink(
+            at: linkedWorkspace,
+            withDestinationURL: realWorkspace
+        )
+
+        let id = UUID()
+        let directory = AssistantAttachmentStore.managedRootURL(
+            for: linkedWorkspace
+        ).appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let stagedURL = directory.appendingPathComponent("\(id.uuidString)-notes.md")
+        try Data("notes".utf8).write(to: stagedURL)
+        let attachment = ChatAttachment(
+            id: id,
+            displayName: "notes.md",
+            kind: .text,
+            stagedURL: stagedURL,
+            mediaType: "text/markdown",
+            byteCount: 5,
+            sourceIdentity: "/original/notes.md"
+        )
+        let prompt = AssistantAttachmentManifest.providerPrompt(
+            base: "Review this",
+            visibleText: "Review this",
+            attachments: [attachment]
+        )
+        try writeConfig([
+            "transcripts": [
+                "TH-LINKED": ["turns": [["items": [[
+                    "type": "userMessage",
+                    "content": [["type": "text", "text": prompt]],
+                ]]]]],
+            ],
+        ], into: linkedWorkspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        let rows = await provider.sessionTranscript(
+            sessionID: "TH-LINKED",
+            workspaceURL: linkedWorkspace
+        )
+
+        XCTAssertEqual(rows.first?.body, "Review this")
+        XCTAssertEqual(rows.first?.attachments.map(\.displayName), ["notes.md"])
+        XCTAssertFalse(rows.first?.body.contains("rubien-attachments-v1") == true)
+    }
+
     func testHistoryReusesTheLiveServerAcrossQueryAndTurn() async throws {
         let workspace = try makeWorkspace()
         try writeConfig(["assistantText": "ok"], into: workspace)

@@ -899,9 +899,7 @@ private actor CodexAppServerConnection {
             let result = try await sendRequest(srv, method: "thread/read") {
                 CodexAppServerProtocol.threadRead(requestID: $0, threadId: candidate.id)
             }
-            let managedRoot = workspaceURL.appendingPathComponent(
-                AssistantAttachmentStore.relativeRoot, isDirectory: true
-            )
+            let managedRoot = AssistantAttachmentStore.managedRootURL(for: workspaceURL)
             let entry = HistoryCacheEntry(
                 date: candidate.date,
                 rows: CodexAppServerProtocol.decodeThreadTranscript(
@@ -927,8 +925,8 @@ private actor CodexAppServerConnection {
             decode: {
                 CodexAppServerProtocol.decodeThreadTranscript(
                     $0,
-                    managedAttachmentsRoot: workspaceURL.appendingPathComponent(
-                        AssistantAttachmentStore.relativeRoot, isDirectory: true
+                    managedAttachmentsRoot: AssistantAttachmentStore.managedRootURL(
+                        for: workspaceURL
                     )
                 )
             })

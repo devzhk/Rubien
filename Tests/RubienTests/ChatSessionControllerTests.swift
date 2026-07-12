@@ -59,7 +59,8 @@ final class ChatSessionControllerTests: XCTestCase {
 
     private func makeAttachmentController(
         gate: AssistantTurnGate = AssistantTurnGate(),
-        withProviderFactory: Bool = false
+        withProviderFactory: Bool = false,
+        fileManager: FileManager = .default
     ) throws -> AttachmentFixture {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("Rubien-controller-attachments-\(UUID().uuidString)", isDirectory: true)
@@ -71,7 +72,10 @@ final class ChatSessionControllerTests: XCTestCase {
         let provider = MockAgentProvider(kind: .claude)
         let alternate = withProviderFactory ? MockAgentProvider(kind: .codex) : nil
         let sink = SpyTranscriptSink()
-        let store = AssistantAttachmentStore(workspaceURL: workspace)
+        let store = AssistantAttachmentStore(
+            workspaceURL: workspace,
+            fileManager: fileManager
+        )
         let controller = ChatSessionController(
             provider: provider,
             transcript: sink,
@@ -1673,6 +1677,47 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertTrue(fixture.controller.canSend(draft: "question"))
     }
 
+    func testRehomeRecoveryKeepsControllerOwnershipAndCanRetryThenRemove() async throws {
+        let fileManager = ControllerRehomeRecoveryFileManager()
+        let fixture = try makeAttachmentController(
+            withProviderFactory: true,
+            fileManager: fileManager
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let second = fixture.root.appendingPathComponent("second.txt")
+        try Data("second".utf8).write(to: second)
+
+        fixture.controller.stageAttachments([fixture.source, second])
+        await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
+        fileManager.armCleanupAndRestorationFailure()
+
+        fixture.controller.switchProvider(to: .codex)
+        await waitUntil({ !fixture.controller.isRehomingAttachments }, ticks: 5_000)
+
+        XCTAssertTrue(fixture.controller.hasAttachmentRehomeFailure)
+        let recovered = fixture.controller.pendingAttachments
+        XCTAssertEqual(recovered.count, 2)
+        XCTAssertTrue(recovered.allSatisfy {
+            FileManager.default.fileExists(atPath: $0.stagedURL.path)
+        })
+        XCTAssertEqual(Set(recovered.map { $0.stagedURL.deletingLastPathComponent() }).count, 1)
+
+        fixture.controller.clearAttachmentIssues()
+        await waitUntil({ !fixture.controller.isRehomingAttachments }, ticks: 5_000)
+        XCTAssertFalse(fixture.controller.hasAttachmentRehomeFailure)
+        XCTAssertEqual(fixture.controller.pendingAttachments, recovered)
+
+        for attachment in recovered {
+            fixture.controller.removePendingAttachment(id: attachment.id)
+        }
+        await waitUntil({
+            recovered.allSatisfy {
+                !FileManager.default.fileExists(atPath: $0.stagedURL.path)
+            }
+        }, ticks: 5_000)
+        XCTAssertTrue(fixture.controller.pendingAttachments.isEmpty)
+    }
+
     func testTeardownDeletesUnsentPendingAttachments() async throws {
         let fixture = try makeAttachmentController()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -1795,6 +1840,43 @@ final class ChatSessionControllerTests: XCTestCase {
 }
 
 // MARK: - Test doubles
+
+private final class ControllerRehomeRecoveryFileManager: FileManager {
+    private var armed = false
+    private var sourceDirectory: URL?
+    private var originalRemovalCalls = 0
+    private var didFailOriginalRemoval = false
+
+    func armCleanupAndRestorationFailure() {
+        armed = true
+    }
+
+    override func removeItem(at url: URL) throws {
+        if armed {
+            let parent = url.deletingLastPathComponent().standardizedFileURL
+            if sourceDirectory == nil {
+                sourceDirectory = parent
+            }
+            if parent == sourceDirectory {
+                originalRemovalCalls += 1
+                if originalRemovalCalls == 2 {
+                    didFailOriginalRemoval = true
+                    throw InjectedFailure()
+                }
+            }
+        }
+        try super.removeItem(at: url)
+    }
+
+    override func copyItem(at srcURL: URL, to dstURL: URL) throws {
+        if armed, didFailOriginalRemoval {
+            throw InjectedFailure()
+        }
+        try super.copyItem(at: srcURL, to: dstURL)
+    }
+
+    private struct InjectedFailure: Error {}
+}
 
 /// A provider whose event stream the test drives explicitly. Thread-safe via a lock
 /// (`send` is a nonisolated protocol requirement).

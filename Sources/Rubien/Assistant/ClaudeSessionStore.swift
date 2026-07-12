@@ -84,8 +84,9 @@ struct ClaudeSessionStore {
         guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else { return nil }
         guard let date = (try? fileURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
         else { return nil }
-        let managedRoot = URL(fileURLWithPath: expectedCWD, isDirectory: true)
-            .appendingPathComponent(AssistantAttachmentStore.relativeRoot, isDirectory: true)
+        let managedRoot = AssistantAttachmentStore.managedRootURL(
+            for: URL(fileURLWithPath: expectedCWD, isDirectory: true)
+        )
 
         var preview: String?
         var cwdMatches = false
@@ -121,8 +122,7 @@ struct ClaudeSessionStore {
     func fullTranscript(sessionID: String, workspaceURL: URL) -> [ChatRenderMessage] {
         let fileURL = projectDir(for: workspaceURL).appendingPathComponent("\(sessionID).jsonl")
         guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else { return [] }
-        let managedRoot = workspaceURL
-            .appendingPathComponent(AssistantAttachmentStore.relativeRoot, isDirectory: true)
+        let managedRoot = AssistantAttachmentStore.managedRootURL(for: workspaceURL)
 
         var rows: [ChatRenderMessage] = []
         func append(
@@ -195,8 +195,7 @@ struct ClaudeSessionStore {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, limit > 0 else { return [] }
         var hits: [AgentSessionSummary] = []
-        let managedRoot = workspaceURL
-            .appendingPathComponent(AssistantAttachmentStore.relativeRoot, isDirectory: true)
+        let managedRoot = AssistantAttachmentStore.managedRootURL(for: workspaceURL)
         for url in sessionFilesNewestFirst(for: workspaceURL) {
             if hits.count >= limit { break }
             // A superseded search (the user kept typing) is cancelled by the

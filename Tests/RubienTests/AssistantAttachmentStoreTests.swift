@@ -87,8 +87,26 @@ final class AssistantAttachmentStoreTests: XCTestCase {
         )
         XCTAssertEqual(
             error as? AssistantAttachmentStoreError,
-            .imageDecode("not-an-image.csv")
+            .unsupported("not-an-image.csv")
         )
+    }
+
+    func testSparseOversizedSourcesAreRejectedWithoutEagerWholeFileReads() async throws {
+        for (name, expectedError) in [
+            ("huge.txt", AssistantAttachmentStoreError.tooLarge("huge.txt")),
+            ("huge.bin", AssistantAttachmentStoreError.unsupported("huge.bin")),
+        ] {
+            let url = workspace.appendingPathComponent(name)
+            XCTAssertTrue(FileManager.default.createFile(atPath: url.path, contents: nil))
+            let handle = try FileHandle(forWritingTo: url)
+            try handle.truncate(atOffset: 1_024 * 1_024 * 1_024)
+            try handle.close()
+
+            let error = await XCTAssertThrowsErrorAsync(
+                try await store.stageFile(url, conversationID: UUID())
+            )
+            XCTAssertEqual(error as? AssistantAttachmentStoreError, expectedError)
+        }
     }
 
     func testAcceptsBOMAndExactFiveMiBBoundary() async throws {
@@ -477,23 +495,32 @@ final class AssistantAttachmentStoreTests: XCTestCase {
         let second = try await failingStore.stageFile(secondSource, conversationID: sourceConversation)
         failingFileManager.failOnSecondOriginalRemoval(in: sourceConversation)
 
-        _ = await XCTAssertThrowsErrorAsync(
+        let error = await XCTAssertThrowsErrorAsync(
             try await failingStore.rehomePending([first, second], to: destinationConversation)
         )
 
-        XCTAssertFalse(FileManager.default.fileExists(atPath: first.stagedURL.path))
-        XCTAssertEqual(try Data(contentsOf: second.stagedURL), Data("second".utf8))
+        guard case .rehomeRecovered(let recovered) = error as? AssistantAttachmentStoreError else {
+            return XCTFail("Expected recovered attachment ownership, got \(String(describing: error))")
+        }
+        XCTAssertEqual(recovered.map(\.id), [first.id, second.id])
+        XCTAssertTrue(recovered.allSatisfy {
+            FileManager.default.fileExists(atPath: $0.stagedURL.path)
+        })
         let destinationDirectory = failingStore.managedRoot
             .appendingPathComponent(destinationConversation.uuidString)
-        let recoveryCopy = destinationDirectory
-            .appendingPathComponent(first.stagedURL.lastPathComponent)
-        XCTAssertEqual(try Data(contentsOf: recoveryCopy), Data("first".utf8))
-        XCTAssertFalse(
-            FileManager.default.fileExists(
-                atPath: destinationDirectory
-                    .appendingPathComponent(second.stagedURL.lastPathComponent).path
-            )
+        XCTAssertEqual(Set(recovered.map { $0.stagedURL.deletingLastPathComponent() }),
+                       [destinationDirectory])
+        XCTAssertEqual(try Data(contentsOf: recovered[0].stagedURL), Data("first".utf8))
+        XCTAssertEqual(try Data(contentsOf: recovered[1].stagedURL), Data("second".utf8))
+
+        let retried = try await failingStore.rehomePending(
+            recovered, to: destinationConversation
         )
+        XCTAssertEqual(retried, recovered)
+        await failingStore.removePending(retried)
+        XCTAssertTrue(retried.allSatisfy {
+            !FileManager.default.fileExists(atPath: $0.stagedURL.path)
+        })
     }
 
     func testDestinationCreationAndCopyFailuresAreNotReportedAsSourceUnreadable() async throws {

@@ -1,4 +1,5 @@
 import Foundation
+import UniformTypeIdentifiers
 
 enum AssistantAttachmentStoreError: LocalizedError, Equatable {
     case unsupported(String)
@@ -9,6 +10,7 @@ enum AssistantAttachmentStoreError: LocalizedError, Equatable {
     case imageDecode(String)
     case imageEncode(String)
     case writeFailed(String)
+    case rehomeRecovered([ChatAttachment])
 
     var errorDescription: String? {
         switch self {
@@ -28,6 +30,8 @@ enum AssistantAttachmentStoreError: LocalizedError, Equatable {
             return "\(name) could not be encoded within the image attachment limits."
         case .writeFailed(let name):
             return "\(name) could not be saved in Rubien's attachment storage."
+        case .rehomeRecovered:
+            return "Attachments were recovered in Rubien's storage but still need to be reconciled."
         }
     }
 }
@@ -41,15 +45,23 @@ actor AssistantAttachmentStore {
     private let fileManager: FileManager
     private let workspaceRoot: URL
 
-    init(workspaceURL: URL, fileManager: FileManager = .default) {
-        self.fileManager = fileManager
-        workspaceRoot = workspaceURL
+    private static func canonicalWorkspaceURL(_ workspaceURL: URL) -> URL {
+        workspaceURL
             .standardizedFileURL
             .resolvingSymlinksInPath()
             .standardizedFileURL
-        managedRoot = workspaceRoot
-            .appendingPathComponent(Self.relativeRoot, isDirectory: true)
+    }
+
+    static func managedRootURL(for workspaceURL: URL) -> URL {
+        canonicalWorkspaceURL(workspaceURL)
+            .appendingPathComponent(relativeRoot, isDirectory: true)
             .standardizedFileURL
+    }
+
+    init(workspaceURL: URL, fileManager: FileManager = .default) {
+        self.fileManager = fileManager
+        workspaceRoot = Self.canonicalWorkspaceURL(workspaceURL)
+        managedRoot = Self.managedRootURL(for: workspaceURL)
     }
 
     func stageFile(
@@ -64,6 +76,7 @@ actor AssistantAttachmentStore {
                 .isRegularFileKey,
                 .isSymbolicLinkKey,
                 .isAliasFileKey,
+                .fileSizeKey,
             ])
         } catch {
             throw AssistantAttachmentStoreError.unreadable(name)
@@ -76,21 +89,34 @@ actor AssistantAttachmentStore {
         else {
             throw AssistantAttachmentStoreError.notRegularFile(name)
         }
+        guard let fileSize = values.fileSize else {
+            throw AssistantAttachmentStoreError.unreadable(name)
+        }
 
         let pathExtension = sourceURL.pathExtension.lowercased()
         guard ["md", "markdown", "txt"].contains(pathExtension) else {
+            let claimedImage = UTType(filenameExtension: pathExtension)?.conforms(to: .image) == true
             return try stageImageFile(
                 sourceURL,
                 id: id,
-                conversationID: conversationID
+                conversationID: conversationID,
+                fallbackError: claimedImage ? nil : .unsupported(name)
             )
         }
 
-        let data = try read(sourceURL)
+        guard Int64(fileSize) <= Self.maxTextBytes else {
+            return try stageImageFile(
+                sourceURL,
+                id: id,
+                conversationID: conversationID,
+                fallbackError: .tooLarge(name)
+            )
+        }
+
+        let data = try readText(sourceURL)
         guard Int64(data.count) <= Self.maxTextBytes else {
             return try stageImageFile(
                 sourceURL,
-                data: data,
                 id: id,
                 conversationID: conversationID,
                 fallbackError: .tooLarge(name)
@@ -289,7 +315,7 @@ actor AssistantAttachmentStore {
                 removedOriginals.append((item.original, item.destination))
             }
         } catch {
-            var destinationsToPreserve = Set<URL>()
+            var restorationFailed = false
             for item in removedOriginals.reversed() where !pathEntryExists(at: item.original) {
                 do {
                     try validateManagedPath(item.destination, requireExisting: true)
@@ -297,13 +323,34 @@ actor AssistantAttachmentStore {
                     try fileManager.copyItem(at: item.destination, to: item.original)
                     try validateManagedPath(item.original, requireExisting: true)
                 } catch {
-                    // The destination remains the only recovery copy if restoration fails.
-                    destinationsToPreserve.insert(item.destination.standardizedFileURL)
+                    restorationFailed = true
                 }
             }
-            for item in committed.reversed() where
-                !destinationsToPreserve.contains(item.destination.standardizedFileURL)
-            {
+
+            if restorationFailed {
+                // Rollback can no longer make every original authoritative. Keep the
+                // complete committed batch and transfer those URLs back to the caller
+                // so no recovery copy becomes unreachable or unremovable. Best-effort
+                // cleanup of remaining originals only removes duplicates.
+                for item in prepared where pathEntryExists(at: item.original) {
+                    try? removeManagedItem(at: item.original)
+                }
+                let recovered = zip(attachments, committed).map { attachment, item in
+                    ChatAttachment(
+                        id: attachment.id,
+                        displayName: attachment.displayName,
+                        kind: attachment.kind,
+                        stagedURL: item.destination,
+                        mediaType: attachment.mediaType,
+                        byteCount: attachment.byteCount,
+                        sourceIdentity: attachment.sourceIdentity,
+                        thumbnailDataURL: attachment.thumbnailDataURL
+                    )
+                }
+                throw AssistantAttachmentStoreError.rehomeRecovered(recovered)
+            }
+
+            for item in committed.reversed() {
                 try? removeManagedItem(at: item.destination)
             }
             let failedIndex = min(removedOriginals.count, prepared.count - 1)
@@ -333,10 +380,17 @@ actor AssistantAttachmentStore {
     ) throws -> ChatAttachment {
         let normalized: NormalizedAssistantImage
         do {
-            normalized = try AssistantImageNormalizer.normalize(
-                data ?? read(sourceURL),
-                displayName: sourceURL.lastPathComponent
-            )
+            if let data {
+                normalized = try AssistantImageNormalizer.normalize(
+                    data,
+                    displayName: sourceURL.lastPathComponent
+                )
+            } else {
+                normalized = try AssistantImageNormalizer.normalize(
+                    fileURL: sourceURL,
+                    displayName: sourceURL.lastPathComponent
+                )
+            }
         } catch let error as AssistantAttachmentStoreError {
             if case .imageDecode = error, let fallbackError {
                 throw fallbackError
@@ -356,9 +410,23 @@ actor AssistantAttachmentStore {
         )
     }
 
-    private func read(_ sourceURL: URL) throws -> Data {
+    private func readText(_ sourceURL: URL) throws -> Data {
         do {
-            return try Data(contentsOf: sourceURL)
+            let handle = try FileHandle(forReadingFrom: sourceURL)
+            defer { try? handle.close() }
+            let limit = Int(Self.maxTextBytes + 1)
+            var data = Data()
+            while data.count < limit {
+                let requested = min(64 * 1_024, limit - data.count)
+                guard
+                    let chunk = try handle.read(upToCount: requested),
+                    !chunk.isEmpty
+                else {
+                    break
+                }
+                data.append(chunk)
+            }
+            return data
         } catch {
             throw AssistantAttachmentStoreError.unreadable(sourceURL.lastPathComponent)
         }

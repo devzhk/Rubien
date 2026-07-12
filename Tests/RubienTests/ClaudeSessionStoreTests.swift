@@ -227,6 +227,69 @@ final class ClaudeSessionStoreTests: XCTestCase {
         )
     }
 
+    func testHistoryManifestUsesCanonicalManagedRootForSymlinkedWorkspace() throws {
+        let (store, root, workspace, _) = try makeStore()
+        let linkedWorkspace = root.appendingPathComponent("workspace-link", isDirectory: true)
+        try FileManager.default.createSymbolicLink(
+            at: linkedWorkspace,
+            withDestinationURL: workspace
+        )
+        let linkedProjectDirectory = root.appendingPathComponent(
+            ClaudeSessionStore.projectDirName(forWorkspacePath: linkedWorkspace.path),
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: linkedProjectDirectory,
+            withIntermediateDirectories: true
+        )
+
+        let id = UUID()
+        let attachmentDirectory = AssistantAttachmentStore.managedRootURL(
+            for: linkedWorkspace
+        ).appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: attachmentDirectory,
+            withIntermediateDirectories: true
+        )
+        let stagedURL = attachmentDirectory
+            .appendingPathComponent("\(id.uuidString)-notes.md")
+        try Data("notes".utf8).write(to: stagedURL)
+        let attachment = ChatAttachment(
+            id: id,
+            displayName: "notes.md",
+            kind: .text,
+            stagedURL: stagedURL,
+            mediaType: "text/markdown",
+            byteCount: 5,
+            sourceIdentity: "/original/notes.md"
+        )
+        let prompt = AssistantAttachmentManifest.providerPrompt(
+            base: "Review this",
+            visibleText: "Review this",
+            attachments: [attachment]
+        )
+        try writeSession(
+            "linked",
+            lines: [try userLineJSON(cwd: linkedWorkspace.path, content: prompt)],
+            mtime: Date(timeIntervalSince1970: 1_000),
+            in: linkedProjectDirectory
+        )
+
+        let row = try XCTUnwrap(
+            store.fullTranscript(sessionID: "linked", workspaceURL: linkedWorkspace).first
+        )
+        XCTAssertEqual(row.body, "Review this")
+        XCTAssertEqual(row.attachments.map(\.displayName), ["notes.md"])
+        XCTAssertFalse(row.body.contains("rubien-attachments-v1"))
+        XCTAssertTrue(
+            store.searchSessions(
+                query: stagedURL.path,
+                workspaceURL: linkedWorkspace,
+                limit: 25
+            ).isEmpty
+        )
+    }
+
     func testAttachmentOnlyHistoryUsesSummaryAndSearchFallbackWhileBodyStaysEmpty() throws {
         let (store, _, workspace, dir) = try makeStore()
         let attachment = try makeStagedAttachment(in: workspace, name: "figure.png", kind: .image)

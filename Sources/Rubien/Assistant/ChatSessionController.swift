@@ -664,11 +664,22 @@ final class ChatSessionController: ObservableObject {
                 }
                 self.pendingAttachments = moved
             } catch {
+                let recovered: [ChatAttachment]?
+                if case .rehomeRecovered(let attachments) = error as? AssistantAttachmentStoreError {
+                    recovered = attachments
+                } else {
+                    recovered = nil
+                }
                 if generation == self.attachmentGeneration {
+                    if let recovered {
+                        self.pendingAttachments = recovered
+                    }
                     self.hasAttachmentRehomeFailure = true
                     self.attachmentIssues = [ChatAttachmentIssue(
                         displayName: "Attachments",
                         message: "Could not move attachments. Remove them or retry. \(error.localizedDescription)")]
+                } else if let recovered {
+                    await self.attachmentStore.removePending(recovered)
                 }
             }
             if generation == self.attachmentGeneration {
