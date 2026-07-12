@@ -92,7 +92,6 @@ final class AssistantAttachmentManifestTests: XCTestCase {
 
     func testProviderPromptRoundTripsSupportedTextAndAttachmentOnlyEnvelopes() {
         let textPrompt = AssistantAttachmentManifest.providerPrompt(
-            base: "Review these notes",
             visibleText: "Review these notes",
             attachments: [attachment()]
         )
@@ -100,10 +99,14 @@ final class AssistantAttachmentManifestTests: XCTestCase {
 
         XCTAssertEqual(parsedText.visibleText, "Review these notes")
         XCTAssertEqual(parsedText.attachments.map(\.displayName), ["notes \"α\".md"])
-        XCTAssertTrue(textPrompt.contains("<rubien-attachments-v1>"))
+        XCTAssertTrue(textPrompt.contains("<rubien-attachments-v2>"))
+        XCTAssertEqual(
+            textPrompt.components(separatedBy: "Review these notes").count - 1,
+            1,
+            "the visible prompt is not duplicated inside the manifest"
+        )
 
         let attachmentOnlyPrompt = AssistantAttachmentManifest.providerPrompt(
-            base: "Inspect the attached files.",
             visibleText: "",
             attachments: [attachment(byteCount: 0)]
         )
@@ -114,6 +117,16 @@ final class AssistantAttachmentManifestTests: XCTestCase {
 
         XCTAssertEqual(parsedAttachmentOnly.visibleText, "")
         XCTAssertEqual(parsedAttachmentOnly.attachments.map(\.byteCount), [0])
+    }
+
+    func testLegacyV1ManifestStillRestoresWithoutExposingItsPath() throws {
+        let legacy = try manifest(prefix: "Review", visibleText: "Review")
+
+        let parsed = AssistantAttachmentManifest.parse(legacy, managedRoot: root)
+
+        XCTAssertEqual(parsed.visibleText, "Review")
+        XCTAssertEqual(parsed.attachments.map(\.displayName), ["notes.md"])
+        XCTAssertFalse(parsed.visibleText.contains("rubien-attachments-v1"))
     }
 
     func testProviderPromptAcceptsSupportedCountAndSizeBoundaries() {
@@ -133,7 +146,6 @@ final class AssistantAttachmentManifestTests: XCTestCase {
             )
         }
         let prompt = AssistantAttachmentManifest.providerPrompt(
-            base: "Review",
             visibleText: "Review",
             attachments: images + texts
         )
@@ -278,7 +290,6 @@ final class AssistantAttachmentManifestTests: XCTestCase {
         assertPreserved(malformed)
 
         let outside = AssistantAttachmentManifest.providerPrompt(
-            base: "Q",
             visibleText: "Q",
             attachments: [attachment(path: "/etc/passwd")]
         )
@@ -287,7 +298,6 @@ final class AssistantAttachmentManifestTests: XCTestCase {
 
     func testMissingStagedFileBecomesUnavailablePresentation() {
         let prompt = AssistantAttachmentManifest.providerPrompt(
-            base: "Q",
             visibleText: "Q",
             attachments: [attachment()]
         )

@@ -1,4 +1,9 @@
 import Foundation
+
+enum CodexUserInput: Sendable, Equatable {
+    case text(String)
+    case localImage(path: String)
+}
 #if canImport(CoreFoundation)
 import CoreFoundation  // CFGetTypeID/CFBooleanGetTypeID: not re-exported by Foundation on Linux
 #endif
@@ -443,12 +448,19 @@ enum CodexAppServerProtocol {
     }
 
     static func turnStart(
-        requestID: Int, threadId: String, prompt: String,
-        imagePaths: [String] = [], effort: String?
+        requestID: Int,
+        threadId: String,
+        inputs: [CodexUserInput],
+        effort: String?
     ) -> String {
-        let input: [[String: Any]] = [
-            ["type": "text", "text": prompt, "text_elements": []]
-        ] + imagePaths.map { ["type": "localImage", "path": $0] }
+        let input: [[String: Any]] = inputs.map {
+            switch $0 {
+            case .text(let text):
+                return ["type": "text", "text": text, "text_elements": []]
+            case .localImage(let path):
+                return ["type": "localImage", "path": path]
+            }
+        }
         var params: [String: Any] = [
             "threadId": threadId,
             "input": input,
@@ -604,8 +616,14 @@ enum CodexAppServerProtocol {
         let visibleRows = rows.compactMap { row -> (role: ChatRole, text: String)? in
             guard row.role == .user || row.role == .assistant else { return nil }
             let body = collapseWhitespace(row.body)
-            if row.role == .user, body.isEmpty, !row.attachments.isEmpty {
-                return (.user, "Attached: " + row.attachments.map(\.displayName).joined(separator: ", "))
+            if row.role == .user, !row.attachments.isEmpty {
+                return (
+                    .user,
+                    AssistantAttachmentPolicy.historyText(
+                        visibleText: body,
+                        attachments: row.attachments
+                    )
+                )
             }
             return body.isEmpty ? nil : (row.role, body)
         }

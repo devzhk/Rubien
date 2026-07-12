@@ -316,8 +316,11 @@ final class CodexAppServerProtocolTests: XCTestCase {
 
     func testTurnStartCarriesTextThenLocalImagesAndEffort() {
         let obj = json(CodexAppServerProtocol.turnStart(
-            requestID: 3, threadId: "t", prompt: "hi",
-            imagePaths: ["/ws/a.png", "/ws/b.jpg"], effort: "medium"))
+            requestID: 3,
+            threadId: "t",
+            inputs: [.text("hi"), .localImage(path: "/ws/a.png"),
+                     .localImage(path: "/ws/b.jpg")],
+            effort: "medium"))
         let params = try! XCTUnwrap(obj["params"] as? [String: Any])
         XCTAssertEqual(params["threadId"] as? String, "t")
         XCTAssertEqual(params["effort"] as? String, "medium")
@@ -419,7 +422,7 @@ final class CodexAppServerProtocolTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: workspace) }
         let attachment = try makeStagedAttachment(in: workspace, name: "figure.png")
         let prompt = AssistantAttachmentManifest.providerPrompt(
-            base: "Inspect the attached files.", visibleText: "", attachments: [attachment]
+            visibleText: "", attachments: [attachment]
         )
         let result: [String: Any] = ["thread": ["turns": [["items": [[
             "type": "userMessage", "content": [
@@ -447,7 +450,7 @@ final class CodexAppServerProtocolTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: workspace) }
         let attachment = try makeStagedAttachment(in: workspace, name: "figure.png")
         let prompt = AssistantAttachmentManifest.providerPrompt(
-            base: "Inspect the attached files.", visibleText: "", attachments: [attachment]
+            visibleText: "", attachments: [attachment]
         )
         let result: [String: Any] = ["thread": ["turns": [["items": [[
             "type": "userMessage", "content": [["type": "text", "text": prompt]],
@@ -468,7 +471,7 @@ final class CodexAppServerProtocolTests: XCTestCase {
             from: raw, rows: rows, matching: "figure.png"
         )
         let delimiterHit = CodexAppServerProtocol.visibleSessionSummary(
-            from: raw, rows: rows, matching: "rubien-attachments-v1"
+            from: raw, rows: rows, matching: "rubien-attachments-v2"
         )
         let pathHit = CodexAppServerProtocol.visibleSessionSummary(
             from: raw, rows: rows, matching: attachment.stagedURL.path
@@ -515,7 +518,7 @@ final class CodexAppServerProtocolTests: XCTestCase {
             sourceIdentity: "/tmp/outside.md"
         )
         let prompt = AssistantAttachmentManifest.providerPrompt(
-            base: "Unsafe", visibleText: "Unsafe", attachments: [outside]
+            visibleText: "Unsafe", attachments: [outside]
         )
         let result: [String: Any] = ["thread": ["turns": [["items": [[
             "type": "userMessage", "content": [["type": "text", "text": prompt]],
@@ -531,7 +534,7 @@ final class CodexAppServerProtocolTests: XCTestCase {
             id: "unsafe", preview: "server preview", date: Date(timeIntervalSince1970: 123)
         )
         let summary = CodexAppServerProtocol.visibleSessionSummary(from: raw, rows: rows)
-        XCTAssertTrue(summary?.preview.contains("rubien-attachments-v1") == true,
+        XCTAssertTrue(summary?.preview.contains("rubien-attachments-v2") == true,
                       "an unsafe manifest stays visible instead of being partially trusted")
     }
 

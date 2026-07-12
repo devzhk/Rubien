@@ -38,7 +38,7 @@ enum AssistantAttachmentStoreError: LocalizedError, Equatable {
 
 actor AssistantAttachmentStore {
     static let relativeRoot = ".rubien/attachments"
-    static let maxTextBytes: Int64 = 5 * 1_024 * 1_024
+    static let maxTextBytes = AssistantAttachmentPolicy.maximumFileBytes
 
     nonisolated let managedRoot: URL
 
@@ -56,6 +56,18 @@ actor AssistantAttachmentStore {
         canonicalWorkspaceURL(workspaceURL)
             .appendingPathComponent(relativeRoot, isDirectory: true)
             .standardizedFileURL
+    }
+
+    static func sourceIdentity(for sourceURL: URL) -> String {
+        if let identifier = try? sourceURL.resourceValues(
+            forKeys: [.fileResourceIdentifierKey]
+        ).fileResourceIdentifier {
+            return "resource:\(String(describing: identifier))"
+        }
+        return "path:" + sourceURL
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+            .standardizedFileURL.path
     }
 
     init(workspaceURL: URL, fileManager: FileManager = .default) {
@@ -139,7 +151,7 @@ actor AssistantAttachmentStore {
             displayName: name,
             kind: .text,
             mediaType: pathExtension == "txt" ? "text/plain" : "text/markdown",
-            sourceIdentity: sourceURL.standardizedFileURL.path,
+            sourceIdentity: Self.sourceIdentity(for: sourceURL),
             pathExtension: pathExtension,
             conversationID: conversationID,
             id: id
@@ -402,7 +414,7 @@ actor AssistantAttachmentStore {
             displayName: sourceURL.lastPathComponent,
             kind: .image,
             mediaType: normalized.mediaType,
-            sourceIdentity: sourceURL.standardizedFileURL.path,
+            sourceIdentity: Self.sourceIdentity(for: sourceURL),
             pathExtension: normalized.pathExtension,
             conversationID: conversationID,
             id: id,
@@ -535,8 +547,11 @@ actor AssistantAttachmentStore {
 
     private func isOwnedAttachment(_ attachment: ChatAttachment) -> Bool {
         guard
-            attachment.stagedURL.lastPathComponent
-                .hasPrefix(attachment.id.uuidString + "-")
+            AssistantManagedAttachmentPath.isCanonical(
+                attachment.stagedURL,
+                id: attachment.id,
+                managedRoot: managedRoot
+            )
         else {
             return false
         }

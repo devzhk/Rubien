@@ -554,7 +554,7 @@ final class CodexProviderTests: XCTestCase {
         let observed = try readObserved(in: workspace)
         let params = try XCTUnwrap(observed["threadListParams"] as? [String: Any])
         XCTAssertEqual(params["cwd"] as? String, workspace.path)
-        XCTAssertEqual(params["limit"] as? Int, 10)
+        XCTAssertEqual(params["limit"] as? Int, 50)
         let sourceKinds = try XCTUnwrap(params["sourceKinds"] as? [String])
         XCTAssertTrue(sourceKinds.contains("appServer"))
     }
@@ -639,17 +639,92 @@ final class CodexProviderTests: XCTestCase {
 
         for summary in general + scoped {
             XCTAssertEqual(summary.preview, "Attached: figure.png")
-            XCTAssertFalse(summary.preview.contains("rubien-attachments-v1"))
+            XCTAssertFalse(summary.preview.contains("rubien-attachments-v2"))
             XCTAssertFalse(summary.preview.contains(fixture.stagedPath))
         }
         XCTAssertEqual(general.map(\.id), [fixture.threadID])
         XCTAssertEqual(scoped.map(\.id), [fixture.threadID])
+        let restored = await provider.sessionTranscript(
+            sessionID: fixture.threadID,
+            workspaceURL: workspace
+        )
+        XCTAssertEqual(restored.first?.attachments.map(\.displayName), ["figure.png"])
+        try FileManager.default.removeItem(atPath: fixture.stagedPath)
+        let unavailable = await provider.sessionTranscript(
+            sessionID: fixture.threadID,
+            workspaceURL: workspace
+        )
+        XCTAssertEqual(unavailable.first?.attachments.first?.isAvailable, false)
         let observed = try readObserved(in: workspace)
         XCTAssertEqual(
             try XCTUnwrap(observed["threadReadIds"] as? [String]),
-            [fixture.threadID],
-            "general and scoped projections share the unchanged thread read"
+            Array(repeating: fixture.threadID, count: 4),
+            "attachment rows are re-read so local availability cannot go stale"
         )
+    }
+
+    func testRecentSessionsOverfetchesPastAnEmptyNewestThread() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "threads": [
+                ["id": "EMPTY", "preview": "", "updatedAt": 1_700_000_300],
+                ["id": "VALID", "preview": "Older valid thread", "updatedAt": 1_700_000_200],
+            ],
+            "transcripts": ["EMPTY": [:]],
+        ], into: workspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        let recent = await provider.recentSessions(workspaceURL: workspace, limit: 1)
+
+        XCTAssertEqual(recent.map(\.id), ["VALID"])
+        let params = try XCTUnwrap(
+            try readObserved(in: workspace)["threadListParams"] as? [String: Any]
+        )
+        XCTAssertEqual(params["limit"] as? Int, 5)
+    }
+
+    func testHistoryEvictsTextCacheWhenThreadGainsAnAttachment() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "threads": [[
+                "id": "TH-CHANGES",
+                "preview": "Plain",
+                "updatedAt": 1_700_000_100,
+            ]],
+            "transcripts": [
+                "TH-CHANGES": ["turns": [["items": [[
+                    "type": "userMessage",
+                    "content": [["type": "text", "text": "Plain"]],
+                ]]]]],
+            ],
+        ], into: workspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+        let initial = await provider.recentSessions(workspaceURL: workspace, limit: 5)
+        XCTAssertEqual(initial.first?.preview, "Plain")
+
+        let fixture = try attachmentOnlyHistoryFixture(
+            in: workspace,
+            threadID: "TH-CHANGES",
+            referenceID: 42
+        )
+        try writeConfig([
+            "threads": [[
+                "id": fixture.threadID,
+                "preview": fixture.providerPrompt,
+                "updatedAt": 1_700_000_200,
+            ]],
+            "transcripts": [fixture.threadID: fixture.transcript],
+        ], into: workspace)
+
+        _ = await provider.recentSessions(workspaceURL: workspace, limit: 5)
+        let rows = await provider.sessionTranscript(
+            sessionID: fixture.threadID,
+            workspaceURL: workspace
+        )
+
+        XCTAssertEqual(rows.first?.attachments.map(\.displayName), ["figure.png"])
     }
 
     func testSearchSessionsIndexesOnlyVisibleTranscriptForGeneralAndScopedResults() async throws {
@@ -680,7 +755,7 @@ final class CodexProviderTests: XCTestCase {
             query: "figure.png", workspaceURL: workspace, limit: 10, referenceID: 42
         )
         let delimiterHits = await provider.searchSessions(
-            query: "rubien-attachments-v1", workspaceURL: workspace, limit: 10
+            query: "rubien-attachments-v2", workspaceURL: workspace, limit: 10
         )
         let pathHits = await provider.searchSessions(
             query: fixture.stagedPath, workspaceURL: workspace, limit: 10, referenceID: 42
@@ -697,8 +772,8 @@ final class CodexProviderTests: XCTestCase {
         let observed = try readObserved(in: workspace)
         XCTAssertEqual(
             try XCTUnwrap(observed["threadReadIds"] as? [String]),
-            [fixture.threadID],
-            "successive visible-text searches reuse the unchanged thread read"
+            Array(repeating: fixture.threadID, count: 4),
+            "attachment searches re-read local availability"
         )
     }
 
@@ -738,8 +813,9 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertEqual(scoped.map(\.id), ["TH-A", "TH-C"], "only the reference's threads, order kept")
 
         let observed = try readObserved(in: workspace)
-        XCTAssertEqual(try XCTUnwrap(observed["threadReadIds"] as? [String]),
-                       ["TH-A", "TH-B", "TH-C"], "every candidate was read for attribution")
+        let readIDs = try XCTUnwrap(observed["threadReadIds"] as? [String])
+        XCTAssertEqual(Set(readIDs), ["TH-A", "TH-B", "TH-C"])
+        XCTAssertEqual(readIDs.count, 3, "every candidate was read for attribution")
         // The over-fetched list request (candidates beyond `limit` may be needed
         // after filtering).
         let params = try XCTUnwrap(observed["threadListParams"] as? [String: Any])
@@ -792,8 +868,9 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertEqual(second.map(\.id), ["TH-A"], "cache hit returns the same attribution")
 
         let observed = try readObserved(in: workspace)
-        XCTAssertEqual(try XCTUnwrap(observed["threadReadIds"] as? [String]),
-                       ["TH-A", "TH-B"], "the rerun issued NO additional thread/reads")
+        let readIDs = try XCTUnwrap(observed["threadReadIds"] as? [String])
+        XCTAssertEqual(Set(readIDs), ["TH-A", "TH-B"])
+        XCTAssertEqual(readIDs.count, 2, "the rerun issued NO additional thread/reads")
     }
 
     func testScopedSearchFiltersHitsByReference() async throws {
@@ -862,7 +939,7 @@ final class CodexProviderTests: XCTestCase {
             sourceIdentity: "/original/notes.md"
         )
         let prompt = AssistantAttachmentManifest.providerPrompt(
-            base: "Review this", visibleText: "Review this", attachments: [attachment]
+            visibleText: "Review this", attachments: [attachment]
         )
         try writeConfig([
             "transcripts": [
@@ -911,7 +988,6 @@ final class CodexProviderTests: XCTestCase {
             sourceIdentity: "/original/notes.md"
         )
         let prompt = AssistantAttachmentManifest.providerPrompt(
-            base: "Review this",
             visibleText: "Review this",
             attachments: [attachment]
         )
@@ -933,7 +1009,7 @@ final class CodexProviderTests: XCTestCase {
 
         XCTAssertEqual(rows.first?.body, "Review this")
         XCTAssertEqual(rows.first?.attachments.map(\.displayName), ["notes.md"])
-        XCTAssertFalse(rows.first?.body.contains("rubien-attachments-v1") == true)
+        XCTAssertFalse(rows.first?.body.contains("rubien-attachments-v2") == true)
     }
 
     func testHistoryReusesTheLiveServerAcrossQueryAndTurn() async throws {
@@ -1009,7 +1085,7 @@ final class CodexProviderTests: XCTestCase {
             sourceIdentity: "/original/figure.png"
         )
         let prompt = AssistantAttachmentManifest.providerPrompt(
-            base: "Inspect the attached files.", visibleText: "", attachments: [attachment]
+            visibleText: "", attachments: [attachment]
         )
         return (
             threadID,

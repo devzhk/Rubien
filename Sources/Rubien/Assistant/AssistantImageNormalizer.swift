@@ -14,7 +14,7 @@ struct NormalizedAssistantImage: Sendable, Equatable {
 
 enum AssistantImageNormalizer {
     static let maxPixelSize = 2_576
-    static let maxBytes = 5 * 1_024 * 1_024
+    static let maxBytes = Int(AssistantAttachmentPolicy.maximumFileBytes)
 
     private static let candidateEdges = [2_576, 2_048, 1_600, 1_280, 1_024, 768, 512]
     private static let jpegQualities: [Double] = [0.90, 0.82, 0.74, 0.64, 0.52]
@@ -82,49 +82,43 @@ enum AssistantImageNormalizer {
         let edges = descendingEdges(sourceMaximum: sourceMaximum, limit: maxPixelSize)
         var decodedAnyCandidate = false
 
+        var alphaImageDecoded = false
         for edge in edges {
-            let options: [CFString: Any] = [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceThumbnailMaxPixelSize: edge,
-            ]
-            guard
-                let image = CGImageSourceCreateThumbnailAtIndex(
-                    source,
-                    0,
-                    options as CFDictionary
-                )
-            else {
-                continue
-            }
+            guard let image = thumbnail(from: source, edge: edge) else { continue }
             decodedAnyCandidate = true
 
-            if hasAlpha(image),
-               let png = encode(image, type: .png, quality: nil),
-               png.count <= maxBytes
-            {
-                return try result(
-                    data: png,
-                    image: image,
-                    mediaType: "image/png",
-                    pathExtension: "png",
-                    displayName: displayName
-                )
-            }
-
-            guard let opaqueImage = compositeOnWhite(image) else { continue }
-            for quality in jpegQualities {
-                guard let jpeg = encode(opaqueImage, type: .jpeg, quality: quality) else {
-                    continue
-                }
-                if jpeg.count <= maxBytes {
+            if hasAlpha(image) {
+                alphaImageDecoded = true
+                if let png = encode(image, type: .png, quality: nil),
+                   png.count <= maxBytes {
                     return try result(
-                        data: jpeg,
-                        image: opaqueImage,
-                        mediaType: "image/jpeg",
-                        pathExtension: "jpg",
+                        data: png,
+                        image: image,
+                        mediaType: "image/png",
+                        pathExtension: "png",
                         displayName: displayName
                     )
+                }
+                continue
+            }
+
+            if let result = try jpegResult(
+                image, maxBytes: maxBytes, displayName: displayName
+            ) {
+                return result
+            }
+        }
+
+        if alphaImageDecoded {
+            for edge in edges {
+                guard
+                    let image = thumbnail(from: source, edge: edge),
+                    let opaqueImage = compositeOnWhite(image)
+                else { continue }
+                if let result = try jpegResult(
+                    opaqueImage, maxBytes: maxBytes, displayName: displayName
+                ) {
+                    return result
                 }
             }
         }
@@ -133,6 +127,38 @@ enum AssistantImageNormalizer {
             throw AssistantAttachmentStoreError.imageDecode(displayName)
         }
         throw AssistantAttachmentStoreError.imageEncode(displayName)
+    }
+
+    private static func thumbnail(from source: CGImageSource, edge: Int) -> CGImage? {
+        CGImageSourceCreateThumbnailAtIndex(
+            source,
+            0,
+            [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceThumbnailMaxPixelSize: edge,
+            ] as CFDictionary
+        )
+    }
+
+    private static func jpegResult(
+        _ image: CGImage,
+        maxBytes: Int,
+        displayName: String
+    ) throws -> NormalizedAssistantImage? {
+        for quality in jpegQualities {
+            guard let jpeg = encode(image, type: .jpeg, quality: quality) else { continue }
+            if jpeg.count <= maxBytes {
+                return try result(
+                    data: jpeg,
+                    image: image,
+                    mediaType: "image/jpeg",
+                    pathExtension: "jpg",
+                    displayName: displayName
+                )
+            }
+        }
+        return nil
     }
 
     private static func descendingEdges(sourceMaximum: Int, limit: Int) -> [Int] {

@@ -1741,17 +1741,19 @@ final class ChatSessionControllerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let second = fixture.root.appendingPathComponent("second.txt")
         let unsupported = fixture.root.appendingPathComponent("paper.pdf")
+        let duplicateLink = fixture.root.appendingPathComponent("same-notes.md")
         try Data("second".utf8).write(to: second)
         try Data("not a pdf".utf8).write(to: unsupported)
+        try FileManager.default.linkItem(at: fixture.source, to: duplicateLink)
 
-        fixture.controller.stageAttachments([fixture.source, fixture.source, unsupported, second])
+        fixture.controller.stageAttachments([fixture.source, duplicateLink, unsupported, second])
         await waitUntil({ !fixture.controller.isStagingAttachments }, ticks: 5_000)
 
         XCTAssertEqual(
             Set(fixture.controller.pendingAttachments.map(\.displayName)),
             Set([fixture.source.lastPathComponent, second.lastPathComponent]))
         XCTAssertEqual(fixture.controller.attachmentIssues.count, 2)
-        XCTAssertTrue(fixture.controller.attachmentIssues.contains { $0.displayName == fixture.source.lastPathComponent })
+        XCTAssertTrue(fixture.controller.attachmentIssues.contains { $0.displayName == duplicateLink.lastPathComponent })
         XCTAssertTrue(fixture.controller.attachmentIssues.contains { $0.displayName == unsupported.lastPathComponent })
     }
 

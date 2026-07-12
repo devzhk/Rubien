@@ -271,7 +271,10 @@ struct ClaudeSessionStore {
                 let parsed = AssistantAttachmentManifest.parse(
                     rawText, managedRoot: managedRoot, fileManager: fileManager
                 )
-                text = Self.historyText(for: parsed)
+                text = AssistantAttachmentPolicy.historyText(
+                    visibleText: parsed.visibleText,
+                    attachments: parsed.attachments
+                )
             } else {
                 text = rawText
             }
@@ -322,19 +325,12 @@ struct ClaudeSessionStore {
         let parsed = AssistantAttachmentManifest.parse(
             raw, managedRoot: managedRoot, fileManager: fileManager
         )
-        let collapsed = collapseWhitespace(historyText(for: parsed))
+        let collapsed = collapseWhitespace(AssistantAttachmentPolicy.historyText(
+            visibleText: parsed.visibleText,
+            attachments: parsed.attachments
+        ))
         guard !collapsed.isEmpty else { return nil }
         return collapsed.count > 140 ? String(collapsed.prefix(140)) + "…" : collapsed
-    }
-
-    /// The text History may preview and index for a parsed user turn. A turn with
-    /// visible prose keeps that prose; an attachment-only turn gets a local-only,
-    /// path-free fallback so it remains discoverable without exposing the manifest.
-    private static func historyText(for parsed: ParsedAttachmentMessage) -> String {
-        guard parsed.visibleText.isEmpty, !parsed.attachments.isEmpty else {
-            return parsed.visibleText
-        }
-        return "Attached: " + parsed.attachments.map(\.displayName).joined(separator: ", ")
     }
 
     /// Runs of any whitespace (incl. newlines) become single spaces — the

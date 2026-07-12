@@ -539,7 +539,7 @@ struct ChatSidebarView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(.red)
                 .padding(.top, 1)
-            Text("\(issue.displayName): \(issue.message)")
+            Text(issue.presentedMessage)
                 .font(.system(size: 10.5))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

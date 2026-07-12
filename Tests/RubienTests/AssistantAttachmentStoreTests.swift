@@ -169,7 +169,10 @@ final class AssistantAttachmentStoreTests: XCTestCase {
         XCTAssertEqual(attachment.displayName, "line\nbreak.txt")
         XCTAssertTrue(attachment.stagedURL.lastPathComponent.hasPrefix(id.uuidString + "-"))
         XCTAssertFalse(attachment.stagedURL.lastPathComponent.contains("\n"))
-        XCTAssertEqual(attachment.sourceIdentity, source.standardizedFileURL.path)
+        XCTAssertEqual(
+            attachment.sourceIdentity,
+            AssistantAttachmentStore.sourceIdentity(for: source)
+        )
     }
 
     func testBoundsASCIIAndUnicodeStagedFilenamesToFilesystemComponentLimit() async throws {
@@ -634,6 +637,27 @@ final class AssistantAttachmentStoreTests: XCTestCase {
         XCTAssertEqual(fallback.mediaType, "image/jpeg")
         XCTAssertLessThanOrEqual(fallback.data.count, png.data.count / 2)
         XCTAssertTrue(fallback.thumbnailDataURL.hasPrefix("data:image/jpeg;base64,"))
+    }
+
+    func testTransparentImageTriesSmallerPNGBeforeJPEGFallback() throws {
+        let data = try makeNoisyTransparentImageData(width: 1_024, height: 1_024)
+        let smallerPNG = try AssistantImageNormalizer.normalize(
+            data,
+            displayName: "noise.png",
+            maxPixelSize: 768,
+            maxBytes: 20 * 1_024 * 1_024
+        )
+        XCTAssertEqual(smallerPNG.mediaType, "image/png")
+
+        let normalized = try AssistantImageNormalizer.normalize(
+            data,
+            displayName: "noise.png",
+            maxPixelSize: 1_024,
+            maxBytes: smallerPNG.data.count
+        )
+
+        XCTAssertEqual(normalized.mediaType, "image/png")
+        XCTAssertLessThanOrEqual(max(normalized.width, normalized.height), 768)
     }
 
     func testImageNormalizationHonorsOrientationAndBoundsThumbnail() throws {

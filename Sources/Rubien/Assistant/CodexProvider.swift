@@ -373,12 +373,14 @@ private actor CodexAppServerConnection {
             //    (review #2) accepts exactly this turn's notifications.
             let result = try await sendRequest(srv, method: "turn/start") { id in
                 active.turnStartRequestID = id
+                let inputs: [CodexUserInput] = [.text(request.prompt)]
+                    + request.attachments.compactMap {
+                        $0.kind == .image ? .localImage(path: $0.stagedURL.path) : nil
+                    }
                 return CodexAppServerProtocol.turnStart(
-                    requestID: id, threadId: threadID,
-                    prompt: request.prompt,
-                    imagePaths: request.attachments.compactMap {
-                        $0.kind == .image ? $0.stagedURL.path : nil
-                    },
+                    requestID: id,
+                    threadId: threadID,
+                    inputs: inputs,
                     effort: request.effortOverride)
             }
             // `turn/start` HAS been sent — a turn now runs server-side whatever happened
@@ -797,15 +799,17 @@ private actor CodexAppServerConnection {
     /// which scans its whole folder, has no such bound). If that bites, the fix
     /// is a `thread/list` continuation loop inside the scoped path.
     private static let filterOverfetch = 5
+    private static let historyReadConcurrency = 4
+    private static let historyCacheLimit = 64
 
     /// Recent conversations for `workspaceURL`, newest first (History picker).
-    /// `thread/list` returns only unsafe server summaries (`turns: []`, verified
-    /// 0.142), so every candidate is projected through a safe `thread/read`. A
-    /// non-nil `referenceID` additionally keeps only threads whose rubien tool
-    /// calls address that reference; that path over-fetches and stops at `limit`.
+    /// `thread/list` returns summaries with `turns: []` (verified 0.142), so candidates
+    /// are projected through bounded-concurrent `thread/read` calls. This is the only
+    /// reliable way to hide complete or truncated private manifests. A non-nil
+    /// `referenceID` also inspects rubien tool attribution from the same reads.
     func recentThreads(workspaceURL: URL, limit: Int, referenceID: Int64? = nil) async -> [AgentSessionSummary] {
         guard limit > 0 else { return [] }
-        let fetch = referenceID == nil ? limit : limit * Self.filterOverfetch
+        let fetch = limit * Self.filterOverfetch
         let candidates = await query(
             workspaceURL: workspaceURL, method: "thread/list",
             build: { CodexAppServerProtocol.threadList(requestID: $0, cwd: workspaceURL.path, limit: fetch) },
@@ -842,18 +846,21 @@ private actor CodexAppServerConnection {
         )
     }
 
-    private struct HistoryCacheEntry {
+    private struct HistoryCacheEntry: Sendable {
         let date: Date
         let rows: [ChatRenderMessage]
         let referencedIDs: Set<Int64>
     }
 
-    /// Thread reads now feed every History row, not only reference attribution:
+    /// Thread reads feed History rows and reference attribution:
     /// the server's preview/snippet can contain Rubien's synthetic prompt and
     /// private attachment manifest. Cache the safely decoded visible rows and IDs
-    /// together so general/scoped listings and successive searches reuse the same
-    /// local IPC read until `updatedAt` changes.
+    /// together so listings, searches, and selection reuse the same local IPC read
+    /// until `updatedAt` changes. Attachment-bearing rows are deliberately not cached
+    /// because local file availability can change independently of the thread date;
+    /// the LRU bound prevents unbounded retention of all other transcripts.
     private var historyCache: [String: HistoryCacheEntry] = [:]
+    private var historyCacheOrder: [String] = []
 
     /// Project server candidates onto visible transcript history, preserving their
     /// server order and stopping once `limit` qualifying rows are collected.
@@ -866,22 +873,54 @@ private actor CodexAppServerConnection {
         workspaceURL: URL,
         limit: Int
     ) async -> [AgentSessionSummary] {
-        var kept: [AgentSessionSummary] = []
         var visited: Set<String> = []
-        for candidate in candidates {
+        let uniqueCandidates = candidates.filter { visited.insert($0.id).inserted }
+        var kept: [AgentSessionSummary] = []
+
+        var batchStart = 0
+        while batchStart < uniqueCandidates.count {
             if kept.count >= limit || Task.isCancelled { break }
-            guard visited.insert(candidate.id).inserted else { continue }
-            guard let history = await threadHistory(for: candidate, workspaceURL: workspaceURL) else {
-                continue
+            let batchSize = min(
+                Self.historyReadConcurrency,
+                max(1, limit - kept.count)
+            )
+            let batchEnd = min(
+                batchStart + batchSize,
+                uniqueCandidates.count
+            )
+            let batch = Array(uniqueCandidates[batchStart..<batchEnd])
+            batchStart = batchEnd
+            var histories: [Int: HistoryCacheEntry] = [:]
+
+            await withTaskGroup(of: (Int, HistoryCacheEntry?).self) { group in
+                for (index, candidate) in batch.enumerated() {
+                    group.addTask { [weak self] in
+                        guard let self else { return (index, nil) }
+                        return (
+                            index,
+                            await self.threadHistory(
+                                for: candidate,
+                                workspaceURL: workspaceURL
+                            )
+                        )
+                    }
+                }
+                for await (index, history) in group {
+                    if let history { histories[index] = history }
+                }
             }
-            if let referenceID, !history.referencedIDs.contains(referenceID) { continue }
-            guard let visible = CodexAppServerProtocol.visibleSessionSummary(
-                from: candidate, rows: history.rows, matching: searchTerm
-            ) else { continue }
-            kept.append(visible)
-            // Cancelled mid-read: the data is valid and cached, but don't let a
-            // superseded scope/search append more rows.
-            if Task.isCancelled { break }
+
+            for (index, candidate) in batch.enumerated() {
+                if kept.count >= limit || Task.isCancelled { break }
+                guard let history = histories[index] else { continue }
+                if let referenceID, !history.referencedIDs.contains(referenceID) { continue }
+                guard let visible = CodexAppServerProtocol.visibleSessionSummary(
+                    from: candidate,
+                    rows: history.rows,
+                    matching: searchTerm
+                ) else { continue }
+                kept.append(visible)
+            }
         }
         return kept
     }
@@ -892,6 +931,7 @@ private actor CodexAppServerConnection {
     ) async -> HistoryCacheEntry? {
         let cacheKey = workspaceURL.standardizedFileURL.path + "\0" + candidate.id
         if let cached = historyCache[cacheKey], cached.date == candidate.date {
+            touchHistoryCache(cacheKey)
             return cached
         }
         do {
@@ -907,7 +947,12 @@ private actor CodexAppServerConnection {
                 ),
                 referencedIDs: CodexAppServerProtocol.threadReferencedIDs(result)
             )
-            historyCache[cacheKey] = entry
+            if entry.rows.allSatisfy({ $0.attachments.isEmpty }) {
+                storeHistoryCache(entry, forKey: cacheKey)
+            } else {
+                historyCache.removeValue(forKey: cacheKey)
+                historyCacheOrder.removeAll { $0 == cacheKey }
+            }
             return entry
         } catch {
             logger.error("codex history read failed: \(String(describing: error))")
@@ -919,7 +964,12 @@ private actor CodexAppServerConnection {
     /// `thread/read` is a read-only preview — NOT `thread/resume` (which would load +
     /// subscribe the thread); the actual continuation resumes on the next turn.
     func readTranscript(threadID: String, workspaceURL: URL) async -> [ChatRenderMessage] {
-        await query(
+        let cacheKey = workspaceURL.standardizedFileURL.path + "\0" + threadID
+        if let cached = historyCache[cacheKey] {
+            touchHistoryCache(cacheKey)
+            return cached.rows
+        }
+        return await query(
             workspaceURL: workspaceURL, method: "thread/read",
             build: { CodexAppServerProtocol.threadRead(requestID: $0, threadId: threadID) },
             decode: {
@@ -930,6 +980,19 @@ private actor CodexAppServerConnection {
                     )
                 )
             })
+    }
+
+    private func storeHistoryCache(_ entry: HistoryCacheEntry, forKey key: String) {
+        historyCache[key] = entry
+        touchHistoryCache(key)
+        while historyCacheOrder.count > Self.historyCacheLimit {
+            historyCache.removeValue(forKey: historyCacheOrder.removeFirst())
+        }
+    }
+
+    private func touchHistoryCache(_ key: String) {
+        historyCacheOrder.removeAll { $0 == key }
+        historyCacheOrder.append(key)
     }
 
     /// One-shot read: ensure a live server (reuse ANY running one — a read doesn't use

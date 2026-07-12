@@ -217,7 +217,7 @@ final class ChatSessionController: ObservableObject {
 
         var admissionIdentity: String {
             switch self {
-            case .file(let url): return url.standardizedFileURL.path
+            case .file(let url): return AssistantAttachmentStore.sourceIdentity(for: url)
             case .imageData: return "clipboard:\(UUID().uuidString)"
             }
         }
@@ -292,7 +292,7 @@ final class ChatSessionController: ObservableObject {
     }
 
     static func acceptsImageBytes(existing: Int64, adding: Int64) -> Bool {
-        let limit: Int64 = 20 * 1_024 * 1_024
+        let limit = AssistantAttachmentPolicy.maximumTotalImageBytes
         return existing >= 0 && adding >= 0 && adding <= limit && existing <= limit - adding
     }
 
@@ -352,10 +352,11 @@ final class ChatSessionController: ObservableObject {
 
         for input in inputs {
             let displayName = input.displayName
-            guard pendingAttachments.count + stagingAttachments.count < 10 else {
+            guard pendingAttachments.count + stagingAttachments.count
+                    < AssistantAttachmentPolicy.maximumAttachmentCount else {
                 attachmentIssues.append(ChatAttachmentIssue(
                     displayName: displayName,
-                    message: "You can attach up to 10 files per turn."
+                    message: "You can attach up to \(AssistantAttachmentPolicy.maximumAttachmentCount) files per turn."
                 ))
                 continue
             }
@@ -463,9 +464,8 @@ final class ChatSessionController: ObservableObject {
         let resumeID = liveSessionID
         let attachments = pendingAttachments
         let visible = composeUserMessage(text)
-        let base = visible.isEmpty ? "Inspect the attached files." : visible
         let providerPrompt = AssistantAttachmentManifest.providerPrompt(
-            base: base, visibleText: visible, attachments: attachments)
+            visibleText: visible, attachments: attachments)
         let request = AgentTurnRequest(
             workspaceURL: workspaceURL,
             resumeSessionID: resumeID,

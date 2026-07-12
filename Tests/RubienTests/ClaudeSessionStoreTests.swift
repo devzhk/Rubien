@@ -196,7 +196,6 @@ final class ClaudeSessionStoreTests: XCTestCase {
         let (store, _, workspace, dir) = try makeStore()
         let attachment = try makeStagedAttachment(in: workspace, name: "notes.md")
         let prompt = AssistantAttachmentManifest.providerPrompt(
-            base: "Compare these",
             visibleText: "Compare these",
             attachments: [attachment]
         )
@@ -212,13 +211,13 @@ final class ClaudeSessionStoreTests: XCTestCase {
         XCTAssertEqual(rows.first?.body, "Compare these")
         XCTAssertEqual(rows.first?.attachments.map(\.displayName), ["notes.md"])
         XCTAssertEqual(rows.first?.attachments.first?.isAvailable, true)
-        XCTAssertFalse(rows.first?.body.contains("rubien-attachments-v1") == true)
+        XCTAssertFalse(rows.first?.body.contains("rubien-attachments-v2") == true)
         XCTAssertEqual(
             store.summarize(fileURL: sessionURL, expectedCWD: workspace.path)?.preview,
             "Compare these"
         )
         XCTAssertTrue(
-            store.searchSessions(query: "rubien-attachments-v1", workspaceURL: workspace, limit: 25).isEmpty,
+            store.searchSessions(query: "rubien-attachments-v2", workspaceURL: workspace, limit: 25).isEmpty,
             "the private manifest must not be searchable"
         )
         XCTAssertTrue(
@@ -264,7 +263,6 @@ final class ClaudeSessionStoreTests: XCTestCase {
             sourceIdentity: "/original/notes.md"
         )
         let prompt = AssistantAttachmentManifest.providerPrompt(
-            base: "Review this",
             visibleText: "Review this",
             attachments: [attachment]
         )
@@ -280,7 +278,7 @@ final class ClaudeSessionStoreTests: XCTestCase {
         )
         XCTAssertEqual(row.body, "Review this")
         XCTAssertEqual(row.attachments.map(\.displayName), ["notes.md"])
-        XCTAssertFalse(row.body.contains("rubien-attachments-v1"))
+        XCTAssertFalse(row.body.contains("rubien-attachments-v2"))
         XCTAssertTrue(
             store.searchSessions(
                 query: stagedURL.path,
@@ -294,7 +292,6 @@ final class ClaudeSessionStoreTests: XCTestCase {
         let (store, _, workspace, dir) = try makeStore()
         let attachment = try makeStagedAttachment(in: workspace, name: "figure.png", kind: .image)
         let prompt = AssistantAttachmentManifest.providerPrompt(
-            base: "Inspect the attached files.",
             visibleText: "",
             attachments: [attachment]
         )
@@ -335,7 +332,6 @@ final class ClaudeSessionStoreTests: XCTestCase {
             sourceIdentity: "/tmp/outside.md"
         )
         let prompt = AssistantAttachmentManifest.providerPrompt(
-            base: "Unsafe",
             visibleText: "Unsafe",
             attachments: [outside]
         )
