@@ -127,7 +127,15 @@ final class PDFDownloadServiceTests: XCTestCase {
     }
 
     // MARK: - temporary downloads
-
+    //
+    // Darwin-only: these drive PDFDownloadService.downloadTemporary — a
+    // `session.download(from:)` DOWNLOAD task — through the shared
+    // ImportSourceURLProtocol stub. swift-corelibs FoundationNetworking's
+    // download-task path fatal-errors on custom-URLProtocol callbacks
+    // (TaskRegistry "task not in registry"); only the `data(for:)` convenience
+    // tolerates stubs there (see PaperURLResolverTests, which stays on Linux).
+    // Same convention as ImportSourceMaterializerTests' remote-import guards.
+    #if canImport(Network)
     func testDownloadTemporaryWritesValidatedPDFToRequestedDirectory() async throws {
         let remoteURL = "https://example.test/papers/temporary.pdf"
         let expectedData = Data("%PDF-1.7\ntemporary".utf8)
@@ -251,6 +259,7 @@ final class PDFDownloadServiceTests: XCTestCase {
             destinationDirectory: destinationDirectory
         )
     }
+    #endif
 
     private func makeTemporaryDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory
