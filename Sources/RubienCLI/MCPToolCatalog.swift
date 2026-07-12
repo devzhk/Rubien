@@ -10,8 +10,8 @@ import CoreFoundation
 // (`mcp-server/src/tools/*.ts`) so the two servers are drop-in interchangeable;
 // keep them in lockstep. Each tool maps to the identical `rubien-cli`
 // subcommand invocation the npm proxy uses — cross-argument validation (e.g.
-// pdf_text's pages/sections exclusivity, web_get's bounds) is left to the CLI,
-// the single source of truth, rather than duplicated here.
+// read_text's pages/sections and pages/start exclusivity, its maxChars bounds)
+// is left to the CLI, the single source of truth, rather than duplicated here.
 
 enum MCPToolCatalog {
     static let readOnlyTools: [MCPTool] = [
@@ -19,11 +19,9 @@ enum MCPToolCatalog {
         listTool,
         getTool,
         pdfInfoTool,
-        pdfTextTool,
         pdfPageImageTool,
-        annotationsListTool,
-        webGetTool,
-        webAnnotationsTool,
+        readTextTool,
+        readAnnotationsTool,
     ]
 
     // MARK: references
@@ -122,7 +120,7 @@ enum MCPToolCatalog {
 
     private static let pdfInfoTool = MCPTool(
         name: "rubien_pdf_info",
-        description: "Return page count, hasTextLayer (sampled across first/middle/last page), file size, isEncrypted, documentTitle, and the flattened outline `sections` (or null when the PDF has no outline). Each section carries title, level (1=top), startPage, and endPage; parent ranges span their descendants. Call this before `rubien_pdf_text` so you know whether to use sections or page ranges.",
+        description: "Return page count, hasTextLayer (sampled across first/middle/last page), file size, isEncrypted, documentTitle, and the flattened outline `sections` (or null when the PDF has no outline). Each section carries title, level (1=top), startPage, and endPage; parent ranges span their descendants. Call this before `rubien_read_text` when you plan to select by `sections` or page ranges.",
         inputSchema: [
             "type": "object",
             "properties": ["id": ["type": "integer", "description": "Reference ID"]],
@@ -134,46 +132,6 @@ enum MCPToolCatalog {
                 throw MCPToolError.invalidArguments("Missing required argument: id")
             }
             return ["pdf", "info", String(id)]
-        }
-    )
-
-    private static let pdfTextTool = MCPTool(
-        name: "rubien_pdf_text",
-        description: "Extract page-keyed text from a reference's attached PDF. Two mutually-exclusive selection modes: `pages` (e.g. '1-3' or '1-3,8-10') or `sections` (array of section title substrings; case-insensitive). When neither is provided the whole document is returned (subject to maxChars). Each returned page carries `text` and `sectionPath` (breadcrumb of containing sections). Errors with `no-outline` when `sections` is requested but the PDF has no outline — fall back to `pages` in that case.",
-        inputSchema: [
-            "type": "object",
-            "properties": [
-                "id": ["type": "integer", "description": "Reference ID"],
-                "pages": ["type": "string", "description": "Page range string, e.g. '1-3' or '1-3,8-10' or '12-'. Mutually exclusive with `sections`."],
-                "sections": [
-                    "type": "array",
-                    "items": ["type": "string", "minLength": 1],
-                    "description": "Section title substrings (case-insensitive, repeatable). Mutually exclusive with `pages`. Use after `rubien_pdf_info` confirms `sections != null`.",
-                ],
-                "maxChars": ["type": "integer", "exclusiveMinimum": 0, "maximum": 500000, "description": "Cap total returned characters (default 50000). Truncation is at page boundary."],
-            ],
-            "required": ["id"],
-        ],
-        isImage: false,
-        buildArgv: { args in
-            guard let id = try mcpInt(args, "id") else {
-                throw MCPToolError.invalidArguments("Missing required argument: id")
-            }
-            let pages = try mcpString(args, "pages")
-            let sections = try mcpStringArray(args, "sections")
-            // Mirror the npm server: `pages` and `sections` are mutually
-            // exclusive, rejected up front (the message names the MCP argument
-            // spellings, not the CLI's `--pages`/`--section` flags).
-            if pages != nil, let sections, !sections.isEmpty {
-                throw MCPToolError.invalidArguments("`pages` and `sections` are mutually exclusive")
-            }
-            var argv = ["pdf", "text", String(id)]
-            mcpAppendString(&argv, "--pages", pages)
-            if let sections {
-                for section in sections { argv += ["--section", section] }
-            }
-            mcpAppendInt(&argv, "--max-chars", try mcpInt(args, "maxChars"))
-            return argv
         }
     )
 
@@ -207,65 +165,73 @@ enum MCPToolCatalog {
         }
     )
 
-    // MARK: annotations
+    // MARK: read (kind-agnostic)
 
-    private static let annotationsListTool = MCPTool(
-        name: "rubien_annotations_list",
-        description: "Return all PDF annotations (highlights, underlines, anchored notes) on a single reference's attached PDF. PDF references only — for clipped web pages, use `rubien_web_annotations` instead. Returns [{ id, type, color, pageIndex, selectedText, noteText }].",
-        inputSchema: [
-            "type": "object",
-            "properties": ["referenceId": ["type": "integer"]],
-            "required": ["referenceId"],
-        ],
-        isImage: false,
-        buildArgv: { args in
-            guard let referenceId = try mcpInt(args, "referenceId") else {
-                throw MCPToolError.invalidArguments("Missing required argument: referenceId")
-            }
-            return ["annotations", String(referenceId)]
-        }
-    )
-
-    // MARK: web
-
-    private static let webGetTool = MCPTool(
-        name: "rubien_web_get",
-        description: "Return the extracted readable text of a clipped web page reference that is already in the library. This is library-only — it does NOT fetch from the network; it returns the same text the in-app WebReader shows. Use `start` (character offset) and `maxChars` (default 50000) to paginate long pages — `contentLength` tells you the total decoded body length. The `contentFormat` field is `\"markdown\"` (most pages, post-extraction) or `\"html\"` (a small number of pages where the clipper preserved markup). For HTML, treat `content` as a fragment, not a full document. To see the user's highlights/notes on the page, call `rubien_web_annotations` for the same reference. Errors when the reference doesn't exist or has no web content (e.g. PDF-only references).",
+    private static let readTextTool = MCPTool(
+        name: "rubien_read_text",
+        description: "Return the readable body text of any reference — its attached PDF or its clipped web page — without needing to know which it has. Source selection when `source` is omitted: `pages`/`sections` imply pdf, `start` implies web, otherwise PDF wins when both exist. Every response carries `source` (what was read) and `available` (which sources are readable now, e.g. [\"pdf\",\"web\"]). PDF responses are page-keyed: each `pages[]` item carries `text` and `sectionPath`, selected via `pages` ('1-3' or '1-3,8-10') or `sections` (title substrings, case-insensitive; errors `no-outline` when the PDF has no outline — fall back to `pages`). Web responses are one flat windowed body: `content` + `contentLength`, paginated via `start`/`maxChars`; `contentFormat` is \"markdown\" or \"html\" (treat html as a fragment). Library-only — never fetches from the network. Use `rubien_read_annotations` for the user's highlights/notes, and `rubien_pdf_info` first when you plan to select by `sections`.",
         inputSchema: [
             "type": "object",
             "properties": [
-                "referenceId": ["type": "integer", "description": "Reference ID"],
-                "maxChars": ["type": "integer", "exclusiveMinimum": 0, "description": "Cap returned characters (default 50000). Truncation is at the character boundary."],
-                "start": ["type": "integer", "minimum": 0, "description": "Character offset into the decoded body (default 0). Past end-of-content returns content=\"\" with truncated=false."],
+                "id": ["type": "integer", "description": "Reference ID"],
+                "source": ["type": "string", "enum": ["pdf", "web"], "description": "Force a source. Default: pages/sections imply pdf, start implies web, else PDF wins."],
+                "pages": ["type": "string", "description": "PDF page range, e.g. '1-3' or '1-3,8-10' or '12-'. Implies pdf. Mutually exclusive with `sections`."],
+                "sections": [
+                    "type": "array",
+                    "items": ["type": "string", "minLength": 1],
+                    "description": "PDF section title substrings (case-insensitive). Implies pdf. Mutually exclusive with `pages`.",
+                ],
+                "start": ["type": "integer", "minimum": 0, "description": "Character offset into the web body (default 0). Implies web."],
+                "maxChars": ["type": "integer", "exclusiveMinimum": 0, "maximum": 500000, "description": "Cap returned characters (default 50000). PDF truncates at page boundary (always ≥ 1 page); web at the character boundary."],
             ],
-            "required": ["referenceId"],
+            "required": ["id"],
         ],
         isImage: false,
         buildArgv: { args in
-            guard let referenceId = try mcpInt(args, "referenceId") else {
-                throw MCPToolError.invalidArguments("Missing required argument: referenceId")
+            guard let id = try mcpInt(args, "id") else {
+                throw MCPToolError.invalidArguments("Missing required argument: id")
             }
-            var argv = ["web", "get", String(referenceId)]
+            let pages = try mcpString(args, "pages")
+            let sections = try mcpStringArray(args, "sections")
+            let start = try mcpInt(args, "start")
+            if pages != nil, let sections, !sections.isEmpty {
+                throw MCPToolError.invalidArguments("`pages` and `sections` are mutually exclusive")
+            }
+            let pdfParams = pages != nil || !(sections ?? []).isEmpty
+            if pdfParams, start != nil {
+                throw MCPToolError.invalidArguments("`pages`/`sections` and `start` are mutually exclusive")
+            }
+            var argv = ["read", "text", String(id)]
+            mcpAppendString(&argv, "--pages", pages)
+            if let sections {
+                for section in sections { argv += ["--section", section] }
+            }
+            mcpAppendInt(&argv, "--start", start)
             mcpAppendInt(&argv, "--max-chars", try mcpInt(args, "maxChars"))
-            mcpAppendInt(&argv, "--start", try mcpInt(args, "start"))
+            mcpAppendString(&argv, "--source", try mcpString(args, "source"))
             return argv
         }
     )
 
-    private static let webAnnotationsTool = MCPTool(
-        name: "rubien_web_annotations",
-        description: "Return the highlights, underlines, and anchored notes the user has made on a clipped web reference. This is the web-page counterpart to `rubien_annotations_list` (which covers PDF annotations only). Each annotation carries `anchorText` (the highlighted string — also what the sidebar displays), `noteText` (the user's attached note, if any), and `prefixText` / `suffixText` (the surrounding text that disambiguates the location). Together `prefixText` / `anchorText` / `suffixText` form a W3C TextQuoteSelector — use them to locate each highlight inside the body returned by `rubien_web_get`. Empty array when the reference has no web annotations or the reference ID doesn't exist (not an error).",
+    private static let readAnnotationsTool = MCPTool(
+        name: "rubien_read_annotations",
+        description: "Return the user's annotations (highlights, underlines, anchored notes) on a reference — PDF and web-clip annotations in one array, each item tagged `source`: \"pdf\" | \"web\" (optional `source` param filters to one kind). PDF items carry `pageIndex` + `selectedText`; web items carry a W3C TextQuoteSelector (`prefixText`/`anchorText`/`suffixText`) — use it to locate the highlight inside the body returned by `rubien_read_text`. All items carry `type`, `color`, `noteText`, `dateCreated`, `dateModified`. Ordered: PDF items first (by pageIndex), then web items (by dateCreated). Empty array when the reference doesn't exist or has no annotations (not an error).",
         inputSchema: [
             "type": "object",
-            "properties": ["referenceId": ["type": "integer", "description": "Reference ID"]],
-            "required": ["referenceId"],
+            "properties": [
+                "id": ["type": "integer", "description": "Reference ID"],
+                "source": ["type": "string", "enum": ["pdf", "web"], "description": "Filter to one kind."],
+            ],
+            "required": ["id"],
         ],
         isImage: false,
         buildArgv: { args in
-            guard let referenceId = try mcpInt(args, "referenceId") else {
-                throw MCPToolError.invalidArguments("Missing required argument: referenceId")
+            guard let id = try mcpInt(args, "id") else {
+                throw MCPToolError.invalidArguments("Missing required argument: id")
             }
-            return ["web", "annotations", String(referenceId)]
+            var argv = ["read", "annotations", String(id)]
+            mcpAppendString(&argv, "--source", try mcpString(args, "source"))
+            return argv
         }
     )
 }
