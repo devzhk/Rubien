@@ -72,6 +72,10 @@ let package = Package(
                 "RubienPDFKit",
                 .target(name: "RubienSync", condition: .when(platforms: [.macOS])),
                 .target(name: "RubienExceptionCatcher", condition: .when(platforms: [.macOS])),
+                // The portable Assistant subset (ClaudeSessionStore, CodexAppServerProtocol,
+                // AssistantAttachments, …) compiles on Linux; its SHA-256 needs swift-crypto
+                // there, mirroring RubienCore/RubienCLI.
+                .product(name: "Crypto", package: "swift-crypto", condition: .when(platforms: [.linux])),
                 .product(
                     name: "Sparkle",
                     package: "Sparkle",

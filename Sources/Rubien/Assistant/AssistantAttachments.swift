@@ -1,5 +1,9 @@
-import CryptoKit
 import Foundation
+#if canImport(CryptoKit)
+import CryptoKit
+#else
+import Crypto  // swift-crypto: the portable Assistant subset compiles on Linux
+#endif
 
 enum AssistantAttachmentPolicy {
     static let maximumAttachmentCount = 10
@@ -19,6 +23,24 @@ enum AssistantAttachmentPolicy {
 }
 
 enum AssistantManagedAttachmentPath {
+    static let relativeRoot = ".rubien/attachments"
+
+    /// The workspace with symlinks resolved — staged paths and containment checks
+    /// all derive from this canonical form (a symlinked workspace root must not
+    /// yield two spellings of the same managed path).
+    static func canonicalWorkspaceURL(_ workspaceURL: URL) -> URL {
+        workspaceURL
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+    }
+
+    static func managedRoot(for workspaceURL: URL) -> URL {
+        canonicalWorkspaceURL(workspaceURL)
+            .appendingPathComponent(relativeRoot, isDirectory: true)
+            .standardizedFileURL
+    }
+
     static func isCanonical(_ url: URL, id: UUID, managedRoot: URL) -> Bool {
         let stagedURL = url.standardizedFileURL
         let root = managedRoot.standardizedFileURL

@@ -1,3 +1,4 @@
+#if os(macOS)
 import CoreGraphics
 import Foundation
 import ImageIO
@@ -271,3 +272,4 @@ enum AssistantImageNormalizer {
         )
     }
 }
+#endif

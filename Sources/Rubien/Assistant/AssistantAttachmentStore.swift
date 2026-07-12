@@ -1,3 +1,4 @@
+#if os(macOS)
 import Foundation
 import UniformTypeIdentifiers
 
@@ -37,7 +38,7 @@ enum AssistantAttachmentStoreError: LocalizedError, Equatable {
 }
 
 actor AssistantAttachmentStore {
-    static let relativeRoot = ".rubien/attachments"
+    static let relativeRoot = AssistantManagedAttachmentPath.relativeRoot
     static let maxTextBytes = AssistantAttachmentPolicy.maximumFileBytes
 
     nonisolated let managedRoot: URL
@@ -46,16 +47,11 @@ actor AssistantAttachmentStore {
     private let workspaceRoot: URL
 
     private static func canonicalWorkspaceURL(_ workspaceURL: URL) -> URL {
-        workspaceURL
-            .standardizedFileURL
-            .resolvingSymlinksInPath()
-            .standardizedFileURL
+        AssistantManagedAttachmentPath.canonicalWorkspaceURL(workspaceURL)
     }
 
     static func managedRootURL(for workspaceURL: URL) -> URL {
-        canonicalWorkspaceURL(workspaceURL)
-            .appendingPathComponent(relativeRoot, isDirectory: true)
-            .standardizedFileURL
+        AssistantManagedAttachmentPath.managedRoot(for: workspaceURL)
     }
 
     static func sourceIdentity(for sourceURL: URL) -> String {
@@ -661,3 +657,4 @@ actor AssistantAttachmentStore {
         case missing
     }
 }
+#endif
