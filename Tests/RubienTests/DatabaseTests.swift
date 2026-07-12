@@ -35,6 +35,31 @@ final class DatabaseTests: XCTestCase {
         XCTAssertEqual(matches.first?.authors, [AuthorName(given: "John", family: "Smith")])
     }
 
+    func testReferenceMentionSearchIsTitleOnlyAndReturnsNarrowMetadata() async throws {
+        let db = try makeDatabase()
+        var titleMatch = Reference(
+            title: "Graph Neural Networks",
+            authors: [AuthorName(given: "Alice", family: "Smith")],
+            doi: "10.1000/graph",
+            webContent: String(repeating: "large body ", count: 1_000),
+            referenceType: .conferencePaper
+        )
+        var bodyOnlyMatch = Reference(
+            title: "Unrelated title",
+            notes: "Graph Neural Networks"
+        )
+        try db.saveReference(&titleMatch)
+        try db.saveReference(&bodyOnlyMatch)
+
+        let matches = try await db.searchReferenceMentions(query: "Graph Neural", limit: 8)
+
+        XCTAssertEqual(matches.map(\.id), [try XCTUnwrap(titleMatch.id)])
+        XCTAssertEqual(matches.first?.title, "Graph Neural Networks")
+        XCTAssertEqual(matches.first?.authors, [AuthorName(given: "Alice", family: "Smith")])
+        XCTAssertEqual(matches.first?.referenceType, .conferencePaper)
+        XCTAssertEqual(matches.first?.doi, "10.1000/graph")
+    }
+
     func testUpdateReferenceWebContentReplacesStoredBody() throws {
         let db = try makeDatabase()
         var reference = Reference(

@@ -100,6 +100,15 @@ enum ComposerPasteboardRouter {
 
 // MARK: - Text view
 
+/// Unmodified keys the AppKit composer offers to the paper-mention UI before
+/// falling back to native text editing.
+enum ComposerNavigationKey: Equatable {
+    case returnKey
+    case downArrow
+    case upArrow
+    case escape
+}
+
 /// The chat composer's editor. A plain SwiftUI `TextEditor` can't be used here: its
 /// backing NSTextView is the first responder and a registered drag destination, so
 /// it consumes ⌘V (an image-only pasteboard no-ops; a copied file pastes as its
@@ -109,6 +118,7 @@ enum ComposerPasteboardRouter {
 /// else through to native text editing.
 final class ComposerNSTextView: NSTextView {
     var onCommandReturn: () -> Void = {}
+    var onNavigationKey: (ComposerNavigationKey) -> Bool = { _ in false }
     var onAttachFiles: ([URL]) -> Void = { _ in }
     var onAttachImageData: (Data, String) -> Void = { _, _ in }
     var onDragTargeted: (Bool) -> Void = { _ in }
@@ -174,6 +184,38 @@ final class ComposerNSTextView: NSTextView {
             .intersection(.deviceIndependentFlagsMask)
             .subtracting([.capsLock, .numericPad, .function])
         return chord == .command
+    }
+
+    // MARK: Mention navigation
+
+    /// Let an open mention popover consume plain Return/arrows/Escape. Modified
+    /// keys remain owned by the text system so selection and editing shortcuts
+    /// keep their native behavior.
+    override func keyDown(with event: NSEvent) {
+        if let key = Self.navigationKey(
+            keyCode: event.keyCode,
+            modifierFlags: event.modifierFlags
+        ), onNavigationKey(key) {
+            return
+        }
+        super.keyDown(with: event)
+    }
+
+    static func navigationKey(
+        keyCode: UInt16,
+        modifierFlags: NSEvent.ModifierFlags
+    ) -> ComposerNavigationKey? {
+        let chord = modifierFlags
+            .intersection(.deviceIndependentFlagsMask)
+            .subtracting([.capsLock, .numericPad, .function])
+        guard chord.isEmpty else { return nil }
+        switch keyCode {
+        case 36, 76: return .returnKey
+        case 125: return .downArrow
+        case 126: return .upArrow
+        case 53: return .escape
+        default: return nil
+        }
     }
 
     // MARK: Paste
@@ -270,10 +312,14 @@ final class ComposerNSTextView: NSTextView {
 /// the ZStack sizer and scrolling internally past the frame cap.
 struct ComposerTextView: NSViewRepresentable {
     @Binding var text: String
+    /// Character-offset selection in `text`. Offsets avoid retaining potentially
+    /// invalid `String.Index` values while AppKit and SwiftUI bindings coalesce.
+    @Binding var selection: Range<Int>?
     /// Monotonic counter — each bump moves first-responder status to the editor
     /// (the write-only replacement for the old `@FocusState`).
     var focusRequestCount: Int
     var onCommandReturn: () -> Void
+    var onNavigationKey: (ComposerNavigationKey) -> Bool
     var onAttachFiles: ([URL]) -> Void
     var onAttachImageData: (Data, String) -> Void
     var onDragTargeted: (Bool) -> Void
@@ -309,6 +355,11 @@ struct ComposerTextView: NSViewRepresentable {
         textView.textColor = .textColor
         textView.delegate = context.coordinator
         textView.string = text
+        textView.onCommandReturn = onCommandReturn
+        textView.onNavigationKey = onNavigationKey
+        textView.onAttachFiles = onAttachFiles
+        textView.onAttachImageData = onAttachImageData
+        textView.onDragTargeted = onDragTargeted
 
         scrollView.documentView = textView
         return scrollView
@@ -318,6 +369,7 @@ struct ComposerTextView: NSViewRepresentable {
         guard let textView = scrollView.documentView as? ComposerNSTextView else { return }
         context.coordinator.parent = self
         textView.onCommandReturn = onCommandReturn
+        textView.onNavigationKey = onNavigationKey
         textView.onAttachFiles = onAttachFiles
         textView.onAttachImageData = onAttachImageData
         textView.onDragTargeted = onDragTargeted
@@ -332,7 +384,18 @@ struct ComposerTextView: NSViewRepresentable {
             // programmatic replacement restores text the user never typed here.
             textView.string = text
             context.coordinator.lastSyncedText = text
+            context.coordinator.lastSyncedSelection = nil
             context.coordinator.undoManager.removeAllActions()
+        }
+
+        if selection != context.coordinator.lastSyncedSelection,
+           let selection,
+           let nativeRange = Self.nativeRange(for: selection, in: text) {
+            context.coordinator.lastSyncedSelection = selection
+            textView.setSelectedRange(nativeRange)
+            textView.scrollRangeToVisible(nativeRange)
+        } else if selection == nil {
+            context.coordinator.lastSyncedSelection = nil
         }
 
         let coordinator = context.coordinator
@@ -359,6 +422,8 @@ struct ComposerTextView: NSViewRepresentable {
         /// `updateNSView` detect external writes without re-bridging the AppKit
         /// text storage every render.
         var lastSyncedText: String
+        /// Character offsets matching the primary AppKit selection.
+        var lastSyncedSelection: Range<Int>?
         /// Editor-private undo stack — the window's shared undo manager would let
         /// ⌘Z in the composer unwind other views' registrations (and vice versa).
         let undoManager = UndoManager()
@@ -367,6 +432,7 @@ struct ComposerTextView: NSViewRepresentable {
             self.parent = parent
             honoredFocusRequestCount = parent.focusRequestCount
             lastSyncedText = parent.text
+            lastSyncedSelection = parent.selection
         }
 
         func textDidChange(_ notification: Notification) {
@@ -374,9 +440,50 @@ struct ComposerTextView: NSViewRepresentable {
             let latest = textView.string
             lastSyncedText = latest
             parent.text = latest
+            syncSelection(from: textView)
+        }
+
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            syncSelection(from: textView)
+        }
+
+        private func syncSelection(from textView: NSTextView) {
+            guard let latest = ComposerTextView.selectionOffsets(from: textView) else { return }
+            guard latest != lastSyncedSelection else { return }
+            lastSyncedSelection = latest
+            parent.selection = latest
         }
 
         func undoManager(for view: NSTextView) -> UndoManager? { undoManager }
+    }
+
+    static func selectionOffsets(from textView: NSTextView) -> Range<Int>? {
+        let text = textView.string
+        guard let range = Range(textView.selectedRange(), in: text) else { return nil }
+        let lower = text.distance(from: text.startIndex, to: range.lowerBound)
+        let upper = text.distance(from: text.startIndex, to: range.upperBound)
+        return lower..<upper
+    }
+
+    static func nativeRange(
+        for offsets: Range<Int>,
+        in text: String
+    ) -> NSRange? {
+        guard offsets.lowerBound >= 0,
+              offsets.upperBound >= offsets.lowerBound,
+              let lower = text.index(
+                text.startIndex,
+                offsetBy: offsets.lowerBound,
+                limitedBy: text.endIndex
+              ),
+              let upper = text.index(
+                lower,
+                offsetBy: offsets.upperBound - offsets.lowerBound,
+                limitedBy: text.endIndex
+              )
+        else { return nil }
+        return NSRange(lower..<upper, in: text)
     }
 }
 #endif

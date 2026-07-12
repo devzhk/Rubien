@@ -15,6 +15,10 @@ struct ChatReference: Sendable, Equatable {
     let title: String
     /// Author display string (may be empty).
     let authors: String
+    /// Compact metadata copied into a provider-only mention snapshot. The stable
+    /// `id` remains authoritative; these fields save an unnecessary first lookup.
+    var referenceType: String? = nil
+    var doi: String? = nil
 }
 
 enum AssistantContext {

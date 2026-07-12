@@ -24,7 +24,29 @@ struct ChatSidebarHarnessView: View {
                 id: 1,
                 title: "Attention Is All You Need",
                 authors: "Vaswani et al."),
-            workspaceURL: workspace)
+            workspaceURL: workspace,
+            mentionSearch: { query, limit in
+                let examples = [
+                    ChatReference(
+                        id: 2,
+                        title: "BERT: Pre-training of Deep Bidirectional Transformers",
+                        authors: "Devlin et al.",
+                        referenceType: "Conference Paper",
+                        doi: "10.18653/v1/N19-1423"
+                    ),
+                    ChatReference(
+                        id: 3,
+                        title: "Deep Residual Learning for Image Recognition",
+                        authors: "He et al.",
+                        referenceType: "Conference Paper",
+                        doi: "10.1109/CVPR.2016.90"
+                    ),
+                ]
+                let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+                return examples.filter {
+                    trimmed.isEmpty || $0.title.localizedCaseInsensitiveContains(trimmed)
+                }.prefix(limit).map { $0 }
+            })
         _renderer = StateObject(wrappedValue: renderer)
         _session = StateObject(wrappedValue: session)
     }

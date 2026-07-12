@@ -176,5 +176,44 @@ final class ComposerTextViewTests: XCTestCase {
         XCTAssertFalse(ComposerNSTextView.isCommandReturnChord(
             keyCode: 0, modifierFlags: [.command]))
     }
+
+    // MARK: Paper-mention navigation
+
+    func testMentionNavigationRecognizesOnlyUnmodifiedKeys() {
+        XCTAssertEqual(ComposerNSTextView.navigationKey(
+            keyCode: 36, modifierFlags: []), .returnKey)
+        XCTAssertEqual(ComposerNSTextView.navigationKey(
+            keyCode: 76, modifierFlags: [.numericPad, .function]), .returnKey)
+        XCTAssertEqual(ComposerNSTextView.navigationKey(
+            keyCode: 125, modifierFlags: [.function]), .downArrow)
+        XCTAssertEqual(ComposerNSTextView.navigationKey(
+            keyCode: 126, modifierFlags: [.capsLock, .function]), .upArrow)
+        XCTAssertEqual(ComposerNSTextView.navigationKey(
+            keyCode: 53, modifierFlags: []), .escape)
+
+        // Modified arrows/Return retain native editing or send behavior.
+        XCTAssertNil(ComposerNSTextView.navigationKey(
+            keyCode: 125, modifierFlags: [.shift, .function]))
+        XCTAssertNil(ComposerNSTextView.navigationKey(
+            keyCode: 36, modifierFlags: [.command]))
+        XCTAssertNil(ComposerNSTextView.navigationKey(
+            keyCode: 0, modifierFlags: []))
+    }
+
+    func testSelectionOffsetsRoundTripComposedUnicodeAndRejectStaleRanges() throws {
+        let text = "A👨‍👩‍👧‍👦e\u{301}Z"
+        let offsets = 1..<3
+        let nativeRange = try XCTUnwrap(ComposerTextView.nativeRange(
+            for: offsets,
+            in: text
+        ))
+        let textView = NSTextView()
+        textView.string = text
+        textView.setSelectedRange(nativeRange)
+
+        XCTAssertEqual(ComposerTextView.selectionOffsets(from: textView), offsets)
+        XCTAssertNil(ComposerTextView.nativeRange(for: (-1)..<0, in: text))
+        XCTAssertNil(ComposerTextView.nativeRange(for: 0..<5, in: text))
+    }
 }
 #endif

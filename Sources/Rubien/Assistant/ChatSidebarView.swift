@@ -35,6 +35,21 @@ struct ChatSidebarView: View {
     /// the AppKit-backed editor. Distinct from `session.composerFocusRequest`,
     /// the controller-level signal that feeds this via `focusComposerSoon`.
     @State private var editorFocusRequests = 0
+    /// Character offsets supplied by the AppKit-backed composer. Offsets remain
+    /// safe to validate while the text and selection bindings coalesce.
+    @State private var draftSelection: Range<Int>?
+    @State private var activeMentionQuery: PaperMentionQuery?
+    @State private var mentionResults: [ChatReference] = []
+    @State private var selectedMentionIndex = 0
+    @State private var selectedMentions: [PaperMentionSelection] = []
+    /// Exact draft already reconciled by a programmatic completion. Its next
+    /// `onChange` must not apply the same edit a second time.
+    @State private var reconciledDraft: String?
+    /// Draft and selection are separate SwiftUI bindings and can publish in
+    /// either order. Coalesce them before converting offsets to String.Index.
+    @State private var mentionRefreshTask: Task<Void, Never>?
+    @State private var mentionSearchTask: Task<Void, Never>?
+    @State private var mentionSearchInProgress = false
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
@@ -59,6 +74,23 @@ struct ChatSidebarView: View {
         // Selection→Ask while the pane is already open — each Ask bumps the token
         // (even re-Asking the same passage), which focuses the composer (§5.4).
         .onChange(of: session.composerFocusRequest) { _, _ in focusComposerSoon() }
+        .onChange(of: draft) { old, new in
+            if reconciledDraft == new {
+                reconciledDraft = nil
+            } else {
+                selectedMentions = PaperMentions.reconciling(
+                    selectedMentions,
+                    from: old,
+                    to: new
+                )
+            }
+            scheduleMentionRefresh()
+        }
+        .onChange(of: draftSelection) { _, _ in scheduleMentionRefresh() }
+        .onDisappear {
+            mentionSearchTask?.cancel()
+            mentionRefreshTask?.cancel()
+        }
     }
 
     // MARK: Header (popover-toolbar idiom)
@@ -78,7 +110,7 @@ struct ChatSidebarView: View {
             Spacer()
             iconButton("square.and.pencil", help: "New conversation") {
                 session.newConversation()
-                draft = ""
+                resetDraft()
             }
             iconButton("clock.arrow.circlepath", help: "History — resume a past conversation") {
                 showingHistory = true
@@ -86,7 +118,7 @@ struct ChatSidebarView: View {
             .popover(isPresented: $showingHistory, arrowEdge: .bottom) {
                 ChatHistoryPopover(session: session) {
                     showingHistory = false
-                    draft = ""
+                    resetDraft()
                 }
             }
             if let onClose {
@@ -435,7 +467,7 @@ struct ChatSidebarView: View {
                 pendingAttachmentTray
             }
             composerEditor
-            Text("Add images, Markdown, or text files")
+            Text("Type @ to mention a paper · Add files or images")
                 .font(.system(size: 10.5))
                 .foregroundStyle(.tertiary)
             HStack(spacing: 8) {
@@ -847,23 +879,32 @@ struct ChatSidebarView: View {
                 Text("Chat about this document — ⌘+↩ to send")
                     .font(.body)
                     .foregroundStyle(.tertiary)
-                    // Align with the TextEditor's insertion point (its text
-                    // container has a ~5 pt leading line-fragment inset).
+                    // Align with the AppKit editor's insertion point (its text
+                    // container has a 5 pt leading line-fragment inset).
                     .padding(.leading, 5)
                     .allowsHitTesting(false)
             }
             // AppKit-backed editor (not a `TextEditor`): it routes pasted/dropped
             // images and files into the attachment pipeline — a TextEditor's text
             // view swallows those (image ⌘V no-ops, file drops paste the path) —
-            // and owns ⌘↩-sends-exactly deterministically (see ComposerNSTextView).
+            // owns ⌘↩-sends-exactly, and reports selection/key events for mentions.
             ComposerTextView(
                 text: $draft,
+                selection: $draftSelection,
                 focusRequestCount: editorFocusRequests,
                 onCommandReturn: sendDraft,
+                onNavigationKey: handleComposerNavigationKey,
                 onAttachFiles: { session.stageAttachments($0) },
                 onAttachImageData: { session.stagePastedImage($0, suggestedName: $1) },
                 onDragTargeted: { isDropTargeted = $0 }
             )
+                .popover(
+                    isPresented: mentionPopoverPresented,
+                    attachmentAnchor: .rect(.bounds),
+                    arrowEdge: .top
+                ) {
+                    mentionSearchPopover
+                }
         }
         // Grow with content up to ~6 lines, then the editor scrolls internally.
         .frame(maxHeight: 120)
@@ -902,9 +943,9 @@ struct ChatSidebarView: View {
                     .contentShape(Self.sendButtonShape)
             }
             .buttonStyle(.plain)
-            // No .keyboardShortcut here — the composer's onKeyPress is the one
-            // owner of ⌘↩ (a key EQUIVALENT on the button is the loose-matching
-            // pass that made ⇧↩ send by accident).
+            // No .keyboardShortcut here — ComposerNSTextView.performKeyEquivalent
+            // owns ⌘↩ (a key equivalent on the button is the loose-matching pass
+            // that made ⇧↩ send by accident).
             .disabled(!canSend)
             .help(canSend ? "Send (⌘↩)" : "Enter a message or add an attachment")
         }
@@ -934,9 +975,229 @@ struct ChatSidebarView: View {
             return
         }
         let text = draft
-        draft = ""
-        session.send(text)
+        let mentions = selectedMentions
+        resetDraft()
+        session.send(text, mentionedReferences: mentions)
         editorFocusRequests += 1
+    }
+
+    // MARK: Paper mentions
+
+    private var mentionPopoverPresented: Binding<Bool> {
+        Binding(
+            get: { activeMentionQuery != nil },
+            set: { if !$0 { dismissMentionPopover() } }
+        )
+    }
+
+    private var mentionSearchPopover: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "books.vertical")
+                    .foregroundStyle(.secondary)
+                Text(activeMentionQuery?.text.trimmingCharacters(in: .whitespaces).isEmpty == false
+                    ? "Search library"
+                    : "Mention a paper")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
+                if mentionSearchInProgress {
+                    ProgressView().controlSize(.small)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+
+            Divider()
+
+            if mentionResults.isEmpty, !mentionSearchInProgress {
+                Text("No matching papers")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 2) {
+                            ForEach(Array(mentionResults.enumerated()), id: \.element.id) { index, reference in
+                                Button {
+                                    completeMention(reference)
+                                } label: {
+                                    mentionResultRow(
+                                        reference,
+                                        selected: index == selectedMentionIndex
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                                .id(reference.id)
+                            }
+                        }
+                        .padding(4)
+                    }
+                    .onChange(of: selectedMentionIndex) { _, index in
+                        guard mentionResults.indices.contains(index) else { return }
+                        proxy.scrollTo(mentionResults[index].id, anchor: .center)
+                    }
+                }
+                // A ScrollView has no intrinsic height. A bare maxHeight lets the
+                // popover stay at the tiny size it had while search was loading,
+                // leaving only a sliver of the results visible.
+                .frame(height: min(
+                    CGFloat(mentionResults.count) * Self.mentionResultRowHeight + 8,
+                    280
+                ))
+            }
+        }
+        .frame(width: 330)
+    }
+
+    private static let mentionResultRowHeight: CGFloat = 58
+
+    private func mentionResultRow(_ reference: ChatReference, selected: Bool) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "doc.text")
+                .font(.system(size: 12))
+                .foregroundStyle(selected ? Color.accentColor : .secondary)
+                .frame(width: 18, height: 20)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(reference.title.isEmpty ? "Untitled" : reference.title)
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                if !reference.authors.isEmpty {
+                    Text(reference.authors)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(height: Self.mentionResultRowHeight)
+        .padding(.horizontal, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(selected ? Color.accentColor.opacity(0.11) : Color.clear)
+        )
+        .contentShape(Rectangle())
+    }
+
+    private func refreshActiveMention() {
+        guard let selection = draftSelection,
+              selection.isEmpty,
+              selection.lowerBound >= 0,
+              let caret = draft.index(
+                draft.startIndex,
+                offsetBy: selection.lowerBound,
+                limitedBy: draft.endIndex
+              )
+        else {
+            dismissMentionPopover()
+            return
+        }
+
+        let next = PaperMentions.activeQuery(
+            in: draft,
+            caret: caret,
+            completed: selectedMentions
+        )
+        guard next != activeMentionQuery else { return }
+        activeMentionQuery = next
+        selectedMentionIndex = 0
+        mentionSearchTask?.cancel()
+        mentionResults = []
+
+        guard let next else {
+            mentionSearchInProgress = false
+            return
+        }
+        mentionSearchInProgress = true
+        mentionSearchTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(140))
+            guard !Task.isCancelled else { return }
+            let results = await session.searchMentionableReferences(next.text)
+            guard !Task.isCancelled, activeMentionQuery == next else { return }
+            mentionResults = results
+            selectedMentionIndex = 0
+            mentionSearchInProgress = false
+        }
+    }
+
+    private func scheduleMentionRefresh() {
+        mentionRefreshTask?.cancel()
+        mentionRefreshTask = Task { @MainActor in
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            refreshActiveMention()
+        }
+    }
+
+    private func completeMention(_ reference: ChatReference) {
+        guard let query = activeMentionQuery else { return }
+        let completed = PaperMentions.completing(query, with: reference, in: draft)
+        var mentions = PaperMentions.reconciling(
+            selectedMentions,
+            from: draft,
+            to: completed.text
+        )
+        guard mentions.count < PaperMentions.maximumMentionsPerTurn else {
+            dismissMentionPopover()
+            return
+        }
+        mentions.append(PaperMentionSelection(
+            reference: reference,
+            range: completed.mentionRange
+        ))
+        selectedMentions = mentions
+        activeMentionQuery = nil
+        mentionSearchTask?.cancel()
+        mentionSearchInProgress = false
+        draftSelection = nil
+        reconciledDraft = completed.text
+        draft = completed.text
+        draftSelection = completed.caretOffset..<completed.caretOffset
+        editorFocusRequests += 1
+    }
+
+    private func handleComposerNavigationKey(_ key: ComposerNavigationKey) -> Bool {
+        switch key {
+        case .returnKey:
+            guard activeMentionQuery != nil,
+                  mentionResults.indices.contains(selectedMentionIndex)
+            else { return false }
+            completeMention(mentionResults[selectedMentionIndex])
+        case .downArrow:
+            guard activeMentionQuery != nil, !mentionResults.isEmpty else { return false }
+            moveMentionSelection(by: 1)
+        case .upArrow:
+            guard activeMentionQuery != nil, !mentionResults.isEmpty else { return false }
+            moveMentionSelection(by: -1)
+        case .escape:
+            guard activeMentionQuery != nil else { return false }
+            dismissMentionPopover()
+        }
+        return true
+    }
+
+    private func moveMentionSelection(by delta: Int) {
+        guard !mentionResults.isEmpty else { return }
+        selectedMentionIndex = (selectedMentionIndex + delta + mentionResults.count)
+            % mentionResults.count
+    }
+
+    private func dismissMentionPopover() {
+        activeMentionQuery = nil
+        mentionResults = []
+        mentionSearchTask?.cancel()
+        mentionSearchInProgress = false
+    }
+
+    private func resetDraft() {
+        draftSelection = nil
+        draft = ""
+        selectedMentions = []
+        reconciledDraft = nil
+        dismissMentionPopover()
     }
 
     /// Move keyboard focus into the composer shortly after a selection is staged
