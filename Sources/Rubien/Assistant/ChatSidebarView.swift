@@ -58,7 +58,7 @@ struct ChatSidebarView: View {
             hairline
             content
         }
-        .frame(minWidth: 300)
+        .frame(minWidth: AssistantSidebarMetrics.minimumWidth)
         .task { await session.recheckAvailability() }
         .onAppear {
             session.refreshCodexCatalog()
@@ -860,28 +860,44 @@ struct ChatSidebarView: View {
     /// One compact empty-state block inside the editor. Keeping the heading and
     /// affordances together avoids the visual gap created when they were separate
     /// siblings in the composer box.
+    private static let composerHintKeyWidth: CGFloat = 24
+    private static let composerHintColumnSpacing: CGFloat = 8
+    private static let composerHintGridSpacing: CGFloat = 12
+
     private var composerEmptyGuidance: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 6) {
             Text("Chat about document:")
                 .font(.system(size: 12, weight: .medium))
-            composerHint("⌘↩", "Send")
-            composerHint("@", "Mention a paper")
-            composerHint("⌘V", "Paste an image")
-            composerHint("+", "Add files")
+            HStack(alignment: .top, spacing: Self.composerHintGridSpacing) {
+                VStack(alignment: .leading, spacing: 3) {
+                    composerHint("⌘↩", "Send")
+                    composerHint("⌘V", "Paste an image")
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    composerHint("@", "Mention a paper", keyAlignment: .center)
+                    composerHint("+", "Add files", keyAlignment: .center)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
-        .padding(.leading, 5)
+        .padding(.horizontal, 5)
         .foregroundStyle(.tertiary)
         .allowsHitTesting(false)
     }
 
-    private func composerHint(_ key: String, _ label: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+    private func composerHint(
+        _ key: String,
+        _ label: String,
+        keyAlignment: Alignment = .leading
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: Self.composerHintColumnSpacing) {
             Text(key)
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .frame(width: 30, alignment: .leading)
+                .frame(width: Self.composerHintKeyWidth, alignment: keyAlignment)
             Text(label)
-                .font(.system(size: 12))
         }
+        .font(.system(size: 12))
     }
 
     private var composerEditor: some View {
@@ -1230,7 +1246,11 @@ struct ChatSidebarView: View {
 // MARK: - Floating card (Phase 3a)
 
 enum AssistantSidebarMetrics {
-    static let widthRange: ClosedRange<CGFloat> = 300...900
+    /// The composer's single-line control row is the limiting intrinsic width.
+    /// Keep the card at or above this floor so its input box never clips.
+    static let minimumWidth: CGFloat = 380
+    static let maximumWidth: CGFloat = 900
+    static let widthRange: ClosedRange<CGFloat> = minimumWidth...maximumWidth
 }
 
 /// The assistant as a floating card over the reader's content — the details-panel

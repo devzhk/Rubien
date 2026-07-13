@@ -439,7 +439,7 @@ struct PDFReaderView: View {
     // window; conversation state is in-memory only (D5). Floats as a card over
     // the content (details-panel idiom), not a docked pane.
     @State private var showChatSidebar: Bool
-    @State private var chatPanelWidth: CGFloat = 380
+    @State private var chatPanelWidth: CGFloat = AssistantSidebarMetrics.minimumWidth
 
     @StateObject private var chatRenderer: ChatTranscriptController
     @StateObject private var chatSession: ChatSessionController

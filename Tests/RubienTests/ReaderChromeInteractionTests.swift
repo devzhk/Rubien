@@ -28,7 +28,11 @@ final class ReaderChromeInteractionTests: XCTestCase {
     }
 
     func testAssistantSidebarCanResizeToWideConversationLayout() {
-        XCTAssertEqual(AssistantSidebarMetrics.widthRange.lowerBound, 300)
+        XCTAssertEqual(AssistantSidebarMetrics.widthRange.lowerBound, 380)
+        XCTAssertEqual(
+            AssistantSidebarMetrics.widthRange.lowerBound,
+            WebReaderMetrics.defaultChatPanelWidth
+        )
         XCTAssertEqual(AssistantSidebarMetrics.widthRange.upperBound, 900)
         XCTAssertEqual(
             FloatingPanelMetrics.width(

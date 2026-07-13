@@ -68,7 +68,7 @@ struct ChatSidebarHarnessView: View {
             })
         }
         .background(HarnessWindowAppearance(appearance: appearance.nsAppearance))
-        .frame(minWidth: 340, minHeight: 520)
+        .frame(minWidth: AssistantSidebarMetrics.minimumWidth, minHeight: 520)
         .task {
             guard !didStageAttachmentPreviews else { return }
             didStageAttachmentPreviews = true
