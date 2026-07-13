@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+This file is the single source of guidance for coding agents (Claude Code, Codex, and others) working in this repository. `CLAUDE.md` is a symlink to this file — Claude Code only auto-loads `CLAUDE.md`, so the symlink keeps every agent reading the same instructions with nothing to sync.
 
 ## Overview
 
@@ -32,6 +32,16 @@ swift test --filter RubienCoreTests.CitationFormatterTests/testAPA   # single me
 ./scripts/build-app.sh release   # Release bundle + DMG
 ```
 
+### Launching from a worktree
+
+For ordinary UI checks from a git worktree, run the app from that worktree:
+
+```bash
+swift run Rubien
+```
+
+Avoid `open -a Rubien` or AppleScript activation by app name when verifying worktree changes; macOS may bring forward `/Applications/Rubien.app` instead. Use `./scripts/dev-launch.sh` only when you need signed-app behavior such as App Group / CloudKit entitlements.
+
 ### Foot-gun: stale `.build/checkouts` after toolchain swap
 
 After `sudo xcode-select -s ...` between CommandLineTools and Xcode, SPM's checkout cache can corrupt with cryptic "Source files for target X should be located under …" errors. Fix:
@@ -47,8 +57,8 @@ It's an SPM bug around stale state, not something you broke.
 
 Five Swift targets in `Package.swift`:
 
-- **`RubienPDFKit`** (library) — cross-platform PDF facade with Darwin (PDFKit) and Linux (poppler-glib) backends. Hosts `PDFExtractor`, `PDFService`, `ZoteroFolderImporter`. The Mac app's reader still uses PDFKit directly; the facade is for the headless extract/render path. Read `Docs/Linux-PDF-Backend.md` before touching `Sources/RubienPDFKit/Linux/`.
-- **`RubienCore`** (library) — everything usable without AppKit: GRDB models, migrations, metadata resolvers, BibTeX/RIS importers, citation engines. Depends on `RubienPDFKit`. Only target the CLI/tests depend on directly.
+- **`RubienPDFKit`** (library) — cross-platform PDF facade with Darwin (PDFKit) and Linux (poppler-glib) backends. Hosts `PDFExtractor`, `PDFService`, `ZoteroFolderImporter`. Depends on `RubienCore`. The Mac app's reader still uses PDFKit directly; the facade is for the headless extract/render path. Read `Docs/Linux-PDF-Backend.md` before touching `Sources/RubienPDFKit/Linux/`.
+- **`RubienCore`** (library) — everything usable without AppKit: GRDB models, migrations, metadata resolvers, BibTeX/RIS importers, citation engines. Depends on no other Rubien target (it is the root library; `RubienPDFKit` depends on *it*, not vice versa).
 - **`RubienSync`** (library, Mac-only) — CloudKit mapping + `CKSyncEngine`. CLI does not link it.
 - **`Rubien`** (app executable, Mac-only) — SwiftUI views, readers.
 - **`RubienCLI`** (executable, `rubien-cli`) — 18 subcommands on Mac, 17 on Linux (no `sync`).
@@ -83,7 +93,7 @@ Pipeline in `Sources/Rubien/Services/MetadataResolver.swift`: `DOI → arXiv →
 
 ### Citation engine
 
-`CitationFormatter` (pure Swift, seven built-in styles APA/MLA/Chicago/IEEE/Harvard/Vancouver/Nature) and `CSLEngine` / `CSLManager` (pure Swift, user-imported `.csl` files) handle every live citation path. `CiteprocJSCoreEngine` + the `Resources/Citeproc/` tree are parked — kept in-tree but never invoked; adding a built-in style only needs `CitationFormatter`.
+`CitationFormatter` (pure Swift, seven built-in styles APA/MLA/Chicago/IEEE/Harvard/Vancouver/Nature) and `CSLEngine` / `CSLManager` (pure Swift, user-imported `.csl` files) handle every citation path; adding a built-in style only needs `CitationFormatter`. (A parked citeproc-js JSCore engine + bundled `Resources/Citeproc/` tree were removed in July 2026 — recover from git history if CSL-JS fidelity is ever needed.)
 
 ### Readers and annotations
 
@@ -118,7 +128,7 @@ Five test targets:
 
 - `RubienCoreTests` — bulk of business-logic coverage. Fastest loop; prefer adding coverage here.
 - `RubienSyncTests` — CKRecord ↔ model round-trip per entity. Pure in-memory.
-- `RubienTests` — app-level tests that import SwiftUI.
+- `RubienTests` — app-level tests that import SwiftUI. **Every file in this target must be wrapped in `#if os(macOS)` … `#endif`** — SwiftPM compiles all test targets on Linux CI even for a filtered run, and the Mac-only `Rubien` module doesn't exist there ("no such module 'Rubien'"). A macOS build won't catch a missing guard; only Linux CI does.
 - `RubienCLITests` — exercises `.build/debug/rubien-cli` via Process. Keep JSON contracts stable.
 - `RubienPDFKitTests` — cross-backend parity tests. **Mac-only** by `Package.swift` conditional dep; linking poppler into the Linux test bundle triggers a swift-corelibs-xctest+libdispatch hang. Linux contributors who want to run them locally: see `scripts/run-linux-parity-tests.sh`.
 
@@ -151,15 +161,19 @@ Skip the cycle for trivial diffs (typos, single-line edits, doc tweaks).
 
 ### Codex review foot-guns
 
-The `codex-rescue` step shells out to the vendored codex-companion runtime (`~/.Codex/plugins/cache/openai-codex/codex/<ver>/scripts/codex-companion.mjs`). Two traps have silently eaten whole reviews:
+The `codex-rescue` step shells out to the vendored codex-companion runtime (`~/.claude/plugins/cache/openai-codex/codex/<ver>/scripts/codex-companion.mjs`). Two traps have silently eaten whole reviews:
 
 - **Long reviews die at the 10-minute Bash cap → zombie job.** The `codex:codex-rescue` subagent runs `codex-companion.mjs task` in the **foreground and blocks** (it strips `--background` by design). The harness Bash tool is hard-capped at 600 s, so any review needing >10 min is killed mid-run, leaving the job frozen at `status:"running"` with no result and no notification. **Fix:** for a big diff/plan review, don't rely on the blocking forwarder — either run the foreground `task` call via a Bash `run_in_background: true` command (its stdout is the full rendered review, delivered when it exits, with no 10-min cap), or drive the companion **detached** with `task --background` (returns a `jobId` immediately) and poll `status <jobId>` / `result <jobId>` with short calls. Quick small-diff reviews through the subagent are fine.
 - **Codex's sandbox is read-only — never ask it to write a file.** A prompt that says "write findings to /tmp/…" makes Codex burn its time budget on doomed writes (and shell-quoting retries) instead of reviewing — which is exactly what pushed a run past the 10-min cap. Always tell it to **return findings inline**; capture them yourself.
-- **Recovering a stuck/finished review:** job records + logs live under `~/.Codex/plugins/data/codex-openai-codex/state/<workspace-slug>-<hash>/jobs/` (`<jobId>.json` has `rawOutput`; `<jobId>.log` is the live trace). Clear a zombie with `codex-companion.mjs cancel <jobId>`.
+- **Recovering a stuck/finished review:** job records + logs live under `~/.claude/plugins/data/codex-openai-codex/state/<workspace-slug>-<hash>/jobs/` (`<jobId>.json` has `rawOutput`; `<jobId>.log` is the live trace). Clear a zombie with `codex-companion.mjs cancel <jobId>`.
 - **Run reviews at `--effort medium`, not the `xhigh` config default.** At `xhigh` (`~/.codex/config.toml`) a turn can stall forever: it reaches `response.in_progress`, streams nothing, and codex has no turn timeout — so the job hangs at `status:"running"` with empty `rawOutput` (distinct from the Bash-cap zombie; happens even backgrounded). **Fix:** `codex-companion.mjs task --background --effort medium < prompt-file`, poll `status`/`result`; if it stalls ~2 min, `cancel <jobId>` and retry at medium. Confirm the stall signature in `~/.codex/logs_2.sqlite` (table `logs`) if needed.
 - **Model:** never pass `--model` — stay on the config default gpt-5.5; never downgrade (not gpt-4.1, not gpt-5.4). For a stall, change *effort*, never the model.
 
 ## Conventions worth knowing
 
 - **Cross-platform logging:** use `RubienLogger` (shim in `Sources/RubienCore/Logging/`). Don't `import os.Logger` directly in code that compiles on Linux.
+- **The Mac-only `Rubien` app target still COMPILES on Linux CI** (SwiftPM builds the whole package graph for `swift test`), surviving via a two-tier file convention: most files are wrapped whole-file in `#if os(macOS)`, but a deliberate **portable subset of `Sources/Rubien/Assistant/`** (`AgentProvider`, `ClaudeStreamParser`, `ClaudeSessionStore`, `CodexAppServerProtocol`, `ChatTranscriptModels`, `ChatTranscriptJS`, `AssistantTurnGate`, `AssistantModelOptions`, `AssistantAttachments`, `MCPContentChannel`) is Foundation-only and un-gated. Two rules follow: (1) a new app-target file must either take the `os(macOS)` guard or stay Foundation-pure (CryptoKit → the `canImport(CryptoKit)`/`Crypto` dance, and the target needs the Linux-conditional `Crypto` product dep — already added); (2) any type referenced FROM a portable file must itself live in a portable file. A macOS build won't catch a violation — only Linux CI does (shipped example: the attachments feature's Mac-framework files defining types used by portable `AgentProvider`/history readers; fixed in `c7e7f6e`).
+- **CoreFoundation on Linux needs an explicit import.** swift-corelibs-foundation does **not** re-export CF symbols (`CFGetTypeID`, `CFBooleanGetTypeID`, …) through `import Foundation`. Any file that compiles on Linux and touches CF needs `#if canImport(CoreFoundation)` / `import CoreFoundation` / `#endif` (precedent: `Sources/RubienCLI/MCPToolCatalog.swift`). A macOS build won't catch the omission — only Linux CI does. Common trigger: the CFBoolean type-id check that distinguishes JSON `true` from `1` (the only reliable test; `NSNumber(1) is Bool` is `true` on Apple platforms).
 - **Built-in property mutability has two buckets.** "Fixed" options when they're coupled to BibTeX/CSL/export schemas (currently only Type/`referenceType`); "user-extensible" otherwise (Status/`readingStatus` today, and any future built-in). The split is encoded in `Properties.optionsMutable(for:)` in `RubienCLI.swift`; pick the right bucket when adding a new built-in. Custom (non-default) properties are always user-extensible.
+- **`RubienPreferences` is not observable** — it's an `enum` of `UserDefaults.standard` statics. A SwiftUI control bound with `Binding(get: { pref }, set: { pref = $0 })` **straight to it** *persists* the change but the view never invalidates, so the control only reflects the new value **after a relaunch** — a silent bug (unit tests pass; it "works" next launch). Back the control with a `@State` mirror (seed on appear, write through via `.onChange`), or `@AppStorage` when the pref has no custom empty/default logic. The theme picker is the misleading exception: it refreshes only because its setter *also* flips `NSApplication.appearance`, which forces a redraw. `SettingsActionButtonStyle` / the assistant Settings pane show the mirror pattern.
+- **Reader windows are reused per reference.** `ReaderWindowManager.openWebReader` / `openPDFReader` cache one `NSWindow` per `reference.id`, so reopening an already-open document does **not** re-run the reader's `init`. Anything read only at init (e.g. a just-changed setting) won't refresh for an open reader — apply live-changing state on a user action instead (the assistant sidebar re-reads its defaults on "New conversation", not just at window open).
