@@ -1558,6 +1558,7 @@ struct AnnotatablePDFView: NSViewRepresentable {
                 page: page,
                 cropRect: target.cropRect,
                 backingScale: backingScale,
+                appearance: pdfView.effectiveAppearance,
                 displayBox: target.displayBox
             ) else {
                 return nil

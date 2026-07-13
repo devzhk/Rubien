@@ -99,6 +99,7 @@ enum PDFLinkPreviewResolver {
         page: PDFPage,
         cropRect: CGRect,
         backingScale: CGFloat,
+        appearance: NSAppearance,
         displayBox: PDFDisplayBox = .cropBox
     ) -> NSImage? {
         let crop = cropRect.standardized
@@ -127,19 +128,23 @@ enum PDFLinkPreviewResolver {
 
         representation.size = crop.size
 
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = graphicsContext
+        // Bitmap contexts do not inherit the source view's appearance. Bind it
+        // explicitly so semantic colors follow Rubien's theme instead of macOS.
+        appearance.performAsCurrentDrawingAppearance {
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = graphicsContext
+            defer { NSGraphicsContext.restoreGraphicsState() }
 
-        let context = graphicsContext.cgContext
-        context.saveGState()
-        context.scaleBy(x: scale, y: scale)
-        NSColor.textBackgroundColor.setFill()
-        CGRect(origin: .zero, size: crop.size).fill()
-        context.translateBy(x: -crop.minX, y: -crop.minY)
-        page.draw(with: displayBox, to: context)
-        context.restoreGState()
+            let context = graphicsContext.cgContext
+            context.saveGState()
+            defer { context.restoreGState() }
 
-        NSGraphicsContext.restoreGraphicsState()
+            context.scaleBy(x: scale, y: scale)
+            NSColor.textBackgroundColor.setFill()
+            CGRect(origin: .zero, size: crop.size).fill()
+            context.translateBy(x: -crop.minX, y: -crop.minY)
+            page.draw(with: displayBox, to: context)
+        }
 
         let image = NSImage(size: crop.size)
         image.addRepresentation(representation)

@@ -168,16 +168,68 @@ final class PDFLinkPreviewResolverTests: XCTestCase {
     func testRenderPreviewUsesBackingScaleForBitmapPixels() throws {
         let document = try makeDocument(pageCount: 1)
         let page = try XCTUnwrap(document.page(at: 0))
+        let appearance = try XCTUnwrap(NSAppearance(named: .aqua))
         let image = try XCTUnwrap(PDFLinkPreviewResolver.renderPreview(
             page: page,
             cropRect: CGRect(x: 0, y: 0, width: 120, height: 80),
-            backingScale: 2
+            backingScale: 2,
+            appearance: appearance
         ))
         let representation = try XCTUnwrap(image.representations.first)
 
         XCTAssertEqual(image.size, CGSize(width: 120, height: 80))
         XCTAssertEqual(representation.pixelsWide, 240)
         XCTAssertEqual(representation.pixelsHigh, 160)
+    }
+
+    func testRenderPreviewUsesRequestedLightAppearanceInsideDarkDrawingContext() throws {
+        let size = CGSize(width: 16, height: 16)
+        let sourceRepresentation = try XCTUnwrap(NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(size.width),
+            pixelsHigh: Int(size.height),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bitmapFormat: [],
+            bytesPerRow: 0,
+            bitsPerPixel: 32
+        ))
+        sourceRepresentation.size = size
+
+        let sourceImage = NSImage(size: size)
+        sourceImage.addRepresentation(sourceRepresentation)
+        let page = try XCTUnwrap(PDFPage(image: sourceImage))
+        let document = PDFDocument()
+        document.insert(page, at: 0)
+
+        let lightAppearance = try XCTUnwrap(NSAppearance(named: .aqua))
+        let darkAppearance = try XCTUnwrap(NSAppearance(named: .darkAqua))
+        let preview: NSImage? = withExtendedLifetime(document) {
+            var renderedImage: NSImage?
+            darkAppearance.performAsCurrentDrawingAppearance {
+                renderedImage = PDFLinkPreviewResolver.renderPreview(
+                    page: page,
+                    cropRect: CGRect(origin: .zero, size: size),
+                    backingScale: 1,
+                    appearance: lightAppearance,
+                    displayBox: .mediaBox
+                )
+            }
+            return renderedImage
+        }
+
+        let representation = try XCTUnwrap(preview?.representations.first as? NSBitmapImageRep)
+        let centerColor = try XCTUnwrap(
+            representation.colorAt(x: Int(size.width / 2), y: Int(size.height / 2))?
+                .usingColorSpace(.deviceRGB)
+        )
+
+        XCTAssertEqual(centerColor.redComponent, 1, accuracy: 0.02)
+        XCTAssertEqual(centerColor.greenComponent, 1, accuracy: 0.02)
+        XCTAssertEqual(centerColor.blueComponent, 1, accuracy: 0.02)
     }
 
     private func makeDocument(pageCount: Int) throws -> PDFDocument {
