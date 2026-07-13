@@ -326,5 +326,20 @@ Also in 0.3.0:
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.3.2</title>
+            <description><![CDATA[• Add papers from eLife — paste an eLife article URL (elifesciences.org/articles/…) and Rubien resolves its metadata and downloads the open-access PDF.
+• Smaller download — a leaner, Apple Silicon-only app image.]]></description>
+            <pubDate>Mon, 13 Jul 2026 04:12:08 +0000</pubDate>
+            <sparkle:version>23</sparkle:version>
+            <sparkle:shortVersionString>0.3.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.3.2/Rubien-0.3.2.dmg"
+                sparkle:edSignature="Ub/ojTGhj0fIpXOcqQB31ro+Qsv1g/DHJGG6VhVDbjo5gtWKy1+uPM/VLH+xwgPR4TZjx+aKVKiB+7g0u9gOBg=="
+                length="12374400"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
