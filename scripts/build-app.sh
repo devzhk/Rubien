@@ -55,6 +55,23 @@ fi
 echo "▸ Building Rubien $VERSION (build $BUILD_NUMBER)"
 
 HELPERS_DIR="$APP_BUNDLE/Contents/Helpers"
+DSYM_ARCHIVE_DIR="$OUTPUT_DIR/dSYMs"
+DSYM_ARCHIVE_PATH=""
+
+# Xcode scheme state is user-specific and can silently leave coverage enabled
+# or vary the architecture with the build host. Pin the release settings here
+# so shipped binaries are coverage-free and keep the intentional Apple
+# Silicon-only contract regardless of a developer machine's scheme.
+XCODEBUILD_SETTINGS=()
+if [ "$MODE" = "release" ]; then
+    XCODEBUILD_SETTINGS=(
+        ARCHS=arm64
+        ONLY_ACTIVE_ARCH=NO
+        CLANG_ENABLE_CODE_COVERAGE=NO
+        CLANG_COVERAGE_MAPPING=NO
+        ENABLE_CODE_COVERAGE=NO
+    )
+fi
 
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 CODESIGN_ENABLED="${CODESIGN_ENABLED:-1}"
@@ -85,6 +102,7 @@ build_app() {
         -configuration "$CONFIGURATION" \
         -destination 'platform=macOS' \
         -derivedDataPath "$DERIVED_DATA" \
+        "${XCODEBUILD_SETTINGS[@]}" \
         -quiet
 }
 
@@ -95,6 +113,7 @@ build_cli() {
         -configuration "$CONFIGURATION" \
         -destination 'platform=macOS' \
         -derivedDataPath "$DERIVED_DATA" \
+        "${XCODEBUILD_SETTINGS[@]}" \
         -quiet
 }
 
@@ -240,7 +259,10 @@ embed_sparkle_framework() {
     # canonical Mac-app rpath. Add it via install_name_tool, idempotently —
     # repeated -add_rpath errors with "file already has rpath" on rebuilds.
     local exe="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
-    if ! /usr/bin/otool -l "$exe" | grep -q "path @executable_path/../Frameworks "; then
+    # grep must consume the full otool stream under pipefail; grep -q can give
+    # otool SIGPIPE and make an existing rpath look absent.
+    if ! /usr/bin/otool -l "$exe" \
+        | grep "path @executable_path/../Frameworks " >/dev/null; then
         /usr/bin/install_name_tool -add_rpath "@executable_path/../Frameworks" "$exe"
         echo "   ✓ Added @executable_path/../Frameworks rpath to $APP_NAME"
     fi
@@ -264,6 +286,198 @@ embed_provisioning_profile() {
     echo "▸ Embedding provisioning profile..."
     cp "$PROVISION_PROFILE" "$APP_BUNDLE/Contents/embedded.provisionprofile"
     echo "   ✓ Embedded $(basename "$PROVISION_PROFILE")"
+}
+
+thin_sparkle_for_release() {
+    [ "$MODE" = "release" ] || return 0
+    [ "$FLAVOR" = "dmg" ] || return 0
+
+    local framework="$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
+    local temp_dir
+    temp_dir="$(mktemp -d -t RubienSparkleArm64)"
+    local macho_count=0
+
+    echo "▸ Thinning embedded Sparkle components to arm64..."
+    while IFS= read -r -d '' candidate; do
+        local architectures
+        if ! architectures="$(/usr/bin/lipo -archs "$candidate" 2>/dev/null)"; then
+            continue
+        fi
+        macho_count=$((macho_count + 1))
+
+        case " $architectures " in
+            *" arm64 "*) ;;
+            *)
+                rm -rf "$temp_dir"
+                echo "✗ Embedded Sparkle binary has no arm64 slice: $candidate" >&2
+                echo "  Found: $architectures" >&2
+                exit 1
+                ;;
+        esac
+
+        if [ "$architectures" != "arm64" ]; then
+            local permissions thin_output
+            permissions="$(stat -f '%Lp' "$candidate")"
+            thin_output="$temp_dir/$(basename "$candidate").arm64"
+            if ! /usr/bin/lipo "$candidate" -thin arm64 -output "$thin_output" \
+                || ! chmod "$permissions" "$thin_output" \
+                || ! mv -f "$thin_output" "$candidate"; then
+                rm -rf "$temp_dir"
+                echo "✗ Failed to thin embedded Sparkle binary: $candidate" >&2
+                exit 1
+            fi
+        fi
+
+        architectures="$(/usr/bin/lipo -archs "$candidate")"
+        if [ "$architectures" != "arm64" ]; then
+            rm -rf "$temp_dir"
+            echo "✗ Embedded Sparkle binary is not Apple Silicon-only: $candidate" >&2
+            echo "  Expected: arm64; found: $architectures" >&2
+            exit 1
+        fi
+    done < <(find "$framework" -type f -print0)
+
+    rm -rf "$temp_dir"
+    if [ "$macho_count" -eq 0 ]; then
+        echo "✗ No Mach-O binaries found in embedded Sparkle.framework" >&2
+        exit 1
+    fi
+    echo "   ✓ Thinned + verified $macho_count Sparkle Mach-O binaries"
+}
+
+prepare_release_artifacts() {
+    [ "$MODE" = "release" ] || return 0
+
+    echo "▸ Verifying release artifacts and stripping binaries..."
+    mkdir -p "$DSYM_ARCHIVE_DIR"
+
+    local all_uuids=""
+    local names=("$APP_NAME" "$CLI_NAME")
+    local binaries=(
+        "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+        "$HELPERS_DIR/$CLI_NAME"
+    )
+    local dsyms=(
+        "$PRODUCTS_DIR/$APP_NAME.dSYM"
+        "$PRODUCTS_DIR/$CLI_NAME.dSYM"
+    )
+    if [ "${#names[@]}" -ne "${#binaries[@]}" ] \
+        || [ "${#names[@]}" -ne "${#dsyms[@]}" ]; then
+        echo "✗ Internal release-artifact list mismatch" >&2
+        exit 1
+    fi
+
+    local index name binary dsym binary_uuids dsym_uuids uuid_record
+    for index in "${!names[@]}"; do
+        name="${names[$index]}"
+        binary="${binaries[$index]}"
+        dsym="${dsyms[$index]}"
+
+        local architectures
+        architectures="$(/usr/bin/lipo -archs "$binary")"
+        if [ "$architectures" != "arm64" ]; then
+            echo "✗ Release binary must be Apple Silicon-only: $binary" >&2
+            echo "  Expected: arm64; found: $architectures" >&2
+            exit 1
+        fi
+
+        # strip(1) removes symbols but deliberately leaves LLVM coverage maps
+        # and counters. Reject them before signing so a scheme-setting
+        # regression cannot silently ship an instrumented release again.
+        # Do not use grep -q here: with pipefail, its early exit gives otool a
+        # SIGPIPE and can make a real match look like a failed pipeline.
+        if /usr/bin/otool -l "$binary" \
+            | /usr/bin/grep -E '(__LLVM_COV|__llvm_prf_)' >/dev/null; then
+            echo "✗ Coverage instrumentation found in release binary: $binary" >&2
+            echo "  Ensure the xcodebuild coverage overrides above remain disabled." >&2
+            exit 1
+        fi
+
+        if [ ! -d "$dsym" ]; then
+            echo "✗ Missing release dSYM: $dsym" >&2
+            exit 1
+        fi
+        binary_uuids="$(dwarfdump --uuid "$binary" | awk '{ print $2, $3 }' | LC_ALL=C sort)"
+        dsym_uuids="$(dwarfdump --uuid "$dsym" | awk '{ print $2, $3 }' | LC_ALL=C sort)"
+        if [ -z "$binary_uuids" ] || [ "$binary_uuids" != "$dsym_uuids" ]; then
+            echo "✗ dSYM UUID mismatch for $name" >&2
+            echo "  Binary: ${binary_uuids:-<none>}" >&2
+            echo "  dSYM:   ${dsym_uuids:-<none>}" >&2
+            exit 1
+        fi
+        uuid_record="$name"$'\n'"$binary_uuids"
+        if [ -n "$all_uuids" ]; then all_uuids+=$'\n'; fi
+        all_uuids+="$uuid_record"
+
+        local before_size after_size
+        before_size="$(stat -f '%z' "$binary")"
+        /usr/bin/strip -S -x "$binary"
+        after_size="$(stat -f '%z' "$binary")"
+        echo "   ✓ Verified + stripped $name ($architectures): ${before_size} → ${after_size} bytes"
+    done
+
+    # Catch universal slices in every bundled dependency, not just binaries we
+    # compile ourselves. Sparkle is copied from a binary target and therefore
+    # does not inherit ARCHS=arm64 from the xcodebuild invocations above.
+    local bundled_macho_count=0 candidate architectures
+    while IFS= read -r -d '' candidate; do
+        if ! architectures="$(/usr/bin/lipo -archs "$candidate" 2>/dev/null)"; then
+            continue
+        fi
+        bundled_macho_count=$((bundled_macho_count + 1))
+        if [ "$architectures" != "arm64" ]; then
+            echo "✗ Bundled Mach-O must be Apple Silicon-only: $candidate" >&2
+            echo "  Expected: arm64; found: $architectures" >&2
+            exit 1
+        fi
+    done < <(find "$APP_BUNDLE/Contents" -type f -print0)
+    if [ "$bundled_macho_count" -eq 0 ]; then
+        echo "✗ No Mach-O binaries found in assembled app" >&2
+        exit 1
+    fi
+    echo "   ✓ Verified all $bundled_macho_count bundled Mach-O binaries are arm64-only"
+
+    local symbol_id existing_uuids
+    symbol_id="$(printf '%s' "$all_uuids" | shasum -a 256 | awk '{ print substr($1, 1, 12) }')"
+    DSYM_ARCHIVE_PATH="$DSYM_ARCHIVE_DIR/$APP_NAME-$VERSION-$BUILD_NUMBER-$symbol_id.dSYMs.zip"
+
+    if [ -e "$DSYM_ARCHIVE_PATH" ]; then
+        if ! existing_uuids="$(unzip -p "$DSYM_ARCHIVE_PATH" '*/UUIDs.txt')" \
+            || [ "$existing_uuids" != "$all_uuids" ] \
+            || ! unzip -tq "$DSYM_ARCHIVE_PATH" >/dev/null; then
+            echo "✗ Existing dSYM archive is invalid or has different UUIDs: $DSYM_ARCHIVE_PATH" >&2
+            exit 1
+        fi
+        echo "   ✓ Preserved existing UUID-matched dSYM archive"
+    else
+        local archive_temp archive_root
+        archive_temp="$(mktemp -d -t RubienDSYMs)"
+        archive_root="$archive_temp/$APP_NAME-$VERSION-$BUILD_NUMBER.dSYMs"
+        if ! mkdir -p "$archive_root"; then
+            rm -rf "$archive_temp"
+            echo "✗ Failed to create temporary dSYM archive directory" >&2
+            exit 1
+        fi
+        for index in "${!names[@]}"; do
+            if ! cp -R "${dsyms[$index]}" "$archive_root/${names[$index]}.dSYM"; then
+                rm -rf "$archive_temp"
+                echo "✗ Failed to stage ${names[$index]}.dSYM" >&2
+                exit 1
+            fi
+        done
+        if ! printf '%s\n' "$all_uuids" > "$archive_root/UUIDs.txt" \
+            || ! ditto -c -k --sequesterRsrc --keepParent "$archive_root" "$DSYM_ARCHIVE_PATH" \
+            || ! unzip -tq "$DSYM_ARCHIVE_PATH" >/dev/null; then
+            rm -rf "$archive_temp"
+            rm -f "$DSYM_ARCHIVE_PATH"
+            echo "✗ Failed to create verified dSYM archive" >&2
+            exit 1
+        fi
+        rm -rf "$archive_temp"
+        echo "   ✓ Archived dSYMs: $DSYM_ARCHIVE_PATH"
+    fi
+    printf '%s\n' "$DSYM_ARCHIVE_PATH" \
+        > "$DSYM_ARCHIVE_DIR/$APP_NAME-$VERSION-$BUILD_NUMBER.latest.txt"
 }
 
 sign_bundle() {
@@ -387,13 +601,18 @@ create_dmg() {
     fi
 
     # create-dmg adds the Applications symlink via --app-drop-link, runs
-    # AppleScript to position icons + apply the background, then converts
-    # the resulting image to UDZO. Coordinates match render-dmg-background.swift's
-    # layout assumptions (Rubien at x=165, Applications at x=495, both at y=200).
+    # AppleScript to position icons + apply the background, then converts the
+    # resulting image to the selected compressed format. Coordinates match
+    # render-dmg-background.swift's layout assumptions (Rubien at x=165,
+    # Applications at x=495, both at y=200).
+    # ULFO is smaller than UDZO for Rubien's mixed Mach-O/PNG payload, mounts
+    # quickly, and avoids hdiutil's deprecated UDBZ format.
     create-dmg \
         --volname "$APP_NAME" \
         --background "$bg" \
         "${volicon_arg[@]}" \
+        --filesystem APFS \
+        --format ULFO \
         --window-pos 200 120 \
         --window-size 660 400 \
         --icon-size 100 \
@@ -405,17 +624,11 @@ create_dmg() {
         "$DMG_PATH" \
         "$STAGING_DIR/" >/dev/null
 
-    # Set the .dmg file's own Finder icon (what users see in Safari/Finder
-    # downloads BEFORE mounting). create-dmg's --volicon only covers the
-    # mounted-volume icon. NSWorkspace.setIcon writes the file's
-    # com.apple.ResourceFork + FinderInfo, which Finder honors.
-    if [ -f "$icns" ]; then
-        /usr/bin/env swift -e "
-        import Cocoa
-        let img = NSImage(contentsOfFile: \"$icns\")!
-        NSWorkspace.shared.setIcon(img, forFile: \"$DMG_PATH\", options: [])
-        " 2>/dev/null || echo "   ⚠ failed to stamp .dmg file icon (cosmetic only)"
-    fi
+    # Do not stamp a custom icon onto the .dmg file itself with
+    # NSWorkspace.setIcon. That creates a large ResourceFork xattr which is not
+    # included in an HTTP/GitHub asset upload and makes local `du` output
+    # overstate the downloadable size. The intentional mounted-volume icon
+    # above remains embedded inside the DMG as .VolumeIcon.icns.
 }
 
 build_app
@@ -425,16 +638,23 @@ embed_app_icon
 embed_helpers
 embed_sparkle_framework
 embed_provisioning_profile
+thin_sparkle_for_release
+prepare_release_artifacts
 sign_bundle
 create_dmg
 
 APP_SIZE=$(du -sh "$APP_BUNDLE" | cut -f1 | xargs)
-DMG_SIZE=$(du -sh "$DMG_PATH" | cut -f1 | xargs)
+DMG_SIZE_BYTES=$(stat -f '%z' "$DMG_PATH")
+DMG_SIZE=$(awk -v bytes="$DMG_SIZE_BYTES" 'BEGIN { printf "%.1f MiB", bytes / 1048576 }')
 
 echo ""
 echo "✅ Done!  App=${APP_SIZE}  DMG=${DMG_SIZE}"
+echo "   DMG data fork: ${DMG_SIZE_BYTES} bytes"
 echo "   App: $APP_BUNDLE"
 echo "   DMG: $DMG_PATH"
+if [ "$MODE" = "release" ]; then
+    echo "   dSYMs: $DSYM_ARCHIVE_PATH"
+fi
 echo ""
 echo "   Run:      open \"$APP_BUNDLE\""
 echo "   DMG:      \"$DMG_PATH\""

@@ -51,7 +51,7 @@ PDF auto-download works for arXiv, bioRxiv, medRxiv, any open-access paper with 
 
 **For the app (Mac):**
 - macOS 15 (Sequoia) or later to run
-- Apple Silicon or Intel
+- Apple Silicon
 - Xcode 16.3+ to build from source (GRDB 7.10 declares `swift-tools-version: 6.1`)
 
 **For the CLI on Linux:** Swift 6.3+ toolchain and a few system libraries — see [Linux CLI](#linux-cli) below.

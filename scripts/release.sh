@@ -13,6 +13,7 @@ set -euo pipefail
 # Optional env:
 #   NOTARY_PROFILE      — keychain profile name (default: "RubienNotary")
 #   APPCAST_TARGET      — "production" (default) or "staging"
+#   ALLOW_DMG_SIZE_GROWTH — set to 1 only after auditing an intentional increase
 #   PROVISION_PROFILE   — Developer ID Distribution provisioning profile
 #                         (default: ~/Downloads/Rubien_Developer_ID_Distribution.provisionprofile).
 #                         Required for the DMG flavor. Must authorize App
@@ -35,6 +36,42 @@ case "$APPCAST_TARGET" in
     *) echo "✗ APPCAST_TARGET must be production or staging" >&2; exit 64 ;;
 esac
 export APPCAST_PATH APPCAST_TARGET
+
+readonly DMG_SIZE_GROWTH_LIMIT_BYTES=2097152
+ALLOW_DMG_SIZE_GROWTH="${ALLOW_DMG_SIZE_GROWTH:-0}"
+case "$ALLOW_DMG_SIZE_GROWTH" in
+    0|1) ;;
+    *) echo "✗ ALLOW_DMG_SIZE_GROWTH must be 0 or 1" >&2; exit 64 ;;
+esac
+
+check_dmg_size_growth() {
+    local dmg="$1"
+    local phase="$2"
+    local current_size previous_size growth
+    current_size="$(stat -f '%z' "$dmg")"
+    # appcast.sh inserts new items immediately before </channel>, so this feed
+    # is oldest-first and the final enclosure length is the latest release.
+    previous_size="$(sed -n 's/.*length="\([0-9][0-9]*\)".*/\1/p' "$APPCAST_PATH" | tail -1)"
+
+    if [ -z "$previous_size" ]; then
+        echo "   ℹ No previous $APPCAST_TARGET DMG size is recorded; skipping $phase growth comparison"
+        return 0
+    fi
+
+    growth=$((current_size - previous_size))
+    if [ "$growth" -gt "$DMG_SIZE_GROWTH_LIMIT_BYTES" ]; then
+        if [ "$ALLOW_DMG_SIZE_GROWTH" = "1" ]; then
+            echo "   ⚠ $phase DMG grew by $growth bytes (override acknowledged)"
+        else
+            echo "✗ $phase DMG grew by $growth bytes (previous=$previous_size, current=$current_size)" >&2
+            echo "  Limit: $DMG_SIZE_GROWTH_LIMIT_BYTES bytes." >&2
+            echo "  Audit the payload, then rerun with ALLOW_DMG_SIZE_GROWTH=1 if intentional." >&2
+            exit 1
+        fi
+    else
+        echo "   ✓ $phase DMG size delta within limit: $growth bytes (previous=$previous_size, current=$current_size)"
+    fi
+}
 
 # 1. Clean working tree check
 if ! git diff --quiet || ! git diff --cached --quiet; then
@@ -63,6 +100,7 @@ if [ ! -f "$DMG_PATH" ]; then
     echo "✗ Expected DMG not produced at $DMG_PATH" >&2
     exit 1
 fi
+check_dmg_size_growth "$DMG_PATH" "Pre-notarization"
 
 # 4. Notarize
 echo "▸ Submitting $DMG_NAME to notarytool (this can take 5–15 min)…"
@@ -75,6 +113,7 @@ xcrun notarytool submit "$DMG_PATH" \
 echo "▸ Stapling notarization ticket…"
 xcrun stapler staple "$DMG_PATH"
 xcrun stapler validate "$DMG_PATH"
+check_dmg_size_growth "$DMG_PATH" "Stapled"
 
 # 6. Per-component signature integrity (catches any --deep slip, missing
 #    Sparkle component, or post-hoc tamper). Each line emits 'valid on disk'

@@ -74,6 +74,66 @@ export CODESIGN_IDENTITY="Developer ID Application: <Your Name> (9TXK4V3SS8)"
 
 **You must bump `VERSION` (if the marketing version is changing) and `BUILD.txt` (every release) before running — `release.sh` does not bump them for you. Then run `./scripts/generate-cli-version.sh` and commit the regenerated `Sources/RubienCLI/GeneratedVersion.swift` alongside the bump; the file is checked in and CI's "Verify generated CLI version is in sync" step fails the build if it drifts from `VERSION` + `BUILD.txt`.** `release.sh` is then the single entry point: it calls `scripts/build-app.sh` (which assembles + signs + embeds Sparkle, then builds the DMG), notarizes, signs the appcast item with `sign_update`, prepends the item to `Docs/appcast.xml`, commits + pushes the appcast change, tags the source commit on the private repo, and creates the GitHub release with the DMG on the public `devzhk/Rubien-releases` repo via `gh release create --repo`.
 
+## Artifact-size guardrails
+
+`scripts/build-app.sh release` makes release size deterministic rather than
+inheriting user-specific Xcode scheme state:
+
+- Both first-party Mac executables are pinned to exactly `arm64`, matching
+  Rubien's Apple Silicon-only release policy, and code coverage is explicitly
+  disabled. The copied Sparkle binary framework is thinned to arm64 too, and
+  the build rejects any non-arm64 Mach-O anywhere in the assembled app.
+- The assembled app and CLI binaries are checked for LLVM coverage sections,
+  then stripped with `strip -S -x` before codesigning. Before stripping, their
+  UUID-matched dSYMs are preserved in a compressed, UUID-keyed archive under
+  `build/dSYMs/Rubien-<version>-<build>-<uuid-hash>.dSYMs.zip`.
+  The build fails if the architecture is not exactly `arm64`, a matching dSYM
+  is missing, or `__LLVM_COV` / `__llvm_prf_*` is present.
+- The DMG uses APFS + ULFO/LZFSE. The custom mounted-volume icon remains by
+  design; it is the Rubien disk icon shown after mounting.
+- The `.dmg` file itself does not receive a Finder ResourceFork icon. Resource
+  forks are not part of GitHub/HTTP file uploads, and `du` counts them even
+  though users never download them.
+
+After a release build, these checks should succeed before notarization:
+
+```bash
+APP=build/Rubien.app
+DSYM_ZIP=$(cat "build/dSYMs/Rubien-$(tr -d '[:space:]' < VERSION)-$(tr -d '[:space:]' < BUILD.txt).latest.txt")
+
+# Expected: every line begins with exactly "arm64" (currently seven Mach-Os:
+# the app, CLI, Sparkle framework, Autoupdate, Updater, and two XPC services).
+find "$APP/Contents" -type f -print0 | while IFS= read -r -d '' binary; do
+  archs=$(lipo -archs "$binary" 2>/dev/null) || continue
+  printf '%s\t%s\n' "$archs" "${binary#$APP/Contents/}"
+done
+
+# Expected: both negated checks exit zero with no output.
+! otool -l "$APP/Contents/MacOS/Rubien" | grep -E '(__LLVM_COV|__llvm_prf_)'
+! otool -l "$APP/Contents/Helpers/rubien-cli" | grep -E '(__LLVM_COV|__llvm_prf_)'
+
+# Expected: the manifest lists the same UUIDs as the two binaries above.
+dwarfdump --uuid "$APP/Contents/MacOS/Rubien" "$APP/Contents/Helpers/rubien-cli"
+unzip -p "$DSYM_ZIP" '*/UUIDs.txt'
+
+# This is the downloadable byte count used by Sparkle/GitHub. Do not use du.
+stat -f '%z bytes' build/Rubien-Release.dmg
+```
+
+`release.sh` compares the exact byte count with the latest appcast
+`<enclosure length="…">` both before notarization and after stapling, and
+aborts on growth over 2 MiB.
+Rubien 0.3.1, before these guardrails, was 18,978,423 bytes. Feature-driven
+growth is acceptable, but audit it first and rerun with
+`ALLOW_DMG_SIZE_GROWTH=1`; coverage sections, unstripped symbol tables, missing
+or unexpected architecture slices (including dependencies), or new duplicate
+payloads are not acceptable overrides.
+An ad-hoc-signed 0.3.1 arm64 validation image with the mounted-volume icon
+retained measured 12,344,233 bytes before notarization; Developer ID signing,
+Finder layout metadata, and stapling can move the final number slightly.
+After publishing, copy the printed dSYM zip to durable private storage;
+`build/` is ignored local output and is not a backup.
+
 ## Linux `rubien-cli` build (automatic)
 
 `release.sh` dispatches the `linux-cli-release.yml` workflow automatically after publishing the Mac release (production target). It builds a static-stdlib x86_64 binary, smoke-tests it from the tarball in a clean container, signs it (ed25519), and uploads the `.tar.gz` + `.tar.gz.sig` to `devzhk/Rubien-releases`. To re-run manually:
