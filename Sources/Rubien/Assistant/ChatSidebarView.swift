@@ -467,9 +467,9 @@ struct ChatSidebarView: View {
                 pendingAttachmentTray
             }
             composerEditor
-            Text("Type @ to mention a paper · Add files or images")
-                .font(.system(size: 10.5))
-                .foregroundStyle(.tertiary)
+            if draft.isEmpty {
+                composerHints
+            }
             HStack(spacing: 8) {
                 plusMenu
                 approvalPicker
@@ -860,6 +860,32 @@ struct ChatSidebarView: View {
         return text.font(.system(size: 12))
     }
 
+    /// The empty-composer guidance: a short affordance list shown right under the
+    /// "Chat about this document:" placeholder and gated on an empty draft, so it
+    /// collapses the moment you start typing. One hint per line with the key/glyph
+    /// in a fixed-width leading column so the descriptions align into a clean list.
+    private var composerHints: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            composerHint("⌘↩", "Send")
+            composerHint("@", "Mention a paper")
+            composerHint("⌘V", "Paste an image")
+            composerHint("+", "Add files")
+        }
+        .padding(.leading, 5)
+        .padding(.top, 1)
+    }
+
+    private func composerHint(_ key: String, _ label: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(key)
+                .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                .frame(width: 30, alignment: .leading)
+            Text(label)
+                .font(.system(size: 10.5))
+        }
+        .foregroundStyle(.tertiary)
+    }
+
     private var composerEditor: some View {
         ZStack(alignment: .topLeading) {
             // Invisible sizer: the ZStack takes THIS text's height, so the editor
@@ -873,10 +899,11 @@ struct ChatSidebarView: View {
                 .opacity(0)
                 .allowsHitTesting(false)
             if draft.isEmpty {
-                // The placeholder doubles as the send-shortcut hint (plain ↩ is a
-                // newline, so ⌘↩ is otherwise undiscoverable — and this line was
-                // spending its words on nothing).
-                Text("Chat about this document — ⌘+↩ to send")
+                // The empty-state heading; `composerHints` renders the affordance
+                // list (send / mention / paste / add files) right under it. Both are
+                // gated on an empty draft, so they collapse together the moment you
+                // start typing.
+                Text("Chat about this document:")
                     .font(.body)
                     .foregroundStyle(.tertiary)
                     // Align with the AppKit editor's insertion point (its text
