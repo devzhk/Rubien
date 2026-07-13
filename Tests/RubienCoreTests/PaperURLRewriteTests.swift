@@ -64,6 +64,16 @@ final class PaperURLRewriteTests: XCTestCase {
                        "https://sciencedirect.com/science/article/pii/SXXXX")
     }
 
+    func testELifePDFRewrite() {
+        XCTAssertEqual(rewrite("https://www.elifesciences.org/articles/29515.pdf"),
+                       "https://elifesciences.org/articles/29515")
+    }
+
+    func testELifeLandingNoChange() {
+        XCTAssertEqual(rewrite("https://elifesciences.org/articles/29515"),
+                       "https://elifesciences.org/articles/29515")
+    }
+
     func testIEEEStampStaysAsIs() {
         // IEEE stamp.jsp PDFs have no clean landing-page mapping; pass through
         // so subsequent fetch hits the PDF endpoint and content-type check

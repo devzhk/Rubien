@@ -4,6 +4,39 @@ import XCTest
 
 final class PDFDownloadServiceTests: XCTestCase {
 
+    // MARK: - eLife direct PDF URL
+
+    func testELifePDFURLFromLandingPage() {
+        let ref = Reference(
+            title: "Sample",
+            url: "https://elifesciences.org/articles/29515"
+        )
+        XCTAssertEqual(
+            PDFDownloadService.eLifePDFURL(for: ref)?.absoluteString,
+            "https://elifesciences.org/articles/29515.pdf"
+        )
+        XCTAssertTrue(ref.canDownloadPDF)
+    }
+
+    func testELifePDFURLNormalizesExistingPDFURL() {
+        let ref = Reference(
+            title: "Sample",
+            url: "https://www.elifesciences.org/articles/29515.pdf"
+        )
+        XCTAssertEqual(
+            PDFDownloadService.eLifePDFURL(for: ref)?.absoluteString,
+            "https://elifesciences.org/articles/29515.pdf"
+        )
+    }
+
+    func testELifePDFURLRejectsOtherELifePages() {
+        let ref = Reference(
+            title: "Sample",
+            url: "https://elifesciences.org/inside-elife/example"
+        )
+        XCTAssertNil(PDFDownloadService.eLifePDFURL(for: ref))
+    }
+
     // MARK: - preprintServerPDFURL
 
     func testPreprintURLForBioRxiv() {

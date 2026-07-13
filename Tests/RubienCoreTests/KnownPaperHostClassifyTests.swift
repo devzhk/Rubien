@@ -217,6 +217,21 @@ final class KnownPaperHostClassifyTests: XCTestCase {
         XCTAssertEqual(classify("https://www.sciencedirect.com/science/article/pii/S0123456789012345/pdfft"), .scienceDirect)
     }
 
+    // eLife
+    func testELifeArticle() {
+        XCTAssertEqual(classify("https://elifesciences.org/articles/29515"), .eLife)
+    }
+    func testELifeWWWArticle() {
+        XCTAssertEqual(classify("https://www.elifesciences.org/articles/29515/"), .eLife)
+    }
+    func testELifePDF() {
+        XCTAssertEqual(classify("https://elifesciences.org/articles/29515.pdf"), .eLife)
+    }
+    func testELifeRejectsNonArticlePages() {
+        XCTAssertNil(classify("https://elifesciences.org/articles/research-article"))
+        XCTAssertNil(classify("https://elifesciences.org/inside-elife/example"))
+    }
+
     // Negatives — random hosts
     func testRandomBlog() {
         XCTAssertNil(classify("https://example-blog.com/post/hello"))

@@ -53,8 +53,22 @@ public enum PaperURLResolver {
         // 3. Rewrite PDF URL → landing URL if applicable.
         let landingURL = rewritePDFURLToLanding(canonical, host: host)
 
-        // 4. Dispatch to the citation_* meta-tag scraper.
-        let (scrapedReference, scrapedPDFURL) = try await resolveCitationMeta(landingURL: landingURL, host: host, session: session)
+        // 4. Resolve publisher metadata. eLife exposes a stable, keyless JSON
+        // API with an explicit versioned PDF URL; the remaining hosts use the
+        // generic citation_* meta-tag scraper.
+        let (scrapedReference, scrapedPDFURL): (Reference, String?)
+        if host == .eLife {
+            (scrapedReference, scrapedPDFURL) = try await resolveELife(
+                landingURL: landingURL,
+                session: session
+            )
+        } else {
+            (scrapedReference, scrapedPDFURL) = try await resolveCitationMeta(
+                landingURL: landingURL,
+                host: host,
+                session: session
+            )
+        }
 
         // 5. If DOI present, re-fetch via CrossRef.
         var finalReference = scrapedReference
@@ -128,7 +142,7 @@ public enum PaperURLResolver {
                 return .conferencePaper
             case .aclAnthology:
                 return meta.conferenceTitle != nil ? .conferencePaper : .journalArticle
-            case .ieeeXplore, .acmDL, .nature, .springer, .scienceDirect:
+            case .ieeeXplore, .acmDL, .nature, .springer, .scienceDirect, .eLife:
                 if meta.journal != nil { return .journalArticle }
                 if meta.conferenceTitle != nil { return .conferencePaper }
                 return .journalArticle
@@ -167,6 +181,173 @@ public enum PaperURLResolver {
         )
         return (ref, meta.pdfURL)
     }
+
+    // MARK: - eLife official article API
+
+    private static func resolveELife(
+        landingURL: URL,
+        session: URLSession
+    ) async throws -> (Reference, String?) {
+        guard let articleID = eLifeArticleID(from: landingURL),
+              let apiURL = URL(string: "https://api.elifesciences.org/articles/\(articleID)") else {
+            throw ResolveError.insufficientMetadata
+        }
+
+        let data = try await withRetry(maxAttempts: 3) {
+            var request = URLRequest(url: apiURL)
+            request.setValue(MetadataFetcher.userAgent, forHTTPHeaderField: "User-Agent")
+            // eLife negotiates versioned vendor media types and rejects a
+            // generic `application/json` Accept header with HTTP 406. Leaving
+            // Accept unset selects the current public representation.
+            request.timeoutInterval = 15
+
+            let (data, response) = try await session.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw ResolveError.fetchFailed(statusCode: 0, host: apiURL.host ?? "")
+            }
+            guard (200..<300).contains(httpResponse.statusCode) else {
+                throw ResolveError.fetchFailed(
+                    statusCode: httpResponse.statusCode,
+                    host: apiURL.host ?? ""
+                )
+            }
+
+            let finalHost = (httpResponse.url ?? apiURL).host?.lowercased() ?? ""
+            guard finalHost == "api.elifesciences.org" else {
+                throw ResolveError.redirectedAwayFromAllowlist(finalHost: finalHost)
+            }
+
+            let contentType = (httpResponse.value(forHTTPHeaderField: "Content-Type") ?? "")
+                .lowercased()
+            let mediaType = contentType
+                .split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false)
+                .first?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let isJSON = mediaType == "application/json"
+                || (mediaType.hasPrefix("application/") && mediaType.hasSuffix("+json"))
+            guard isJSON else {
+                throw ResolveError.unexpectedContentType(contentType)
+            }
+            return data
+        }
+
+        return try parseELifeArticle(
+            data,
+            expectedArticleID: articleID,
+            landingURL: landingURL
+        )
+    }
+
+    private static func parseELifeArticle(
+        _ data: Data,
+        expectedArticleID: String,
+        landingURL: URL
+    ) throws -> (Reference, String?) {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let responseID = json["id"] as? String,
+              responseID == expectedArticleID,
+              let rawTitle = json["title"] as? String else {
+            throw ResolveError.insufficientMetadata
+        }
+
+        let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { throw ResolveError.insufficientMetadata }
+
+        let authors = parseELifeAuthors(json["authors"])
+        let published = (json["published"] as? String) ?? (json["versionDate"] as? String)
+        let year = published.flatMap { MetadataResolution.extractYear(fromMetadataText: $0) }
+
+        let volume: String? = {
+            if let value = json["volume"] as? String { return value }
+            if let value = json["volume"] as? NSNumber { return value.stringValue }
+            return nil
+        }()
+
+        let abstract = plainTextFromELifeContent(json["abstract"])
+        let pdfURL: String? = {
+            guard let raw = json["pdf"] as? String,
+                  let url = URL(string: raw),
+                  url.scheme?.lowercased() == "https",
+                  let host = url.host?.lowercased(),
+                  host == "cdn.elifesciences.org" || host == "elifesciences.org" else { return nil }
+            return url.absoluteString
+        }()
+
+        let reference = Reference(
+            title: title,
+            authors: authors,
+            year: year,
+            journal: "eLife",
+            volume: volume,
+            pages: json["elocationId"] as? String,
+            doi: (json["doi"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+            url: landingURL.absoluteString,
+            abstract: abstract,
+            referenceType: .journalArticle,
+            metadataSource: .publisherCitationMeta,
+            publisher: "eLife Sciences Publications, Ltd"
+        )
+        return (reference, pdfURL)
+    }
+
+    private static func parseELifeAuthors(_ value: Any?) -> [AuthorName] {
+        guard let rawAuthors = value as? [[String: Any]] else { return [] }
+        return rawAuthors.compactMap { author in
+            if let groupName = author["name"] as? String {
+                let trimmed = groupName.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : AuthorName(given: "", family: trimmed)
+            }
+            if let groupNames = author["name"] as? [String] {
+                let joined = groupNames
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                    .joined(separator: ", ")
+                return joined.isEmpty ? nil : AuthorName(given: "", family: joined)
+            }
+            if let personName = author["name"] as? [String: Any] {
+                if let indexName = personName["index"] as? String,
+                   !indexName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return AuthorName.parse(indexName)
+                }
+                if let preferredName = personName["preferred"] as? String,
+                   !preferredName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return AuthorName.parse(preferredName)
+                }
+            }
+            return nil
+        }
+    }
+
+    private static func plainTextFromELifeContent(_ value: Any?) -> String? {
+        let fragments = eLifeTextFragments(value).compactMap { raw -> String? in
+            let withoutTags = raw.replacingOccurrences(
+                of: "<[^>]+>",
+                with: "",
+                options: .regularExpression
+            )
+            let decoded = CitationMetaScraper.decodeHTMLEntities(withoutTags)
+                .replacingOccurrences(of: "&nbsp;", with: " ")
+            let normalized = decoded
+                .components(separatedBy: .whitespacesAndNewlines)
+                .filter { !$0.isEmpty }
+                .joined(separator: " ")
+            return normalized.isEmpty ? nil : normalized
+        }
+        return fragments.isEmpty ? nil : fragments.joined(separator: "\n\n")
+    }
+
+    private static func eLifeTextFragments(_ value: Any?) -> [String] {
+        if let object = value as? [String: Any] {
+            var fragments: [String] = []
+            if let text = object["text"] as? String { fragments.append(text) }
+            if let content = object["content"] { fragments.append(contentsOf: eLifeTextFragments(content)) }
+            return fragments
+        }
+        if let array = value as? [Any] {
+            return array.flatMap { eLifeTextFragments($0) }
+        }
+        return []
+    }
 }
 
 // MARK: - KnownPaperHost (internal)
@@ -174,7 +355,7 @@ public enum PaperURLResolver {
 internal enum KnownPaperHost: CaseIterable {
     case openReview, aclAnthology, cvfOpenAccess
     case neurIPS, neurIPSProceedings
-    case pmlr, ieeeXplore, acmDL, nature, springer, scienceDirect
+    case pmlr, ieeeXplore, acmDL, nature, springer, scienceDirect, eLife
 
     /// Returns the host bucket if the URL matches both a known host and a
     /// known path shape (landing OR PDF). Returns nil otherwise — callers
@@ -234,6 +415,9 @@ internal enum KnownPaperHost: CaseIterable {
             if matches(path, pattern: #"^/science/article/.+/pdfft$"#) { return .scienceDirect }
             if matches(path, pattern: #"^/science/article/(pii|abs/pii)/.+$"#) { return .scienceDirect }
             return nil
+        case "elifesciences.org":
+            if PaperURLResolver.eLifeArticleID(from: canonical) != nil { return .eLife }
+            return nil
         default:
             return nil
         }
@@ -278,7 +462,7 @@ internal extension PaperURLResolver {
         components.host = strippedHost
 
         // Upgrade http -> https. Per spec §2.4: "If both work for a publisher,
-        // store as https." All 10 target hosts support https; this also covers
+        // store as https." All target hosts support https; this also covers
         // default-port stripping in one move (an http://...:80 becomes https://...).
         components.scheme = "https"
 
@@ -291,6 +475,18 @@ internal extension PaperURLResolver {
         components.fragment = nil
 
         return components.url
+    }
+
+    static func eLifeArticleID(from url: URL) -> String? {
+        guard let canonical = canonicalize(url),
+              canonical.host == "elifesciences.org" else { return nil }
+        let segments = canonical.path.split(separator: "/", omittingEmptySubsequences: true)
+        guard segments.count == 2, segments[0] == "articles" else { return nil }
+
+        var articleID = String(segments[1])
+        if articleID.hasSuffix(".pdf") { articleID.removeLast(4) }
+        guard !articleID.isEmpty, articleID.allSatisfy(\.isNumber) else { return nil }
+        return articleID
     }
 }
 
@@ -389,6 +585,12 @@ internal extension PaperURLResolver {
             // /science/article/pii/SXXXX/pdfft → /science/article/pii/SXXXX
             if path.hasSuffix("/pdfft") {
                 components.path = String(path.dropLast("/pdfft".count))
+            }
+
+        case .eLife:
+            // /articles/29515.pdf → /articles/29515
+            if path.hasSuffix(".pdf") {
+                components.path = String(path.dropLast(4))
             }
         }
 
