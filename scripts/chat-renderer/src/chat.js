@@ -25,6 +25,11 @@ let transcript = null
 let streaming = null // { root, body } | null
 let streamingRaw = '' // accumulated markdown for the open bubble
 let rafHandle = null
+let toolGroupSequence = 0
+
+// Keep short tool traces fully visible. Once a consecutive run reaches three
+// calls, retain the newest call and fold the earlier calls behind a disclosure.
+const TOOL_GROUP_COLLAPSE_AFTER = 2
 
 // --- Stick-to-bottom + "new messages" pill ------------------------------------
 // The transcript follows the stream ONLY while the user is at the bottom. Once
@@ -117,6 +122,140 @@ function makeToolChip(chip) {
     root.appendChild(d)
   }
   return root
+}
+
+function directChildWithClass(root, className) {
+  return Array.from(root.children).find((child) => child.classList.contains(className)) ?? null
+}
+
+function setToolGroupExpanded(root, expanded) {
+  const history = directChildWithClass(root, 'chat-tool-history')
+  const toggle = directChildWithClass(root, 'chat-tool-toggle')
+  if (!history || !toggle) return
+
+  history.hidden = !expanded
+  root.classList.toggle('is-expanded', expanded)
+  toggle.setAttribute('aria-expanded', String(expanded))
+  const count = history.children.length
+  const noun = count === 1 ? 'tool call' : 'tool calls'
+  const label = directChildWithClass(toggle, 'chat-tool-toggle-label')
+  if (label) label.textContent = expanded ? 'Show fewer tool calls' : `+ ${count} more ${noun}`
+  toggle.setAttribute(
+    'aria-label',
+    expanded ? `Hide ${count} earlier ${noun}` : `Show ${count} earlier ${noun}`,
+  )
+}
+
+// Expanding inserts history above the newest chip. Preserve the disclosure's
+// viewport position across that height change, then refresh follow state so the
+// next live event cannot unexpectedly yank a reader who was already scrolled up.
+function toggleToolGroup(root, expanded, keyboardInitiated) {
+  const toggle = directChildWithClass(root, 'chat-tool-toggle')
+  if (!toggle) return
+  const topBefore = toggle.getBoundingClientRect().top
+  setToolGroupExpanded(root, expanded)
+  const topAfter = toggle.getBoundingClientRect().top
+  transcript.scrollTop += topAfter - topBefore
+  onUserScroll()
+
+  // The revealed summaries precede the disclosure in DOM order. Keyboard and
+  // assistive-tech activations enter that content so forward navigation visits
+  // every newly revealed tool call before returning to the collapse button. Let
+  // focus scroll normally so a long history never leaves keyboard focus offscreen.
+  if (expanded && keyboardInitiated) {
+    const history = directChildWithClass(root, 'chat-tool-history')
+    history?.querySelector('.chat-tool-chip summary')?.focus()
+  }
+}
+
+function makeToolGroup(earlierChips, latestChip, expanded = false) {
+  const root = document.createElement('div')
+  root.className = 'chat-tool-group'
+
+  const history = document.createElement('div')
+  history.className = 'chat-tool-history'
+  history.id = `chat-tool-history-${++toolGroupSequence}`
+  for (const chip of earlierChips) history.appendChild(chip)
+  root.appendChild(history)
+
+  latestChip.classList.add('chat-tool-latest')
+  root.appendChild(latestChip)
+
+  const toggle = document.createElement('button')
+  toggle.type = 'button'
+  toggle.className = 'chat-tool-toggle'
+  toggle.setAttribute('aria-controls', history.id)
+  const arrow = document.createElement('span')
+  arrow.className = 'chat-tool-toggle-arrow'
+  arrow.setAttribute('aria-hidden', 'true')
+  const label = document.createElement('span')
+  label.className = 'chat-tool-toggle-label'
+  toggle.appendChild(arrow)
+  toggle.appendChild(label)
+  toggle.addEventListener('click', (event) => {
+    toggleToolGroup(
+      root,
+      toggle.getAttribute('aria-expanded') !== 'true',
+      event.detail === 0,
+    )
+  })
+  root.appendChild(toggle)
+
+  setToolGroupExpanded(root, expanded)
+  return root
+}
+
+function appendToolChip(chip) {
+  const nextChip = makeToolChip(chip)
+  const last = transcript.lastElementChild
+
+  // Extend an existing trailing group without rebuilding it, preserving the
+  // user's expanded/collapsed choice while the live turn adds more calls.
+  if (last?.classList.contains('chat-tool-group')) {
+    const history = directChildWithClass(last, 'chat-tool-history')
+    const latest = directChildWithClass(last, 'chat-tool-latest')
+    const toggle = directChildWithClass(last, 'chat-tool-toggle')
+    if (history && latest && toggle) {
+      const focusedElement = latest.contains(document.activeElement) ? document.activeElement : null
+      const preserveInteraction = latest.open || focusedElement != null
+      const anchor = preserveInteraction ? latest : null
+      const topBefore = anchor?.getBoundingClientRect().top
+      const wasExpanded = toggle.getAttribute('aria-expanded') === 'true' || preserveInteraction
+      latest.classList.remove('chat-tool-latest')
+      history.appendChild(latest)
+      nextChip.classList.add('chat-tool-latest')
+      last.insertBefore(nextChip, toggle)
+      setToolGroupExpanded(last, wasExpanded)
+      if (anchor && topBefore != null) {
+        transcript.scrollTop += anchor.getBoundingClientRect().top - topBefore
+        onUserScroll()
+      }
+      focusedElement?.focus({ preventScroll: true })
+      return
+    }
+  }
+
+  // Direct chips are only left behind for runs of one or two. The next call
+  // crosses the threshold, so move that trailing run into a compact group.
+  const trailingChips = []
+  let cursor = last
+  while (cursor?.classList.contains('chat-tool-chip')) {
+    trailingChips.unshift(cursor)
+    cursor = cursor.previousElementSibling
+  }
+  if (trailingChips.length >= TOOL_GROUP_COLLAPSE_AFTER) {
+    // A live third call must not hide content the user has opened or focused.
+    const focusedElement = trailingChips.some((chip) => chip.contains(document.activeElement))
+      ? document.activeElement
+      : null
+    const preserveInteraction = focusedElement != null || trailingChips.some((chip) => chip.open)
+    transcript.appendChild(makeToolGroup(trailingChips, nextChip, preserveInteraction))
+    // Moving a focused node through the detached group root clears focus in
+    // WebKit/jsdom, so restore it once the complete group is back in the DOM.
+    focusedElement?.focus({ preventScroll: true })
+  } else {
+    transcript.appendChild(nextChip)
+  }
 }
 
 // Wrap each <pre> in a copy-button affordance. Idempotent (guarded), and only
@@ -319,7 +458,7 @@ function appendRecord(m) {
     } catch (_) {
       chip = { name: 'tool', detail: String(m?.body ?? ''), status: 'started' }
     }
-    transcript.appendChild(makeToolChip(chip))
+    appendToolChip(chip)
     return
   }
   if (role === 'notice') {
@@ -393,7 +532,7 @@ const RubienChat = {
   },
 
   addToolChip(chip) {
-    transcript.appendChild(makeToolChip(chip || {}))
+    appendToolChip(chip || {})
     followOrHint(true)
   },
 

@@ -342,7 +342,66 @@ body {
   background: rgba(255, 255, 255, 0.22);
 }
 
-/* --- Tool chip (collapsed <details>) --- */
+/* --- Tool calls --- */
+
+.chat-tool-group {
+  align-self: flex-start;
+  display: flex;
+  flex-direction: column;
+  gap: var(--chat-gap);
+  max-width: 92%;
+}
+
+.chat-tool-history {
+  display: flex;
+  flex-direction: column;
+  gap: var(--chat-gap);
+}
+
+.chat-tool-history[hidden] {
+  display: none;
+}
+
+.chat-tool-toggle {
+  align-self: flex-start;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  padding: 3px 2px;
+  border: 0;
+  color: var(--chat-fg-muted);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.chat-tool-toggle:hover {
+  color: var(--chat-fg);
+}
+
+.chat-tool-toggle:focus-visible {
+  border-radius: 4px;
+  outline: 2px solid var(--chat-link);
+  outline-offset: 2px;
+}
+
+.chat-tool-toggle-arrow {
+  box-sizing: border-box;
+  width: 7px;
+  height: 7px;
+  margin-left: 1px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 0.12s ease;
+}
+
+.chat-tool-group.is-expanded .chat-tool-toggle-arrow {
+  transform: rotate(45deg);
+}
 
 .chat-tool-chip {
   /* No border or fill — a tool call is just a muted, secondary trace (status dot +
@@ -352,6 +411,10 @@ body {
   color: var(--chat-fg-muted);
   align-self: flex-start;
   max-width: 92%;
+}
+
+.chat-tool-group .chat-tool-chip {
+  max-width: 100%;
 }
 
 .chat-tool-chip summary {

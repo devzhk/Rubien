@@ -137,6 +137,122 @@ test('tool chips + notices render with status variants', async () => {
   assert.match(T().querySelector('.chat-tool-name').textContent, /rubien_read_text/)
 })
 
+test('consecutive tool calls fold after two and keep the latest call visible', async () => {
+  const { window, doc, R, T } = await boot()
+  R.addToolChip({ name: 'first', status: 'completed' })
+  R.addToolChip({ name: 'second', status: 'completed' })
+  assert.equal(T().querySelector('.chat-tool-group'), null, 'two calls stay fully visible')
+
+  R.addToolChip({ name: 'third', status: 'completed' })
+  await tick()
+  const group = T().querySelector('.chat-tool-group')
+  const history = group.querySelector('.chat-tool-history')
+  const latest = group.querySelector('.chat-tool-latest')
+  const toggle = group.querySelector('.chat-tool-toggle')
+  assert.ok(history.hidden, 'earlier calls start folded')
+  assert.equal(history.querySelectorAll('.chat-tool-chip').length, 2)
+  assert.equal(latest.querySelector('.chat-tool-name').textContent, 'third')
+  assert.equal(toggle.textContent.trim(), '+ 2 more tool calls')
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false')
+
+  toggle.dispatchEvent(new window.MouseEvent('click', { bubbles: true, detail: 1 }))
+  assert.equal(history.hidden, false, 'the disclosure reveals all earlier calls')
+  assert.equal(toggle.getAttribute('aria-expanded'), 'true')
+  assert.equal(toggle.textContent.trim(), 'Show fewer tool calls')
+
+  R.addToolChip({ name: 'fourth', status: 'completed' })
+  assert.equal(history.hidden, false, 'live additions preserve the expanded choice')
+  assert.equal(history.querySelectorAll('.chat-tool-chip').length, 3)
+  assert.equal(group.querySelector('.chat-tool-latest .chat-tool-name').textContent, 'fourth')
+
+  toggle.dispatchEvent(new window.MouseEvent('click', { bubbles: true, detail: 1 }))
+  assert.ok(history.hidden)
+  assert.equal(toggle.textContent.trim(), '+ 3 more tool calls')
+
+  R.addToolChip({ name: 'fifth', status: 'completed' })
+  assert.ok(history.hidden, 'live additions also preserve the collapsed choice')
+  assert.equal(history.querySelectorAll('.chat-tool-chip').length, 4)
+  assert.equal(group.querySelector('.chat-tool-latest .chat-tool-name').textContent, 'fifth')
+
+  toggle.focus()
+  toggle.dispatchEvent(new window.MouseEvent('click', { bubbles: true, detail: 0 }))
+  assert.equal(doc.activeElement, history.querySelector('.chat-tool-chip summary'),
+    'keyboard expansion enters the revealed calls in forward-navigation order')
+})
+
+test('an inspected tool remains visible when a third live call creates the group', async () => {
+  const opened = await boot()
+  opened.R.addToolChip({ name: 'open', detail: 'being read', status: 'completed' })
+  opened.R.addToolChip({ name: 'second', status: 'completed' })
+  opened.T().querySelector('.chat-tool-chip').open = true
+  opened.R.addToolChip({ name: 'third', status: 'completed' })
+  assert.equal(opened.T().querySelector('.chat-tool-history').hidden, false,
+    'an open tool detail keeps the new group expanded')
+
+  const focused = await boot()
+  focused.R.addToolChip({ name: 'focused', status: 'completed' })
+  focused.R.addToolChip({ name: 'second', status: 'completed' })
+  const summary = focused.T().querySelector('.chat-tool-chip summary')
+  summary.focus()
+  assert.equal(focused.doc.activeElement, summary)
+  focused.R.addToolChip({ name: 'third', status: 'completed' })
+  assert.equal(focused.T().querySelector('.chat-tool-history').hidden, false,
+    'a focused tool keeps the new group expanded')
+  assert.equal(focused.doc.activeElement, summary, 'reparenting preserves keyboard focus')
+
+  const advancing = await boot()
+  advancing.R.addToolChip({ name: 'one', status: 'completed' })
+  advancing.R.addToolChip({ name: 'two', status: 'completed' })
+  advancing.R.addToolChip({ name: 'inspected latest', detail: 'being read', status: 'completed' })
+  const latest = advancing.T().querySelector('.chat-tool-latest')
+  const latestSummary = latest.querySelector('summary')
+  latest.open = true
+  latestSummary.focus()
+  advancing.R.addToolChip({ name: 'new latest', status: 'completed' })
+  assert.equal(advancing.T().querySelector('.chat-tool-history').hidden, false,
+    'advancing the latest call keeps its inspected predecessor visible')
+  assert.ok(latest.open)
+  assert.equal(advancing.doc.activeElement, latestSummary)
+})
+
+test('live and restored transcripts group the same consecutive tool runs', async () => {
+  const tool = (name, seq) => ({
+    role: 'tool',
+    body: JSON.stringify({ name, status: 'completed' }),
+    seq,
+  })
+  const messages = [
+    tool('one', 0), tool('two', 1), tool('three', 2),
+    { role: 'user', body: 'break', seq: 3 },
+    tool('four', 4), tool('five', 5), tool('six', 6),
+  ]
+
+  const live = await boot()
+  live.R.addToolChip({ name: 'one', status: 'completed' })
+  live.R.addToolChip({ name: 'two', status: 'completed' })
+  live.R.addToolChip({ name: 'three', status: 'completed' })
+  live.R.addUserMessage('break')
+  live.R.addToolChip({ name: 'four', status: 'completed' })
+  live.R.addToolChip({ name: 'five', status: 'completed' })
+  live.R.addToolChip({ name: 'six', status: 'completed' })
+
+  const restored = await boot()
+  restored.R.loadTranscript(messages)
+  await tick()
+
+  assert.equal(restored.T().innerHTML, live.T().innerHTML)
+  const groups = restored.T().querySelectorAll('.chat-tool-group')
+  assert.equal(groups.length, 2, 'the user message ends the first run')
+  assert.deepEqual(
+    [...restored.T().querySelectorAll('.chat-tool-latest .chat-tool-name')].map((node) => node.textContent),
+    ['three', 'six'],
+  )
+  const controls = [...restored.T().querySelectorAll('.chat-tool-toggle')]
+    .map((toggle) => toggle.getAttribute('aria-controls'))
+  assert.equal(new Set(controls).size, controls.length, 'each disclosure controls a unique history')
+  for (const id of controls) assert.ok(restored.doc.getElementById(id))
+})
+
 test('hostile message content is fully inert', async () => {
   const { window, R, T } = await boot()
   R.beginAssistantMessage()
@@ -221,6 +337,58 @@ function fakeScroller(window, T, scrollHeight, clientHeight) {
   const fire = () => T.dispatchEvent(new window.Event('scroll'))
   return { toBottom() { top = scrollHeight; fire() }, up() { top = 0; fire() } }
 }
+
+// Give the disclosure a deterministic 200 px history block. Its toggle sits
+// below that block, so a correct expand/collapse implementation compensates
+// scrollTop by the same amount and leaves the toggle at a stable viewport Y.
+function fakeToolDisclosureLayout(window, T, history, toggle) {
+  let top = 0
+  const height = () => history.hidden ? 1000 : 1200
+  Object.defineProperty(T, 'scrollHeight', { configurable: true, get: height })
+  Object.defineProperty(T, 'clientHeight', { configurable: true, get: () => 300 })
+  Object.defineProperty(T, 'scrollTop', {
+    configurable: true,
+    get: () => top,
+    set: (value) => { top = Math.max(0, Math.min(value, height() - 300)) },
+  })
+  toggle.getBoundingClientRect = () => ({ top: 800 + (history.hidden ? 0 : 200) - top })
+  const fire = () => T.dispatchEvent(new window.Event('scroll'))
+  return {
+    scrollTop: () => top,
+    toggleTop: () => toggle.getBoundingClientRect().top,
+    toBottom() { top = height() - 300; fire() },
+    up() { top = 0; fire() },
+  }
+}
+
+test('tool disclosure preserves its scroll anchor and refreshes follow state', async () => {
+  const { window, doc, R, T } = await boot()
+  R.addToolChip({ name: 'one', status: 'completed' })
+  R.addToolChip({ name: 'two', status: 'completed' })
+  R.addToolChip({ name: 'three', status: 'completed' })
+  const history = T().querySelector('.chat-tool-history')
+  const toggle = T().querySelector('.chat-tool-toggle')
+  const layout = fakeToolDisclosureLayout(window, T(), history, toggle)
+
+  layout.toBottom()
+  const bottomAnchor = layout.toggleTop()
+  toggle.dispatchEvent(new window.MouseEvent('click', { bubbles: true, detail: 1 }))
+  assert.equal(layout.toggleTop(), bottomAnchor, 'expanding keeps the disclosure anchored')
+  assert.equal(layout.scrollTop(), 900, 'the bottom-following position grows with the history')
+  toggle.dispatchEvent(new window.MouseEvent('click', { bubbles: true, detail: 1 }))
+  assert.equal(layout.toggleTop(), bottomAnchor, 'collapsing keeps the disclosure anchored')
+  assert.equal(layout.scrollTop(), 700)
+
+  layout.up()
+  const readingAnchor = layout.toggleTop()
+  toggle.dispatchEvent(new window.MouseEvent('click', { bubbles: true, detail: 1 }))
+  assert.equal(layout.toggleTop(), readingAnchor)
+  assert.equal(layout.scrollTop(), 200)
+  R.addToolChip({ name: 'four', status: 'completed' })
+  assert.equal(layout.scrollTop(), 200, 'a later call does not snap a reader to the bottom')
+  assert.equal(doc.getElementById('chat-jump').textContent, '1 new message')
+  assert.ok(doc.getElementById('chat-jump').classList.contains('is-visible'))
+})
 
 test('stick-to-bottom: follows silently at bottom, pills when scrolled up', async () => {
   const { window, doc, R, T } = await boot()
