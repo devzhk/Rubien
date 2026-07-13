@@ -46,7 +46,9 @@ The source repo `devzhk/Rubien` is **private**, but Sparkle downloads update DMG
 
 ## Per-release procedure
 
-Prereqs: `gh` authenticated, `CODESIGN_IDENTITY` exported, working tree clean on `main`, EdDSA private key in Keychain.
+Prereqs: `gh` authenticated, `CODESIGN_IDENTITY` exported, working tree clean on `main`, EdDSA private key in Keychain, and the `RubienNotary` notarytool profile in the login Keychain (from One-time setup §4 — it persists across releases; you do **not** re-run `store-credentials` each time).
+
+> **Run the release on the interactive host — not from a sandboxed agent (e.g. Codex).** Signing (Developer ID + Sparkle EdDSA keys), notarization (the `RubienNotary` Keychain profile), the `build/` writes, and `git push` all need access a read-only sandbox denies. A sandboxed agent that cannot read the login Keychain will report `RubienNotary` (or the signing identity) as **missing** when it is in fact present — that is a sandbox limitation, not a setup gap. Drive `./scripts/release.sh` from Claude Code running on the host, or hand that step to the maintainer. (Verify a suspected-missing profile the real way: `xcrun notarytool history --keychain-profile RubienNotary` on the host — success means it is there.)
 
 ```bash
 # 1. Clean state on main
