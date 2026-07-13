@@ -290,6 +290,52 @@ final class PaperURLResolverTests: XCTestCase {
         }
     }
 
+    // MARK: - eNeuro citation-meta path
+
+    func testENeuroLongURLResolvesFromCanonicalLandingPage() async throws {
+        let canonicalURL = "https://www.eneuro.org/content/9/2/ENEURO.0361-21.2022"
+        StubURLProtocol.stub(
+            canonicalURL,
+            body: """
+            <html><head>
+            <meta name="citation_title" content="Neurophysiological Evidence for Cognitive Map Formation during Sequence Learning">
+            <meta name="citation_author" content="Jennifer Stiso">
+            <meta name="citation_author" content="Christopher W. Lynn">
+            <meta name="citation_journal_title" content="eNeuro">
+            <meta name="citation_publisher" content="Society for Neuroscience">
+            <meta name="citation_publication_date" content="2022/03/01">
+            <meta name="citation_volume" content="9">
+            <meta name="citation_issue" content="2">
+            <meta name="citation_doi" content="10.1523/ENEURO.0361-21.2022">
+            <meta name="citation_pdf_url" content="https://www.eneuro.org/content/eneuro/9/2/ENEURO.0361-21.2022.full.pdf">
+            </head></html>
+            """
+        )
+
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: "https://www.eneuro.org/content/9/2/ENEURO.0361-21.2022.long")!,
+            session: StubURLProtocol.makeSession(),
+            crossrefFetcher: { _ in throw URLError(.notConnectedToInternet) }
+        )
+
+        XCTAssertEqual(outcome.reference.title, "Neurophysiological Evidence for Cognitive Map Formation during Sequence Learning")
+        XCTAssertEqual(outcome.reference.authors.map(\.family), ["Stiso", "Lynn"])
+        XCTAssertEqual(outcome.reference.year, 2022)
+        XCTAssertEqual(outcome.reference.journal, "eNeuro")
+        XCTAssertEqual(outcome.reference.volume, "9")
+        XCTAssertEqual(outcome.reference.issue, "2")
+        XCTAssertEqual(outcome.reference.doi, "10.1523/ENEURO.0361-21.2022")
+        XCTAssertEqual(outcome.reference.publisher, "Society for Neuroscience")
+        XCTAssertEqual(outcome.reference.url, canonicalURL)
+        XCTAssertEqual(outcome.reference.referenceType, .journalArticle)
+        XCTAssertEqual(outcome.reference.metadataSource, .publisherCitationMeta)
+        XCTAssertEqual(
+            outcome.scrapedPDFURL,
+            "https://www.eneuro.org/content/eneuro/9/2/ENEURO.0361-21.2022.full.pdf"
+        )
+        XCTAssertEqual(StubURLProtocol.requests.map(\.url), [URL(string: canonicalURL)!])
+    }
+
     // MARK: - Canonical Reference.url after canonicalization
 
     func testCanonicalURLOnReference() async throws {

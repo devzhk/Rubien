@@ -146,16 +146,17 @@ rubien-cli add --identifier "https://pmc.ncbi.nlm.nih.gov/articles/PMC4587766/"
 rubien-cli add --identifier "https://openreview.net/forum?id=YicbFdNTTy" --download-pdf
 rubien-cli add --identifier "https://aclanthology.org/2025.acl-long.1141.pdf" --download-pdf
 rubien-cli add --identifier "https://openaccess.thecvf.com/content/CVPR2025/html/Wang_VGGT_Visual_Geometry_Grounded_Transformer_CVPR_2025_paper.html" --download-pdf
+rubien-cli add --identifier "https://www.eneuro.org/content/9/2/ENEURO.0361-21.2022.long" --download-pdf
 rubien-cli add --bibtex '@article{..., title={...}, ...}'
 rubien-cli add --title "My Paper"
 ```
 
 | Option | Type | Description |
 |---|---|---|
-| `--identifier` | String | DOI, arXiv ID, PMID, PMCID, ISBN, or a paper landing-page URL — metadata is fetched automatically. Supported URL hosts: `openreview.net`, `aclanthology.org`, `openaccess.thecvf.com`, `papers.nips.cc`, `proceedings.neurips.cc`, `proceedings.mlr.press`, `ieeexplore.ieee.org`, `dl.acm.org`, `nature.com`, `link.springer.com`, `sciencedirect.com`, `elifesciences.org`. Most paper URLs are scraped via `<meta name="citation_*">` tags; eLife URLs resolve through eLife's official article API. When a DOI is available, the resolver re-fetches via CrossRef for canonical fields. Supported direct PDF URLs (including `aclanthology.org/<id>.pdf` and `elifesciences.org/articles/<id>.pdf`) are rewritten to their landing pages before metadata lookup. PMCIDs (`PMC1234567` or `pmc.ncbi.nlm.nih.gov/articles/PMC.../`) resolve via NCBI's ID converter then delegate to PubMed/CrossRef. |
+| `--identifier` | String | Fetches metadata for a DOI, arXiv ID, PMID, PMCID, ISBN, or paper URL. See [Supported Paper URLs](Supported-Paper-URLs.md) for recognized URL patterns. When a page includes a DOI, CrossRef supplies canonical fields. Rubien rewrites supported PDF URLs to landing pages before lookup. PMCID values (`PMC1234567`) and PMC URLs resolve through NCBI's ID converter, then PubMed/CrossRef. |
 | `--bibtex` | String | BibTeX source string (can contain multiple entries) |
 | `--title` | String | Title for manual entry (creates a minimal reference) |
-| `--download-pdf` | Flag | Only valid with `--identifier`. After metadata lookup, fetch the open-access PDF. For DOI / arXiv / PMID / PMCID inputs, the open-access PDF is resolved via arXiv (preprints) or OpenAlex's best-OA-location (any DOI). For paper-URL inputs, the PDF URL comes from `citation_pdf_url` or, for eLife, the official article API; saved eLife references also use eLife's stable direct-PDF endpoint. This makes `--download-pdf` work on OpenReview / CVF / PMLR papers without a DOI and on eLife articles without depending on OpenAlex. The reference is saved either way; PDF failures are reported in the envelope rather than aborting. |
+| `--download-pdf` | Flag | Requires `--identifier`. Fetches an open-access PDF after metadata lookup. arXiv inputs use the preprint PDF; DOI, PMID, and PMCID inputs use OpenAlex's best open-access location. For paper URLs, Rubien uses `citation_pdf_url`, which does not require a DOI; eLife uses its official API. Rubien saves the reference even if the download fails and reports the error in the response envelope. |
 
 Exactly one of `--identifier`, `--bibtex`, or `--title` is required.
 

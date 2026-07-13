@@ -89,6 +89,8 @@ PDF storage, metadata artifacts, and the sync state sidecar all ride this same r
 
 Pipeline in `Sources/Rubien/Services/MetadataResolver.swift`: `DOI → arXiv → PMID → ISBN → OpenAlex title search → Semantic Scholar → .seedOnly`. Identifier resolvers in `Sources/RubienCore/Services/MetadataFetcher.swift` talk directly to public HTTP APIs — no keys. `MetadataVerifier` applies evidence-based rules and downgrades to `.candidate` when multiple results compete.
 
+**Supported paper URL registry:** `Docs/Supported-Paper-URLs.md` is the canonical list of supported hosts and URL patterns. Any change to a `KnownPaperHost` classification or URL rewrite must also update the registry and the related extraction, classification, rewrite, and resolver tests. Other user-facing docs should link to the registry instead of duplicating its host list.
+
 **Foot-gun:** arXiv DataCite DOIs (`10.48550/arXiv.1706.03762`) must route to the arXiv resolver, not CrossRef (which returns 404 for them). Already handled in `extractIdentifier`.
 
 ### Citation engine

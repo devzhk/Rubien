@@ -1,0 +1,20 @@
+name: Paper URL support
+description: Request support for an unrecognized paper URL.
+title: "[Paper URL]: "
+labels:
+  - enhancement
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the [supported paper URLs](https://github.com/devzhk/Rubien/blob/main/Docs/Supported-Paper-URLs.md) first. Submit a publisher landing page. Remove proxy credentials, session tokens, and temporary signatures.
+
+  - type: input
+    id: article_url
+    attributes:
+      label: Article URL
+      placeholder: https://publisher.example/article/...
+    validations:
+      required: true

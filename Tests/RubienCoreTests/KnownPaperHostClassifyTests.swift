@@ -232,6 +232,30 @@ final class KnownPaperHostClassifyTests: XCTestCase {
         XCTAssertNil(classify("https://elifesciences.org/inside-elife/example"))
     }
 
+    // eNeuro
+    func testENeuroAssignedIssueArticle() {
+        XCTAssertEqual(
+            classify("https://www.eneuro.org/content/9/2/ENEURO.0361-21.2022.long"),
+            .eNeuro
+        )
+    }
+    func testENeuroEarlyReleaseArticle() {
+        XCTAssertEqual(
+            classify("https://www.eneuro.org/content/early/2026/07/02/ENEURO.0257-25.2026"),
+            .eNeuro
+        )
+    }
+    func testENeuroEarlyReleasePDF() {
+        XCTAssertEqual(
+            classify("https://www.eneuro.org/content/eneuro/early/2026/07/02/ENEURO.0257-25.2026.full.pdf"),
+            .eNeuro
+        )
+    }
+    func testENeuroRejectsNonArticlePages() {
+        XCTAssertNil(classify("https://www.eneuro.org/content/9/2"))
+        XCTAssertNil(classify("https://www.eneuro.org/content/by/section/Cognition%20and%20Behavior"))
+    }
+
     // Negatives — random hosts
     func testRandomBlog() {
         XCTAssertNil(classify("https://example-blog.com/post/hello"))

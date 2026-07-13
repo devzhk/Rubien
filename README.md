@@ -40,12 +40,12 @@ Rubien adds references from:
 - bioRxiv and medRxiv
 - PubMed and PubMed Central (PMC)
 - Books (by ISBN)
-- Paper landing-page URLs from OpenReview, ACL Anthology, CVF Open Access, NeurIPS, PMLR, IEEE Xplore, ACM DL, Nature, Springer, ScienceDirect, and eLife (publisher meta tags or the official eLife article API)
+- Paper URLs from [supported publishers and venues](Docs/Supported-Paper-URLs.md)
 - Title search when you don't have an identifier
 
 Paste a URL, an identifier, or a title — Rubien figures out the rest.
 
-PDF auto-download works for arXiv, bioRxiv, medRxiv, eLife, any open-access paper with a DOI, and venue pages that expose `citation_pdf_url` (covers OpenReview, ACL, CVF, NeurIPS, PMLR — even when the paper has no DOI). Paywalled PDFs aren't fetched, but metadata and abstract still come through.
+PDF auto-download supports arXiv, bioRxiv, medRxiv, eLife, open-access papers with a DOI, and [supported paper pages](Docs/Supported-Paper-URLs.md) that expose `citation_pdf_url`. Rubien still imports metadata and the abstract when a PDF is paywalled.
 
 ## Requirements
 

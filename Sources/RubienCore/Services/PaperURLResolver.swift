@@ -142,7 +142,7 @@ public enum PaperURLResolver {
                 return .conferencePaper
             case .aclAnthology:
                 return meta.conferenceTitle != nil ? .conferencePaper : .journalArticle
-            case .ieeeXplore, .acmDL, .nature, .springer, .scienceDirect, .eLife:
+            case .ieeeXplore, .acmDL, .nature, .springer, .scienceDirect, .eLife, .eNeuro:
                 if meta.journal != nil { return .journalArticle }
                 if meta.conferenceTitle != nil { return .conferencePaper }
                 return .journalArticle
@@ -355,7 +355,7 @@ public enum PaperURLResolver {
 internal enum KnownPaperHost: CaseIterable {
     case openReview, aclAnthology, cvfOpenAccess
     case neurIPS, neurIPSProceedings
-    case pmlr, ieeeXplore, acmDL, nature, springer, scienceDirect, eLife
+    case pmlr, ieeeXplore, acmDL, nature, springer, scienceDirect, eLife, eNeuro
 
     /// Returns the host bucket if the URL matches both a known host and a
     /// known path shape (landing OR PDF). Returns nil otherwise — callers
@@ -417,6 +417,18 @@ internal enum KnownPaperHost: CaseIterable {
             return nil
         case "elifesciences.org":
             if PaperURLResolver.eLifeArticleID(from: canonical) != nil { return .eLife }
+            return nil
+        case "eneuro.org":
+            // HighWire article pages are either assigned to an issue or in
+            // early release. PDF links insert the site code after /content.
+            // Requiring eNeuro's article-ID shape excludes section listings.
+            let articleID = #"(?i:ENEURO\.[0-9]{4}-[0-9]{2}\.[0-9]{4})"#
+            let variant = #"(?:\.(?:abstract|full|long)|\.full\.pdf)?"#
+            let assignedIssue = #"^/content/(?:eneuro/)?[^/]+/[^/]+/\#(articleID)\#(variant)/?$"#
+            let earlyRelease = #"^/content/(?:eneuro/)?early/[0-9]{4}/[0-9]{2}/[0-9]{2}/\#(articleID)\#(variant)/?$"#
+            if matches(path, pattern: assignedIssue) || matches(path, pattern: earlyRelease) {
+                return .eNeuro
+            }
             return nil
         default:
             return nil
@@ -591,6 +603,26 @@ internal extension PaperURLResolver {
             // /articles/29515.pdf → /articles/29515
             if path.hasSuffix(".pdf") {
                 components.path = String(path.dropLast(4))
+            }
+
+        case .eNeuro:
+            // eNeuro's bare host does not reliably serve the site, so retain
+            // the publisher's working www host. Normalize HighWire variants:
+            // /content/9/2/ID.long                 → /content/9/2/ID
+            // /content/eneuro/9/2/ID.full.pdf      → /content/9/2/ID
+            // /content/eneuro/early/date/ID.full.pdf → /content/early/date/ID
+            components.host = "www.eneuro.org"
+            var segments = path.split(separator: "/").map(String.init)
+            if segments.count > 1, segments[1].lowercased() == "eneuro" {
+                segments.remove(at: 1)
+            }
+            if !segments.isEmpty {
+                for suffix in [".full.pdf", ".abstract", ".full", ".long"]
+                    where segments[segments.count - 1].hasSuffix(suffix) {
+                    segments[segments.count - 1].removeLast(suffix.count)
+                    break
+                }
+                components.path = "/" + segments.joined(separator: "/")
             }
         }
 

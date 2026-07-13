@@ -74,6 +74,20 @@ final class PaperURLRewriteTests: XCTestCase {
                        "https://elifesciences.org/articles/29515")
     }
 
+    func testENeuroLongPageRewrite() {
+        XCTAssertEqual(
+            rewrite("https://www.eneuro.org/content/9/2/ENEURO.0361-21.2022.long"),
+            "https://www.eneuro.org/content/9/2/ENEURO.0361-21.2022"
+        )
+    }
+
+    func testENeuroEarlyReleasePDFRewrite() {
+        XCTAssertEqual(
+            rewrite("https://www.eneuro.org/content/eneuro/early/2026/07/02/ENEURO.0257-25.2026.full.pdf"),
+            "https://www.eneuro.org/content/early/2026/07/02/ENEURO.0257-25.2026"
+        )
+    }
+
     func testIEEEStampStaysAsIs() {
         // IEEE stamp.jsp PDFs have no clean landing-page mapping; pass through
         // so subsequent fetch hits the PDF endpoint and content-type check

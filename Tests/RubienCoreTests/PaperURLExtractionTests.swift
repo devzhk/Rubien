@@ -43,6 +43,22 @@ final class PaperURLExtractionTests: XCTestCase {
         }
     }
 
+    func testENeuroLongArticleExtractsAsPaperURL() {
+        guard case .paperURL(let url) = extract(
+            "https://www.eneuro.org/content/9/2/ENEURO.0361-21.2022.long"
+        ) else {
+            return XCTFail("Expected .paperURL")
+        }
+        XCTAssertEqual(
+            url.absoluteString,
+            "https://www.eneuro.org/content/9/2/ENEURO.0361-21.2022.long"
+        )
+    }
+
+    func testENeuroTableOfContentsFallsThrough() {
+        XCTAssertNil(extract("https://www.eneuro.org/content/9/2"))
+    }
+
     func testSpringerArticleExtractsAsPaperURL() {
         guard case .paperURL = extract("https://link.springer.com/article/10.1007/s11042-024-12345-6") else {
             return XCTFail("Expected .paperURL — must beat bare DOI extraction")
