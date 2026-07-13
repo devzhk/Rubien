@@ -182,7 +182,7 @@ public enum CitationMetaScraper {
         return result
     }
 
-    private static func decodeHTMLEntities(_ s: String) -> String {
+    internal static func decodeHTMLEntities(_ s: String) -> String {
         s.replacingOccurrences(of: "&amp;", with: "&")
          .replacingOccurrences(of: "&lt;", with: "<")
          .replacingOccurrences(of: "&gt;", with: ">")

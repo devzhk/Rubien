@@ -31,6 +31,18 @@ final class PaperURLExtractionTests: XCTestCase {
         }
     }
 
+    func testELifeArticleExtractsAsPaperURL() {
+        guard case .paperURL = extract("https://elifesciences.org/articles/29515") else {
+            return XCTFail("Expected .paperURL")
+        }
+    }
+
+    func testELifePDFExtractsAsPaperURL() {
+        guard case .paperURL = extract("https://elifesciences.org/articles/29515.pdf") else {
+            return XCTFail("Expected .paperURL")
+        }
+    }
+
     func testSpringerArticleExtractsAsPaperURL() {
         guard case .paperURL = extract("https://link.springer.com/article/10.1007/s11042-024-12345-6") else {
             return XCTFail("Expected .paperURL — must beat bare DOI extraction")

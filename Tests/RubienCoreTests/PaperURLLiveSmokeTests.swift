@@ -40,7 +40,32 @@ final class PaperURLLiveSmokeTests: XCTestCase {
         )
     }
 
-    // Add similar smokeURL calls for the remaining 8 hosts when stable URLs
+    func testELifeLive() async throws {
+        try XCTSkipIf(ProcessInfo.processInfo.environment["RUBIEN_LIVE_TESTS"] != "1",
+                      "Set RUBIEN_LIVE_TESTS=1 to run live smoke tests")
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: "https://elifesciences.org/articles/29515")!
+        )
+        XCTAssertTrue(outcome.reference.title.lowercased().contains("theta-burst microstimulation"))
+        XCTAssertFalse(outcome.reference.authors.isEmpty)
+        XCTAssertEqual(outcome.reference.doi, "10.7554/eLife.29515")
+        XCTAssertNotNil(outcome.scrapedPDFURL)
+        let pdfURL = try await PDFDownloadService.resolvePDFURL(for: outcome.reference)
+        XCTAssertEqual(pdfURL.absoluteString, "https://elifesciences.org/articles/29515.pdf")
+        let destination = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RubienELifeLive-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: destination) }
+
+        let downloaded = try await PDFDownloadService.downloadTemporary(
+            from: pdfURL,
+            suggestedFilename: "elife-29515.pdf",
+            destinationDirectory: destination
+        )
+        let size = try downloaded.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        XCTAssertGreaterThan(size, 4)
+    }
+
+    // Add similar smokeURL calls for the remaining hosts when stable URLs
     // are identified. See Scripts/refresh-citation-fixtures.sh for the
     // capture-and-update workflow.
 }

@@ -15,7 +15,7 @@ public enum PDFDownloadService {
         public var errorDescription: String? {
             switch self {
             case .noIdentifier:
-                return "No DOI or arXiv identifier available"
+                return "No supported PDF source available"
             case .noOpenAccessPDF:
                 return "No open-access PDF available"
             case .httpFailure(let code):
@@ -29,12 +29,17 @@ public enum PDFDownloadService {
     }
 
     public static func resolvePDFURL(for reference: Reference) async throws -> URL {
-        // 1. arXiv direct — from URL or DataCite DOI
+        // 1. eLife direct — every article page exposes a stable .pdf endpoint.
+        if let eLifeURL = eLifePDFURL(for: reference) {
+            return eLifeURL
+        }
+
+        // 2. arXiv direct — from URL or DataCite DOI
         if let arxivID = extractArxivID(from: reference) {
             return URL(string: "https://arxiv.org/pdf/\(arxivID).pdf")!
         }
 
-        // 2. OpenAlex OA lookup by DOI
+        // 3. OpenAlex OA lookup by DOI
         if let doi = reference.doi, !doi.isEmpty {
             if let pdfURL = try await fetchOpenAlexPDFURL(doi: doi) {
                 return pdfURL
@@ -198,6 +203,19 @@ public enum PDFDownloadService {
 
     // MARK: - Internal (testable)
 
+    /// Construct eLife's stable direct-PDF URL from a canonical article URL.
+    /// The download path still performs content-type and PDF magic validation,
+    /// so this pure helper only needs to enforce the publisher's URL shape.
+    internal static func eLifePDFURL(for reference: Reference) -> URL? {
+        guard let articleID = eLifeArticleID(for: reference) else { return nil }
+        return URL(string: "https://elifesciences.org/articles/\(articleID).pdf")
+    }
+
+    private static func eLifeArticleID(for reference: Reference) -> String? {
+        guard let rawURL = reference.url, let url = URL(string: rawURL) else { return nil }
+        return PaperURLResolver.eLifeArticleID(from: url)
+    }
+
     /// Construct a direct PDF URL for bioRxiv / medRxiv preprints. Pure (no
     /// network). Returns nil whenever the reference isn't clearly a bioRxiv /
     /// medRxiv preprint — caller falls back to OpenAlex.
@@ -306,6 +324,9 @@ public enum PDFDownloadService {
     }
 
     private static func suggestedFilename(for reference: Reference) -> String {
+        if let articleID = eLifeArticleID(for: reference) {
+            return "elife_\(articleID)"
+        }
         if let arxivID = extractArxivID(from: reference) {
             return "arxiv_\(arxivID)"
         }

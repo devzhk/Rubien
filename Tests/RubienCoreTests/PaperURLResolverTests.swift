@@ -9,6 +9,7 @@ import FoundationNetworking   // Linux: URLProtocol, URLSessionConfiguration, HT
 final class StubURLProtocol: URLProtocol {
     nonisolated(unsafe) static var stubs: [URL: (data: Data, response: HTTPURLResponse)] = [:]
     nonisolated(unsafe) static var failures: [URL: Error] = [:]
+    nonisolated(unsafe) static var requests: [URLRequest] = []
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -18,6 +19,7 @@ final class StubURLProtocol: URLProtocol {
             client?.urlProtocol(self, didFailWithError: URLError(.badURL))
             return
         }
+        StubURLProtocol.requests.append(request)
         if let err = StubURLProtocol.failures[url] {
             client?.urlProtocol(self, didFailWithError: err)
             return
@@ -36,6 +38,7 @@ final class StubURLProtocol: URLProtocol {
     static func reset() {
         stubs = [:]
         failures = [:]
+        requests = []
     }
 
     static func makeSession() -> URLSession {
@@ -157,6 +160,134 @@ final class PaperURLResolverTests: XCTestCase {
         XCTAssertEqual(outcome.reference.year, 2025)
         XCTAssertEqual(outcome.reference.pages, "5294-5306")
         XCTAssertEqual(outcome.scrapedPDFURL, "https://openaccess.thecvf.com/content/CVPR2025/papers/Wang_VGGT_Visual_Geometry_Grounded_Transformer_CVPR_2025_paper.pdf")
+    }
+
+    // MARK: - eLife official API path
+
+    func testELifeArticleResolvesMetadataAndPDFThroughOfficialAPI() async throws {
+        StubURLProtocol.stub(
+            "https://api.elifesciences.org/articles/29515",
+            contentType: "application/vnd.elife.article-vor+json; version=8",
+            body: """
+            {
+              "status": "vor",
+              "id": "29515",
+              "version": 1,
+              "type": "research-article",
+              "doi": "10.7554/eLife.29515",
+              "title": "Theta-burst microstimulation in the human entorhinal area improves memory specificity",
+              "published": "2017-10-24T00:00:00Z",
+              "volume": 6,
+              "elocationId": "e29515",
+              "pdf": "https://cdn.elifesciences.org/articles/29515/elife-29515-v1.pdf",
+              "abstract": {
+                "content": [
+                  {"type": "paragraph", "text": "The <i>hippocampus</i> is critical for episodic memory."}
+                ]
+              },
+              "authors": [
+                {"type": "person", "name": {"index": "Titiz, Ali S", "preferred": "Ali S Titiz"}},
+                {"type": "person", "name": {"index": "Hill, Michael R H", "preferred": "Michael R H Hill"}}
+              ]
+            }
+            """
+        )
+
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: "https://www.elifesciences.org/articles/29515.pdf")!,
+            session: StubURLProtocol.makeSession(),
+            crossrefFetcher: { _ in throw URLError(.notConnectedToInternet) }
+        )
+
+        XCTAssertEqual(outcome.reference.title, "Theta-burst microstimulation in the human entorhinal area improves memory specificity")
+        XCTAssertEqual(outcome.reference.authors.count, 2)
+        XCTAssertEqual(outcome.reference.authors[0], AuthorName(given: "Ali S", family: "Titiz"))
+        XCTAssertEqual(outcome.reference.year, 2017)
+        XCTAssertEqual(outcome.reference.journal, "eLife")
+        XCTAssertEqual(outcome.reference.volume, "6")
+        XCTAssertEqual(outcome.reference.pages, "e29515")
+        XCTAssertEqual(outcome.reference.doi, "10.7554/eLife.29515")
+        XCTAssertEqual(outcome.reference.url, "https://elifesciences.org/articles/29515")
+        XCTAssertEqual(outcome.reference.abstract, "The hippocampus is critical for episodic memory.")
+        XCTAssertEqual(outcome.reference.referenceType, .journalArticle)
+        XCTAssertEqual(outcome.reference.metadataSource, .publisherCitationMeta)
+        XCTAssertEqual(outcome.scrapedPDFURL, "https://cdn.elifesciences.org/articles/29515/elife-29515-v1.pdf")
+        XCTAssertNil(
+            StubURLProtocol.requests.first?.value(forHTTPHeaderField: "Accept"),
+            "eLife rejects generic JSON Accept headers with HTTP 406"
+        )
+    }
+
+    func testELifeGroupAuthorIsPreserved() async throws {
+        StubURLProtocol.stub(
+            "https://api.elifesciences.org/articles/99998",
+            contentType: "application/vnd.elife.article-rp+json; version=8",
+            body: """
+            {
+              "id": "99998",
+              "title": "A consortium study",
+              "published": "2026-01-02T00:00:00Z",
+              "authors": [
+                {"type": "group", "name": "The Example Research Consortium"}
+              ]
+            }
+            """
+        )
+
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: "https://elifesciences.org/articles/99998")!,
+            session: StubURLProtocol.makeSession()
+        )
+
+        XCTAssertEqual(
+            outcome.reference.authors,
+            [AuthorName(given: "", family: "The Example Research Consortium")]
+        )
+    }
+
+    func testELifeRejectsUnexpectedPDFHostFromAPI() async throws {
+        StubURLProtocol.stub(
+            "https://api.elifesciences.org/articles/99999",
+            contentType: "application/vnd.elife.article-vor+json; version=8",
+            body: """
+            {
+              "id": "99999",
+              "title": "An article with an unsafe PDF URL",
+              "published": "2026-01-02T00:00:00Z",
+              "pdf": "https://downloads.example.com/article.pdf",
+              "authors": [
+                {"type": "person", "name": {"index": "Smith, Jane", "preferred": "Jane Smith"}}
+              ]
+            }
+            """
+        )
+
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: "https://elifesciences.org/articles/99999")!,
+            session: StubURLProtocol.makeSession()
+        )
+
+        XCTAssertNil(outcome.scrapedPDFURL)
+    }
+
+    func testELifeRejectsNonJSONMediaType() async {
+        StubURLProtocol.stub(
+            "https://api.elifesciences.org/articles/99997",
+            contentType: "text/notjson",
+            body: #"{"id":"99997","title":"Not actually JSON media"}"#
+        )
+
+        do {
+            _ = try await PaperURLResolver.resolve(
+                URL(string: "https://elifesciences.org/articles/99997")!,
+                session: StubURLProtocol.makeSession()
+            )
+            XCTFail("Expected unexpectedContentType")
+        } catch PaperURLResolver.ResolveError.unexpectedContentType(let contentType) {
+            XCTAssertEqual(contentType, "text/notjson")
+        } catch {
+            XCTFail("Wrong error type: \(error)")
+        }
     }
 
     // MARK: - Canonical Reference.url after canonicalization

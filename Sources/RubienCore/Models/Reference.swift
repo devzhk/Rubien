@@ -472,13 +472,15 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
 
 extension Reference {
     /// True when an open-access PDF can plausibly be located for this reference.
-    /// Today the download pipeline (`PDFDownloadService`) supports two sources:
-    /// arXiv (matched via the abstract URL) and any DOI (looked up against
-    /// OpenAlex's best-OA-location). Anything else is unreachable and callers
-    /// should hide the download affordance.
+    /// The download pipeline (`PDFDownloadService`) supports direct eLife and
+    /// arXiv URLs plus any DOI looked up against OpenAlex's best-OA-location.
+    /// Anything else is unreachable and callers should hide the affordance.
     public var canDownloadPDF: Bool {
         if let doi, !doi.isEmpty { return true }
-        if let url, url.range(of: "arxiv.org/abs/", options: .caseInsensitive) != nil { return true }
+        if let url {
+            if url.range(of: "arxiv.org/abs/", options: .caseInsensitive) != nil { return true }
+            if let parsed = URL(string: url), PaperURLResolver.eLifeArticleID(from: parsed) != nil { return true }
+        }
         return false
     }
 
