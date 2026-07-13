@@ -109,6 +109,44 @@ final class PendingPDFHashResolverTests: XCTestCase {
         XCTAssertEqual(h, "pending")
     }
 
+    func testResolverDoesNotApplyOldHashAfterAttachmentReplacement() async throws {
+        let originalFilename = try seedPDFCacheRow(
+            referenceId: 1,
+            contentHash: "pending",
+            contents: "%PDF-original"
+        )
+        let replacementFilename = "\(UUID().uuidString)_replacement.pdf"
+        let replacementURL = AppDatabase.pdfStorageURL.appendingPathComponent(replacementFilename)
+        try Data("%PDF-replacement".utf8).write(to: replacementURL)
+        let database = try XCTUnwrap(db)
+
+        let library = SyncedLibrary(
+            appDatabase: database,
+            stateFileURL: FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).engine-state"),
+            pdfContentHasher: { url in
+                XCTAssertEqual(url.lastPathComponent, originalFilename)
+                let replacedFilename = try database.replaceImportedPDF(
+                    referenceId: 1,
+                    filename: replacementFilename
+                )
+                XCTAssertEqual(replacedFilename, originalFilename)
+                return "hash-of-original"
+            },
+            pdfAssetSyncEnabledProvider: { true }
+        )
+
+        await library.resolvePendingHashForReference(1)
+
+        let status = try XCTUnwrap(try database.pdfCacheStatus(for: 1))
+        XCTAssertEqual(status.localFilename, replacementFilename)
+        XCTAssertEqual(status.assetVersion, 2)
+        XCTAssertEqual(
+            status.contentHash,
+            "pending",
+            "a hash computed from the prior file must not be written onto its replacement"
+        )
+    }
+
     func testDrainerResolvesPendingHashBeforeMarkingDirty() async throws {
         let filename = try seedPDFCacheRow(referenceId: 1, contentHash: "pending", contents: "%PDF-drainer")
 

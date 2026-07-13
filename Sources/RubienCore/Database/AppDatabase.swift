@@ -1297,30 +1297,65 @@ extension AppDatabase {
         try dbWriter.write { db in
             for (id, filename) in zip(rowIds, filenames) {
                 guard let filename else { continue }
-                let alreadyCached = try Bool.fetchOne(db, sql: """
-                    SELECT 1 FROM pdfCache WHERE referenceId = ? LIMIT 1
-                """, arguments: [id]) ?? false
-                if alreadyCached { continue }
-                let now = Date()
-                try db.execute(sql: """
-                    INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
-                    VALUES(?, ?, 'pending', 1, ?, ?)
-                """, arguments: [id, filename, now, now])
-                try db.execute(sql: """
-                    INSERT OR REPLACE INTO pdfUploadQueue(referenceId, localFilename, queuedAt)
-                    VALUES(?, ?, ?)
-                """, arguments: [id, filename, now])
+                try attachPDFInTransaction(referenceId: id, filename: filename, db: db)
             }
+        }
+    }
+
+    /// Atomically attach one imported PDF and stamp the owning reference's
+    /// modification date. Returns `false` when another materialized attachment
+    /// already won the race, allowing the caller to delete its unowned copy.
+    /// A metadata-only cache placeholder is replaced by the local file because
+    /// the detail panel offers attachment whenever no bytes are materialized.
+    ///
+    /// The detail panel uses this entry point from a detached worker. Updating
+    /// only `dateModified` avoids writing a stale full `Reference` snapshot over
+    /// metadata that an MCP process may have changed concurrently.
+    @discardableResult
+    public func attachImportedPDF(
+        referenceId: Int64,
+        filename: String
+    ) throws -> Bool {
+        try dbWriter.write { db in
+            let result = try attachPDFInTransaction(
+                referenceId: referenceId,
+                filename: filename,
+                db: db,
+                existingPolicy: .replaceNonMaterialized
+            )
+            if result.attached {
+                try stampReferenceModified(referenceId: referenceId, db: db)
+            }
+            return result.attached
+        }
+    }
+
+    /// Atomically replace the current cache and upload-queue rows, incrementing
+    /// the existing asset version. Returns the prior materialized filename so
+    /// the caller can delete it only after the transaction commits.
+    @discardableResult
+    public func replaceImportedPDF(
+        referenceId: Int64,
+        filename: String
+    ) throws -> String? {
+        try dbWriter.write { db in
+            let result = try attachPDFInTransaction(
+                referenceId: referenceId,
+                filename: filename,
+                db: db,
+                existingPolicy: .replace
+            )
+            try stampReferenceModified(referenceId: referenceId, db: db)
+            return result.previousFilename
         }
     }
 
     /// Drop a reference's `pdfCache` + `pdfUploadQueue` rows. Caller is
     /// responsible for removing the on-disk file (the cache row holds the
     /// only reference to its filename, so do that lookup *before* calling
-    /// this). Used when the user explicitly detaches a PDF or swaps it for a
-    /// freshly downloaded one — those flows want full row deletion, not the
-    /// `dematerialize` semantic that keeps the row but nulls
-    /// `materializedAt`.
+    /// this). Used when the user explicitly detaches a PDF; that flow wants
+    /// full row deletion, not the `dematerialize` semantic that keeps the row
+    /// but nulls `materializedAt`.
     public func detachReferencePDF(id: Int64) throws {
         try dbWriter.write { db in
             try db.execute(sql: "DELETE FROM pdfCache WHERE referenceId = ?", arguments: [id])
@@ -1458,24 +1493,79 @@ extension AppDatabase {
     /// atomic with the surrounding Reference write. Used by
     /// `persistMetadataResolution`, `confirmMetadataIntake`, and
     /// `batchImportReferences` (when its `pdfFilenames` parameter is set).
+    private enum ExistingPDFAttachmentPolicy {
+        case preserve
+        case replaceNonMaterialized
+        case replace
+    }
+
+    private struct ImportedPDFAttachmentResult {
+        let attached: Bool
+        let previousFilename: String?
+    }
+
+    @discardableResult
     private func attachPDFInTransaction(
         referenceId: Int64,
         filename: String,
-        db: Database
-    ) throws {
-        let alreadyCached = try Bool.fetchOne(db, sql: """
-            SELECT 1 FROM pdfCache WHERE referenceId = ? LIMIT 1
-        """, arguments: [referenceId]) ?? false
-        guard !alreadyCached else { return }
+        db: Database,
+        existingPolicy: ExistingPDFAttachmentPolicy = .preserve
+    ) throws -> ImportedPDFAttachmentResult {
+        let existing = try Row.fetchOne(db, sql: """
+            SELECT localFilename, assetVersion, materializedAt
+            FROM pdfCache WHERE referenceId = ? LIMIT 1
+        """, arguments: [referenceId])
         let now = Date()
-        try db.execute(sql: """
-            INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
-            VALUES(?, ?, 'pending', 1, ?, ?)
-        """, arguments: [referenceId, filename, now, now])
+        var previousFilename: String?
+
+        if let existing {
+            let materializedAt: Date? = existing["materializedAt"]
+            switch existingPolicy {
+            case .preserve:
+                return ImportedPDFAttachmentResult(attached: false, previousFilename: nil)
+            case .replaceNonMaterialized:
+                guard materializedAt == nil else {
+                    return ImportedPDFAttachmentResult(attached: false, previousFilename: nil)
+                }
+            case .replace:
+                if materializedAt != nil {
+                    previousFilename = existing["localFilename"]
+                }
+            }
+            let assetVersion: Int64 = existing["assetVersion"]
+            try db.execute(sql: """
+                UPDATE pdfCache
+                SET localFilename = ?, contentHash = 'pending', assetVersion = ?,
+                    materializedAt = ?, lastOpenedAt = ?
+                WHERE referenceId = ?
+            """, arguments: [filename, assetVersion + 1, now, now, referenceId])
+        } else {
+            try db.execute(sql: """
+                INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
+                VALUES(?, ?, 'pending', 1, ?, ?)
+            """, arguments: [referenceId, filename, now, now])
+        }
         try db.execute(sql: """
             INSERT OR REPLACE INTO pdfUploadQueue(referenceId, localFilename, queuedAt)
             VALUES(?, ?, ?)
         """, arguments: [referenceId, filename, now])
+        return ImportedPDFAttachmentResult(
+            attached: true,
+            previousFilename: previousFilename
+        )
+    }
+
+    private func stampReferenceModified(referenceId: Int64, db: Database) throws {
+        let currentModifiedAt = try Date.fetchOne(
+            db,
+            sql: "SELECT dateModified FROM reference WHERE id = ?",
+            arguments: [referenceId]
+        )
+        let modifiedAt = max(currentModifiedAt ?? .distantPast, Date())
+        try db.execute(
+            sql: "UPDATE reference SET dateModified = ? WHERE id = ?",
+            arguments: [modifiedAt, referenceId]
+        )
     }
 
     public func deleteReferences(ids: [Int64]) throws {

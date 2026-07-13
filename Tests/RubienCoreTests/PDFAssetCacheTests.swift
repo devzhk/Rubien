@@ -140,6 +140,190 @@ final class PDFAssetCacheTests: XCTestCase {
         XCTAssertNil(entry)
     }
 
+    // MARK: - Manual attachment transaction
+
+    func testAttachImportedPDFStampsMonotonicallyAndPreservesExistingAttachment() throws {
+        try makeRef(id: 1)
+        let initialStamp = try XCTUnwrap(try db.dbWriter.read { database in
+            try Date.fetchOne(
+                database,
+                sql: "SELECT dateModified FROM reference WHERE id = 1"
+            )
+        })
+
+        let attached = try db.attachImportedPDF(
+            referenceId: 1,
+            filename: "first.pdf"
+        )
+
+        XCTAssertTrue(attached)
+        XCTAssertEqual(try db.pdfFilename(for: 1), "first.pdf")
+        let attachedStamp = try XCTUnwrap(try db.dbWriter.read { database in
+            try Date.fetchOne(
+                database,
+                sql: "SELECT dateModified FROM reference WHERE id = 1"
+            )
+        })
+        XCTAssertGreaterThanOrEqual(attachedStamp, initialStamp)
+
+        let replacementStamp = attachedStamp.addingTimeInterval(60)
+        try db.dbWriter.write { database in
+            try database.execute(
+                sql: "UPDATE reference SET dateModified = ? WHERE id = 1",
+                arguments: [replacementStamp]
+            )
+        }
+        let replaced = try db.attachImportedPDF(
+            referenceId: 1,
+            filename: "replacement.pdf"
+        )
+
+        XCTAssertFalse(replaced, "manual attach must not overwrite a concurrently-added PDF")
+        XCTAssertEqual(try db.pdfFilename(for: 1), "first.pdf")
+        let unchangedStamp = try db.dbWriter.read { database in
+            try Date.fetchOne(
+                database,
+                sql: "SELECT dateModified FROM reference WHERE id = 1"
+            )
+        }
+        XCTAssertEqual(
+            try XCTUnwrap(unchangedStamp).timeIntervalSince1970,
+            replacementStamp.timeIntervalSince1970,
+            accuracy: 0.001
+        )
+
+        try makeRef(id: 2)
+        let futureMCPStamp = Date().addingTimeInterval(3_600)
+        try db.dbWriter.write { database in
+            try database.execute(
+                sql: "UPDATE reference SET dateModified = ? WHERE id = 2",
+                arguments: [futureMCPStamp]
+            )
+        }
+
+        XCTAssertTrue(try db.attachImportedPDF(referenceId: 2, filename: "second.pdf"))
+        let monotonicStamp = try XCTUnwrap(try db.dbWriter.read { database in
+            try Date.fetchOne(
+                database,
+                sql: "SELECT dateModified FROM reference WHERE id = 2"
+            )
+        })
+        XCTAssertEqual(
+            monotonicStamp.timeIntervalSince1970,
+            futureMCPStamp.timeIntervalSince1970,
+            accuracy: 0.001,
+            "attachment must not move a newer concurrent metadata timestamp backward"
+        )
+    }
+
+    func testAttachImportedPDFMaterializesMetadataOnlyPlaceholder() throws {
+        try makeRef(id: 1)
+        try db.dbWriter.write { database in
+            try database.execute(sql: """
+                INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
+                VALUES(1, 'remote-placeholder.pdf', 'remote-hash', 7, NULL, ?)
+            """, arguments: [Date()])
+        }
+
+        XCTAssertTrue(try db.attachImportedPDF(referenceId: 1, filename: "local.pdf"))
+
+        let status = try XCTUnwrap(try db.pdfCacheStatus(for: 1))
+        XCTAssertEqual(status.localFilename, "local.pdf")
+        XCTAssertEqual(status.contentHash, "pending")
+        XCTAssertEqual(status.assetVersion, 8)
+        XCTAssertNotNil(status.materializedAt)
+        XCTAssertTrue(status.inUploadQueue)
+    }
+
+    func testReplaceImportedPDFSwapsCurrentRowAndIncrementsAssetVersion() throws {
+        try makeRef(id: 1)
+        let futureMCPStamp = Date().addingTimeInterval(3_600)
+        try db.dbWriter.write { database in
+            try database.execute(sql: """
+                INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
+                VALUES(1, 'concurrent.pdf', 'concurrent-hash', 11, ?, ?)
+            """, arguments: [Date(), Date()])
+            try database.execute(sql: """
+                INSERT INTO pdfUploadQueue(referenceId, localFilename, queuedAt)
+                VALUES(1, 'concurrent.pdf', ?)
+            """, arguments: [Date()])
+            try database.execute(
+                sql: "UPDATE reference SET dateModified = ? WHERE id = 1",
+                arguments: [futureMCPStamp]
+            )
+        }
+
+        let previousFilename = try db.replaceImportedPDF(
+            referenceId: 1,
+            filename: "replacement.pdf"
+        )
+
+        XCTAssertEqual(previousFilename, "concurrent.pdf")
+        let status = try XCTUnwrap(try db.pdfCacheStatus(for: 1))
+        XCTAssertEqual(status.localFilename, "replacement.pdf")
+        XCTAssertEqual(status.contentHash, "pending")
+        XCTAssertEqual(status.assetVersion, 12)
+        XCTAssertNotNil(status.materializedAt)
+        XCTAssertTrue(status.inUploadQueue)
+        let queuedFilename = try db.dbWriter.read { database in
+            try String.fetchOne(
+                database,
+                sql: "SELECT localFilename FROM pdfUploadQueue WHERE referenceId = 1"
+            )
+        }
+        XCTAssertEqual(queuedFilename, "replacement.pdf")
+        let modifiedAt = try XCTUnwrap(try db.dbWriter.read { database in
+            try Date.fetchOne(
+                database,
+                sql: "SELECT dateModified FROM reference WHERE id = 1"
+            )
+        })
+        XCTAssertEqual(
+            modifiedAt.timeIntervalSince1970,
+            futureMCPStamp.timeIntervalSince1970,
+            accuracy: 0.001
+        )
+    }
+
+    func testReplaceImportedPDFFailureRollsBackExistingRows() throws {
+        try makeRef(id: 1)
+        try db.dbWriter.write { database in
+            try database.execute(sql: """
+                INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
+                VALUES(1, 'original.pdf', 'original-hash', 7, ?, ?)
+            """, arguments: [Date(), Date()])
+            try database.execute(sql: """
+                INSERT INTO pdfUploadQueue(referenceId, localFilename, queuedAt)
+                VALUES(1, 'original.pdf', ?)
+            """, arguments: [Date()])
+            try database.execute(sql: """
+                CREATE TEMP TRIGGER reject_pdf_replacement_stamp
+                BEFORE UPDATE OF dateModified ON reference
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced replacement failure');
+                END
+            """)
+        }
+
+        XCTAssertThrowsError(
+            try db.replaceImportedPDF(referenceId: 1, filename: "replacement.pdf")
+        )
+
+        let status = try XCTUnwrap(try db.pdfCacheStatus(for: 1))
+        XCTAssertEqual(status.localFilename, "original.pdf")
+        XCTAssertEqual(status.contentHash, "original-hash")
+        XCTAssertEqual(status.assetVersion, 7)
+        XCTAssertNotNil(status.materializedAt)
+        XCTAssertTrue(status.inUploadQueue)
+        let queuedFilename = try db.dbWriter.read { database in
+            try String.fetchOne(
+                database,
+                sql: "SELECT localFilename FROM pdfUploadQueue WHERE referenceId = 1"
+            )
+        }
+        XCTAssertEqual(queuedFilename, "original.pdf")
+    }
+
     // MARK: - AppDatabase.pdfFilename(for:) sync helper (Task 6)
 
     func testAppDatabasePdfFilenameReturnsNilWhenNoRow() throws {

@@ -7,6 +7,190 @@ import RubienPDFKit
 
 private let detailLog = Logger(subsystem: "Rubien", category: "reference-detail")
 
+/// Runs manual PDF file I/O and the potentially-contended SQLite write away
+/// from the main actor. The injected operations keep the threading and cleanup
+/// contract directly testable without opening an `NSOpenPanel`.
+enum ReferenceDetailPDFAttachmentWorker {
+    enum Outcome: Equatable, Sendable {
+        case attached
+        case alreadyAttached
+        case failed(String)
+    }
+
+    typealias Importer = @Sendable (URL) throws -> String
+    typealias Downloader = @Sendable (Reference) async throws -> String
+    typealias Attacher = @Sendable (AppDatabase, Int64, String) throws -> Bool
+    typealias Replacer = @Sendable (AppDatabase, Int64, String) throws -> String?
+    typealias Deleter = @Sendable (String) -> Void
+
+    static func attach(
+        sourceURL: URL,
+        referenceId: Int64,
+        database: AppDatabase,
+        importer: @escaping Importer = { try PDFService.importPDF(from: $0) },
+        attacher: @escaping Attacher = { database, referenceId, filename in
+            try database.attachImportedPDF(
+                referenceId: referenceId,
+                filename: filename
+            )
+        },
+        deleter: @escaping Deleter = { PDFService.deletePDF(at: $0) }
+    ) async -> Outcome {
+        await Task.detached(priority: .userInitiated) {
+            let filename: String
+            do {
+                filename = try importer(sourceURL)
+            } catch {
+                return .failed(error.localizedDescription)
+            }
+
+            return persistImportedPDF(
+                filename: filename,
+                referenceId: referenceId,
+                database: database,
+                attacher: attacher,
+                deleter: deleter
+            )
+        }.value
+    }
+
+    /// Download first, then commit the new cache state. A failed download never
+    /// touches the current attachment; a failed commit removes only the new file.
+    static func downloadAndAttach(
+        reference: Reference,
+        referenceId: Int64,
+        database: AppDatabase,
+        replacingExisting: Bool,
+        downloader: @escaping Downloader = { try await PDFDownloadService.downloadPDF(for: $0) },
+        attacher: @escaping Attacher = { database, referenceId, filename in
+            try database.attachImportedPDF(referenceId: referenceId, filename: filename)
+        },
+        replacer: @escaping Replacer = { database, referenceId, filename in
+            try database.replaceImportedPDF(referenceId: referenceId, filename: filename)
+        },
+        deleter: @escaping Deleter = { PDFService.deletePDF(at: $0) }
+    ) async -> Outcome {
+        let filename: String
+        do {
+            filename = try await downloader(reference)
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+
+        if replacingExisting {
+            return await replaceImportedPDF(
+                filename: filename,
+                referenceId: referenceId,
+                database: database,
+                replacer: replacer,
+                deleter: deleter
+            )
+        }
+        return await registerImportedPDF(
+            filename: filename,
+            referenceId: referenceId,
+            database: database,
+            attacher: attacher,
+            deleter: deleter
+        )
+    }
+
+    /// Register a file that is already in Rubien's PDF storage, such as a
+    /// finished network download. The same loser/error cleanup contract as
+    /// manual attachment prevents unowned files during concurrent operations.
+    static func registerImportedPDF(
+        filename: String,
+        referenceId: Int64,
+        database: AppDatabase,
+        attacher: @escaping Attacher = { database, referenceId, filename in
+            try database.attachImportedPDF(referenceId: referenceId, filename: filename)
+        },
+        deleter: @escaping Deleter = { PDFService.deletePDF(at: $0) }
+    ) async -> Outcome {
+        await Task.detached(priority: .userInitiated) {
+            persistImportedPDF(
+                filename: filename,
+                referenceId: referenceId,
+                database: database,
+                attacher: attacher,
+                deleter: deleter
+            )
+        }.value
+    }
+
+    /// Atomically replace the cache row before deleting the prior file. If the
+    /// transaction fails, the current attachment remains and only the new copy
+    /// is removed.
+    static func replaceImportedPDF(
+        filename: String,
+        referenceId: Int64,
+        database: AppDatabase,
+        replacer: @escaping Replacer = { database, referenceId, filename in
+            try database.replaceImportedPDF(referenceId: referenceId, filename: filename)
+        },
+        deleter: @escaping Deleter = { PDFService.deletePDF(at: $0) }
+    ) async -> Outcome {
+        await Task.detached(priority: .userInitiated) {
+            do {
+                let previousFilename = try replacer(database, referenceId, filename)
+                if let previousFilename, previousFilename != filename {
+                    deleter(previousFilename)
+                }
+                return .attached
+            } catch {
+                deleter(filename)
+                return .failed(error.localizedDescription)
+            }
+        }.value
+    }
+
+    private static func persistImportedPDF(
+        filename: String,
+        referenceId: Int64,
+        database: AppDatabase,
+        attacher: Attacher,
+        deleter: Deleter
+    ) -> Outcome {
+        do {
+            let attached = try attacher(database, referenceId, filename)
+            guard attached else {
+                deleter(filename)
+                return .alreadyAttached
+            }
+            return .attached
+        } catch {
+            // The cache transaction failed, so this copy has no durable owner.
+            deleter(filename)
+            return .failed(error.localizedDescription)
+        }
+    }
+}
+
+struct ReferenceDetailPDFOperationRegistry {
+    enum Operation: Equatable {
+        case attachment
+        case download
+    }
+
+    private var operations: [Int64: Operation] = [:]
+
+    func operation(for referenceId: Int64?) -> Operation? {
+        guard let referenceId else { return nil }
+        return operations[referenceId]
+    }
+
+    mutating func begin(_ operation: Operation, for referenceId: Int64) -> Bool {
+        guard operations[referenceId] == nil else { return false }
+        operations[referenceId] = operation
+        return true
+    }
+
+    mutating func finish(_ operation: Operation, for referenceId: Int64) {
+        guard operations[referenceId] == operation else { return }
+        operations.removeValue(forKey: referenceId)
+    }
+}
+
 struct ReferenceDetailView: View {
     let reference: Reference
     let allTags: [Tag]
@@ -29,6 +213,8 @@ struct ReferenceDetailView: View {
     @State private var webAnnotationCount: Int = 0
     @State private var hasStoredWebContent = false
     @State private var pdfDownloadState: PDFDownloadState = .idle
+    @State private var pdfAttachmentState: PDFAttachmentState = .idle
+    @Binding private var pdfOperations: ReferenceDetailPDFOperationRegistry
     @State private var showOverwriteConfirmation = false
     @Binding var propertyDefs: [PropertyDefinition]
     @State private var customValues: [Int64: String] = [:]
@@ -38,8 +224,18 @@ struct ReferenceDetailView: View {
 
     private enum PDFDownloadState {
         case idle, downloading, failed(String)
-        var isDownloading: Bool { if case .downloading = self { return true } else { return false } }
     }
+
+    private enum PDFAttachmentState {
+        case idle, attaching, failed(String)
+    }
+
+    private var activePDFOperation: ReferenceDetailPDFOperationRegistry.Operation? {
+        pdfOperations.operation(for: editedRef.id)
+    }
+
+    private var isPDFDownloadActive: Bool { activePDFOperation == .download }
+    private var isPDFAttachmentActive: Bool { activePDFOperation == .attachment }
 
     let liveTags: [Tag]
 
@@ -50,6 +246,7 @@ struct ReferenceDetailView: View {
          onCreateTag: ((String) -> Int64?)? = nil,
          onDeleteTag: ((Int64) -> Void)? = nil,
          deleteTagUnlessInUse: ((Int64) -> Int?)? = nil,
+         pdfOperations: Binding<ReferenceDetailPDFOperationRegistry>,
          propertyDefs: Binding<[PropertyDefinition]>) {
         self.reference = reference
         self.allTags = allTags
@@ -64,6 +261,7 @@ struct ReferenceDetailView: View {
         self.onDeleteTag = onDeleteTag
         self.deleteTagUnlessInUse = deleteTagUnlessInUse
         self._editedRef = State(initialValue: reference)
+        self._pdfOperations = pdfOperations
         self._propertyDefs = propertyDefs
     }
 
@@ -96,6 +294,8 @@ struct ReferenceDetailView: View {
             editedRef = newRef
             editingField = nil
             guard oldRef.id != newRef.id else { return }
+            pdfAttachmentState = .idle
+            pdfDownloadState = .idle
             referenceTags = []
             pdfAnnotationCount = 0
             webAnnotationCount = 0
@@ -237,19 +437,40 @@ struct ReferenceDetailView: View {
                         }
                         .buttonStyle(SLDestructiveButtonStyle())
                         .controlSize(.mini)
+                        .disabled(activePDFOperation != nil)
                         .help("Remove PDF")
                     }
                 } else {
-                    Button {
-                        if let url = OpenPanelPicker.pickPDFFile() {
-                            attachPDF(from: url)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Button {
+                            if let url = OpenPanelPicker.pickPDFFile() {
+                                attachPDF(from: url)
+                            }
+                        } label: {
+                            if isPDFAttachmentActive {
+                                HStack(spacing: 6) {
+                                    ProgressView()
+                                        .controlSize(.mini)
+                                    Text("Attaching PDF…")
+                                }
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                            } else {
+                                Label("Attach PDF...", systemImage: "plus")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+                            }
                         }
-                    } label: {
-                        Label("Attach PDF...", systemImage: "plus")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
+                        .buttonStyle(.plain)
+                        .disabled(activePDFOperation != nil)
+
+                        if case .failed(let message) = pdfAttachmentState {
+                            Text(message)
+                                .font(.caption2)
+                                .foregroundStyle(.red)
+                                .lineLimit(2)
+                        }
                     }
-                    .buttonStyle(.plain)
                 }
             }
 
@@ -1004,10 +1225,10 @@ struct ReferenceDetailView: View {
                     if reference.hasPDFInCache(in: db) {
                         showOverwriteConfirmation = true
                     } else {
-                        performPDFDownload()
+                        performPDFDownload(replacingExisting: false)
                     }
                 } label: {
-                    if pdfDownloadState.isDownloading {
+                    if isPDFDownloadActive {
                         ProgressView()
                             .controlSize(.small)
                     } else {
@@ -1017,12 +1238,15 @@ struct ReferenceDetailView: View {
                 }
                 .buttonStyle(SLPrimaryButtonStyle())
                 .controlSize(.small)
-                .disabled(!canDownloadPDF || pdfDownloadState.isDownloading)
+                .disabled(
+                    !canDownloadPDF
+                    || activePDFOperation != nil
+                )
                 .help(canDownloadPDF ? "" : String(localized: "Needs a DOI or arXiv link", bundle: .module))
                 .alert(String(localized: "Replace existing PDF?", bundle: .module),
                        isPresented: $showOverwriteConfirmation) {
                     Button(String(localized: "Replace", bundle: .module), role: .destructive) {
-                        performPDFDownload()
+                        performPDFDownload(replacingExisting: true)
                     }
                     Button(String(localized: "Cancel", bundle: .module), role: .cancel) {}
                 } message: {
@@ -1149,53 +1373,74 @@ struct ReferenceDetailView: View {
 
     private var canDownloadPDF: Bool { reference.canDownloadPDF }
 
-    private func performPDFDownload() {
+    private func performPDFDownload(replacingExisting: Bool) {
+        guard let id = reference.id,
+              pdfOperations.begin(.download, for: id) else { return }
         pdfDownloadState = .downloading
-        Task {
-            do {
-                // Swap out any prior PDF: remove the on-disk file + cache row
-                // first so the new download doesn't orphan the old asset.
-                if let id = reference.id,
-                   let oldFilename = try? db.pdfFilename(for: id) {
-                    let oldURL = AppDatabase.pdfStorageURL.appendingPathComponent(oldFilename)
-                    try? FileManager.default.removeItem(at: oldURL)
-                    try? db.detachReferencePDF(id: id)
-                }
-                let newPath = try await PDFDownloadService.downloadPDF(for: reference)
-                if let id = reference.id {
-                    try db.attachImportedPDFs(rowIds: [id], filenames: [newPath])
-                    let coordinator = syncCoordinator
-                    Task { await coordinator?.kickPDFUploadDrainer() }
-                }
-                var updated = reference
-                updated.dateModified = Date()
-                onSave(updated)
+
+        let database = db
+        let selectedReference = reference
+        let coordinator = syncCoordinator
+        Task { @MainActor in
+            let outcome = await ReferenceDetailPDFAttachmentWorker.downloadAndAttach(
+                reference: selectedReference,
+                referenceId: id,
+                database: database,
+                replacingExisting: replacingExisting
+            )
+            pdfOperations.finish(.download, for: id)
+
+            if outcome == .attached {
+                Task { await coordinator?.kickPDFUploadDrainer() }
+            }
+
+            guard editedRef.id == id else { return }
+            switch outcome {
+            case .attached:
                 pdfDownloadState = .idle
-            } catch {
-                pdfDownloadState = .failed(error.localizedDescription)
+            case .alreadyAttached:
+                pdfDownloadState = .failed(
+                    String(localized: "Another PDF was attached while the download was running", bundle: .module)
+                )
+            case .failed(let message):
+                pdfDownloadState = .failed(message)
             }
         }
     }
 
-    /// Copy a user-picked PDF into storage and register a fresh cache row +
-    /// upload-queue row for the reference. Bumps `dateModified` so the
-    /// reference still reflects "recently changed" in the UI even though the
-    /// reference row itself hasn't changed any fields.
+    /// Copy a user-picked PDF into storage and atomically register its cache /
+    /// upload rows plus the reference modification stamp. File I/O and the
+    /// SQLite writer wait both run detached so MCP activity cannot freeze the
+    /// main run loop.
     private func attachPDF(from sourceURL: URL) {
-        guard let id = editedRef.id else { return }
-        guard let filename = try? PDFService.importPDF(from: sourceURL) else { return }
-        do {
-            try db.attachImportedPDFs(rowIds: [id], filenames: [filename])
-        } catch {
-            // Roll back the on-disk copy so we don't orphan a file with no cache row.
-            PDFService.deletePDF(at: filename)
-            return
-        }
+        guard let id = editedRef.id,
+              pdfOperations.begin(.attachment, for: id) else { return }
+        pdfAttachmentState = .attaching
+
+        let database = db
         let coordinator = syncCoordinator
-        Task { await coordinator?.kickPDFUploadDrainer() }
-        var updated = editedRef
-        updated.dateModified = Date()
-        onSave(updated)
+        Task { @MainActor in
+            let outcome = await ReferenceDetailPDFAttachmentWorker.attach(
+                sourceURL: sourceURL,
+                referenceId: id,
+                database: database
+            )
+            pdfOperations.finish(.attachment, for: id)
+
+            if outcome == .attached {
+                Task { await coordinator?.kickPDFUploadDrainer() }
+            }
+
+            // Selection can change while a large or cloud-backed PDF copies.
+            guard editedRef.id == id else { return }
+            switch outcome {
+            case .attached, .alreadyAttached:
+                pdfAttachmentState = .idle
+            case .failed(let message):
+                detailLog.error("Manual PDF attachment failed for reference \(id, privacy: .public): \(message, privacy: .public)")
+                pdfAttachmentState = .failed(message)
+            }
+        }
     }
 
     private func revealAttachedPDF() {
@@ -1214,7 +1459,8 @@ struct ReferenceDetailView: View {
     /// from disk plus the `pdfCache` and `pdfUploadQueue` rows. Bumps
     /// `dateModified` like the attach path.
     private func removeAttachedPDF() {
-        guard let id = editedRef.id else { return }
+        guard let id = editedRef.id,
+              pdfOperations.operation(for: id) == nil else { return }
         if let filename = try? db.pdfFilename(for: id) {
             let url = AppDatabase.pdfStorageURL.appendingPathComponent(filename)
             try? FileManager.default.removeItem(at: url)
