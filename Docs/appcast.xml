@@ -310,5 +310,21 @@ Also in 0.3.0:
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.3.1</title>
+            <description><![CDATA[• Mention papers from your library in Assistant conversations.
+• Paste or drag images and files directly into the Assistant composer.
+• Improved composer guidance and paper mention popover layout.]]></description>
+            <pubDate>Mon, 13 Jul 2026 00:41:50 +0000</pubDate>
+            <sparkle:version>22</sparkle:version>
+            <sparkle:shortVersionString>0.3.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.3.1/Rubien-0.3.1.dmg"
+                sparkle:edSignature="6da2bU3mw17vXHwZIjRiQPQrJtpLNcuPNv5FzPf1P6ehSHtXYhxdg8phJtjn4MHLQRoa1aV50QpXB7S5G0yyBw=="
+                length="18978423"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
