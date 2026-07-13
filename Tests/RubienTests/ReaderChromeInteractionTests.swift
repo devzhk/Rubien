@@ -27,6 +27,19 @@ final class ReaderChromeInteractionTests: XCTestCase {
         )
     }
 
+    func testAssistantSidebarCanResizeToWideConversationLayout() {
+        XCTAssertEqual(AssistantSidebarMetrics.widthRange.lowerBound, 300)
+        XCTAssertEqual(AssistantSidebarMetrics.widthRange.upperBound, 900)
+        XCTAssertEqual(
+            FloatingPanelMetrics.width(
+                afterLeadingEdgeTranslation: -1_000,
+                from: WebReaderMetrics.defaultChatPanelWidth,
+                in: AssistantSidebarMetrics.widthRange
+            ),
+            900
+        )
+    }
+
     func testPDFSidebarWidthClampsTrailingEdgeDragToRange() {
         XCTAssertEqual(
             PDFReaderMetrics.sidebarWidth(afterTrailingEdgeTranslation: -500, from: 240, in: 200...400),

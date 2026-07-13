@@ -467,9 +467,6 @@ struct ChatSidebarView: View {
                 pendingAttachmentTray
             }
             composerEditor
-            if draft.isEmpty {
-                composerHints
-            }
             HStack(spacing: 8) {
                 plusMenu
                 approvalPicker
@@ -860,30 +857,31 @@ struct ChatSidebarView: View {
         return text.font(.system(size: 12))
     }
 
-    /// The empty-composer guidance: a short affordance list shown right under the
-    /// "Chat about this document:" placeholder and gated on an empty draft, so it
-    /// collapses the moment you start typing. One hint per line with the key/glyph
-    /// in a fixed-width leading column so the descriptions align into a clean list.
-    private var composerHints: some View {
+    /// One compact empty-state block inside the editor. Keeping the heading and
+    /// affordances together avoids the visual gap created when they were separate
+    /// siblings in the composer box.
+    private var composerEmptyGuidance: some View {
         VStack(alignment: .leading, spacing: 3) {
+            Text("Chat about document:")
+                .font(.system(size: 12, weight: .medium))
             composerHint("⌘↩", "Send")
             composerHint("@", "Mention a paper")
             composerHint("⌘V", "Paste an image")
             composerHint("+", "Add files")
         }
         .padding(.leading, 5)
-        .padding(.top, 1)
+        .foregroundStyle(.tertiary)
+        .allowsHitTesting(false)
     }
 
     private func composerHint(_ key: String, _ label: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Text(key)
-                .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
                 .frame(width: 30, alignment: .leading)
             Text(label)
-                .font(.system(size: 10.5))
+                .font(.system(size: 12))
         }
-        .foregroundStyle(.tertiary)
     }
 
     private var composerEditor: some View {
@@ -899,17 +897,7 @@ struct ChatSidebarView: View {
                 .opacity(0)
                 .allowsHitTesting(false)
             if draft.isEmpty {
-                // The empty-state heading; `composerHints` renders the affordance
-                // list (send / mention / paste / add files) right under it. Both are
-                // gated on an empty draft, so they collapse together the moment you
-                // start typing.
-                Text("Chat about this document:")
-                    .font(.body)
-                    .foregroundStyle(.tertiary)
-                    // Align with the AppKit editor's insertion point (its text
-                    // container has a 5 pt leading line-fragment inset).
-                    .padding(.leading, 5)
-                    .allowsHitTesting(false)
+                composerEmptyGuidance
             }
             // AppKit-backed editor (not a `TextEditor`): it routes pasted/dropped
             // images and files into the attachment pipeline — a TextEditor's text
@@ -1241,6 +1229,10 @@ struct ChatSidebarView: View {
 
 // MARK: - Floating card (Phase 3a)
 
+enum AssistantSidebarMetrics {
+    static let widthRange: ClosedRange<CGFloat> = 300...900
+}
+
 /// The assistant as a floating card over the reader's content — the details-panel
 /// idiom (`FloatingPanel`), not a docked split pane: solid surface, rounded,
 /// hairline-bordered, shadowed, resizable from its leading edge. Readers overlay
@@ -1255,7 +1247,7 @@ struct FloatingChatPanel: View {
     let onClose: () -> Void
 
     var body: some View {
-        FloatingPanel(width: $width, range: 300...640) {
+        FloatingPanel(width: $width, range: AssistantSidebarMetrics.widthRange) {
             ChatSidebarView(session: session, renderer: renderer, onClose: onClose)
                 .background(Color.chatSurface)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
