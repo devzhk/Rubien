@@ -461,7 +461,7 @@ struct ReferenceDetailView: View {
                                     .foregroundStyle(.secondary)
                             }
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(ToolbarHoverButtonStyle(hoverOpacity: 0.10, pressedOpacity: 0.16))
                         .disabled(activePDFOperation != nil)
 
                         if case .failed(let message) = pdfAttachmentState {
