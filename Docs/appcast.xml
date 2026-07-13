@@ -341,5 +341,22 @@ Also in 0.3.0:
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.3.3</title>
+            <description><![CDATA[• Add papers from eNeuro URLs — Rubien resolves their metadata and downloads the open-access PDF.
+• PDF attachments no longer hang; attaching or replacing a PDF is now safe during concurrent operations, with clearer hover feedback.
+• Citation previews now match the reader theme.
+• Assistant composer guidance is more compact, and the chat sidebar can be resized wider.]]></description>
+            <pubDate>Mon, 13 Jul 2026 06:48:46 +0000</pubDate>
+            <sparkle:version>24</sparkle:version>
+            <sparkle:shortVersionString>0.3.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.3.3/Rubien-0.3.3.dmg"
+                sparkle:edSignature="sP7q5kPBlWZArr9nkXUmiQDp4Kik4w5JpSD0xmvuge4S493+ySJYVCguV3oGBemAD/Sd1KPF5hpCBNfF5RUmBQ=="
+                length="12388468"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
