@@ -37,6 +37,11 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     /// in `SyncCoordinator`; tests inject `{ true }` or `{ false }` directly.
     private let pdfAssetSyncEnabledProvider: @Sendable () -> Bool
 
+    /// Injectable so tests can deterministically replace a cache row between
+    /// the resolver's read and write without holding the SQLite writer during
+    /// the potentially-expensive hash computation.
+    private let pdfContentHasher: @Sendable (URL) throws -> String
+
     /// Internal shape for deletions threaded into `applyFetchedRecordsInternal`.
     /// `CKSyncEngine.Event.FetchedRecordZoneChanges.Deletion` is not publicly
     /// constructible, so the production adapter unpacks it into this struct
@@ -76,6 +81,9 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         containerProvider: @escaping @Sendable () -> CKContainer = {
             CKContainer(identifier: SyncConstants.containerIdentifier)
         },
+        pdfContentHasher: @escaping @Sendable (URL) throws -> String = {
+            try PDFContentHasher.sha256(of: $0)
+        },
         // Tests default to `false` so the existing startup / observer /
         // status-stream tests (which don't seed pdfUploadQueue rows) keep
         // their behavior unchanged. Production callers in `SyncCoordinator`
@@ -91,6 +99,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         self.stateStore = SyncStateStore()
         self.engineStateStore = SyncEngineStateStore(fileURL: stateFileURL)
         self.containerProvider = containerProvider
+        self.pdfContentHasher = pdfContentHasher
         self.pdfAssetSyncEnabledProvider = pdfAssetSyncEnabledProvider
     }
 
@@ -245,29 +254,41 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     /// rows still exist.
     ///
     /// **No transaction wraps the SHA-256 compute.** Each row gets two tiny
-    /// `dbWriter.read` / `dbWriter.write` hops: one to read the filename, one
-    /// to write the resolved hash. Between them, `PDFContentHasher.sha256`
-    /// streams the file with the writer queue free.
+    /// `dbWriter.read` / `dbWriter.write` hops: one to read the filename and
+    /// asset version, one to write the resolved hash. Between them,
+    /// `PDFContentHasher.sha256` streams the file with the writer queue free.
+    /// The update matches that snapshot so replacing the PDF mid-hash cannot
+    /// assign the old file's hash to the new attachment.
     ///
     /// Missing files are tolerated (logged + skipped). Leaving such a row
     /// at `contentHash='pending'` is safe: `buildPushRecord(.referencePDF)`
     /// returns nil for missing-file rows via an earlier `fileExists` guard,
     /// so no inline-hash branch is ever reached for them.
     func resolvePendingPDFContentHashes() async {
-        let pending: [(id: Int64, filename: String)]
+        let pending: [(id: Int64, filename: String, assetVersion: Int64)]
         do {
             pending = try await appDatabase.dbWriter.read { db in
                 try Row.fetchAll(db, sql: """
-                    SELECT referenceId, localFilename FROM pdfCache
+                    SELECT referenceId, localFilename, assetVersion FROM pdfCache
                     WHERE contentHash = 'pending' AND materializedAt IS NOT NULL
-                """).map { (id: $0["referenceId"], filename: $0["localFilename"]) }
+                """).map {
+                    (
+                        id: $0["referenceId"],
+                        filename: $0["localFilename"],
+                        assetVersion: $0["assetVersion"]
+                    )
+                }
             }
         } catch {
             log.error("resolvePendingPDFContentHashes: failed to read pending list: \(error.localizedDescription, privacy: .public)")
             return
         }
         for row in pending {
-            await resolvePendingHashFor(referenceId: row.id, filename: row.filename)
+            await resolvePendingHashFor(
+                referenceId: row.id,
+                filename: row.filename,
+                assetVersion: row.assetVersion
+            )
         }
     }
 
@@ -276,28 +297,41 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     /// lookup. Idempotent for non-pending rows (WHERE contentHash =
     /// 'pending' guard on the UPDATE).
     func resolvePendingHashForReference(_ referenceId: Int64) async {
-        let filename: String?
+        let pending: (filename: String, assetVersion: Int64)?
         do {
-            filename = try await appDatabase.dbWriter.read { db in
-                try String.fetchOne(
+            pending = try await appDatabase.dbWriter.read { db in
+                try Row.fetchOne(
                     db,
-                    sql: "SELECT localFilename FROM pdfCache WHERE referenceId = ? AND contentHash = 'pending'",
+                    sql: """
+                        SELECT localFilename, assetVersion FROM pdfCache
+                        WHERE referenceId = ? AND contentHash = 'pending'
+                    """,
                     arguments: [referenceId]
-                )
+                ).map {
+                    (filename: $0["localFilename"], assetVersion: $0["assetVersion"])
+                }
             }
         } catch {
             log.error("resolvePendingHashForReference: read failed for \(referenceId, privacy: .public): \(error.localizedDescription, privacy: .public)")
             return
         }
-        guard let filename else { return }
-        await resolvePendingHashFor(referenceId: referenceId, filename: filename)
+        guard let pending else { return }
+        await resolvePendingHashFor(
+            referenceId: referenceId,
+            filename: pending.filename,
+            assetVersion: pending.assetVersion
+        )
     }
 
-    private func resolvePendingHashFor(referenceId: Int64, filename: String) async {
+    private func resolvePendingHashFor(
+        referenceId: Int64,
+        filename: String,
+        assetVersion: Int64
+    ) async {
         let url = AppDatabase.pdfStorageURL.appendingPathComponent(filename)
         let hash: String
         do {
-            hash = try PDFContentHasher.sha256(of: url)
+            hash = try pdfContentHasher(url)
         } catch {
             // Missing-file or unreadable-file case lands here. Leave the
             // row at 'pending'; safe because buildPushRecord(.referencePDF)
@@ -309,8 +343,12 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         do {
             try await appDatabase.dbWriter.write { db in
                 try db.execute(
-                    sql: "UPDATE pdfCache SET contentHash = ? WHERE referenceId = ? AND contentHash = 'pending'",
-                    arguments: [hash, referenceId]
+                    sql: """
+                        UPDATE pdfCache SET contentHash = ?
+                        WHERE referenceId = ? AND localFilename = ?
+                            AND assetVersion = ? AND contentHash = 'pending'
+                    """,
+                    arguments: [hash, referenceId, filename, assetVersion]
                 )
             }
         } catch {

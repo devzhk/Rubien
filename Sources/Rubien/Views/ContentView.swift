@@ -859,6 +859,9 @@ struct ContentView: View {
     @State private var showPropertyManager = false
     @State private var showInspector = true
     @State private var inspectorWidth: CGFloat = 380
+    /// Outlives the conditional inspector so in-flight PDF work remains locked
+    /// if the panel is hidden and reopened before the operation completes.
+    @State private var pdfOperations = ReferenceDetailPDFOperationRegistry()
     @State private var showAddReference = false
     @State private var addReferenceInitialType: ReferenceType = .journalArticle
     @State private var showWebImport = false
@@ -1093,6 +1096,7 @@ struct ContentView: View {
                     onCreateTag: { name in viewModel.createTag(name: name) },
                     onDeleteTag: { tagId in viewModel.deleteTag(id: tagId) },
                     deleteTagUnlessInUse: { tagId in viewModel.probeDeleteTag(id: tagId) },
+                    pdfOperations: $pdfOperations,
                     propertyDefs: Binding(
                         get: { viewModel.propertyDefs },
                         set: { viewModel.propertyDefs = $0 }
