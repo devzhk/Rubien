@@ -6,25 +6,77 @@ public struct ZoteroFolderImportPlan: Sendable {
         public let id: UUID
         public let sourceIndex: Int
         public let reference: Reference
+        /// Concrete source URLs aligned with `attachmentPaths`. Export-folder
+        /// plans resolve relative BibTeX paths here; local-API plans carry the
+        /// file URLs exposed by Zotero.
+        public let attachmentURLs: [URL]
         public let attachmentPaths: [String]
         public let rejectedAttachmentPaths: [String]
         public let missingAttachmentPaths: [String]
+        public let annotations: [PDFAnnotationDraft]
+        public let skippedAnnotationCount: Int
 
-        fileprivate init(sourceIndex: Int, entry: BibTeXEntry, folderURL: URL) {
+        init(sourceIndex: Int, entry: BibTeXEntry, folderURL: URL) {
             self.id = UUID()
             self.sourceIndex = sourceIndex
             self.reference = entry.reference
+            self.attachmentURLs = entry.attachmentPaths.map {
+                folderURL.appendingPathComponent($0)
+            }
             self.attachmentPaths = entry.attachmentPaths
             self.rejectedAttachmentPaths = entry.rejectedAttachmentPaths
-            self.missingAttachmentPaths = entry.attachmentPaths.filter {
-                !FileManager.default.fileExists(atPath: folderURL.appendingPathComponent($0).path)
+            self.missingAttachmentPaths = zip(attachmentURLs, entry.attachmentPaths).compactMap { url, path in
+                FileManager.default.fileExists(atPath: url.path) ? nil : path
             }
+            self.annotations = []
+            self.skippedAnnotationCount = 0
+        }
+
+        init(
+            sourceIndex: Int,
+            reference: Reference,
+            attachmentURLs: [URL],
+            attachmentPaths: [String],
+            rejectedAttachmentPaths: [String] = [],
+            missingAttachmentPaths: [String] = [],
+            annotations: [PDFAnnotationDraft] = [],
+            skippedAnnotationCount: Int = 0
+        ) {
+            precondition(
+                attachmentURLs.count == attachmentPaths.count,
+                "attachment URLs and display paths must stay aligned"
+            )
+            self.id = UUID()
+            self.sourceIndex = sourceIndex
+            self.reference = reference
+            self.attachmentURLs = attachmentURLs
+            self.attachmentPaths = attachmentPaths
+            self.rejectedAttachmentPaths = rejectedAttachmentPaths
+            self.missingAttachmentPaths = missingAttachmentPaths
+            self.annotations = annotations
+            self.skippedAnnotationCount = skippedAnnotationCount
         }
     }
 
-    public let folderURL: URL
+    /// Present only for user-selected export folders that need their security
+    /// scope reacquired during commit. A local Zotero plan already carries
+    /// concrete file URLs and has no folder security scope.
+    public let folderURL: URL?
+    public let sourceName: String
     public let propertyTarget: ZoteroImportPropertyTarget?
     public let entries: [Entry]
+
+    init(
+        folderURL: URL?,
+        sourceName: String,
+        propertyTarget: ZoteroImportPropertyTarget?,
+        entries: [Entry]
+    ) {
+        self.folderURL = folderURL
+        self.sourceName = sourceName
+        self.propertyTarget = propertyTarget
+        self.entries = entries
+    }
 }
 
 /// Imports a Zotero "Export Collection… with files" folder into Rubien:
@@ -37,6 +89,24 @@ public enum ZoteroFolderImporter {
         public let attached: Int
         public let missingPDFs: [String]
         public let duplicatesSkipped: Int
+        public let annotationsImported: Int
+        public let annotationsSkipped: Int
+
+        public init(
+            imported: Int,
+            attached: Int,
+            missingPDFs: [String],
+            duplicatesSkipped: Int,
+            annotationsImported: Int = 0,
+            annotationsSkipped: Int = 0
+        ) {
+            self.imported = imported
+            self.attached = attached
+            self.missingPDFs = missingPDFs
+            self.duplicatesSkipped = duplicatesSkipped
+            self.annotationsImported = annotationsImported
+            self.annotationsSkipped = annotationsSkipped
+        }
     }
 
     public enum Error: Swift.Error, LocalizedError {
@@ -96,6 +166,7 @@ public enum ZoteroFolderImporter {
         let entries = BibTeXImporter.parseWithAttachments(content)
         return ZoteroFolderImportPlan(
             folderURL: folderURL,
+            sourceName: folderURL.lastPathComponent,
             propertyTarget: propertyTarget,
             entries: entries.enumerated().map { index, entry in
                 ZoteroFolderImportPlan.Entry(
@@ -113,8 +184,8 @@ public enum ZoteroFolderImporter {
         db: AppDatabase
     ) throws -> Result {
 #if canImport(Darwin)
-        let accessing = plan.folderURL.startAccessingSecurityScopedResource()
-        defer { if accessing { plan.folderURL.stopAccessingSecurityScopedResource() } }
+        let accessing = plan.folderURL?.startAccessingSecurityScopedResource() ?? false
+        defer { if accessing { plan.folderURL?.stopAccessingSecurityScopedResource() } }
 #endif
 
         let entries = plan.entries
@@ -125,9 +196,11 @@ public enum ZoteroFolderImporter {
         }
 
         // Advisory classifier (read-only). Distinguishes DB duplicates whose existing row
-        // already has a pdfPath (skip copy — would orphan the existing file) from those
-        // that don't (copy — merge will attach), and also catches intra-batch duplicates
-        // so two entries sharing the same DOI don't both copy.
+        // already has a PDF (preserve it) from those that don't (copy — merge
+        // will attach). Intra-batch duplicate candidates are copied
+        // defensively so a later valid PDF can win when an earlier source is
+        // missing; the transaction reports the one adopted copy and the rest
+        // are deleted below.
         let classifications = try db.classifyImportEntries(entries.map(\.reference))
 
         var prepared: [Reference] = []
@@ -138,9 +211,14 @@ public enum ZoteroFolderImporter {
         // inside the same transaction as the reference inserts.
         var copiedFilenames: [String?] = []
         copiedFilenames.reserveCapacity(entries.count)
+        var annotationDrafts: [[PDFAnnotationDraft]] = []
+        annotationDrafts.reserveCapacity(entries.count)
+        var annotationAnchorFilenames: [String?] = []
+        annotationAnchorFilenames.reserveCapacity(entries.count)
         var missing: [String] = []
-        var attachedCount = 0
         var duplicatesSkipped = 0
+        var annotationsSkipped = entries.reduce(0) { $0 + $1.skippedAnnotationCount }
+        var existingPDFHashes: [String: String] = [:]
         // Track every PDF we copy into the store. If the write transaction
         // throws, we delete these so nothing is left orphaned.
         var copiedPaths: [String] = []
@@ -153,31 +231,60 @@ public enum ZoteroFolderImporter {
             if kind != .fresh { duplicatesSkipped += 1 }
 
             let shouldCopy: Bool = {
-                guard entry.attachmentPaths.first != nil else { return false }
+                guard entry.attachmentURLs.first != nil else { return false }
                 switch kind {
-                case .fresh, .dbDuplicateWithoutPDF: return true
-                case .dbDuplicateWithPDF, .intraBatchDuplicate: return false
+                case .fresh, .dbDuplicateWithoutPDF, .intraBatchDuplicate: return true
+                case .dbDuplicateWithPDF: return false
                 }
             }()
 
             var copiedThisRow: String? = nil
-            if shouldCopy, let relPath = entry.attachmentPaths.first {
-                let sourceURL = plan.folderURL.appendingPathComponent(relPath)
+            if shouldCopy, let sourceURL = entry.attachmentURLs.first {
+                let attachmentLabel = entry.attachmentPaths.first ?? sourceURL.lastPathComponent
                 if FileManager.default.fileExists(atPath: sourceURL.path) {
                     do {
                         let stored = try PDFService.importPDF(from: sourceURL)
                         copiedThisRow = stored
                         copiedPaths.append(stored)
-                        attachedCount += 1
                     } catch {
-                        missing.append(relPath)
+                        missing.append(attachmentLabel)
                     }
                 } else {
-                    missing.append(relPath)
+                    missing.append(attachmentLabel)
                 }
             }
             prepared.append(ref)
             copiedFilenames.append(copiedThisRow)
+
+            var annotationAnchorFilename = copiedThisRow
+            if case .dbDuplicateWithPDF(let existingFilename) = kind,
+               annotationAnchorFilename == nil,
+               !entry.annotations.isEmpty,
+               let sourceURL = entry.attachmentURLs.first,
+               let sourceHash = try? PDFContentHasher.sha256(of: sourceURL) {
+                let existingURL = AppDatabase.pdfStorageURL.appendingPathComponent(existingFilename)
+                let existingHash: String?
+                if let cached = existingPDFHashes[existingFilename] {
+                    existingHash = cached
+                } else if FileManager.default.fileExists(atPath: existingURL.path),
+                          let hash = try? PDFContentHasher.sha256(of: existingURL) {
+                    existingPDFHashes[existingFilename] = hash
+                    existingHash = hash
+                } else {
+                    existingHash = nil
+                }
+                if let existingHash, sourceHash == existingHash {
+                    annotationAnchorFilename = existingFilename
+                }
+            }
+
+            if annotationAnchorFilename != nil {
+                annotationDrafts.append(entry.annotations)
+            } else {
+                annotationDrafts.append([])
+                annotationsSkipped += entry.annotations.count
+            }
+            annotationAnchorFilenames.append(annotationAnchorFilename)
         }
 
         // Reference inserts + pdfCache attaches share one write transaction
@@ -186,23 +293,39 @@ public enum ZoteroFolderImporter {
         // attach is skipped per-row when the destination already has a cache
         // entry — preserves prior attachments on merge, matching the
         // "don't orphan an existing PDF" invariant the classifier enforces.
-        let outcome: (count: Int, ids: [Int64])
+        let outcome: (
+            count: Int,
+            ids: [Int64],
+            annotationsInserted: Int,
+            annotationsSkipped: Int,
+            attachedPDFFilenames: [String]
+        )
         do {
             outcome = try db.batchImportReferences(
                 prepared,
                 stamping: plan.propertyTarget,
-                pdfFilenames: copiedFilenames
+                pdfFilenames: copiedFilenames,
+                pdfAnnotationDrafts: annotationDrafts,
+                annotationAnchorFilenames: annotationAnchorFilenames
             )
         } catch {
             for path in copiedPaths { PDFService.deletePDF(at: path) }
             throw error
         }
 
+        let adoptedPDFs = Set(outcome.attachedPDFFilenames)
+        for path in copiedPaths where !adoptedPDFs.contains(path) {
+            PDFService.deletePDF(at: path)
+        }
+        annotationsSkipped += outcome.annotationsSkipped
+
         return Result(
             imported: outcome.count,
-            attached: attachedCount,
+            attached: adoptedPDFs.count,
             missingPDFs: missing,
-            duplicatesSkipped: duplicatesSkipped
+            duplicatesSkipped: duplicatesSkipped,
+            annotationsImported: outcome.annotationsInserted,
+            annotationsSkipped: annotationsSkipped
         )
     }
 

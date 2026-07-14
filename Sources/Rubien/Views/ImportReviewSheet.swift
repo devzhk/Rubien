@@ -48,7 +48,7 @@ struct ImportReviewSheet: View {
                     .font(.system(size: 17, weight: .medium))
                     .foregroundStyle(item.isSelectable ? Color.accentColor : Color.secondary.opacity(0.45))
             }
-            .buttonStyle(ImportReviewCheckboxButtonStyle())
+            .buttonStyle(CompactHoverButtonStyle())
             .disabled(!item.isSelectable || session.isBusy)
             .accessibilityLabel(
                 session.selectedIDs.contains(item.id)

@@ -1,7 +1,7 @@
 import Foundation
 import GRDB
 
-public struct PDFAnnotationRect: Codable, Hashable {
+public struct PDFAnnotationRect: Codable, Hashable, Sendable {
     public var x: Double
     public var y: Double
     public var width: Double
@@ -19,7 +19,7 @@ public struct PDFAnnotationRect: Codable, Hashable {
     }
 }
 
-public enum AnnotationType: String, Codable, CaseIterable, DatabaseValueConvertible {
+public enum AnnotationType: String, Codable, CaseIterable, DatabaseValueConvertible, Sendable {
     case highlight = "highlight"
     case underline = "underline"
     case note = "note"
@@ -38,6 +38,56 @@ public enum AnnotationType: String, Codable, CaseIterable, DatabaseValueConverti
         case .underline: return "Underline"
         case .note: return "Note"
         }
+    }
+}
+
+/// Reference-ID-independent annotation payload used when annotations must be
+/// inserted atomically with a reference whose final row ID is not known yet.
+public struct PDFAnnotationDraft: Equatable, Sendable {
+    public let type: AnnotationType
+    public let selectedText: String?
+    public let noteText: String?
+    public let color: String
+    public let pageIndex: Int
+    public let rects: [PDFAnnotationRect]
+    public let dateCreated: Date
+    public let dateModified: Date
+
+    public init(
+        type: AnnotationType,
+        selectedText: String? = nil,
+        noteText: String? = nil,
+        color: String = "#FFDE59",
+        pageIndex: Int,
+        rects: [CGRect],
+        dateCreated: Date = Date(),
+        dateModified: Date = Date()
+    ) {
+        self.type = type
+        self.selectedText = selectedText
+        self.noteText = noteText
+        self.color = color
+        self.pageIndex = pageIndex
+        self.rects = rects
+            .map(\.standardized)
+            .filter { !$0.isNull && !$0.isEmpty && $0.width > 0 && $0.height > 0 }
+            .map(PDFAnnotationRect.init)
+        self.dateCreated = dateCreated
+        self.dateModified = dateModified
+    }
+
+    func makeRecord(referenceId: Int64) -> PDFAnnotationRecord {
+        PDFAnnotationRecord(
+            referenceId: referenceId,
+            type: type,
+            selectedText: selectedText,
+            noteText: noteText,
+            color: color,
+            pageIndex: pageIndex,
+            rects: rects.map(\.cgRect),
+            dateCreated: dateCreated,
+            dateModified: dateModified
+        )
     }
 }
 

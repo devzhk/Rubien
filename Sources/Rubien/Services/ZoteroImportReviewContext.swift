@@ -42,20 +42,31 @@ final class ZoteroImportReviewContext: ImportReviewContext {
         self.onCompleted = onCompleted
         self.items = plan.entries.map { entry in
             let attachmentProblems = entry.rejectedAttachmentPaths + entry.missingAttachmentPaths
-            let attachmentMessage = String(
-                format: String(
-                    localized: "zoteroImport.attachmentNotFound",
-                    bundle: .module
-                ),
-                attachmentProblems.joined(separator: ", ")
-            )
+            var messages: [String] = []
+            if !attachmentProblems.isEmpty {
+                messages.append(
+                    String(
+                        format: String(
+                            localized: "zoteroImport.attachmentNotFound",
+                            bundle: .module
+                        ),
+                        attachmentProblems.joined(separator: ", ")
+                    )
+                )
+            }
+            if !entry.annotations.isEmpty {
+                messages.append(
+                    "\(entry.annotations.count) PDF annotation\(entry.annotations.count == 1 ? "" : "s")"
+                )
+            }
+            if entry.skippedAnnotationCount > 0 {
+                messages.append("\(entry.skippedAnnotationCount) annotation\(entry.skippedAnnotationCount == 1 ? "" : "s") skipped")
+            }
             return ImportReviewItem(
                 id: entry.id,
                 title: entry.reference.title,
-                subtitle: plan.folderURL.lastPathComponent,
-                message: attachmentProblems.isEmpty
-                    ? nil
-                    : attachmentMessage,
+                subtitle: plan.sourceName,
+                message: messages.isEmpty ? nil : messages.joined(separator: " • "),
                 reference: entry.reference,
                 candidates: [],
                 readiness: .ready,

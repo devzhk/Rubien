@@ -48,14 +48,14 @@ struct SLSecondaryButtonStyle: ButtonStyle {
     }
 }
 
-/// Compact hover and pressed treatment for square selection controls.
-struct ImportReviewCheckboxButtonStyle: ButtonStyle {
+/// Compact hover and pressed treatment for square icon/selection controls.
+struct CompactHoverButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
-        ImportReviewCheckboxButtonBody(configuration: configuration)
+        CompactHoverButtonBody(configuration: configuration)
     }
 }
 
-private struct ImportReviewCheckboxButtonBody: View {
+private struct CompactHoverButtonBody: View {
     let configuration: ButtonStyleConfiguration
     @Environment(\.isEnabled) private var isEnabled
     @State private var isHovered = false
@@ -76,6 +76,42 @@ private struct ImportReviewCheckboxButtonBody: View {
             .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
             .animation(.easeOut(duration: 0.12), value: isHovered)
             .onHover { isHovered = $0 }
+    }
+}
+
+// MARK: - HoverCheckboxToggleStyle
+// Preserves the native macOS checkbox while adding a visible hover target
+// around the checkbox and its label.
+
+struct HoverCheckboxToggleStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HoverCheckboxToggleBody(configuration: configuration)
+    }
+}
+
+private struct HoverCheckboxToggleBody: View {
+    let configuration: ToggleStyleConfiguration
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var isHovered = false
+
+    var body: some View {
+        Toggle(isOn: configuration.$isOn) {
+            configuration.label
+        }
+        .toggleStyle(.checkbox)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(
+                    isHovered && isEnabled
+                        ? Color.primary.opacity(0.08)
+                        : Color.clear
+                )
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .animation(.easeOut(duration: 0.12), value: isHovered)
+        .onHover { isHovered = $0 }
     }
 }
 

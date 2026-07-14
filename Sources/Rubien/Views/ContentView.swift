@@ -876,8 +876,8 @@ struct ContentView: View {
     /// if it still matches, so a stale timer from an earlier batch can't erase
     /// a newer (fast markdown-only) batch's summary toast.
     @State private var importGeneration = 0
-    @State private var pendingZoteroImportFolder: PendingZoteroImport?
-    @State private var zoteroImportHandoff = ImportReviewSheetHandoff<PreparedZoteroImport>()
+    @State private var showZoteroLibraryImport = false
+    @State private var zoteroLibraryImportHandoff = ImportReviewSheetHandoff<ZoteroLibraryImportRequest>()
     @State private var showPendingMetadataQueue = false
     @State private var scopedPendingMetadataIntakes: [MetadataIntake]?
     @State private var pendingQueueNotice: PendingQueueNotice?
@@ -896,16 +896,6 @@ struct ContentView: View {
         let id = UUID()
         let title: String
         let message: String
-    }
-
-    private struct PendingZoteroImport: Identifiable {
-        let id = UUID()
-        let url: URL
-    }
-
-    private struct PreparedZoteroImport {
-        let folderURL: URL
-        let target: ZoteroImportPropertyTarget
     }
 
     /// Per-file result of a single PDF import, surfaced to the batch
@@ -1042,7 +1032,9 @@ struct ContentView: View {
                     Divider()
                     Button(String(localized: "content.toolbar.importBibTeX", bundle: .module)) { importBibTeX() }
                     Button(String(localized: "content.toolbar.importRIS", bundle: .module)) { importRIS() }
-                    Button(String(localized: "content.toolbar.importZoteroFolder", bundle: .module)) { pickZoteroFolder() }
+                    Button(String(localized: "content.toolbar.importFromZotero", bundle: .module)) {
+                        showZoteroLibraryImport = true
+                    }
                 }
                 .disabled(viewModel.isImporting)
             } label: {
@@ -1308,17 +1300,14 @@ struct ContentView: View {
         .sheet(item: $importReviewSession) { session in
             ImportReviewSheet(session: session)
         }
-        .sheet(item: $pendingZoteroImportFolder, onDismiss: {
-            guard let prepared = zoteroImportHandoff.takeAfterDismiss() else { return }
-            prepareZoteroFolderImport(from: prepared.folderURL, target: prepared.target)
-        }) { pending in
-            ZoteroImportSheet(
-                folderURL: pending.url,
+        .sheet(isPresented: $showZoteroLibraryImport, onDismiss: {
+            guard let request = zoteroLibraryImportHandoff.takeAfterDismiss() else { return }
+            prepareZoteroLibraryImport(request)
+        }) {
+            ZoteroLibraryImportSheet(
                 db: viewModel.db,
-                onConfirm: { target in
-                    zoteroImportHandoff.stage(
-                        PreparedZoteroImport(folderURL: pending.url, target: target)
-                    )
+                onConfirm: { request in
+                    zoteroLibraryImportHandoff.stage(request)
                 },
                 onCancel: {}
             )
@@ -1605,59 +1594,63 @@ struct ContentView: View {
         }
     }
 
-    private func pickZoteroFolder() {
-        guard let url = OpenPanelPicker.pickZoteroFolder() else { return }
-        pendingZoteroImportFolder = PendingZoteroImport(url: url)
-    }
-
-    private func prepareZoteroFolderImport(
-        from url: URL,
-        target: ZoteroImportPropertyTarget
-    ) {
+    private func prepareZoteroLibraryImport(_ request: ZoteroLibraryImportRequest) {
         guard !viewModel.isImporting else { return }
         viewModel.isImporting = true
-        viewModel.importProgress = String(localized: "Reading folder…", bundle: .module)
+        viewModel.importProgress = String(localized: "Reading Zotero library…", bundle: .module)
         let database = viewModel.db
 
         Task { @MainActor in
             do {
-                let plan = try await Task.detached(priority: .userInitiated) {
-                    try ZoteroFolderImporter.prepareFolder(
-                        at: url,
-                        db: database,
-                        propertyTarget: target
-                    )
-                }.value
-
-                if ZoteroImportReviewPresentation.shouldReview(entryCount: plan.entries.count) {
-                    viewModel.isImporting = false
-                    viewModel.importProgress = nil
-                    importReviewSession = ImportReviewSession(
-                        title: String(localized: "Review Zotero Import", bundle: .module),
-                        context: ZoteroImportReviewContext(
-                            database: database,
-                            plan: plan,
-                            onCompleted: { result in finishZoteroFolderImport(result) }
-                        )
-                    )
-                    return
-                }
-
-                let selectedIDs = Set(plan.entries.map(\.id))
-                let result = try await Task.detached(priority: .userInitiated) {
-                    try ZoteroFolderImporter.commit(
-                        plan: plan,
-                        selectedEntryIDs: selectedIDs,
-                        db: database
-                    )
-                }.value
-                finishZoteroFolderImport(result)
+                let plan = try await ZoteroLibraryImporter.prepare(
+                    scope: request.scope,
+                    collections: request.collections,
+                    includeSubcollections: request.includeSubcollections,
+                    includeAnnotations: request.includeAnnotations,
+                    db: database,
+                    propertyTarget: request.propertyTarget
+                )
+                try await continueZoteroImport(plan: plan, database: database)
             } catch {
-                let fmt = String(localized: "content.import.error.generic", bundle: .module)
-                viewModel.importProgress = String(format: fmt, error.localizedDescription)
-                viewModel.isImporting = false
+                failZoteroImport(error)
             }
         }
+    }
+
+    @MainActor
+    private func continueZoteroImport(
+        plan: ZoteroFolderImportPlan,
+        database: AppDatabase
+    ) async throws {
+        if ZoteroImportReviewPresentation.shouldReview(entryCount: plan.entries.count) {
+            viewModel.isImporting = false
+            viewModel.importProgress = nil
+            importReviewSession = ImportReviewSession(
+                title: String(localized: "Review Zotero Import", bundle: .module),
+                context: ZoteroImportReviewContext(
+                    database: database,
+                    plan: plan,
+                    onCompleted: { result in finishZoteroFolderImport(result) }
+                )
+            )
+            return
+        }
+
+        let selectedIDs = Set(plan.entries.map(\.id))
+        let result = try await Task.detached(priority: .userInitiated) {
+            try ZoteroFolderImporter.commit(
+                plan: plan,
+                selectedEntryIDs: selectedIDs,
+                db: database
+            )
+        }.value
+        finishZoteroFolderImport(result)
+    }
+
+    private func failZoteroImport(_ error: Error) {
+        let fmt = String(localized: "content.import.error.generic", bundle: .module)
+        viewModel.importProgress = String(format: fmt, error.localizedDescription)
+        viewModel.isImporting = false
     }
 
     private func finishZoteroFolderImport(_ result: ZoteroFolderImporter.Result) {
@@ -1668,6 +1661,12 @@ struct ContentView: View {
         }
         if !result.missingPDFs.isEmpty {
             message += " • \(result.missingPDFs.count) missing"
+        }
+        if result.annotationsImported > 0 {
+            message += " • \(result.annotationsImported) annotation\(result.annotationsImported == 1 ? "" : "s") imported"
+        }
+        if result.annotationsSkipped > 0 {
+            message += " • \(result.annotationsSkipped) annotation\(result.annotationsSkipped == 1 ? "" : "s") skipped"
         }
         viewModel.importProgress = message
         viewModel.isImporting = false

@@ -14,11 +14,12 @@ private let sqlNowISO8601 = "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))"
 
 /// Per-entry outcome from `AppDatabase.classifyImportEntries`. The Zotero importer uses
 /// this to decide whether to copy each attachment:
-/// - `.fresh`, `.dbDuplicateWithoutPDF` → copy (merge will attach in the latter case);
-/// - `.dbDuplicateWithPDF`, `.intraBatchDuplicate` → skip copy to avoid orphaning.
+/// - `.fresh`, `.dbDuplicateWithoutPDF`, `.intraBatchDuplicate` → stage a copy and let
+///   the write transaction adopt at most one;
+/// - `.dbDuplicateWithPDF` → preserve the named cache file.
 package enum ImportClassification: Equatable {
     case fresh
-    case dbDuplicateWithPDF
+    case dbDuplicateWithPDF(filename: String)
     case dbDuplicateWithoutPDF
     case intraBatchDuplicate
 }
@@ -1774,13 +1775,57 @@ extension AppDatabase {
         pdfFilenames: [String?]? = nil,
         mergePolicy: ImportMergePolicy = .standard
     ) throws -> (count: Int, ids: [Int64]) {
-        guard !references.isEmpty else { return (0, []) }
+        let result = try batchImportReferences(
+            references,
+            stamping: target,
+            pdfFilenames: pdfFilenames,
+            pdfAnnotationDrafts: Array(repeating: [], count: references.count),
+            annotationAnchorFilenames: Array(repeating: nil, count: references.count),
+            mergePolicy: mergePolicy
+        )
+        return (result.count, result.ids)
+    }
+
+    /// Imports references, PDFs, and reference-ID-independent annotation
+    /// drafts atomically. Both annotation arrays must align 1:1 with the
+    /// input. Geometry is admitted only when its expected PDF filename is the
+    /// materialized cache anchor after merge. Exact type/page/rect/text
+    /// matches are skipped so repeated imports do not duplicate annotations.
+    package func batchImportReferences(
+        _ references: [Reference],
+        stamping target: ZoteroImportPropertyTarget? = nil,
+        pdfFilenames: [String?]? = nil,
+        pdfAnnotationDrafts: [[PDFAnnotationDraft]],
+        annotationAnchorFilenames: [String?],
+        mergePolicy: ImportMergePolicy = .standard
+    ) throws -> (
+        count: Int,
+        ids: [Int64],
+        annotationsInserted: Int,
+        annotationsSkipped: Int,
+        attachedPDFFilenames: [String]
+    ) {
+        guard !references.isEmpty else { return (0, [], 0, 0, []) }
         if let pdfFilenames {
             precondition(pdfFilenames.count == references.count,
                 "pdfFilenames must align 1:1 with references; pass nil entries for refs without PDFs")
         }
+        precondition(
+            pdfAnnotationDrafts.count == references.count,
+            "pdfAnnotationDrafts must align 1:1 with references"
+        )
+        precondition(
+            annotationAnchorFilenames.count == references.count,
+            "annotationAnchorFilenames must align 1:1 with references"
+        )
         return try dbWriter.write { db in
+            // A prepared import can remain in review for an arbitrary time.
+            // Fresh rows enter Rubien now, not when their source was parsed.
+            let insertionTimestamp = Date()
             var ids: [Int64] = []
+            var annotationsInserted = 0
+            var annotationsSkipped = 0
+            var attachedPDFFilenames: [String] = []
             ids.reserveCapacity(references.count)
             for (idx, original) in references.enumerated() {
                 var ref = original
@@ -1796,17 +1841,52 @@ extension AppDatabase {
                     try existing.save(db)
                     resolvedId = existing.id
                 } else {
+                    ref.dateAdded = insertionTimestamp
+                    ref.dateModified = insertionTimestamp
                     try ref.insert(db)
                     resolvedId = ref.id
                 }
                 if let id = resolvedId {
                     ids.append(id)
                     if let filename = pdfFilenames?[idx]?.rubien_nilIfBlank {
-                        try attachPDFInTransaction(
+                        let attachment = try attachPDFInTransaction(
                             referenceId: id,
                             filename: filename,
                             db: db
                         )
+                        if attachment.attached {
+                            attachedPDFFilenames.append(filename)
+                        }
+                    }
+                    let drafts = pdfAnnotationDrafts[idx]
+                    if !drafts.isEmpty {
+                        let actualAnchor = try String.fetchOne(db, sql: """
+                            SELECT localFilename FROM pdfCache
+                            WHERE referenceId = ? AND materializedAt IS NOT NULL
+                        """, arguments: [id])
+                        guard let expectedAnchor = annotationAnchorFilenames[idx],
+                              actualAnchor == expectedAnchor
+                        else {
+                            annotationsSkipped += drafts.count
+                            continue
+                        }
+                        // Re-fetch for the rare duplicate row later in the
+                        // batch. Rows inserted earlier in this transaction are
+                        // visible here, and avoiding a batch-wide cache keeps
+                        // memory proportional to one reference's annotations.
+                        let existing = try PDFAnnotationRecord
+                            .filter(PDFAnnotationRecord.Columns.referenceId == id)
+                            .fetchAll(db)
+                        var fingerprints = Set(
+                            existing.map(ImportedAnnotationFingerprint.init)
+                        )
+                        for draft in drafts {
+                            let fingerprint = ImportedAnnotationFingerprint(draft)
+                            guard fingerprints.insert(fingerprint).inserted else { continue }
+                            var annotation = draft.makeRecord(referenceId: id)
+                            try annotation.insert(db)
+                            annotationsInserted += 1
+                        }
                     }
                 }
             }
@@ -1818,7 +1898,37 @@ extension AppDatabase {
                     db: db
                 )
             }
-            return (ids.count, ids)
+            return (
+                ids.count,
+                ids,
+                annotationsInserted,
+                annotationsSkipped,
+                attachedPDFFilenames
+            )
+        }
+    }
+
+    private struct ImportedAnnotationFingerprint: Hashable {
+        let type: AnnotationType
+        let pageIndex: Int
+        let selectedText: String
+        let noteText: String
+        let rects: [PDFAnnotationRect]
+
+        init(_ draft: PDFAnnotationDraft) {
+            type = draft.type
+            pageIndex = draft.pageIndex
+            selectedText = draft.selectedText ?? ""
+            noteText = draft.noteText ?? ""
+            rects = draft.rects
+        }
+
+        init(_ annotation: PDFAnnotationRecord) {
+            type = annotation.type
+            pageIndex = annotation.pageIndex
+            selectedText = annotation.selectedText ?? ""
+            noteText = annotation.noteText ?? ""
+            rects = annotation.rects.map(PDFAnnotationRect.init)
         }
     }
 
@@ -2418,7 +2528,9 @@ extension AppDatabase {
             )
 
             // Track identifiers already claimed by earlier entries in this batch so
-            // later occurrences become `.intraBatchDuplicate` (skip copy).
+            // later occurrences become `.intraBatchDuplicate`. The importer
+            // may still stage their PDFs defensively; the write transaction
+            // adopts at most one and its caller cleans up the rest.
             var claimedDoi = Set<String>()
             var claimedPmid = Set<String>()
             var claimedPmcid = Set<String>()
@@ -2470,7 +2582,11 @@ extension AppDatabase {
                 apply(url, in: urlMap)
 
                 if dbMatched {
-                    result.append(dbExistingPDF != nil ? .dbDuplicateWithPDF : .dbDuplicateWithoutPDF)
+                    if let dbExistingPDF {
+                        result.append(.dbDuplicateWithPDF(filename: dbExistingPDF))
+                    } else {
+                        result.append(.dbDuplicateWithoutPDF)
+                    }
                     continue
                 }
 
@@ -2478,7 +2594,11 @@ extension AppDatabase {
                 // (strategies 6–7) — rare in practice for Zotero exports, so this
                 // doesn't warrant a second batching pass.
                 if let fallback = try findDuplicateReferenceID(for: ref, db: db) {
-                    result.append(fallback.pdfPath != nil ? .dbDuplicateWithPDF : .dbDuplicateWithoutPDF)
+                    if let filename = fallback.pdfPath {
+                        result.append(.dbDuplicateWithPDF(filename: filename))
+                    } else {
+                        result.append(.dbDuplicateWithoutPDF)
+                    }
                     continue
                 }
 

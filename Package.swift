@@ -154,6 +154,7 @@ let package = Package(
             dependencies: [
                 .target(name: "Rubien", condition: .when(platforms: [.macOS])),
                 "RubienCore",
+                .target(name: "RubienPDFKit", condition: .when(platforms: [.macOS])),
                 .target(name: "RubienSync", condition: .when(platforms: [.macOS])),
             ],
             path: "Tests/RubienTests"

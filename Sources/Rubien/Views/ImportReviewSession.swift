@@ -111,53 +111,78 @@ final class ImportReviewSession: ObservableObject, Identifiable {
     }
 
     func confirmSelected() async {
-        var selection = selectedIDs.intersection(items.filter(\.isSelectable).map(\.id))
+        var itemByID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
+        var selection = Set(selectedIDs.filter { itemByID[$0]?.isSelectable == true })
         guard !selection.isEmpty, !isBusy, !didDiscard else { return }
 
-        for id in selection where items.first(where: { $0.id == id })?.readiness == .needsProposal {
-            replaceItem(context.useProposedMetadata(itemID: id))
+        let proposalIDs = selection.filter {
+            itemByID[$0]?.readiness == .needsProposal
+        }
+        if !proposalIDs.isEmpty {
+            let proposedByID = Dictionary(
+                uniqueKeysWithValues: proposalIDs.map { id in
+                    (id, context.useProposedMetadata(itemID: id))
+                }
+            )
+            var proposedItems = items
+            for index in proposedItems.indices {
+                let id = proposedItems[index].id
+                guard let proposed = proposedByID[id] else { continue }
+                let wasSelected = selectedIDs.contains(id)
+                proposedItems[index] = proposed
+                if proposed.isSelectable {
+                    if wasSelected || proposed.isSelectedByDefault {
+                        selectedIDs.insert(id)
+                    }
+                } else {
+                    selectedIDs.remove(id)
+                }
+            }
+            items = proposedItems
+            itemByID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
         }
 
-        let readyIDs = Set(
-            items
-                .filter { $0.readiness == .ready && !$0.isWorking }
-                .map(\.id)
-        )
+        let readyIDs = Set(selection.filter {
+            itemByID[$0]?.readiness == .ready && itemByID[$0]?.isWorking == false
+        })
         let unresolvedIDs = selection.subtracting(readyIDs)
-        for id in unresolvedIDs {
-            updateItem(id: id) { item in
-                item.commitError = String(
-                    localized: "importReview.error.proposalAcceptance",
-                    bundle: .module
-                )
+        if !unresolvedIDs.isEmpty {
+            let message = String(
+                localized: "importReview.error.proposalAcceptance",
+                bundle: .module
+            )
+            var unresolvedItems = items
+            for index in unresolvedItems.indices
+                where unresolvedIDs.contains(unresolvedItems[index].id) {
+                unresolvedItems[index].commitError = message
             }
+            items = unresolvedItems
         }
         selection.formIntersection(readyIDs)
         guard !selection.isEmpty else { return }
 
         isCommitting = true
-        for id in selection {
-            updateItem(id: id) { item in
-                item.isWorking = true
-                item.commitError = nil
-            }
+        var workingItems = items
+        for index in workingItems.indices where selection.contains(workingItems[index].id) {
+            workingItems[index].isWorking = true
+            workingItems[index].commitError = nil
         }
+        items = workingItems
 
         let report = await context.commit(selectedIDs: selection)
-        items.removeAll { report.succeededIDs.contains($0.id) }
         selectedIDs.subtract(report.succeededIDs)
 
-        for (id, message) in report.failures {
-            updateItem(id: id) { item in
-                item.isWorking = false
-                item.commitError = message
+        var remainingItems = items.filter { !report.succeededIDs.contains($0.id) }
+        for index in remainingItems.indices {
+            let id = remainingItems[index].id
+            guard selection.contains(id) else { continue }
+            remainingItems[index].isWorking = false
+            if let message = report.failures[id] {
+                remainingItems[index].commitError = message
             }
         }
-        for id in selection where report.failures[id] == nil {
-            updateItem(id: id) { $0.isWorking = false }
-        }
-
-        selectedIDs.formIntersection(items.filter(\.isSelectable).map(\.id))
+        items = remainingItems
+        selectedIDs.formIntersection(Set(items.filter(\.isSelectable).map(\.id)))
         isCommitting = false
     }
 

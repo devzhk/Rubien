@@ -96,7 +96,7 @@
 "content.toolbar.importPDFAuto" = "Import PDF/Markdown";
 "content.toolbar.importBibTeX" = "Import BibTeX…";
 "content.toolbar.importRIS" = "Import RIS…";
-"content.toolbar.importZoteroFolder" = "Import Zotero Folder…";
+"content.toolbar.importFromZotero" = "Import from Zotero…";
 "content.toolbar.webImport" = "Import from Web…";
 "content.toolbar.pendingQueue" = "Pending metadata";
 "content.toolbar.search" = "Search";
