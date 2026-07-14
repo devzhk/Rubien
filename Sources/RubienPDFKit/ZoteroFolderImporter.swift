@@ -275,7 +275,6 @@ public enum ZoteroFolderImporter {
         var annotationAnchorFilenames: [String?] = []
         annotationAnchorFilenames.reserveCapacity(entries.count)
         var missing: [String] = []
-        var duplicatesSkipped = 0
         var annotationsSkipped = entries.reduce(0) { $0 + $1.skippedAnnotationCount }
         var existingPDFHashes: [String: String] = [:]
         // Track every PDF we copy into the store. If the write transaction
@@ -287,7 +286,6 @@ public enum ZoteroFolderImporter {
             missing.append(contentsOf: entry.rejectedAttachmentPaths)
 
             let kind = classifications[index]
-            if kind != .fresh { duplicatesSkipped += 1 }
 
             let shouldCopy: Bool = {
                 guard entry.attachmentURLs.first != nil else { return false }
@@ -358,7 +356,8 @@ public enum ZoteroFolderImporter {
             annotationsInserted: Int,
             annotationsSkipped: Int,
             attachedPDFFilenames: [String],
-            dispositions: [ItemOutcome.Disposition]
+            dispositions: [ItemOutcome.Disposition],
+            finalReferences: [Reference?]
         )
         do {
             outcome = try db.batchImportReferences(
@@ -380,25 +379,20 @@ public enum ZoteroFolderImporter {
         annotationsSkipped += outcome.annotationsSkipped
 
         // One `ItemOutcome` per committed entry, in `sourceIndex` order (1:1 with
-        // `entries` and `outcome.ids`/`outcome.dispositions`). Disposition and the
-        // reference come from the AUTHORITATIVE batch transaction — not the
-        // advisory preflight classifier, which keys only on DOI/PMID/PMCID/ISBN/URL
-        // and so mislabels a title/year/author intra-batch duplicate as fresh. The
-        // reference is re-fetched by id post-commit, so it reflects normalization
-        // and any merge (never the pre-commit parsed snapshot). Missing/failed PDF
+        // `entries` and `outcome.dispositions`/`outcome.finalReferences`).
+        // Disposition and the reference come from the AUTHORITATIVE batch
+        // transaction — not the advisory preflight classifier, which keys only on
+        // DOI/PMID/PMCID/ISBN/URL and so mislabels a title/year/author intra-batch
+        // duplicate as fresh. The reference is the row re-fetched INSIDE that
+        // transaction, so it reflects normalization + any merge (never the parsed
+        // snapshot, and never a fallible post-commit read). Missing/failed PDF
         // copies stay in `missingPDFs`; they never demote an entry to `.failed`.
         let provenanceBase = plan.bibPath ?? plan.sourceName
-        let committed = try db.fetchReferences(ids: outcome.ids)
-        let byId = Dictionary(
-            committed.compactMap { ref in ref.id.map { ($0, ref) } },
-            uniquingKeysWith: { first, _ in first }
-        )
         var items: [ItemOutcome] = []
         items.reserveCapacity(entries.count)
         for (index, entry) in entries.enumerated() {
-            let id = index < outcome.ids.count ? outcome.ids[index] : nil
             items.append(ItemOutcome(
-                reference: id.flatMap { byId[$0] },
+                reference: index < outcome.finalReferences.count ? outcome.finalReferences[index] : nil,
                 disposition: index < outcome.dispositions.count ? outcome.dispositions[index] : .created,
                 intakeId: nil,
                 input: "\(provenanceBase)#bibtex[\(entry.sourceIndex)]",
@@ -406,12 +400,17 @@ public enum ZoteroFolderImporter {
             ))
         }
 
+        // Authoritative duplicate count (an `.existing` item is a merged
+        // duplicate) — the preflight `duplicatesSkipped` misses title/year/author
+        // intra-batch dups. `classifications` still drives PDF staging above.
+        let mergedDuplicates = outcome.dispositions.filter { $0 == .existing }.count
+
         return DetailedResult(
             result: Result(
                 imported: outcome.count,
                 attached: adoptedPDFs.count,
                 missingPDFs: missing,
-                duplicatesSkipped: duplicatesSkipped,
+                duplicatesSkipped: mergedDuplicates,
                 annotationsImported: outcome.annotationsInserted,
                 annotationsSkipped: annotationsSkipped
             ),

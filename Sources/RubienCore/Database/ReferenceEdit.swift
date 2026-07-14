@@ -302,7 +302,14 @@ extension ReferenceEdit {
             // in-range Int64 stays an integer (a JS-safe-integer cutoff would
             // wrongly reject large valid ids that the model + SQLite hold fine).
             if payloadIsIntegerNumber(number) {
-                return .integer(number.int64Value)
+                // Guard exact Int64 representability: on Linux a nonnegative
+                // literal above Int64.max parses as a UInt64-backed integer
+                // NSNumber whose `int64Value` silently wraps to a negative value.
+                // The round-trip only holds when the value fits Int64.
+                let i = number.int64Value
+                if NSNumber(value: i) == number {
+                    return .integer(i)
+                }
             }
             return .decimal(number.doubleValue)
         }

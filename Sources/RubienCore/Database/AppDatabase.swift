@@ -1804,9 +1804,10 @@ extension AppDatabase {
         annotationsInserted: Int,
         annotationsSkipped: Int,
         attachedPDFFilenames: [String],
-        dispositions: [ItemOutcome.Disposition]
+        dispositions: [ItemOutcome.Disposition],
+        finalReferences: [Reference?]
     ) {
-        guard !references.isEmpty else { return (0, [], 0, 0, [], []) }
+        guard !references.isEmpty else { return (0, [], 0, 0, [], [], []) }
         if let pdfFilenames {
             precondition(pdfFilenames.count == references.count,
                 "pdfFilenames must align 1:1 with references; pass nil entries for refs without PDFs")
@@ -1908,13 +1909,24 @@ extension AppDatabase {
                     db: db
                 )
             }
+            // Final per-entry references, re-fetched INSIDE the transaction so an
+            // early entry reflects a later intra-batch merge into the same row
+            // AND callers never need a post-commit read (which could fail after
+            // the writes already committed, or race a concurrent delete).
+            let finalRows = try Reference.filter(ids.contains(Reference.Columns.id)).fetchAll(db)
+            let finalByID = Dictionary(
+                finalRows.compactMap { row in row.id.map { ($0, row) } },
+                uniquingKeysWith: { first, _ in first }
+            )
+            let finalReferences: [Reference?] = ids.map { finalByID[$0] }
             return (
                 ids.count,
                 ids,
                 annotationsInserted,
                 annotationsSkipped,
                 attachedPDFFilenames,
-                dispositions
+                dispositions,
+                finalReferences
             )
         }
     }
@@ -1947,9 +1959,9 @@ extension AppDatabase {
         guard !entries.isEmpty else { return [] }
         // Delegate to the single batch implementation so dedup/merge/timestamp
         // behavior can never drift, then map its authoritative per-entry
-        // (id, disposition) to outcomes. References are re-fetched by id AFTER the
-        // commit, so an early entry's outcome reflects a later intra-batch merge
-        // into the same row rather than its pre-merge snapshot.
+        // (finalReference, disposition) — both captured inside the write
+        // transaction, so an early entry reflects a later intra-batch merge and
+        // there is no fallible post-commit read.
         let result = try batchImportReferences(
             entries.map(\.reference),
             stamping: nil,
@@ -1958,15 +1970,9 @@ extension AppDatabase {
             annotationAnchorFilenames: Array(repeating: nil, count: entries.count),
             mergePolicy: mergePolicy
         )
-        let fetched = try fetchReferences(ids: result.ids)
-        let byId = Dictionary(
-            fetched.compactMap { ref in ref.id.map { ($0, ref) } },
-            uniquingKeysWith: { first, _ in first }
-        )
         return entries.indices.map { i in
-            let id = result.ids[i]
-            return ItemOutcome(
-                reference: byId[id],
+            ItemOutcome(
+                reference: result.finalReferences[i],
                 disposition: result.dispositions[i],
                 intakeId: nil,
                 input: entries[i].input,
@@ -2409,11 +2415,12 @@ extension AppDatabase {
             return .existing
         }
 
-        // A reference arriving with an id already lives in the library, so `save`
-        // updates it rather than inserting — that is `.existing`, not `.created`.
-        let wasExisting = reference.id != nil
+        // A reference whose id matches a live row is updated by `save` (→
+        // `.existing`); a nil id — or a stale id with no surviving row, which
+        // GRDB's `save` inserts — is `.created`.
+        let updatesExistingRow = try reference.id.map { try Reference.fetchOne(db, id: $0) != nil } ?? false
         try reference.save(db)
-        return wasExisting ? .existing : .created
+        return updatesExistingRow ? .existing : .created
     }
 
     private func upsertEvidence(

@@ -707,6 +707,16 @@ final class ReferenceEditApplyTests: XCTestCase {
         XCTAssertEqual(decoded["5"], .replace(.integer(9_000_000_000_000_000)))
     }
 
+    /// #7 (re-review) — a value beyond `Int64.max` must NOT decode as `.integer`
+    /// (on Linux it parses as a UInt64-backed NSNumber whose `int64Value` wraps
+    /// negative); it falls to `.decimal` and is then rejected for number props.
+    func testDecodeIntegerBeyondInt64IsNotWrapped() throws {
+        let decoded = try ReferenceEdit.decodeProperties(fromJSON: "{\"5\": 9223372036854775808}")
+        if case .replace(.integer) = decoded["5"] {
+            XCTFail("out-of-range integer must not decode as .integer (would silently wrap)")
+        }
+    }
+
     /// #8 — add/remove canonicalizes the whole stored array, collapsing a
     /// pre-existing duplicate (first occurrence wins), not just deduping new adds.
     func testMultiSelectAddRemoveCollapsesPreexistingDuplicate() throws {
