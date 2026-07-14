@@ -358,5 +358,22 @@ Also in 0.3.0:
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.3.4</title>
+            <description sparkle:format="plain-text"><![CDATA[- Import directly from Zotero desktop: browse collections, expand them to preview papers and PDFs, and choose exactly what to import.
+- Transfer local PDFs and supported Zotero highlights, underlines, and anchored notes; newly imported references now use their Rubien added time.
+- Improved hover feedback and collection-selection clarity throughout the Zotero importer.
+- Refined new-view creation, collapsed long Assistant tool-call runs, and improved the Assistant composer layout.]]></description>
+            <pubDate>Tue, 14 Jul 2026 04:22:04 +0000</pubDate>
+            <sparkle:version>25</sparkle:version>
+            <sparkle:shortVersionString>0.3.4</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.3.4/Rubien-0.3.4.dmg"
+                sparkle:edSignature="cJzRQOFeXpst4j87Q9EukHnSVgl541sFLJgcll3moeBZA7/9oFeMI29BqeTKKsZ6KJpzVTavtGoW7Yhz7+y8Dg=="
+                length="12642653"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
