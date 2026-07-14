@@ -63,6 +63,12 @@ final class BatchImportOutcomeTests: XCTestCase {
         let all = try db.fetchAllReferences()
         XCTAssertEqual(all.count, 1)
         XCTAssertEqual(all[0].abstract, "Merged abstract")
+
+        // #3 regression: the EARLIER (`.created`) outcome must reflect the later
+        // merge into its row — outcomes are re-fetched post-commit, not captured
+        // as pre-merge snapshots. Entry 0 carried no abstract; the final row does.
+        XCTAssertEqual(outcomes[0].reference?.abstract, "Merged abstract", "early outcome must be the final merged reference, not a stale snapshot")
+        XCTAssertEqual(outcomes[1].reference?.abstract, "Merged abstract")
     }
 
     func testEntryDuplicatingAnExistingRowReportsExisting() throws {

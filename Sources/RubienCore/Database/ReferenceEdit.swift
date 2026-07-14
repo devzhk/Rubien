@@ -296,11 +296,15 @@ extension ReferenceEdit {
         }
         if let number = raw as? NSNumber {
             if payloadIsJSONBool(number) { return .bool(number.boolValue) }
-            let d = number.doubleValue
-            if d.rounded() == d && abs(d) < 9.007e15 {
+            // Classify by the NSNumber's underlying CF type, not a magnitude
+            // heuristic: JSONSerialization backs an integer literal with an
+            // integer CFNumber and a fractional one with a float CFNumber, so any
+            // in-range Int64 stays an integer (a JS-safe-integer cutoff would
+            // wrongly reject large valid ids that the model + SQLite hold fine).
+            if payloadIsIntegerNumber(number) {
                 return .integer(number.int64Value)
             }
-            return .decimal(d)
+            return .decimal(number.doubleValue)
         }
         if raw is [String: Any] {
             throw ReferenceEditError.invalidPayload(key: key, message: "a nested object is not a valid value")
@@ -320,6 +324,19 @@ private func payloadIsJSONBool(_ number: NSNumber) -> Bool {
     return CFGetTypeID(number) == CFBooleanGetTypeID()
     #else
     return false
+    #endif
+}
+
+/// True when a (non-boolean) JSON number is integer-backed. `CFNumberIsFloatType`
+/// is the reliable test — `1` and `1.0` differ only in CFNumber subtype, and any
+/// Int64-range integer literal is integer-backed regardless of magnitude.
+private func payloadIsIntegerNumber(_ number: NSNumber) -> Bool {
+    #if canImport(CoreFoundation)
+    return !CFNumberIsFloatType(number)
+    #else
+    // Fallback (no CoreFoundation): integral only if the double round-trips.
+    let d = number.doubleValue
+    return d.rounded() == d && d >= -9.223e18 && d <= 9.223e18
     #endif
 }
 
@@ -737,7 +754,15 @@ extension AppDatabase {
 
         case "editors", "translators":
             let display = try requireNonEmptyString(value, key: key)
-            let encoded = Reference.encodeNames(AuthorName.parseList(display))
+            let parsed = AuthorName.parseList(display)
+            // Compare decoded names, never re-encoded JSON: `encodeNames` uses an
+            // unsorted `JSONEncoder`, so re-encoding identical names can reorder
+            // keys and would spuriously stamp `dateModified` + dirty the row for
+            // sync (also true for a historical row stored in a different key
+            // order). Only assign when the names actually differ.
+            let existingNames = (fieldKey == "editors") ? edited.parsedEditors : edited.parsedTranslators
+            guard parsed != existingNames else { return }
+            let encoded = Reference.encodeNames(parsed)
             if fieldKey == "editors" { edited.editors = encoded } else { edited.translators = encoded }
 
         case "accessedDate":
@@ -864,16 +889,20 @@ extension AppDatabase {
         case .addRemove(let addValues, let removeValues):
             let add = try addValues.map { try requireStringElement($0, key: key) }
             let remove = try removeValues.map { try requireStringElement($0, key: key) }
+            // Every supplied option must exist (§4.4) — add and remove alike; this
+            // also rejects an empty-string element (never an existing option).
             try validate(add)
+            try validate(remove)
             let current = try currentMultiSelectArray(referenceId: referenceId, propertyId: definition.id!, db: db)
-            var next = current
-            var seen = Set(current)
-            for value in add where !seen.contains(value) {
-                seen.insert(value)
+            let drop = Set(remove)
+            // Canonicalize the whole result: dedupe first-occurrence-wins across
+            // the existing array + adds (a legacy stored array may carry dups),
+            // dropping removed values.
+            var seen = Set<String>()
+            var next: [String] = []
+            for value in current + add where !drop.contains(value) && seen.insert(value).inserted {
                 next.append(value)
             }
-            let drop = Set(remove)
-            next = next.filter { !drop.contains($0) }
             return next.isEmpty ? nil : PropertyValue.encodeMultiSelect(next)
         }
     }
@@ -934,7 +963,10 @@ extension AppDatabase {
         case .addRemove(let addValues, let removeValues):
             let addIds = Set(try addValues.map(parseTagId))
             let removeIds = Set(try removeValues.map(parseTagId))
+            // Both add and remove tag ids must exist (§4.4). `parseTagId` already
+            // rejects empty / non-numeric elements.
             try ensureExist(addIds)
+            try ensureExist(removeIds)
             let current = try currentTagIds(referenceId: referenceId, db: db)
             return current.union(addIds).subtracting(removeIds)
         }

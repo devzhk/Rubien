@@ -357,7 +357,8 @@ public enum ZoteroFolderImporter {
             ids: [Int64],
             annotationsInserted: Int,
             annotationsSkipped: Int,
-            attachedPDFFilenames: [String]
+            attachedPDFFilenames: [String],
+            dispositions: [ItemOutcome.Disposition]
         )
         do {
             outcome = try db.batchImportReferences(
@@ -379,26 +380,26 @@ public enum ZoteroFolderImporter {
         annotationsSkipped += outcome.annotationsSkipped
 
         // One `ItemOutcome` per committed entry, in `sourceIndex` order (1:1 with
-        // `entries`, `outcome.ids`, and `classifications`). Disposition mirrors
-        // the advisory classifier the aggregate `duplicatesSkipped` count already
-        // uses (`.fresh` → created, any duplicate kind → existing), keeping the
-        // detailed items consistent with `Result`. Missing/failed PDF copies stay
-        // in `missingPDFs`; they never demote an entry to `.failed`. The resolved
-        // row id is patched onto the parsed reference so the CLI can map it to a
-        // full DTO post-commit.
+        // `entries` and `outcome.ids`/`outcome.dispositions`). Disposition and the
+        // reference come from the AUTHORITATIVE batch transaction — not the
+        // advisory preflight classifier, which keys only on DOI/PMID/PMCID/ISBN/URL
+        // and so mislabels a title/year/author intra-batch duplicate as fresh. The
+        // reference is re-fetched by id post-commit, so it reflects normalization
+        // and any merge (never the pre-commit parsed snapshot). Missing/failed PDF
+        // copies stay in `missingPDFs`; they never demote an entry to `.failed`.
         let provenanceBase = plan.bibPath ?? plan.sourceName
+        let committed = try db.fetchReferences(ids: outcome.ids)
+        let byId = Dictionary(
+            committed.compactMap { ref in ref.id.map { ($0, ref) } },
+            uniquingKeysWith: { first, _ in first }
+        )
         var items: [ItemOutcome] = []
         items.reserveCapacity(entries.count)
         for (index, entry) in entries.enumerated() {
-            let disposition: ItemOutcome.Disposition =
-                classifications[index] == .fresh ? .created : .existing
-            var reference = entry.reference
-            if index < outcome.ids.count {
-                reference.id = outcome.ids[index]
-            }
+            let id = index < outcome.ids.count ? outcome.ids[index] : nil
             items.append(ItemOutcome(
-                reference: reference,
-                disposition: disposition,
+                reference: id.flatMap { byId[$0] },
+                disposition: index < outcome.dispositions.count ? outcome.dispositions[index] : .created,
                 intakeId: nil,
                 input: "\(provenanceBase)#bibtex[\(entry.sourceIndex)]",
                 error: nil

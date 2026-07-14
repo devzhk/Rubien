@@ -1803,9 +1803,10 @@ extension AppDatabase {
         ids: [Int64],
         annotationsInserted: Int,
         annotationsSkipped: Int,
-        attachedPDFFilenames: [String]
+        attachedPDFFilenames: [String],
+        dispositions: [ItemOutcome.Disposition]
     ) {
-        guard !references.isEmpty else { return (0, [], 0, 0, []) }
+        guard !references.isEmpty else { return (0, [], 0, 0, [], []) }
         if let pdfFilenames {
             precondition(pdfFilenames.count == references.count,
                 "pdfFilenames must align 1:1 with references; pass nil entries for refs without PDFs")
@@ -1826,12 +1827,18 @@ extension AppDatabase {
             var annotationsInserted = 0
             var annotationsSkipped = 0
             var attachedPDFFilenames: [String] = []
+            // Authoritative per-entry disposition, decided inside the transaction
+            // (a later intra-batch duplicate merges into the row inserted earlier
+            // this loop). 1:1 with `ids` / the input.
+            var dispositions: [ItemOutcome.Disposition] = []
             ids.reserveCapacity(references.count)
+            dispositions.reserveCapacity(references.count)
             for (idx, original) in references.enumerated() {
                 var ref = original
                 try normalizeForDirectLibrarySave(&ref)
                 try ensureLibraryReady(ref)
                 let resolvedId: Int64?
+                let entryDisposition: ItemOutcome.Disposition
                 if let match = try findDuplicateReferenceID(for: ref, db: db),
                    var existing = try Reference.fetchOne(db, id: match.id) {
                     existing = switch mergePolicy {
@@ -1840,14 +1847,17 @@ extension AppDatabase {
                     }
                     try existing.save(db)
                     resolvedId = existing.id
+                    entryDisposition = .existing
                 } else {
                     ref.dateAdded = insertionTimestamp
                     ref.dateModified = insertionTimestamp
                     try ref.insert(db)
                     resolvedId = ref.id
+                    entryDisposition = .created
                 }
                 if let id = resolvedId {
                     ids.append(id)
+                    dispositions.append(entryDisposition)
                     if let filename = pdfFilenames?[idx]?.rubien_nilIfBlank {
                         let attachment = try attachPDFInTransaction(
                             referenceId: id,
@@ -1903,7 +1913,8 @@ extension AppDatabase {
                 ids,
                 annotationsInserted,
                 annotationsSkipped,
-                attachedPDFFilenames
+                attachedPDFFilenames,
+                dispositions
             )
         }
     }
@@ -1934,41 +1945,33 @@ extension AppDatabase {
         mergePolicy: ImportMergePolicy = .standard
     ) throws -> [ItemOutcome] {
         guard !entries.isEmpty else { return [] }
-        return try dbWriter.write { db in
-            // A prepared import can remain in review for an arbitrary time.
-            // Fresh rows enter Rubien now, not when their source was parsed.
-            let insertionTimestamp = Date()
-            var outcomes: [ItemOutcome] = []
-            outcomes.reserveCapacity(entries.count)
-            for entry in entries {
-                var ref = entry.reference
-                try normalizeForDirectLibrarySave(&ref)
-                try ensureLibraryReady(ref)
-                let disposition: ItemOutcome.Disposition
-                if let match = try findDuplicateReferenceID(for: ref, db: db),
-                   var existing = try Reference.fetchOne(db, id: match.id) {
-                    existing = switch mergePolicy {
-                    case .standard:         mergedReference(existing: existing, incoming: ref)
-                    case .markdownFillOnly: markdownFillMergedReference(existing: existing, incoming: ref)
-                    }
-                    try existing.save(db)
-                    ref = existing
-                    disposition = .existing
-                } else {
-                    ref.dateAdded = insertionTimestamp
-                    ref.dateModified = insertionTimestamp
-                    try ref.insert(db)
-                    disposition = .created
-                }
-                outcomes.append(ItemOutcome(
-                    reference: ref,
-                    disposition: disposition,
-                    intakeId: nil,
-                    input: entry.input,
-                    error: nil
-                ))
-            }
-            return outcomes
+        // Delegate to the single batch implementation so dedup/merge/timestamp
+        // behavior can never drift, then map its authoritative per-entry
+        // (id, disposition) to outcomes. References are re-fetched by id AFTER the
+        // commit, so an early entry's outcome reflects a later intra-batch merge
+        // into the same row rather than its pre-merge snapshot.
+        let result = try batchImportReferences(
+            entries.map(\.reference),
+            stamping: nil,
+            pdfFilenames: nil,
+            pdfAnnotationDrafts: Array(repeating: [], count: entries.count),
+            annotationAnchorFilenames: Array(repeating: nil, count: entries.count),
+            mergePolicy: mergePolicy
+        )
+        let fetched = try fetchReferences(ids: result.ids)
+        let byId = Dictionary(
+            fetched.compactMap { ref in ref.id.map { ($0, ref) } },
+            uniquingKeysWith: { first, _ in first }
+        )
+        return entries.indices.map { i in
+            let id = result.ids[i]
+            return ItemOutcome(
+                reference: byId[id],
+                disposition: result.dispositions[i],
+                intakeId: nil,
+                input: entries[i].input,
+                error: nil
+            )
         }
     }
 
@@ -2406,8 +2409,11 @@ extension AppDatabase {
             return .existing
         }
 
+        // A reference arriving with an id already lives in the library, so `save`
+        // updates it rather than inserting — that is `.existing`, not `.created`.
+        let wasExisting = reference.id != nil
         try reference.save(db)
-        return .created
+        return wasExisting ? .existing : .created
     }
 
     private func upsertEvidence(

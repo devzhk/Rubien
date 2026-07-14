@@ -655,4 +655,72 @@ final class ReferenceEditApplyTests: XCTestCase {
             }
         }
     }
+
+    private func assertInvalidValue(_ body: () throws -> Void, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertThrowsError(try body(), file: file, line: line) { error in
+            guard case ReferenceEditError.invalidValue = error else {
+                return XCTFail("expected invalidValue, got \(error)", file: file, line: line)
+            }
+        }
+    }
+
+    // MARK: - Review regressions (codex pass on Phase A+B, 2026-07-14)
+
+    /// #1 — re-applying identical editor names must not churn `dateModified`:
+    /// `encodeNames` key order is nondeterministic, so the no-op check compares
+    /// decoded names, not re-encoded JSON.
+    func testEditorsResetToIdenticalNamesIsNoOp() throws {
+        let db = try makeDB()
+        let id = try makeRef(db)
+        let names = "Smith, John; Doe, Jane"
+        try db.applyReferenceEdit(id: id, edit: .init(properties: ["Editors": .replace(.string(names))]), now: t1)
+        let after1 = try fetch(db, id)
+        XCTAssertNotNil(after1.editors)
+        try db.applyReferenceEdit(id: id, edit: .init(properties: ["Editors": .replace(.string(names))]), now: t2)
+        let after2 = try fetch(db, id)
+        XCTAssertEqual(after2.dateModified, after1.dateModified, "identical editors must not re-stamp dateModified")
+        XCTAssertEqual(after2.editors, after1.editors)
+    }
+
+    /// #2 — a `remove` value that isn't an existing option is rejected (custom
+    /// multiSelect), and so is an empty string (never a valid option).
+    func testMultiSelectRemoveUnknownOptionRejected() throws {
+        let db = try makeDB()
+        let id = try makeRef(db)
+        let m = try makeCustom(db, name: "Topics", type: .multiSelect, options: ["ml", "nlp"])
+        assertInvalidValue { try db.applyReferenceEdit(id: id, edit: .init(properties: [String(m): .addRemove(add: [], remove: [.string("vision")])])) }
+        assertInvalidValue { try db.applyReferenceEdit(id: id, edit: .init(properties: [String(m): .addRemove(add: [], remove: [.string("")])])) }
+    }
+
+    /// #2 (Tags) — removing a nonexistent tag id is rejected (every supplied id
+    /// must exist).
+    func testTagsRemoveUnknownIdRejected() throws {
+        let db = try makeDB()
+        let id = try makeRef(db)
+        assertInvalidValue { try db.applyReferenceEdit(id: id, edit: .init(properties: ["Tags": .addRemove(add: [], remove: [.string("999999")])])) }
+    }
+
+    /// #7 — a JSON integer above the old JS-safe cutoff (~9.007e15) must decode as
+    /// an integer, not a decimal (Int64/SQLite hold it fine).
+    func testDecodeLargeIntegerStaysInteger() throws {
+        let decoded = try ReferenceEdit.decodeProperties(fromJSON: "{\"5\": 9000000000000000}")
+        XCTAssertEqual(decoded["5"], .replace(.integer(9_000_000_000_000_000)))
+    }
+
+    /// #8 — add/remove canonicalizes the whole stored array, collapsing a
+    /// pre-existing duplicate (first occurrence wins), not just deduping new adds.
+    func testMultiSelectAddRemoveCollapsesPreexistingDuplicate() throws {
+        let db = try makeDB()
+        let id = try makeRef(db)
+        let m = try makeCustom(db, name: "Topics", type: .multiSelect, options: ["ml", "nlp", "rl"])
+        try db.dbWriter.write {
+            var pv = PropertyValue(referenceId: id, propertyId: m, value: PropertyValue.encodeMultiSelect(["ml", "ml", "nlp"]), dateModified: t1)
+            try pv.insert($0)
+        }
+        try db.applyReferenceEdit(id: id, edit: .init(properties: [String(m): .addRemove(add: [.string("rl")], remove: [])]))
+        let stored = try db.dbWriter.read {
+            try String.fetchOne($0, sql: "SELECT value FROM propertyValue WHERE referenceId = ? AND propertyId = ?", arguments: [id, m])
+        }
+        XCTAssertEqual(PropertyValue.decodeMultiSelect(stored ?? ""), ["ml", "nlp", "rl"])
+    }
 }
