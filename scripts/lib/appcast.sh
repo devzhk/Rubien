@@ -20,7 +20,7 @@ rubien_appcast_render_item() {
     cat <<XML
         <item>
             <title>Rubien ${VERSION}</title>
-            <description><![CDATA[${RELEASE_NOTES_TEXT}]]></description>
+            <description sparkle:format="plain-text"><![CDATA[${RELEASE_NOTES_TEXT}]]></description>
             <pubDate>${pubdate}</pubDate>
             <sparkle:version>${BUILD_NUMBER}</sparkle:version>
             <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
