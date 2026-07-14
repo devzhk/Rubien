@@ -92,15 +92,9 @@ struct SidebarView: View {
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(.secondary)
                         Spacer()
-                        Button { editorMode = .create } label: {
-                            Image(systemName: "plus")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(.tertiary)
-                                .frame(width: 20, height: 20)
-                                .contentShape(Rectangle())
+                        NewViewButton {
+                            editorMode = .create
                         }
-                        .buttonStyle(.plain)
-                        .help("Create a new view")
                     }
                 } content: {
                     if userViews.isEmpty {
@@ -325,6 +319,23 @@ private struct SidebarRow<Trailing: View>: View {
     }
 }
 
+/// Compact but explicit affordance for creating a view. Unlike the old tertiary
+/// plus glyph, the title remains discoverable while the pill appears only on hover.
+private struct NewViewButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Label("New", systemImage: "plus")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(ToolbarHoverButtonStyle(hoverOpacity: 0.07, pressedOpacity: 0.12))
+        .accessibilityLabel("Create a new view")
+        .help("Create a new view")
+    }
+}
+
 // Per-cell chips (tags, status, select options) hit `Color(hex:)` hundreds of
 // times per body re-eval. The Scanner-based parse allocates each call, which
 // is measurable in aggregate across the visible row set. The set of distinct
@@ -416,10 +427,9 @@ private struct ViewEditorSheet: View {
                 .font(.headline)
             TextField("View name", text: $name)
                 .textFieldStyle(.roundedBorder)
-                .frame(width: 260)
+                .frame(maxWidth: .infinity)
                 .onSubmit(save)
             ViewIconGrid(selection: $icon)
-                .frame(width: 260)
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }
@@ -429,7 +439,9 @@ private struct ViewEditorSheet: View {
                     .disabled(trimmedName.isEmpty)
             }
         }
+        .frame(width: ViewIconGrid.preferredWidth, alignment: .leading)
         .padding(20)
+        .presentationSizing(.fitted)
     }
 
     private func save() {
