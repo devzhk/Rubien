@@ -271,6 +271,76 @@ final class PDFImportCoordinatorTests: XCTestCase {
         XCTAssertEqual(intake.message, "No authoritative metadata matched; keeping local attachment and seed only.")
     }
 
+    // MARK: - Detailed outcome mapping (spec §5.3)
+
+    func testCommitPreparedPDFDetailedReportsCreatedForFreshVerifiedResolution() async throws {
+        let database = try makeDatabase()
+        let sourceURL = try makeSourcePDF()
+        let prepared = await PDFImportCoordinator.preparePDF(
+            from: sourceURL,
+            resolver: { _, _ in self.verifiedResolution() }
+        )
+
+        let detailed = try PDFImportCoordinator.commitPreparedPDFDetailed(prepared, database: database)
+
+        XCTAssertEqual(detailed.disposition, .created)
+        guard case .imported(let reference) = detailed.outcome else {
+            return XCTFail("A fresh verified resolution should import")
+        }
+        let referenceID = try XCTUnwrap(reference.id)
+        copiedPDFPaths.append(try XCTUnwrap(try database.pdfFilename(for: referenceID)))
+        XCTAssertEqual(try database.referenceCount(), 1)
+    }
+
+    func testImportPDFDetailedReportsExistingForDuplicateVerifiedResolution() async throws {
+        let database = try makeDatabase()
+        let resolution = verifiedResolution()
+
+        let firstSource = try makeSourcePDF()
+        let first = try await PDFImportCoordinator.importPDFDetailed(
+            from: firstSource,
+            database: database,
+            resolver: { _, _ in resolution }
+        )
+        XCTAssertEqual(first.disposition, .created)
+        guard case .imported(let firstReference) = first.outcome else {
+            return XCTFail("The first verified resolution should import")
+        }
+        let firstID = try XCTUnwrap(firstReference.id)
+        copiedPDFPaths.append(try XCTUnwrap(try database.pdfFilename(for: firstID)))
+
+        let secondSource = try makeSourcePDF()
+        let second = try await PDFImportCoordinator.importPDFDetailed(
+            from: secondSource,
+            database: database,
+            resolver: { _, _ in resolution }
+        )
+        XCTAssertEqual(second.disposition, .existing, "A duplicate verified resolution merges into the existing row")
+        guard case .imported(let secondReference) = second.outcome else {
+            return XCTFail("A duplicate verified resolution should still map to imported")
+        }
+        XCTAssertEqual(secondReference.id, firstID)
+        XCTAssertEqual(try database.referenceCount(), 1)
+    }
+
+    func testImportPDFDetailedReportsQueuedForUnverifiedResolution() async throws {
+        let database = try makeDatabase()
+        let sourceURL = try makeSourcePDF()
+
+        let detailed = try await PDFImportCoordinator.importPDFDetailed(
+            from: sourceURL,
+            database: database,
+            resolver: { _, _ in self.queuedResolution(for: sourceURL) }
+        )
+
+        XCTAssertEqual(detailed.disposition, .queued)
+        guard case .queued(let intake) = detailed.outcome else {
+            return XCTFail("An unverified resolution should be queued")
+        }
+        copiedPDFPaths.append(try XCTUnwrap(intake.pdfPath))
+        XCTAssertEqual(try database.referenceCount(), 0)
+    }
+
     private func makeDatabase() throws -> AppDatabase {
         try AppDatabase(DatabaseQueue(path: ":memory:"))
     }

@@ -65,17 +65,24 @@ public struct ZoteroFolderImportPlan: Sendable {
     public let sourceName: String
     public let propertyTarget: ZoteroImportPropertyTarget?
     public let entries: [Entry]
+    /// Filesystem path of the single root `.bib` this plan parsed, used as the
+    /// provenance base for detailed per-entry outcomes (`<bib path>#bibtex[<n>]`,
+    /// spec §5.3). Nil for local-API plans, which have no single `.bib` source
+    /// (detailed outcomes then fall back to `sourceName`).
+    public let bibPath: String?
 
     init(
         folderURL: URL?,
         sourceName: String,
         propertyTarget: ZoteroImportPropertyTarget?,
-        entries: [Entry]
+        entries: [Entry],
+        bibPath: String? = nil
     ) {
         self.folderURL = folderURL
         self.sourceName = sourceName
         self.propertyTarget = propertyTarget
         self.entries = entries
+        self.bibPath = bibPath
     }
 }
 
@@ -109,6 +116,23 @@ public enum ZoteroFolderImporter {
         }
     }
 
+    /// Additive detailed variant of `Result` (spec §5.3): the same aggregate
+    /// `Result` plus one `ItemOutcome` per committed entry (1:1 with the parsed
+    /// `.bib` entries in `sourceIndex` order). Every committed entry is a
+    /// successful `.created`/`.existing` item — missing/failed PDF copies stay
+    /// diagnostics in `result.missingPDFs`, never `.failed` items. Produced by
+    /// `importFolderDetailed` / `commitDetailed`; `importFolder` / `commit` keep
+    /// returning `Result` unchanged, so existing call sites are untouched.
+    public struct DetailedResult: Sendable {
+        public let result: Result
+        public let items: [ItemOutcome]
+
+        public init(result: Result, items: [ItemOutcome]) {
+            self.result = result
+            self.items = items
+        }
+    }
+
     public enum Error: Swift.Error, LocalizedError {
         case bibFileNotFound(in: URL)
         case multipleBibFiles(in: URL, paths: [String])
@@ -131,8 +155,24 @@ public enum ZoteroFolderImporter {
         db: AppDatabase,
         propertyTarget: ZoteroImportPropertyTarget?
     ) throws -> Result {
+        try importFolderDetailed(
+            at: folderURL,
+            db: db,
+            propertyTarget: propertyTarget
+        ).result
+    }
+
+    /// Detailed sibling of `importFolder` carrying per-entry `ItemOutcome`s
+    /// (spec §5.3). A root `.bib` read failure THROWS (source-level failure —
+    /// the CLI synthesizes a single `.failed` item from it); `importFolder`
+    /// delegates here and drops the items.
+    public static func importFolderDetailed(
+        at folderURL: URL,
+        db: AppDatabase,
+        propertyTarget: ZoteroImportPropertyTarget?
+    ) throws -> DetailedResult {
         let plan = try prepareFolder(at: folderURL, db: db, propertyTarget: propertyTarget)
-        return try commit(
+        return try commitDetailed(
             plan: plan,
             selectedEntryIDs: Set(plan.entries.map(\.id)),
             db: db
@@ -174,7 +214,8 @@ public enum ZoteroFolderImporter {
                     entry: entry,
                     folderURL: folderURL
                 )
-            }
+            },
+            bibPath: bibURL.path
         )
     }
 
@@ -183,6 +224,21 @@ public enum ZoteroFolderImporter {
         selectedEntryIDs: Set<UUID>,
         db: AppDatabase
     ) throws -> Result {
+        try commitDetailed(
+            plan: plan,
+            selectedEntryIDs: selectedEntryIDs,
+            db: db
+        ).result
+    }
+
+    /// Detailed sibling of `commit` carrying per-entry `ItemOutcome`s (spec §5.3).
+    /// `commit` delegates here and drops the items, so the copy/merge/annotation
+    /// behavior is byte-for-byte identical.
+    public static func commitDetailed(
+        plan: ZoteroFolderImportPlan,
+        selectedEntryIDs: Set<UUID>,
+        db: AppDatabase
+    ) throws -> DetailedResult {
 #if canImport(Darwin)
         let accessing = plan.folderURL?.startAccessingSecurityScopedResource() ?? false
         defer { if accessing { plan.folderURL?.stopAccessingSecurityScopedResource() } }
@@ -192,7 +248,10 @@ public enum ZoteroFolderImporter {
             .filter { selectedEntryIDs.contains($0.id) }
             .sorted { $0.sourceIndex < $1.sourceIndex }
         guard !entries.isEmpty else {
-            return Result(imported: 0, attached: 0, missingPDFs: [], duplicatesSkipped: 0)
+            return DetailedResult(
+                result: Result(imported: 0, attached: 0, missingPDFs: [], duplicatesSkipped: 0),
+                items: []
+            )
         }
 
         // Advisory classifier (read-only). Distinguishes DB duplicates whose existing row
@@ -319,13 +378,43 @@ public enum ZoteroFolderImporter {
         }
         annotationsSkipped += outcome.annotationsSkipped
 
-        return Result(
-            imported: outcome.count,
-            attached: adoptedPDFs.count,
-            missingPDFs: missing,
-            duplicatesSkipped: duplicatesSkipped,
-            annotationsImported: outcome.annotationsInserted,
-            annotationsSkipped: annotationsSkipped
+        // One `ItemOutcome` per committed entry, in `sourceIndex` order (1:1 with
+        // `entries`, `outcome.ids`, and `classifications`). Disposition mirrors
+        // the advisory classifier the aggregate `duplicatesSkipped` count already
+        // uses (`.fresh` → created, any duplicate kind → existing), keeping the
+        // detailed items consistent with `Result`. Missing/failed PDF copies stay
+        // in `missingPDFs`; they never demote an entry to `.failed`. The resolved
+        // row id is patched onto the parsed reference so the CLI can map it to a
+        // full DTO post-commit.
+        let provenanceBase = plan.bibPath ?? plan.sourceName
+        var items: [ItemOutcome] = []
+        items.reserveCapacity(entries.count)
+        for (index, entry) in entries.enumerated() {
+            let disposition: ItemOutcome.Disposition =
+                classifications[index] == .fresh ? .created : .existing
+            var reference = entry.reference
+            if index < outcome.ids.count {
+                reference.id = outcome.ids[index]
+            }
+            items.append(ItemOutcome(
+                reference: reference,
+                disposition: disposition,
+                intakeId: nil,
+                input: "\(provenanceBase)#bibtex[\(entry.sourceIndex)]",
+                error: nil
+            ))
+        }
+
+        return DetailedResult(
+            result: Result(
+                imported: outcome.count,
+                attached: adoptedPDFs.count,
+                missingPDFs: missing,
+                duplicatesSkipped: duplicatesSkipped,
+                annotationsImported: outcome.annotationsInserted,
+                annotationsSkipped: annotationsSkipped
+            ),
+            items: items
         )
     }
 

@@ -626,5 +626,110 @@ final class ZoteroFolderImporterTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - Detailed outcome mapping (spec §5.3)
+
+    private func runImportDetailed(
+        folder: URL,
+        db: AppDatabase,
+        target: ZoteroImportPropertyTarget?
+    ) throws -> ZoteroFolderImporter.DetailedResult {
+        let detailed = try ZoteroFolderImporter.importFolderDetailed(
+            at: folder,
+            db: db,
+            propertyTarget: target
+        )
+        for ref in try db.fetchAllReferences() {
+            if let id = ref.id, let filename = try db.pdfFilename(for: id) {
+                copiedPDFPaths.append(filename)
+            }
+        }
+        return detailed
+    }
+
+    func testDetailedImportReportsPerEntryOutcomesWithBibProvenance() throws {
+        let db = try makeDatabase()
+        let bibtex = """
+        @article{a, title = {Paper A}, doi = {10.1/a}, file = {PDF:files/1/a.pdf:application/pdf}}
+        @article{b, title = {Paper B}, doi = {10.1/b}, file = {PDF:files/2/b.pdf:application/pdf}}
+        """
+        let folder = try makeFakeZoteroFolder(
+            name: "F",
+            bibtex: bibtex,
+            pdfs: ["files/1/a.pdf": Data("a".utf8), "files/2/b.pdf": Data("b".utf8)]
+        )
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+
+        let detailed = try runImportDetailed(folder: folder, db: db, target: nil)
+
+        XCTAssertEqual(detailed.result.imported, 2)
+        XCTAssertEqual(detailed.items.count, 2, "One item per parsed .bib entry")
+        XCTAssertEqual(detailed.items.map(\.disposition), [.created, .created])
+        XCTAssertTrue(detailed.items.allSatisfy { $0.error == nil })
+        // Provenance base is the root .bib path (has a `.bib` component), not the
+        // folder's `sourceName` fallback; ordinals are 0-based parsed-entry index.
+        XCTAssertTrue(detailed.items[0].input.hasSuffix("F.bib#bibtex[0]"), detailed.items[0].input)
+        XCTAssertTrue(detailed.items[1].input.hasSuffix("F.bib#bibtex[1]"), detailed.items[1].input)
+        // Each item carries the resolved row id.
+        let itemIDs = Set(detailed.items.compactMap { $0.reference?.id })
+        let dbIDs = Set(try db.fetchAllReferences().compactMap(\.id))
+        XCTAssertEqual(itemIDs, dbIDs)
+    }
+
+    func testDetailedImportReportsExistingForDuplicateReimport() throws {
+        let db = try makeDatabase()
+        let bibtex = "@article{a, title = {Paper A}, doi = {10.1000/xyz}, file = {PDF:files/1/a.pdf:application/pdf}}"
+        let folder = try makeFakeZoteroFolder(
+            name: "RL",
+            bibtex: bibtex,
+            pdfs: ["files/1/a.pdf": Data("x".utf8)]
+        )
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+
+        let first = try runImportDetailed(folder: folder, db: db, target: nil)
+        XCTAssertEqual(first.items.map(\.disposition), [.created])
+        let firstID = try XCTUnwrap(first.items.first?.reference?.id)
+
+        let second = try runImportDetailed(folder: folder, db: db, target: nil)
+        XCTAssertEqual(second.result.duplicatesSkipped, 1)
+        XCTAssertEqual(second.items.count, 1)
+        XCTAssertEqual(second.items[0].disposition, .existing)
+        XCTAssertEqual(second.items[0].reference?.id, firstID, "The duplicate item points at the first row")
+        XCTAssertEqual(try db.fetchAllReferences().count, 1)
+    }
+
+    func testDetailedImportKeepsMissingPDFAsDiagnosticNotFailedItem() throws {
+        let db = try makeDatabase()
+        let bibtex = "@book{a, title = {A}, file = {PDF:files/1/a.pdf:application/pdf}}"
+        let folder = try makeFakeZoteroFolder(name: "X", bibtex: bibtex, pdfs: [:])
+        defer { try? FileManager.default.removeItem(at: folder.deletingLastPathComponent()) }
+
+        let detailed = try runImportDetailed(folder: folder, db: db, target: nil)
+
+        // The reference imports fine; the absent PDF is a diagnostic, not a failure.
+        XCTAssertEqual(detailed.result.missingPDFs, ["files/1/a.pdf"])
+        XCTAssertEqual(detailed.items.count, 1)
+        XCTAssertEqual(detailed.items[0].disposition, .created)
+        XCTAssertNil(detailed.items[0].error)
+        XCTAssertNotNil(detailed.items[0].reference?.id)
+    }
+
+    func testDetailedImportThrowsOnMissingRootBib() throws {
+        let db = try makeDatabase()
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RubienZoteroImportTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        // A source-level failure (unreadable root .bib) THROWS rather than
+        // producing items — the CLI synthesizes the single failed item.
+        XCTAssertThrowsError(
+            try ZoteroFolderImporter.importFolderDetailed(at: tempRoot, db: db, propertyTarget: nil)
+        ) { error in
+            guard case ZoteroFolderImporter.Error.bibFileNotFound = error else {
+                XCTFail("Expected bibFileNotFound, got \(error)"); return
+            }
+        }
+    }
 }
 #endif // canImport(PDFKit)

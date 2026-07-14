@@ -25,6 +25,23 @@ public enum PDFImportOutcome: Sendable {
     }
 }
 
+/// Additive detailed variant of `PDFImportOutcome` (spec §5.3): the same
+/// imported/queued outcome plus the full `created | existing | queued`
+/// disposition the aggregate `.imported` case cannot express (it hides whether
+/// the reference was freshly inserted or merged into a duplicate). Produced by
+/// `commitPreparedPDFDetailed` / `importPDFDetailed`; the plain
+/// `commitPreparedPDF` / `importPDF` keep returning `PDFImportOutcome`
+/// unchanged, so existing call sites are untouched.
+public struct PDFImportDetailedOutcome: Sendable {
+    public let outcome: PDFImportOutcome
+    public let disposition: ItemOutcome.Disposition
+
+    public init(outcome: PDFImportOutcome, disposition: ItemOutcome.Disposition) {
+        self.outcome = outcome
+        self.disposition = disposition
+    }
+}
+
 public struct PreparedPDFImport: Sendable {
     public let sourceURL: URL
     public var resolution: MetadataResolutionResult
@@ -46,8 +63,22 @@ public enum PDFImportCoordinator {
         database: AppDatabase,
         resolver: @escaping Resolver = ImportedPDFMetadataResolver.resolve
     ) async throws -> PDFImportOutcome {
+        try await importPDFDetailed(
+            from: sourceURL,
+            database: database,
+            resolver: resolver
+        ).outcome
+    }
+
+    /// Detailed sibling of `importPDF` carrying the `created | existing | queued`
+    /// disposition (spec §5.3). `importPDF` delegates here and drops it.
+    public static func importPDFDetailed(
+        from sourceURL: URL,
+        database: AppDatabase,
+        resolver: @escaping Resolver = ImportedPDFMetadataResolver.resolve
+    ) async throws -> PDFImportDetailedOutcome {
         let prepared = await preparePDF(from: sourceURL, resolver: resolver)
-        return try commitPreparedPDF(prepared, database: database)
+        return try commitPreparedPDFDetailed(prepared, database: database)
     }
 
     public static func preparePDF(
@@ -70,17 +101,27 @@ public enum PDFImportCoordinator {
         _ prepared: PreparedPDFImport,
         database: AppDatabase
     ) throws -> PDFImportOutcome {
+        try commitPreparedPDFDetailed(prepared, database: database).outcome
+    }
+
+    /// Detailed sibling of `commitPreparedPDF` carrying the
+    /// `created | existing | queued` disposition (spec §5.3). `commitPreparedPDF`
+    /// delegates here and drops it, so the copied-PDF lifecycle stays identical.
+    public static func commitPreparedPDFDetailed(
+        _ prepared: PreparedPDFImport,
+        database: AppDatabase
+    ) throws -> PDFImportDetailedOutcome {
         let pdfPath = try PDFService.copyImportedPDF(from: prepared.sourceURL)
 
         do {
-            let persisted = try database.persistMetadataResolution(
+            let persisted = try database.persistMetadataResolutionDetailed(
                 prepared.resolution,
                 options: MetadataPersistenceOptions(
                     sourceKind: .importedPDF,
                     preferredPDFPath: pdfPath
                 )
             )
-            switch persisted {
+            switch persisted.result {
             case .verified(let reference):
                 if preparedCopyHasDurableOwner(
                     pdfPath,
@@ -93,9 +134,15 @@ public enum PDFImportCoordinator {
                     // owner and must not be left behind.
                     PDFService.deletePDF(at: pdfPath)
                 }
-                return .imported(reference)
+                return PDFImportDetailedOutcome(
+                    outcome: .imported(reference),
+                    disposition: persisted.disposition
+                )
             case .intake(let intake):
-                return .queued(intake)
+                return PDFImportDetailedOutcome(
+                    outcome: .queued(intake),
+                    disposition: persisted.disposition
+                )
             }
         } catch {
             PDFService.deletePDF(at: pdfPath)

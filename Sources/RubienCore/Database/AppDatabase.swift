@@ -1908,6 +1908,70 @@ extension AppDatabase {
         }
     }
 
+    /// One entry for `batchImportReferencesDetailed`: the parsed reference paired
+    /// with the original locator string that produced it. `input` is echoed
+    /// verbatim into the resulting `ItemOutcome.input` (provenance), so callers
+    /// pass whatever provenance the route defines (e.g. `"<path>#bibtex[<n>]"`).
+    public typealias DetailedImportEntry = (input: String, reference: Reference)
+
+    /// Batch import that reports a per-entry `ItemOutcome` (disposition +
+    /// provenance) instead of bare counts/ids. Same single-transaction
+    /// dedup/merge semantics as `batchImportReferences(_:)` — this adds
+    /// *reporting*, not new behavior.
+    ///
+    /// Alignment precondition: returns exactly one `ItemOutcome` per input entry,
+    /// in input order (1:1 provenance). An intra-batch duplicate — two entries
+    /// whose dedup keys resolve to the same row — yields two outcomes pointing at
+    /// the same merged `Reference`; the first is `.created` (fresh insert), the
+    /// later `.existing` (the just-inserted row is now a duplicate match).
+    ///
+    /// A batch-transaction failure THROWS (the whole transaction rolls back);
+    /// callers synthesize the per-entry `.failed` representation from the thrown
+    /// error. On the success path every returned outcome is `.created`/`.existing`
+    /// (never `.queued`/`.failed`) and carries the resolved `Reference`.
+    public func batchImportReferencesDetailed(
+        _ entries: [DetailedImportEntry],
+        mergePolicy: ImportMergePolicy = .standard
+    ) throws -> [ItemOutcome] {
+        guard !entries.isEmpty else { return [] }
+        return try dbWriter.write { db in
+            // A prepared import can remain in review for an arbitrary time.
+            // Fresh rows enter Rubien now, not when their source was parsed.
+            let insertionTimestamp = Date()
+            var outcomes: [ItemOutcome] = []
+            outcomes.reserveCapacity(entries.count)
+            for entry in entries {
+                var ref = entry.reference
+                try normalizeForDirectLibrarySave(&ref)
+                try ensureLibraryReady(ref)
+                let disposition: ItemOutcome.Disposition
+                if let match = try findDuplicateReferenceID(for: ref, db: db),
+                   var existing = try Reference.fetchOne(db, id: match.id) {
+                    existing = switch mergePolicy {
+                    case .standard:         mergedReference(existing: existing, incoming: ref)
+                    case .markdownFillOnly: markdownFillMergedReference(existing: existing, incoming: ref)
+                    }
+                    try existing.save(db)
+                    ref = existing
+                    disposition = .existing
+                } else {
+                    ref.dateAdded = insertionTimestamp
+                    ref.dateModified = insertionTimestamp
+                    try ref.insert(db)
+                    disposition = .created
+                }
+                outcomes.append(ItemOutcome(
+                    reference: ref,
+                    disposition: disposition,
+                    intakeId: nil,
+                    input: entry.input,
+                    error: nil
+                ))
+            }
+            return outcomes
+        }
+    }
+
     private struct ImportedAnnotationFingerprint: Hashable {
         let type: AnnotationType
         let pageIndex: Int
@@ -1973,11 +2037,23 @@ extension AppDatabase {
         _ result: MetadataResolutionResult,
         options: MetadataPersistenceOptions
     ) throws -> MetadataPersistenceResult {
+        try persistMetadataResolutionDetailed(result, options: options).result
+    }
+
+    /// Additive detailed sibling of `persistMetadataResolution` (spec §5.3): same
+    /// single-transaction persistence, but also reports the
+    /// `created | existing | queued` disposition the aggregate result cannot
+    /// express. `persistMetadataResolution` above delegates here and drops the
+    /// disposition, so its callers are unchanged.
+    public func persistMetadataResolutionDetailed(
+        _ result: MetadataResolutionResult,
+        options: MetadataPersistenceOptions
+    ) throws -> DetailedMetadataPersistenceResult {
         try dbWriter.write { db in
             switch result {
             case .verified(var envelope):
                 try ensureLibraryReady(envelope.reference)
-                try saveResolvedReference(
+                let saveResult = try saveResolvedReference(
                     &envelope.reference,
                     linkedReferenceId: options.linkedReferenceId,
                     db: db
@@ -2006,7 +2082,11 @@ extension AppDatabase {
                 }
 
                 try upsertEvidence(bundle: envelope.evidence, intakeId: options.existingIntakeId, referenceId: envelope.reference.id, db: db)
-                return .verified(envelope.reference)
+                let disposition: ItemOutcome.Disposition = (saveResult == .existing) ? .existing : .created
+                return DetailedMetadataPersistenceResult(
+                    result: .verified(envelope.reference),
+                    disposition: disposition
+                )
 
             case .candidate(let envelope):
                 var intake = buildMetadataIntake(
@@ -2021,7 +2101,7 @@ extension AppDatabase {
                 )
                 try intake.save(db)
                 try upsertEvidence(bundle: envelope.evidence, intakeId: intake.id, referenceId: nil, db: db)
-                return .intake(intake)
+                return DetailedMetadataPersistenceResult(result: .intake(intake), disposition: .queued)
 
             case .blocked(let envelope):
                 var intake = buildMetadataIntake(
@@ -2036,7 +2116,7 @@ extension AppDatabase {
                 )
                 try intake.save(db)
                 try upsertEvidence(bundle: envelope.evidence, intakeId: intake.id, referenceId: nil, db: db)
-                return .intake(intake)
+                return DetailedMetadataPersistenceResult(result: .intake(intake), disposition: .queued)
 
             case .seedOnly(let envelope):
                 var intake = buildMetadataIntake(
@@ -2051,7 +2131,7 @@ extension AppDatabase {
                 )
                 try intake.save(db)
                 try upsertEvidence(bundle: envelope.evidence, intakeId: intake.id, referenceId: nil, db: db)
-                return .intake(intake)
+                return DetailedMetadataPersistenceResult(result: .intake(intake), disposition: .queued)
 
             case .rejected(let envelope):
                 var intake = buildMetadataIntake(
@@ -2066,7 +2146,7 @@ extension AppDatabase {
                 )
                 try intake.save(db)
                 try upsertEvidence(bundle: envelope.evidence, intakeId: intake.id, referenceId: nil, db: db)
-                return .intake(intake)
+                return DetailedMetadataPersistenceResult(result: .intake(intake), disposition: .queued)
             }
         }
     }
@@ -2299,17 +2379,22 @@ extension AppDatabase {
         )
     }
 
+    /// Persists a resolved reference, merging into a linked or duplicate row when
+    /// one exists. Returns `.existing` when it merged into an already-present row,
+    /// `.created` when it inserted/saved a fresh one — the disposition the
+    /// detailed persistence result surfaces (`persistMetadataResolutionDetailed`).
+    @discardableResult
     private func saveResolvedReference(
         _ reference: inout Reference,
         linkedReferenceId: Int64?,
         db: Database
-    ) throws {
+    ) throws -> ReferenceSaveResult {
         if let linkedReferenceId,
            var linkedReference = try Reference.fetchOne(db, id: linkedReferenceId) {
             linkedReference = mergedReference(existing: linkedReference, incoming: reference)
             try linkedReference.save(db)
             reference = linkedReference
-            return
+            return .existing
         }
 
         if reference.id == nil,
@@ -2318,10 +2403,11 @@ extension AppDatabase {
             existing = mergedReference(existing: existing, incoming: reference)
             try existing.save(db)
             reference = existing
-            return
+            return .existing
         }
 
         try reference.save(db)
+        return .created
     }
 
     private func upsertEvidence(

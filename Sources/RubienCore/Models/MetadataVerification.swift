@@ -423,6 +423,23 @@ public enum MetadataPersistenceResult: Sendable {
     case intake(MetadataIntake)
 }
 
+/// Additive detailed variant of `MetadataPersistenceResult` (spec §5.3): the same
+/// `.verified`/`.intake` outcome plus the full `created | existing | queued`
+/// disposition the aggregate result cannot express (`.verified` alone hides
+/// whether the row was freshly inserted or merged into a duplicate). Produced by
+/// `AppDatabase.persistMetadataResolutionDetailed`; the plain
+/// `persistMetadataResolution` keeps returning `MetadataPersistenceResult`
+/// unchanged, so existing call sites are untouched.
+public struct DetailedMetadataPersistenceResult: Sendable {
+    public let result: MetadataPersistenceResult
+    public let disposition: ItemOutcome.Disposition
+
+    public init(result: MetadataPersistenceResult, disposition: ItemOutcome.Disposition) {
+        self.result = result
+        self.disposition = disposition
+    }
+}
+
 public struct SourceInput: Codable, Hashable, Sendable {
     public var url: String?
     public var identifier: String?
