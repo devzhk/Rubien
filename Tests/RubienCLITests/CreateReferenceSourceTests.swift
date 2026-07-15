@@ -236,6 +236,18 @@ final class CreateReferenceSourceTests: XCTestCase {
         XCTAssertEqual(items[0]["status"] as? String, "failed")
     }
 
+    /// `--source` is the single locator: combining it with a legacy input is
+    /// rejected (spec §5.1 exactly-one-input, CLI half). Legacy-only precedence
+    /// is unchanged.
+    func testSourceCannotCombineWithLegacyInput() throws {
+        try skipIfBinaryMissing()
+        let result = try runCLI(["add", "--source", "10.1/x", "--title", "T"])
+        XCTAssertNotEqual(result.exitCode, 0)
+        let obj = try json(result.stderr)
+        XCTAssertTrue((obj["error"] as? String ?? "").contains("cannot be combined"),
+                      "stderr should reject combining --source with a legacy input; got: \(result.stderr)")
+    }
+
     func testDownloadPdfRejectedOnFileRoute() throws {
         try skipIfBinaryMissing()
         let path = try write("@article{a, title={T}, doi={10.1/a}}", to: "one.bib")

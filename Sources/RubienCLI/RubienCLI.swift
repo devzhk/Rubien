@@ -790,7 +790,13 @@ struct Add: AsyncParsableCommand {
     func run() async throws {
         // New one-door routing (spec §5). `--source` produces the unified
         // envelope; the legacy --identifier / --bibtex / --title paths below are
-        // unchanged (additive).
+        // unchanged (additive). `--source` is the single locator, so it cannot be
+        // combined with a legacy input (a new-only ambiguity — the legacy inputs'
+        // own precedence among themselves is preserved).
+        if source != nil && (identifier != nil || bibtex != nil || title != nil) {
+            printJSONError("--source cannot be combined with --identifier / --bibtex / --title; provide exactly one input")
+            throw ExitCode.failure
+        }
         if let src = source {
             try await CreateReferenceSource.run(
                 source: src,
