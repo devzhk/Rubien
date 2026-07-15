@@ -137,47 +137,47 @@ rubien-cli get 42
 
 ## add
 
-Add a reference via DOI / arXiv / PMID / PMCID / ISBN / paper-landing URL, BibTeX string, or manual title.
+Add a reference from any locator (identifier, URL, file, folder), an inline BibTeX string, or a manual title.
 
 ```bash
-rubien-cli add --identifier "10.1038/s41586-021-03819-2"
-rubien-cli add --identifier "2106.04561" --download-pdf
-rubien-cli add --identifier "PMC4587766"
-rubien-cli add --identifier "https://pmc.ncbi.nlm.nih.gov/articles/PMC4587766/"
-rubien-cli add --identifier "https://openreview.net/forum?id=YicbFdNTTy" --download-pdf
-rubien-cli add --identifier "https://aclanthology.org/2025.acl-long.1141.pdf" --download-pdf
-rubien-cli add --identifier "https://openaccess.thecvf.com/content/CVPR2025/html/Wang_VGGT_Visual_Geometry_Grounded_Transformer_CVPR_2025_paper.html" --download-pdf
-rubien-cli add --identifier "https://www.eneuro.org/content/9/2/ENEURO.0361-21.2022.long" --download-pdf
-rubien-cli add --bibtex '@article{..., title={...}, ...}'
-rubien-cli add --title "My Paper"
 # One door: --source routes any locator automatically (spec §5)
 rubien-cli add --source "10.1038/s41586-021-03819-2"
+rubien-cli add --source "2106.04561" --download-pdf
+rubien-cli add --source "PMC4587766"
+rubien-cli add --source "https://openreview.net/forum?id=YicbFdNTTy" --download-pdf
 rubien-cli add --source "https://aclanthology.org/2025.acl-long.1141.pdf"   # implies --download-pdf
 rubien-cli add --source ./references.bib
 rubien-cli add --source ./zotero-export                 # folder → Zotero / Markdown
 rubien-cli add --source - --format ris < refs.ris       # stdin (CLI only)
+# Inline content a locator can't express:
+rubien-cli add --bibtex '@article{..., title={...}, ...}'
+rubien-cli add --title "My Paper"
 ```
 
 | Option | Type | Description |
 |---|---|---|
-| `--source` | String | **One door in** — any locator, routed automatically (§5): identifier (DOI / arXiv / PMID / PMCID / ISBN), paper URL, PDF/Markdown file URL, local file path, folder path, or `-` (stdin). Returns the unified envelope below. |
-| `--identifier` | String | Fetches metadata for a DOI, arXiv ID, PMID, PMCID, ISBN, or paper URL. See [Supported Paper URLs](Supported-Paper-URLs.md) for recognized URL patterns. When a page includes a DOI, CrossRef supplies canonical fields. Rubien rewrites supported PDF URLs to landing pages before lookup. PMCID values (`PMC1234567`) and PMC URLs resolve through NCBI's ID converter, then PubMed/CrossRef. |
-| `--bibtex` | String | BibTeX source string (can contain multiple entries) |
+| `--source` | String | **One door in** — any locator, routed automatically (§5): identifier (DOI / arXiv / PMID / PMCID / ISBN), paper URL, PDF/Markdown file URL, local file path, folder path, or `-` (stdin). See [Supported Paper URLs](Supported-Paper-URLs.md) for recognized URL patterns; PMCID values (`PMC1234567`) and PMC URLs resolve through NCBI's ID converter, then PubMed/CrossRef; supported PDF URLs are rewritten to landing pages before lookup. |
+| `--bibtex` | String | Inline BibTeX source string (can contain multiple entries; persisted per entry, continuing past entry failures) |
 | `--title` | String | Title for manual entry (creates a minimal reference) |
 | `--format` | String | With `--source`: format hint (`bib`, `ris`, `md`) for a file or stdin source; disambiguates a folder holding both `.bib` and `.md`. |
 | `--property` | String | With `--source` folder: property to stamp on every imported reference (default: `Tags`). |
 | `--value` | String | With `--source` folder: value to stamp on `--property` (default: folder basename). |
-| `--download-pdf` / `--no-download-pdf` | Flag (tri-state) | Fetch (or explicitly skip) the open-access PDF after resolving an identifier / paper URL. A registered `.pdf` URL **implies** `--download-pdf` unless `--no-download-pdf` is given. Absent = the router decides. Only valid on a resolver route (identifier / paper-URL source); rejected on file/folder/download-import routes. arXiv inputs use the preprint PDF; DOI/PMID/PMCID use OpenAlex's best open-access location; paper URLs use `citation_pdf_url` (eLife uses its API). The reference is saved even if the download fails. |
+| `--download-pdf` / `--no-download-pdf` | Flag (tri-state) | Fetch (or explicitly skip) the open-access PDF after resolving an identifier / paper URL. A registered `.pdf` URL **implies** `--download-pdf` unless `--no-download-pdf` is given. Absent = the router decides. Only valid with `--source` on a resolver route (identifier / paper-URL); rejected on file/folder/download-import routes and on `--bibtex`/`--title`. arXiv inputs use the preprint PDF; DOI/PMID/PMCID use OpenAlex's best open-access location; paper URLs use `citation_pdf_url` (eLife uses its API). The reference is saved even if the download fails. |
 
-Exactly one of `--source`, `--identifier`, `--bibtex`, or `--title` is required.
+Exactly one of `--source`, `--bibtex`, or `--title` is required.
 
-### `--identifier` / `--bibtex` / `--title` output
+> **Removed (v0.4.0 cutover):** `add --identifier <x>` → `add --source <x>` (same resolver, same routing).
+>
+> | Removed form | Replacement |
+> |---|---|
+> | `add --identifier "10.1038/x"` | `add --source "10.1038/x"` |
+> | `add --identifier "2106.04561" --download-pdf` | `add --source "2106.04561" --download-pdf` |
+>
+> `--bibtex` / `--title` are kept but now emit the same unified envelope as `--source` (below) instead of the old flat `{reference, status, pdfDownload}` shape.
 
-JSON envelope `{ "reference": ReferenceDTO, "status": "created" | "existing", "pdfDownload": PDFDownloadStatusDTO | null }`. For `--bibtex`, output is a JSON array of envelopes, one per parsed entry.
+### Output (unified envelope, spec §5.4)
 
-### `--source` output (unified envelope, spec §5.4)
-
-One shape for every route:
+One shape for every route — `--source`, `--bibtex`, and `--title`:
 
 ```jsonc
 {
@@ -195,19 +195,12 @@ One shape for every route:
 }
 ```
 
-- One item per parsed input (multi-entry BibTeX and folders emit several); an intra-batch duplicate emits two items pointing at one reference (the later `existing`).
-- `diagnostics` is present only when the route produces it (`file` for single-file/URL routes; `property`/`value` for folder stamping; `attached`/`duplicatesSkipped`/`missingPDFs` for Zotero).
+- One item per parsed input (multi-entry BibTeX and folders emit several); an intra-batch duplicate emits two items pointing at one reference (the later `existing`). `status: "existing"` means the input matched an existing reference (deduped by normalized DOI / PMID / PMCID / ISBN / URL / ISSN+title+year) and any non-empty incoming fields were folded into the existing row; `reference.id` is the existing row's id.
+- `input` provenance: the locator / file path for `--source` routes, `bibtex[<n>]` for inline BibTeX entries (`bibtex` for the zero-entries failure), the title string for `--title`.
+- `diagnostics` is present only when the route produces it (`file` for single-file/URL routes; `property`/`value` for folder stamping; `attached`/`duplicatesSkipped`/`missingPDFs` for Zotero). Inline routes never carry it.
+- `pdfDownload` is present only when a PDF fetch was attempted: `{ "ok": Bool, "action": String?, "filename": String?, "error": String? }`. `action` values: `"downloaded"`, `"replaced"`, `"already-attached"`, `"already-pending"` (cache row exists but the file hasn't been materialized yet — sync will deliver it), `"skipped"` (no DOI/arXiv identifier AND no scraped `citation_pdf_url`). The item's `status` and the exit code are unaffected by `pdfDownload.ok` — the reference is saved either way.
 - Exit code is nonzero **iff zero items succeeded** (succeeded = created/existing/queued). A partial failure exits 0 with the failures visible in `items`. On the all-failed path the full envelope is written to **stderr**; partial/full success goes to stdout.
 - Routing highlights: an existing local **path wins** over an identifier-shaped string (escape a DOI with `https://doi.org/…`, a filename with `./name`); a registered-host `.pdf` URL takes the resolver route and still attaches the PDF (implied download); an unregistered `.pdf`/`.md` URL (e.g. `arxiv.org/pdf/…`) is downloaded and imported directly; remote `.bib`/`.ris` URLs are not supported (download first).
-
-### `--identifier` / `--bibtex` / `--title` output notes
-
-- `status` is always one of:
-  - `"created"` — a new reference row was inserted.
-  - `"existing"` — the input matched an existing reference (deduped by normalized DOI / PMID / PMCID / ISBN / URL / ISSN+title+year); `mergedReference` folded any non-empty incoming fields into the existing row. `reference.id` is the existing row's id.
-- `pdfDownload` is always present (explicit `null`, not omitted):
-  - `null` when `--download-pdf` was not set.
-  - `{ "ok": Bool, "action": String?, "filename": String?, "error": String? }` when `--download-pdf` was set. `action` values: `"downloaded"`, `"already-attached"`, `"already-pending"` (cache row exists but the file hasn't been materialized yet — sync will deliver it), `"skipped"` (no DOI/arXiv identifier AND no scraped `citation_pdf_url` — happens for raw title-only entries or DOI-less paper URLs whose landing page omitted the PDF link). The command exits 0 regardless of `pdfDownload.ok`.
 
 ---
 

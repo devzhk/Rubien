@@ -137,7 +137,7 @@ final class MCPServerTests: XCTestCase {
         let result = try runCLI(["add", "--title", title])
         XCTAssertEqual(result.exitCode, 0, "seed add failed: \(result.stderr)")
         let obj = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any]
-        let ref = obj?["reference"] as? [String: Any]
+        let ref = (obj?["items"] as? [[String: Any]])?.first?["reference"] as? [String: Any]
         let id = (ref?["id"] as? NSNumber)?.intValue
         return try XCTUnwrap(id, "could not read seeded reference id from: \(result.stdout)")
     }

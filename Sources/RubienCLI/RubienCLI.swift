@@ -380,7 +380,8 @@ struct CitationTextOutput: Encodable {
 // MARK: - PDF download
 
 /// Stable JSON string for the `action` field across both PDF-download
-/// outputs. Used by `pdf download <id>` and `add --identifier --download-pdf`.
+/// outputs. Used by `pdf download <id>` and the resolver route's PDF fetch
+/// (`add --source <identifier|paper URL> --download-pdf`).
 enum PDFDownloadAction: String, Encodable {
     case downloaded
     case replaced
@@ -394,20 +395,6 @@ struct PDFDownloadStatusDTO: Encodable {
     let action: PDFDownloadAction?
     let filename: String?
     let error: String?
-}
-
-struct AddStatusOutput: Encodable {
-    let reference: ReferenceDTO
-    let status: AppDatabase.ReferenceSaveResult
-    let pdfDownload: AlwaysEncodedOptional<PDFDownloadStatusDTO>
-
-    init(reference: ReferenceDTO,
-         status: AppDatabase.ReferenceSaveResult,
-         pdfDownload: PDFDownloadStatusDTO? = nil) {
-        self.reference = reference
-        self.status = status
-        self.pdfDownload = AlwaysEncodedOptional(value: pdfDownload)
-    }
 }
 
 /// Download via `PDFDownloadService`, attach via `attachImportedPDFs`,
@@ -431,7 +418,7 @@ private func downloadAndAttachPDF(
     return filename
 }
 
-/// Best-effort PDF download for `add --identifier --download-pdf`. The
+/// Best-effort PDF download for the resolver route's `--download-pdf`. The
 /// reference is already saved by the caller, so all error paths must
 /// soft-fail into the DTO so the command still exits 0. When
 /// `pdfURLOverride` is provided (e.g. from `citation_pdf_url` on a
@@ -772,10 +759,7 @@ struct Get: ParsableCommand {
 struct Add: AsyncParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Add a reference from any locator (identifier, URL, file, folder, BibTeX, or title)")
 
-    @Option(name: .long, help: "DOI, PMID, or arXiv ID")
-    var identifier: String?
-
-    @Option(name: .long, help: "BibTeX source")
+    @Option(name: .long, help: "Inline BibTeX source (can hold multiple entries)")
     var bibtex: String?
 
     @Option(name: .long, help: "Title (for manual entry)")
@@ -802,13 +786,12 @@ struct Add: AsyncParsableCommand {
     var downloadPdf: Bool?
 
     func run() async throws {
-        // New one-door routing (spec §5). `--source` produces the unified
-        // envelope; the legacy --identifier / --bibtex / --title paths below are
-        // unchanged (additive). `--source` is the single locator, so it cannot be
-        // combined with a legacy input (a new-only ambiguity — the legacy inputs'
-        // own precedence among themselves is preserved).
-        if source != nil && (identifier != nil || bibtex != nil || title != nil) {
-            printJSONError("--source cannot be combined with --identifier / --bibtex / --title; provide exactly one input")
+        // One door (spec §5): exactly one input. `--source` is the locator
+        // (identifiers route through it since `--identifier` was removed);
+        // `--bibtex` / `--title` carry inline content a locator can't express.
+        // Every path emits the unified create-reference envelope (§5.4).
+        if [source, bibtex, title].compactMap({ $0 }).count > 1 {
+            printJSONError("--source / --bibtex / --title cannot be combined; provide exactly one input")
             throw ExitCode.failure
         }
         if let src = source {
@@ -821,60 +804,18 @@ struct Add: AsyncParsableCommand {
             )
             return
         }
-        let wantPDF = (downloadPdf == true)
-        if wantPDF && identifier == nil {
-            printJSONError("--download-pdf requires --identifier or --source")
+        // The route-scoped flags apply only to `--source` routes (§5.1:
+        // inapplicable options are rejected, not silently ignored).
+        if downloadPdf != nil || format != nil || property != nil || value != nil {
+            printJSONError("--download-pdf / --format / --property / --value require --source")
             throw ExitCode.failure
         }
-        if let id = identifier {
-            let ref: Reference
-            // Scraped PDF URL from a paper-landing-page resolve (OpenReview /
-            // CVF / PMLR / etc. — papers without DOIs that the
-            // arXiv/OpenAlex resolution path can't find).
-            let scrapedPDFURL: String?
-            do {
-                var fetched: Reference
-                (fetched, scrapedPDFURL) = try await MetadataFetcher.fetchWithScrapedPDFURL(from: id)
-                fetched = MetadataVerifier.manuallyVerified(fetched, reviewedBy: "cli-identifier")
-                ref = fetched
-            } catch let error as MetadataFetcher.FetchError {
-                printJSONError(error.errorDescription ?? String(describing: error))
-                throw ExitCode.failure
-            }
-            var mutableRef = ref
-            let result = try AppDatabase.shared.saveReference(&mutableRef)
-            notifyLibraryChanged()
-            let pdfStatus = wantPDF
-                ? await attemptPDFDownload(for: mutableRef, pdfURLOverride: scrapedPDFURL)
-                : nil
-            let dto = try referenceDTO(for: mutableRef)
-            printJSON(AddStatusOutput(reference: dto, status: result, pdfDownload: pdfStatus))
-        } else if let bib = bibtex {
-            let parsed = BibTeXImporter.parse(bib)
-            guard !parsed.isEmpty else {
-                printJSONError("No valid BibTeX entries found")
-                throw ExitCode.failure
-            }
-            var saved: [Reference] = []
-            var statuses: [AppDatabase.ReferenceSaveResult] = []
-            for var ref in parsed {
-                statuses.append(try AppDatabase.shared.saveReference(&ref))
-                saved.append(ref)
-            }
-            notifyLibraryChanged()
-            let dtos = try mapReferenceDTOs(saved)
-            let envelopes = zip(dtos, statuses).map {
-                AddStatusOutput(reference: $0, status: $1)
-            }
-            printJSON(envelopes)
+        if let bib = bibtex {
+            try CreateReferenceSource.runInlineBibTeX(bib)
         } else if let t = title {
-            var ref = Reference(title: t)
-            let result = try AppDatabase.shared.saveReference(&ref)
-            notifyLibraryChanged()
-            let dto = try referenceDTO(for: ref)
-            printJSON(AddStatusOutput(reference: dto, status: result))
+            try CreateReferenceSource.runTitle(t)
         } else {
-            printJSONError("Provide --identifier, --bibtex, or --title")
+            printJSONError("Provide --source, --bibtex, or --title")
             throw ExitCode.failure
         }
     }

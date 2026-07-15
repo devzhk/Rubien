@@ -54,6 +54,50 @@ enum CreateReferenceSource {
         }
     }
 
+    // MARK: - Inline routes (`add --bibtex` / `add --title`)
+
+    /// Inline `--bibtex` (§5.3): persists PER ENTRY, continuing past entry
+    /// failures — deliberately different from the file route's batch-atomic
+    /// semantics, and a decision-logged behavior change vs the old
+    /// stop-on-first-throw loop. Zero parsed entries → one synthetic failed
+    /// item whose `input` is the constant `bibtex` (never the payload);
+    /// per-entry provenance is `bibtex[<ordinal>]`.
+    static func runInlineBibTeX(_ bib: String) throws {
+        let parsed = BibTeXImporter.parse(bib)
+        guard !parsed.isEmpty else {
+            try emit([(failed("bibtex", "No valid BibTeX entries found"), nil)], diagnostics: nil)
+            return
+        }
+        let pairs: [OutcomePair] = parsed.enumerated().map { i, ref in
+            let input = "bibtex[\(i)]"
+            do {
+                var mutableRef = ref
+                let saveResult = try AppDatabase.shared.saveReference(&mutableRef)
+                return (ItemOutcome(
+                    reference: mutableRef,
+                    disposition: saveResult == .existing ? .existing : .created,
+                    input: input
+                ), nil)
+            } catch {
+                return (failed(input, error.localizedDescription), nil)
+            }
+        }
+        try emit(pairs, diagnostics: nil)
+    }
+
+    /// Manual `--title` route: one minimal row; `input` is the title string
+    /// (§5.3 provenance).
+    static func runTitle(_ title: String) throws {
+        var ref = Reference(title: title)
+        let saveResult = try AppDatabase.shared.saveReference(&ref)
+        let outcome = ItemOutcome(
+            reference: ref,
+            disposition: saveResult == .existing ? .existing : .created,
+            input: title
+        )
+        try emit([(outcome, nil)], diagnostics: nil)
+    }
+
     // MARK: - Option applicability (§5.1)
 
     private static func validateOptions(

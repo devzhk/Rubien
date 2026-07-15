@@ -61,13 +61,13 @@ final class GrepCommandTests: XCTestCase {
     // MARK: seeding
 
     /// Add a bare manual reference via the CLI; returns its id.
-    /// (`add` has no `--authors` option — only --identifier/--bibtex/--title;
+    /// (`add` has no `--authors` option — only --source/--bibtex/--title;
     /// authors are irrelevant to these tests, so a bare `--title` suffices.)
     private func addReference(title: String = "Read Test") throws -> Int64 {
         let result = try runCLI(["add", "--title", title])
         XCTAssertEqual(result.exitCode, 0, "add failed: \(result.stderr)")
         let json = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any]
-        let ref = json?["reference"] as? [String: Any]
+        let ref = (json?["items"] as? [[String: Any]])?.first?["reference"] as? [String: Any]
         return try XCTUnwrap((ref?["id"] as? NSNumber)?.int64Value, "no id in add envelope")
     }
 

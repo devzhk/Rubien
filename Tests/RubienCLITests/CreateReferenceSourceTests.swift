@@ -273,26 +273,39 @@ final class CreateReferenceSourceTests: XCTestCase {
         XCTAssertTrue(result.stderr.contains("folder"), "stderr should say --property/--value apply to folders; got: \(result.stderr)")
     }
 
-    // MARK: - Legacy paths still work (additive rule)
+    // MARK: - Inline routes (phase-D cutover: unified envelope on --bibtex / --title)
 
-    func testLegacyBibtexEnvelopeUnchanged() throws {
+    func testInlineBibTeXEmitsUnifiedEnvelope() throws {
         try skipIfBinaryMissing()
-        let result = try runCLI(["add", "--bibtex", "@article{x, title={Legacy}, doi={10.5/z}}"])
-        XCTAssertEqual(result.exitCode, 0, "stderr=\(result.stderr)")
-        // Legacy --bibtex still emits a JSON ARRAY of {reference,status,pdfDownload}.
-        let arr = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [[String: Any]])
-        XCTAssertEqual(arr.first?["status"] as? String, "created")
-        XCTAssertNotNil(arr.first?["reference"])
-    }
-
-    func testLegacyTitleEnvelopeUnchanged() throws {
-        try skipIfBinaryMissing()
-        let result = try runCLI(["add", "--title", "Legacy Title \(UUID().uuidString.prefix(6))"])
+        let result = try runCLI(["add", "--bibtex", "@article{x, title={Inline-\(UUID().uuidString.prefix(6))}, doi={10.5/inl-\(UUID().uuidString.prefix(6))}}"])
         XCTAssertEqual(result.exitCode, 0, "stderr=\(result.stderr)")
         let obj = try json(result.stdout)
-        XCTAssertEqual(obj["status"] as? String, "created")
-        XCTAssertNotNil(obj["reference"])
-        XCTAssertTrue(obj.keys.contains("pdfDownload"), "legacy envelope always carries pdfDownload")
+        let items = try XCTUnwrap(obj["items"] as? [[String: Any]])
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items[0]["status"] as? String, "created")
+        XCTAssertEqual(items[0]["input"] as? String, "bibtex[0]",
+                       "inline entries carry ordinal provenance (§5.3)")
+        XCTAssertNotNil(items[0]["reference"])
+        let summary = try XCTUnwrap(obj["summary"] as? [String: Any])
+        XCTAssertEqual(summary["created"] as? Int, 1)
+    }
+
+    /// Zero parsed entries is a FAILURE (blessed product call): non-zero exit,
+    /// the envelope on stderr with one synthetic failed item whose `input` is
+    /// the constant `bibtex` — never the (arbitrarily large) payload itself.
+    func testInlineBibTeXZeroEntriesFailsWithEnvelope() throws {
+        try skipIfBinaryMissing()
+        let result = try runCLI(["add", "--bibtex", "not bibtex at all"])
+        XCTAssertNotEqual(result.exitCode, 0)
+        XCTAssertTrue(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      "stdout must be empty on the all-failed path; got: \(result.stdout)")
+        let obj = try json(result.stderr)
+        let items = try XCTUnwrap(obj["items"] as? [[String: Any]])
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items[0]["status"] as? String, "failed")
+        XCTAssertEqual(items[0]["input"] as? String, "bibtex")
+        XCTAssertNotNil(items[0]["error"])
+        XCTAssertEqual((obj["summary"] as? [String: Any])?["failed"] as? Int, 1)
     }
 
     /// Re-review regression: a forced-format folder that lacks the requested
