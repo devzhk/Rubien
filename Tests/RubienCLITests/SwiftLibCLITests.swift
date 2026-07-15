@@ -900,17 +900,40 @@ final class RubienCLITests: XCTestCase {
     /// structured envelope now prints to **stderr**, leaving stdout empty.
     func testPropertiesUnresolvedSelectorErrorsLoudly() throws {
         try skipIfBinaryMissing()
-        let result = try runCLI(["properties", "--name", "DefinitelyNotAProperty-\(UUID().uuidString.prefix(6))"])
+        let missing = "DefinitelyNotAProperty-\(UUID().uuidString.prefix(6))"
+        let result = try runCLI(["properties", "--name", missing])
         XCTAssertNotEqual(result.exitCode, 0)
         // stdout stays reserved for success JSON — the error envelope moved to stderr.
         XCTAssertTrue(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                       "stdout must be empty on the error path; got: \(result.stdout)")
         let env = try JSONSerialization.jsonObject(with: Data(result.stderr.utf8)) as? [String: Any]
         XCTAssertEqual(env?["error"] as? String, "unresolved-selectors")
-        let names = env?["names"] as? [String] ?? []
-        XCTAssertFalse(names.isEmpty, "unresolved names must surface in the error envelope")
-        // `ids` is always present in the envelope (empty here — only a name was unresolved).
-        XCTAssertNotNil(env?["ids"] as? [String], "envelope must carry an ids array")
+        // Exact envelope (§4.6): the specific missing name, an empty ids array,
+        // and no extra keys.
+        XCTAssertEqual(env?["names"] as? [String], [missing])
+        XCTAssertEqual(env?["ids"] as? [String], [])
+        XCTAssertEqual(Set(env?.keys ?? [:].keys), ["error", "ids", "names"],
+                       "envelope key set must be exactly error/ids/names")
+    }
+
+    /// `update --properties` routes `ReferenceEditError` through the SAME
+    /// stderr envelope helper (§4.6): an unresolved payload key exits non-zero
+    /// with the envelope on stderr and empty stdout, naming the missing key.
+    func testUpdatePropertiesUnresolvedKeyErrorsLoudly() throws {
+        try skipIfBinaryMissing()
+        let added = try runCLI(["add", "--title", "Update-Envelope-\(UUID().uuidString.prefix(8))"])
+        guard let refId = parseId(from: Data(added.stdout.utf8)) else {
+            return XCTFail("add failed: \(added.stderr)")
+        }
+        let missing = "NoSuchProperty-\(UUID().uuidString.prefix(6))"
+        let result = try runCLI(["update", String(refId), "--properties", "{\"\(missing)\": \"x\"}"])
+        XCTAssertNotEqual(result.exitCode, 0)
+        XCTAssertTrue(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      "stdout must be empty on the error path; got: \(result.stdout)")
+        let env = try JSONSerialization.jsonObject(with: Data(result.stderr.utf8)) as? [String: Any]
+        XCTAssertEqual(env?["error"] as? String, "unresolved-selectors")
+        XCTAssertEqual(env?["names"] as? [String], [missing])
+        XCTAssertEqual(env?["ids"] as? [String], [])
     }
 
     /// Explicit selectors win over `--visible` filtering — the caller asked
@@ -1869,6 +1892,22 @@ final class RubienCLITests: XCTestCase {
         let viaQuery = try runCLI(["views", "--query", String(vid)])
         let queryRows = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(viaQuery.stdout.utf8)) as? [[String: Any]])
         XCTAssertEqual(Set(queryRows.compactMap { $0["title"] as? String }), titles, "list --view and views --query must agree")
+    }
+
+    /// #6 regression: `--limit N --offset N` on a saved view must return the
+    /// NEXT page, not nothing. The bug fetched ≤limit rows then dropped offset,
+    /// emptying the first page. Uses a filterless (scope-all) view — the fast
+    /// path where the bug lived.
+    func testListViewPaginationAppliesOffsetAfterLimit() throws {
+        try skipIfBinaryMissing()
+        for i in 0..<5 {
+            _ = try runCLI(["add", "--bibtex", "@article{pg\(i), title={PageRef-\(i)}, doi={10.88/pg\(i)}}"])
+        }
+        let vid = try createFilteredView(name: "AllScope-\(UUID().uuidString.prefix(6))", filtersJSON: "[]")
+        let page = try runCLI(["list", "--view", String(vid), "--limit", "2", "--offset", "2"])
+        XCTAssertEqual(page.exitCode, 0, "stderr=\(page.stderr)")
+        let rows = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(page.stdout.utf8)) as? [[String: Any]])
+        XCTAssertEqual(rows.count, 2, "offset applied before limit would return an empty second page; got \(rows.count)")
     }
 
     func testListViewMutualExclusionWithInlineFilter() throws {

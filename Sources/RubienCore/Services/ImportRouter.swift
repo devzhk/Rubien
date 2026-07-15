@@ -47,10 +47,16 @@ public enum ImportRouter {
     /// string names an existing local path — defaults to `FileManager`, and is
     /// injectable so the routing matrix runs without touching disk.
     public static func classify(
-        source: String,
+        source rawSource: String,
         explicitDownloadPdf: Bool? = nil,
         probe: (String) -> PathProbe = ImportRouter.defaultProbe
     ) -> Route {
+        // Normalize the locator the way `ImportSourceMaterializer` does before it
+        // acts (`ImportSourceMaterializer.swift:123`): trim surrounding whitespace
+        // so an MCP source — no shell to strip it — classifies the same as the
+        // materializer would import it.
+        let source = rawSource.trimmingCharacters(in: .whitespacesAndNewlines)
+
         // Step 0: stdin (CLI-only).
         if source == "-" { return .stdin }
 
@@ -59,7 +65,12 @@ public enum ImportRouter {
         // `http://…` string is never treated as a local path. The reverse
         // escape hatch for identifier-shaped filenames is `./10.1234/foo`.
         if !hasURLScheme(source) {
-            let p = probe(source)
+            // Expand a leading `~` for the probe, matching the materializer
+            // (`ImportSourceMaterializer.swift:176`) — an MCP source like
+            // `~/Downloads/paper.pdf` has no shell to expand it, so probing the
+            // raw string would miss the file and misroute it as unroutable.
+            let probePath = (source as NSString).expandingTildeInPath
+            let p = probe(probePath)
             if p.exists { return .existingPath(isDirectory: p.isDirectory) }
         }
 

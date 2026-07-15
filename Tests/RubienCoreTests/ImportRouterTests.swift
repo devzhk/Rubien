@@ -139,4 +139,21 @@ final class ImportRouterTests: XCTestCase {
         }
         XCTAssertTrue(reason.lowercased().contains("path"), "message should mention the path-not-found case; got: \(reason)")
     }
+
+    // MARK: - Locator normalization (matches ImportSourceMaterializer)
+
+    /// A leading `~` is expanded before the existence probe — an MCP source has
+    /// no shell to expand it, so probing the raw string would misroute it.
+    func testLeadingTildeExpandedBeforeProbe() {
+        let expanded = ("~/Downloads/paper.pdf" as NSString).expandingTildeInPath
+        let route = ImportRouter.classify(source: "~/Downloads/paper.pdf", probe: probe(existing: [expanded: false]))
+        XCTAssertEqual(route, .existingPath(isDirectory: false))
+    }
+
+    /// Surrounding whitespace is trimmed before the probe (and before routing),
+    /// matching the materializer.
+    func testSurroundingWhitespaceTrimmedBeforeProbe() {
+        let route = ImportRouter.classify(source: "  zotero  ", probe: probe(existing: ["zotero": true]))
+        XCTAssertEqual(route, .existingPath(isDirectory: true))
+    }
 }

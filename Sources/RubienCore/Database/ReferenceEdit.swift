@@ -419,6 +419,20 @@ extension AppDatabase {
     /// (incoming value equals stored value) performs no write.
     @discardableResult
     public func applyReferenceEdit(id: Int64, edit: ReferenceEdit, now: Date = Date()) throws -> Reference {
+        try applyReferenceEditReportingChange(id: id, edit: edit, now: now).reference
+    }
+
+    /// `applyReferenceEdit` variant that also reports whether the transaction
+    /// actually wrote any row. The CLI uses it to suppress `notifyLibraryChanged`
+    /// on a no-op edit (empty payload or every value already equal), so an
+    /// unchanged edit produces no dirty-queue traffic or spurious sync upload
+    /// (spec §4.5). The plain `applyReferenceEdit` delegates here and drops the
+    /// flag, keeping every existing caller unchanged.
+    public func applyReferenceEditReportingChange(
+        id: Int64,
+        edit: ReferenceEdit,
+        now: Date = Date()
+    ) throws -> (reference: Reference, didChange: Bool) {
         try dbWriter.write { db in
             guard let original = try Reference.fetchOne(db, id: id) else {
                 throw ReferenceEditError.referenceNotFound(id)
@@ -469,32 +483,42 @@ extension AppDatabase {
                 }
             }
 
-            // --- Apply phase: the only DB writes.
+            // --- Apply phase: the only DB writes. `didChange` is true iff at
+            // least one row was actually written (drives the CLI's no-op notify
+            // suppression).
+            var didChange = false
+
             // Reference row: stamp `now` only if a column actually changed.
             var withOriginalStamp = edited
             withOriginalStamp.dateModified = original.dateModified
             if withOriginalStamp != original {
                 edited.dateModified = now
                 try edited.update(db)
+                didChange = true
             }
 
             // Custom property values: upsert/delete with per-row no-op + stamp.
             for op in propertyValueOps {
-                try upsertPropertyValueRow(
+                if try upsertPropertyValueRow(
                     db,
                     referenceId: id,
                     propertyId: op.propertyId,
                     value: op.value,
                     now: now
-                )
+                ) {
+                    didChange = true
+                }
             }
 
             // Tags: diff the pivot set — never delete-all + reinsert.
             if let finalSet = tagsFinalSet {
-                try applyTagsPivotDiff(db, referenceId: id, finalSet: finalSet, now: now)
+                if try applyTagsPivotDiff(db, referenceId: id, finalSet: finalSet, now: now) {
+                    didChange = true
+                }
             }
 
-            return try Reference.fetchOne(db, id: id) ?? edited
+            let result = try Reference.fetchOne(db, id: id) ?? edited
+            return (result, didChange)
         }
     }
 
@@ -990,7 +1014,10 @@ extension AppDatabase {
     /// Diff the desired final tag set against the current pivots: insert added,
     /// delete removed, leave unchanged pivots (and their timestamps) untouched.
     /// An unchanged set touches no rows.
-    private func applyTagsPivotDiff(_ db: Database, referenceId: Int64, finalSet: Set<Int64>, now: Date) throws {
+    /// Returns `true` iff the pivot set actually changed (a row was inserted or
+    /// deleted) — an unchanged set touches nothing (no timestamp churn).
+    @discardableResult
+    private func applyTagsPivotDiff(_ db: Database, referenceId: Int64, finalSet: Set<Int64>, now: Date) throws -> Bool {
         let current = try currentTagIds(referenceId: referenceId, db: db)
         let toInsert = finalSet.subtracting(current)
         let toDelete = current.subtracting(finalSet)
@@ -1009,39 +1036,46 @@ extension AppDatabase {
                 arguments: StatementArguments(args)
             )
         }
+        return !toInsert.isEmpty || !toDelete.isEmpty
     }
 
     // MARK: PropertyValue upsert (custom)
 
     /// Upsert or delete a `propertyValue` row with per-row no-op detection.
     /// Stamps `now` on any insert/update (fixing today's missed stamp on value
-    /// updates); an unchanged value writes nothing.
+    /// updates); an unchanged value writes nothing. Returns `true` iff a row was
+    /// actually inserted, updated, or deleted.
+    @discardableResult
     private func upsertPropertyValueRow(
         _ db: Database,
         referenceId: Int64,
         propertyId: Int64,
         value: String?,
         now: Date
-    ) throws {
+    ) throws -> Bool {
         let existing = try PropertyValue
             .filter(PropertyValue.Columns.referenceId == referenceId)
             .filter(PropertyValue.Columns.propertyId == propertyId)
             .fetchOne(db)
         if let value {
             if let existing {
-                if existing.value == value { return }  // no-op
+                if existing.value == value { return false }  // no-op
                 var updated = existing
                 updated.value = value
                 updated.dateModified = now
                 try updated.update(db)
+                return true
             } else {
                 var pv = PropertyValue(referenceId: referenceId, propertyId: propertyId, value: value, dateModified: now)
                 try pv.insert(db)
+                return true
             }
         } else if let existing {
             _ = try existing.delete(db)
+            return true
         }
-        // else: nil over an absent row → no-op.
+        // nil over an absent row → no-op.
+        return false
     }
 
     // MARK: Shared value helpers
@@ -1176,6 +1210,19 @@ extension AppDatabase {
         visible: Bool? = nil,
         now: Date = Date()
     ) throws -> PropertyDefinition {
+        try updatePropertyDefinitionReportingChange(id: id, name: name, visible: visible, now: now).definition
+    }
+
+    /// `updatePropertyDefinition` variant that also reports whether a row was
+    /// written, so the CLI can suppress `notifyLibraryChanged` on a no-op update
+    /// (name/visible already equal — spec §4.5 no-op rule). The plain method
+    /// delegates here and drops the flag.
+    public func updatePropertyDefinitionReportingChange(
+        id: Int64,
+        name: String? = nil,
+        visible: Bool? = nil,
+        now: Date = Date()
+    ) throws -> (definition: PropertyDefinition, didChange: Bool) {
         guard name != nil || visible != nil else {
             throw PropertyMutationError.nothingToUpdate
         }
@@ -1200,7 +1247,7 @@ extension AppDatabase {
                 prop.dateModified = now
                 try prop.update(db)
             }
-            return prop
+            return (prop, changed)
         }
     }
 
@@ -1217,6 +1264,22 @@ extension AppDatabase {
         color: String? = nil,
         now: Date = Date()
     ) throws -> PropertyDefinition {
+        try updatePropertyOptionReportingChange(
+            propertyId: propertyId, option: option, newName: newName, color: color, now: now
+        ).definition
+    }
+
+    /// `updatePropertyOption` variant that also reports whether a row was
+    /// written, so the CLI can suppress `notifyLibraryChanged` on a no-op update
+    /// (name/color already equal — spec §4.5 no-op rule). The plain method
+    /// delegates here and drops the flag.
+    public func updatePropertyOptionReportingChange(
+        propertyId: Int64,
+        option: String,
+        newName: String? = nil,
+        color: String? = nil,
+        now: Date = Date()
+    ) throws -> (definition: PropertyDefinition, didChange: Bool) {
         guard newName != nil || color != nil else {
             throw PropertyMutationError.nothingToUpdate
         }
@@ -1255,7 +1318,7 @@ extension AppDatabase {
                     tag.dateModified = now
                     try tag.update(db)
                 }
-                return prop
+                return (prop, changed)
             }
 
             guard prop.type == .singleSelect || prop.type == .multiSelect else {
@@ -1312,7 +1375,8 @@ extension AppDatabase {
                     }
                 }
             }
-            return try PropertyDefinition.fetchOne(db, id: propertyId) ?? prop
+            let refreshed = try PropertyDefinition.fetchOne(db, id: propertyId) ?? prop
+            return (refreshed, changed)
         }
     }
 

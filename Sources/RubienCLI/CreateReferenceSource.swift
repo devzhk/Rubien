@@ -16,12 +16,17 @@ enum CreateReferenceSource {
 
     /// Entry point from `add --source`.
     static func run(
-        source: String,
+        source rawSource: String,
         downloadPdf: Bool?,
         format: String?,
         property: String?,
         value: String?
     ) async throws {
+        // Normalize the locator once (trim surrounding whitespace + expand a
+        // leading `~`), matching `ImportSourceMaterializer` — an MCP source has
+        // no shell to do it. The router, the executors, and the `input`
+        // provenance then all see the same resolved path.
+        let source = (rawSource.trimmingCharacters(in: .whitespacesAndNewlines) as NSString).expandingTildeInPath
         let route = ImportRouter.classify(source: source, explicitDownloadPdf: downloadPdf)
 
         // An unroutable locator is a source problem, not a usage error — emit one
@@ -106,8 +111,20 @@ enum CreateReferenceSource {
                 input: source
             )
             try emit([(outcome, pdf)], diagnostics: nil)
+        } catch let exit as ExitCode {
+            // `emit`'s own all-failed exit (or a DTO-readback that flipped the
+            // envelope to failure) is the intended nonzero path — never wrap it.
+            throw exit
+        } catch is CancellationError {
+            throw CancellationError()
         } catch let error as MetadataFetcher.FetchError {
             try emit([(failed(source, error.errorDescription ?? String(describing: error)), nil)], diagnostics: nil)
+        } catch {
+            // Any other non-cancellation error (network URLError, persistence,
+            // DTO readback) is a source-level failure → one synthetic failed item
+            // in the full envelope, not an escape to ArgumentParser's raw stderr
+            // (spec §5.3).
+            try emit([(failed(source, error.localizedDescription), nil)], diagnostics: nil)
         }
     }
 
@@ -134,11 +151,7 @@ enum CreateReferenceSource {
                     from: materialized.fileURL,
                     database: AppDatabase.shared
                 )
-                detailed.outcome.postImportNotifications(
-                    libraryChanged: notifyLibraryChanged,
-                    uploadQueueChanged: PDFUploadQueueBroadcaster.postChangeNotification
-                )
-                try emit([(pdfOutcome(detailed, input: source), nil)], diagnostics: CreateReferenceDiagnostics(file: source))
+                try emitPDFImport(detailed, source: source)
             } catch {
                 try emit([(failed(source, error.localizedDescription), nil)], diagnostics: CreateReferenceDiagnostics(file: source))
             }
@@ -188,39 +201,38 @@ enum CreateReferenceSource {
             try runFolder(source: source, format: format, property: property, value: value)
             return
         }
-        // Single file — kind by extension (or `--format` override for markdown,
-        // matching the legacy `import` file behavior).
+        // Single file. Route the PDF decision by the ACTUAL path extension — a
+        // `.pdf` is ALWAYS the PDF coordinator and `--format` can never
+        // reinterpret it, matching the legacy `import` router
+        // (`shouldMaterializeImportSource`). `--format` only overrides the
+        // text-format selection among bib/ris/md, so a `.bib`/`.ris` never routes
+        // into the PDF coordinator and a `.pdf --format bib` never parses as text.
         let url = URL(fileURLWithPath: source)
-        let ext = format?.lowercased() ?? url.pathExtension.lowercased()
-        switch ext {
-        case "pdf":
+        if url.pathExtension.lowercased() == "pdf" {
             do {
                 let detailed = try await PDFImportCoordinator.importPDFDetailed(from: url, database: AppDatabase.shared)
-                detailed.outcome.postImportNotifications(
-                    libraryChanged: notifyLibraryChanged,
-                    uploadQueueChanged: PDFUploadQueueBroadcaster.postChangeNotification
-                )
-                try emit([(pdfOutcome(detailed, input: source), nil)], diagnostics: CreateReferenceDiagnostics(file: source))
+                try emitPDFImport(detailed, source: source)
             } catch {
                 try emit([(failed(source, error.localizedDescription), nil)], diagnostics: CreateReferenceDiagnostics(file: source))
             }
-        default:
-            let content: String
-            do {
-                let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
-                if let size = attrs[.size] as? UInt64, size > 50 * 1024 * 1024 {
-                    try emit([(failed(source, "File exceeds 50 MB limit (\(size / 1024 / 1024) MB)"), nil)],
-                             diagnostics: CreateReferenceDiagnostics(file: source))
-                    return
-                }
-                content = try String(contentsOf: url, encoding: .utf8)
-            } catch {
-                try emit([(failed(source, "Cannot read \(url.lastPathComponent): \(error.localizedDescription)"), nil)],
+            return
+        }
+        let ext = format?.lowercased() ?? url.pathExtension.lowercased()
+        let content: String
+        do {
+            let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+            if let size = attrs[.size] as? UInt64, size > 50 * 1024 * 1024 {
+                try emit([(failed(source, "File exceeds 50 MB limit (\(size / 1024 / 1024) MB)"), nil)],
                          diagnostics: CreateReferenceDiagnostics(file: source))
                 return
             }
-            try runFileContent(content: content, format: ext, provenancePath: source, source: source)
+            content = try String(contentsOf: url, encoding: .utf8)
+        } catch {
+            try emit([(failed(source, "Cannot read \(url.lastPathComponent): \(error.localizedDescription)"), nil)],
+                     diagnostics: CreateReferenceDiagnostics(file: source))
+            return
         }
+        try runFileContent(content: content, format: ext, provenancePath: source, source: source)
     }
 
     /// Shared BibTeX/RIS/Markdown content handling for the file + stdin routes.
@@ -262,8 +274,11 @@ enum CreateReferenceSource {
         mergePolicy: ImportMergePolicy,
         emptyError: String
     ) throws {
+        // Preserve legacy `import`'s `"file": <path>` field under `diagnostics.file`
+        // (§5.4) on success AND failure — the locator for a file, `"-"` for stdin.
+        let diagnostics = CreateReferenceDiagnostics(file: source)
         guard !references.isEmpty else {
-            try emit([(failed(source, emptyError), nil)], diagnostics: nil)
+            try emit([(failed(source, emptyError), nil)], diagnostics: diagnostics)
             return
         }
         let entries: [AppDatabase.DetailedImportEntry] = references.enumerated().map { i, ref in
@@ -272,11 +287,11 @@ enum CreateReferenceSource {
         }
         do {
             let outcomes = try AppDatabase.shared.batchImportReferencesDetailed(entries, mergePolicy: mergePolicy)
-            try emit(outcomes.map { ($0, nil) }, diagnostics: nil)
+            try emit(outcomes.map { ($0, nil) }, diagnostics: diagnostics)
         } catch {
             // Batch persistence failed → one failed item per parsed entry.
             let failedItems = entries.map { (failed($0.input, error.localizedDescription), nil as PDF?) }
-            try emit(failedItems, diagnostics: nil)
+            try emit(failedItems, diagnostics: diagnostics)
         }
     }
 
@@ -337,8 +352,10 @@ enum CreateReferenceSource {
         case (false, true):
             try runMarkdownFolder(source: source, folderURL: folderURL, files: regularFiles, property: property, value: value)
         case (false, false):
-            printJSONError("No importable files found (expected .bib or .md)")
-            throw ExitCode.failure
+            // No `.bib`/`.md` in the folder is a source-level failure → one
+            // synthetic failed item in the unified envelope on stderr (§5.3/§5.4),
+            // not a raw `{"error"}` that bypasses the items/summary shape.
+            try emit([(failed(source, "No importable files found (expected .bib or .md)"), nil)], diagnostics: nil)
         }
     }
 
@@ -361,6 +378,13 @@ enum CreateReferenceSource {
                 duplicatesSkipped: detailed.result.duplicatesSkipped,
                 missingPDFs: detailed.result.missingPDFs
             )
+            // A `.bib` that parsed to zero entries would forward `items: []` — no
+            // cardinality, no explanation. Synthesize one failed item so the
+            // all-failed envelope carries both (§5.3); exit stays nonzero.
+            guard !detailed.items.isEmpty else {
+                try emit([(failed(source, "No entries found in the Zotero .bib export"), nil)], diagnostics: diagnostics)
+                return
+            }
             try emit(detailed.items.map { ($0, nil) }, diagnostics: diagnostics)
         } catch let error as ZoteroImportError {
             printJSONError(error.errorDescription ?? "\(error)")
@@ -456,6 +480,18 @@ enum CreateReferenceSource {
         case .queued(let intake):
             return ItemOutcome(reference: nil, disposition: .queued, intakeId: intake.id, input: input)
         }
+    }
+
+    /// Emit a successful PDF import. Wakes the upload-queue drainer here, but
+    /// leaves the library-changed notification to `emit` — which fires it exactly
+    /// once for a succeeded item — so a PDF import notifies the library once, not
+    /// twice (`postImportNotifications` + `emit` would otherwise both fire it).
+    private static func emitPDFImport(_ detailed: PDFImportDetailedOutcome, source: String) throws {
+        detailed.outcome.postImportNotifications(
+            libraryChanged: {},
+            uploadQueueChanged: PDFUploadQueueBroadcaster.postChangeNotification
+        )
+        try emit([(pdfOutcome(detailed, input: source), nil)], diagnostics: CreateReferenceDiagnostics(file: source))
     }
 
     /// Top-level, regular (non-directory, non-symlink), non-hidden files. Kept

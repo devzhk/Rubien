@@ -555,16 +555,26 @@ func referenceDTO(for ref: Reference) throws -> ReferenceDTO {
 /// the matching references, honoring `limit` (0 = all). Shared by `views
 /// --query <id>` and `list --view <id>` — identical output shape (a reference
 /// array), so both front doors route through the same engine CLI-side.
-func querySavedView(_ view: DatabaseView, limit: Int) throws -> [Reference] {
+func querySavedView(_ view: DatabaseView, limit: Int, offset: Int = 0) throws -> [Reference] {
     let db = AppDatabase.shared
     let scope: ReferenceScope
     switch view.parsedScope {
     case .all: scope = .all
     case .tag(let id): scope = .tag(id)
     }
-    // Fast path: no filters/sorts/groupBy → push limit to SQL, skip the engines.
+    // Fast path: no filters/sorts/groupBy → push (limit+offset) to SQL, then drop
+    // the leading `offset` — a bare `limit` fetch followed by `dropFirst(offset)`
+    // would return the first page and then empty it (e.g. --limit 20 --offset 20).
     if view.parsedFilters.isEmpty && view.parsedSorts.isEmpty && view.parsedGroupBy == nil {
-        return try db.fetchReferences(scope: scope, filter: ReferenceFilter(), limit: limit)
+        let fetchLimit: Int
+        if limit > 0 {
+            let (sum, overflow) = limit.addingReportingOverflow(offset)
+            fetchLimit = overflow ? 0 : sum   // 0 == fetch all (overflow is absurd input)
+        } else {
+            fetchLimit = 0
+        }
+        let rows = try db.fetchReferences(scope: scope, filter: ReferenceFilter(), limit: fetchLimit)
+        return offset > 0 ? Array(rows.dropFirst(offset)) : rows
     }
     let refs = try db.fetchReferences(scope: scope, filter: ReferenceFilter(), limit: 0)
     let context = PipelineContext(
@@ -575,7 +585,8 @@ func querySavedView(_ view: DatabaseView, limit: Int) throws -> [Reference] {
     )
     let filtered = FilterEngine.apply(refs, filters: view.parsedFilters, context: context)
     let sorted = SortEngine.apply(filtered, sorts: view.parsedSorts, context: context)
-    return limit > 0 ? Array(sorted.prefix(limit)) : sorted
+    let paged = offset > 0 ? Array(sorted.dropFirst(offset)) : sorted
+    return limit > 0 ? Array(paged.prefix(limit)) : paged
 }
 
 // MARK: - Subcommands
@@ -689,8 +700,9 @@ struct List: ParsableCommand {
                 printJSONError("View \(viewId) not found")
                 throw ExitCode.failure
             }
-            var refs = try querySavedView(savedView, limit: limit)
-            if offset > 0 { refs = Array(refs.dropFirst(offset)) }
+            // Pagination is offset-aware inside the query (fetch limit+offset, drop
+            // offset) so `--limit N --offset N` returns the next page, not nothing.
+            let refs = try querySavedView(savedView, limit: limit, offset: offset)
             printJSON(try mapReferenceDTOs(refs))
             return
         }
@@ -1042,13 +1054,17 @@ struct Update: ParsableCommand {
             properties: decoded
         )
         let updated: Reference
+        let didChange: Bool
         do {
-            updated = try AppDatabase.shared.applyReferenceEdit(id: id, edit: edit)
+            (updated, didChange) = try AppDatabase.shared.applyReferenceEditReportingChange(id: id, edit: edit)
         } catch let error as ReferenceEditError {
             writeReferenceEditError(error)
             throw ExitCode.failure
         }
-        notifyLibraryChanged()
+        // A no-op edit (empty `--properties {}` payload, or every value already
+        // equal) writes nothing — skip the notification so it triggers no
+        // dirty-queue / sync churn (spec §4.5). Output is unchanged.
+        if didChange { notifyLibraryChanged() }
         printJSON(try referenceDTO(for: updated))
     }
 }
@@ -1735,10 +1751,12 @@ struct Properties: ParsableCommand {
                 throw ExitCode.failure
             }
             do {
-                let updated = try AppDatabase.shared.updatePropertyDefinition(
+                let (updated, didChange) = try AppDatabase.shared.updatePropertyDefinitionReportingChange(
                     id: propId, name: newName, visible: setVisible
                 )
-                notifyLibraryChanged()
+                // No-op update (name/visible already equal) writes nothing — skip
+                // the notification (spec §4.5). Output is unchanged.
+                if didChange { notifyLibraryChanged() }
                 printJSON(try makePropertyDefinitionDTO(from: updated))
             } catch let error as PropertyMutationError {
                 printJSONError(describePropertyMutationError(error))
@@ -1817,10 +1835,12 @@ struct Properties: ParsableCommand {
                 throw ExitCode.failure
             }
             do {
-                let updated = try AppDatabase.shared.updatePropertyOption(
+                let (updated, didChange) = try AppDatabase.shared.updatePropertyOptionReportingChange(
                     propertyId: propId, option: opt, newName: toValue, color: color
                 )
-                notifyLibraryChanged()
+                // No-op update (name/color already equal) writes nothing — skip
+                // the notification (spec §4.5). Output is unchanged.
+                if didChange { notifyLibraryChanged() }
                 printJSON(try makePropertyDefinitionDTO(from: updated))
             } catch let error as PropertyMutationError {
                 printJSONError(describePropertyMutationError(error))
