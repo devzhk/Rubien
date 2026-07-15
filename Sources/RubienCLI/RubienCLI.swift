@@ -555,7 +555,10 @@ func referenceDTO(for ref: Reference) throws -> ReferenceDTO {
 /// the matching references, honoring `limit` (0 = all). Shared by `views
 /// --query <id>` and `list --view <id>` — identical output shape (a reference
 /// array), so both front doors route through the same engine CLI-side.
-func querySavedView(_ view: DatabaseView, limit: Int, offset: Int = 0) throws -> [Reference] {
+func querySavedView(_ view: DatabaseView, limit: Int, offset rawOffset: Int = 0) throws -> [Reference] {
+    // Clamp a negative offset to 0 so the fast path's `limit + offset` can't go
+    // nonpositive (which would fetch-all) — both paths then treat it as no offset.
+    let offset = max(0, rawOffset)
     let db = AppDatabase.shared
     let scope: ReferenceScope
     switch view.parsedScope {

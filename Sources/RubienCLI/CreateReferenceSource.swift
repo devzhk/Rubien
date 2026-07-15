@@ -331,10 +331,19 @@ enum CreateReferenceSource {
         if let forced = format?.lowercased() {
             switch forced {
             case "bib", "bibtex":
-                guard hasBib else { printJSONError("No .bib files found in folder"); throw ExitCode.failure }
+                // Missing the requested type is a source-level failure → one
+                // synthetic item in the unified envelope (§5.3), matching the
+                // unforced (false,false) branch below — not a raw `{"error"}`.
+                guard hasBib else {
+                    try emit([(failed(source, "No .bib files found in folder"), nil)], diagnostics: nil)
+                    return
+                }
                 try runZoteroFolder(source: source, folderURL: folderURL, property: property, value: value)
             case "md", "markdown":
-                guard hasMD else { printJSONError("No .md files found in folder"); throw ExitCode.failure }
+                guard hasMD else {
+                    try emit([(failed(source, "No .md files found in folder"), nil)], diagnostics: nil)
+                    return
+                }
                 try runMarkdownFolder(source: source, folderURL: folderURL, files: regularFiles, property: property, value: value)
             default:
                 printJSONError("Unsupported folder format: \(forced). Use bib or md.")
@@ -447,6 +456,13 @@ enum CreateReferenceSource {
     /// then emit it (spec §5.4). Partial/full success → stdout, exit 0; all
     /// failed → the full envelope on stderr, exit nonzero (§5.3).
     private static func emit(_ pairs: [OutcomePair], diagnostics: CreateReferenceDiagnostics?) throws {
+        let summary = ImportSummary(dispositions: pairs.map { $0.outcome.disposition })
+        // Notify up front — BEFORE the fallible DTO assembly below — so a
+        // committed mutation always triggers a library refresh even if building
+        // the response DTO then throws (a post-commit readback failure must not
+        // swallow the notification). Guarded by `succeeded > 0`, so an all-failed
+        // envelope stays silent.
+        if summary.succeeded > 0 { notifyLibraryChanged() }
         let items: [Item] = try pairs.map { pair in
             let dto = try pair.outcome.reference.map { try referenceDTO(for: $0) }
             return Item(
@@ -458,10 +474,8 @@ enum CreateReferenceSource {
                 error: pair.outcome.error
             )
         }
-        let summary = ImportSummary(dispositions: pairs.map { $0.outcome.disposition })
         let diag = (diagnostics?.isEmpty == false) ? diagnostics : nil
         let envelope = Envelope(items: items, summary: summary, diagnostics: diag)
-        if summary.succeeded > 0 { notifyLibraryChanged() }
         if summary.isFailure {
             printJSONErrorEnvelope(envelope)
             throw ExitCode.failure

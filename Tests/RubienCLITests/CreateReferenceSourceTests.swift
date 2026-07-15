@@ -294,4 +294,24 @@ final class CreateReferenceSourceTests: XCTestCase {
         XCTAssertNotNil(obj["reference"])
         XCTAssertTrue(obj.keys.contains("pdfDownload"), "legacy envelope always carries pdfDownload")
     }
+
+    /// Re-review regression: a forced-format folder that lacks the requested
+    /// type is a source-level failure → the unified `items`/`summary` envelope on
+    /// stderr, NOT a raw `{"error"}` (matches the unforced empty-folder branch).
+    func testForcedFormatEmptyFolderEmitsFailedItemEnvelope() throws {
+        try skipIfBinaryMissing()
+        let empty = workDir.appendingPathComponent("empty-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
+        let result = try runCLI(["add", "--source", empty.path, "--format", "bib"])
+        XCTAssertNotEqual(result.exitCode, 0)
+        XCTAssertTrue(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      "stdout must be empty on the all-failed path; got: \(result.stdout)")
+        let obj = try json(result.stderr)
+        let items = try XCTUnwrap(obj["items"] as? [[String: Any]])
+        XCTAssertEqual(items.count, 1)
+        XCTAssertEqual(items[0]["status"] as? String, "failed")
+        XCTAssertNotNil(items[0]["error"])
+        let summary = try XCTUnwrap(obj["summary"] as? [String: Any])
+        XCTAssertEqual(summary["failed"] as? Int, 1)
+    }
 }
