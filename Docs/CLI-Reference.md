@@ -311,112 +311,18 @@ rubien-cli cite 42 43 --style ieee --format bibliography
 
 ---
 
-## import
+## import (removed)
 
-Import references from a BibTeX (`.bib`), RIS (`.ris`), Markdown (`.md` / `.markdown`), or PDF (`.pdf`) file; from a direct HTTP(S) PDF/Markdown file URL; or from a Zotero "Export Collection… with files" folder or a folder of Markdown files. Use `"-"` to read from stdin (pass `--format`).
+The `import` subcommand was removed in the v0.4.0 cutover — folded into **`add --source`**, which routes any locator (identifier, URL, file, folder, BibTeX, or title) automatically. See [`add`](#add).
 
-```bash
-rubien-cli import references.bib
-cat paper.ris | rubien-cli import - --format ris
+| Old | New |
+|---|---|
+| `import refs.bib` | `add --source refs.bib` |
+| `import ./zotero-export` | `add --source ./zotero-export` |
+| `import - --format md` | `add --source - --format md` |
+| `import ./paper.pdf` | `add --source ./paper.pdf` |
 
-# Markdown note or Obsidian Web Clipper file
-rubien-cli import "Solving OPSD.md"
-cat note.md | rubien-cli import - --format md
-
-# Local PDF or a direct PDF/Markdown URL
-rubien-cli import ./papers/attention-is-all-you-need.pdf
-rubien-cli import https://arxiv.org/pdf/1706.03762.pdf
-rubien-cli import https://example.com/notes/reading-list.markdown
-
-# Zotero folder (a directory containing one .bib plus files/NNN/*.pdf)
-rubien-cli import ~/Downloads/RL
-rubien-cli import ~/Downloads/RL --property Project --value "RL Research"
-
-# Markdown folder (a directory of .md notes / clippings)
-rubien-cli import ~/Obsidian/Clippings
-rubien-cli import ~/Obsidian/Clippings --property Tags --value reading-list
-```
-
-| Argument / Option | Type | Description |
-|---|---|---|
-| `file` | String (required) | Local file/folder path, direct HTTP(S) URL with a `.pdf`, `.md`, or `.markdown` path extension, or `"-"` for stdin |
-| `--format` | String | Format hint: `bib`, `ris`, or `md`. Required for stdin; also forces folder routing (see below). It cannot override a direct URL's extension. |
-| `--property` | String | Folder import only: property name to stamp (default `Tags`) |
-| `--value` | String | Folder import only: value to stamp (default: folder basename) |
-
-Text-file size limit (single-file, and per file inside a folder): 50 MB; text input must be UTF-8. When reading from stdin, `--format` is required.
-
-### PDF files and direct URLs
-
-Local PDF paths may be relative to the current working directory. A direct URL must use `http` or `https` and have a `.pdf`, `.md`, or `.markdown` path extension; Rubien validates the response before importing it. Public GitHub `/blob/` file links are converted to GitHub's raw download before normal validation; private or authenticated links may still fail because Rubien does not add GitHub credentials. PDF responses require a 2xx status and PDF magic bytes; `application/pdf` is accepted, as is `application/octet-stream` for a `.pdf` URL. Markdown responses require a compatible text content type, valid UTF-8, and a 50 MB maximum.
-
-PDFs enter the same metadata verification pipeline as the app. A completed import reports the normal count/file fields plus `status: "imported"`; an unresolved result is retained in the pending-metadata queue and reports `status: "queued"` with `intakeId`:
-
-```json
-{"file":"./paper.pdf","imported":"1","status":"imported"}
-{"file":"https://example.com/paper.pdf","imported":"1","status":"queued","intakeId":42}
-```
-
-Acquisition and validation errors exit non-zero and write the standard JSON error envelope to stderr, for example `{"error":"Unsupported import file type: .html"}`. URL downloads are temporary and are removed after the import completes or fails.
-
-### Markdown files
-
-A `.md` / `.markdown` file — an Obsidian Web Clipper export or any plain note — imports as one reference. A leading YAML frontmatter block is parsed for metadata (only when it is plausible YAML; a stray `---` thematic break is never mistaken for frontmatter), and everything after it becomes the reference's Markdown **body**, readable and annotatable in the web reader. A file with no frontmatter and no body still imports as a metadata-only reference.
-
-Frontmatter keys map to reference fields as follows (keys lowercase, as the Obsidian clipper emits them):
-
-| Frontmatter key | Reference field | Notes |
-|---|---|---|
-| `title` | `title` | |
-| `source` | `url` + `siteName` | Only when it parses as a valid `http`/`https` URL; anything else is ignored |
-| `author` | `authors` | Scalar or list; `[[wiki-link]]` wrappers are stripped, then free-text name parsing (`author: ["Smith, John", "[[Jane Doe]]"]` → two authors) |
-| `published` | `year` / `issuedMonth` / `issuedDay` | `YYYY-MM-DD`, `YYYY-MM`, or `YYYY`; calendar-validated (`2025-02-31` rejected), datetimes truncate at `T` |
-| `created` | `accessedDate` | Stored as the literal `YYYY-MM-DD` |
-| `description` | `abstract` | |
-| `tags` | — | Ignored |
-| anything else | — | Ignored |
-
-The **title** falls back through: frontmatter `title` → a leading `# ` H1 line (which is then removed from the body so it isn't rendered twice) → the filename (basename without extension) → `Untitled` (for stdin). A file with a valid `source` URL imports as reference type `Web Page`; a URL-less note imports as `Markdown`.
-
-**Re-import merge (fill-only).** Markdown imports use a conservative fill-only merge rather than the BibTeX/RIS merge:
-
-- A **clipper file** (has a `source` URL) matches the existing reference for that URL — dedup keys are DOI → PMID → PMCID → ISBN → exact URL → ISSN+title+year, so a re-import merges into the reference created by the in-app web clipper too. Existing curated fields (`title`, `authors`, `abstract`, dates, `siteName`) are filled only when currently empty and are **never overwritten**; the **longer** body wins (a shortened re-clip won't replace a longer stored one — this protects annotation anchors).
-- A **URL-less note** has no match key, so re-importing it **creates a duplicate** (title-based matching of arbitrary notes is unsafe — two different `Meeting notes.md` must not merge).
-
-### Folder import
-
-When `file` is a directory, Rubien routes by the files it contains (top level only — folder imports are **not** recursive):
-
-- `.bib` present and no `.md` → **Zotero folder import** (see below);
-- `.md` present and no `.bib` → **Markdown folder import**;
-- **both** present → error `Ambiguous folder: contains both .bib and .md. Pass --format bib or --format md to choose.`;
-- **neither** present → error `No importable files found (expected .bib or .md)`.
-
-`--format bib` or `--format md` forces the branch (and errors `No .bib files found in folder` / `No .md files found in folder` if the folder lacks that kind).
-
-**Markdown folder.** Every top-level `.md` file (sorted by name) parses exactly as a single Markdown file (above) and imports in one batch with the same fill-only merge. Each reference is stamped with one property value — `--property` (default `Tags`) set to `--value` (default: the folder's basename) — using the same property-stamping machinery as the Zotero path below (the built-in `Tags` value routes through the Tag table; a `number`/`date`/`checkbox` property is rejected). Unreadable, non-UTF-8, or oversized files are skipped and reported in `failed`.
-
-**Zotero folder.** Expects an "Export Collection… with files" layout:
-
-```
-RL/
-  RL.bib
-  files/835/Paper A.pdf
-  files/845/Paper B.pdf
-```
-
-- The parser reads the `file = {PDF:files/…/name.pdf:application/pdf}` field on each BibTeX entry, copies the referenced PDF into the library's PDF storage directory, and registers it in `pdfCache` so the reference appears as having a PDF. Non-PDF attachments are ignored.
-- Each imported reference is stamped with one value on the chosen property. `Tags` (the default) routes through the Tag table; other `multiSelect`, `singleSelect`, `string`, and `url` properties are written to `propertyValue`. Passing `--property` with a `number`/`date`/`checkbox` type errors out.
-- Re-importing the same folder is safe: existing references are merged (by DOI/PMID/PMCID/ISBN/arXiv/record key), tags aren't duplicated, and previously-copied PDFs aren't re-copied.
-- Linked-file Zotero exports (absolute PDF paths) are reported in `missingPDFs`; re-export the collection with "Files copied into export" to attach them.
-
-**Output (single-file / stdin):** JSON `{"imported": N, "file": "path"}`.
-
-**Output (Markdown folder):** JSON `{"imported": N, "failed": "bad.md", "property": "Tags", "value": "Clippings", "file": "path"}` — `failed` is a comma-joined list of skipped basenames, empty string when none.
-
-**Output (Zotero folder):** JSON `{"imported": N, "attached": M, "duplicatesSkipped": K, "missingPDFs": "a, b, c", "property": "Tags", "value": "RL", "file": "path"}`.
-
----
+`add --source` returns the unified `{items, summary, diagnostics}` envelope (spec §5.4) rather than `import`'s per-file shape.
 
 ## export
 

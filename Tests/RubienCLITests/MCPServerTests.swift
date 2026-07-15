@@ -486,7 +486,7 @@ final class MCPServerTests: XCTestCase {
         """
         try bib.write(to: folder.appendingPathComponent("RL.bib"), atomically: true, encoding: .utf8)
 
-        let importResult = try runCLI(["import", folder.path])
+        let importResult = try runCLI(["add", "--source", folder.path])
         XCTAssertEqual(importResult.exitCode, 0, "zotero import failed: \(importResult.stderr)")
 
         // Fresh library → the imported reference is the only one.

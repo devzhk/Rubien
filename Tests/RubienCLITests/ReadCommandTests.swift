@@ -338,7 +338,7 @@ final class ReadCommandTests: XCTestCase {
         }
         """
         try bib.write(to: folder.appendingPathComponent("RL.bib"), atomically: true, encoding: .utf8)
-        let importResult = try runCLI(["import", folder.path])
+        let importResult = try runCLI(["add", "--source", folder.path])
         XCTAssertEqual(importResult.exitCode, 0, "zotero import failed: \(importResult.stderr)")
         let list = try runCLI(["list", "--limit", "1"])
         let arr = try JSONSerialization.jsonObject(with: Data(list.stdout.utf8)) as? [[String: Any]]

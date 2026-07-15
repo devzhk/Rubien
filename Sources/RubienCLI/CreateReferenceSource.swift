@@ -509,8 +509,8 @@ enum CreateReferenceSource {
     }
 
     /// Top-level, regular (non-directory, non-symlink), non-hidden files. Kept
-    /// separate from `Import.topLevelRegularFiles` so the legacy `import`
-    /// subcommand stays untouched (additive rule).
+    /// the folder routing for `add --source` (formerly the legacy `import`
+    /// subcommand, now removed in the phase-D cutover).
     private static func topLevelRegularFiles(in folderURL: URL) throws -> [URL] {
         let entries = try FileManager.default.contentsOfDirectory(
             at: folderURL,
