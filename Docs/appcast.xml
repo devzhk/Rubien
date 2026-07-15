@@ -375,5 +375,28 @@ Also in 0.3.0:
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.3.5</title>
+            <description sparkle:format="plain-text"><![CDATA[Rubien 0.3.5 (Beta)
+
+New
+• Unified "Add reference" — a single sheet now routes DOIs, arXiv/paper URLs, BibTeX, PDF files, and manual entry through one intake flow, with clearer per-item results.
+• Web reader: LaTeX/math rendering fixes and general polish.
+• Assistant can perform native library writes (add / update / edit properties) behind explicit per-action approvals.
+
+Breaking — CLI & MCP
+• rubien-cli: the `import` subcommand is removed — use `add --source`. `add --identifier` is removed (pass identifiers to the unified `--bibtex`/`--title` intake). `views --query` is removed — use `list --view`. Legacy per-flag property mutations are replaced by `properties --update` / `update --properties` cell edits. All write commands now emit a unified JSON envelope.
+• MCP server 0.3.0: the tool catalog is rewritten to a 27-tool {op}_{target} grid and now requires rubien-cli build 26 or newer (this release).]]></description>
+            <pubDate>Wed, 15 Jul 2026 18:22:16 +0000</pubDate>
+            <sparkle:version>26</sparkle:version>
+            <sparkle:shortVersionString>0.3.5</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.3.5/Rubien-0.3.5.dmg"
+                sparkle:edSignature="k2ZyBGrgrmQeMxMNCRvdUdVESalOq0GLq1QCCP9bnP6YfAQ2QOwwvuzo4y5chuZ5mg0f2uxzPjqFKrj6pmhrBw=="
+                length="12862965"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
