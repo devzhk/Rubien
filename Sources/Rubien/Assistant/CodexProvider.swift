@@ -21,8 +21,8 @@ import RubienCore
 // `effort` rides `turn/start` (both verified to override the user's defaults), the
 // rubien content channel is injected via `-c mcp_servers.rubien.*` KEY overrides
 // (verified to replace a user-configured `rubien` entry), and codex's built-in app
-// connectors are dropped via `--disable apps` — gated on `loadUserTools`, the lever
-// the future "use my other MCP servers" opt-in flips.
+// connectors are dropped via `--disable apps` unless the conversation explicitly
+// opts into the user's normal connected apps and tools.
 
 final class CodexProvider: AgentProvider {
     let kind: AgentProviderKind = .codex
@@ -220,14 +220,24 @@ private actor CodexAppServerConnection {
 
     // MARK: Long-lived server state
 
+    /// Every option fixed when `codex app-server` starts. Turns can reuse a server
+    /// only when this snapshot matches; History may explicitly reuse any live one.
+    private struct SpawnConfiguration: Equatable {
+        let webAccess: Bool
+        let loadUserTools: Bool
+
+        /// A fresh History-only server uses the normal web default and isolated Apps
+        /// posture. If a turn follows with different settings it will respawn once.
+        static let historyDefault = SpawnConfiguration(
+            webAccess: true, loadUserTools: false)
+    }
+
     /// One spawned `codex app-server` + its JSON-RPC bookkeeping. Reference type,
     /// only touched inside this actor's isolation.
     private final class Server {
         let process: SpawnedAgentProcess
         let generation: Int
-        /// Spawn-time `-c` snapshot — a turn requesting a different web toggle forces
-        /// a respawn (the flag is fixed for the process's lifetime).
-        let webAccess: Bool
+        let spawnConfiguration: SpawnConfiguration
         let stderr = StderrRingBuffer()
         var nextRequestID = 1
         var pending: [Int: CheckedContinuation<Result<[String: Any], RequestFailure>, Never>] = [:]
@@ -243,10 +253,13 @@ private actor CodexAppServerConnection {
         var handshakeFailure: RequestFailure?
         var handshakeWaiters: [CheckedContinuation<Result<Void, RequestFailure>, Never>] = []
 
-        init(process: SpawnedAgentProcess, generation: Int, webAccess: Bool) {
+        init(
+            process: SpawnedAgentProcess, generation: Int,
+            spawnConfiguration: SpawnConfiguration
+        ) {
             self.process = process
             self.generation = generation
-            self.webAccess = webAccess
+            self.spawnConfiguration = spawnConfiguration
         }
     }
 
@@ -315,7 +328,11 @@ private actor CodexAppServerConnection {
         // 1. Server (lazy spawn + handshake; reused across turns).
         let srv: Server
         do {
-            srv = try await ensureServer(webAccess: request.webAccess, workspaceURL: request.workspaceURL)
+            srv = try await ensureServer(
+                configuration: SpawnConfiguration(
+                    webAccess: request.webAccess,
+                    loadUserTools: request.loadUserTools),
+                workspaceURL: request.workspaceURL)
         } catch let error as AgentProviderError {
             turn = nil
             continuation.finish(throwing: error)   // hard start failure — mirrors Claude
@@ -529,21 +546,23 @@ private actor CodexAppServerConnection {
 
     // MARK: Server lifecycle
 
-    /// The live server, spawning + handshaking one if needed. A changed web toggle
-    /// forces a respawn (the `-c` snapshot is fixed per process) — UNLESS `reuseAnyWeb`
-    /// (History queries, which don't use web) is set, which reuses whatever server is
-    /// live so a read never respawns just for a web mismatch. EVERY caller — the
-    /// spawner and a fast-path reuser — awaits the handshake before returning, so a
-    /// thread/turn/query request can never hit an un-initialized server (review #1).
+    /// The live server, spawning + handshaking one if needed. A changed spawn
+    /// configuration forces a respawn because these flags are fixed for the process's
+    /// lifetime — UNLESS `reuseAnySpawnConfiguration` is set for a History query,
+    /// which can use whatever server is already live. EVERY caller — the spawner and
+    /// a fast-path reuser — awaits the handshake before returning, so a request can
+    /// never hit an un-initialized server (review #1).
     private func ensureServer(
-        webAccess: Bool, workspaceURL: URL, reuseAnyWeb: Bool = false
+        configuration: SpawnConfiguration,
+        workspaceURL: URL,
+        reuseAnySpawnConfiguration: Bool = false
     ) async throws -> Server {
         if let srv = server {
-            if reuseAnyWeb || srv.webAccess == webAccess {
+            if reuseAnySpawnConfiguration || srv.spawnConfiguration == configuration {
                 try await joinHandshake(srv)   // fast path still waits for initialize
                 return srv
             }
-            logger.info("web toggle changed — respawning codex app-server")
+            logger.info("spawn configuration changed — respawning codex app-server")
             killServer(srv)
         }
 
@@ -553,7 +572,8 @@ private actor CodexAppServerConnection {
         let arguments = CodexInvocation.arguments(
             rubienCLIPath: contentChannel?.cliURL.path,
             libraryRoot: contentChannel?.libraryRoot.path,
-            webAccess: webAccess)
+            webAccess: configuration.webAccess,
+            loadUserTools: configuration.loadUserTools)
         let environment = CodexInvocation.environment(
             binaryDirectory: (executable as NSString).deletingLastPathComponent)
 
@@ -563,7 +583,9 @@ private actor CodexAppServerConnection {
             arguments: arguments,
             environment: environment,
             workingDirectory: workspaceURL.path)
-        let srv = Server(process: process, generation: serverGeneration, webAccess: webAccess)
+        let srv = Server(
+            process: process, generation: serverGeneration,
+            spawnConfiguration: configuration)
         server = srv
         shuttingDown = false
         startReaders(srv)
@@ -949,7 +971,10 @@ private actor CodexAppServerConnection {
             return cached
         }
         do {
-            let srv = try await ensureServer(webAccess: true, workspaceURL: workspaceURL, reuseAnyWeb: true)
+            let srv = try await ensureServer(
+                configuration: .historyDefault,
+                workspaceURL: workspaceURL,
+                reuseAnySpawnConfiguration: true)
             let result = try await sendRequest(srv, method: "thread/read") {
                 CodexAppServerProtocol.threadRead(requestID: $0, threadId: candidate.id)
             }
@@ -1009,17 +1034,19 @@ private actor CodexAppServerConnection {
         historyCacheOrder.append(key)
     }
 
-    /// One-shot read: ensure a live server (reuse ANY running one — a read doesn't use
-    /// web; the `webAccess: true` seed only matters for a fresh spawn, and matches the
-    /// turn default so a following turn reuses this server), send the request, and
-    /// decode. Any spawn/handshake/request failure degrades to `[]`, never throwing
-    /// into the UI. `build`/`decode` are called synchronously, so neither escapes.
+    /// One-shot read: ensure a live server (reuse ANY running one because History does
+    /// not depend on turn configuration; `historyDefault` only matters for a fresh
+    /// spawn), send the request, and decode. Any failure degrades to `[]`, never
+    /// throwing into the UI. `build`/`decode` are synchronous, so neither escapes.
     private func query<T>(
         workspaceURL: URL, method: String,
         build: (Int) -> String, decode: ([String: Any]) -> [T]
     ) async -> [T] {
         do {
-            let srv = try await ensureServer(webAccess: true, workspaceURL: workspaceURL, reuseAnyWeb: true)
+            let srv = try await ensureServer(
+                configuration: .historyDefault,
+                workspaceURL: workspaceURL,
+                reuseAnySpawnConfiguration: true)
             return decode(try await sendRequest(srv, method: method, build: build))
         } catch {
             logger.error("codex \(method) query failed: \(String(describing: error))")

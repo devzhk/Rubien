@@ -71,6 +71,26 @@ final class MCPContentChannelTests: XCTestCase {
         }
     }
 
+    func testUserToolsOptInKeepsRubienConfigButDropsClaudeIsolationFlags() throws {
+        let request = AgentTurnRequest(
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"),
+            prompt: "hi", loadUserTools: true)
+        let config = try XCTUnwrap(makeChannel().configArgument())
+
+        let args = ClaudeCLIInvocation.arguments(for: request, mcpConfig: config)
+
+        let configIndex = try XCTUnwrap(args.firstIndex(of: "--mcp-config"))
+        XCTAssertEqual(args[configIndex + 1], config,
+                       "Rubien remains available alongside the user's tools")
+        XCTAssertFalse(args.contains("--strict-mcp-config"),
+                       "ambient user MCP servers must be allowed in the opted-in posture")
+        XCTAssertFalse(args.contains("--setting-sources"),
+                       "Claude's normal user/project/local settings and plugins must load")
+        let approvalIndex = try XCTUnwrap(args.firstIndex(of: "--permission-prompt-tool"))
+        XCTAssertEqual(args[approvalIndex + 1], "stdio",
+                       "Rubien's approval transport remains active")
+    }
+
     // MARK: bundled-cli resolution
 
     func testResolveBundledCLIPrefersBundleHelper() throws {

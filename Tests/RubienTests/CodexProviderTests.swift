@@ -153,6 +153,45 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertFalse(argv.contains("-c tools.web_search=false"), "web on by default")
     }
 
+    func testUserToolsOptInEnablesCodexAppsAndKeepsRubienInjection() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["assistantText": "ok"], into: workspace)
+        let channel = MCPContentChannel(
+            cliURL: URL(fileURLWithPath: "/Applications/Rubien.app/Contents/Helpers/rubien-cli"),
+            libraryRoot: URL(fileURLWithPath: "/tmp/lib"))
+        let provider = CodexProvider(executableOverride: fakeServerPath, contentChannel: channel)
+        defer { provider.shutdown() }
+
+        _ = try await collectAllEvents(provider.send(turn: turn(
+            workspace: workspace, loadUserTools: true)))
+
+        let argv = try readSpawnedArgv(in: workspace)
+        XCTAssertFalse(argv.containsPair("--disable", "apps"),
+                       "connected apps must load after the explicit opt-in")
+        XCTAssertTrue(argv.containsPair(
+            "-c", "mcp_servers.rubien.command=/Applications/Rubien.app/Contents/Helpers/rubien-cli"))
+    }
+
+    func testChangingUserToolsPostureRespawnsCodexServer() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["assistantText": "isolated"], into: workspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        _ = try await collectAllEvents(provider.send(turn: turn(workspace: workspace)))
+        let isolatedPID = pid_t(try XCTUnwrap(try readObserved(in: workspace)["pid"] as? Int))
+        XCTAssertTrue(try readSpawnedArgv(in: workspace).containsPair("--disable", "apps"))
+
+        try writeConfig(["assistantText": "full tools"], into: workspace)
+        _ = try await collectAllEvents(provider.send(turn: turn(
+            workspace: workspace, loadUserTools: true)))
+        let optedInPID = pid_t(try XCTUnwrap(try readObserved(in: workspace)["pid"] as? Int))
+
+        XCTAssertNotEqual(isolatedPID, optedInPID,
+                          "the Apps feature flag is fixed at spawn, so the server must restart")
+        XCTAssertFalse(try readSpawnedArgv(in: workspace).containsPair("--disable", "apps"))
+    }
+
     func testEnvironmentPathResolvesNodeForNpmInstalledCodex() {
         // codex is a Node CLI; when it's npm-global but node came from the installer /
         // Homebrew, node lives in a DIFFERENT dir than codex — the PATH must still
@@ -1252,11 +1291,12 @@ final class CodexProviderTests: XCTestCase {
 
     private func turn(
         workspace: URL, prompt: String = "hello", resume: String? = nil,
-        webAccess: Bool = true, attachments: [ChatAttachment] = []
+        webAccess: Bool = true, attachments: [ChatAttachment] = [],
+        loadUserTools: Bool = false
     ) -> AgentTurnRequest {
         AgentTurnRequest(
             workspaceURL: workspace, resumeSessionID: resume, prompt: prompt,
-            attachments: attachments, webAccess: webAccess)
+            attachments: attachments, webAccess: webAccess, loadUserTools: loadUserTools)
     }
 
     private func readSpawnedArgv(in workspace: URL) throws -> [String] {

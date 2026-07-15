@@ -665,13 +665,18 @@ struct ChatSidebarView: View {
 
     // MARK: Approval mode switch (Ask ⟷ Auto)
 
-    /// Whether the agent's write/tool-use actions prompt (Ask — a native approval
-    /// card, the D6 soft boundary) or run automatically (Auto). Reads/search are
-    /// silent either way.
+    /// Whether approval requests become native cards or run automatically. In the
+    /// isolated posture this is Ask vs Auto; with the full user environment, the
+    /// agent's own permissions apply first and Rubien can card only requests the
+    /// provider actually emits. Reads/search are silent either way.
     private var approvalPicker: some View {
         Menu {
             Picker("Approvals", selection: $session.autoApprove) {
-                Label("Ask for approval", systemImage: "hand.raised").tag(false)
+                if session.loadUserTools {
+                    Label("Use agent permissions", systemImage: "hand.raised").tag(false)
+                } else {
+                    Label("Ask for approval", systemImage: "hand.raised").tag(false)
+                }
                 Label("Auto-accept actions", systemImage: "bolt").tag(true)
             }
             .pickerStyle(.inline)
@@ -690,12 +695,14 @@ struct ChatSidebarView: View {
         )
         .onHover { approvalMenuHovered = $0 }
         .animation(.easeOut(duration: 0.12), value: approvalMenuHovered)
-        .help("Approvals — Ask shows a card before writes/shell; Auto runs them automatically")
+        .help(session.loadUserTools
+              ? "Approvals — existing agent permissions apply; Rubien shows a card when the agent asks"
+              : "Approvals — Ask shows a card before writes/shell; Auto runs them automatically")
     }
 
     private var approvalPickerText: Text {
         let icon = session.autoApprove ? "bolt.fill" : "hand.raised"
-        let word = session.autoApprove ? "Auto" : "Ask"
+        let word = session.autoApprove ? "Auto" : (session.loadUserTools ? "Agent" : "Ask")
         let tint: Color = session.autoApprove ? .orange : Color.primary.opacity(0.80)
         return ((Text(Image(systemName: icon)) + Text(" \(word)"))
             .foregroundStyle(tint)

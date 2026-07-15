@@ -23,6 +23,7 @@ final class RubienPreferencesTests: XCTestCase {
             RubienPreferences.assistantEffortKey,
             RubienPreferences.assistantWebAccessKey,
             RubienPreferences.assistantAutoApproveKey,
+            RubienPreferences.assistantLoadUserToolsKey,
             RubienPreferences.assistantWorkspacePathKey,
             RubienPreferences.assistantBinaryPathKey,
             RubienPreferences.assistantProviderKey,
@@ -183,6 +184,8 @@ final class RubienPreferencesTests: XCTestCase {
 
     func testAssistantBackendDefaultsWhenUnset() {
         XCTAssertEqual(RubienPreferences.assistantProvider, .claude, "unset ⇒ Claude")
+        XCTAssertFalse(RubienPreferences.assistantLoadUserTools,
+                       "connected apps and user MCP tools must require an explicit opt-in")
         XCTAssertNil(RubienPreferences.assistantCodexModel,
                      "unset ⇒ Codex default (no model sent; codex resolves its own config)")
         XCTAssertEqual(RubienPreferences.assistantCodexEffort, "medium",
@@ -204,6 +207,10 @@ final class RubienPreferencesTests: XCTestCase {
         XCTAssertEqual(RubienPreferences.assistantCodexSandbox, .workspaceWrite)
         RubienPreferences.assistantCodexBinaryPath = "/opt/bin/codex"
         XCTAssertEqual(RubienPreferences.assistantCodexBinaryPath, "/opt/bin/codex")
+        RubienPreferences.assistantLoadUserTools = true
+        XCTAssertTrue(RubienPreferences.assistantLoadUserTools)
+        RubienPreferences.assistantLoadUserTools = false
+        XCTAssertFalse(RubienPreferences.assistantLoadUserTools)
     }
 
     /// The Codex prefs are RAW (spec §4.4): no static normalization — the old clamp

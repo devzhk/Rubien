@@ -31,7 +31,7 @@ extension ChatTranscriptController: ChatTranscriptSink {}
 // MARK: - Conversation defaults
 
 /// A snapshot of the user's Assistant defaults (Settings ▸ Assistant) applied to a
-/// FRESH conversation: model / effort / web / approval. A new reader window reads
+/// FRESH conversation: model / effort / web / approval / tool posture. A new reader window reads
 /// these at construction; `newConversation()` re-reads them (via an injected
 /// provider) so a changed default is adopted in an open window without reopening it.
 struct AssistantConversationDefaults: Equatable {
@@ -39,6 +39,9 @@ struct AssistantConversationDefaults: Equatable {
     var effort: String?
     var webAccess: Bool
     var autoApprove: Bool
+    /// Load the provider's normal connected apps/configured tools for this fresh
+    /// conversation. Default off so existing call sites retain the isolated posture.
+    var loadUserTools: Bool = false
     /// The Codex OS-sandbox mode to seed (ignored by Claude conversations). Defaulted
     /// so Claude-only call sites and tests stay unchanged.
     var codexSandbox: CodexSandbox = .readOnly
@@ -76,6 +79,9 @@ final class ChatSessionController: ObservableObject {
     /// The approval the card currently shows (the queue head).
     var pendingApproval: PendingApproval? { pendingApprovals.first }
     @Published var webAccess: Bool
+    /// Tool-environment posture snapshotted for this conversation. Settings changes
+    /// are adopted by `newConversation()` rather than mutating a live agent session.
+    @Published private(set) var loadUserTools: Bool
     @Published private(set) var availability: AgentAvailability?
     @Published private(set) var statusText: String?
     /// The requested resume session is busy in another window (§4.1) — the composer
@@ -118,9 +124,10 @@ final class ChatSessionController: ObservableObject {
     /// low/medium/high/xhigh/max). `nil` omits the flag.
     @Published var effortOverride: String?
     /// When true, tool-use approval requests are accepted automatically (no card).
-    /// Default false — the soft-boundary "Ask" mode where writes prompt via the
-    /// control protocol (D6). A per-conversation choice; reads/search stay silent
-    /// either way.
+    /// Default false — provider-emitted requests become cards. In the isolated
+    /// posture writes prompt via the control protocol (D6); with user tools loaded,
+    /// the agent's ambient permission rules may approve a tool before Rubien receives
+    /// a request. A per-conversation choice; reads/search stay silent either way.
     @Published var autoApprove = false
     /// The Codex OS-sandbox mode carried on every turn (D6). Ignored by Claude
     /// (which uses the control protocol, not an OS sandbox). A per-conversation
@@ -242,6 +249,7 @@ final class ChatSessionController: ObservableObject {
         workspaceURL: URL,
         gate: AssistantTurnGate = .shared,
         webAccess: Bool = true,
+        loadUserTools: Bool = false,
         modelOverride: String? = "opus",
         effortOverride: String? = "high",
         autoApprove: Bool = false,
@@ -261,6 +269,7 @@ final class ChatSessionController: ObservableObject {
         self.mentionSearch = mentionSearch
         self.gate = gate
         self.webAccess = webAccess
+        self.loadUserTools = loadUserTools
         self.modelOverride = modelOverride
         self.effortOverride = effortOverride
         self.autoApprove = autoApprove
@@ -487,6 +496,7 @@ final class ChatSessionController: ObservableObject {
             attachments: attachments,
             seed: seedSent ? nil : AssistantContext.seed(for: reference),
             webAccess: webAccess,
+            loadUserTools: loadUserTools,
             codexSandbox: codexSandbox,
             modelOverride: modelOverride,
             effortOverride: effortOverride)
@@ -729,11 +739,7 @@ final class ChatSessionController: ObservableObject {
         seedSent = false
         hasMessages = false
         if let defaults = defaultsProvider?(providerKind) {
-            modelOverride = defaults.model
-            effortOverride = defaults.effort
-            webAccess = defaults.webAccess
-            autoApprove = defaults.autoApprove
-            codexSandbox = defaults.codexSandbox
+            applyConversationDefaults(defaults)
         }
         // A never-picked Codex user (nil model default) would otherwise drop to a
         // blank picker here; seed a concrete model when the catalog is already loaded.
@@ -775,15 +781,22 @@ final class ChatSessionController: ObservableObject {
         seedSent = false
         hasMessages = false
         if let defaults = defaultsProvider?(providerKind) {
-            modelOverride = defaults.model
-            effortOverride = defaults.effort
-            webAccess = defaults.webAccess
-            autoApprove = defaults.autoApprove
-            codexSandbox = defaults.codexSandbox
+            applyConversationDefaults(defaults)
         }
         seedCodexModelIfUnset()
         refreshCodexCatalog()
         Task { await recheckAvailability() }
+    }
+
+    /// Keep every fresh-conversation entry point in lockstep when Settings gains a
+    /// new default. Provider switches and the New conversation button both call it.
+    private func applyConversationDefaults(_ defaults: AssistantConversationDefaults) {
+        modelOverride = defaults.model
+        effortOverride = defaults.effort
+        webAccess = defaults.webAccess
+        autoApprove = defaults.autoApprove
+        loadUserTools = defaults.loadUserTools
+        codexSandbox = defaults.codexSandbox
     }
 
     /// The runtime's own recent sessions for this conversation's working folder, for
@@ -809,8 +822,10 @@ final class ChatSessionController: ObservableObject {
 
     /// Resume a past conversation from History: point the next turn at its session id
     /// (`--resume`) and start with a clean pane (Rubien has no stored transcript — D5).
-    /// The resumed session already carries its seed/context, so `seedSent` is set to
-    /// avoid re-seeding. A notice with the preview gives the user their bearings.
+    /// The provider stores no Rubien conversation-default snapshot, so the pane's
+    /// current web/approval/tool posture intentionally carries into the resume. The
+    /// resumed session already carries its seed/context, so `seedSent` is set to avoid
+    /// re-seeding. A notice with the preview gives the user their bearings.
     func resume(_ summary: AgentSessionSummary) {
         resetConversationState(attachments: .discard)
         liveSessionID = summary.id

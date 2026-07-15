@@ -508,10 +508,13 @@ enum ClaudeCLIInvocation {
             "--verbose",
             "--include-partial-messages",
             "--permission-prompt-tool", "stdio",
-            // Config isolation (mandatory, D6): drops ambient settings/MCP/plugins
-            // while subscription auth survives. The value is an empty string.
-            "--setting-sources", "",
         ]
+        if !request.loadUserTools {
+            // Default isolation (D6): drops ambient settings/MCP/plugins while
+            // subscription auth survives. Opted-in conversations omit this flag so
+            // Claude loads its normal user/project/local configuration.
+            args += ["--setting-sources", ""]
+        }
         if let resume = request.resumeSessionID, !resume.isEmpty {
             args += ["--resume", resume]
         }
@@ -535,12 +538,17 @@ enum ClaudeCLIInvocation {
             args += ["--disallowedTools", "WebFetch WebSearch"]
         }
         // The native MCP library channel: an inline `--mcp-config` naming the
-        // bundled full `rubien-cli mcp` server, plus
-        // `--strict-mcp-config` so ONLY Rubien's server loads (no ambient MCP —
-        // pairs with `--setting-sources ''`). Absent when the channel couldn't be
-        // resolved; the turn still runs, just without document tools.
+        // bundled full `rubien-cli mcp` server. In the default posture,
+        // `--strict-mcp-config` means ONLY Rubien loads (and
+        // pairs with `--setting-sources ''`). The explicit user-tools opt-in keeps
+        // Rubien's config but omits strict mode, merging the user's normal MCP and
+        // plugin environment. Absent when the channel couldn't be resolved; the turn
+        // still runs, just without Rubien document tools.
         if let mcpConfig, !mcpConfig.isEmpty {
-            args += ["--mcp-config", mcpConfig, "--strict-mcp-config"]
+            args += ["--mcp-config", mcpConfig]
+            if !request.loadUserTools {
+                args.append("--strict-mcp-config")
+            }
         }
         return args
     }

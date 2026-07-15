@@ -49,6 +49,7 @@ struct RubienSettingsView: View {
     @State private var defaultCodexSandbox: CodexSandbox = .readOnly
     @State private var defaultWebAccess = true
     @State private var defaultAutoApprove = false
+    @State private var defaultLoadUserTools = false
     /// Latched at the start of an upload session so the indicator can render
     /// as "Uploading 4 of 31 PDFs to iCloud". Cleared back to nil when the
     /// queue reaches 0 so the next upload session re-latches with its own
@@ -259,6 +260,7 @@ struct RubienSettingsView: View {
             defaultCodexSandbox = RubienPreferences.assistantCodexSandbox
             defaultWebAccess = RubienPreferences.assistantWebAccess
             defaultAutoApprove = RubienPreferences.assistantAutoApprove
+            defaultLoadUserTools = RubienPreferences.assistantLoadUserTools
             seedModelEffortMirrors(for: defaultProvider)
             if claudeAvailability == nil { recheckClaude() }
             if codexAvailability == nil { recheckCodex() }
@@ -291,6 +293,9 @@ struct RubienSettingsView: View {
         .onChange(of: defaultCodexSandbox) { _, value in RubienPreferences.assistantCodexSandbox = value }
         .onChange(of: defaultWebAccess) { _, value in RubienPreferences.assistantWebAccess = value }
         .onChange(of: defaultAutoApprove) { _, value in RubienPreferences.assistantAutoApprove = value }
+        .onChange(of: defaultLoadUserTools) { _, value in
+            RubienPreferences.assistantLoadUserTools = value
+        }
     }
 
     /// Re-seed the model/effort mirrors from the selected default backend's prefs.
@@ -463,8 +468,16 @@ struct RubienSettingsView: View {
                 Text(String(localized: "Web search", bundle: .module))
             }
 
+            Toggle(isOn: $defaultLoadUserTools) {
+                Text(String(localized: "Use connected apps and MCP tools", bundle: .module))
+            }
+
             Picker(selection: $defaultAutoApprove) {
-                Text(String(localized: "Ask before writes", bundle: .module)).tag(false)
+                if defaultLoadUserTools {
+                    Text(String(localized: "Use agent permissions", bundle: .module)).tag(false)
+                } else {
+                    Text(String(localized: "Ask before writes", bundle: .module)).tag(false)
+                }
                 Text(String(localized: "Auto-accept actions", bundle: .module)).tag(true)
             } label: {
                 Text(String(localized: "Approvals", bundle: .module))
@@ -472,7 +485,12 @@ struct RubienSettingsView: View {
         } header: {
             Text(String(localized: "Defaults for new conversations", bundle: .module))
         } footer: {
-            Text(String(localized: "Applies to newly opened documents and new conversations. Existing conversations keep their current settings.", bundle: .module))
+            VStack(alignment: .leading, spacing: 4) {
+                Text(String(localized: "Only applies to new conversations.", bundle: .module))
+                Text(String(localized: "Claude: loads your plugins, settings, and MCP servers.", bundle: .module))
+                Text(String(localized: "Codex: enables connected apps; MCP servers are already loaded.", bundle: .module))
+                Text(String(localized: "Permissions: your agent rules apply, so Rubien may not ask first.", bundle: .module))
+            }
         }
     }
 

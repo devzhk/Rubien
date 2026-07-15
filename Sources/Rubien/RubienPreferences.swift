@@ -178,6 +178,18 @@ enum RubienPreferences {
         set { UserDefaults.standard.set(newValue, forKey: assistantAutoApproveKey) }
     }
 
+    /// Whether new conversations load the selected provider's normal connected
+    /// apps, plugins, settings, and user-configured MCP servers in addition to
+    /// Rubien's own MCP channel. Unset ⇒ false. Codex's own configured MCP servers
+    /// remain an accepted ambient-config residual; this flag additionally enables
+    /// Codex Apps, while Claude switches from isolated to normal user settings.
+    static let assistantLoadUserToolsKey = "Rubien.assistant.loadUserTools"
+
+    static var assistantLoadUserTools: Bool {
+        get { UserDefaults.standard.bool(forKey: assistantLoadUserToolsKey) }
+        set { UserDefaults.standard.set(newValue, forKey: assistantLoadUserToolsKey) }
+    }
+
     /// Default visibility for the assistant panel in newly opened reader windows.
     /// Unset ⇒ visible, so the assistant is discoverable until the user explicitly
     /// hides it. Existing open readers keep their local state; this seeds new ones.

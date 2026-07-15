@@ -50,6 +50,10 @@ struct AgentTurnRequest: Sendable, Equatable {
     let seed: String?
     /// Web toggle. When `false`, Claude gets `--disallowedTools "WebFetch WebSearch"`.
     let webAccess: Bool
+    /// Opt in to the provider's normal connected apps, plugins, settings, and
+    /// user-configured MCP servers. Default off; Rubien's own MCP server remains
+    /// available in either posture.
+    let loadUserTools: Bool
     /// Codex sandbox mode (Phase 3). Ignored by the Claude provider.
     let codexSandbox: CodexSandbox
     /// Optional model override (empty/`nil` = CLI default). Passed as `--model`.
@@ -66,6 +70,7 @@ struct AgentTurnRequest: Sendable, Equatable {
         attachments: [ChatAttachment] = [],
         seed: String? = nil,
         webAccess: Bool = true,
+        loadUserTools: Bool = false,
         codexSandbox: CodexSandbox = .readOnly,
         modelOverride: String? = nil,
         effortOverride: String? = nil
@@ -76,6 +81,7 @@ struct AgentTurnRequest: Sendable, Equatable {
         self.attachments = attachments
         self.seed = seed
         self.webAccess = webAccess
+        self.loadUserTools = loadUserTools
         self.codexSandbox = codexSandbox
         self.modelOverride = modelOverride
         self.effortOverride = effortOverride

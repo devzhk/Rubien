@@ -13,6 +13,7 @@ final class ChatSessionControllerTests: XCTestCase {
         sink: SpyTranscriptSink,
         gate: AssistantTurnGate = AssistantTurnGate(),
         webAccess: Bool = true,
+        loadUserTools: Bool = false,
         initialAvailability: AgentAvailability? = .installed(version: "test", path: "/fake/claude")
     ) -> ChatSessionController {
         ChatSessionController(
@@ -22,6 +23,7 @@ final class ChatSessionControllerTests: XCTestCase {
             workspaceURL: URL(fileURLWithPath: "/tmp/ws"),
             gate: gate,
             webAccess: webAccess,
+            loadUserTools: loadUserTools,
             initialAvailability: initialAvailability)
     }
 
@@ -485,6 +487,16 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertEqual(provider.lastRequest?.webAccess, false)
     }
 
+    func testUserToolsPosturePropagatesToRequest() async {
+        let provider = MockAgentProvider()
+        let controller = makeController(
+            provider: provider, sink: SpyTranscriptSink(), loadUserTools: true)
+
+        await runTurn(controller, provider: provider, send: "q", events: [.turnCompleted(usage: nil)])
+
+        XCTAssertEqual(provider.lastRequest?.loadUserTools, true)
+    }
+
     func testModelAndEffortSelectionPropagateToRequest() async {
         let provider = MockAgentProvider()
         let controller = makeController(provider: provider, sink: SpyTranscriptSink())
@@ -551,7 +563,9 @@ final class ChatSessionControllerTests: XCTestCase {
         // A reader stays open while the user changes Settings ▸ Assistant; "New
         // conversation" should adopt the new defaults (the reader can't be reopened
         // to pick them up because window reuse keeps the same session).
-        var current = AssistantConversationDefaults(model: "opus", effort: "high", webAccess: true, autoApprove: false)
+        var current = AssistantConversationDefaults(
+            model: "opus", effort: "high", webAccess: true, autoApprove: false,
+            loadUserTools: false)
         let controller = ChatSessionController(
             provider: MockAgentProvider(), transcript: SpyTranscriptSink(),
             reference: ChatReference(id: 1, title: "T", authors: ""),
@@ -561,13 +575,16 @@ final class ChatSessionControllerTests: XCTestCase {
             effortOverride: current.effort, autoApprove: current.autoApprove,
             defaultsProvider: { _ in current })
 
-        current = AssistantConversationDefaults(model: "sonnet", effort: "medium", webAccess: false, autoApprove: true)
+        current = AssistantConversationDefaults(
+            model: "sonnet", effort: "medium", webAccess: false, autoApprove: true,
+            loadUserTools: true)
         controller.newConversation()
 
         XCTAssertEqual(controller.modelOverride, "sonnet")
         XCTAssertEqual(controller.effortOverride, "medium")
         XCTAssertFalse(controller.webAccess)
         XCTAssertTrue(controller.autoApprove)
+        XCTAssertTrue(controller.loadUserTools)
     }
 
     // MARK: Provider switch (Phase 3b-3)
@@ -595,7 +612,8 @@ final class ChatSessionControllerTests: XCTestCase {
                 return AssistantConversationDefaults(model: "opus", effort: "high", webAccess: true, autoApprove: false)
             case .codex:
                 return AssistantConversationDefaults(model: "gpt-5.5", effort: "medium", webAccess: false,
-                                                     autoApprove: true, codexSandbox: .workspaceWrite)
+                                                     autoApprove: true, loadUserTools: true,
+                                                     codexSandbox: .workspaceWrite)
             }
         }
         let controller = ChatSessionController(
@@ -616,6 +634,7 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertEqual(controller.effortOverride, "medium")
         XCTAssertFalse(controller.webAccess)
         XCTAssertTrue(controller.autoApprove)
+        XCTAssertTrue(controller.loadUserTools)
         XCTAssertEqual(controller.codexSandbox, .workspaceWrite)
         XCTAssertEqual(claude.cancelCount, 1, "the outgoing runtime is shut down (shutdown → cancel)")
         XCTAssertGreaterThan(controller.generation, genBefore, "a fresh conversation started")
@@ -625,6 +644,7 @@ final class ChatSessionControllerTests: XCTestCase {
         controller.send("hi")
         await codex.waitUntilStreaming()
         XCTAssertEqual(codex.requests.count, 1)
+        XCTAssertEqual(codex.lastRequest?.loadUserTools, true)
         XCTAssertEqual(codex.lastRequest?.codexSandbox, .workspaceWrite)
         XCTAssertTrue(claude.requests.isEmpty, "the old provider gets no turns")
         codex.finishStream()
@@ -674,7 +694,8 @@ final class ChatSessionControllerTests: XCTestCase {
     func testResumePointsNextTurnAtSessionWithoutReseeding() async {
         let provider = MockAgentProvider()
         let sink = SpyTranscriptSink()
-        let controller = makeController(provider: provider, sink: sink)
+        let controller = makeController(
+            provider: provider, sink: sink, loadUserTools: true)
         let summary = AgentSessionSummary(id: "sess-123", preview: "Prior chat", date: Date(timeIntervalSince1970: 0))
 
         controller.resume(summary)
@@ -692,6 +713,8 @@ final class ChatSessionControllerTests: XCTestCase {
         await runTurn(controller, provider: provider, send: "continue", events: [.turnCompleted(usage: nil)])
         XCTAssertEqual(provider.lastRequest?.resumeSessionID, "sess-123")
         XCTAssertNil(provider.lastRequest?.seed, "a resumed conversation must not re-seed")
+        XCTAssertEqual(provider.lastRequest?.loadUserTools, true,
+                       "History uses the pane's current tool posture; providers do not store this Rubien setting")
     }
 
     func testResumeRestoresTheConversationTranscript() async {

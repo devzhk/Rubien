@@ -195,6 +195,25 @@ final class ClaudeCodeProviderTests: XCTestCase {
         XCTAssertTrue(argv.contains("--strict-mcp-config"))
     }
 
+    func testUserToolsOptInReachesSpawnedClaudeInvocation() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["deltas": ["ok"], "assistantText": "ok"], into: workspace)
+        let channel = MCPContentChannel(
+            cliURL: URL(fileURLWithPath: "/Applications/Rubien.app/Contents/Helpers/rubien-cli"),
+            libraryRoot: URL(fileURLWithPath: "/tmp/lib"))
+        let provider = ClaudeCodeProvider(executableOverride: fakeCLIPath, contentChannel: channel)
+        let request = AgentTurnRequest(
+            workspaceURL: workspace, prompt: "hello", loadUserTools: true)
+
+        _ = try await collectAllEvents(provider.send(turn: request))
+
+        let argv = try readSpawnedArgv(in: workspace)
+        XCTAssertTrue(argv.contains("--mcp-config"))
+        XCTAssertFalse(argv.contains("--strict-mcp-config"))
+        XCTAssertFalse(argv.contains("--setting-sources"))
+        XCTAssertTrue(argv.containsPair("--permission-prompt-tool", "stdio"))
+    }
+
     func testNoContentChannelOmitsMCPConfigFromSpawnedArgv() async throws {
         let workspace = try makeWorkspace()
         try writeConfig(["deltas": ["ok"], "assistantText": "ok"], into: workspace)

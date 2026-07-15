@@ -46,22 +46,27 @@ enum ReaderChatSession {
 
         // The live pref snapshot for a backend, re-read on every fresh conversation so
         // a changed default is adopted on "New conversation"/provider switch without
-        // reopening the window. Model/effort/sandbox are backend-specific; web +
-        // approvals are shared across backends.
+        // reopening the window. Model/effort/sandbox are backend-specific; web,
+        // approvals, and the user-tool posture are shared across backends.
         let defaultsProvider: (AgentProviderKind) -> AssistantConversationDefaults = { kind in
+            let webAccess = RubienPreferences.assistantWebAccess
+            let autoApprove = RubienPreferences.assistantAutoApprove
+            let loadUserTools = RubienPreferences.assistantLoadUserTools
             switch kind {
             case .claude:
                 return AssistantConversationDefaults(
                     model: RubienPreferences.assistantModel,
                     effort: RubienPreferences.assistantEffort,
-                    webAccess: RubienPreferences.assistantWebAccess,
-                    autoApprove: RubienPreferences.assistantAutoApprove)
+                    webAccess: webAccess,
+                    autoApprove: autoApprove,
+                    loadUserTools: loadUserTools)
             case .codex:
                 return AssistantConversationDefaults(
                     model: RubienPreferences.assistantCodexModel,
                     effort: RubienPreferences.assistantCodexEffort,
-                    webAccess: RubienPreferences.assistantWebAccess,
-                    autoApprove: RubienPreferences.assistantAutoApprove,
+                    webAccess: webAccess,
+                    autoApprove: autoApprove,
+                    loadUserTools: loadUserTools,
                     codexSandbox: RubienPreferences.assistantCodexSandbox)
             }
         }
@@ -77,6 +82,7 @@ enum ReaderChatSession {
                 authors: reference.authors.displayString),
             workspaceURL: AssistantContext.ensureWorkspace(RubienPreferences.assistantWorkspaceURL),
             webAccess: initial.webAccess,
+            loadUserTools: initial.loadUserTools,
             modelOverride: initial.model,
             effortOverride: initial.effort,
             autoApprove: initial.autoApprove,
