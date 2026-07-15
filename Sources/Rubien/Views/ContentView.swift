@@ -81,7 +81,7 @@ enum FileImportReviewPresentation {
 /// Holds a prepared handoff while its initiating sheet animates away. SwiftUI
 /// cannot reliably present a second sheet from the same host until the first
 /// sheet's `onDismiss` has run.
-struct ImportReviewSheetHandoff<Payload> {
+struct DeferredSheetHandoff<Payload> {
     private var payload: Payload?
 
     var hasPendingPayload: Bool { payload != nil }
@@ -864,12 +864,14 @@ struct ContentView: View {
     @State private var pdfOperations = ReferenceDetailPDFOperationRegistry()
     @State private var showAddReference = false
     @State private var addReferenceInitialType: ReferenceType = .journalArticle
+    @State private var showAddReferenceSourceSheet = false
+    @State private var addReferenceSourceHandoff = DeferredSheetHandoff<AddReferenceSourceRoute>()
+    @State private var routedMetadataInput = ""
+    @State private var routedWebsiteInput = ""
     @State private var showWebImport = false
     @State private var showAddByIdentifier = false
     @State private var showBatchImport = false
     @State private var preparedMetadataImportsAfterBatchDismiss: [PreparedMetadataImport]?
-    @State private var showImportSourceSheet = false
-    @State private var fileImportHandoff = ImportReviewSheetHandoff<[MaterializedImportSource]>()
     @State private var importReviewSession: ImportReviewSession?
     /// Monotonic token owned by `importFilesWithMetadata`. Each batch captures
     /// its value; the batch's own auto-clear timer only wipes `importProgress`
@@ -877,7 +879,7 @@ struct ContentView: View {
     /// a newer (fast markdown-only) batch's summary toast.
     @State private var importGeneration = 0
     @State private var showZoteroLibraryImport = false
-    @State private var zoteroLibraryImportHandoff = ImportReviewSheetHandoff<ZoteroLibraryImportRequest>()
+    @State private var zoteroLibraryImportHandoff = DeferredSheetHandoff<ZoteroLibraryImportRequest>()
     @State private var showPendingMetadataQueue = false
     @State private var scopedPendingMetadataIntakes: [MetadataIntake]?
     @State private var pendingQueueNotice: PendingQueueNotice?
@@ -923,8 +925,8 @@ struct ContentView: View {
         )
     }
 
-    /// The leading toolbar's flat buttons, in order: Properties, Search, the
-    /// add/import actions, then the More-import menu. Rendered with
+    /// The leading toolbar's flat controls, in order: Properties, Search, the
+    /// Add Reference button, then the More-import menu. Rendered with
     /// `ToolbarHoverButtonStyle` (no glass capsule, just a light hover) and a
     /// shared `.titleAndIcon` label style. The enclosing `ToolbarItemGroup` opts
     /// out of the macOS 26 shared glass platter so these stay flat.
@@ -977,29 +979,11 @@ struct ContentView: View {
             .keyboardShortcut("f", modifiers: .command)
 
             Button {
-                showAddByIdentifier = true
+                showAddReferenceSourceSheet = true
             } label: {
-                Label(String(localized: "content.toolbar.addByIdentifier", bundle: .module), systemImage: "text.magnifyingglass")
+                Label(String(localized: "content.toolbar.addReference", bundle: .module), systemImage: "square.and.arrow.down")
             }
-            .help(String(localized: "Paste a paper URL, DOI, or paper title and fetch metadata automatically", bundle: .module))
-
-            Button {
-                showWebImport = true
-            } label: {
-                Label(String(localized: "Add website", bundle: .module), systemImage: "globe")
-            }
-            .help(String(localized: "Paste a URL and let Rubien clip the title, abstract, and article body", bundle: .module))
-
-            Button {
-                showImportSourceSheet = true
-            } label: {
-                Label(String(localized: "content.toolbar.importPDFAuto", bundle: .module), systemImage: "doc.badge.plus")
-            }
-            .help(String(localized: "Import PDFs or markdown notes; PDF metadata is auto-filled when possible", bundle: .module))
-            // Gate reentrancy while a batch runs, mirroring the sibling import
-            // Menu group below (a second batch would corrupt shared
-            // isImporting/importProgress/selectedId state).
-            .disabled(viewModel.isImporting)
+            .help(String(localized: "content.toolbar.addReference.help", bundle: .module))
 
             if !viewModel.pendingMetadataIntakes.isEmpty {
                 Button {
@@ -1257,8 +1241,26 @@ struct ContentView: View {
                 initialReferenceType: addReferenceInitialType
             )
         }
+        .sheet(isPresented: $showAddReferenceSourceSheet, onDismiss: {
+            guard let route = addReferenceSourceHandoff.takeAfterDismiss() else { return }
+            switch route {
+            case .metadata(let input):
+                routedMetadataInput = input
+                showAddByIdentifier = true
+            case .website(let url):
+                routedWebsiteInput = url
+                showWebImport = true
+            case .files(let sources):
+                importFilesWithMetadata(sources)
+            }
+        }) {
+            AddReferenceSourceSheet(allowsFileImports: !viewModel.isImporting) { route in
+                addReferenceSourceHandoff.stage(route)
+            }
+        }
         .sheet(isPresented: $showWebImport) {
             WebImportView(
+                initialURL: routedWebsiteInput,
                 onSave: { ref in
                     var r = ref
                     let result = viewModel.saveManualReference(&r, reviewedBy: "web-import")
@@ -1288,14 +1290,6 @@ struct ContentView: View {
                     )
                 }
             )
-        }
-        .sheet(isPresented: $showImportSourceSheet, onDismiss: {
-            guard let sources = fileImportHandoff.takeAfterDismiss() else { return }
-            importFilesWithMetadata(sources)
-        }) {
-            ImportSourceSheet { sources in
-                fileImportHandoff.stage(sources)
-            }
         }
         .sheet(item: $importReviewSession) { session in
             ImportReviewSheet(session: session)
@@ -1349,6 +1343,7 @@ struct ContentView: View {
         .sheet(isPresented: $showAddByIdentifier) {
             AddByIdentifierView(
                 resolver: metadataResolver,
+                initialInput: routedMetadataInput,
                 onSave: { ref, downloadPDF, pdfURLOverride in
                     var r = ref
                     let result = viewModel.saveReference(&r)

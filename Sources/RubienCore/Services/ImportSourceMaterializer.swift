@@ -7,6 +7,17 @@ import FoundationNetworking
 public enum ImportSourceKind: String, Sendable, Equatable {
     case pdf
     case markdown
+
+    public init?(pathExtension: String) {
+        switch pathExtension.lowercased() {
+        case "pdf":
+            self = .pdf
+        case "md", "markdown":
+            self = .markdown
+        default:
+            return nil
+        }
+    }
 }
 
 /// A validated import file. Remote files are copied into a temporary
@@ -267,14 +278,10 @@ public enum ImportSourceMaterializer {
 
     private static func kind(for url: URL) throws -> ImportSourceKind {
         let ext = url.pathExtension.lowercased()
-        switch ext {
-        case "pdf":
-            return .pdf
-        case "md", "markdown":
-            return .markdown
-        default:
+        guard let kind = ImportSourceKind(pathExtension: ext) else {
             throw MaterializationError.unsupportedExtension(ext)
         }
+        return kind
     }
 
     private static func normalizeGitHubBlobURL(_ url: URL) -> URL {

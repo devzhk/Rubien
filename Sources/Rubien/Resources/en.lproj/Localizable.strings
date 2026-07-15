@@ -44,15 +44,31 @@
 "batchImport.result.queued" = "Queued for review";
 "batchImport.result.failed" = "Failed";
 
-// MARK: - Import source sheet
+// MARK: - Unified Add Reference sheet
 
-"importSourceSheet.title" = "Import PDF/Markdown";
-"importSourceSheet.field.placeholder" = "Paste a file path or a URL to a PDF/Markdown file";
-"importSourceSheet.button.choose" = "Choose…";
-"importSourceSheet.button.import" = "Import";
-"importSourceSheet.selection.multiple" = "%d files selected";
-"importSourceSheet.status.preparing" = "Preparing import…";
-"importSourceSheet.error.acquisition" = "Unable to prepare import: %@";
+"addReferenceSourceSheet.title" = "Add Reference";
+"addReferenceSourceSheet.field.placeholder" = "Paste a DOI, title, URL, or file path";
+"addReferenceSourceSheet.hint" = "Rubien automatically recognizes papers, websites, PDFs, and Markdown notes.";
+"addReferenceSourceSheet.detected.metadata" = "Detected route: Reference lookup";
+"addReferenceSourceSheet.detected.website" = "Detected route: Website";
+"addReferenceSourceSheet.detected.file" = "Detected route: PDF or Markdown file";
+"addReferenceSourceSheet.button.choose" = "Choose PDF/Markdown…";
+"addReferenceSourceSheet.button.continue" = "Continue";
+"addReferenceSourceSheet.selection.multiple" = "%d files selected";
+"addReferenceSourceSheet.status.preparing" = "Preparing file…";
+"addReferenceSourceSheet.error.acquisition" = "Unable to add reference: %@";
+"addReferenceSourceSheet.error.empty" = "Enter a DOI, title, URL, or PDF/Markdown file path.";
+"addReferenceSourceSheet.error.directory" = "Choose a PDF or Markdown file, not a folder.";
+"addReferenceSourceSheet.error.invalidURL" = "Enter a complete HTTP or HTTPS URL.";
+"addReferenceSourceSheet.error.urlScheme" = "Only HTTP and HTTPS URLs are supported.";
+"addReferenceSourceSheet.error.fileType" = "Add Reference supports PDF and Markdown files, not .%@ files.";
+"addReferenceSourceSheet.error.fileTypeUnknown" = "Add Reference supports PDF and Markdown files only.";
+"addReferenceSourceSheet.error.relativePath" = "Local file paths must be absolute or start with ~/; use Choose PDF/Markdown for other files.";
+"addReferenceSourceSheet.error.importInProgress" = "Finish the current file import before adding another PDF or Markdown file.";
+
+// MARK: - Import confirmation
+
+"importConfirmation.referenceType" = "Reference type: %@";
 
 // MARK: - Metadata candidate picker
 
@@ -88,16 +104,13 @@
 
 // MARK: - Content view / main shell
 
-"content.toolbar.add" = "Add";
-"content.toolbar.addByIdentifier" = "Add paper";
+"content.toolbar.addReference" = "Add Reference";
+"content.toolbar.addReference.help" = "Add a paper, website, PDF, or Markdown note";
 "content.toolbar.batchImport" = "Batch Import";
 "content.toolbar.addManually" = "Add manually";
-"content.toolbar.importPDF" = "Import PDF";
-"content.toolbar.importPDFAuto" = "Import PDF/Markdown";
 "content.toolbar.importBibTeX" = "Import BibTeX…";
 "content.toolbar.importRIS" = "Import RIS…";
 "content.toolbar.importFromZotero" = "Import from Zotero…";
-"content.toolbar.webImport" = "Import from Web…";
 "content.toolbar.pendingQueue" = "Pending metadata";
 "content.toolbar.search" = "Search";
 "content.import.progress.importingPDF" = "Importing PDF…";

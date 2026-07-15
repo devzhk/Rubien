@@ -68,6 +68,10 @@ struct ImportReviewSheet: View {
                         .lineLimit(2)
                 }
 
+                if let reference = item.reference {
+                    ReferenceTypeConfirmationLabel(referenceType: reference.referenceType)
+                }
+
                 if let message = item.message?.rubien_nilIfBlank {
                     Text(message)
                         .font(.caption2)

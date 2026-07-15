@@ -25,6 +25,7 @@ final class ViewIconCatalogTests: XCTestCase {
         XCTAssertTrue(ViewIconCatalog.all.contains("cube"))
         XCTAssertTrue(ViewIconCatalog.all.contains("music.note"))
         XCTAssertTrue(ViewIconCatalog.all.contains("gamecontroller"))
+        XCTAssertTrue(ViewIconCatalog.all.contains("movieclapper"))
 
         let newSymbols = ["paperplane", "sailboat", "alarm", "leaf", "carrot", "fish"]
         XCTAssertTrue(newSymbols.allSatisfy(ViewIconCatalog.all.contains))
@@ -46,6 +47,7 @@ final class ViewIconCatalogTests: XCTestCase {
         XCTAssertFalse(ViewIconCatalog.all.contains("square.grid.2x2"))
         XCTAssertFalse(ViewIconCatalog.all.contains("pawprint"))
         XCTAssertFalse(ViewIconCatalog.all.contains("teddybear"))
+        XCTAssertFalse(ViewIconCatalog.all.contains("books.vertical"))
     }
 
     func testNewViewUsesCatalogDefaultIcon() {

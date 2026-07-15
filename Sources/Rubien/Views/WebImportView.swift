@@ -9,7 +9,7 @@ struct WebImportView: View {
     @Environment(\.dismiss) private var dismiss
 
     @StateObject private var clipperExtractor = ClipperWebMetadataExtractor()
-    @State private var url = ""
+    @State private var url: String
     @State private var clipperError: String?
     @State private var isSaving = false
     @FocusState private var urlFieldFocused: Bool
@@ -20,6 +20,11 @@ struct WebImportView: View {
               let parsed = URL(string: trimmed),
               let scheme = parsed.scheme?.lowercased() else { return false }
         return scheme == "http" || scheme == "https"
+    }
+
+    init(initialURL: String = "", onSave: @escaping (Reference) -> Void) {
+        self.onSave = onSave
+        _url = State(initialValue: initialURL)
     }
 
     var body: some View {
@@ -70,6 +75,7 @@ struct WebImportView: View {
                             .textContentType(.URL)
                             .focused($urlFieldFocused)
                             .disabled(isSaving)
+                        ReferenceTypeConfirmationLabel(referenceType: .webpage)
                         Text("Rubien extracts the title, abstract, and article body from the page.", bundle: .module)
                             .font(.caption)
                             .foregroundStyle(.secondary)

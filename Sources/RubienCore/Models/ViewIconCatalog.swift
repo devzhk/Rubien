@@ -30,8 +30,8 @@ public enum ViewIconCatalog {
         Option(systemName: "music.note", label: "Music"),
         Option(systemName: "gamecontroller", label: "Game Controller"),
         Option(systemName: "tray.full", label: "Tray"),
-        // Reading / documents
-        Option(systemName: "books.vertical", label: "Books"),
+        // Media / documents
+        Option(systemName: "movieclapper", label: "Movies"),
         Option(systemName: "book", label: "Book"),
         Option(systemName: "doc.text", label: "Document"),
         Option(systemName: "newspaper", label: "Newspaper"),

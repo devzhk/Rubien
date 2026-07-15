@@ -6,20 +6,39 @@ struct AddByIdentifierView: View {
     let resolver: MetadataResolver
     let onSave: (Reference, _ downloadPDF: Bool, _ pdfURLOverride: String?) -> Void
     let onQueueResult: (MetadataResolutionResult, String) -> Void
+    private let shouldAutomaticallyFetch: Bool
 
     @Environment(\.dismiss) private var dismiss
-    @State private var inputText = ""
+    @State private var inputText: String
     @State private var isFetching = false
     @State private var fetchedReference: Reference?
     @State private var pendingResolution: MetadataResolutionResult?
+    @State private var resolvedInput: String?
     @State private var errorMessage: String?
     @State private var statusMessage: String?
     @State private var downloadPDFOnImport: Bool = true
+    @State private var didAutomaticallyFetch = false
+    @State private var manualFetchTask: Task<Void, Never>?
     // Captured from ManualEntryOutcome.preferredPDFURL on resolve. Threaded
     // into onSave so a venue-page URL (OpenReview / CVF / PMLR) without a DOI
     // can still download a PDF; also gates the Toggle so the checkbox is
     // enabled whenever we have any usable PDF source (DOI or scraped URL).
     @State private var preferredPDFURL: String?
+
+    init(
+        resolver: MetadataResolver,
+        initialInput: String = "",
+        onSave: @escaping (Reference, _ downloadPDF: Bool, _ pdfURLOverride: String?) -> Void,
+        onQueueResult: @escaping (MetadataResolutionResult, String) -> Void
+    ) {
+        self.resolver = resolver
+        self.onSave = onSave
+        self.onQueueResult = onQueueResult
+        self.shouldAutomaticallyFetch = !initialInput
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty
+        _inputText = State(initialValue: initialInput)
+    }
 
     var body: some View {
         VStack(spacing: 16) {
@@ -32,9 +51,13 @@ struct AddByIdentifierView: View {
                     text: $inputText
                 )
                     .textFieldStyle(.roundedBorder)
-                    .onSubmit { fetchMetadata() }
+                    .disabled(isFetching)
+                    .onSubmit(startFetchMetadata)
+                    .onChange(of: inputText) { _, _ in
+                        discardResolutionForEditedInput()
+                    }
 
-                Button(action: fetchMetadata) {
+                Button(action: startFetchMetadata) {
                     if isFetching {
                         ProgressView()
                             .controlSize(.small)
@@ -103,7 +126,10 @@ struct AddByIdentifierView: View {
                 Spacer()
                 if let pendingResolution {
                     Button(String(localized: "Queue for review", bundle: .module)) {
-                        onQueueResult(pendingResolution, inputText.trimmingCharacters(in: .whitespacesAndNewlines))
+                        onQueueResult(
+                            pendingResolution,
+                            resolvedInput ?? inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        )
                         dismiss()
                     }
                     .disabled(isFetching)
@@ -129,6 +155,15 @@ struct AddByIdentifierView: View {
         .frame(width: 440)
         .frame(minHeight: 280)
         .liquidGlassPresentation()
+        .task {
+            guard shouldAutomaticallyFetch, !didAutomaticallyFetch else { return }
+            didAutomaticallyFetch = true
+            await fetchMetadata()
+        }
+        .onDisappear {
+            manualFetchTask?.cancel()
+            manualFetchTask = nil
+        }
     }
 
     @ViewBuilder
@@ -141,6 +176,8 @@ struct AddByIdentifierView: View {
                 .foregroundStyle(.primary)
                 .lineLimit(3)
                 .truncationMode(.tail)
+
+            ReferenceTypeConfirmationLabel(referenceType: reference.referenceType)
 
             if !reference.authors.displayString.isEmpty {
                 Text(reference.authors.displayString)
@@ -198,28 +235,50 @@ struct AddByIdentifierView: View {
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
     }
 
-    private func fetchMetadata() {
+    private func startFetchMetadata() {
+        guard !isFetching else { return }
+        manualFetchTask?.cancel()
+        manualFetchTask = Task { @MainActor in
+            await fetchMetadata()
+            manualFetchTask = nil
+        }
+    }
+
+    @MainActor
+    private func fetchMetadata() async {
         let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        guard !text.isEmpty, !isFetching else { return }
 
         isFetching = true
-        errorMessage = nil
-        fetchedReference = nil
-        pendingResolution = nil
-        statusMessage = statusMessage(for: text)
-
-        Task { @MainActor in
-            let outcome = await resolver.resolveManualEntry(text)
-            preferredPDFURL = outcome.preferredPDFURL
-            switch outcome.result {
-            case .verified(let envelope):
-                fetchedReference = envelope.reference
-            case .candidate, .blocked, .seedOnly, .rejected:
-                pendingResolution = outcome.result
-            }
+        defer {
             isFetching = false
             statusMessage = nil
         }
+        errorMessage = nil
+        fetchedReference = nil
+        pendingResolution = nil
+        resolvedInput = nil
+        preferredPDFURL = nil
+        statusMessage = statusMessage(for: text)
+
+        let outcome = await resolver.resolveManualEntry(text)
+        guard !Task.isCancelled else { return }
+        resolvedInput = text
+        preferredPDFURL = outcome.preferredPDFURL
+        switch outcome.result {
+        case .verified(let envelope):
+            fetchedReference = envelope.reference
+        case .candidate, .blocked, .seedOnly, .rejected:
+            pendingResolution = outcome.result
+        }
+    }
+
+    private func discardResolutionForEditedInput() {
+        guard resolvedInput != nil else { return }
+        resolvedInput = nil
+        fetchedReference = nil
+        pendingResolution = nil
+        preferredPDFURL = nil
     }
 
     private func statusMessage(for text: String) -> String {

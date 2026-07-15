@@ -2,10 +2,11 @@
 import Foundation
 import XCTest
 @testable import Rubien
+import RubienCore
 
-final class ImportSourceSheetModelTests: XCTestCase {
+final class AddReferenceSourceSheetModelTests: XCTestCase {
     func testTypingClearsStagedSelection() {
-        var state = ImportSourceSheetState(
+        var state = AddReferenceSourceSheetState(
             stagedURLs: [URL(fileURLWithPath: "/tmp/first.pdf")]
         )
 
@@ -16,7 +17,7 @@ final class ImportSourceSheetModelTests: XCTestCase {
     }
 
     func testChoosingFilesClearsTypedInput() {
-        var state = ImportSourceSheetState(typedInput: "/tmp/note.md")
+        var state = AddReferenceSourceSheetState(typedInput: "/tmp/note.md")
         let selections = [
             URL(fileURLWithPath: "/tmp/first.pdf"),
             URL(fileURLWithPath: "/tmp/second.markdown"),
@@ -28,18 +29,18 @@ final class ImportSourceSheetModelTests: XCTestCase {
         XCTAssertTrue(state.typedInput.isEmpty)
     }
 
-    func testEmptySourceDisablesImport() {
-        var state = ImportSourceSheetState()
+    func testEmptySourceDisablesContinue() {
+        var state = AddReferenceSourceSheetState()
 
-        XCTAssertFalse(state.canImport)
+        XCTAssertFalse(state.hasSource)
 
         state.setTypedInput("   \n")
 
-        XCTAssertFalse(state.canImport)
+        XCTAssertFalse(state.hasSource)
     }
 
     func testStagedSelectionSummaryUsesFilenameForOneAndCountForMany() {
-        var state = ImportSourceSheetState()
+        var state = AddReferenceSourceSheetState()
 
         state.setStagedURLs([URL(fileURLWithPath: "/tmp/one.md")])
         XCTAssertEqual(state.stagedSelectionSummary, .filename("one.md"))
@@ -52,7 +53,7 @@ final class ImportSourceSheetModelTests: XCTestCase {
     }
 
     func testSubmissionRequiresSourceAndIdleState() {
-        var state = ImportSourceSheetState()
+        var state = AddReferenceSourceSheetState()
         XCTAssertFalse(state.canSubmit)
 
         state.setTypedInput("/tmp/paper.pdf")
@@ -65,8 +66,28 @@ final class ImportSourceSheetModelTests: XCTestCase {
         XCTAssertTrue(state.canSubmit)
     }
 
+    func testPreviewInvalidInputDisablesSubmission() {
+        let state = AddReferenceSourceSheetState(typedInput: "paper.pdf")
+
+        XCTAssertFalse(state.canSubmit(previewRoute: .invalid(.relativeFilePath)))
+        XCTAssertTrue(state.canSubmit(previewRoute: .metadata("paper.pdf")))
+    }
+
+    func testSubmittedFilesystemErrorDisablesRetryUntilInputChanges() {
+        var state = AddReferenceSourceSheetState(typedInput: "/tmp/folder.pdf")
+        state.recordSubmittedInvalidReason(.directory)
+
+        XCTAssertEqual(state.submittedInvalidReason, .directory)
+        XCTAssertFalse(state.canSubmit(previewRoute: .file("/tmp/folder.pdf")))
+
+        state.setTypedInput("/tmp/paper.pdf")
+
+        XCTAssertNil(state.submittedInvalidReason)
+        XCTAssertTrue(state.canSubmit(previewRoute: .file("/tmp/paper.pdf")))
+    }
+
     func testBeginningSubmissionLatchesImmediatelyAndRejectsDuplicateReturnAction() {
-        var state = ImportSourceSheetState(
+        var state = AddReferenceSourceSheetState(
             stagedURLs: [URL(fileURLWithPath: "/tmp/paper.pdf")]
         )
 
@@ -84,7 +105,7 @@ final class ImportSourceSheetModelTests: XCTestCase {
             URL(fileURLWithPath: "/tmp/one.pdf"),
             URL(fileURLWithPath: "/tmp/two.md"),
         ]
-        var state = ImportSourceSheetState(stagedURLs: selectedURLs)
+        var state = AddReferenceSourceSheetState(stagedURLs: selectedURLs)
 
         // SwiftUI commits the text field's existing empty value before firing
         // the default button action for Return.

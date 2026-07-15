@@ -86,19 +86,17 @@ public enum ImportRouter {
                 let implied = isPDFLink && (explicitDownloadPdf != false)
                 return .resolver(impliedDownloadPdf: implied)
             }
-            switch pathExtension(of: url) {
-            case "pdf", "md", "markdown":
+            if ImportSourceKind(pathExtension: pathExtension(of: url)) != nil {
                 // Unregistered host with a file extension → download-import
                 // (e.g. `arxiv.org/pdf/…` — arXiv is not in the registry).
                 return .downloadImport
-            default:
-                // Unregistered host, no file extension → last-chance identifier
-                // extraction (a `doi.org/…` or `arxiv.org/abs/…` URL).
-                if MetadataFetcher.extractIdentifier(from: source) != nil {
-                    return .resolver(impliedDownloadPdf: false)
-                }
-                return .unroutable(reason: Self.unroutableURLMessage)
             }
+            // Unregistered host, no file extension → last-chance identifier
+            // extraction (a `doi.org/…` or `arxiv.org/abs/…` URL).
+            if MetadataFetcher.extractIdentifier(from: source) != nil {
+                return .resolver(impliedDownloadPdf: false)
+            }
+            return .unroutable(reason: Self.unroutableURLMessage)
         }
 
         // Step 3: a bare string — identifier patterns only.

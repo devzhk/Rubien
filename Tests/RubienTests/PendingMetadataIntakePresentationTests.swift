@@ -5,7 +5,7 @@ import XCTest
 
 final class PendingMetadataIntakePresentationTests: XCTestCase {
     func testInitiatingSheetHandoffReleasesPayloadOnlyOnceAfterDismiss() {
-        var handoff = ImportReviewSheetHandoff<String>()
+        var handoff = DeferredSheetHandoff<String>()
 
         handoff.stage("prepared review")
 
