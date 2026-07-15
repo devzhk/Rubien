@@ -48,7 +48,6 @@ Linux needs system deps first — see [Linux CLI](../README.md#linux-cli). For d
 | `update` | Update fields on an existing reference |
 | `delete` | Delete references by ID |
 | `cite` | Generate formatted citations |
-| `import` | Import from a BibTeX, RIS, Markdown, or PDF file; a direct PDF/Markdown URL; or a Zotero / Markdown folder |
 | `export` | Export references as JSON, BibTeX, or RIS |
 | `properties` | List or manage property definitions, options, and per-reference values (covers tags via the built-in `Tags` property) |
 | `read text` | Read a reference's body text — its attached PDF or clipped web page — routed by what it has |
@@ -114,7 +113,7 @@ rubien-cli list --view 4 --limit 20     # rows from a saved view's query
 | `--reading-status` | String | — | Filter: `unread`, `reading`, `skimmed`, `read` |
 | `--sort-by` | String | — | Sort field: `year`, `dateAdded`, `title` |
 | `--asc` | Flag | false | Sort ascending (default descending) |
-| `--view` | Int64 | — | List rows matching a **saved view**'s query (by view id, from `views --list`). Routes through the same query engine as `views --query`, identical output shape. **Mutually exclusive** with the inline filter/sort options above (errors if combined); `--limit` and `--offset` still apply. |
+| `--view` | Int64 | — | List rows matching a **saved view**'s query (by view id, from `views --list`). Routes through the same query engine as an inline `list`, identical output shape. **Mutually exclusive** with the inline filter/sort options above (errors if combined); `--limit` and `--offset` still apply. |
 
 **Output:** JSON array of reference objects.
 
@@ -670,9 +669,10 @@ On Linux, `self-update` downloads the latest `rubien-cli-*-linux-x86_64.tar.gz` 
 
 ## views
 
-Manage database views (saved filter/sort/group configurations). `--query`
-runs the full filter → sort → group pipeline client-side against the view's
-scope.
+Manage database views (saved filter/sort/group configurations). To run a
+view's filter → sort → group pipeline and print the matching references, use
+**`list --view <id>`** (the `views --query` mode was removed in the v0.4.0
+cutover).
 
 ```bash
 rubien-cli views                                              # List all
@@ -681,7 +681,7 @@ rubien-cli views --create --name "Recent Reading" \
   --filters '[{"target":{"kind":"builtin","value":"readingStatus"},"op":"isAnyOf","value":{"kind":"selectKeys","value":["reading","read"]}}]' \
   --sorts '[{"target":{"kind":"builtin","value":"dateAdded"},"ascending":false}]' \
   --group-by '{"target":{"kind":"builtin","value":"dateAdded"},"dateBin":"month","collapsed":[],"showEmpty":false}'
-rubien-cli views --query 3 --limit 50                         # Run the view's pipeline
+rubien-cli list --view 3 --limit 50                           # Run the view's pipeline (was `views --query`)
 rubien-cli views --rename 3 --name "Urgent Papers"
 rubien-cli views --delete 3
 ```
@@ -691,8 +691,6 @@ rubien-cli views --delete 3
 | `--create` | Flag | false | Create a new view |
 | `--name` | String | — | View name (with `--create` or `--rename`) |
 | `--delete` | Int64 | — | Delete view by ID (default view cannot be deleted) |
-| `--query` | Int64 | — | Execute the view's pipeline, print matching references |
-| `-l, --limit` | Int | 0 (all) | Max results (with `--query`) |
 | `--rename` | Int64 | — | Rename view by ID |
 | `--filters` | String | `[]` | JSON `[ViewFilter]` (with `--create`) |
 | `--sorts` | String | default sort | JSON `[ViewSort]` (with `--create`) |
@@ -823,7 +821,7 @@ Listing and create/rename emit a `DatabaseViewDTO`:
 }
 ```
 
-`--query` emits a reference array (same shape as `list` / `search`).
+`list --view <id>` emits a reference array (same shape as `list` / `search`).
 
 ---
 

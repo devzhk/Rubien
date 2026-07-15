@@ -1413,16 +1413,16 @@ final class RubienCLITests: XCTestCase {
         XCTAssertNotEqual(result.exitCode, 0, "deleting the default view must be refused")
     }
 
-    func testViewsQueryReturnsReferenceArray() throws {
+    /// Phase-D cutover: `views --query` was removed — replaced by `list --view`.
+    func testViewsQueryRemoved() throws {
         try skipIfBinaryMissing()
         guard let id = try defaultViewId() else {
             XCTFail("default view not found")
             return
         }
-        let result = try runCLI(["views", "--query", String(id), "--limit", "5"])
-        XCTAssertEqual(result.exitCode, 0, "query should succeed; stderr=\(result.stderr)")
-        let refs = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [[String: Any]]
-        XCTAssertNotNil(refs, "query output should be a JSON array of references")
+        let result = try runCLI(["views", "--query", String(id)])
+        XCTAssertNotEqual(result.exitCode, 0,
+                          "the removed `views --query` must error; use `list --view` instead")
     }
 
     // MARK: - properties --update / --update-option (phase C3)
@@ -1543,11 +1543,6 @@ final class RubienCLITests: XCTestCase {
         let titles = Set(rows.compactMap { $0["title"] as? String })
         XCTAssertTrue(titles.contains("ViewRefB"), "year>2020 row missing: \(titles)")
         XCTAssertFalse(titles.contains("ViewRefC"), "year<2020 row must be filtered out: \(titles)")
-
-        // Identical shape to `views --query`.
-        let viaQuery = try runCLI(["views", "--query", String(vid)])
-        let queryRows = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(viaQuery.stdout.utf8)) as? [[String: Any]])
-        XCTAssertEqual(Set(queryRows.compactMap { $0["title"] as? String }), titles, "list --view and views --query must agree")
     }
 
     /// #6 regression: `--limit N --offset N` on a saved view must return the

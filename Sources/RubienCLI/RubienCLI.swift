@@ -551,9 +551,9 @@ func referenceDTO(for ref: Reference) throws -> ReferenceDTO {
 }
 
 /// Execute a saved view's query (scope + filters + sorts + groupBy) and return
-/// the matching references, honoring `limit` (0 = all). Shared by `views
-/// --query <id>` and `list --view <id>` — identical output shape (a reference
-/// array), so both front doors route through the same engine CLI-side.
+/// the matching references, honoring `limit` (0 = all) and `offset`. Backs
+/// `list --view <id>` (a reference array), routing through the same query
+/// engine as an inline `list`.
 func querySavedView(_ view: DatabaseView, limit: Int, offset rawOffset: Int = 0) throws -> [Reference] {
     // Clamp a negative offset to 0 so the fast path's `limit + offset` can't go
     // nonpositive (which would fetch-all) — both paths then treat it as no offset.
@@ -688,8 +688,8 @@ struct List: ParsableCommand {
     var view: Int64?
 
     func run() throws {
-        // Saved-view rows (spec §3): route through the same query engine as
-        // `views --query`, mutually exclusive with inline filters/sorts.
+        // Saved-view rows (spec §3): route through the same query engine as an
+        // inline list, mutually exclusive with inline filters/sorts.
         if let viewId = view {
             let hasInlineFilter = tag != nil || author != nil || yearFrom != nil || yearTo != nil
                 || journal != nil || referenceType != nil || hasPdf || keyword != nil
@@ -1863,12 +1863,6 @@ struct Views: ParsableCommand {
     @Option(name: .long, help: "Delete a view by ID")
     var delete: Int64?
 
-    @Option(name: .long, help: "Execute a view's query and return matching references")
-    var query: Int64?
-
-    @Option(name: .shortAndLong, help: "Max results for --query (0 = all)")
-    var limit: Int = 0
-
     @Option(name: .long, help: "Rename a view by ID")
     var rename: Int64?
 
@@ -1916,12 +1910,6 @@ struct Views: ParsableCommand {
             try db.deleteDatabaseView(id: deleteId)
             notifyLibraryChanged()
             printJSON(["deleted": deleteId])
-        } else if let queryId = query {
-            guard let view = try db.fetchDatabaseView(id: queryId) else {
-                printJSONError("View \(queryId) not found")
-                throw ExitCode.failure
-            }
-            printJSON(try mapReferenceDTOs(try querySavedView(view, limit: limit)))
         } else if let renameId = rename {
             guard var view = try db.fetchDatabaseView(id: renameId) else {
                 printJSONError("View \(renameId) not found")
