@@ -66,3 +66,43 @@ jobs:
         # poppler-linked bundles. macOS runs the parity tests in full.
         # See Docs/Linux-PDF-Backend.md.
         run: swift test --filter 'RubienCoreTests|RubienCLITests'
+
+  mcp-e2e:
+    name: MCP server ↔ CLI e2e (Linux)
+    # The npm↔CLI contract check: build rubien-cli in the same pinned
+    # container the Linux job uses, then run the npm server's full vitest
+    # suite against it — including the stdio e2e that boots the built server,
+    # passes the MIN_CLI_BUILD startup guard, and asserts the live 27-tool
+    # catalog. Catches server/CLI drift (renamed subcommands, envelope shape,
+    # version-guard skew) that neither side's isolated suite can see.
+    runs-on: ubuntu-22.04
+    container: swift:6.3-jammy
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system deps
+        # Same PDF-backend deps as the linux job (the CLI links RubienPDFKit),
+        # plus curl for the Node installer.
+        run: |
+          apt-get update
+          apt-get install -y libsqlite3-dev libpoppler-glib-dev libcairo2-dev libgdk-pixbuf-2.0-dev pkg-config curl
+      - name: Install Node 20
+        # mcp-server requires Node >= 20; jammy's apt node is far older.
+        run: |
+          curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+          apt-get install -y nodejs
+          node --version
+      - name: Build rubien-cli
+        # The stdio e2e resolves the CLI at ../.build/debug/rubien-cli
+        # relative to mcp-server/ and skips itself if it's missing — build it
+        # so the e2e actually runs.
+        run: swift build --product rubien-cli
+      - name: npm ci + build + test
+        working-directory: mcp-server
+        env:
+          # Hermetic library for the CLI the e2e spawns — don't let a
+          # container-default XDG path leak state between steps.
+          RUBIEN_LIBRARY_ROOT: /tmp/rubien-e2e-lib
+        run: |
+          npm ci
+          npm run build
+          npm test
