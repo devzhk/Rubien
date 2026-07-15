@@ -113,7 +113,7 @@ rubien-cli list --view 4 --limit 20     # rows from a saved view's query
 | `--reading-status` | String | — | Filter: `unread`, `reading`, `skimmed`, `read` |
 | `--sort-by` | String | — | Sort field: `year`, `dateAdded`, `title` |
 | `--asc` | Flag | false | Sort ascending (default descending) |
-| `--view` | Int64 | — | List rows matching a **saved view**'s query (by view id, from `views --list`). Routes through the same query engine as an inline `list`, identical output shape. **Mutually exclusive** with the inline filter/sort options above (errors if combined); `--limit` and `--offset` still apply. |
+| `--view` | Int64 | — | List rows matching a **saved view**'s query (by view id, from `views`). Routes through the same query engine as an inline `list`, identical output shape. **Mutually exclusive** with the inline filter/sort options above (errors if combined); `--limit` and `--offset` still apply. |
 
 **Output:** JSON array of reference objects.
 

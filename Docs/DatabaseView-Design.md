@@ -308,11 +308,12 @@ Output from `rubien-cli views` (`DatabaseViewDTO`):
 }
 ```
 
-`rubien-cli views --query <id>` applies the view's filter/sort pipeline
-client-side and prints `[Reference]` JSON. If the view has no
-filters/sorts/groupBy, there's a fast path that pushes the limit down to SQL
-and skips the engines. Grouping-aware output is not yet defined — currently
-the query returns a flat sorted list, ignoring the group config.
+`rubien-cli list --view <id>` (which superseded `views --query` in the
+v0.4.0 cutover) applies the view's filter/sort pipeline client-side and
+prints `[Reference]` JSON. If the view has no filters/sorts/groupBy, there's
+a fast path that pushes the limit down to SQL and skips the engines.
+Grouping-aware output is not yet defined — currently the query returns a
+flat sorted list, ignoring the group config.
 
 `RubienCLITests` locks the JSON contract; any change to the DTO shape needs
 an accompanying test update and a `Docs/CLI-Reference.md` revision.

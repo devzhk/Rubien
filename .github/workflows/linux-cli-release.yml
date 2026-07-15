@@ -49,7 +49,7 @@ jobs:
 
       - name: Smoke test from the TARBALL in a clean container
         # Mirrors D1's spike so the recurring RELEASE GATE is as strong as the
-        # one-time spike: `add --identifier` exercises network + libxml2,
+        # one-time spike: `add --source` exercises network + libxml2,
         # `cite` exercises the citeproc resource bundle. (One arXiv network call
         # runs in the gate; if it ever flakes, that single line can be relaxed.)
         run: |
@@ -62,7 +62,7 @@ jobs:
             export RUBIEN_LIBRARY_ROOT=/tmp/lib
             /opt/r/rubien-cli version
             /opt/r/rubien-cli list
-            /opt/r/rubien-cli add --identifier 10.48550/arXiv.1706.03762
+            /opt/r/rubien-cli add --source 10.48550/arXiv.1706.03762
             /opt/r/rubien-cli styles
             /opt/r/rubien-cli cite 1 --style apa'
 

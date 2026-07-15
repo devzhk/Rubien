@@ -1,6 +1,6 @@
 # Supported Paper URLs
 
-Rubien resolves journal articles by DOI without journal-specific support. Direct publisher URLs require explicit support. This table lists the URL patterns recognized by the app and `rubien-cli add --identifier`.
+Rubien resolves journal articles by DOI without journal-specific support. Direct publisher URLs require explicit support. This table lists the URL patterns recognized by the app and `rubien-cli add --source`.
 
 This is the canonical registry. Other documentation should link here instead of duplicating the list.
 
