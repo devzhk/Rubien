@@ -80,11 +80,12 @@ export const PropertyDefinitionDTO = z.object({
 });
 export type PropertyDefinitionDTO = z.infer<typeof PropertyDefinitionDTO>;
 
-// PDF-download status DTO emitted by `add --identifier --download-pdf` and by
-// `pdf download <id>`. Mirrors PDFDownloadStatusDTO in RubienCLI.swift.
-// `action` is the raw value of PDFDownloadAction (downloaded | already-attached
-// | already-pending | skipped). All fields except `ok` use plain `Optional` in
-// Swift → key omitted when nil → `.optional()` here.
+// PDF-download status DTO emitted by the create-reference resolver route's
+// PDF fetch and by `pdf download <id>`. Mirrors PDFDownloadStatusDTO in
+// RubienCLI.swift. `action` is the raw value of PDFDownloadAction (downloaded
+// | replaced | already-attached | already-pending | skipped). All fields
+// except `ok` use plain `Optional` in Swift → key omitted when nil →
+// `.optional()` here.
 export const PDFDownloadStatusDTO = z.object({
   ok: z.boolean(),
   action: z.string().optional(),
@@ -93,16 +94,40 @@ export const PDFDownloadStatusDTO = z.object({
 });
 export type PDFDownloadStatusDTO = z.infer<typeof PDFDownloadStatusDTO>;
 
-// Envelope returned by `add` (single object) or `add --bibtex` (array of these).
-// `status` mirrors AppDatabase.ReferenceSaveResult.
-// `pdfDownload` is an AlwaysEncodedOptional in Swift, so it's always present
-// in the JSON — explicit `null` when --download-pdf wasn't set.
-export const AddStatusOutput = z.object({
-  reference: ReferenceDTO,
-  status: z.enum(["created", "existing"]),
-  pdfDownload: PDFDownloadStatusDTO.nullable(),
+// Unified create-reference envelope (spec §5.4) — one shape for every route
+// (`add --source` / `--bibtex` / `--title`). Swift-Optional contract as
+// everywhere: absent keys, never null. `diagnostics` appears only when the
+// route produces it; `pdfDownload` only when a fetch was attempted.
+export const CreateReferenceItem = z.object({
+  reference: ReferenceDTO.optional(),
+  status: z.enum(["created", "existing", "queued", "failed"]),
+  intakeId: z.number().int().optional(),
+  input: z.string(),
+  pdfDownload: PDFDownloadStatusDTO.optional(),
+  error: z.string().optional(),
 });
-export type AddStatusOutput = z.infer<typeof AddStatusOutput>;
+export type CreateReferenceItem = z.infer<typeof CreateReferenceItem>;
+
+export const CreateReferenceEnvelope = z.object({
+  items: z.array(CreateReferenceItem),
+  summary: z.object({
+    created: z.number().int(),
+    existing: z.number().int(),
+    queued: z.number().int(),
+    failed: z.number().int(),
+  }),
+  diagnostics: z
+    .object({
+      file: z.string().optional(),
+      property: z.string().optional(),
+      value: z.string().optional(),
+      attached: z.number().int().optional(),
+      duplicatesSkipped: z.number().int().optional(),
+      missingPDFs: z.array(z.string()).optional(),
+    })
+    .optional(),
+});
+export type CreateReferenceEnvelope = z.infer<typeof CreateReferenceEnvelope>;
 
 // TagDTO retired alongside the rubien_tags_* MCP tool family. Tag rows now
 // surface as inline options on the built-in Tags PropertyDefinition (see

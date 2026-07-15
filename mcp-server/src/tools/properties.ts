@@ -13,23 +13,28 @@ const PROPERTY_TYPES = [
 ] as const;
 
 /// Tags are exposed as the seeded built-in PropertyDefinition with
-/// `defaultFieldKey == "tags"`. All operations below treat Tags as a regular
-/// multiSelect property — `set` / `add_values` / `remove_values` accept tag
-/// IDs (stringified), `add_option` creates a new Tag from a name + color,
-/// `rename_option` / `delete_option` operate by tag ID. The retired
-/// rubien_tags_* tool family folded into this surface.
+/// `defaultFieldKey == "tags"`. The option tools below treat Tags options as
+/// Tag rows — `create_option` creates a new Tag from a name + color,
+/// `update_option` / `delete_option` address tags by stringified tag ID.
+/// ASSIGNING values to a reference is rubien_update_reference's `properties`
+/// payload, not these tools.
 function tagsContractNote(extra = ""): string {
   return (
-    "For the built-in Tags property (defaultFieldKey == 'tags'): values are " +
-    "tag IDs (stringified). Create new tags via rubien_properties_add_option " +
-    "(value=name, color=hex)." +
+    "For the built-in Tags property (defaultFieldKey == 'tags'): options are " +
+    "Tag rows addressed by stringified tag ID. Create new tags via " +
+    "rubien_create_option (value=name, color=hex)." +
     (extra ? " " + extra : "")
   );
 }
 
+/// The column-vs-cell boundary, stated on every option tool: these tools
+/// edit the CHOICES; update_reference edits a reference's chosen VALUES.
+const assignmentPointer =
+  " (These tools edit the available choices themselves. To assign/unassign values on a specific reference, use rubien_update_reference's `properties` payload.)";
+
 export function registerPropertyTools(server: McpServer): void {
   server.registerTool(
-    "rubien_properties_list",
+    "rubien_list_properties",
     {
       title: "List property definitions (incl. Tags)",
       description:
@@ -66,13 +71,14 @@ export function registerPropertyTools(server: McpServer): void {
   );
 
   server.registerTool(
-    "rubien_properties_create",
+    "rubien_create_property",
     {
-      title: "Create custom property",
+      title: "Create custom property (column)",
       description:
-        "Create a new custom property definition. To create a new tag instead, use rubien_properties_add_option against the built-in Tags property.",
+        "Create a new custom property definition (a column). All-digit names are rejected — they would shadow id selectors in rubien_update_reference's payload. To create a new tag instead, use rubien_create_option against the built-in Tags property." +
+        assignmentPointer,
       inputSchema: {
-        name: z.string(),
+        name: z.string().describe("Property name (must not be all digits)"),
         type: z.enum(PROPERTY_TYPES),
         options: z
           .string()
@@ -97,11 +103,31 @@ export function registerPropertyTools(server: McpServer): void {
   );
 
   server.registerTool(
-    "rubien_properties_delete",
+    "rubien_update_property",
+    {
+      title: "Update property (rename and/or visibility)",
+      description:
+        "Update a property definition: rename it and/or change its UI visibility, in one transaction. At least one of `name` / `visible` is required. Built-in properties (incl. Tags) cannot be renamed; visibility can be changed on any property. All-digit names are rejected.",
+      inputSchema: {
+        id: z.string().describe("Property ID"),
+        name: z.string().optional().describe("New display name"),
+        visible: z.boolean().optional().describe("Show (true) or hide (false) in the app UI"),
+      },
+    },
+    async ({ id, name, visible }) => {
+      const args = ["properties", "--update", "--id", id];
+      if (name !== undefined) args.push("--name", name);
+      if (visible !== undefined) args.push("--set-visible", String(visible));
+      return runCliAsTool(args);
+    },
+  );
+
+  server.registerTool(
+    "rubien_delete_property",
     {
       title: "Delete custom property",
       description:
-        "Remove a property definition and all its values on references. Cannot delete default/built-in properties (Tags included — use rubien_properties_delete_option to remove individual tags).",
+        "Remove a property definition and all its values on references. Cannot delete default/built-in properties (Tags included — use rubien_delete_option to remove individual tags).",
       inputSchema: { id: z.string() },
       annotations: { destructiveHint: true },
     },
@@ -110,104 +136,72 @@ export function registerPropertyTools(server: McpServer): void {
   );
 
   server.registerTool(
-    "rubien_properties_rename",
+    "rubien_create_option",
     {
-      title: "Rename custom property",
-      description:
-        "Change a property's display name. Built-in properties (incl. Tags) cannot be renamed.",
-      inputSchema: { id: z.string(), name: z.string() },
-    },
-    async ({ id, name }) =>
-      runCliAsTool(["properties", "--rename", "--id", id, "--name", name]),
-  );
-
-  server.registerTool(
-    "rubien_properties_show",
-    {
-      title: "Show property in UI",
-      description: "Mark a property as visible in the app UI.",
-      inputSchema: { id: z.string() },
-    },
-    async ({ id }) =>
-      runCliAsTool(["properties", "--show", "--id", id]),
-  );
-
-  server.registerTool(
-    "rubien_properties_hide",
-    {
-      title: "Hide property in UI",
-      description: "Mark a property as hidden in the app UI.",
-      inputSchema: { id: z.string() },
-    },
-    async ({ id }) =>
-      runCliAsTool(["properties", "--hide", "--id", id]),
-  );
-
-  server.registerTool(
-    "rubien_properties_add_option",
-    {
-      title: "Add option to select property (creates a Tag for the Tags property)",
+      title: "Create select option (creates a Tag for the Tags property)",
       description:
         "Append an option to a singleSelect/multiSelect property. " +
         "For the built-in Tags property, this creates a new Tag row with `value` as the tag name " +
-        "and `color` as the tag color; the returned option's `value` is the new tag's stable id.",
+        "and `color` as the tag color; the returned option's `value` is the new tag's stable id." +
+        assignmentPointer,
       inputSchema: {
-        id: z.string().describe("Property ID"),
+        propertyId: z.string().describe("Property ID"),
         value: z
           .string()
           .describe("Option label (or, for Tags, the new tag's display name)"),
-        color: z.string().optional().describe("Optional hex color"),
+        color: z.string().optional().describe("Optional hex color (#RRGGBB)"),
       },
     },
-    async ({ id, value, color }) =>
+    async ({ propertyId, value, color }) =>
       runCliAsTool([
         "properties",
         "--add-option",
         "--id",
-        id,
+        propertyId,
         ...flagsFromOptions({ "--value": value, "--color": color }),
       ]),
   );
 
   server.registerTool(
-    "rubien_properties_rename_option",
+    "rubien_update_option",
     {
-      title: "Rename a select option (renames the underlying Tag for Tags)",
+      title: "Update a select option (rename and/or recolor)",
       description:
-        "Rename an existing option on a singleSelect/multiSelect property and bulk-update affected references. " +
-        "For Tags: `from` is the stringified tag id (identity-stable), `to` is the new display name. " +
-        "Pivots are not touched. For other multiSelect: rewrites the JSON arrays in every affected propertyValue row.",
+        "Rename and/or recolor an existing option on a singleSelect/multiSelect property, in one transaction. `option` addresses the option by its original identity; at least one of `name` / `color` is required. Renames bulk-update affected references. " +
+        "For Tags: `option` is the stringified tag id (identity-stable), `name` is the new display name, recolor updates the Tag row. `color` accepts #RRGGBB only. The built-in Type property's options are fully immutable (recolor included)." +
+        assignmentPointer,
       inputSchema: {
-        id: z.string().describe("Property ID"),
-        from: z.string().describe("Existing option value (tag id for Tags)"),
-        to: z.string().describe("New option value (new tag name for Tags)"),
+        propertyId: z.string().describe("Property ID"),
+        option: z.string().describe("Existing option value (stringified tag id for Tags)"),
+        name: z.string().optional().describe("New option value (new tag name for Tags)"),
+        color: z.string().optional().describe("New hex color (#RRGGBB)"),
       },
     },
-    async ({ id, from, to }) =>
+    async ({ propertyId, option, name, color }) =>
       runCliAsTool([
         "properties",
-        "--rename-option",
+        "--update-option",
         "--id",
-        id,
-        "--from",
-        from,
-        "--to",
-        to,
+        propertyId,
+        "--option",
+        option,
+        ...flagsFromOptions({ "--to": name, "--color": color }),
       ]),
   );
 
   server.registerTool(
-    "rubien_properties_delete_option",
+    "rubien_delete_option",
     {
       title: "Delete a select option (deletes the underlying Tag for Tags)",
       description:
         "Remove a select option from a property. " + tagsContractNote(
           "For Tags, deleting a tag with attached references requires `replaceWith` (the stringified id of another tag) — affected references are re-tagged before the old tag is removed. Without `replaceWith`, in-use options surface an `optionInUse` error.",
         ) +
-        " To delete an in-use option without migrating, set `clearInUse: true` — affected references have the option cleared from their value (singleSelect loses its value; multiSelect drops just this option). `clearInUse` and `replaceWith` are mutually exclusive.",
+        " To delete an in-use option without migrating, set `clearInUse: true` — affected references have the option cleared from their value (singleSelect loses its value; multiSelect drops just this option). `clearInUse` and `replaceWith` are mutually exclusive." +
+        assignmentPointer,
       inputSchema: {
-        id: z.string().describe("Property ID"),
-        value: z.string().describe("Option value to delete (tag id for Tags)"),
+        propertyId: z.string().describe("Property ID"),
+        value: z.string().describe("Option value to delete (stringified tag id for Tags)"),
         replaceWith: z
           .string()
           .optional()
@@ -223,126 +217,18 @@ export function registerPropertyTools(server: McpServer): void {
       },
       annotations: { destructiveHint: true },
     },
-    async ({ id, value, replaceWith, clearInUse }) =>
+    async ({ propertyId, value, replaceWith, clearInUse }) =>
       runCliAsTool([
         "properties",
         "--delete-option",
         "--id",
-        id,
+        propertyId,
         "--value",
         value,
         ...flagsFromOptions({
           "--replace-with": replaceWith,
           "--clear-in-use": clearInUse,
         }),
-      ]),
-  );
-
-  server.registerTool(
-    "rubien_properties_set",
-    {
-      title: "Set property value on reference (replace semantics)",
-      description:
-        "Assign a property value to a reference using replace semantics. For multiSelect (incl. Tags), pass comma-separated values — the existing set is overwritten. " +
-        "Use rubien_properties_add_values / rubien_properties_remove_values for incremental edits. " +
-        tagsContractNote(),
-      inputSchema: {
-        reference: z.number().int(),
-        id: z.string().describe("Property ID"),
-        value: z.string(),
-      },
-    },
-    async ({ reference, id, value }) =>
-      runCliAsTool([
-        "properties",
-        "--set",
-        "--reference",
-        String(reference),
-        "--id",
-        id,
-        "--value",
-        value,
-      ]),
-  );
-
-  server.registerTool(
-    "rubien_properties_add_values",
-    {
-      title: "Add values to a multiSelect property (additive, idempotent)",
-      description:
-        "Append one or more values to a multiSelect property on a reference without disturbing existing selections. " +
-        "Idempotent: re-adding a present value is a no-op (no sync churn). " +
-        tagsContractNote("For Tags this inserts ReferenceTag pivots."),
-      inputSchema: {
-        reference: z.number().int(),
-        id: z.string().describe("Property ID"),
-        value: z.string().describe("Comma-separated values (tag IDs for Tags)"),
-      },
-    },
-    async ({ reference, id, value }) =>
-      runCliAsTool([
-        "properties",
-        "--set",
-        "--add-value",
-        "--reference",
-        String(reference),
-        "--id",
-        id,
-        "--value",
-        value,
-      ]),
-  );
-
-  server.registerTool(
-    "rubien_properties_remove_values",
-    {
-      title: "Remove values from a multiSelect property (subtractive, idempotent)",
-      description:
-        "Remove one or more values from a multiSelect property on a reference without disturbing other selections. " +
-        "Idempotent: removing an absent value is a no-op. " +
-        tagsContractNote("For Tags this deletes ReferenceTag pivots."),
-      inputSchema: {
-        reference: z.number().int(),
-        id: z.string().describe("Property ID"),
-        value: z.string().describe("Comma-separated values (tag IDs for Tags)"),
-      },
-      annotations: { destructiveHint: true },
-    },
-    async ({ reference, id, value }) =>
-      runCliAsTool([
-        "properties",
-        "--set",
-        "--remove-value",
-        "--reference",
-        String(reference),
-        "--id",
-        id,
-        "--value",
-        value,
-      ]),
-  );
-
-  server.registerTool(
-    "rubien_properties_clear",
-    {
-      title: "Clear property value on reference",
-      description:
-        "Remove a property value from a reference. " +
-        tagsContractNote("For Tags this removes all of the reference's tag assignments."),
-      inputSchema: {
-        reference: z.number().int(),
-        id: z.string().describe("Property ID"),
-      },
-      annotations: { destructiveHint: true },
-    },
-    async ({ reference, id }) =>
-      runCliAsTool([
-        "properties",
-        "--clear",
-        "--reference",
-        String(reference),
-        "--id",
-        id,
       ]),
   );
 }

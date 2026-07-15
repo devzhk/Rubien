@@ -20,14 +20,14 @@ export function registerCitationTools(server: McpServer): void {
     {
       title: "Format citations",
       description:
-        "Generate formatted citations for one or more references. Output shape varies by format: `text` → { style, inline, bibliography }, `bibliography` → { style, entries }, `docx-cc` → { tag, text, style, isShortTag?, fallbackPayload? }. Use arbitrary CSL style IDs from `rubien_styles_list` if needed.",
+        "Generate formatted citations for one or more references. Output shape varies by format: `text` → { style, inline, bibliography }, `bibliography` → { style, entries }, `docx-cc` → { tag, text, style, isShortTag?, fallbackPayload? }. Use arbitrary CSL style IDs from `rubien_list_styles` if needed.",
       inputSchema: {
         ids: z.array(z.number().int()).min(1).describe("Reference IDs to cite"),
         style: z
           .string()
           .optional()
           .describe(
-            `Citation style (default apa). Built-ins: ${BUILTIN_STYLES.join(", ")}. Any CSL ID from rubien_styles_list also works.`,
+            `Citation style (default apa). Built-ins: ${BUILTIN_STYLES.join(", ")}. Any CSL ID from rubien_list_styles also works.`,
           ),
         format: z
           .enum(CITE_FORMATS)
@@ -47,7 +47,7 @@ export function registerCitationTools(server: McpServer): void {
   );
 
   server.registerTool(
-    "rubien_styles_list",
+    "rubien_list_styles",
     {
       title: "List citation styles",
       description:

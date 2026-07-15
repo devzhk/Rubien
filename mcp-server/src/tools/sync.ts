@@ -3,7 +3,7 @@ import { runCliAsTool } from "../toolHelpers.js";
 
 export function registerSyncTools(server: McpServer): void {
   server.registerTool(
-    "rubien_sync_status",
+    "rubien_get_sync_status",
     {
       title: "CloudKit sync status",
       description:

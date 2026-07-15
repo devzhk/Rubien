@@ -70,9 +70,12 @@ export interface CliOptions {
  * Invoke rubien-cli with the given argv and return the parsed result.
  *
  * Contract: on exit 0, stdout is JSON (default) or plain text (`textMode`).
- * On non-zero exit, stderr is `{"error": "..."}` per the contract pinned in
- * Tests/RubienCLITests/SwiftLibCLITests.swift:189; this function throws a
- * CliError with that message.
+ * On non-zero exit, stderr carries a structured JSON error envelope — either
+ * plain `{"error": "..."}` or a richer shape like the `unresolved-selectors`
+ * envelope (`{"error", "ids", "names"}`) or the all-failed create-reference
+ * envelope (`{"items", "summary"}`). Per spec §4.6 the envelope must reach
+ * the agent VERBATIM — no field extraction — so CliError.message is the raw
+ * stderr text.
  */
 export async function invokeCli(
   args: string[],
@@ -114,20 +117,11 @@ export async function invokeCli(
       message?: string;
     };
     const stderr = (e.stderr ?? "").trim();
-    let parsedError: string | undefined;
-    if (stderr.length > 0) {
-      try {
-        const parsed = JSON.parse(stderr);
-        if (parsed && typeof parsed === "object" && "error" in parsed) {
-          parsedError = String(parsed.error);
-        }
-      } catch {
-        // stderr wasn't JSON; fall through and use raw text.
-      }
-    }
+    // Raw pass-through (§4.6): structured envelopes (unresolved-selectors,
+    // all-failed create envelopes) must survive to the agent unmodified —
+    // extracting `.error` here would silently drop `ids`/`names`/`items`.
     const message =
-      parsedError ??
-      (stderr.length > 0 ? stderr : (e.message ?? "rubien-cli invocation failed"));
+      stderr.length > 0 ? stderr : (e.message ?? "rubien-cli invocation failed");
     throw new CliError(
       message,
       typeof e.code === "number" ? e.code : null,

@@ -4,6 +4,7 @@ import {
   PropertyDefinitionDTO,
   CitationTextOutput,
   CitationDocxCCOutput,
+  CreateReferenceEnvelope,
   DatabaseViewDTO,
   StyleDTO,
   ReadTextPdfOutput,
@@ -172,6 +173,68 @@ describe("zod schemas", () => {
       isVisible: true,
     };
     expect(() => PropertyDefinitionDTO.parse(def)).not.toThrow();
+  });
+
+  it("accepts a created-item CreateReferenceEnvelope with diagnostics omitted", () => {
+    // Inline routes (`--title`) carry no diagnostics and no pdfDownload —
+    // Swift-Optional contract: absent keys, never null.
+    const envelope = {
+      items: [
+        {
+          reference: {
+            title: "A paper",
+            authors: "Alice",
+            referenceType: "Journal Article",
+            dateAdded: "2026-04-24T10:00:00.000Z",
+            dateModified: "2026-04-24T10:00:00.000Z",
+            readingStatus: "unread",
+            readCount: 0,
+            customProperties: [],
+          },
+          status: "created",
+          input: "A paper",
+        },
+      ],
+      summary: { created: 1, existing: 0, queued: 0, failed: 0 },
+    };
+    expect(() => CreateReferenceEnvelope.parse(envelope)).not.toThrow();
+  });
+
+  it("accepts a failed item without a reference (synthetic zero-entries item)", () => {
+    const envelope = {
+      items: [
+        { status: "failed", input: "bibtex", error: "No valid BibTeX entries found" },
+      ],
+      summary: { created: 0, existing: 0, queued: 0, failed: 1 },
+    };
+    expect(() => CreateReferenceEnvelope.parse(envelope)).not.toThrow();
+  });
+
+  it("accepts a queued item carrying intakeId + Zotero diagnostics", () => {
+    const envelope = {
+      items: [{ status: "queued", intakeId: 7, input: "/tmp/paper.pdf" }],
+      summary: { created: 0, existing: 0, queued: 1, failed: 0 },
+      diagnostics: { attached: 3, duplicatesSkipped: 1, missingPDFs: ["files/12/x.pdf"] },
+    };
+    expect(() => CreateReferenceEnvelope.parse(envelope)).not.toThrow();
+  });
+
+  it("rejects an out-of-enum item status", () => {
+    const envelope = {
+      items: [{ status: "merged", input: "x" }], // <-- not a Disposition
+      summary: { created: 0, existing: 0, queued: 0, failed: 0 },
+    };
+    expect(() => CreateReferenceEnvelope.parse(envelope)).toThrow();
+  });
+
+  it("rejects an item missing `input` provenance", () => {
+    // `input` is always present (§5.4) — dropping it would orphan multi-item
+    // envelopes from their source entries.
+    const envelope = {
+      items: [{ status: "created" }],
+      summary: { created: 1, existing: 0, queued: 0, failed: 0 },
+    };
+    expect(() => CreateReferenceEnvelope.parse(envelope)).toThrow();
   });
 
   it("accepts StyleDTO", () => {

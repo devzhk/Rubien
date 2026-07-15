@@ -44,7 +44,7 @@ describe("invokeCli", () => {
     expect(result.text).toContain("@article{foo");
   });
 
-  it("parses stderr {error} JSON on non-zero exit and throws CliError", async () => {
+  it("throws CliError carrying stderr JSON on non-zero exit", async () => {
     installStub(`echo '{"error":"reference 999 not found"}' >&2\nexit 3`);
     await expect(invokeCli(["get", "999"])).rejects.toThrowError(
       /reference 999 not found/,
@@ -54,6 +54,32 @@ describe("invokeCli", () => {
     } catch (err) {
       expect(err).toBeInstanceOf(CliError);
       expect((err as CliError).exitCode).toBe(3);
+    }
+  });
+
+  it("preserves structured stderr envelopes VERBATIM — no field extraction (§4.6)", async () => {
+    // The unresolved-selectors envelope carries ids/names beyond `error`;
+    // extracting `.error` would silently drop them.
+    const envelope = '{"error":"unresolved-selectors","ids":["9"],"names":["Topics"]}';
+    installStub(`echo '${envelope}' >&2\nexit 1`);
+    try {
+      await invokeCli(["update", "1", "--properties", "{}"]);
+      expect.unreachable("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(CliError);
+      expect((err as CliError).message).toBe(envelope);
+    }
+  });
+
+  it("preserves an all-failed create envelope (items/summary) verbatim", async () => {
+    const envelope =
+      '{"items":[{"status":"failed","input":"bibtex","error":"No valid BibTeX entries found"}],"summary":{"created":0,"existing":0,"queued":0,"failed":1}}';
+    installStub(`echo '${envelope}' >&2\nexit 1`);
+    try {
+      await invokeCli(["add", "--bibtex", "junk"]);
+      expect.unreachable("should have thrown");
+    } catch (err) {
+      expect((err as CliError).message).toBe(envelope);
     }
   });
 
@@ -71,13 +97,13 @@ describe("invokeCli", () => {
   });
 
   it("closes child stdin so subcommands that read stdin don't hang", async () => {
-    // `rubien-cli import -` calls readDataToEndOfFile. If invokeCli leaves
-    // stdin open, the child blocks until the timeout fires. Stub below
+    // `rubien-cli add --source -` calls readDataToEndOfFile. If invokeCli
+    // leaves stdin open, the child blocks until the timeout fires. Stub below
     // drains stdin and echoes byte count; test fails fast on a hang.
     installStub(
       `read_bytes=$(cat | wc -c | tr -d ' '); echo "{\\"bytes\\":$read_bytes}"`,
     );
-    const result = (await invokeCli(["import", "-"], { timeoutMs: 3000 })) as {
+    const result = (await invokeCli(["add", "--source", "-"], { timeoutMs: 3000 })) as {
       bytes: number;
     };
     expect(result.bytes).toBe(0);

@@ -62,32 +62,40 @@ describe.skipIf(skipReason !== null)("e2e stdio JSON-RPC", () => {
         expect(toolsResult.result).toBeDefined();
         const toolNames = (toolsResult.result.tools as Array<{ name: string }>)
           .map((t) => t.name);
+        // The 0.3.0 {op}_{target} catalog is exactly 27 tools.
+        expect(toolNames).toHaveLength(27);
         // Spot-check a few from each category.
-        expect(toolNames).toContain("rubien_search");
-        expect(toolNames).toContain("rubien_list");
+        expect(toolNames).toContain("rubien_search_references");
+        expect(toolNames).toContain("rubien_list_references");
+        expect(toolNames).toContain("rubien_create_reference");
+        expect(toolNames).toContain("rubien_update_reference");
         expect(toolNames).toContain("rubien_cite");
-        expect(toolNames).toContain("rubien_styles_list");
-        expect(toolNames).toContain("rubien_delete");
-        expect(toolNames).toContain("rubien_sync_status");
+        expect(toolNames).toContain("rubien_list_styles");
+        expect(toolNames).toContain("rubien_delete_reference");
+        expect(toolNames).toContain("rubien_get_sync_status");
         expect(toolNames).toContain("rubien_read_text");
         expect(toolNames).toContain("rubien_read_annotations");
         expect(toolNames).toContain("rubien_grep_text");
-        expect(toolNames).not.toContain("rubien_pdf_text");
+        // Retired old-generation names must be gone.
+        expect(toolNames).not.toContain("rubien_add");
+        expect(toolNames).not.toContain("rubien_import");
+        expect(toolNames).not.toContain("rubien_views_query");
+        expect(toolNames).not.toContain("rubien_properties_set");
         // Sanity-check destructiveHint on delete.
         const deleteTool = (toolsResult.result.tools as Array<{
           name: string;
           annotations?: { destructiveHint?: boolean };
-        }>).find((t) => t.name === "rubien_delete");
+        }>).find((t) => t.name === "rubien_delete_reference");
         expect(deleteTool?.annotations?.destructiveHint).toBe(true);
 
-        // 4. tools/call rubien_styles_list → should invoke real CLI and return
+        // 4. tools/call rubien_list_styles → should invoke real CLI and return
         //    something parseable. Exact content depends on local library
         //    state; we only assert structural success.
         const callResult = await rpcRequest(child, {
           jsonrpc: "2.0",
           id: 3,
           method: "tools/call",
-          params: { name: "rubien_styles_list", arguments: {} },
+          params: { name: "rubien_list_styles", arguments: {} },
         });
         expect(callResult.result).toBeDefined();
         expect(callResult.result.content).toBeDefined();

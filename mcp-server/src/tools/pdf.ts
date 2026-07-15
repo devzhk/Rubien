@@ -15,7 +15,7 @@ interface PdfPageImageResult {
 
 export function registerPdfTools(server: McpServer): void {
   server.registerTool(
-    "rubien_pdf_info",
+    "rubien_get_pdf_info",
     {
       title: "Probe PDF metadata + outline",
       description:
@@ -29,7 +29,7 @@ export function registerPdfTools(server: McpServer): void {
   );
 
   server.registerTool(
-    "rubien_pdf_page_image",
+    "rubien_render_pdf_page",
     {
       title: "Render a PDF page as an image",
       description:
@@ -106,11 +106,11 @@ export function registerPdfTools(server: McpServer): void {
   );
 
   server.registerTool(
-    "rubien_pdf_download",
+    "rubien_download_pdf",
     {
-      title: "Download the open-access PDF for a reference",
+      title: "Download the open-access PDF for an existing reference",
       description:
-        "Fetch the open-access PDF (via DOI or arXiv resolution) and attach it to the reference. Skip-if-attached by default; pass `force: true` to detach the existing PDF and re-download. Side effects: writes a file under the library's PDF storage and inserts a pdfCache row + pdfUploadQueue row (so the running app's sync engine will push to CloudKit). Returns `{ id, ok, action, filename? }` where `action` is `\"downloaded\" | \"replaced\" | \"already-attached\" | \"already-pending\"`. Errors (isError) when the reference is missing, has no DOI/arXiv, or the network fetch fails. Long-running — up to 5 minutes.",
+        "Fetch the open-access PDF (via DOI or arXiv resolution) and attach it to an EXISTING reference (creation via rubien_create_reference fetches PDFs itself with `downloadPdf`). Skip-if-attached by default; pass `force: true` to detach the existing PDF and re-download. Side effects: writes a file under the library's PDF storage and inserts a pdfCache row + pdfUploadQueue row (so the running app's sync engine will push to CloudKit). Returns `{ id, ok, action, filename? }` where `action` is `\"downloaded\" | \"replaced\" | \"already-attached\" | \"already-pending\"`. Errors (isError) when the reference is missing, has no DOI/arXiv, or the network fetch fails. Long-running — up to 5 minutes.",
       inputSchema: {
         id: z.number().int().describe("Reference ID"),
         force: z
