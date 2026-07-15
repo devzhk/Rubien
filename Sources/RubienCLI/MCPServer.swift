@@ -19,7 +19,7 @@ import Darwin
 // child's JSON stdout through verbatim. That guarantees the tool output is
 // byte-identical to the shipped CLI contract (the child *is* the CLI) with no
 // refactor of the read subcommands, and keeps `rubien-mcp-server` and this
-// server drop-in interchangeable. `rubien_pdf_page_image` is the sole special
+// server drop-in interchangeable. `rubien_render_pdf_page` is the sole special
 // case: its JSON is re-split into an MCP text-meta block + an `image` block,
 // mirroring the npm server's two-block shape (the metadata block is an
 // equivalent JSON object, not a byte-for-byte copy of npm's key order).
@@ -330,7 +330,7 @@ struct MCPTool {
     let description: String
     let inputSchema: [String: Any]
     /// Whether the CLI's JSON stdout is re-split into a text-meta + `image`
-    /// block (true only for `rubien_pdf_page_image`).
+    /// block (true only for `rubien_render_pdf_page`).
     let isImage: Bool
     let buildArgv: ([String: Any]) throws -> [String]
 
@@ -353,7 +353,7 @@ struct MCPTool {
         return ["content": [["type": "text", "text": text]]]
     }
 
-    /// `rubien_pdf_page_image`: split the CLI JSON `{id,page,mimeType,data,...}`
+    /// `rubien_render_pdf_page`: split the CLI JSON `{id,page,mimeType,data,...}`
     /// into a human-readable metadata text block + an MCP `image` block, as
     /// `rubien-mcp-server` does. The metadata block is an equivalent JSON object
     /// (keys sorted for determinism, not npm's insertion order).

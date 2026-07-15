@@ -266,19 +266,40 @@ enum ReferenceAttribution {
     /// `id`/`referenceId` so a future read tool still attributes (over-inclusion
     /// beats a miss in a display filter).
     static func referenceKeys(for tool: String) -> [String] {
-        // The trap: on the properties tools `id`/`ids` are PROPERTY rowids — a
-        // colliding id namespace (`rubien_properties_set {reference: 900,
-        // id: "29"}` addresses reference 900, property 29). The reference, where
-        // one exists, is always the `reference` argument.
+        // The trap: on the OLD-generation properties tools `id`/`ids` are
+        // PROPERTY rowids — a colliding id namespace (`rubien_properties_set
+        // {reference: 900, id: "29"}` addresses reference 900, property 29).
+        // The reference, where one exists, is always the `reference` argument.
+        // These rules are correct for historical sessions and must not change.
+        if neverAttribute.contains(tool) { return [] }
         if tool.hasPrefix("rubien_properties_") { return ["reference"] }
         return toolKeys[tool] ?? ["id", "referenceId"]
     }
 
+    /// Tools whose id-shaped arguments are NEVER reference ids. The new
+    /// {op}_{target} definition/option/view tools carry property/option/view
+    /// ids (`id` / `propertyId`), which the default rule would mis-attribute.
+    /// Old-generation fix in passing: `rubien_views_query`'s scalar `id` is a
+    /// VIEW id — a pre-existing latent mis-attribution for historical sessions
+    /// (the other old views_* write tools were never registered in the
+    /// read-only channel, so no historical session contains them). New-gen
+    /// `list_properties`/`list_views` and `create_reference` carry no
+    /// default-rule key, safe without entries; `update_reference` attributes
+    /// its top-level `id` via the default rule and never its payload keys.
+    private static let neverAttribute: Set<String> = [
+        "rubien_create_property", "rubien_update_property", "rubien_delete_property",
+        "rubien_create_option", "rubien_update_option", "rubien_delete_option",
+        "rubien_create_view", "rubien_update_view", "rubien_delete_view",
+        "rubien_views_query",
+    ]
+
     /// Only the tools whose keys the default can't cover: array-shaped `ids`
-    /// (delete/cite/export address MANY references). `rubien_get`/`pdf_*`
-    /// (`id`) and `annotations_list`/`web_*` (`referenceId`) ride the default.
+    /// (delete/cite/export address MANY references; both delete generations).
+    /// `rubien_get_reference`/`get_pdf_info`/`render_pdf_page` (`id`) and the
+    /// old `annotations_list`/`web_*` (`referenceId`) ride the default.
     private static let toolKeys: [String: [String]] = [
         "rubien_delete": ["ids"],
+        "rubien_delete_reference": ["ids"],
         "rubien_cite": ["ids"],
         "rubien_export": ["ids"],
     ]

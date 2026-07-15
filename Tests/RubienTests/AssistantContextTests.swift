@@ -11,8 +11,11 @@ final class AssistantContextTests: XCTestCase {
         XCTAssertTrue(seed.contains("ID 7"))
         XCTAssertTrue(seed.contains("Attention Is All You Need"))
         XCTAssertTrue(seed.contains("Vaswani et al."))
-        // Names the Rubien tools + the untrusted-data framing (§3 layer 8).
-        XCTAssertTrue(seed.contains("rubien_get"))
+        // Names the Rubien tools (new {op}_{target} generation) + the
+        // untrusted-data framing (§3 layer 8).
+        XCTAssertTrue(seed.contains("rubien_get_reference"))
+        XCTAssertTrue(seed.contains("rubien_render_pdf_page"))
+        XCTAssertTrue(seed.contains("rubien_search_references"))
         XCTAssertTrue(seed.lowercased().contains("untrusted"))
     }
 

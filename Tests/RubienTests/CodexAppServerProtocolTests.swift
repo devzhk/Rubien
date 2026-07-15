@@ -626,6 +626,44 @@ final class CodexAppServerProtocolTests: XCTestCase {
             [8])
     }
 
+    /// The new {op}_{target} generation's attribution rules (spec §7) — the
+    /// old-generation assertions above stay untouched (both generations hold).
+    func testReferenceAttributionNewGenerationRules() {
+        // The payload trap: update_reference attributes its top-level `id`,
+        // NEVER the property keys inside the `properties` payload.
+        XCTAssertEqual(
+            ReferenceAttribution.referencedIDs(
+                tool: "rubien_update_reference",
+                arguments: ["id": 42, "properties": ["7": "x", "Tags": ["add": ["12"]]]]),
+            [42], "reference 42, not property 7 / tag 12")
+        // Definition/option/view tools never attribute — their ids are
+        // property/option/view ids.
+        XCTAssertTrue(
+            ReferenceAttribution.referencedIDs(
+                tool: "rubien_update_property", arguments: ["id": "29", "name": "Topics"]).isEmpty)
+        XCTAssertTrue(
+            ReferenceAttribution.referencedIDs(
+                tool: "rubien_update_option",
+                arguments: ["propertyId": "3", "option": "low", "name": "lowest"]).isEmpty)
+        XCTAssertTrue(
+            ReferenceAttribution.referencedIDs(
+                tool: "rubien_delete_view", arguments: ["id": 4]).isEmpty)
+        // Old-generation fix in passing: views_query's scalar id is a VIEW id;
+        // the default rule used to mis-attribute it for historical sessions.
+        XCTAssertTrue(
+            ReferenceAttribution.referencedIDs(
+                tool: "rubien_views_query", arguments: ["id": 4]).isEmpty)
+        // delete_reference keeps the array-shaped ids mapping under its new name.
+        XCTAssertEqual(
+            ReferenceAttribution.referencedIDs(
+                tool: "rubien_delete_reference", arguments: ["ids": [4, 5]]),
+            [4, 5])
+        // list_references' `view` param is not an attribution key.
+        XCTAssertTrue(
+            ReferenceAttribution.referencedIDs(
+                tool: "rubien_list_references", arguments: ["view": 12]).isEmpty)
+    }
+
     // MARK: - model/list (model auto-discovery)
 
     /// Shape sanitized from a real codex 0.144.1 `model/list` capture (spec §2.1).

@@ -138,7 +138,7 @@ final class AssistantAttachmentManifestTests: XCTestCase {
         XCTAssertTrue(prompt.contains(#""id":42"#))
         XCTAssertTrue(prompt.contains(#""referenceType":"Journal Article""#))
         XCTAssertTrue(prompt.contains(#""doi":"10.18653/v1/N19-1423""#))
-        XCTAssertTrue(prompt.contains("rubien_get") || prompt.contains("Rubien tools"))
+        XCTAssertTrue(prompt.contains("rubien_get_reference") || prompt.contains("Rubien tools"))
 
         let parsed = AssistantAttachmentManifest.parse(prompt, managedRoot: root)
         XCTAssertEqual(parsed.visibleText, "Compare @BERT with this paper")

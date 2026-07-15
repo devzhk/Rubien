@@ -45,8 +45,8 @@ final class MCPServerTests: XCTestCase {
     // The 8 read-only content tools the native server must advertise, mirroring
     // the read tools in mcp-server/src/tools/*.ts.
     private let expectedToolNames: Set<String> = [
-        "rubien_search", "rubien_list", "rubien_get",
-        "rubien_pdf_info", "rubien_pdf_page_image",
+        "rubien_search_references", "rubien_list_references", "rubien_get_reference",
+        "rubien_get_pdf_info", "rubien_render_pdf_page",
         "rubien_read_text", "rubien_read_annotations", "rubien_grep_text",
     ]
 
@@ -182,11 +182,11 @@ final class MCPServerTests: XCTestCase {
         func required(_ name: String) -> [String] {
             ((byName[name]?["inputSchema"] as? [String: Any])?["required"] as? [String]) ?? []
         }
-        XCTAssertEqual(Set(required("rubien_pdf_page_image")), ["id", "page"])
-        XCTAssertEqual(required("rubien_search"), ["query"])
+        XCTAssertEqual(Set(required("rubien_render_pdf_page")), ["id", "page"])
+        XCTAssertEqual(required("rubien_search_references"), ["query"])
         XCTAssertEqual(required("rubien_read_annotations"), ["id"])
         XCTAssertEqual(required("rubien_read_text"), ["id"])
-        XCTAssertEqual(required("rubien_list"), [])
+        XCTAssertEqual(required("rubien_list_references"), [])
     }
 
     func testPingAndUnknownMethodAndUnknownTool() throws {
@@ -227,9 +227,9 @@ final class MCPServerTests: XCTestCase {
         // (a JSON bool bridges to NSNumber → would silently become `get 1`) or
         // silently dropped (a string where an int is expected).
         let responses = try runMCP([
-            toolCall(id: 1, name: "rubien_get", arguments: ["id": true]),
-            toolCall(id: 2, name: "rubien_get", arguments: ["id": "5"]),
-            toolCall(id: 3, name: "rubien_search", arguments: ["query": 5]),
+            toolCall(id: 1, name: "rubien_get_reference", arguments: ["id": true]),
+            toolCall(id: 2, name: "rubien_get_reference", arguments: ["id": "5"]),
+            toolCall(id: 3, name: "rubien_search_references", arguments: ["query": 5]),
             toolCall(id: 4, name: "rubien_read_text", arguments: ["id": 1, "maxChars": 1.5]),
         ])
         for id in 1...4 {
@@ -275,7 +275,7 @@ final class MCPServerTests: XCTestCase {
         let directJSON = try JSONSerialization.jsonObject(with: Data(direct.stdout.utf8))
 
         // Same read through the MCP tool.
-        let responses = try runMCP([toolCall(id: 1, name: "rubien_get", arguments: ["id": id])])
+        let responses = try runMCP([toolCall(id: 1, name: "rubien_get_reference", arguments: ["id": id])])
         let result = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
         XCTAssertNil(result["isError"], "get on an existing ref must not be an error")
         let content = try XCTUnwrap(result["content"] as? [[String: Any]])
@@ -297,8 +297,8 @@ final class MCPServerTests: XCTestCase {
         try seedTitle("Attention Is All You Need")
 
         let responses = try runMCP([
-            toolCall(id: 1, name: "rubien_search", arguments: ["query": "attention"]),
-            toolCall(id: 2, name: "rubien_list", arguments: ["limit": 10]),
+            toolCall(id: 1, name: "rubien_search_references", arguments: ["query": "attention"]),
+            toolCall(id: 2, name: "rubien_list_references", arguments: ["limit": 10]),
         ])
         for id in [1, 2] {
             let result = try XCTUnwrap(response(responses, id: id)?["result"] as? [String: Any])
@@ -325,7 +325,7 @@ final class MCPServerTests: XCTestCase {
 
     func testMissingRequiredArgumentSurfacesAsIsError() throws {
         try skipIfBinaryMissing()
-        let responses = try runMCP([toolCall(id: 1, name: "rubien_get", arguments: [:])])
+        let responses = try runMCP([toolCall(id: 1, name: "rubien_get_reference", arguments: [:])])
         let result = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
         XCTAssertEqual(result["isError"] as? Bool, true)
         let text = try XCTUnwrap((result["content"] as? [[String: Any]])?.first?["text"] as? String)
@@ -339,7 +339,7 @@ final class MCPServerTests: XCTestCase {
         // non-zero with {"error":...} → the server maps it to an isError result.
         let responses = try runMCP([
             toolCall(id: 1, name: "rubien_read_text", arguments: ["id": id]),
-            toolCall(id: 2, name: "rubien_pdf_info", arguments: ["id": id]),
+            toolCall(id: 2, name: "rubien_get_pdf_info", arguments: ["id": id]),
         ])
         let read = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
         XCTAssertEqual(read["isError"] as? Bool, true)
@@ -501,9 +501,9 @@ final class MCPServerTests: XCTestCase {
         let id = try importFixturePDF()
 
         let responses = try runMCP([
-            toolCall(id: 1, name: "rubien_pdf_info", arguments: ["id": id]),
+            toolCall(id: 1, name: "rubien_get_pdf_info", arguments: ["id": id]),
             toolCall(id: 2, name: "rubien_read_text", arguments: ["id": id, "pages": "1"]),
-            toolCall(id: 3, name: "rubien_pdf_page_image", arguments: ["id": id, "page": 1]),
+            toolCall(id: 3, name: "rubien_render_pdf_page", arguments: ["id": id, "page": 1]),
         ])
 
         // pdf_info → text block carrying pageCount.

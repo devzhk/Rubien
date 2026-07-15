@@ -44,7 +44,7 @@ Linux needs system deps first — see [Linux CLI](../README.md#linux-cli). For d
 | `search` | Full-text search across the library |
 | `list` | List references with filtering and sorting |
 | `get` | Fetch a single reference by ID |
-| `add` | Add a reference via identifier, BibTeX, or manual entry |
+| `add` | Add a reference from any locator (`--source`), inline BibTeX, or a manual title |
 | `update` | Update fields on an existing reference |
 | `delete` | Delete references by ID |
 | `cite` | Generate formatted citations |
@@ -110,7 +110,7 @@ rubien-cli list --view 4 --limit 20     # rows from a saved view's query
 | `--type` | String | — | Filter by reference type (e.g. `"Journal Article"`) |
 | `--has-pdf` | Flag | false | Only references with a PDF |
 | `--keyword` | String | — | Keyword search across title, abstract, notes |
-| `--reading-status` | String | — | Filter: `unread`, `reading`, `skimmed`, `read` |
+| `--reading-status` | String | — | Filter by reading status — validated live against the user-extensible Status options (defaults: `unread`, `reading`, `skimmed`, `read`) |
 | `--sort-by` | String | — | Sort field: `year`, `dateAdded`, `title` |
 | `--asc` | Flag | false | Sort ascending (default descending) |
 | `--view` | Int64 | — | List rows matching a **saved view**'s query (by view id, from `views`). Routes through the same query engine as an inline `list`, identical output shape. **Mutually exclusive** with the inline filter/sort options above (errors if combined); `--limit` and `--offset` still apply. |
@@ -1022,7 +1022,7 @@ claude mcp add rubien -- rubien-cli mcp --read-only
 printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"rubien_get","arguments":{"id":1}}}' \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"rubien_get_reference","arguments":{"id":1}}}' \
   | rubien-cli mcp --read-only
 ```
 
@@ -1042,11 +1042,11 @@ the identical subcommand documented above:
 
 | Tool | Backing subcommand |
 |---|---|
-| `rubien_search` | `search` |
-| `rubien_list` | `list` |
-| `rubien_get` | `get` |
-| `rubien_pdf_info` | `pdf info` |
-| `rubien_pdf_page_image` | `pdf page-image` (returned as an MCP `image` content block + a text metadata block) |
+| `rubien_search_references` | `search` |
+| `rubien_list_references` | `list` |
+| `rubien_get_reference` | `get` |
+| `rubien_get_pdf_info` | `pdf info` |
+| `rubien_render_pdf_page` | `pdf page-image` (returned as an MCP `image` content block + a text metadata block) |
 | `rubien_read_text` | `read text` |
 | `rubien_read_annotations` | `read annotations` |
 | `rubien_grep_text` | `grep` |
