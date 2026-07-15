@@ -25,6 +25,11 @@ final class AddReferenceInputRouterTests: XCTestCase {
         XCTAssertEqual(AddReferenceInputRouter.classify(input, probe: noPaths), .metadata(input))
     }
 
+    func testArxivAbstractURLRoutesToMetadata() {
+        let input = "https://arxiv.org/abs/2606.05405"
+        XCTAssertEqual(AddReferenceInputRouter.classify(input, probe: noPaths), .metadata(input))
+    }
+
     func testKnownPaperPDFURLStillRoutesToMetadata() {
         let input = "https://aclanthology.org/2024.acl-long.123.pdf"
         XCTAssertEqual(AddReferenceInputRouter.classify(input, probe: noPaths), .metadata(input))

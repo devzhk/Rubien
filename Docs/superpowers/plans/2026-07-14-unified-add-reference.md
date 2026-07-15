@@ -18,7 +18,7 @@ Replace the toolbar's separate paper, website, and PDF/Markdown choices with one
 1. Add a pure, testable app-intake router in `RubienCore`, reusing `ImportRouter` for path, paper-host, identifier, and direct-file classification.
 2. Evolve the PDF/Markdown source sheet into the unified intake sheet while preserving its picker, security-scoped file handling, and duplicate-submission latch.
 3. Prefill and automatically start metadata resolution for paper inputs; prefill the web clipper for website inputs.
-4. Replace the toolbar menu with one Add Reference button and hand off to the appropriate existing sheet only after the intake sheet dismisses.
+4. Replace the toolbar menu with one Add Reference button. Keep metadata and website confirmation inside the same sheet flow; dismiss before handing files to the existing review pipeline.
 5. Add router/state tests, build, run focused tests, review the diff, and relaunch the worktree app.
 
 ## Non-goals

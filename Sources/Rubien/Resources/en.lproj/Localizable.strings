@@ -52,7 +52,8 @@
 "addReferenceSourceSheet.detected.metadata" = "Detected route: Reference lookup";
 "addReferenceSourceSheet.detected.website" = "Detected route: Website";
 "addReferenceSourceSheet.detected.file" = "Detected route: PDF or Markdown file";
-"addReferenceSourceSheet.button.choose" = "Choose PDF/Markdown…";
+"addReferenceSourceSheet.button.choose" = "Choose Local File…";
+"addReferenceSourceSheet.button.choose.formats" = "PDF or Markdown";
 "addReferenceSourceSheet.button.continue" = "Continue";
 "addReferenceSourceSheet.selection.multiple" = "%d files selected";
 "addReferenceSourceSheet.status.preparing" = "Preparing file…";

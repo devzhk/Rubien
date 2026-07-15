@@ -62,6 +62,31 @@ enum WebReaderMetrics {
     }
 }
 
+/// One delimiter contract for the reader's KaTeX auto-render pass. Supplying a
+/// custom list replaces auto-render's defaults, so every supported display
+/// environment must be included here alongside Rubien's legacy `$` forms.
+enum WebReaderMathRendering {
+    static let displayEnvironments = [
+        "equation", "equation*", "align", "align*", "alignat", "alignat*",
+        "gather", "gather*", "CD",
+    ]
+
+    static let autoRenderDelimiterEntriesJavaScript: String = {
+        var entries = [
+            #"{ left: '$$', right: '$$', display: true }"#,
+            #"{ left: '\\[', right: '\\]', display: true }"#,
+        ]
+        entries.append(contentsOf: displayEnvironments.map { environment in
+            #"{ left: '\\begin{\#(environment)}', right: '\\end{\#(environment)}', display: true }"#
+        })
+        entries.append(contentsOf: [
+            #"{ left: '$', right: '$', display: false }"#,
+            #"{ left: '\\(', right: '\\)', display: false }"#,
+        ])
+        return entries.joined(separator: ",\n                      ")
+    }()
+}
+
 /// Keeps the hosting `NSWindow`'s resize floor in step with the web reader's visible
 /// panels (#5/#13). SwiftUI's `.frame(minWidth:)` governs layout but not the window's
 /// user-resize limit once the hosting controller's sizing is detached (readers pass
@@ -1334,17 +1359,13 @@ final class WebReaderViewModel: ObservableObject {
                   // node carrying the ORIGINAL LaTeX source for accessibility. If that
                   // source contains $, \\[, \\(, auto-render would recurse into it and
                   // double-render. Excluding the .katex subtree prevents that.
-                  // Delimiter escaping: this JS lives inside a Swift triple-quoted
-                  // string. Swift collapses two backslashes to one before the JS
-                  // engine sees the source, and JS then collapses two backslashes
-                  // to one again. Hence the four backslashes here, which produce
-                  // a single backslash in the runtime string KaTeX matches against.
+                  // The helper emits JS string literals with two source backslashes;
+                  // JavaScript reduces them to the single backslash KaTeX matches.
+                  // It also restores KaTeX's display-environment defaults, which a
+                  // custom delimiters array would otherwise replace.
                   renderMathInElement(article, {
                     delimiters: [
-                      { left: '$$',     right: '$$',     display: true  },
-                      { left: '\\\\[',  right: '\\\\]',  display: true  },
-                      { left: '$',      right: '$',      display: false },
-                      { left: '\\\\(',  right: '\\\\)',  display: false }
+                      \(WebReaderMathRendering.autoRenderDelimiterEntriesJavaScript)
                     ],
                     throwOnError: false,
                     ignoredTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],

@@ -864,12 +864,8 @@ struct ContentView: View {
     @State private var pdfOperations = ReferenceDetailPDFOperationRegistry()
     @State private var showAddReference = false
     @State private var addReferenceInitialType: ReferenceType = .journalArticle
-    @State private var showAddReferenceSourceSheet = false
-    @State private var addReferenceSourceHandoff = DeferredSheetHandoff<AddReferenceSourceRoute>()
-    @State private var routedMetadataInput = ""
-    @State private var routedWebsiteInput = ""
-    @State private var showWebImport = false
-    @State private var showAddByIdentifier = false
+    @State private var showAddReferenceFlow = false
+    @State private var addReferenceFileHandoff = DeferredSheetHandoff<[MaterializedImportSource]>()
     @State private var showBatchImport = false
     @State private var preparedMetadataImportsAfterBatchDismiss: [PreparedMetadataImport]?
     @State private var importReviewSession: ImportReviewSession?
@@ -925,7 +921,7 @@ struct ContentView: View {
         )
     }
 
-    /// The leading toolbar's flat controls, in order: Properties, Search, the
+    /// The leading toolbar's flat controls, in order: Manage Properties, Search, the
     /// Add Reference button, then the More-import menu. Rendered with
     /// `ToolbarHoverButtonStyle` (no glass capsule, just a light hover) and a
     /// shared `.titleAndIcon` label style. The enclosing `ToolbarItemGroup` opts
@@ -936,7 +932,7 @@ struct ContentView: View {
             Button {
                 showPropertyManager.toggle()
             } label: {
-                Label("Properties", systemImage: "slider.horizontal.3")
+                Label("Manage Properties", systemImage: "slider.horizontal.3")
             }
             .help("Manage properties")
             .popover(isPresented: $showPropertyManager) {
@@ -979,7 +975,7 @@ struct ContentView: View {
             .keyboardShortcut("f", modifiers: .command)
 
             Button {
-                showAddReferenceSourceSheet = true
+                showAddReferenceFlow = true
             } label: {
                 Label(String(localized: "content.toolbar.addReference", bundle: .module), systemImage: "square.and.arrow.down")
             }
@@ -1241,30 +1237,42 @@ struct ContentView: View {
                 initialReferenceType: addReferenceInitialType
             )
         }
-        .sheet(isPresented: $showAddReferenceSourceSheet, onDismiss: {
-            guard let route = addReferenceSourceHandoff.takeAfterDismiss() else { return }
-            switch route {
-            case .metadata(let input):
-                routedMetadataInput = input
-                showAddByIdentifier = true
-            case .website(let url):
-                routedWebsiteInput = url
-                showWebImport = true
-            case .files(let sources):
-                importFilesWithMetadata(sources)
-            }
+        .sheet(isPresented: $showAddReferenceFlow, onDismiss: {
+            guard let sources = addReferenceFileHandoff.takeAfterDismiss() else { return }
+            importFilesWithMetadata(sources)
         }) {
-            AddReferenceSourceSheet(allowsFileImports: !viewModel.isImporting) { route in
-                addReferenceSourceHandoff.stage(route)
-            }
-        }
-        .sheet(isPresented: $showWebImport) {
-            WebImportView(
-                initialURL: routedWebsiteInput,
-                onSave: { ref in
+            AddReferenceFlowSheet(
+                allowsFileImports: !viewModel.isImporting,
+                resolver: metadataResolver,
+                onSaveMetadata: { ref, downloadPDF, pdfURLOverride in
+                    var r = ref
+                    let result = viewModel.saveReference(&r)
+                    if downloadPDF, result != nil, let id = r.id {
+                        viewModel.downloadPDFInBackground(
+                            for: r,
+                            id: id,
+                            pdfURLOverride: pdfURLOverride
+                        )
+                    }
+                    confirmAndReveal(r, result: result)
+                },
+                onQueueMetadata: { result, input in
+                    queueResolutionResult(
+                        result,
+                        options: MetadataPersistenceOptions(
+                            sourceKind: .manualEntry,
+                            originalInput: input
+                        ),
+                        successMessage: String(localized: "Queued for review", bundle: .module)
+                    )
+                },
+                onSaveWebsite: { ref in
                     var r = ref
                     let result = viewModel.saveManualReference(&r, reviewedBy: "web-import")
                     confirmAndReveal(r, result: result)
+                },
+                onFiles: { sources in
+                    addReferenceFileHandoff.stage(sources)
                 }
             )
         }
@@ -1339,34 +1347,6 @@ struct ContentView: View {
                     .zIndex(11)
                     .animation(.spring(response: 0.35, dampingFraction: 0.8), value: confirmation.id)
             }
-        }
-        .sheet(isPresented: $showAddByIdentifier) {
-            AddByIdentifierView(
-                resolver: metadataResolver,
-                initialInput: routedMetadataInput,
-                onSave: { ref, downloadPDF, pdfURLOverride in
-                    var r = ref
-                    let result = viewModel.saveReference(&r)
-                    if downloadPDF, result != nil, let id = r.id {
-                        viewModel.downloadPDFInBackground(
-                            for: r,
-                            id: id,
-                            pdfURLOverride: pdfURLOverride
-                        )
-                    }
-                    confirmAndReveal(r, result: result)
-                },
-                onQueueResult: { result, input in
-                    queueResolutionResult(
-                        result,
-                        options: MetadataPersistenceOptions(
-                            sourceKind: .manualEntry,
-                            originalInput: input
-                        ),
-                        successMessage: String(localized: "Queued for review", bundle: .module)
-                    )
-                }
-            )
         }
         .sheet(isPresented: $showPendingMetadataQueue, onDismiss: {
             scopedPendingMetadataIntakes = nil

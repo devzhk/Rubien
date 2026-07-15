@@ -146,6 +146,10 @@ struct AddReferenceSourceSheet: View {
                 .buttonStyle(SLSecondaryButtonStyle())
                 .disabled(state.isAcquiring || !allowsFileImports)
 
+                Text(String(localized: "addReferenceSourceSheet.button.choose.formats", bundle: .module))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
                 if let summary = state.stagedSelectionSummary {
                     stagedSelectionLabel(summary)
                 }
@@ -320,11 +324,9 @@ struct AddReferenceSourceSheet: View {
             switch AddReferenceInputRouter.classify(typedInput) {
             case .metadata(let input):
                 onRoute(.metadata(input))
-                dismiss()
                 return
             case .website(let url):
                 onRoute(.website(url))
-                dismiss()
                 return
             case .invalid(let reason):
                 state.recordSubmittedInvalidReason(reason)
@@ -351,7 +353,6 @@ struct AddReferenceSourceSheet: View {
                 return
             }
             onRoute(.files(sources))
-            dismiss()
         } catch {
             guard !Task.isCancelled else { return }
             acquisitionError = error.localizedDescription
