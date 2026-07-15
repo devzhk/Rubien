@@ -236,16 +236,55 @@ final class CreateReferenceSourceTests: XCTestCase {
         XCTAssertEqual(items[0]["status"] as? String, "failed")
     }
 
-    /// `--source` is the single locator: combining it with a legacy input is
-    /// rejected (spec §5.1 exactly-one-input, CLI half). Legacy-only precedence
-    /// is unchanged.
+    /// Exactly one input among `--source` / `--bibtex` / `--title` (spec §5.1,
+    /// CLI half) — any pair is rejected.
     func testSourceCannotCombineWithLegacyInput() throws {
         try skipIfBinaryMissing()
         let result = try runCLI(["add", "--source", "10.1/x", "--title", "T"])
         XCTAssertNotEqual(result.exitCode, 0)
         let obj = try json(result.stderr)
         XCTAssertTrue((obj["error"] as? String ?? "").contains("cannot be combined"),
-                      "stderr should reject combining --source with a legacy input; got: \(result.stderr)")
+                      "stderr should reject combining --source with another input; got: \(result.stderr)")
+    }
+
+    /// Phase-D: `--bibtex` + `--title` is rejected too (the old form silently
+    /// let `--bibtex` win).
+    func testBibTeXAndTitleCannotCombine() throws {
+        try skipIfBinaryMissing()
+        let result = try runCLI(["add", "--bibtex", "@article{x, title={T}}", "--title", "T"])
+        XCTAssertNotEqual(result.exitCode, 0)
+        let obj = try json(result.stderr)
+        XCTAssertTrue((obj["error"] as? String ?? "").contains("cannot be combined"),
+                      "stderr should reject combining --bibtex with --title; got: \(result.stderr)")
+    }
+
+    /// The route-scoped flags apply to `--source` routes only (§5.1): stray
+    /// `--property` / `--format` / `--value` on an inline route is rejected,
+    /// not silently ignored.
+    func testRouteFlagsRequireSource() throws {
+        try skipIfBinaryMissing()
+        let result = try runCLI(["add", "--title", "T \(UUID().uuidString.prefix(6))", "--property", "Tags"])
+        XCTAssertNotEqual(result.exitCode, 0)
+        let obj = try json(result.stderr)
+        XCTAssertTrue((obj["error"] as? String ?? "").contains("require --source"),
+                      "stderr should name the constraint; got: \(result.stderr)")
+    }
+
+    /// Multi-entry inline BibTeX: one item per parsed entry with
+    /// `bibtex[<ordinal>]` provenance (§5.3), tallied in the summary.
+    func testInlineBibTeXMultiEntryOrdinalProvenance() throws {
+        try skipIfBinaryMissing()
+        let bib = """
+        @article{ma, title={Multi A}, doi={10.90/ma}}
+        @article{mb, title={Multi B}, doi={10.90/mb}}
+        """
+        let result = try runCLI(["add", "--bibtex", bib])
+        XCTAssertEqual(result.exitCode, 0, "stderr=\(result.stderr)")
+        let obj = try json(result.stdout)
+        let items = try XCTUnwrap(obj["items"] as? [[String: Any]])
+        XCTAssertEqual(items.count, 2)
+        XCTAssertEqual(items.compactMap { $0["input"] as? String }, ["bibtex[0]", "bibtex[1]"])
+        XCTAssertEqual((obj["summary"] as? [String: Any])?["created"] as? Int, 2)
     }
 
     func testDownloadPdfRejectedOnFileRoute() throws {
