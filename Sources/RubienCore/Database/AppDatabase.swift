@@ -1954,6 +1954,7 @@ extension AppDatabase {
     /// (never `.queued`/`.failed`) and carries the resolved `Reference`.
     public func batchImportReferencesDetailed(
         _ entries: [DetailedImportEntry],
+        stamping target: ZoteroImportPropertyTarget? = nil,
         mergePolicy: ImportMergePolicy = .standard
     ) throws -> [ItemOutcome] {
         guard !entries.isEmpty else { return [] }
@@ -1961,10 +1962,12 @@ extension AppDatabase {
         // behavior can never drift, then map its authoritative per-entry
         // (finalReference, disposition) — both captured inside the write
         // transaction, so an early entry reflects a later intra-batch merge and
-        // there is no fallible post-commit read.
+        // there is no fallible post-commit read. `stamping` is passed through
+        // for the markdown-folder route (an incompatible property type throws a
+        // source-level `ZoteroImportError` the caller reports).
         let result = try batchImportReferences(
             entries.map(\.reference),
-            stamping: nil,
+            stamping: target,
             pdfFilenames: nil,
             pdfAnnotationDrafts: Array(repeating: [], count: entries.count),
             annotationAnchorFilenames: Array(repeating: nil, count: entries.count),

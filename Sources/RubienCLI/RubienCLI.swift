@@ -707,7 +707,7 @@ struct Get: ParsableCommand {
 }
 
 struct Add: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Add a reference via DOI, PMID, arXiv ID, or BibTeX")
+    static let configuration = CommandConfiguration(abstract: "Add a reference from any locator (identifier, URL, file, folder, BibTeX, or title)")
 
     @Option(name: .long, help: "DOI, PMID, or arXiv ID")
     var identifier: String?
@@ -718,13 +718,43 @@ struct Add: AsyncParsableCommand {
     @Option(name: .long, help: "Title (for manual entry)")
     var title: String?
 
-    @Flag(name: .customLong("download-pdf"),
-          help: "After resolving the identifier, fetch the open-access PDF. Only valid with --identifier.")
-    var downloadPdf: Bool = false
+    @Option(name: .long, help: "One locator, routed automatically: identifier (DOI/arXiv/PMID/PMCID/ISBN), paper URL, PDF/Markdown file URL, local file path, folder path, or '-' for stdin (spec §5). Returns the unified create-reference envelope.")
+    var source: String?
+
+    @Option(name: .long, help: "Format hint for a file or stdin source: bib, ris, md")
+    var format: String?
+
+    @Option(name: .long, help: "Folder source: property to stamp on every reference (default: Tags)")
+    var property: String?
+
+    @Option(name: .long, help: "Folder source: value to stamp on the property (default: folder basename)")
+    var value: String?
+
+    // Tri-state (`--download-pdf` / `--no-download-pdf` / absent, spec §5.1): the
+    // implied-download rule for a registered `.pdf` URL needs "explicitly false"
+    // to be representable. Bare `--download-pdf` stays valid (the npm server
+    // emits exactly that spelling).
+    @Flag(inversion: .prefixedNo,
+          help: "Fetch the open-access PDF after resolving an identifier / paper URL. A registered `.pdf` URL implies --download-pdf unless --no-download-pdf is given.")
+    var downloadPdf: Bool?
 
     func run() async throws {
-        if downloadPdf && identifier == nil {
-            printJSONError("--download-pdf requires --identifier")
+        // New one-door routing (spec §5). `--source` produces the unified
+        // envelope; the legacy --identifier / --bibtex / --title paths below are
+        // unchanged (additive).
+        if let src = source {
+            try await CreateReferenceSource.run(
+                source: src,
+                downloadPdf: downloadPdf,
+                format: format,
+                property: property,
+                value: value
+            )
+            return
+        }
+        let wantPDF = (downloadPdf == true)
+        if wantPDF && identifier == nil {
+            printJSONError("--download-pdf requires --identifier or --source")
             throw ExitCode.failure
         }
         if let id = identifier {
@@ -745,7 +775,7 @@ struct Add: AsyncParsableCommand {
             var mutableRef = ref
             let result = try AppDatabase.shared.saveReference(&mutableRef)
             notifyLibraryChanged()
-            let pdfStatus = downloadPdf
+            let pdfStatus = wantPDF
                 ? await attemptPDFDownload(for: mutableRef, pdfURLOverride: scrapedPDFURL)
                 : nil
             let dto = try referenceDTO(for: mutableRef)
