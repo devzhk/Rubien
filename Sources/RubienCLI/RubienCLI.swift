@@ -79,6 +79,72 @@ func printJSONError(_ message: String) {
     }
 }
 
+/// Encode a *structured* error envelope (multiple fields beyond `error`) to
+/// **stderr** (spec §4.6). Success JSON stays on stdout; structured error
+/// envelopes go to stderr so the MCP wrappers — which discard stdout on
+/// nonzero exit and, until the Phase-D cutover, extract only `{"error": …}`
+/// from stderr — can eventually deliver the raw envelope verbatim. Single-
+/// message errors keep using `printJSONError`; this is for envelopes that
+/// carry extra fields (`ids`/`names`, …) that must survive intact.
+func printJSONErrorEnvelope<T: Encodable>(_ envelope: T) {
+    if let data = try? jsonEncoder.encode(envelope), let str = String(data: data, encoding: .utf8) {
+        FileHandle.standardError.write(Data((str + "\n").utf8))
+    }
+}
+
+/// The `unresolved-selectors` error envelope shared by `properties` (list
+/// selectors) and `update --properties` (cell-payload keys). `ids` and
+/// `names` are the unresolved selectors split by kind so callers can tell
+/// a missing id from a missing name. Emitted to **stderr** (spec §4.6).
+struct UnresolvedSelectorsEnvelope: Encodable {
+    let error: String
+    let ids: [String]
+    let names: [String]
+
+    init(ids: [String], names: [String]) {
+        self.error = "unresolved-selectors"
+        self.ids = ids
+        self.names = names
+    }
+}
+
+/// Map a `ReferenceEditError` (thrown by `AppDatabase.applyReferenceEdit`)
+/// to a CLI error envelope on **stderr** (spec §4.6). The multi-field
+/// `unresolved-selectors` case uses the structured envelope; every other
+/// case is a single-message `{"error": …}`. Callers throw `ExitCode.failure`
+/// afterwards.
+func writeReferenceEditError(_ error: ReferenceEditError) {
+    switch error {
+    case .referenceNotFound(let id):
+        printJSONError("Reference \(id) not found")
+    case .invalidSelector(let key):
+        printJSONError("Invalid property selector '\(key)': a digit-only key must be a valid Int64 property id")
+    case .unresolvedSelectors(let keys):
+        // A payload key is an id when it is non-empty all-ASCII-digits, otherwise
+        // a name (§4.2). Split so the envelope mirrors the `properties` list form.
+        func isIdSelector(_ s: String) -> Bool {
+            !s.isEmpty && s.allSatisfy { ("0"..."9").contains($0) }
+        }
+        let ids = keys.filter(isIdSelector)
+        let names = keys.filter { !isIdSelector($0) }
+        printJSONErrorEnvelope(UnresolvedSelectorsEnvelope(ids: ids, names: names))
+    case .duplicateResolution(let propertyId, let keys):
+        printJSONError("Payload keys \(keys.joined(separator: ", ")) all resolve to property \(propertyId); address it with a single selector")
+    case .conflict(let field, let payloadKey):
+        printJSONError("Field '\(field)' and payload key '\(payloadKey)' target the same column; set it in one place")
+    case .readOnlyBuiltin(let key):
+        printJSONError("Property '\(key)' is a read-only built-in and cannot be set through the properties payload")
+    case .nonNullableBuiltin(let key):
+        printJSONError("Property '\(key)' is non-nullable and cannot be cleared")
+    case .unknownField(let message):
+        printJSONError(message)
+    case .invalidValue(let key, let message):
+        printJSONError("Property '\(key)': \(message)")
+    case .invalidPayload(let key, let message):
+        printJSONError(key.map { "Property '\($0)': \(message)" } ?? message)
+    }
+}
+
 // MARK: - Status validation
 
 /// Live values of the Status (`readingStatus`) PropertyDefinition. Status is
@@ -778,7 +844,19 @@ struct Update: ParsableCommand {
     @Option(name: .customLong("reading-status"), help: "Set reading status (Unread, Reading, Skimmed, Read — or any user-added Status option)")
     var readingStatus: String?
 
+    @Option(name: .long, help: "Cell payload as a JSON object of property selectors → values (built-in and custom). Keys are property ids (digits) or exact names; values replace (scalar / full multiSelect array), {\"add\":[…],\"remove\":[…]} (multiSelect), or null (clear). Applied atomically with the field flags above.")
+    var properties: String?
+
     func run() throws {
+        // Unified cell-edit path (spec §4). When `--properties` is present,
+        // ALL field flags + clears + the decoded payload apply atomically via
+        // the single-transaction `applyReferenceEdit`. Without it, the legacy
+        // flag-by-flag path below is preserved unchanged (additive: old form
+        // keeps working, output shape identical).
+        if let propertiesJSON = properties {
+            try runUnifiedEdit(propertiesJSON: propertiesJSON)
+            return
+        }
         let refs = try AppDatabase.shared.fetchReferences(ids: [id])
         guard var ref = refs.first else {
             printJSONError("Reference \(id) not found")
@@ -843,6 +921,50 @@ struct Update: ParsableCommand {
         try AppDatabase.shared.saveReference(&ref)
         notifyLibraryChanged()
         printJSON(try referenceDTO(for: ref))
+    }
+
+    /// Atomic cell-edit path: decode the payload, fold every field flag +
+    /// clear-field into a `ReferenceEdit`, and apply it in one transaction
+    /// (spec §4.2–§4.5). Structured errors go to stderr (spec §4.6).
+    private func runUnifiedEdit(propertiesJSON: String) throws {
+        let decoded: [String: PropertyEntry]
+        do {
+            decoded = try ReferenceEdit.decodeProperties(fromJSON: propertiesJSON)
+        } catch let error as ReferenceEditError {
+            writeReferenceEditError(error)
+            throw ExitCode.failure
+        }
+        let edit = ReferenceEdit(
+            title: title,
+            year: year,
+            authors: authors,
+            referenceType: referenceType,
+            readingStatus: readingStatus,
+            journal: journal,
+            volume: volume,
+            issue: issue,
+            pages: pages,
+            doi: doi,
+            url: url,
+            abstract: abstract,
+            notes: notes,
+            publisher: publisher,
+            isbn: isbn,
+            issn: issn,
+            language: language,
+            edition: edition,
+            clearFields: clearFields,
+            properties: decoded
+        )
+        let updated: Reference
+        do {
+            updated = try AppDatabase.shared.applyReferenceEdit(id: id, edit: edit)
+        } catch let error as ReferenceEditError {
+            writeReferenceEditError(error)
+            throw ExitCode.failure
+        }
+        notifyLibraryChanged()
+        printJSON(try referenceDTO(for: updated))
     }
 }
 
@@ -1728,13 +1850,9 @@ struct Properties: ParsableCommand {
             let unresolvedIds = id.filter { defsById[$0] == nil }
             let unresolvedNames = name.filter { defsByName[$0] == nil }
             if !unresolvedIds.isEmpty || !unresolvedNames.isEmpty {
-                struct UnresolvedSelectorsError: Encodable {
-                    let error: String
-                    let ids: [String]
-                    let names: [String]
-                }
-                printJSON(UnresolvedSelectorsError(
-                    error: "unresolved-selectors",
+                // Structured envelope → stderr (spec §4.6); stdout stays reserved
+                // for success JSON so the MCP wrappers can pass it through raw.
+                printJSONErrorEnvelope(UnresolvedSelectorsEnvelope(
                     ids: unresolvedIds.map(String.init),
                     names: unresolvedNames
                 ))

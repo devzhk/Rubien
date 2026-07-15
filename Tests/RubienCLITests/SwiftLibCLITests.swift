@@ -896,15 +896,21 @@ final class RubienCLITests: XCTestCase {
     }
 
     /// Unresolved selectors must exit non-zero with an `unresolved-selectors`
-    /// error envelope so scripts notice missing inputs.
+    /// error envelope so scripts notice missing inputs. Per spec §4.6 the
+    /// structured envelope now prints to **stderr**, leaving stdout empty.
     func testPropertiesUnresolvedSelectorErrorsLoudly() throws {
         try skipIfBinaryMissing()
         let result = try runCLI(["properties", "--name", "DefinitelyNotAProperty-\(UUID().uuidString.prefix(6))"])
         XCTAssertNotEqual(result.exitCode, 0)
-        let env = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any]
+        // stdout stays reserved for success JSON — the error envelope moved to stderr.
+        XCTAssertTrue(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      "stdout must be empty on the error path; got: \(result.stdout)")
+        let env = try JSONSerialization.jsonObject(with: Data(result.stderr.utf8)) as? [String: Any]
         XCTAssertEqual(env?["error"] as? String, "unresolved-selectors")
         let names = env?["names"] as? [String] ?? []
         XCTAssertFalse(names.isEmpty, "unresolved names must surface in the error envelope")
+        // `ids` is always present in the envelope (empty here — only a name was unresolved).
+        XCTAssertNotNil(env?["ids"] as? [String], "envelope must carry an ids array")
     }
 
     /// Explicit selectors win over `--visible` filtering — the caller asked

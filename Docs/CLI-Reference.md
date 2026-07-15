@@ -179,6 +179,8 @@ Update fields on an existing reference.
 rubien-cli update 42 --title "New Title" --year 2024
 rubien-cli update 42 --reading-status read
 rubien-cli update 42 --clear-field doi --clear-field abstract
+# Edit property cells (built-in and custom) alongside field flags, atomically:
+rubien-cli update 42 --properties '{"Status":"Reading","Tags":{"add":["12"]},"7":["ml","nlp"]}'
 ```
 
 | Argument / Option | Type | Description |
@@ -203,8 +205,25 @@ rubien-cli update 42 --clear-field doi --clear-field abstract
 | `--edition` | String | Edition |
 | `--reading-status` | String | `unread`, `reading`, `skimmed`, `read` |
 | `--clear-field` | String (repeatable) | Clear a field (e.g. `--clear-field doi --clear-field abstract`) |
+| `--properties` | JSON object | Cell payload: property selectors → values, applied atomically with the field flags |
 
 Valid `--clear-field` values: `year`, `journal`, `volume`, `issue`, `pages`, `doi`, `url`, `abstract`, `notes`, `publisher`, `isbn`, `issn`, `language`, `edition`.
+
+### `--properties` cell payload
+
+`--properties` takes a JSON object mapping **property selectors** to values, applied in the same transaction as any field flags above (all-or-nothing).
+
+- **Selector:** an all-digit key is a property **id**; anything else is an exact, case-sensitive property **name**. A digit-only key that overflows `Int64` is an error (never falls back to a name). Two keys resolving to the same property, or any unresolved key, rejects the whole call.
+- **Values:**
+  - scalar (`"Reading"`, `2024`, `true`) — replace the cell;
+  - array (`["ml","nlp"]`) — replace a multiSelect cell with the full set;
+  - `{"add":["12"],"remove":["3"]}` — idempotent multiSelect / Tags membership edit (`add` applies before `remove`);
+  - `null` — clear a nullable cell.
+- **Built-ins** route to their Reference column (Type/Status validated; Year integer; Editors/Translators accept the `--authors` grammar; Accessed Date `YYYY-MM-DD`). `Tags` values are stringified tag ids. `Last Read` / `Read Count` are read-only (rejected). `Type`/`Status` are non-nullable (payload `null` rejected).
+- **Custom** properties validate by type (integer-only `number`, `YYYY-MM-DD` `date`, JSON boolean `checkbox`, existing-option `singleSelect`/`multiSelect`, absolute http/https `url`).
+- An empty string is an error (use `null` to clear).
+
+Structured errors (`unresolved-selectors` with `ids`/`names`, conflicts, read-only/non-nullable, validation) print to **stderr**; success JSON stays on stdout.
 
 **Output:** JSON updated reference object.
 
