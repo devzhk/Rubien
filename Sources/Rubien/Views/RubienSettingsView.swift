@@ -306,38 +306,66 @@ struct RubienSettingsView: View {
         }
     }
 
-    /// Codex model rows for the Settings picker: a leading "First available" reset
-    /// row (mapped to the mirror's "" sentinel → clears the remembered default, so a
-    /// fresh conversation re-seeds from the first discovered model) followed by the
-    /// shared builder's CONCRETE model rows. The current raw selection stays visible
-    /// while the catalog loads (spec finding #6) — the builder's keep-pin row
-    /// guarantees the Picker never loses its selection, so no phantom `.onChange`
-    /// write can fire during load.
+    /// The Codex model the Settings picker DISPLAYS as the current default: the
+    /// remembered pick, or — when nothing is pinned (nil pref → "" mirror) — the
+    /// first discovered model, exactly mirroring the runtime's floating "first
+    /// available" seed (`ChatSessionController.seedCodexModelIfUnset`). Display only:
+    /// never written back unless the user makes an explicit pick, so an unpicked
+    /// default keeps floating onto whatever codex offers first rather than pinning.
+    private var effectiveDefaultCodexModel: String {
+        defaultModel.isEmpty ? (codexCatalogModels.first?.id ?? "") : defaultModel
+    }
+
+    /// Codex model rows for the Settings picker: the shared builder's CONCRETE
+    /// discovered models, with the first shown as the selected default when nothing
+    /// is pinned (`effectiveDefaultCodexModel`). There is deliberately NO separate
+    /// "first available" row — the first concrete model already IS that default, and
+    /// any deviation is remembered, so exposing it as a pickable option only adds a
+    /// redundant, confusing choice. A pinned-but-absent slug stays visible via the
+    /// builder's keep-pin row. Only while the catalog is still empty (discovery
+    /// pending or unavailable) with nothing pinned does a single neutral placeholder
+    /// stand in, so the control isn't blank and its "" selection has a matching tag;
+    /// it disappears the moment real models arrive.
     private var settingsCodexModelRows: [(label: String, value: String)] {
-        var rows: [(label: String, value: String)] = [
-            (label: String(localized: "First available", bundle: .module), value: "")
-        ]
-        rows += AssistantModelOptions.codexModelRows(
+        var rows = AssistantModelOptions.codexModelRows(
             models: codexCatalogModels,
             pinned: defaultModel.isEmpty ? nil : defaultModel)
             .map { (label: $0.label, value: $0.value ?? "") }
+        if rows.isEmpty {
+            rows.append((label: String(localized: "Codex default", bundle: .module), value: ""))
+        }
         return rows
     }
 
-    /// Effort rows follow the pinned default model when it's in the catalog, else
-    /// the universal four. Includes the current selection even if unlisted (an
-    /// unlisted stored effort must not blank the control or trigger a write).
+    /// The model Picker's selection. Claude passes the mirror through unchanged;
+    /// Codex resolves an unpinned ("") mirror to the displayed first model for GET so
+    /// the control shows a concrete default, while SET writes the raw pick straight
+    /// to the mirror — a floating default therefore stays "" (pref nil) until the
+    /// user actually picks something.
+    private var defaultModelSelection: Binding<String> {
+        Binding(
+            get: { defaultProvider == .codex ? effectiveDefaultCodexModel : defaultModel },
+            set: { defaultModel = $0 }
+        )
+    }
+
+    /// Effort rows follow the DISPLAYED default model (the pinned pick, or the first
+    /// discovered model when floating — `effectiveDefaultCodexModel`) when it's in
+    /// the catalog, else the universal four, so the effort list stays consistent with
+    /// the model the picker above shows. Includes the current selection even if
+    /// unlisted (an unlisted stored effort must not blank the control or trigger a write).
     private var settingsCodexEffortRows: [(label: String, value: String)] {
-        let governing = codexCatalogModels.first { $0.id == defaultModel }
+        let governing = codexCatalogModels.first { $0.id == effectiveDefaultCodexModel }
         return AssistantModelOptions.codexEffortRows(
             governing: governing,
             includingCurrent: defaultEffort.isEmpty ? nil : defaultEffort)
     }
 
     /// Route a model-mirror change back to the CURRENTLY-selected backend's pref.
-    /// For Codex, "" is the "First available" sentinel → nil (the pref key is
-    /// removed, clearing the remembered default so a fresh conversation re-seeds
-    /// from the first discovered model — spec §4.4).
+    /// For Codex, an empty mirror means "no explicit pick" → the pref key is removed
+    /// (nil), so the default keeps floating onto the first discovered model rather
+    /// than pinning one (spec §4.4). The picker never offers "" as a real choice; it
+    /// resolves to the first model for display via `effectiveDefaultCodexModel`.
     private func setDefaultModel(_ value: String) {
         switch defaultProvider {
         case .claude: RubienPreferences.assistantModel = value
@@ -389,9 +417,11 @@ struct RubienSettingsView: View {
             }
 
             // Model/effort are the SELECTED backend's. Claude: static verified
-            // aliases. Codex: discovered rows — "" is the mirror's "First available"
-            // sentinel (UI-layer only; the pref stores nil — spec §4.4).
-            Picker(selection: $defaultModel) {
+            // aliases. Codex: discovered rows only — an unpinned default just shows
+            // the first discovered model (no "first available" row), and the pref
+            // stores nil until the user explicitly picks (spec §4.4). The selection
+            // binding resolves that floating default to the first model for display.
+            Picker(selection: defaultModelSelection) {
                 if defaultProvider == .codex {
                     ForEach(settingsCodexModelRows, id: \.value) {
                         Text($0.label).tag($0.value)
