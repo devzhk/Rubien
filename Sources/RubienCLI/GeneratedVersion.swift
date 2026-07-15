@@ -2,5 +2,5 @@
 // Do not edit by hand. CI fails if this drifts from those files.
 enum RubienCLIVersion {
     static let marketing = "0.3.4"
-    static let build = 25
+    static let build = 26
 }

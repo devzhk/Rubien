@@ -54,7 +54,7 @@ The `npx -y rubien-mcp-server` install is **unpinned**, so there is nothing to r
 1. **Update Rubien first** — Sparkle on Mac (Rubien → Settings → Check Now), `rubien-cli self-update` on Linux. The server needs the new `rubien-cli`.
 2. **Restart your MCP client** — quit/reopen Claude Desktop, or start a new Claude Code session. The respawned server is the latest release.
 
-The pairing is guarded in one direction: a new server against a too-old Rubien **exits at startup with an update instruction** (`MIN_CLI_BUILD`), so a half-upgrade fails fast instead of half-working. The other direction is why upgrading matters — an old server against a new Rubien breaks at tool-call time when it shells subcommands that no longer exist (0.1.x vs Rubien ≥ 0.3.0; those versions are deprecated on npm for this reason).
+The pairing is guarded in one direction: a new server against a too-old Rubien **exits at startup with an update instruction** (`MIN_CLI_BUILD`), so a half-upgrade fails fast instead of half-working. The other direction is why upgrading matters — an old server against a new Rubien breaks at tool-call time when it shells subcommands that no longer exist (server < 0.3.0 vs Rubien ≥ 0.4.0: the 0.4.0 CLI cutover removed `import`, `add --identifier`, `views --query`, and the legacy `properties` write flags that 0.1.x/0.2.x servers shell out to; those server versions are deprecated on npm for this reason).
 
 If a stale `npx` cache ever keeps serving an old version after a restart, clear it (`rm -rf ~/.npm/_npx`) or pin `rubien-mcp-server@latest` in the config. HTTP mode (below) runs as a long-lived process you started yourself — it does not auto-upgrade; restart it after updating Rubien.
 
@@ -114,7 +114,7 @@ First hit wins:
 
 **On Mac, prefer the bundled helper** (2–4): it's signed with the App Group entitlement and reads the same `library.sqlite` as the app. A bare `rubien-cli` on PATH is usually an unentitled dev build hitting a *different* database (see "Database location" in `Docs/CLI-Reference.md`).
 
-**On Linux**, everything works except `rubien_sync_status` (no CloudKit — the `sync` subcommand isn't built).
+**On Linux**, everything works except `rubien_get_sync_status` (no CloudKit — the `sync` subcommand isn't built).
 
 ### Run a local checkout
 
@@ -129,26 +129,28 @@ claude mcp add rubien -- node $(pwd)/dist/index.js        # Claude Code
 
 ## Tool catalog
 
-35 tools, one per `rubien-cli` subcommand mode, named `rubien_<subject>_<action>`:
+27 tools on the `{op}_{target}` grid — CRUD operations always carry the target suffix (`create_reference`, `update_property`); a bare verb appears only when the operation is unique and unambiguous (`cite`, `export`):
 
 | Surface | Tools |
 |---|---|
-| References | `rubien_search`, `rubien_list`, `rubien_get`, `rubien_add`, `rubien_update`, `rubien_delete` |
-| Citations | `rubien_cite`, `rubien_styles_list` |
-| Import/Export | `rubien_import`, `rubien_export` |
+| References | `rubien_search_references`, `rubien_list_references`, `rubien_get_reference`, `rubien_create_reference`, `rubien_update_reference`, `rubien_delete_reference` |
+| Citations | `rubien_cite`, `rubien_list_styles` |
+| Export | `rubien_export` |
 | Reading | `rubien_read_text`, `rubien_read_annotations`, `rubien_grep_text` |
-| PDFs | `rubien_pdf_info`, `rubien_pdf_page_image`, `rubien_pdf_download` |
-| Properties (incl. Tags) | `rubien_properties_list`, `rubien_properties_create`, `rubien_properties_delete`, `rubien_properties_rename`, `rubien_properties_show`, `rubien_properties_hide`, `rubien_properties_add_option`, `rubien_properties_rename_option`, `rubien_properties_delete_option`, `rubien_properties_set`, `rubien_properties_add_values`, `rubien_properties_remove_values`, `rubien_properties_clear` |
-| Saved views | `rubien_views_list`, `rubien_views_create`, `rubien_views_delete`, `rubien_views_rename`, `rubien_views_query` |
-| Sync | `rubien_sync_status` (Mac-only — errors on Linux) |
+| PDFs | `rubien_get_pdf_info`, `rubien_render_pdf_page`, `rubien_download_pdf` |
+| Properties (columns + options, incl. Tags) | `rubien_list_properties`, `rubien_create_property`, `rubien_update_property`, `rubien_delete_property`, `rubien_create_option`, `rubien_update_option`, `rubien_delete_option` |
+| Saved views | `rubien_list_views`, `rubien_create_view`, `rubien_update_view`, `rubien_delete_view` |
+| Sync | `rubien_get_sync_status` (Mac-only — errors on Linux) |
 
-`rubien_import` accepts an absolute path on the host or a direct HTTP(S) URL with a `.pdf`, `.md`, or `.markdown` path extension. Direct URLs are validated by `rubien-cli` before import; stdin (`"-"`) is intentionally unavailable through MCP.
+`rubien_create_reference` is the **one door in**: pass exactly one of `source` (any locator — DOI / arXiv / PMID / PMCID / ISBN, paper URL, PDF/Markdown file URL, absolute file path, or folder path; the CLI routes it), `bibtex`, or `title`. It may return multiple items (multi-entry BibTeX, folders) and `status: "existing"` when dedup matched, in the unified `{items, summary, diagnostics}` envelope. Stdin (`"-"`) is intentionally unavailable through MCP.
+
+Per-reference property values (cells) are edited through `rubien_update_reference`'s `properties` payload — `{"Status": "Reading", "Tags": {"add": ["12"]}, "7": ["ml", "nlp"], "Themes": null}` — atomically alongside metadata fields. The option tools (`create_option` / `update_option` / `delete_option`) manage the *choices themselves* (including Tag rows for the built-in Tags property).
 
 Reading tools operate on any reference without your knowing whether it holds a PDF or a clipped web page. `rubien_read_text` returns the readable body text — the attached PDF or the clipped web page — routed automatically: omit `source` and `pages`/`sections` imply the PDF, `start` implies the web body, else PDF wins when both exist. Every response reports `source` (what was read) and `available` (which sources are readable now). PDF results are page-keyed (`pages[]` items with `text` + `sectionPath`, selected by a `pages` range or `sections` title-substrings); web results are one paginated body window (`content` + `contentLength`, `start`/`maxChars`; `contentFormat` markdown or HTML). `rubien_read_annotations` merges the user's highlights/underlines/anchored notes across both kinds into one array, each item tagged `source`; web items carry a W3C TextQuoteSelector triple (`prefixText`/`anchorText`/`suffixText`) that locates them inside the `rubien_read_text` body. `rubien_grep_text` is the lookup half of the same workflow: it finds *where* a reference's body mentions a phrase or regex — PDF hits grouped by page (`sectionPath` breadcrumbs), web hits as exact character offsets — so you can then pull just those spots with `rubien_read_text` (`pages` for PDF, `start` for web). All three are library-only — none hit the network.
 
-PDF tools: `rubien_pdf_info` (page count, `hasTextLayer`, outline sections — call it before selecting `rubien_read_text` by `sections`), `rubien_pdf_page_image` (render a page to an image, for tables/figures/equations), `rubien_pdf_download` (fetch an open-access PDF and attach it).
+PDF tools: `rubien_get_pdf_info` (page count, `hasTextLayer`, outline sections — call it before selecting `rubien_read_text` by `sections`), `rubien_render_pdf_page` (render a page to an image, for tables/figures/equations), `rubien_download_pdf` (fetch an open-access PDF and attach it to an existing reference).
 
-Destructive tools carry `destructiveHint: true` so Claude Code's permission UI flags them. `rubien_delete` passes `--force`; confirmation happens in the client UI, not a CLI prompt (see `src/tools/references.ts`).
+Destructive tools carry `destructiveHint: true` so Claude Code's permission UI flags them. `rubien_delete_reference` passes `--force`; confirmation happens in the client UI, not a CLI prompt (see `src/tools/references.ts`).
 
 ## Contract pinning
 

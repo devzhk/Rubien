@@ -10,7 +10,7 @@ import { registerReadTools } from "./tools/read.js";
 
 export const SERVER_INFO = {
   name: "rubien-mcp-server",
-  version: "0.2.0",
+  version: "0.3.0",
 } as const;
 
 export function buildServer(): McpServer {
