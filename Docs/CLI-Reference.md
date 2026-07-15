@@ -96,6 +96,7 @@ List references with comprehensive filtering and sorting.
 rubien-cli list --author Smith --year-from 2020 --has-pdf
 rubien-cli list --reading-status unread --sort-by year --asc
 rubien-cli list --tag 3
+rubien-cli list --view 4 --limit 20     # rows from a saved view's query
 ```
 
 | Option | Type | Default | Description |
@@ -113,6 +114,7 @@ rubien-cli list --tag 3
 | `--reading-status` | String | — | Filter: `unread`, `reading`, `skimmed`, `read` |
 | `--sort-by` | String | — | Sort field: `year`, `dateAdded`, `title` |
 | `--asc` | Flag | false | Sort ascending (default descending) |
+| `--view` | Int64 | — | List rows matching a **saved view**'s query (by view id, from `views --list`). Routes through the same query engine as `views --query`, identical output shape. **Mutually exclusive** with the inline filter/sort options above (errors if combined); `--limit` and `--offset` still apply. |
 
 **Output:** JSON array of reference objects.
 
@@ -463,10 +465,12 @@ rubien-cli properties --create --name "Themes" \
 rubien-cli properties --rename --id 42 --name "Stage"
 rubien-cli properties --show --id 42                               # Mark visible
 rubien-cli properties --hide --id 42
+rubien-cli properties --update --id 42 --name "Stage" --set-visible false   # rename + hide in one transaction
 
 # Options
 rubien-cli properties --add-option --id 42 --value "blocked"       # Append option (creates a Tag for the Tags property)
 rubien-cli properties --rename-option --id 42 --from "blocked" --to "stalled"
+rubien-cli properties --update-option --id 42 --option "blocked" --to "stalled" --color "#FF0000"   # rename + recolor in one transaction
 rubien-cli properties --delete-option --id 42 --value "stalled" --replace-with "doing"
 rubien-cli properties --delete-option --id 42 --value "stalled" --clear-in-use   # clear it from affected references instead of migrating
 
@@ -494,13 +498,17 @@ rubien-cli properties --reference 7                                # List values
 | `--rename` | Flag | false | Rename a definition (requires `--id` and `--name`) |
 | `--show` | Flag | false | Mark a definition visible (requires `--id`) |
 | `--hide` | Flag | false | Mark a definition hidden (requires `--id`) |
+| `--update` | Flag | false | **Combined** definition update: rename and/or change visibility in one transaction (requires `--id` and at least one of `--name` / `--set-visible`). Built-in rename is refused; all-digit names rejected. |
+| `--set-visible` | Bool | — | Visibility to set with `--update` (`true` or `false`). Distinct from the `--visible` list filter. |
 | `--add-option` | Flag | false | Append a select option (requires `--id` and `--value`). For the Tags property, creates a new Tag; the response's option `value` is the new tag's id. |
 | `--rename-option` | Flag | false | Rename a select option (requires `--id`, `--from`, `--to`). Bulk-updates affected references. For Tags, `--from` is the stringified tag id; renames the underlying Tag without touching pivots. |
+| `--update-option` | Flag | false | **Combined** option update: rename and/or recolor in one transaction (requires `--id` and `--option`, at least one of `--to` / `--color`). Addresses the option by its original identity (for Tags, the stringified tag id). Type's options stay immutable (recolor included). |
+| `--option` | String | — | Existing option value to update (with `--update-option`). For Tags, the stringified tag id. |
 | `--delete-option` | Flag | false | Remove a select option (requires `--id`, `--value`). Errors `optionInUse` for in-use options unless `--replace-with` or `--clear-in-use` is supplied. For Tags, `--value` is the stringified tag id; `--replace-with` re-tags affected references before removing the old tag. |
 | `--value` | String | — | Option value. For `multiSelect` (incl. Tags): comma-separated. With `--add-option` / `--rename-option` / `--delete-option` / `--set`. |
-| `--color` | String | auto | Hex color (with `--add-option`); unused palette color auto-assigned if omitted |
+| `--color` | String | auto | Hex color (`#RRGGBB`). With `--add-option`: unused palette color auto-assigned if omitted. Also the recolor value with `--update-option`. |
 | `--from` | String | — | Existing option value to rename (with `--rename-option`). For Tags, the stringified tag id. |
-| `--to` | String | — | New option value (with `--rename-option`). For Tags, the new display name. |
+| `--to` | String | — | New option value (with `--rename-option` or `--update-option`). For Tags, the new display name. |
 | `--replace-with` | String | — | Replacement option for in-use values when deleting (with `--delete-option`). For Tags, the stringified id of another tag. |
 | `--clear-in-use` | Flag | false | When deleting an in-use option (with `--delete-option`), clear it from affected references instead of refusing (singleSelect loses its value; multiSelect drops just this option). Mutually exclusive with `--replace-with`. |
 | `--set` | Flag | false | Upsert a value on a reference (requires `--reference`, `--id`, `--value`). Replace semantics for `multiSelect`. Refused for column-backed built-ins (Status / Type / Year / DOI / URL); allowed for the Tags property (routes through `setTags`). |

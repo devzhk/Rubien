@@ -551,6 +551,33 @@ func referenceDTO(for ref: Reference) throws -> ReferenceDTO {
     )
 }
 
+/// Execute a saved view's query (scope + filters + sorts + groupBy) and return
+/// the matching references, honoring `limit` (0 = all). Shared by `views
+/// --query <id>` and `list --view <id>` — identical output shape (a reference
+/// array), so both front doors route through the same engine CLI-side.
+func querySavedView(_ view: DatabaseView, limit: Int) throws -> [Reference] {
+    let db = AppDatabase.shared
+    let scope: ReferenceScope
+    switch view.parsedScope {
+    case .all: scope = .all
+    case .tag(let id): scope = .tag(id)
+    }
+    // Fast path: no filters/sorts/groupBy → push limit to SQL, skip the engines.
+    if view.parsedFilters.isEmpty && view.parsedSorts.isEmpty && view.parsedGroupBy == nil {
+        return try db.fetchReferences(scope: scope, filter: ReferenceFilter(), limit: limit)
+    }
+    let refs = try db.fetchReferences(scope: scope, filter: ReferenceFilter(), limit: 0)
+    let context = PipelineContext(
+        tagMap: try db.fetchReferenceTagMappings(),
+        propertyValueMap: try db.fetchAllPropertyValues(),
+        propertyDefs: try db.fetchAllPropertyDefinitions(),
+        pdfAttachedRefIds: try db.pdfAttachedReferenceIDs()
+    )
+    let filtered = FilterEngine.apply(refs, filters: view.parsedFilters, context: context)
+    let sorted = SortEngine.apply(filtered, sorts: view.parsedSorts, context: context)
+    return limit > 0 ? Array(sorted.prefix(limit)) : sorted
+}
+
 // MARK: - Subcommands
 
 struct Search: ParsableCommand {
@@ -644,7 +671,29 @@ struct List: ParsableCommand {
     @Flag(name: .long, help: "Sort ascending (default is descending)")
     var asc = false
 
+    @Option(name: .long, help: "List references matching a saved view's query (by view id). Mutually exclusive with inline filters/sorts; --limit and --offset still apply.")
+    var view: Int64?
+
     func run() throws {
+        // Saved-view rows (spec §3): route through the same query engine as
+        // `views --query`, mutually exclusive with inline filters/sorts.
+        if let viewId = view {
+            let hasInlineFilter = tag != nil || author != nil || yearFrom != nil || yearTo != nil
+                || journal != nil || referenceType != nil || hasPdf || keyword != nil
+                || readingStatus != nil || sortBy != nil || asc
+            if hasInlineFilter {
+                printJSONError("--view is mutually exclusive with inline filters/sorts (tag, author, year-from/to, journal, type, has-pdf, keyword, reading-status, sort-by, asc)")
+                throw ExitCode.failure
+            }
+            guard let savedView = try AppDatabase.shared.fetchDatabaseView(id: viewId) else {
+                printJSONError("View \(viewId) not found")
+                throw ExitCode.failure
+            }
+            var refs = try querySavedView(savedView, limit: limit)
+            if offset > 0 { refs = Array(refs.dropFirst(offset)) }
+            printJSON(try mapReferenceDTOs(refs))
+            return
+        }
         let hasAdvancedFilter = author != nil || yearFrom != nil || yearTo != nil
             || journal != nil || referenceType != nil || hasPdf || keyword != nil
             || readingStatus != nil
@@ -1517,11 +1566,23 @@ struct Properties: ParsableCommand {
     @Flag(name: .long, help: "Mark a property as hidden")
     var hide = false
 
+    @Flag(name: .long, help: "Combined property update: rename and/or change visibility in one transaction (requires --id and at least one of --name / --set-visible)")
+    var update = false
+
+    @Option(name: .customLong("set-visible"), help: "Set visibility with --update (true or false). Distinct from the --visible list filter.")
+    var setVisible: Bool?
+
     @Flag(name: .customLong("add-option"), help: "Append a select option (or, for the Tags property, create a new tag) (requires --id, --value, optional --color)")
     var addOption = false
 
     @Flag(name: .customLong("rename-option"), help: "Rename a select option (requires --id, --from, --to). For Tags, --from is the stringified tag id. Bulk-updates affected reference rows.")
     var renameOption = false
+
+    @Flag(name: .customLong("update-option"), help: "Combined option update: rename and/or recolor in one transaction (requires --id and --option, at least one of --to / --color). For Tags, --option is the stringified tag id.")
+    var updateOption = false
+
+    @Option(name: .customLong("option"), help: "Existing option value to update (with --update-option). For Tags, the stringified tag id.")
+    var optionValue: String?
 
     @Flag(name: .customLong("delete-option"), help: "Remove a select option (requires --id, --value). For Tags, --value is the stringified tag id. If the option is in use, supply --replace-with to migrate affected rows or --clear-in-use to clear it from them.")
     var deleteOption = false
@@ -1657,6 +1718,29 @@ struct Properties: ParsableCommand {
             return
         }
 
+        if update {
+            guard let propId = try singleId(flag: "--update") else {
+                printJSONError("--update requires --id")
+                throw ExitCode.failure
+            }
+            let newName = try singleName(flag: "--update")
+            guard newName != nil || setVisible != nil else {
+                printJSONError("--update requires --name and/or --set-visible")
+                throw ExitCode.failure
+            }
+            do {
+                let updated = try AppDatabase.shared.updatePropertyDefinition(
+                    id: propId, name: newName, visible: setVisible
+                )
+                notifyLibraryChanged()
+                printJSON(try makePropertyDefinitionDTO(from: updated))
+            } catch let error as PropertyMutationError {
+                printJSONError(describePropertyMutationError(error))
+                throw ExitCode.failure
+            }
+            return
+        }
+
         if addOption {
             guard let propId = try singleId(flag: "--add-option"), let v = value else {
                 printJSONError("--add-option requires --id and --value")
@@ -1714,6 +1798,31 @@ struct Properties: ParsableCommand {
             notifyLibraryChanged()
             let updated = try AppDatabase.shared.fetchPropertyDefinition(id: propId)!
             printJSON(try makePropertyDefinitionDTO(from: updated))
+            return
+        }
+
+        if updateOption {
+            guard let propId = try singleId(flag: "--update-option"), let opt = optionValue else {
+                printJSONError("--update-option requires --id and --option")
+                throw ExitCode.failure
+            }
+            guard toValue != nil || color != nil else {
+                printJSONError("--update-option requires --to and/or --color")
+                throw ExitCode.failure
+            }
+            do {
+                let updated = try AppDatabase.shared.updatePropertyOption(
+                    propertyId: propId, option: opt, newName: toValue, color: color
+                )
+                notifyLibraryChanged()
+                printJSON(try makePropertyDefinitionDTO(from: updated))
+            } catch let error as PropertyMutationError {
+                printJSONError(describePropertyMutationError(error))
+                throw ExitCode.failure
+            } catch let error as PropertyOptionError {
+                printJSONError(describePropertyOptionError(error))
+                throw ExitCode.failure
+            }
             return
         }
 
@@ -1939,6 +2048,25 @@ struct Properties: ParsableCommand {
         "'\(propertyName)' is a fixed built-in property because it drives BibTeX/RIS export buckets. For organization, use the Tags property ('rubien-cli properties --add-option --id <Tags id> --value <name>') or create a custom singleSelect property ('rubien-cli properties --create')."
     }
 
+    /// Map a `PropertyMutationError` (combined property/option updates) to a
+    /// user-visible CLI error string.
+    private func describePropertyMutationError(_ error: PropertyMutationError) -> String {
+        switch error {
+        case .propertyNotFound:
+            return "Property not found"
+        case .builtInRenameForbidden(let name):
+            return "Cannot rename built-in property '\(name)'"
+        case .allDigitName(let name):
+            return "Property name '\(name)' cannot be all digits — it would shadow an id selector in the properties payload."
+        case .immutableBuiltInOptions(let name):
+            return typeFixedHintMessage(propertyName: name)
+        case .invalidColor(let color):
+            return "Invalid color '\(color)'. Use #RRGGBB."
+        case .nothingToUpdate:
+            return "Nothing to update (supply a changed value)."
+        }
+    }
+
     /// Map a `PropertyOptionError` to a user-visible CLI error string.
     private func describePropertyOptionError(_ error: PropertyOptionError) -> String {
         switch error {
@@ -2161,28 +2289,7 @@ struct Views: ParsableCommand {
                 printJSONError("View \(queryId) not found")
                 throw ExitCode.failure
             }
-            let scope: ReferenceScope
-            switch view.parsedScope {
-            case .all: scope = .all
-            case .tag(let id): scope = .tag(id)
-            }
-            // Fast path: no filters/sorts/groupBy → push limit to SQL, skip engines.
-            if view.parsedFilters.isEmpty && view.parsedSorts.isEmpty && view.parsedGroupBy == nil {
-                let refs = try db.fetchReferences(scope: scope, filter: ReferenceFilter(), limit: limit)
-                printJSON(try mapReferenceDTOs(refs))
-                return
-            }
-            let refs = try db.fetchReferences(scope: scope, filter: ReferenceFilter(), limit: 0)
-            let context = PipelineContext(
-                tagMap: try db.fetchReferenceTagMappings(),
-                propertyValueMap: try db.fetchAllPropertyValues(),
-                propertyDefs: try db.fetchAllPropertyDefinitions(),
-                pdfAttachedRefIds: try db.pdfAttachedReferenceIDs()
-            )
-            let filtered = FilterEngine.apply(refs, filters: view.parsedFilters, context: context)
-            let sorted = SortEngine.apply(filtered, sorts: view.parsedSorts, context: context)
-            let truncated = limit > 0 ? Array(sorted.prefix(limit)) : sorted
-            printJSON(try mapReferenceDTOs(truncated))
+            printJSON(try mapReferenceDTOs(try querySavedView(view, limit: limit)))
         } else if let renameId = rename {
             guard var view = try db.fetchDatabaseView(id: renameId) else {
                 printJSONError("View \(renameId) not found")

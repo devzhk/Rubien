@@ -1745,4 +1745,149 @@ final class RubienCLITests: XCTestCase {
             "the hidden note must not import: \(list.stdout)"
         )
     }
+
+    // MARK: - properties --update / --update-option (phase C3)
+
+    private func createProperty(name: String, type: String, options: String? = nil) throws -> Int64 {
+        var args = ["properties", "--create", "--name", name, "--type", type]
+        if let options { args += ["--options", options] }
+        let created = try runCLI(args)
+        return try XCTUnwrap(parseId(from: Data(created.stdout.utf8)), "create failed: \(created.stderr)")
+    }
+
+    /// `properties --update` renames and flips visibility in one call.
+    func testPropertiesUpdateCombined() throws {
+        try skipIfBinaryMissing()
+        let pid = try createProperty(name: "Priority-\(UUID().uuidString.prefix(6))", type: "string")
+        let result = try runCLI(["properties", "--update", "--id", String(pid), "--name", "Urgency", "--set-visible", "false"])
+        XCTAssertEqual(result.exitCode, 0, "stderr=\(result.stderr)")
+        let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any])
+        XCTAssertEqual(obj["name"] as? String, "Urgency")
+        XCTAssertEqual(obj["isVisible"] as? Bool, false)
+    }
+
+    func testPropertiesUpdateRequiresChange() throws {
+        try skipIfBinaryMissing()
+        let pid = try createProperty(name: "P-\(UUID().uuidString.prefix(6))", type: "string")
+        let result = try runCLI(["properties", "--update", "--id", String(pid)])
+        XCTAssertNotEqual(result.exitCode, 0)
+        XCTAssertTrue(result.stderr.contains("--name") || result.stderr.contains("--set-visible"),
+                      "should require at least one change; got: \(result.stderr)")
+    }
+
+    func testPropertiesUpdateBuiltinRenameForbidden() throws {
+        try skipIfBinaryMissing()
+        let all = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
+        let typeId = try XCTUnwrap(all.first(where: { ($0["defaultFieldKey"] as? String) == "referenceType" })?["id"] as? String)
+        let result = try runCLI(["properties", "--update", "--id", typeId, "--name", "Kind"])
+        XCTAssertNotEqual(result.exitCode, 0)
+        let obj = try JSONSerialization.jsonObject(with: Data(result.stderr.utf8)) as? [String: Any]
+        XCTAssertTrue((obj?["error"] as? String ?? "").contains("built-in"), "stderr=\(result.stderr)")
+    }
+
+    func testPropertiesUpdateAllDigitNameRejected() throws {
+        try skipIfBinaryMissing()
+        let pid = try createProperty(name: "P-\(UUID().uuidString.prefix(6))", type: "string")
+        let result = try runCLI(["properties", "--update", "--id", String(pid), "--name", "12345"])
+        XCTAssertNotEqual(result.exitCode, 0)
+        XCTAssertTrue(result.stderr.contains("digit"), "all-digit names rejected; got: \(result.stderr)")
+    }
+
+    /// `properties --update-option` renames and recolors a select option at once.
+    func testPropertiesUpdateOptionCombined() throws {
+        try skipIfBinaryMissing()
+        let pid = try createProperty(name: "Sel-\(UUID().uuidString.prefix(6))", type: "singleSelect", options: "low,high")
+        let result = try runCLI(["properties", "--update-option", "--id", String(pid), "--option", "low", "--to", "lowest", "--color", "#00FF00"])
+        XCTAssertEqual(result.exitCode, 0, "stderr=\(result.stderr)")
+        let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any])
+        let options = try XCTUnwrap(obj["options"] as? [[String: Any]])
+        let renamed = options.first(where: { ($0["label"] as? String) == "lowest" })
+        XCTAssertNotNil(renamed, "option not renamed: \(options)")
+        XCTAssertEqual(renamed?["color"] as? String, "#00FF00")
+    }
+
+    func testPropertiesUpdateOptionInvalidColor() throws {
+        try skipIfBinaryMissing()
+        let pid = try createProperty(name: "Sel-\(UUID().uuidString.prefix(6))", type: "singleSelect", options: "a,b")
+        let result = try runCLI(["properties", "--update-option", "--id", String(pid), "--option", "a", "--color", "red"])
+        XCTAssertNotEqual(result.exitCode, 0)
+        XCTAssertTrue(result.stderr.contains("#RRGGBB"), "invalid color rejected; got: \(result.stderr)")
+    }
+
+    /// Tags recolor routes through the Tag row (addressed by stringified tag id).
+    func testPropertiesUpdateOptionOnTags() throws {
+        try skipIfBinaryMissing()
+        let all = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
+        let tagsId = try XCTUnwrap(all.first(where: { ($0["defaultFieldKey"] as? String) == "tags" })?["id"] as? String)
+        let added = try runCLI(["properties", "--add-option", "--id", tagsId, "--value", "recolor-me"])
+        let addedOptions = try XCTUnwrap((JSONSerialization.jsonObject(with: Data(added.stdout.utf8)) as? [String: Any])?["options"] as? [[String: Any]])
+        let tagValue = try XCTUnwrap(addedOptions.first(where: { ($0["label"] as? String) == "recolor-me" })?["value"] as? String)
+        let result = try runCLI(["properties", "--update-option", "--id", tagsId, "--option", tagValue, "--color", "#123456"])
+        XCTAssertEqual(result.exitCode, 0, "stderr=\(result.stderr)")
+        let options = try XCTUnwrap((JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any])?["options"] as? [[String: Any]])
+        XCTAssertEqual(options.first(where: { ($0["value"] as? String) == tagValue })?["color"] as? String, "#123456")
+    }
+
+    /// Old `--rename` / `--show` / `--hide` / `--rename-option` still work (additive rule).
+    func testLegacyPropertyMutationFlagsStillWork() throws {
+        try skipIfBinaryMissing()
+        let pid = try createProperty(name: "Legacy-\(UUID().uuidString.prefix(6))", type: "singleSelect", options: "a,b")
+        XCTAssertEqual(try runCLI(["properties", "--rename", "--id", String(pid), "--name", "Legacy2"]).exitCode, 0)
+        XCTAssertEqual(try runCLI(["properties", "--hide", "--id", String(pid)]).exitCode, 0)
+        XCTAssertEqual(try runCLI(["properties", "--show", "--id", String(pid)]).exitCode, 0)
+        let renamed = try runCLI(["properties", "--rename-option", "--id", String(pid), "--from", "a", "--to", "alpha"])
+        XCTAssertEqual(renamed.exitCode, 0, "stderr=\(renamed.stderr)")
+        let options = try XCTUnwrap((JSONSerialization.jsonObject(with: Data(renamed.stdout.utf8)) as? [String: Any])?["options"] as? [[String: Any]])
+        XCTAssertTrue(options.contains { ($0["label"] as? String) == "alpha" })
+    }
+
+    // MARK: - list --view (phase C3)
+
+    private func createFilteredView(name: String, filtersJSON: String) throws -> Int64 {
+        let created = try runCLI(["views", "--create", "--name", name, "--filters", filtersJSON])
+        let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(created.stdout.utf8)) as? [String: Any], "create view failed: \(created.stderr)")
+        if let s = obj["id"] as? String { return try XCTUnwrap(Int64(s)) }
+        return try XCTUnwrap(obj["id"] as? Int64 ?? (obj["id"] as? Int).map(Int64.init))
+    }
+
+    func testListViewReturnsSavedViewRows() throws {
+        try skipIfBinaryMissing()
+        _ = try runCLI(["add", "--bibtex", "@article{b, title={ViewRefB}, year={2021}, doi={10.77/b}}"])
+        _ = try runCLI(["add", "--bibtex", "@article{c, title={ViewRefC}, year={2019}, doi={10.77/c}}"])
+        let vid = try createFilteredView(
+            name: "Recent-\(UUID().uuidString.prefix(6))",
+            filtersJSON: #"[{"target":{"kind":"builtin","value":"year"},"op":"greaterThan","value":{"kind":"number","value":2020}}]"#
+        )
+        let result = try runCLI(["list", "--view", String(vid)])
+        XCTAssertEqual(result.exitCode, 0, "stderr=\(result.stderr)")
+        let rows = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [[String: Any]])
+        let titles = Set(rows.compactMap { $0["title"] as? String })
+        XCTAssertTrue(titles.contains("ViewRefB"), "year>2020 row missing: \(titles)")
+        XCTAssertFalse(titles.contains("ViewRefC"), "year<2020 row must be filtered out: \(titles)")
+
+        // Identical shape to `views --query`.
+        let viaQuery = try runCLI(["views", "--query", String(vid)])
+        let queryRows = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(viaQuery.stdout.utf8)) as? [[String: Any]])
+        XCTAssertEqual(Set(queryRows.compactMap { $0["title"] as? String }), titles, "list --view and views --query must agree")
+    }
+
+    func testListViewMutualExclusionWithInlineFilter() throws {
+        try skipIfBinaryMissing()
+        let vid = try createFilteredView(
+            name: "V-\(UUID().uuidString.prefix(6))",
+            filtersJSON: #"[{"target":{"kind":"builtin","value":"year"},"op":"greaterThan","value":{"kind":"number","value":2000}}]"#
+        )
+        let result = try runCLI(["list", "--view", String(vid), "--author", "Smith"])
+        XCTAssertNotEqual(result.exitCode, 0)
+        let obj = try JSONSerialization.jsonObject(with: Data(result.stderr.utf8)) as? [String: Any]
+        XCTAssertTrue((obj?["error"] as? String ?? "").contains("mutually exclusive"), "stderr=\(result.stderr)")
+    }
+
+    func testListViewNotFound() throws {
+        try skipIfBinaryMissing()
+        let result = try runCLI(["list", "--view", "999999"])
+        XCTAssertNotEqual(result.exitCode, 0)
+        let obj = try JSONSerialization.jsonObject(with: Data(result.stderr.utf8)) as? [String: Any]
+        XCTAssertTrue((obj?["error"] as? String ?? "").contains("not found"), "stderr=\(result.stderr)")
+    }
 }
