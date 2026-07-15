@@ -1667,10 +1667,11 @@ struct WebReaderView: View {
         self._showChatSidebar = State(initialValue: RubienPreferences.assistantSidebarVisible)
         self._viewModel = StateObject(wrappedValue: WebReaderViewModel(reference: reference))
 
-        // The first production provider construction: Claude wrapped with the
-        // read-only MCP content channel (Phase 2b), so the agent reads THIS
-        // document through Rubien's own tools. Reader windows always hold a
-        // persisted reference; `?? 0` is unreachable in practice.
+        // The first production provider construction: the agent is wrapped with
+        // Rubien's approval-gated MCP library channel, so it reads THIS document
+        // and can propose library updates through Rubien's own tools. Reader
+        // windows always hold a persisted reference; `?? 0` is unreachable in
+        // practice.
         // Build the live session from the user's Assistant settings via the shared
         // production factory (Phase 2c-5) — the PDF reader (Phase 3) reuses the same
         // path, so the wiring lives in one place. Each seeded value stays editable

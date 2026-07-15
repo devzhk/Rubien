@@ -4,6 +4,15 @@
 **Status:** v4 — two architecture corrections (user decisions 2026-07-05): (1) the in-app MCP content channel is the **native `rubien-cli mcp`** — the Node runtime dependency is **gone**; the npm `rubien-mcp-server` becomes the **out-of-app** integration path only; and (2) **Codex gains a real per-action approval channel via `codex app-server`** (server-initiated approval requests — the direct analogue of Claude's control protocol), so Codex is no longer "read-only, no prompt, forever." These supersede v3's Node-bundled-server and codex-`exec`-only framing. v3 established **Rubien persists no chat/session history** — it wraps the Claude Code / Codex CLIs and lets *them* own all session history (revising D5 + §4); v3 retained v2's soft-boundary model (control protocol for Claude, OS sandbox for Codex) from the containment/claude-code-chat/codex spikes; v2 superseded the hook-based v1 (codex-reviewed 2026-07-04; those findings still incorporated). **Phase 0 (un-sandbox) + Phase 1 (transcript renderer) + Phase 2a (Claude provider engine) + Phase 2b (native `rubien-cli mcp` server *and* the Claude-provider `--mcp-config` wiring — verified end-to-end with a real `claude` turn) are implemented and committed on branch `assistant-sidebar`; Phases 2c–4 remain forward-looking.**
 **Feature name:** Assistant (chat sidebar in the PDF reader and web reader)
 
+> **Phase 4 completion note (2026-07-14):** The native server now has a full
+> 27-tool mode (14 reads + 13 writes) and a restricted `--read-only` mode. The
+> in-app Claude and Codex providers use full mode: known reads remain silent,
+> known writes flow through the existing Ask/Auto approval policy, and unknown
+> Rubien tool names are denied fail-closed. Codex MCP approval was captured
+> against app-server 0.144 as `mcpServer/elicitation/request` with an
+> `action: accept|decline` response. Loading the user's other MCP servers remains
+> a separate, default-off next phase.
+
 ## 1. Summary
 
 Add a chat sidebar to both reader windows that lets the user converse with a coding-agent runtime — **Claude Code or Codex, spawned directly as subprocesses** — about the document they are reading. The agent runs on the user's existing subscription login (no API keys), gets the document as context, supports "ask about this selection," renders markdown + LaTeX, and reuses the runtimes' **built-in session persistence** for conversation context.

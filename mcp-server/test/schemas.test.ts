@@ -164,7 +164,7 @@ describe("zod schemas", () => {
 
   it("accepts PropertyDefinitionDTO with no options", () => {
     const def = {
-      id: "p1",
+      id: 1,
       name: "My Property",
       type: "string",
       options: [],
@@ -173,6 +173,18 @@ describe("zod schemas", () => {
       isVisible: true,
     };
     expect(() => PropertyDefinitionDTO.parse(def)).not.toThrow();
+  });
+
+  it("requires numeric property ids in property DTOs", () => {
+    expect(() => PropertyDefinitionDTO.parse({
+      id: "1",
+      name: "My Property",
+      type: "string",
+      options: [],
+      sortOrder: 0,
+      isDefault: false,
+      isVisible: true,
+    })).toThrow();
   });
 
   it("accepts a created-item CreateReferenceEnvelope with diagnostics omitted", () => {

@@ -271,7 +271,7 @@ export function registerReferenceTools(server: McpServer): void {
             "Property-cell edits keyed by property name or id: scalar/array = replace, {add/remove} = incremental multiSelect edit, null = clear. Example: {\"Status\": \"Reading\", \"Tags\": {\"add\": [\"12\"]}, \"7\": [\"ml\", \"nlp\"], \"Themes\": null}",
           ),
       },
-      annotations: { destructiveHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true },
     },
     async (args) => {
       const flags = flagsFromOptions({
@@ -320,7 +320,11 @@ export function registerReferenceTools(server: McpServer): void {
           .min(1)
           .describe("One or more reference IDs to delete"),
       },
-      annotations: { destructiveHint: true, idempotentHint: false },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+      },
     },
     // Always passes --force: the MCP client's permission layer is the user
     // confirmation point for destructive tools, not the CLI's TTY prompt.

@@ -230,12 +230,22 @@ final class ClaudeCodeProviderTests: XCTestCase {
 
     // MARK: Approval round-trip (control protocol)
 
-    func testApprovalAllowContinuesTurn() async throws {
+    func testRubienMCPApprovalAllowContinuesTurnAndMutatesExactlyOnce() async throws {
         let workspace = try makeWorkspace()
+        let libraryRoot = workspace.appendingPathComponent("library")
         try writeConfig([
             "deltas": ["Working"],
-            "approval": ["requestId": "req-xyz", "toolName": "Write", "toolUseId": "toolu_xyz",
-                         "input": ["file_path": "note.txt", "content": "hi"], "description": "note.txt"],
+            "approval": [
+                "requestId": "req-xyz",
+                "toolName": "mcp__rubien__rubien_create_reference",
+                "toolUseId": "toolu_xyz",
+                "input": ["title": "Claude Approved"],
+                "description": "Create reference Claude Approved",
+                "mutation": referenceMutation(
+                    title: "Claude Approved",
+                    libraryRoot: libraryRoot
+                ),
+            ],
             "afterApprovalText": "All done",
         ], into: workspace)
         let provider = ClaudeCodeProvider(executableOverride: fakeCLIPath)
@@ -252,20 +262,34 @@ final class ClaudeCodeProviderTests: XCTestCase {
             return collected
         }
 
-        XCTAssertTrue(events.contains(
-            .approvalRequested(id: "req-xyz", toolName: "Write", summary: "note.txt")))
+        XCTAssertTrue(events.contains(.approvalRequested(
+            id: "req-xyz",
+            toolName: "mcp__rubien__rubien_create_reference",
+            summary: "Create reference Claude Approved"
+        )))
         // The turn CONTINUED past the approval only because our control_response
         // reached the child's stdin.
         XCTAssertTrue(events.contains(.assistantMessageCompleted(text: "All done")))
         XCTAssertTrue(events.containsTurnCompleted)
+        XCTAssertEqual(try referenceTitles(libraryRoot: libraryRoot), ["Claude Approved"])
     }
 
-    func testApprovalDenyBlocksToolAndReportsDenial() async throws {
+    func testRubienMCPApprovalDenyBlocksToolWithoutMutation() async throws {
         let workspace = try makeWorkspace()
+        let libraryRoot = workspace.appendingPathComponent("library")
         try writeConfig([
             "deltas": ["Working"],
-            "approval": ["requestId": "req-deny", "toolName": "Write", "toolUseId": "toolu_deny",
-                         "input": ["file_path": "note.txt"], "description": "note.txt"],
+            "approval": [
+                "requestId": "req-deny",
+                "toolName": "mcp__rubien__rubien_create_reference",
+                "toolUseId": "toolu_deny",
+                "input": ["title": "Must Not Exist"],
+                "description": "Create reference Must Not Exist",
+                "mutation": referenceMutation(
+                    title: "Must Not Exist",
+                    libraryRoot: libraryRoot
+                ),
+            ],
             "afterApprovalText": "SHOULD NOT APPEAR",
         ], into: workspace)
         let provider = ClaudeCodeProvider(executableOverride: fakeCLIPath)
@@ -282,8 +306,12 @@ final class ClaudeCodeProviderTests: XCTestCase {
             return collected
         }
 
-        XCTAssertTrue(events.contains(.toolDenied(name: "Write", reason: "Permission denied")))
+        XCTAssertTrue(events.contains(.toolDenied(
+            name: "mcp__rubien__rubien_create_reference",
+            reason: "Permission denied"
+        )))
         XCTAssertFalse(events.contains(.assistantMessageCompleted(text: "SHOULD NOT APPEAR")))
+        XCTAssertEqual(try referenceTitles(libraryRoot: libraryRoot), [])
     }
 
     // MARK: Cancellation → process-group kill
@@ -473,6 +501,7 @@ final class ClaudeCodeProviderTests: XCTestCase {
             webAccess: false, codexSandbox: .readOnly, modelOverride: "claude-x",
             effortOverride: "high")
         let args = ClaudeCLIInvocation.arguments(for: request)
+        XCTAssertTrue(args.contains("--print"), "stream-json input requires print mode")
 
         XCTAssertTrue(args.containsPair("--input-format", "stream-json"))
         XCTAssertTrue(args.containsPair("--output-format", "stream-json"))
@@ -523,6 +552,42 @@ final class ClaudeCodeProviderTests: XCTestCase {
             .deletingLastPathComponent()
             .appendingPathComponent("Fixtures/fake-claude.py")
             .path
+    }
+
+    private var rubienCLIBinaryPath: String {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent(".build/debug/rubien-cli")
+            .path
+    }
+
+    private func referenceMutation(title: String, libraryRoot: URL) -> [String: Any] {
+        [
+            "executable": rubienCLIBinaryPath,
+            "arguments": ["add", "--title", title],
+            "environment": ["RUBIEN_LIBRARY_ROOT": libraryRoot.path],
+        ]
+    }
+
+    private func referenceTitles(libraryRoot: URL) throws -> [String] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: rubienCLIBinaryPath)
+        process.arguments = ["list"]
+        var environment = ProcessInfo.processInfo.environment
+        environment["RUBIEN_LIBRARY_ROOT"] = libraryRoot.path
+        process.environment = environment
+        process.standardInput = FileHandle.nullDevice
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardError = Pipe()
+        try process.run()
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+        let rows = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
+        return rows.compactMap { $0["title"] as? String }
     }
 
     private func makeWorkspace() throws -> URL {

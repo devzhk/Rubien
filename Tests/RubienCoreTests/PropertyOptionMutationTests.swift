@@ -117,12 +117,23 @@ final class PropertyOptionMutationTests: XCTestCase {
         let id = try makeRef(db)
         let prop = try db.createPropertyDefinition(name: "Stage", type: .singleSelect, options: [SelectOption(value: "draft", color: "#111111")])
         try db.setPropertyValue(referenceId: id, propertyId: prop.id!, value: "draft")
-        try db.updatePropertyOption(propertyId: prop.id!, option: "draft", newName: "final")
-        // Option renamed in the definition AND the reference's value migrated.
-        let refValue = try db.dbWriter.read {
-            try String.fetchOne($0, sql: "SELECT value FROM propertyValue WHERE referenceId = ? AND propertyId = ?", arguments: [id, prop.id!])
+        try db.dbWriter.write {
+            try $0.execute(
+                sql: "UPDATE propertyValue SET dateModified = ? WHERE referenceId = ? AND propertyId = ?",
+                arguments: [t1, id, prop.id!]
+            )
         }
-        XCTAssertEqual(refValue, "final")
+        try db.updatePropertyOption(propertyId: prop.id!, option: "draft", newName: "final", now: t2)
+        // Option renamed in the definition AND the reference's value migrated.
+        let migrated = try db.dbWriter.read { db in
+            try Row.fetchOne(
+                db,
+                sql: "SELECT value, dateModified FROM propertyValue WHERE referenceId = ? AND propertyId = ?",
+                arguments: [id, prop.id!]
+            )
+        }
+        XCTAssertEqual(migrated?["value"] as String?, "final")
+        XCTAssertEqual(migrated?["dateModified"] as Date?, t2)
         let updatedProp = try db.fetchPropertyDefinition(id: prop.id!)!
         XCTAssertEqual(updatedProp.options.map(\.value), ["final"])
     }
@@ -150,11 +161,22 @@ final class PropertyOptionMutationTests: XCTestCase {
         let id = try makeRef(db)
         let prop = try db.createPropertyDefinition(name: "Modality", type: .multiSelect, options: [SelectOption(value: "ml", color: "#111111"), SelectOption(value: "nlp", color: "#222222")])
         try db.setPropertyValue(referenceId: id, propertyId: prop.id!, value: PropertyValue.encodeMultiSelect(["ml", "nlp"]))
-        try db.updatePropertyOption(propertyId: prop.id!, option: "ml", newName: "machine-learning")
-        let stored = try db.dbWriter.read {
-            try String.fetchOne($0, sql: "SELECT value FROM propertyValue WHERE referenceId = ? AND propertyId = ?", arguments: [id, prop.id!])
+        try db.dbWriter.write {
+            try $0.execute(
+                sql: "UPDATE propertyValue SET dateModified = ? WHERE referenceId = ? AND propertyId = ?",
+                arguments: [t1, id, prop.id!]
+            )
         }
-        XCTAssertEqual(PropertyValue.decodeMultiSelect(stored ?? ""), ["machine-learning", "nlp"])
+        try db.updatePropertyOption(propertyId: prop.id!, option: "ml", newName: "machine-learning", now: t2)
+        let stored = try db.dbWriter.read { db in
+            try Row.fetchOne(
+                db,
+                sql: "SELECT value, dateModified FROM propertyValue WHERE referenceId = ? AND propertyId = ?",
+                arguments: [id, prop.id!]
+            )
+        }
+        XCTAssertEqual(PropertyValue.decodeMultiSelect(stored?["value"] as String? ?? ""), ["machine-learning", "nlp"])
+        XCTAssertEqual(stored?["dateModified"] as Date?, t2)
     }
 
     func testUpdateOptionRejectsDuplicateRenameTarget() throws {
@@ -219,9 +241,43 @@ final class PropertyOptionMutationTests: XCTestCase {
         // Status routes to the `readingStatus` Reference column, not a shadow
         // propertyValue row — set it through the real cell path.
         try db.applyReferenceEdit(id: id, edit: .init(properties: ["Status": .replace(.string("Skimmed"))]))
-        try db.updatePropertyOption(propertyId: status.id!, option: "Skimmed", newName: "Browsed")
+        try db.dbWriter.write {
+            try $0.execute(sql: "UPDATE reference SET dateModified = ? WHERE id = ?", arguments: [t1, id])
+        }
+        try db.updatePropertyOption(propertyId: status.id!, option: "Skimmed", newName: "Browsed", now: t2)
         // Status is a Reference column — the rename bulk-updates the column.
-        XCTAssertEqual(try db.dbWriter.read { try Reference.fetchOne($0, id: id)!.readingStatus }, "Browsed")
+        let updated = try db.dbWriter.read { try Reference.fetchOne($0, id: id)! }
+        XCTAssertEqual(updated.readingStatus, "Browsed")
+        XCTAssertEqual(updated.dateModified, t2)
+    }
+
+    func testUpdateOptionNoOpDoesNotStampDefinitionOrValues() throws {
+        let db = try makeDB()
+        let id = try makeRef(db)
+        let prop = try db.createPropertyDefinition(
+            name: "Stage", type: .singleSelect,
+            options: [SelectOption(value: "draft", color: "#111111")], now: t1)
+        try db.setPropertyValue(referenceId: id, propertyId: prop.id!, value: "draft")
+        try db.dbWriter.write {
+            try $0.execute(
+                sql: "UPDATE propertyValue SET dateModified = ? WHERE referenceId = ? AND propertyId = ?",
+                arguments: [t1, id, prop.id!]
+            )
+        }
+
+        let result = try db.updatePropertyOptionReportingChange(
+            propertyId: prop.id!, option: "draft", newName: "draft", color: "#111111", now: t2)
+
+        XCTAssertFalse(result.didChange)
+        XCTAssertEqual(result.definition.dateModified, t1)
+        let valueStamp = try db.dbWriter.read {
+            try Date.fetchOne(
+                $0,
+                sql: "SELECT dateModified FROM propertyValue WHERE referenceId = ? AND propertyId = ?",
+                arguments: [id, prop.id!]
+            )
+        }
+        XCTAssertEqual(valueStamp, t1)
     }
 
     // MARK: - Tags recolor / rename

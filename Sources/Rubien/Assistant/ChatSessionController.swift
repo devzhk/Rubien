@@ -1,6 +1,7 @@
 #if os(macOS)
 import Foundation
 import Combine
+import RubienCore
 
 // MARK: - Renderer seam
 //
@@ -1015,9 +1016,13 @@ final class ChatSessionController: ObservableObject {
         case .toolUseCompleted(let name):
             renderToolChip(ToolChipPayload(name: name, detail: popToolDetail(name), status: .completed))
         case .approvalRequested(let id, let toolName, let summary):
-            // Reads/search run silently even in "Ask" — the D6 soft boundary (§3)
-            // only prompts for writes/shell. Auto (autoApprove) accepts everything.
-            if autoApprove || Self.isSilentReadTool(toolName) {
+            // The Rubien catalog is exact-name classified. Known reads stay
+            // silent; known writes card in Ask and auto-accept in Auto. Any
+            // future/unclassified Rubien tool is denied even in Auto so a newly
+            // added mutation can never inherit a permissive prefix rule.
+            if Self.isUnknownRubienTool(toolName) {
+                provider.respondToApproval(id: id, .deny)
+            } else if autoApprove || Self.isSilentReadTool(toolName) {
                 provider.respondToApproval(id: id, .allowForConversation)  // no card
             } else {
                 pendingApprovals.append(PendingApproval(id: id, toolName: toolName, summary: summary))
@@ -1098,19 +1103,39 @@ final class ChatSessionController: ObservableObject {
         turnTask = nil
     }
 
-    /// Claude's read/search builtins that are safe to run without a prompt (the D6
-    /// soft boundary, §3). Every `mcp__rubien__*` tool is also silent — the content
-    /// channel is a `--read-only` server — handled by the prefix check below.
+    /// Claude's read/search builtins that are safe to run without a prompt.
     private static let silentReadBuiltins: Set<String> = [
         "ToolSearch", "Read", "Glob", "Grep", "LS", "NotebookRead", "WebFetch", "WebSearch",
     ]
 
-    /// Whether a tool may run without an approval card even in "Ask" mode: the Rubien
-    /// read-only content channel (`mcp__rubien__*`) and Claude's read/search builtins.
-    /// Writes / shell (`Write`, `Edit`, `Bash`, …) are absent, so they still prompt.
+    /// Whether a tool may run without an approval card even in "Ask" mode.
     static func isSilentReadTool(_ toolName: String) -> Bool {
-        toolName.hasPrefix(ReferenceAttribution.claudeToolPrefix)
-            || silentReadBuiltins.contains(toolName)
+        if let rubienName = bareRubienToolName(toolName) {
+            return RubienMCPToolPolicy.access(for: rubienName) == .read
+        }
+        return silentReadBuiltins.contains(toolName)
+    }
+
+    /// A qualified Rubien tool that is absent from the canonical policy. This is
+    /// deliberately separate from `isSilentReadTool`: Auto mode must deny it,
+    /// not merely turn it into a card or auto-approve it.
+    static func isUnknownRubienTool(_ toolName: String) -> Bool {
+        guard let bare = bareRubienToolName(toolName) else { return false }
+        return RubienMCPToolPolicy.access(for: bare) == nil
+    }
+
+    /// Normalize Claude (`mcp__rubien__tool`) and Codex (`rubien/tool`) display
+    /// names. Bare canonical names are accepted for protocol compatibility.
+    private static func bareRubienToolName(_ toolName: String) -> String? {
+        if toolName.hasPrefix(ReferenceAttribution.claudeToolPrefix) {
+            return String(toolName.dropFirst(ReferenceAttribution.claudeToolPrefix.count))
+        }
+        let codexPrefix = "\(ReferenceAttribution.serverName)/"
+        if toolName.hasPrefix(codexPrefix) {
+            return String(toolName.dropFirst(codexPrefix.count))
+        }
+        if toolName.hasPrefix("rubien_") { return toolName }
+        return nil
     }
 
     /// Pop the oldest remembered detail for a tool name (FIFO — events carry no id).

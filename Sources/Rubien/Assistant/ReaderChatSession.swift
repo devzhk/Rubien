@@ -7,7 +7,7 @@ import RubienCore
 // The one place a reader window builds its live assistant session from the current
 // Assistant settings (Phase 2c-5). Both readers go through here — the web reader
 // today, the PDF reader in Phase 3 — so the production wiring (Claude + the bundled
-// read-only MCP content channel + the binary-path override + working folder + the
+// approval-gated MCP library channel + the binary-path override + working folder + the
 // model/effort/web/approval defaults) lives in exactly one spot and can't drift.
 //
 // Tests and the DEBUG harness deliberately DON'T use this: they construct
@@ -24,8 +24,8 @@ enum ReaderChatSession {
         transcript: ChatTranscriptController,
         database: AppDatabase = .shared
     ) -> ChatSessionController {
-        // The read-only MCP content channel (Phase 2b) is shared by both backends, so
-        // whichever runtime is active reads THIS document through Rubien's own tools.
+        // The MCP library channel is shared by both backends, so whichever runtime is
+        // active reads and, with approval, updates the live Rubien library.
         let contentChannel = MCPContentChannel.resolveBundled()
 
         // Builds a fresh provider for a backend kind — used at construction and by

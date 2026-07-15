@@ -208,7 +208,7 @@ private func uniqueBibTeXKeys(for refs: [Reference]) -> [String] {
 // MARK: - Reference JSON DTO
 
 struct CustomPropertyValueDTO: Encodable {
-    let propertyId: String
+    let propertyId: Int64
     let name: String
     let type: String
     let value: String
@@ -286,7 +286,7 @@ struct ReferenceDTO: Encodable {
         self.customProperties = customDefs.compactMap { def -> CustomPropertyValueDTO? in
             guard let propId = def.id, let value = refValues[propId] else { return nil }
             return CustomPropertyValueDTO(
-                propertyId: String(propId),
+                propertyId: propId,
                 name: def.name,
                 type: def.type.rawValue,
                 value: value
@@ -309,7 +309,7 @@ struct PropertyOptionDTO: Encodable {
 }
 
 struct PropertyDefinitionDTO: Encodable {
-    let id: String
+    let id: Int64
     let name: String
     let type: String
     let options: [PropertyOptionDTO]
@@ -322,8 +322,14 @@ struct PropertyDefinitionDTO: Encodable {
     /// `makePropertyDefinitionDTO` / `makePropertyDefinitionDTOs` are the
     /// supported entry — they fetch tags). Required-arg signature prevents
     /// silently emitting an empty options array for the Tags property.
-    init(from def: PropertyDefinition, tags: [Tag]) {
-        self.id = def.id.map(String.init) ?? ""
+    init(from def: PropertyDefinition, tags: [Tag]) throws {
+        // Every definition exposed by the CLI has already been persisted. Keep
+        // the wire contract numeric; a missing rowid is an internal invariant
+        // violation rather than something to encode as a magic empty string.
+        guard let id = def.id else {
+            throw ValidationError("Cannot encode an unpersisted property definition")
+        }
+        self.id = id
         self.name = def.name
         self.type = def.type.rawValue
         if def.isTags {
@@ -347,7 +353,7 @@ struct PropertyDefinitionDTO: Encodable {
 /// the definition is the built-in Tags property so its options inline.
 func makePropertyDefinitionDTO(from def: PropertyDefinition) throws -> PropertyDefinitionDTO {
     let tags: [Tag] = def.isTags ? try AppDatabase.shared.fetchAllTags() : []
-    return PropertyDefinitionDTO(from: def, tags: tags)
+    return try PropertyDefinitionDTO(from: def, tags: tags)
 }
 
 /// Build DTOs for a list of definitions. Fetches tags exactly once when any
@@ -355,7 +361,7 @@ func makePropertyDefinitionDTO(from def: PropertyDefinition) throws -> PropertyD
 func makePropertyDefinitionDTOs(from defs: [PropertyDefinition]) throws -> [PropertyDefinitionDTO] {
     let needsTags = defs.contains { $0.isTags }
     let tags: [Tag] = needsTags ? try AppDatabase.shared.fetchAllTags() : []
-    return defs.map { PropertyDefinitionDTO(from: $0, tags: tags) }
+    return try defs.map { try PropertyDefinitionDTO(from: $0, tags: tags) }
 }
 
 struct CitationBibliographyOutput: Encodable {
@@ -1196,19 +1202,18 @@ struct Properties: ParsableCommand {
                 printJSONError("--options only applies to singleSelect or multiSelect types")
                 throw ExitCode.failure
             }
-            let existing = try AppDatabase.shared.fetchAllPropertyDefinitions()
-            let maxOrder = existing.map(\.sortOrder).max() ?? 0
-            var prop = PropertyDefinition(
-                name: n,
-                type: ptype,
-                options: parsedOptions,
-                sortOrder: maxOrder + 1,
-                isDefault: false,
-                isVisible: true
-            )
-            try AppDatabase.shared.savePropertyDefinition(&prop)
-            notifyLibraryChanged()
-            printJSON(try makePropertyDefinitionDTO(from: prop))
+            do {
+                let prop = try AppDatabase.shared.createPropertyDefinition(
+                    name: n,
+                    type: ptype,
+                    options: parsedOptions
+                )
+                notifyLibraryChanged()
+                printJSON(try makePropertyDefinitionDTO(from: prop))
+            } catch let error as PropertyMutationError {
+                printJSONError(describePropertyMutationError(error))
+                throw ExitCode.failure
+            }
             return
         }
 
@@ -1339,7 +1344,7 @@ struct Properties: ParsableCommand {
             let dtos: [CustomPropertyValueDTO] = values.compactMap { v in
                 guard let val = v.value, let def = defsById[v.propertyId] else { return nil }
                 return CustomPropertyValueDTO(
-                    propertyId: String(v.propertyId),
+                    propertyId: v.propertyId,
                     name: def.name,
                     type: def.type.rawValue,
                     value: val

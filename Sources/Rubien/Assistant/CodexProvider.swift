@@ -149,7 +149,13 @@ enum CodexInvocation {
             // server name — the same one History attribution matches against.
             let server = "mcp_servers.\(MCPContentChannel.serverName)"
             args += ["-c", "\(server).command=\(cli)"]
-            args += ["-c", #"\#(server).args=["mcp","--read-only"]"#]
+            args += ["-c", #"\#(server).args=["mcp"]"#]
+            // The native catalog annotates all 14 reads and 13 writes. Prompt
+            // for every non-read tool, and allow the two long intake routes to
+            // use their own five-minute child timeout without Codex cutting the
+            // outer MCP call off at its 60-second default.
+            args += ["-c", "\(server).default_tools_approval_mode=writes"]
+            args += ["-c", "\(server).tool_timeout_sec=310"]
             if let root = libraryRoot, !root.isEmpty {
                 args += ["-c", "\(server).env.RUBIEN_LIBRARY_ROOT=\(root)"]
             }
@@ -446,7 +452,11 @@ private actor CodexAppServerConnection {
               let srv = server
         else { return }
         srv.process.writeLine(CodexAppServerProtocol.approvalResponse(
-            id: pendingApproval.id, decision, available: pendingApproval.availableDecisions))
+            id: pendingApproval.id,
+            decision,
+            method: pendingApproval.method,
+            available: pendingApproval.availableDecisions
+        ))
     }
 
     func interruptCurrent() {
@@ -723,7 +733,11 @@ private actor CodexAppServerConnection {
             // No live turn to ask (late/stray approval) — decline so nothing runs
             // un-reviewed and the server isn't left waiting.
             srv.process.writeLine(CodexAppServerProtocol.approvalResponse(
-                id: id, .deny, available: pendingApproval.availableDecisions))
+                id: id,
+                .deny,
+                method: pendingApproval.method,
+                available: pendingApproval.availableDecisions
+            ))
             return
         }
         active.pendingApprovals[id.uiString] = pendingApproval

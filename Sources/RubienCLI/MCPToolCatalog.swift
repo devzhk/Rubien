@@ -1,20 +1,22 @@
 import Foundation
+import RubienCore
 #if canImport(CoreFoundation)
 import CoreFoundation
 #endif
 
 // MARK: - Tool catalog
 //
-// The read-only tool set exposed by `rubien-cli mcp`. Names, descriptions, and
+// The native tool definitions exposed by `rubien-cli mcp`. Names, descriptions, and
 // input schemas mirror the `rubien-mcp-server` npm package
 // (`mcp-server/src/tools/*.ts`) so the two servers are drop-in interchangeable;
 // keep them in lockstep. Each tool maps to the identical `rubien-cli`
 // subcommand invocation the npm proxy uses — cross-argument validation (e.g.
-// read_text's pages/sections and pages/start exclusivity, its maxChars bounds)
-// is left to the CLI, the single source of truth, rather than duplicated here.
+// read_text's pages/sections and pages/start exclusivity) stays in the CLI, the
+// single source of truth. JSON-schema constraints are also enforced at the MCP
+// boundary before a child process is launched.
 
 enum MCPToolCatalog {
-    static let readOnlyTools: [MCPTool] = [
+    private static let documentReadTools: [MCPTool] = [
         searchTool,
         listTool,
         getTool,
@@ -24,6 +26,19 @@ enum MCPToolCatalog {
         readAnnotationsTool,
         grepTextTool,
     ]
+
+    static let allTools: [MCPTool] = {
+        let tools = documentReadTools
+            + MCPAdditionalToolCatalog.readTools
+            + MCPAdditionalToolCatalog.writeTools
+        precondition(
+            Set(tools.map(\.name)) == RubienMCPToolPolicy.allToolNames,
+            "Native MCP catalog must exactly match RubienMCPToolPolicy"
+        )
+        return tools
+    }()
+
+    static let readOnlyTools = allTools.filter { $0.access == .read }
 
     // MARK: references
 
@@ -61,12 +76,13 @@ enum MCPToolCatalog {
 
     private static let listTool = MCPTool(
         name: "rubien_list_references",
-        description: "List references with filters and sorting. Returns ReferenceDTO[]. Use this for 'most recent', 'by author', 'by year range' queries.",
+        description: "List references with filters and sorting, or run a saved view. Returns ReferenceDTO[]. Use this for 'most recent', 'by author', 'by year range' queries. Pass `view` (a saved-view id from rubien_list_views) to run that view's persisted filter/sort config instead — `view` is mutually exclusive with the inline filter/sort params (limit/offset still apply).",
         inputSchema: [
             "type": "object",
             "properties": [
                 "limit": ["type": "integer", "minimum": 0, "description": "Maximum results (0 = all)"],
                 "offset": ["type": "integer", "minimum": 0, "description": "Skip first N"],
+                "view": ["type": "integer", "description": "Saved view ID — rows filtered/sorted by that view. Mutually exclusive with the inline filter/sort params below. Discover ids via rubien_list_views."],
                 "tag": ["type": "integer", "description": "Filter by tag ID"],
                 "author": ["type": "string", "description": "Filter by author name (fuzzy)"],
                 "yearFrom": ["type": "integer"],
@@ -85,6 +101,7 @@ enum MCPToolCatalog {
             var argv = ["list"]
             mcpAppendInt(&argv, "--limit", try mcpInt(args, "limit"))
             mcpAppendInt(&argv, "--offset", try mcpInt(args, "offset"))
+            mcpAppendInt(&argv, "--view", try mcpInt(args, "view"))
             mcpAppendInt(&argv, "--tag", try mcpInt(args, "tag"))
             mcpAppendString(&argv, "--author", try mcpString(args, "author"))
             mcpAppendInt(&argv, "--year-from", try mcpInt(args, "yearFrom"))
@@ -309,24 +326,44 @@ enum MCPToolCatalog {
 /// Apple platforms `NSNumber(1) is Bool` returns `true` (the lenient bridge).
 /// The only reliable test is the CFBoolean type id — JSON `true`/`false` are
 /// backed by CFBoolean, numbers by CFNumber.
-private func mcpIsJSONBool(_ value: Any) -> Bool {
+func mcpIsJSONBool(_ value: Any) -> Bool {
     guard let number = value as? NSNumber else { return false }
     return CFGetTypeID(number) == CFBooleanGetTypeID()
 }
 
-private func mcpInt(_ args: [String: Any], _ key: String) throws -> Int? {
-    guard let value = args[key], !(value is NSNull) else { return nil }
-    guard !mcpIsJSONBool(value), let number = value as? NSNumber else {
-        throw MCPToolError.invalidArguments("`\(key)` must be an integer")
+/// Decode a JSON integer without routing integer-backed `NSNumber` values
+/// through `Double`. The latter rounds valid Int64 IDs above 2^53 and could
+/// redirect a write to an adjacent row. Float-backed integral JSON (for
+/// example `1.0`) remains accepted, matching Zod's `number().int()` behavior.
+func mcpExactInt(_ value: Any) -> Int? {
+    guard !mcpIsJSONBool(value), let number = value as? NSNumber else { return nil }
+    #if canImport(CoreFoundation)
+    if !CFNumberIsFloatType(number) {
+        let exact = number.int64Value
+        guard NSNumber(value: exact) == number else { return nil }
+        return Int(exactly: exact)
     }
-    // Reject non-integral numbers (Zod `.int()`): a JSON `1.5` would truncate.
-    guard number.doubleValue.rounded() == number.doubleValue else {
-        throw MCPToolError.invalidArguments("`\(key)` must be an integer")
-    }
-    return number.intValue
+    #endif
+    let floating = number.doubleValue
+    // Once a JSON literal is float-backed, values outside the IEEE-754 safe
+    // integer range may already have rounded to a neighboring ID. Reject them
+    // instead of pretending the rounded Double is the caller's exact integer.
+    let maximumSafeFloatingInteger = 9_007_199_254_740_991.0
+    guard floating.isFinite,
+          floating.rounded() == floating,
+          abs(floating) <= maximumSafeFloatingInteger else { return nil }
+    return Int(exactly: floating)
 }
 
-private func mcpDouble(_ args: [String: Any], _ key: String) throws -> Double? {
+func mcpInt(_ args: [String: Any], _ key: String) throws -> Int? {
+    guard let value = args[key], !(value is NSNull) else { return nil }
+    guard let integer = mcpExactInt(value) else {
+        throw MCPToolError.invalidArguments("`\(key)` must be an integer")
+    }
+    return integer
+}
+
+func mcpDouble(_ args: [String: Any], _ key: String) throws -> Double? {
     guard let value = args[key], !(value is NSNull) else { return nil }
     guard !mcpIsJSONBool(value), let number = value as? NSNumber else {
         throw MCPToolError.invalidArguments("`\(key)` must be a number")
@@ -334,7 +371,7 @@ private func mcpDouble(_ args: [String: Any], _ key: String) throws -> Double? {
     return number.doubleValue
 }
 
-private func mcpString(_ args: [String: Any], _ key: String) throws -> String? {
+func mcpString(_ args: [String: Any], _ key: String) throws -> String? {
     guard let value = args[key], !(value is NSNull) else { return nil }
     guard let string = value as? String else {
         throw MCPToolError.invalidArguments("`\(key)` must be a string")
@@ -342,7 +379,7 @@ private func mcpString(_ args: [String: Any], _ key: String) throws -> String? {
     return string
 }
 
-private func mcpBool(_ args: [String: Any], _ key: String) throws -> Bool? {
+func mcpBool(_ args: [String: Any], _ key: String) throws -> Bool? {
     guard let value = args[key], !(value is NSNull) else { return nil }
     guard mcpIsJSONBool(value), let flag = value as? Bool else {
         throw MCPToolError.invalidArguments("`\(key)` must be a boolean")
@@ -350,7 +387,7 @@ private func mcpBool(_ args: [String: Any], _ key: String) throws -> Bool? {
     return flag
 }
 
-private func mcpStringArray(_ args: [String: Any], _ key: String) throws -> [String]? {
+func mcpStringArray(_ args: [String: Any], _ key: String) throws -> [String]? {
     guard let value = args[key], !(value is NSNull) else { return nil }
     guard let array = value as? [String] else {
         throw MCPToolError.invalidArguments("`\(key)` must be an array of strings")
@@ -358,15 +395,15 @@ private func mcpStringArray(_ args: [String: Any], _ key: String) throws -> [Str
     return array
 }
 
-private func mcpAppendInt(_ argv: inout [String], _ flag: String, _ value: Int?) {
+func mcpAppendInt(_ argv: inout [String], _ flag: String, _ value: Int?) {
     if let value { argv += [flag, String(value)] }
 }
 
-private func mcpAppendString(_ argv: inout [String], _ flag: String, _ value: String?) {
+func mcpAppendString(_ argv: inout [String], _ flag: String, _ value: String?) {
     if let value { argv += [flag, value] }
 }
 
-private func mcpAppendFlag(_ argv: inout [String], _ flag: String, _ value: Bool?) {
+func mcpAppendFlag(_ argv: inout [String], _ flag: String, _ value: Bool?) {
     if value == true { argv.append(flag) }
 }
 

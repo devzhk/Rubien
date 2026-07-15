@@ -61,7 +61,7 @@ Linux needs system deps first — see [Linux CLI](../README.md#linux-cli). For d
 | `pdf page-image` | Render a PDF page as a base64-encoded JPEG/PNG |
 | `pdf status` | Show PDF cache + upload-queue state for a reference (JSON only) |
 | `pdf download` | Fetch the open-access PDF for a reference and attach it (skip-if-attached; `--force` to replace) |
-| `mcp` | Run a Model Context Protocol server over stdio, exposing the read APIs as MCP tools (the in-app Assistant content channel; a Node-free replacement for `rubien-mcp-server`). Mac **and** Linux. |
+| `mcp` | Run a Model Context Protocol server over stdio, exposing the full 27-tool library catalog by default or its 14 read-only tools with `--read-only` (the in-app Assistant channel; a Node-free replacement for `rubien-mcp-server`). Mac **and** Linux. |
 | `sync status` | Inspect iCloud sync state (JSON only). **Mac-only** — Linux builds omit this subcommand entirely. |
 
 ---
@@ -421,7 +421,7 @@ Listing (default): JSON array of `PropertyDefinition` objects. For the Tags prop
 ```json
 [
   {
-    "id": "3",
+    "id": 3,
     "name": "Tags",
     "type": "multiSelect",
     "options": [
@@ -434,7 +434,7 @@ Listing (default): JSON array of `PropertyDefinition` objects. For the Tags prop
     "isVisible": true
   },
   {
-    "id": "7",
+    "id": 7,
     "name": "modality",
     "type": "multiSelect",
     "options": [
@@ -456,8 +456,8 @@ Listing with `--reference <id>`: JSON array of values on that reference (Tags ap
 
 ```json
 [
-  { "propertyId": "1", "name": "Status", "type": "singleSelect", "value": "doing" },
-  { "propertyId": "3", "name": "Tags",   "type": "multiSelect",  "value": "[\"1\",\"2\"]" }
+  { "propertyId": 1, "name": "Status", "type": "singleSelect", "value": "doing" },
+  { "propertyId": 3, "name": "Tags",   "type": "multiSelect",  "value": "[\"1\",\"2\"]" }
 ]
 ```
 
@@ -1007,16 +1007,19 @@ for the next app launch.
 ## mcp
 
 Run a **Model Context Protocol (MCP) server over stdio**, exposing Rubien's
-read APIs as MCP tools. This is the in-app Assistant sidebar's *content
-channel* — the coding-agent runtime (Claude Code / Codex) connects to it and
-reads the document under discussion through these tools — and a **Node-free**
+full library API as MCP tools. This is the in-app Assistant sidebar's library
+channel — the coding-agent runtime (Claude Code / Codex) connects to it to
+read and, after approval, update the library — and a **Node-free**
 replacement for the `rubien-mcp-server` npm package: the tool names, input
 schemas, and outputs mirror it exactly, so the two are drop-in interchangeable.
 Available on macOS **and** Linux.
 
 ```bash
-# Wire into Claude Code (the app does this automatically via --mcp-config):
-claude mcp add rubien -- rubien-cli mcp --read-only
+# Full catalog (the app does this automatically and cards writes):
+claude mcp add rubien -- rubien-cli mcp
+
+# Explicit read-only integration:
+claude mcp add rubien-readonly -- rubien-cli mcp --read-only
 
 # Or drive it by hand — newline-delimited JSON-RPC 2.0 on stdio:
 printf '%s\n' \
@@ -1028,7 +1031,7 @@ printf '%s\n' \
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `--read-only` | Flag | (implied) | Register only read-only tools. Currently the only supported mode — writes are not yet exposed over MCP, so the flag is accepted for forward-compatibility and the server is read-only with or without it. |
+| `--read-only` | Flag | off | Register only the 14 read-only tools. Without the flag, register all 27 tools (14 reads + 13 writes). |
 
 **Protocol.** Speaks JSON-RPC 2.0 over stdio (newline-delimited messages, one
 per line): `initialize` (echoes the client's `protocolVersion`, advertises the
@@ -1037,30 +1040,40 @@ Notifications (`notifications/initialized`, etc.) get no response. Unknown
 methods return error `-32601`; unknown tools return `-32602`. Diagnostics go to
 stderr; stdout carries only protocol messages.
 
-**Tools** (all `readOnlyHint: true`) — the read-only tools, each mapping to
-the identical subcommand documented above:
+**Tools.** The native catalog mirrors the npm server's 27-tool
+`{operation}_{target}` grid. Read tools carry `readOnlyHint: true`; writes carry
+`readOnlyHint: false`; destructive mutations also carry
+`destructiveHint: true`. `--read-only` filters this catalog to the 14 reads.
 
-| Tool | Backing subcommand |
+| Surface | Tools |
 |---|---|
-| `rubien_search_references` | `search` |
-| `rubien_list_references` | `list` |
-| `rubien_get_reference` | `get` |
-| `rubien_get_pdf_info` | `pdf info` |
-| `rubien_render_pdf_page` | `pdf page-image` (returned as an MCP `image` content block + a text metadata block) |
-| `rubien_read_text` | `read text` |
-| `rubien_read_annotations` | `read annotations` |
-| `rubien_grep_text` | `grep` |
+| References | `rubien_search_references`, `rubien_list_references`, `rubien_get_reference`, `rubien_create_reference`, `rubien_update_reference`, `rubien_delete_reference` |
+| Properties + options | `rubien_list_properties`, `rubien_create_property`, `rubien_update_property`, `rubien_delete_property`, `rubien_create_option`, `rubien_update_option`, `rubien_delete_option` |
+| Saved views | `rubien_list_views`, `rubien_create_view`, `rubien_update_view`, `rubien_delete_view` |
+| Citations + export | `rubien_cite`, `rubien_list_styles`, `rubien_export` |
+| PDFs + reading | `rubien_get_pdf_info`, `rubien_render_pdf_page`, `rubien_download_pdf`, `rubien_read_text`, `rubien_read_annotations`, `rubien_grep_text` |
+| Sync | `rubien_get_sync_status` (the backing CLI command is Mac-only; a Linux call returns an in-band error) |
+
+The two potentially long intake calls, `rubien_create_reference` and
+`rubien_download_pdf`, have a five-minute child timeout; other calls retain the
+60-second default. Advertised JSON-schema types, enums, bounds, required fields,
+and unknown-field rules are enforced before the child launches. Captured stdout
+and stderr are each capped at 32 MiB. `rubien_render_pdf_page` returns an MCP
+`image` content block plus text metadata; BibTeX/RIS exports use the npm-compatible
+`{format,text}` envelope.
 
 **Errors.** A tool whose backing command exits non-zero (e.g. a missing
 reference, a reference with no attached PDF) returns a normal result with
-`isError: true` and the CLI's error message as text — not a protocol error —
-so the agent sees it in-band. Missing/invalid arguments surface the same way.
+`isError: true` and the CLI's complete stderr payload as text — including every
+field in a structured JSON error envelope — not a protocol error, so the agent
+sees it in-band. Missing/invalid arguments surface the same way.
 
 **Library selection.** Like every other subcommand, the server resolves the
 library via `RUBIEN_LIBRARY_ROOT` / the standard storage-root order; the
 running app sets `RUBIEN_LIBRARY_ROOT` so the server reads the app's live
 library. Each `tools/call` runs the corresponding `rubien-cli` subcommand as a
-child process, so tool output is byte-identical to that subcommand.
+child process. JSON outputs pass through directly; image rendering and text
+exports are shaped into the same MCP content envelopes as the npm server.
 
 ---
 
@@ -1145,8 +1158,8 @@ All commands that return references use this structure:
   "lastReadAt": "2026-05-12T15:30:00.000Z",
   "readCount": 3,
   "customProperties": [
-    {"propertyId": "17", "name": "Status", "type": "singleSelect", "value": "doing"},
-    {"propertyId": "18", "name": "Tags2",  "type": "multiSelect",  "value": "[\"ml\",\"nlp\"]"}
+    {"propertyId": 17, "name": "Status", "type": "singleSelect", "value": "doing"},
+    {"propertyId": 18, "name": "Tags2",  "type": "multiSelect",  "value": "[\"ml\",\"nlp\"]"}
   ]
 }
 ```

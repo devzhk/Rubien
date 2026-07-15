@@ -20,10 +20,9 @@ import RubienCore
 // a second turn is ever started while one is still live, the engine cancels and
 // finalizes the prior one rather than silently orphaning its process (A2).
 //
-// Extension points (deliberately NOT wired here — later phases):
-//   • MCP content channel (`--mcp-config`/`--strict-mcp-config`) — Phase 2b. See
-//     `ClaudeTurnEngine.buildArguments`, where the flag would slot in.
-//   • Node ≥20 / MCP health in `isAvailable()` — Phase 2b.
+// The full native MCP library channel is wired per turn through
+// `--mcp-config`/`--strict-mcp-config`; availability still probes only the
+// provider binary, while channel resolvability is handled by `MCPContentChannel`.
 
 final class ClaudeCodeProvider: AgentProvider {
     let kind: AgentProviderKind = .claude
@@ -33,8 +32,8 @@ final class ClaudeCodeProvider: AgentProvider {
     /// CLI) and, in production, by the Settings "binary path" override (a later
     /// phase wires `RubienPreferences` here).
     private let executableOverride: String?
-    /// The read-only MCP content channel (Phase 2b) — the bundled `rubien-cli mcp`
-    /// server pointed at the app's library, attached via `--mcp-config`. nil ⇒ the
+    /// The native MCP library channel — the bundled `rubien-cli mcp` server pointed
+    /// at the app's library, attached via `--mcp-config`. nil ⇒ the
     /// turn runs without document tools (the channel couldn't be resolved).
     private let contentChannel: MCPContentChannel?
 
@@ -500,9 +499,10 @@ private actor ClaudeTurnEngine {
 enum ClaudeCLIInvocation {
 
     /// The per-turn argv (D3/§4.2). `mcpConfig`, when present, is the inline
-    /// `--mcp-config` JSON for the read-only content channel (Phase 2b).
+    /// `--mcp-config` JSON for the native Rubien library channel.
     static func arguments(for request: AgentTurnRequest, mcpConfig: String? = nil) -> [String] {
         var args = [
+            "--print",
             "--input-format", "stream-json",
             "--output-format", "stream-json",
             "--verbose",
@@ -534,8 +534,8 @@ enum ClaudeCLIInvocation {
             // bypass (D6).
             args += ["--disallowedTools", "WebFetch WebSearch"]
         }
-        // The read-only MCP content channel (Phase 2b): an inline `--mcp-config`
-        // naming the bundled `rubien-cli mcp --read-only` server, plus
+        // The native MCP library channel: an inline `--mcp-config` naming the
+        // bundled full `rubien-cli mcp` server, plus
         // `--strict-mcp-config` so ONLY Rubien's server loads (no ambient MCP —
         // pairs with `--setting-sources ''`). Absent when the channel couldn't be
         // resolved; the turn still runs, just without document tools.

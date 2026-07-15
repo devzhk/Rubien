@@ -497,9 +497,12 @@ final class RubienCLITests: XCTestCase {
         // Unified create-reference envelope: {items: [{reference: {...}}], ...}.
         let root = (obj["items"] as? [[String: Any]])?.first ?? obj
         let container = (root["reference"] as? [String: Any]) ?? root
-        if let s = container["id"] as? String { return Int64(s) }
-        if let i = container["id"] as? Int64 { return i }
-        if let i = container["id"] as? Int { return Int64(i) }
+        return jsonInt64(container["id"])
+    }
+
+    private func jsonInt64(_ value: Any?) -> Int64? {
+        if let number = value as? NSNumber { return number.int64Value }
+        if let string = value as? String { return Int64(string) }
         return nil
     }
 
@@ -507,9 +510,11 @@ final class RubienCLITests: XCTestCase {
         try skipIfBinaryMissing()
         let result = try runCLI(["properties"])
         XCTAssertEqual(result.exitCode, 0)
-        let arr = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [Any]
+        let arr = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [[String: Any]]
         XCTAssertNotNil(arr, "properties should emit a JSON array")
         XCTAssertGreaterThan(arr?.count ?? 0, 0, "Seeded default properties should appear")
+        XCTAssertTrue(arr?.first?["id"] is NSNumber, "property ids must be JSON integers")
+        XCTAssertFalse(arr?.first?["id"] is String, "property ids must not be stringified")
     }
 
     func testPropertiesListVisibleIsSubset() throws {
@@ -624,7 +629,7 @@ final class RubienCLITests: XCTestCase {
         let listed = try runCLI(["properties", "--reference", String(refId)])
         XCTAssertEqual(listed.exitCode, 0)
         let arr = try JSONSerialization.jsonObject(with: Data(listed.stdout.utf8)) as? [[String: Any]] ?? []
-        XCTAssertTrue(arr.contains { ($0["value"] as? String) == "hello" && ($0["propertyId"] as? String) == String(propId) })
+        XCTAssertTrue(arr.contains { ($0["value"] as? String) == "hello" && jsonInt64($0["propertyId"]) == propId })
 
         // Verify get includes customProperties
         let getResult = try runCLI(["get", String(refId)])
@@ -638,7 +643,7 @@ final class RubienCLITests: XCTestCase {
         XCTAssertEqual(clearResult.exitCode, 0, "stderr=\(clearResult.stderr)")
         let afterClear = try runCLI(["properties", "--reference", String(refId)])
         let afterArr = try JSONSerialization.jsonObject(with: Data(afterClear.stdout.utf8)) as? [[String: Any]] ?? []
-        XCTAssertFalse(afterArr.contains { ($0["propertyId"] as? String) == String(propId) })
+        XCTAssertFalse(afterArr.contains { jsonInt64($0["propertyId"]) == propId })
     }
 
     func testDeleteDefaultPropertyIsRefused() throws {
@@ -646,17 +651,17 @@ final class RubienCLITests: XCTestCase {
         // Find a default property (isDefault == true)
         let all = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
         guard let defaultProp = all.first(where: { ($0["isDefault"] as? Bool) == true }),
-              let idStr = defaultProp["id"] as? String else {
+              let id = jsonInt64(defaultProp["id"]) else {
             XCTFail("No default property found to test against")
             return
         }
 
-        let result = try runCLI(["properties", "--delete", idStr])
+        let result = try runCLI(["properties", "--delete", String(id)])
         XCTAssertNotEqual(result.exitCode, 0, "Deleting a built-in property should fail")
 
         // Ensure it still exists
         let after = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
-        XCTAssertTrue(after.contains { ($0["id"] as? String) == idStr })
+        XCTAssertTrue(after.contains { jsonInt64($0["id"]) == id })
     }
 
     /// Type is permanently locked from option mutations because it drives
@@ -666,13 +671,13 @@ final class RubienCLITests: XCTestCase {
         try skipIfBinaryMissing()
         let all = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
         guard let typeProp = all.first(where: { ($0["defaultFieldKey"] as? String) == "referenceType" }),
-              let idStr = typeProp["id"] as? String else {
+              let id = jsonInt64(typeProp["id"]) else {
             XCTFail("Type PropertyDefinition not seeded")
             return
         }
         let originalCount = (typeProp["options"] as? [Any])?.count ?? 0
 
-        let result = try runCLI(["properties", "--add-option", "--id", idStr, "--value", "Bogus"])
+        let result = try runCLI(["properties", "--add-option", "--id", String(id), "--value", "Bogus"])
         XCTAssertNotEqual(result.exitCode, 0, "--add-option on Type must fail")
         // printJSONError writes the JSON error envelope to stderr, not stdout.
         XCTAssertTrue(
@@ -681,7 +686,7 @@ final class RubienCLITests: XCTestCase {
         )
 
         let after = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
-        let stillThere = after.first { ($0["id"] as? String) == idStr }
+        let stillThere = after.first { jsonInt64($0["id"]) == id }
         let nowCount = (stillThere?["options"] as? [Any])?.count ?? 0
         XCTAssertEqual(nowCount, originalCount, "options list must be unchanged")
     }
@@ -693,18 +698,18 @@ final class RubienCLITests: XCTestCase {
         try skipIfBinaryMissing()
         let all = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
         guard let statusProp = all.first(where: { ($0["defaultFieldKey"] as? String) == "readingStatus" }),
-              let idStr = statusProp["id"] as? String else {
+              let id = jsonInt64(statusProp["id"]) else {
             XCTFail("Status PropertyDefinition not seeded")
             return
         }
         let testValue = "TestStatus-\(UUID().uuidString.prefix(8))"
-        defer { _ = try? runCLI(["properties", "--delete-option", "--id", idStr, "--value", testValue]) }
+        defer { _ = try? runCLI(["properties", "--delete-option", "--id", String(id), "--value", testValue]) }
 
-        let result = try runCLI(["properties", "--add-option", "--id", idStr, "--value", testValue])
+        let result = try runCLI(["properties", "--add-option", "--id", String(id), "--value", testValue])
         XCTAssertEqual(result.exitCode, 0, "Status options are user-extensible: \(result.stderr)")
 
         let after = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
-        let updated = after.first { ($0["id"] as? String) == idStr }
+        let updated = after.first { jsonInt64($0["id"]) == id }
         let optionValues = (updated?["options"] as? [[String: Any]])?.compactMap { $0["value"] as? String } ?? []
         XCTAssertTrue(optionValues.contains(testValue), "added option must appear in the live options list")
     }
@@ -716,26 +721,26 @@ final class RubienCLITests: XCTestCase {
         try skipIfBinaryMissing()
         let all = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
         guard let statusProp = all.first(where: { ($0["defaultFieldKey"] as? String) == "readingStatus" }),
-              let idStr = statusProp["id"] as? String else {
+              let id = jsonInt64(statusProp["id"]) else {
             XCTFail("Status PropertyDefinition not seeded")
             return
         }
         let original = "RenameTest-\(UUID().uuidString.prefix(8))"
         let renamed = "RenameTest-\(UUID().uuidString.prefix(8))"
         defer {
-            _ = try? runCLI(["properties", "--delete-option", "--id", idStr, "--value", original])
-            _ = try? runCLI(["properties", "--delete-option", "--id", idStr, "--value", renamed])
+            _ = try? runCLI(["properties", "--delete-option", "--id", String(id), "--value", original])
+            _ = try? runCLI(["properties", "--delete-option", "--id", String(id), "--value", renamed])
         }
-        _ = try runCLI(["properties", "--add-option", "--id", idStr, "--value", original])
+        _ = try runCLI(["properties", "--add-option", "--id", String(id), "--value", original])
 
         let result = try runCLI([
-            "properties", "--update-option", "--id", idStr,
+            "properties", "--update-option", "--id", String(id),
             "--option", original, "--to", renamed,
         ])
         XCTAssertEqual(result.exitCode, 0, "rename must succeed: \(result.stderr)")
 
         let after = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
-        let updated = after.first { ($0["id"] as? String) == idStr }
+        let updated = after.first { jsonInt64($0["id"]) == id }
         let optionValues = (updated?["options"] as? [[String: Any]])?.compactMap { $0["value"] as? String } ?? []
         XCTAssertFalse(optionValues.contains(original), "old option name must be gone")
         XCTAssertTrue(optionValues.contains(renamed), "new option name must be present")
@@ -750,7 +755,7 @@ final class RubienCLITests: XCTestCase {
         let created = try runCLI(["properties", "--create", "--name", propName, "--type", "singleSelect", "--options", "Alpha,Beta"])
         XCTAssertEqual(created.exitCode, 0, "create failed: \(created.stderr)")
         guard let createdJSON = try JSONSerialization.jsonObject(with: Data(created.stdout.utf8)) as? [String: Any],
-              let propId = createdJSON["id"] as? String else {
+              let propId = jsonInt64(createdJSON["id"]) else {
             XCTFail("could not parse created property id from \(created.stdout)")
             return
         }
@@ -761,23 +766,23 @@ final class RubienCLITests: XCTestCase {
         }
         defer {
             _ = try? runCLI(["delete", String(refId), "--force"])
-            _ = try? runCLI(["properties", "--delete", propId])
+            _ = try? runCLI(["properties", "--delete", String(propId)])
         }
 
         let setResult = try runCLI(["update", String(refId), "--properties", "{\"\(propName)\": \"Alpha\"}"])
         XCTAssertEqual(setResult.exitCode, 0, "set failed: \(setResult.stderr)")
 
-        let del = try runCLI(["properties", "--delete-option", "--id", propId, "--value", "Alpha", "--clear-in-use"])
+        let del = try runCLI(["properties", "--delete-option", "--id", String(propId), "--value", "Alpha", "--clear-in-use"])
         XCTAssertEqual(del.exitCode, 0, "clear-in-use delete must succeed on an in-use option: \(del.stderr)")
 
         let afterProps = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
-        let updated = afterProps.first { ($0["id"] as? String) == propId }
+        let updated = afterProps.first { jsonInt64($0["id"]) == propId }
         let optionValues = (updated?["options"] as? [[String: Any]])?.compactMap { $0["value"] as? String } ?? []
         XCTAssertFalse(optionValues.contains("Alpha"), "deleted option must be gone")
         XCTAssertTrue(optionValues.contains("Beta"), "other options must survive")
 
         let refValues = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties", "--reference", String(refId)]).stdout.utf8)) as? [[String: Any]] ?? []
-        XCTAssertFalse(refValues.contains { ($0["propertyId"] as? String) == propId }, "reference value must be cleared")
+        XCTAssertFalse(refValues.contains { jsonInt64($0["propertyId"]) == propId }, "reference value must be cleared")
     }
 
     /// --clear-in-use and --replace-with are conflicting dispositions; passing
@@ -788,13 +793,13 @@ final class RubienCLITests: XCTestCase {
         let created = try runCLI(["properties", "--create", "--name", propName, "--type", "singleSelect", "--options", "Alpha,Beta"])
         XCTAssertEqual(created.exitCode, 0, "create failed: \(created.stderr)")
         guard let createdJSON = try JSONSerialization.jsonObject(with: Data(created.stdout.utf8)) as? [String: Any],
-              let propId = createdJSON["id"] as? String else {
+              let propId = jsonInt64(createdJSON["id"]) else {
             XCTFail("could not parse created property id")
             return
         }
-        defer { _ = try? runCLI(["properties", "--delete", propId]) }
+        defer { _ = try? runCLI(["properties", "--delete", String(propId)]) }
 
-        let result = try runCLI(["properties", "--delete-option", "--id", propId, "--value", "Alpha", "--replace-with", "Beta", "--clear-in-use"])
+        let result = try runCLI(["properties", "--delete-option", "--id", String(propId), "--value", "Alpha", "--replace-with", "Beta", "--clear-in-use"])
         XCTAssertNotEqual(result.exitCode, 0, "conflicting dispositions must fail")
         XCTAssertTrue(
             (result.stdout + result.stderr).lowercased().contains("either"),
@@ -811,8 +816,7 @@ final class RubienCLITests: XCTestCase {
         // Read a couple of known defaults to use as targets.
         let all = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
         guard let typeProp = all.first(where: { ($0["defaultFieldKey"] as? String) == "referenceType" }),
-              let typeIdStr = typeProp["id"] as? String,
-              let typeId = Int64(typeIdStr) else {
+              let typeId = jsonInt64(typeProp["id"]) else {
             XCTFail("Type property not seeded")
             return
         }
@@ -881,14 +885,14 @@ final class RubienCLITests: XCTestCase {
         // --visible alone hides it.
         let visibleOnly = try runCLI(["properties", "--visible"])
         let visArr = try JSONSerialization.jsonObject(with: Data(visibleOnly.stdout.utf8)) as? [[String: Any]] ?? []
-        XCTAssertFalse(visArr.contains { ($0["id"] as? String) == String(propId) })
+        XCTAssertFalse(visArr.contains { jsonInt64($0["id"]) == propId })
 
         // --id <hidden> + --visible still returns it.
         let withId = try runCLI(["properties", "--visible", "--id", String(propId)])
         XCTAssertEqual(withId.exitCode, 0, "stderr=\(withId.stderr)")
         let arr = try JSONSerialization.jsonObject(with: Data(withId.stdout.utf8)) as? [[String: Any]] ?? []
         XCTAssertEqual(arr.count, 1)
-        XCTAssertEqual(arr.first?["id"] as? String, String(propId))
+        XCTAssertEqual(jsonInt64(arr.first?["id"]), propId)
     }
 
     // MARK: - update --properties value writes (Tags + custom multiSelect)
@@ -909,7 +913,7 @@ final class RubienCLITests: XCTestCase {
         // Locate the seeded Tags PropertyDefinition.
         let all = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
         guard let tagsDef = all.first(where: { ($0["defaultFieldKey"] as? String) == "tags" }),
-              let tagsIdStr = tagsDef["id"] as? String else {
+              let tagsId = jsonInt64(tagsDef["id"]) else {
             XCTFail("Tags PropertyDefinition not seeded")
             return
         }
@@ -917,9 +921,9 @@ final class RubienCLITests: XCTestCase {
         // Create two fresh tags via --add-option (creates Tag rows, returns ids as `value`).
         let nameA = "cli-tag-a-\(UUID().uuidString.prefix(6))"
         let nameB = "cli-tag-b-\(UUID().uuidString.prefix(6))"
-        let addA = try runCLI(["properties", "--add-option", "--id", tagsIdStr, "--value", nameA])
+        let addA = try runCLI(["properties", "--add-option", "--id", String(tagsId), "--value", nameA])
         XCTAssertEqual(addA.exitCode, 0, "stderr=\(addA.stderr)")
-        let addB = try runCLI(["properties", "--add-option", "--id", tagsIdStr, "--value", nameB])
+        let addB = try runCLI(["properties", "--add-option", "--id", String(tagsId), "--value", nameB])
         XCTAssertEqual(addB.exitCode, 0, "stderr=\(addB.stderr)")
 
         // Re-fetch to learn the new tag ids (they are returned as `value`).
@@ -936,8 +940,8 @@ final class RubienCLITests: XCTestCase {
         // leak the test tags into the developer's real library).
         defer {
             _ = try? runCLI(["delete", String(refId), "--force"])
-            _ = try? runCLI(["properties", "--delete-option", "--id", tagsIdStr, "--value", aId])
-            _ = try? runCLI(["properties", "--delete-option", "--id", tagsIdStr, "--value", bId])
+            _ = try? runCLI(["properties", "--delete-option", "--id", String(tagsId), "--value", aId])
+            _ = try? runCLI(["properties", "--delete-option", "--id", String(tagsId), "--value", bId])
         }
 
         // Helper: read the Tags-property value out of `properties --reference <ref>`.
@@ -948,7 +952,7 @@ final class RubienCLITests: XCTestCase {
             let listed = try runCLI(["properties", "--reference", String(refId)])
             XCTAssertEqual(listed.exitCode, 0)
             let arr = try JSONSerialization.jsonObject(with: Data(listed.stdout.utf8)) as? [[String: Any]] ?? []
-            guard let entry = arr.first(where: { ($0["propertyId"] as? String) == tagsIdStr }),
+            guard let entry = arr.first(where: { jsonInt64($0["propertyId"]) == tagsId }),
                   let storedJSON = entry["value"] as? String,
                   let decoded = try JSONSerialization.jsonObject(with: Data(storedJSON.utf8)) as? [String] else {
                 return []
@@ -1022,7 +1026,7 @@ final class RubienCLITests: XCTestCase {
 
         let listed = try runCLI(["properties", "--reference", String(refId)])
         let arr = try JSONSerialization.jsonObject(with: Data(listed.stdout.utf8)) as? [[String: Any]] ?? []
-        guard let entry = arr.first(where: { ($0["propertyId"] as? String) == String(propId) }),
+        guard let entry = arr.first(where: { jsonInt64($0["propertyId"]) == propId }),
               let storedJSON = entry["value"] as? String,
               let decoded = try JSONSerialization.jsonObject(with: Data(storedJSON.utf8)) as? [String] else {
             XCTFail("stored multiSelect value should decode as a JSON string array; got \(arr)")
@@ -1396,8 +1400,8 @@ final class RubienCLITests: XCTestCase {
     func testPropertiesUpdateBuiltinRenameForbidden() throws {
         try skipIfBinaryMissing()
         let all = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
-        let typeId = try XCTUnwrap(all.first(where: { ($0["defaultFieldKey"] as? String) == "referenceType" })?["id"] as? String)
-        let result = try runCLI(["properties", "--update", "--id", typeId, "--name", "Kind"])
+        let typeId = try XCTUnwrap(jsonInt64(all.first(where: { ($0["defaultFieldKey"] as? String) == "referenceType" })?["id"]))
+        let result = try runCLI(["properties", "--update", "--id", String(typeId), "--name", "Kind"])
         XCTAssertNotEqual(result.exitCode, 0)
         let obj = try JSONSerialization.jsonObject(with: Data(result.stderr.utf8)) as? [String: Any]
         XCTAssertTrue((obj?["error"] as? String ?? "").contains("built-in"), "stderr=\(result.stderr)")
@@ -1407,6 +1411,13 @@ final class RubienCLITests: XCTestCase {
         try skipIfBinaryMissing()
         let pid = try createProperty(name: "P-\(UUID().uuidString.prefix(6))", type: "string")
         let result = try runCLI(["properties", "--update", "--id", String(pid), "--name", "12345"])
+        XCTAssertNotEqual(result.exitCode, 0)
+        XCTAssertTrue(result.stderr.contains("digit"), "all-digit names rejected; got: \(result.stderr)")
+    }
+
+    func testPropertiesCreateAllDigitNameRejected() throws {
+        try skipIfBinaryMissing()
+        let result = try runCLI(["properties", "--create", "--name", "12345", "--type", "string"])
         XCTAssertNotEqual(result.exitCode, 0)
         XCTAssertTrue(result.stderr.contains("digit"), "all-digit names rejected; got: \(result.stderr)")
     }
@@ -1436,11 +1447,11 @@ final class RubienCLITests: XCTestCase {
     func testPropertiesUpdateOptionOnTags() throws {
         try skipIfBinaryMissing()
         let all = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
-        let tagsId = try XCTUnwrap(all.first(where: { ($0["defaultFieldKey"] as? String) == "tags" })?["id"] as? String)
-        let added = try runCLI(["properties", "--add-option", "--id", tagsId, "--value", "recolor-me"])
+        let tagsId = try XCTUnwrap(jsonInt64(all.first(where: { ($0["defaultFieldKey"] as? String) == "tags" })?["id"]))
+        let added = try runCLI(["properties", "--add-option", "--id", String(tagsId), "--value", "recolor-me"])
         let addedOptions = try XCTUnwrap((JSONSerialization.jsonObject(with: Data(added.stdout.utf8)) as? [String: Any])?["options"] as? [[String: Any]])
         let tagValue = try XCTUnwrap(addedOptions.first(where: { ($0["label"] as? String) == "recolor-me" })?["value"] as? String)
-        let result = try runCLI(["properties", "--update-option", "--id", tagsId, "--option", tagValue, "--color", "#123456"])
+        let result = try runCLI(["properties", "--update-option", "--id", String(tagsId), "--option", tagValue, "--color", "#123456"])
         XCTAssertEqual(result.exitCode, 0, "stderr=\(result.stderr)")
         let options = try XCTUnwrap((JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any])?["options"] as? [[String: Any]])
         XCTAssertEqual(options.first(where: { ($0["value"] as? String) == tagValue })?["color"] as? String, "#123456")

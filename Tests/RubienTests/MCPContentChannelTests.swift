@@ -2,7 +2,7 @@
 import XCTest
 @testable import Rubien
 
-/// Phase 2b-ii: the read-only MCP content channel and its wiring into the Claude
+/// The native MCP library channel and its wiring into the Claude
 /// argv. Pure/value-level — nothing is spawned.
 final class MCPContentChannelTests: XCTestCase {
 
@@ -21,7 +21,7 @@ final class MCPContentChannelTests: XCTestCase {
         let servers = try? XCTUnwrap(json["mcpServers"] as? [String: Any])
         let rubien = servers?["rubien"] as? [String: Any]
         XCTAssertEqual(rubien?["command"] as? String, channel.cliURL.path)
-        XCTAssertEqual(rubien?["args"] as? [String], ["mcp", "--read-only"])
+        XCTAssertEqual(rubien?["args"] as? [String], ["mcp"])
         let env = rubien?["env"] as? [String: String]
         XCTAssertEqual(env?["RUBIEN_LIBRARY_ROOT"], channel.libraryRoot.path)
     }
@@ -35,7 +35,7 @@ final class MCPContentChannelTests: XCTestCase {
         let parsed = try JSONSerialization.jsonObject(with: Data(arg.utf8)) as? [String: Any]
         let rubien = (parsed?["mcpServers"] as? [String: Any])?["rubien"] as? [String: Any]
         XCTAssertEqual(rubien?["command"] as? String, channel.cliURL.path)
-        XCTAssertEqual(rubien?["args"] as? [String], ["mcp", "--read-only"])
+        XCTAssertEqual(rubien?["args"] as? [String], ["mcp"])
     }
 
     // MARK: argv injection

@@ -113,7 +113,10 @@ struct CodexAppServerParser {
             // below rather than surfacing an unanswerable card (correctness #2).
             guard Self.approvalMethods.contains(method) else { return [] }
             let toolName = Self.approvalToolName(method: method, params: params)
-            let summary = (params["reason"] as? String) ?? (params["command"] as? String) ?? toolName
+            let summary = (params["reason"] as? String)
+                ?? (params["command"] as? String)
+                ?? (params["message"] as? String)
+                ?? toolName
             return [.approvalRequested(id: id.uiString, toolName: toolName, summary: summary)]
         case .notification(let method, let params):
             return mapNotification(method: method, params: params)
@@ -225,10 +228,32 @@ struct CodexAppServerParser {
         case "item/fileChange/requestApproval", "applyPatchApproval": return "apply_patch"
         case "item/permissions/requestApproval": return "permissions"
         case "mcpServer/elicitation/request":
-            return (params["serverName"] as? String).map { "\($0) (elicitation)" } ?? "elicitation"
+            let server = (params["serverName"] as? String) ?? "mcp"
+            if let tool = mcpApprovalToolName(params) { return "\(server)/\(tool)" }
+            // Keep an unrecognized Rubien elicitation inside the `rubien/…`
+            // namespace. The controller then classifies it as unknown and denies
+            // it even in Auto mode instead of inheriting generic auto-approval.
+            return "\(server)/unknown"
         case "item/tool/requestUserInput": return "tool input"
         default: return "tool"
         }
+    }
+
+    /// Codex 0.144 represents an MCP approval as an elicitation request. The
+    /// current wire shape puts the exact tool name in the human message:
+    /// `Allow the rubien MCP server to run tool "rubien_create_reference"?`.
+    /// Keep parsing narrow and return nil on any future shape we don't recognize;
+    /// the caller keeps it under `rubien/unknown` so the controller denies it.
+    private static func mcpApprovalToolName(_ params: [String: Any]) -> String? {
+        guard let meta = params["_meta"] as? [String: Any],
+              meta["codex_approval_kind"] as? String == "mcp_tool_call",
+              let message = params["message"] as? String,
+              let marker = message.range(of: "run tool \"")
+        else { return nil }
+        let remainder = message[marker.upperBound...]
+        guard let closingQuote = remainder.firstIndex(of: "\"") else { return nil }
+        let name = String(remainder[..<closingQuote])
+        return name.isEmpty ? nil : name
     }
 
     /// A tool item's chip display name, or `nil` for a non-tool item (userMessage,
@@ -761,8 +786,21 @@ enum CodexAppServerProtocol {
     /// VERBATIM (design #1) via `CodexRPCID.jsonValue`; `available` is the request's
     /// `availableDecisions` (from `PendingCodexApproval`) so a `deny` maps to `cancel`
     /// when the server didn't offer `decline` (codec review #1).
-    static func approvalResponse(id: CodexRPCID, _ decision: ApprovalDecision, available: [String] = []) -> String {
-        encode([
+    static func approvalResponse(
+        id: CodexRPCID,
+        _ decision: ApprovalDecision,
+        method: String? = nil,
+        available: [String] = []
+    ) -> String {
+        if method == "mcpServer/elicitation/request" {
+            let action = decision.isAllow ? "accept" : "decline"
+            return encode([
+                "jsonrpc": "2.0",
+                "id": id.jsonValue,
+                "result": ["action": action],
+            ])
+        }
+        return encode([
             "jsonrpc": "2.0",
             "id": id.jsonValue,
             "result": ["decision": codexDecision(for: decision, available: available)],

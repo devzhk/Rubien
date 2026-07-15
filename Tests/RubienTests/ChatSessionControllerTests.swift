@@ -1,5 +1,6 @@
 #if os(macOS)
 import XCTest
+import RubienCore
 @testable import Rubien
 
 @MainActor
@@ -817,15 +818,32 @@ final class ChatSessionControllerTests: XCTestCase {
     }
 
     func testSilentReadToolClassification() {
-        XCTAssertTrue(ChatSessionController.isSilentReadTool("mcp__rubien__rubien_get"))
-        XCTAssertTrue(ChatSessionController.isSilentReadTool("mcp__rubien__rubien_pdf_info"))
+        XCTAssertTrue(ChatSessionController.isSilentReadTool("mcp__rubien__rubien_get_reference"))
+        XCTAssertTrue(ChatSessionController.isSilentReadTool("rubien/rubien_get_pdf_info"))
+        XCTAssertFalse(ChatSessionController.isSilentReadTool("mcp__rubien__rubien_update_reference"))
+        XCTAssertFalse(ChatSessionController.isSilentReadTool("mcp__rubien__rubien_future_write"))
+        XCTAssertTrue(ChatSessionController.isUnknownRubienTool("mcp__rubien__rubien_future_write"))
+        XCTAssertFalse(ChatSessionController.isUnknownRubienTool("mcp__rubien__rubien_update_reference"))
         XCTAssertTrue(ChatSessionController.isSilentReadTool("ToolSearch"))
         XCTAssertTrue(ChatSessionController.isSilentReadTool("Read"))
         XCTAssertFalse(ChatSessionController.isSilentReadTool("Write"))
         XCTAssertFalse(ChatSessionController.isSilentReadTool("Edit"))
         XCTAssertFalse(ChatSessionController.isSilentReadTool("Bash"))
         XCTAssertFalse(ChatSessionController.isSilentReadTool("mcp__other__thing"),
-                       "only OUR read-only content channel is auto-silent")
+                       "other MCP servers are not auto-silent")
+    }
+
+    func testEveryCanonicalRubienToolUsesExactAccessClassification() {
+        for name in RubienMCPToolPolicy.readToolNames {
+            let qualified = "mcp__rubien__\(name)"
+            XCTAssertTrue(ChatSessionController.isSilentReadTool(qualified), name)
+            XCTAssertFalse(ChatSessionController.isUnknownRubienTool(qualified), name)
+        }
+        for name in RubienMCPToolPolicy.writeToolNames {
+            let qualified = "mcp__rubien__\(name)"
+            XCTAssertFalse(ChatSessionController.isSilentReadTool(qualified), name)
+            XCTAssertFalse(ChatSessionController.isUnknownRubienTool(qualified), name)
+        }
     }
 
     func testAskModeAutoApprovesReadsButStillPromptsForWrites() {
@@ -834,13 +852,43 @@ final class ChatSessionControllerTests: XCTestCase {
         let g = controller.generation  // Ask mode (autoApprove defaults false)
 
         // A read-only content-channel tool auto-runs — no card, even in Ask.
-        controller.handle(.approvalRequested(id: "r1", toolName: "mcp__rubien__rubien_get", summary: ""), gen: g)
+        controller.handle(.approvalRequested(id: "r1", toolName: "mcp__rubien__rubien_get_reference", summary: ""), gen: g)
         XCTAssertNil(controller.pendingApproval, "reads must not prompt in Ask mode")
         XCTAssertEqual(provider.approvals.map(\.0), ["r1"], "the read was auto-answered")
 
-        // A write still prompts.
-        controller.handle(.approvalRequested(id: "w1", toolName: "Write", summary: "note.md"), gen: g)
-        XCTAssertEqual(controller.pendingApproval?.id, "w1", "writes still show the card in Ask mode")
+        // A known Rubien write prompts through the same native card.
+        controller.handle(.approvalRequested(id: "w1", toolName: "mcp__rubien__rubien_update_reference", summary: "Update reference 1"), gen: g)
+        XCTAssertEqual(controller.pendingApproval?.id, "w1", "Rubien writes show the card in Ask mode")
+    }
+
+    func testUnknownRubienToolIsDeniedEvenInAutoMode() {
+        let provider = MockAgentProvider()
+        let controller = makeController(provider: provider, sink: SpyTranscriptSink())
+        controller.autoApprove = true
+
+        controller.handle(
+            .approvalRequested(id: "unknown-1", toolName: "mcp__rubien__rubien_future_mutation", summary: "future"),
+            gen: controller.generation
+        )
+
+        XCTAssertNil(controller.pendingApproval)
+        XCTAssertEqual(provider.approvals.map(\.0), ["unknown-1"])
+        XCTAssertEqual(provider.approvals.first?.1, .deny)
+    }
+
+    func testKnownRubienWriteIsAutoApprovedInAutoMode() {
+        let provider = MockAgentProvider()
+        let controller = makeController(provider: provider, sink: SpyTranscriptSink())
+        controller.autoApprove = true
+
+        controller.handle(
+            .approvalRequested(id: "write-1", toolName: "rubien/rubien_update_reference", summary: "Update reference 1"),
+            gen: controller.generation
+        )
+
+        XCTAssertNil(controller.pendingApproval)
+        XCTAssertEqual(provider.approvals.map(\.0), ["write-1"])
+        XCTAssertEqual(provider.approvals.first?.1, .allowForConversation)
     }
 
     func testStagedSelectionIsQuotedIntoTheMessageThenCleared() async {

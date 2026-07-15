@@ -152,6 +152,40 @@ final class CodexAppServerProtocolTests: XCTestCase {
         XCTAssertEqual(d, "decline")
     }
 
+    func testMCPWriteApprovalDecodesExactToolAndUsesElicitationResponseShape() throws {
+        let line = #"{"jsonrpc":"2.0","id":4,"method":"mcpServer/elicitation/request","params":{"serverName":"rubien","mode":"form","_meta":{"codex_approval_kind":"mcp_tool_call","tool_params":{"title":"Approval Capture"}},"message":"Allow the rubien MCP server to run tool \"rubien_create_reference\"?","requestedSchema":{"type":"object","properties":{}}}}"#
+        let pending = try XCTUnwrap(CodexAppServerProtocol.decodeApprovalRequest(line: line))
+        XCTAssertEqual(pending.toolName, "rubien/rubien_create_reference")
+
+        let allowed = json(CodexAppServerProtocol.approvalResponse(
+            id: pending.id, .allowForConversation, method: pending.method
+        ))
+        XCTAssertEqual((allowed["result"] as? [String: Any])?["action"] as? String, "accept")
+        XCTAssertNil((allowed["result"] as? [String: Any])?["decision"])
+
+        let denied = json(CodexAppServerProtocol.approvalResponse(
+            id: pending.id, .deny, method: pending.method
+        ))
+        XCTAssertEqual((denied["result"] as? [String: Any])?["action"] as? String, "decline")
+        XCTAssertNil((denied["result"] as? [String: Any])?["decision"])
+
+        var parser = CodexAppServerParser()
+        let event = parser.parse(line: line).first
+        guard case .approvalRequested(_, let toolName, let summary)? = event else {
+            return XCTFail("expected approvalRequested")
+        }
+        XCTAssertEqual(toolName, "rubien/rubien_create_reference")
+        XCTAssertTrue(summary.contains("rubien_create_reference"))
+    }
+
+    @MainActor
+    func testUnrecognizedRubienElicitationStaysInFailClosedNamespace() throws {
+        let line = #"{"jsonrpc":"2.0","id":5,"method":"mcpServer/elicitation/request","params":{"serverName":"rubien","mode":"form","message":"A future approval shape"}}"#
+        let pending = try XCTUnwrap(CodexAppServerProtocol.decodeApprovalRequest(line: line))
+        XCTAssertEqual(pending.toolName, "rubien/unknown")
+        XCTAssertTrue(ChatSessionController.isUnknownRubienTool(pending.toolName))
+    }
+
     func testEmptyLastUsageClearsStaleUsage() {
         var parser = CodexAppServerParser()
         _ = parser.parse(line: #"{"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"tokenUsage":{"last":{"inputTokens":10,"outputTokens":2}}}}"#)

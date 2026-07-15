@@ -16,7 +16,7 @@ const isoDateString = z
   .describe("ISO-8601 timestamp with millisecond precision, e.g. 2026-04-24T12:00:00.000Z");
 
 export const CustomPropertyValueDTO = z.object({
-  propertyId: z.string(),
+  propertyId: z.number().int(),
   name: z.string(),
   type: z.string(),
   value: z.string(),
@@ -69,7 +69,7 @@ export const PropertyOptionDTO = z.object({
 export type PropertyOptionDTO = z.infer<typeof PropertyOptionDTO>;
 
 export const PropertyDefinitionDTO = z.object({
-  id: z.string(),
+  id: z.number().int(),
   name: z.string(),
   type: z.string(),
   options: z.array(PropertyOptionDTO),

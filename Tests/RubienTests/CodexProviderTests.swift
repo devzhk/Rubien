@@ -146,7 +146,9 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertTrue(argv.containsPair("--disable", "apps"), "built-in connectors must be dropped by default")
         XCTAssertTrue(argv.containsPair(
             "-c", "mcp_servers.rubien.command=/Applications/Rubien.app/Contents/Helpers/rubien-cli"))
-        XCTAssertTrue(argv.containsPair("-c", #"mcp_servers.rubien.args=["mcp","--read-only"]"#))
+        XCTAssertTrue(argv.containsPair("-c", #"mcp_servers.rubien.args=["mcp"]"#))
+        XCTAssertTrue(argv.containsPair("-c", "mcp_servers.rubien.default_tools_approval_mode=writes"))
+        XCTAssertTrue(argv.containsPair("-c", "mcp_servers.rubien.tool_timeout_sec=310"))
         XCTAssertTrue(argv.containsPair("-c", "mcp_servers.rubien.env.RUBIEN_LIBRARY_ROOT=/tmp/lib"))
         XCTAssertFalse(argv.contains("-c tools.web_search=false"), "web on by default")
     }
@@ -309,6 +311,74 @@ final class CodexProviderTests: XCTestCase {
         let observed = try readObserved(in: workspace)
         XCTAssertEqual((observed["approval"] as? [String: Any])?["decision"] as? String, "cancel",
                        "deny must fall back to cancel when decline isn't offered")
+    }
+
+    func testMCPWriteApprovalRoundTripUsesActionDecline() async throws {
+        let workspace = try makeWorkspace()
+        let libraryRoot = workspace.appendingPathComponent("library")
+        try writeConfig([
+            "mcpApproval": [
+                "server": "rubien",
+                "tool": "rubien_create_reference",
+                "arguments": ["title": "Approval Capture"],
+                "mutation": referenceMutation(
+                    title: "Must Not Exist",
+                    libraryRoot: libraryRoot
+                ),
+            ],
+            "assistantText": "done",
+        ], into: workspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        let events = try await collectAllEvents(provider.send(turn: turn(workspace: workspace))) { event in
+            if case .approvalRequested(let id, _, _) = event {
+                provider.respondToApproval(id: id, .deny)
+            }
+        }
+
+        let approval = events.compactMap { event -> (String, String)? in
+            if case .approvalRequested(_, let tool, let summary) = event { return (tool, summary) }
+            return nil
+        }.first
+        XCTAssertEqual(approval?.0, "rubien/rubien_create_reference")
+        XCTAssertTrue(approval?.1.contains("rubien_create_reference") == true)
+        let observed = try readObserved(in: workspace)
+        XCTAssertEqual((observed["mcpApproval"] as? [String: Any])?["action"] as? String, "decline")
+        XCTAssertTrue(events.contains {
+            if case .toolDenied("rubien/rubien_create_reference", _) = $0 { return true }
+            return false
+        })
+        XCTAssertEqual(try referenceTitles(libraryRoot: libraryRoot), [])
+    }
+
+    func testMCPWriteApprovalAcceptPerformsExactlyOneMutation() async throws {
+        let workspace = try makeWorkspace()
+        let libraryRoot = workspace.appendingPathComponent("library")
+        try writeConfig([
+            "mcpApproval": [
+                "server": "rubien",
+                "tool": "rubien_create_reference",
+                "arguments": ["title": "Codex Approved"],
+                "mutation": referenceMutation(
+                    title: "Codex Approved",
+                    libraryRoot: libraryRoot
+                ),
+            ],
+            "assistantText": "done",
+        ], into: workspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        _ = try await collectAllEvents(provider.send(turn: turn(workspace: workspace))) { event in
+            if case .approvalRequested(let id, _, _) = event {
+                provider.respondToApproval(id: id, .allowOnce)
+            }
+        }
+
+        XCTAssertEqual(try referenceTitles(libraryRoot: libraryRoot), ["Codex Approved"])
+        let observed = try readObserved(in: workspace)
+        XCTAssertEqual((observed["mcpMutation"] as? [String: Any])?["exitCode"] as? Int, 0)
     }
 
     // MARK: Unknown server request (design #6 — never wedge)
@@ -1107,6 +1177,42 @@ final class CodexProviderTests: XCTestCase {
             .deletingLastPathComponent()
             .appendingPathComponent("Fixtures/fake-codex-app-server.py")
             .path
+    }
+
+    private var rubienCLIBinaryPath: String {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent(".build/debug/rubien-cli")
+            .path
+    }
+
+    private func referenceMutation(title: String, libraryRoot: URL) -> [String: Any] {
+        [
+            "executable": rubienCLIBinaryPath,
+            "arguments": ["add", "--title", title],
+            "environment": ["RUBIEN_LIBRARY_ROOT": libraryRoot.path],
+        ]
+    }
+
+    private func referenceTitles(libraryRoot: URL) throws -> [String] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: rubienCLIBinaryPath)
+        process.arguments = ["list"]
+        var environment = ProcessInfo.processInfo.environment
+        environment["RUBIEN_LIBRARY_ROOT"] = libraryRoot.path
+        process.environment = environment
+        process.standardInput = FileHandle.nullDevice
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardError = Pipe()
+        try process.run()
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+        let rows = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
+        return rows.compactMap { $0["title"] as? String }
     }
 
     private func makeWorkspace() throws -> URL {

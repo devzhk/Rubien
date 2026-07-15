@@ -45,7 +45,7 @@ export function registerPropertyTools(server: McpServer): void {
         "and override `visible`. Unresolved selectors fail loudly with an `unresolved-selectors` error envelope.",
       inputSchema: {
         ids: z
-          .array(z.string())
+          .array(z.number().int())
           .optional()
           .describe("Repeatable property IDs to include. Errors if any ID does not exist."),
         names: z
@@ -64,7 +64,7 @@ export function registerPropertyTools(server: McpServer): void {
     async ({ ids, names, visible }) => {
       const args: string[] = ["properties"];
       if (visible) args.push("--visible");
-      for (const id of ids ?? []) args.push("--id", id);
+      for (const id of ids ?? []) args.push("--id", String(id));
       for (const n of names ?? []) args.push("--name", n);
       return runCliAsTool(args);
     },
@@ -87,6 +87,7 @@ export function registerPropertyTools(server: McpServer): void {
             "For singleSelect/multiSelect, comma-separated option labels.",
           ),
       },
+      annotations: { readOnlyHint: false, destructiveHint: false },
     },
     async ({ name, type, options }) =>
       runCliAsTool(
@@ -109,13 +110,14 @@ export function registerPropertyTools(server: McpServer): void {
       description:
         "Update a property definition: rename it and/or change its UI visibility, in one transaction. At least one of `name` / `visible` is required. Built-in properties (incl. Tags) cannot be renamed; visibility can be changed on any property. All-digit names are rejected.",
       inputSchema: {
-        id: z.string().describe("Property ID"),
+        id: z.number().int().describe("Property ID"),
         name: z.string().optional().describe("New display name"),
         visible: z.boolean().optional().describe("Show (true) or hide (false) in the app UI"),
       },
+      annotations: { readOnlyHint: false, destructiveHint: false },
     },
     async ({ id, name, visible }) => {
-      const args = ["properties", "--update", "--id", id];
+      const args = ["properties", "--update", "--id", String(id)];
       if (name !== undefined) args.push("--name", name);
       if (visible !== undefined) args.push("--set-visible", String(visible));
       return runCliAsTool(args);
@@ -128,11 +130,11 @@ export function registerPropertyTools(server: McpServer): void {
       title: "Delete custom property",
       description:
         "Remove a property definition and all its values on references. Cannot delete default/built-in properties (Tags included — use rubien_delete_option to remove individual tags).",
-      inputSchema: { id: z.string() },
-      annotations: { destructiveHint: true },
+      inputSchema: { id: z.number().int() },
+      annotations: { readOnlyHint: false, destructiveHint: true },
     },
     async ({ id }) =>
-      runCliAsTool(["properties", "--delete", id]),
+      runCliAsTool(["properties", "--delete", String(id)]),
   );
 
   server.registerTool(
@@ -145,19 +147,20 @@ export function registerPropertyTools(server: McpServer): void {
         "and `color` as the tag color; the returned option's `value` is the new tag's stable id." +
         assignmentPointer,
       inputSchema: {
-        propertyId: z.string().describe("Property ID"),
+        propertyId: z.number().int().describe("Property ID"),
         value: z
           .string()
           .describe("Option label (or, for Tags, the new tag's display name)"),
         color: z.string().optional().describe("Optional hex color (#RRGGBB)"),
       },
+      annotations: { readOnlyHint: false, destructiveHint: false },
     },
     async ({ propertyId, value, color }) =>
       runCliAsTool([
         "properties",
         "--add-option",
         "--id",
-        propertyId,
+        String(propertyId),
         ...flagsFromOptions({ "--value": value, "--color": color }),
       ]),
   );
@@ -171,18 +174,19 @@ export function registerPropertyTools(server: McpServer): void {
         "For Tags: `option` is the stringified tag id (identity-stable), `name` is the new display name, recolor updates the Tag row. `color` accepts #RRGGBB only. The built-in Type property's options are fully immutable (recolor included)." +
         assignmentPointer,
       inputSchema: {
-        propertyId: z.string().describe("Property ID"),
+        propertyId: z.number().int().describe("Property ID"),
         option: z.string().describe("Existing option value (stringified tag id for Tags)"),
         name: z.string().optional().describe("New option value (new tag name for Tags)"),
         color: z.string().optional().describe("New hex color (#RRGGBB)"),
       },
+      annotations: { readOnlyHint: false, destructiveHint: false },
     },
     async ({ propertyId, option, name, color }) =>
       runCliAsTool([
         "properties",
         "--update-option",
         "--id",
-        propertyId,
+        String(propertyId),
         "--option",
         option,
         ...flagsFromOptions({ "--to": name, "--color": color }),
@@ -200,7 +204,7 @@ export function registerPropertyTools(server: McpServer): void {
         " To delete an in-use option without migrating, set `clearInUse: true` — affected references have the option cleared from their value (singleSelect loses its value; multiSelect drops just this option). `clearInUse` and `replaceWith` are mutually exclusive." +
         assignmentPointer,
       inputSchema: {
-        propertyId: z.string().describe("Property ID"),
+        propertyId: z.number().int().describe("Property ID"),
         value: z.string().describe("Option value to delete (stringified tag id for Tags)"),
         replaceWith: z
           .string()
@@ -215,14 +219,14 @@ export function registerPropertyTools(server: McpServer): void {
             "Clear the option from affected references instead of migrating. Mutually exclusive with replaceWith.",
           ),
       },
-      annotations: { destructiveHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true },
     },
     async ({ propertyId, value, replaceWith, clearInUse }) =>
       runCliAsTool([
         "properties",
         "--delete-option",
         "--id",
-        propertyId,
+        String(propertyId),
         "--value",
         value,
         ...flagsFromOptions({

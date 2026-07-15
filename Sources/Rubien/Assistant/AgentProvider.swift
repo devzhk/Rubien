@@ -260,9 +260,8 @@ enum ReferenceAttribution {
     /// Which argument keys carry REFERENCE ids, per tool — tool-aware because the
     /// keys are not uniform and `id` is not always a reference. Sources of truth:
     /// `mcp-server/src/tools/*.ts` / `Sources/RubienCLI/MCPToolCatalog.swift`.
-    /// The `--read-only` server the assistant runs registers only read tools
-    /// today, but the write tools are encoded now so Phase 4 (library writes)
-    /// cannot silently mis-attribute. Unknown tools fall back to
+    /// The Assistant's full native server includes reads and approval-gated
+    /// writes. Unknown tools fall back to
     /// `id`/`referenceId` so a future read tool still attributes (over-inclusion
     /// beats a miss in a display filter).
     static func referenceKeys(for tool: String) -> [String] {
@@ -281,7 +280,7 @@ enum ReferenceAttribution {
     /// ids (`id` / `propertyId`), which the default rule would mis-attribute.
     /// Old-generation fix in passing: `rubien_views_query`'s scalar `id` is a
     /// VIEW id — a pre-existing latent mis-attribution for historical sessions
-    /// (the other old views_* write tools were never registered in the
+    /// (the other old views_* write tools were never registered in the earlier
     /// read-only channel, so no historical session contains them). New-gen
     /// `list_properties`/`list_views` and `create_reference` carry no
     /// default-rule key, safe without entries; `update_reference` attributes

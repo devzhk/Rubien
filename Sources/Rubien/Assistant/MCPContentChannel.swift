@@ -1,8 +1,8 @@
 import Foundation
 import RubienCore
 
-/// The read-only MCP content channel the Assistant attaches to a Claude turn: the
-/// already-bundled `rubien-cli` run as an MCP server (`mcp --read-only`) over
+/// The native MCP library channel the Assistant attaches to a Claude turn: the
+/// already-bundled `rubien-cli` run as an MCP server (`mcp`) over
 /// `--mcp-config`, pointed at the app's live library. This is how the agent reads
 /// the document under discussion (design §D4/§D6, Phase 2b).
 ///
@@ -10,7 +10,7 @@ import RubienCore
 /// there is no Node/runtime dependency: the native `rubien-cli mcp` server *is* the
 /// content channel.
 struct MCPContentChannel: Sendable, Equatable {
-    /// The bundled `rubien-cli` to run as `mcp --read-only`.
+    /// The bundled `rubien-cli` to run as the full native MCP server.
     let cliURL: URL
     /// The app's resolved library root, passed to the server as
     /// `RUBIEN_LIBRARY_ROOT` so it reads exactly the library the app is using —
@@ -34,7 +34,7 @@ struct MCPContentChannel: Sendable, Equatable {
             "mcpServers": [
                 Self.serverName: [
                     "command": cliURL.path,
-                    "args": ["mcp", "--read-only"],
+                    "args": ["mcp"],
                     "env": ["RUBIEN_LIBRARY_ROOT": libraryRoot.path],
                 ],
             ],

@@ -291,11 +291,34 @@ describe("rubien_update_reference argv", () => {
 });
 
 describe("property/option/view tool argv", () => {
+  it("list_properties accepts integer ids and rejects string ids", async () => {
+    const client = await connectedClient();
+    await client.callTool({
+      name: "rubien_list_properties",
+      arguments: { ids: [2, 7] },
+    });
+    expect(vi.mocked(runCliAsTool)).toHaveBeenLastCalledWith([
+      "properties",
+      "--id",
+      "2",
+      "--id",
+      "7",
+    ]);
+
+    const before = vi.mocked(runCliAsTool).mock.calls.length;
+    const invalid = await client.callTool({
+      name: "rubien_update_property",
+      arguments: { id: "9", name: "Topics" },
+    });
+    expect(invalid.isError).toBe(true);
+    expect(vi.mocked(runCliAsTool).mock.calls.length).toBe(before);
+  });
+
   it("update_property maps name/visible to --update --name/--set-visible", async () => {
     const client = await connectedClient();
     await client.callTool({
       name: "rubien_update_property",
-      arguments: { id: "9", name: "Topics", visible: false },
+      arguments: { id: 9, name: "Topics", visible: false },
     });
     expect(vi.mocked(runCliAsTool)).toHaveBeenLastCalledWith([
       "properties",
@@ -313,7 +336,7 @@ describe("property/option/view tool argv", () => {
     const client = await connectedClient();
     await client.callTool({
       name: "rubien_update_option",
-      arguments: { propertyId: "3", option: "low", name: "lowest", color: "#00FF00" },
+      arguments: { propertyId: 3, option: "low", name: "lowest", color: "#00FF00" },
     });
     expect(vi.mocked(runCliAsTool)).toHaveBeenLastCalledWith([
       "properties",
@@ -333,7 +356,7 @@ describe("property/option/view tool argv", () => {
     const client = await connectedClient();
     await client.callTool({
       name: "rubien_create_option",
-      arguments: { propertyId: "5", value: "ml", color: "#123456" },
+      arguments: { propertyId: 5, value: "ml", color: "#123456" },
     });
     expect(vi.mocked(runCliAsTool)).toHaveBeenLastCalledWith([
       "properties",

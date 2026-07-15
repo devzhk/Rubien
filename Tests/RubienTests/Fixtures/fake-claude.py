@@ -16,7 +16,7 @@ provider sets cwd = the turn's workspace, so the test writes the config there). 
   * emits a `result` carrying a ROTATED session id.
 
 Config keys (all optional): sessionInit, sessionResult, deltas[], assistantText,
-approval{requestId,toolName,input,toolUseId,description}, afterApprovalText,
+approval{requestId,toolName,input,toolUseId,description,mutation}, afterApprovalText,
 floodStderr(int bytes), partialLine(bool), grandchild(bool), hang(bool),
 exitCode(int), emitResult(bool), delayExitMs(int).
 """
@@ -163,6 +163,18 @@ def main():
         })
         approval_resolved.wait(timeout=10)
         if approval_behavior["value"] == "allow":
+            mutation = approval.get("mutation")
+            if mutation:
+                mutation_env = os.environ.copy()
+                mutation_env.update(mutation.get("environment", {}))
+                subprocess.run(
+                    [mutation["executable"], *mutation.get("arguments", [])],
+                    env=mutation_env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
             emit({
                 "type": "assistant",
                 "message": {"role": "assistant", "content": [{"type": "text", "text": after_text}]},

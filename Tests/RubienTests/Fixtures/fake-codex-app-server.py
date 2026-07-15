@@ -19,7 +19,8 @@ workspace; tests rewrite the file between sends). It:
     exits non-zero after `turn/start` (crash path).
 
 Config keys (all optional): deltas[], assistantText (supports "{threadStarts}"),
-usageLast{...}, approval{reason,command,availableDecisions[]}, unknownRequest(bool),
+usageLast{...}, approval{reason,command,availableDecisions[]},
+mcpApproval{server,tool,mutation}, unknownRequest(bool),
 hang(bool), exitAfterTurnStart(int), models[] / modelListError (model/list).
 History (3b-4): threads[] (thread/list data), searchHits[] (thread/search data,
 each {thread,snippet}), transcript{turns:[…]} (thread/read). All record params.
@@ -220,6 +221,63 @@ class Server:
             item_done = dict(item, status="completed" if accepted else "declined")
             if not accepted:
                 item_done["aggregatedOutput"] = "declined by user"
+            notify("item/completed", dict(base, item=item_done))
+
+        # Real Codex 0.144 MCP write approval shape: an mcpToolCall item plus an
+        # mcpServer/elicitation/request whose response uses `action`, not the
+        # command/file approval `decision` field.
+        if "mcpApproval" in cfg:
+            approval = cfg["mcpApproval"] or {}
+            server = approval.get("server", "rubien")
+            tool = approval.get("tool", "rubien_create_reference")
+            item = {
+                "type": "mcpToolCall",
+                "id": "mcp_FAKE",
+                "server": server,
+                "tool": tool,
+                "status": "inProgress",
+                "arguments": approval.get("arguments", {"title": "Approval Capture"}),
+            }
+            notify("item/started", dict(base, item=item))
+            req = {
+                "threadId": thread_id,
+                "turnId": turn_id,
+                "serverName": server,
+                "mode": "form",
+                "_meta": {
+                    "codex_approval_kind": "mcp_tool_call",
+                    "tool_params": item["arguments"],
+                },
+                "message": f'Allow the {server} MCP server to run tool "{tool}"?',
+                "requestedSchema": {"type": "object", "properties": {}},
+            }
+            server_req = self.next_server_request("mcpServer/elicitation/request", req)
+            kind, payload = self.wait_for_response(server_req)
+            if kind == "eof":
+                return False
+            if kind == "interrupted":
+                notify("turn/completed", {"threadId": thread_id, "turn": {"id": turn_id, "status": "interrupted", "error": None}})
+                return True
+            action = (payload["message"].get("result") or {}).get("action")
+            record(mcpApproval={"action": action, "idType": payload["idType"]})
+            notify("serverRequest/resolved", {"threadId": thread_id, "requestId": server_req})
+            accepted = action == "accept"
+            mutation = approval.get("mutation")
+            if accepted and mutation:
+                mutation_env = os.environ.copy()
+                mutation_env.update(mutation.get("environment", {}))
+                completed = subprocess.run(
+                    [mutation["executable"], *mutation.get("arguments", [])],
+                    env=mutation_env,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                record(mcpMutation={"exitCode": completed.returncode})
+            item_done = dict(item, status="completed" if accepted else "failed")
+            if not accepted:
+                item_done["error"] = {"message": "user rejected MCP tool call"}
             notify("item/completed", dict(base, item=item_done))
 
         # An unsupported server request the client must still answer (no wedge).

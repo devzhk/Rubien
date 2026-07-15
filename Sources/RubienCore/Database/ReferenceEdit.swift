@@ -1352,13 +1352,13 @@ extension AppDatabase {
                     if let fieldKey = prop.defaultFieldKey,
                        fieldKey == PropertyDefinition.readingStatusFieldKey {
                         try db.execute(
-                            sql: "UPDATE reference SET \(fieldKey) = ? WHERE \(fieldKey) = ?",
-                            arguments: [effectiveNewName, option]
+                            sql: "UPDATE reference SET \(fieldKey) = ?, dateModified = ? WHERE \(fieldKey) = ?",
+                            arguments: [effectiveNewName, now, option]
                         )
                     } else {
                         try db.execute(
-                            sql: "UPDATE propertyValue SET value = ? WHERE propertyId = ? AND value = ?",
-                            arguments: [effectiveNewName, propertyId, option]
+                            sql: "UPDATE propertyValue SET value = ?, dateModified = ? WHERE propertyId = ? AND value = ?",
+                            arguments: [effectiveNewName, now, propertyId, option]
                         )
                     }
                 } else {
@@ -1371,6 +1371,7 @@ extension AppDatabase {
                         guard arr.contains(option) else { continue }
                         let next = arr.map { $0 == option ? effectiveNewName : $0 }
                         row.value = PropertyValue.encodeMultiSelect(next)
+                        row.dateModified = now
                         try row.update(db)
                     }
                 }

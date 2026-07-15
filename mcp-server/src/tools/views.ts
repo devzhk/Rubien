@@ -36,6 +36,7 @@ export function registerViewTools(server: McpServer): void {
           .optional()
           .describe("JSON string: GroupConfig"),
       },
+      annotations: { readOnlyHint: false, destructiveHint: false },
     },
     async ({ name, filters, sorts, groupBy }) =>
       runCliAsTool(
@@ -58,6 +59,7 @@ export function registerViewTools(server: McpServer): void {
       title: "Update saved view (rename)",
       description: "Change a saved view's name.",
       inputSchema: { id: z.number().int(), name: z.string() },
+      annotations: { readOnlyHint: false, destructiveHint: false },
     },
     async ({ id, name }) =>
       runCliAsTool([
@@ -75,7 +77,7 @@ export function registerViewTools(server: McpServer): void {
       title: "Delete saved view",
       description: "Remove a saved view by ID.",
       inputSchema: { id: z.number().int() },
-      annotations: { destructiveHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true },
     },
     // NB: `--delete` takes the id as its value (`views --delete <id>`) — the
     // 0.2.0 wrapper's `--delete --id <id>` form never parsed.

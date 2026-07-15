@@ -4,6 +4,13 @@
 **Status:** Draft v6 — v5 + the `views_query`→`list_references {view}` fold (user, 2026-07-14; output shapes verified identical) and the old-`views_query` attribution latent-bug fix. Codex-reviewed four times (v1: 20 findings / v2: 18 / v3: 9 / v4: 5, converging); all incorporated. The v4 pass confirmed the §4.3 seed table clean (all 30 names/keys/types) and §§4.4–4.5 internally consistent; v5 pins the last §5.3 reporting semantics (per-input item cardinality, inline-BibTeX continue [deliberate change], Zotero missing-PDF-as-diagnostic, source-level synthetic failures, npm-only write-route tests).
 **Context:** Follow-up to the unified read tools (`880ddc6`, spec 2026-07-11) and precursor to Assistant Phase 4 (library writes behind the approval card). This spec consolidates the write surface and completes the catalog-wide naming migration so Phase 4 mirrors a clean, final contract into the native `rubien-cli mcp` server instead of porting 12 `properties_*` tools and consolidating later.
 
+> **Superseded implementation boundary (2026-07-14):** Phase 4 now mirrors this
+> finalized 27-tool contract into native `rubien-cli mcp`. Plain `mcp` exposes
+> all 14 reads and 13 writes; `mcp --read-only` remains the restricted mode. The
+> in-app Assistant uses full mode, with exact-name read/write classification and
+> provider approval before writes. The historical npm-only/native-read-only
+> statements below describe this spec's original delivery boundary.
+
 ## 1. Motivation
 
 Four problems, one stroke:
