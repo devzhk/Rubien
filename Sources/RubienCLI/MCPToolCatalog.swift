@@ -331,19 +331,31 @@ func mcpIsJSONBool(_ value: Any) -> Bool {
     return CFGetTypeID(number) == CFBooleanGetTypeID()
 }
 
+/// Whether a (non-bool) JSON `NSNumber` is integer-backed rather than
+/// float-backed — a subtype distinction, not a value one (`1` is integer, `1.0`
+/// is float). Portable: NSNumber does not bridge to CFNumber on
+/// swift-corelibs-foundation, so `CFNumberIsFloatType(number)` won't compile on
+/// Linux; there we read the objC type encoding instead ('d'/'f' ⇒ float).
+private func mcpNumberIsIntegerBacked(_ number: NSNumber) -> Bool {
+    #if canImport(Darwin)
+    return !CFNumberIsFloatType(number)
+    #else
+    let encoding = String(cString: number.objCType)
+    return encoding != "d" && encoding != "f"
+    #endif
+}
+
 /// Decode a JSON integer without routing integer-backed `NSNumber` values
 /// through `Double`. The latter rounds valid Int64 IDs above 2^53 and could
 /// redirect a write to an adjacent row. Float-backed integral JSON (for
 /// example `1.0`) remains accepted, matching Zod's `number().int()` behavior.
 func mcpExactInt(_ value: Any) -> Int? {
     guard !mcpIsJSONBool(value), let number = value as? NSNumber else { return nil }
-    #if canImport(CoreFoundation)
-    if !CFNumberIsFloatType(number) {
+    if mcpNumberIsIntegerBacked(number) {
         let exact = number.int64Value
         guard NSNumber(value: exact) == number else { return nil }
         return Int(exactly: exact)
     }
-    #endif
     let floating = number.doubleValue
     // Once a JSON literal is float-backed, values outside the IEEE-754 safe
     // integer range may already have rounded to a neighboring ID. Reject them

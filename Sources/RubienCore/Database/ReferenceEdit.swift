@@ -338,12 +338,18 @@ private func payloadIsJSONBool(_ number: NSNumber) -> Bool {
 /// is the reliable test — `1` and `1.0` differ only in CFNumber subtype, and any
 /// Int64-range integer literal is integer-backed regardless of magnitude.
 private func payloadIsIntegerNumber(_ number: NSNumber) -> Bool {
-    #if canImport(CoreFoundation)
+    #if canImport(Darwin)
+    // NSNumber toll-free bridges to CFNumber on Apple platforms, so
+    // CFNumberIsFloatType — the canonical subtype test — takes it directly.
     return !CFNumberIsFloatType(number)
     #else
-    // Fallback (no CoreFoundation): integral only if the double round-trips.
-    let d = number.doubleValue
-    return d.rounded() == d && d >= -9.223e18 && d <= 9.223e18
+    // swift-corelibs-foundation does NOT bridge NSNumber to CFNumber, so
+    // CFNumberIsFloatType(number) fails to compile on Linux. The objC type
+    // encoding carries the same integer-vs-float distinction: JSONSerialization
+    // backs a fractional literal with 'd' (Double)/'f' (Float) and every integer
+    // literal with an integer code, so `1` stays integer and `1.0` stays float.
+    let encoding = String(cString: number.objCType)
+    return encoding != "d" && encoding != "f"
     #endif
 }
 
