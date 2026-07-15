@@ -188,16 +188,34 @@ describe("rubien_create_reference argv routing", () => {
     );
   });
 
-  it("rejects stdin ('-') without invoking the CLI", async () => {
+  it("rejects stdin ('-'), including whitespace-padded, without invoking the CLI", async () => {
     const client = await connectedClient();
-    const before = vi.mocked(runCliAsTool).mock.calls.length;
-    const result = await client.callTool({
-      name: "rubien_create_reference",
-      arguments: { source: "-" },
+    for (const source of ["-", " - ", "\t-\n"]) {
+      const before = vi.mocked(runCliAsTool).mock.calls.length;
+      const result = await client.callTool({
+        name: "rubien_create_reference",
+        arguments: { source },
+      });
+      expect(result.isError, `source=${JSON.stringify(source)}`).toBe(true);
+      expect(JSON.stringify(result.content)).toContain("stdin");
+      // The CLI trims the source, so a padded "-" must be caught here too —
+      // else it reaches stdin routing and hangs over MCP.
+      expect(vi.mocked(runCliAsTool).mock.calls.length).toBe(before);
+    }
+  });
+
+  it("forwards an empty properties payload as --properties {} (unified no-op path)", async () => {
+    const client = await connectedClient();
+    await client.callTool({
+      name: "rubien_update_reference",
+      arguments: { id: 9, properties: {} },
     });
-    expect(result.isError).toBe(true);
-    expect(JSON.stringify(result.content)).toContain("stdin");
-    expect(vi.mocked(runCliAsTool).mock.calls.length).toBe(before);
+    expect(vi.mocked(runCliAsTool)).toHaveBeenLastCalledWith([
+      "update",
+      "9",
+      "--properties",
+      "{}",
+    ]);
   });
 
   it("rejects zero and multiple inputs without invoking the CLI", async () => {

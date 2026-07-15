@@ -86,15 +86,23 @@ enum CreateReferenceSource {
     }
 
     /// Manual `--title` route: one minimal row; `input` is the title string
-    /// (§5.3 provenance).
+    /// (§5.3 provenance). A persistence/readback failure is emitted AS the
+    /// unified failed-item envelope (not raw ArgumentParser stderr), matching
+    /// every other route's contract.
     static func runTitle(_ title: String) throws {
-        var ref = Reference(title: title)
-        let saveResult = try AppDatabase.shared.saveReference(&ref)
-        let outcome = ItemOutcome(
-            reference: ref,
-            disposition: saveResult == .existing ? .existing : .created,
-            input: title
-        )
+        let outcome: ItemOutcome
+        do {
+            var ref = Reference(title: title)
+            let saveResult = try AppDatabase.shared.saveReference(&ref)
+            outcome = ItemOutcome(
+                reference: ref,
+                disposition: saveResult == .existing ? .existing : .created,
+                input: title
+            )
+        } catch {
+            try emit([(failed(title, error.localizedDescription), nil)], diagnostics: nil)
+            return
+        }
         try emit([(outcome, nil)], diagnostics: nil)
     }
 

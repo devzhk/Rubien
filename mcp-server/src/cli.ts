@@ -62,7 +62,7 @@ export interface CliOptions {
   textMode?: boolean;
   /** Override the default 60s timeout for slow operations. */
   timeoutMs?: number;
-  /** Write to stdin — used by `import -` with piped content. */
+  /** Write to stdin — used by `add --source -` with piped content. */
   stdin?: string;
 }
 
@@ -91,7 +91,7 @@ export async function invokeCli(
     });
     // Close stdin unconditionally. Even when we have nothing to pipe, leaving
     // it open causes subcommands that call `readDataToEndOfFile()` (like
-    // `import -`) to block until the timeout fires.
+    // `add --source -`) to block until the timeout fires.
     if (child.child.stdin) {
       if (options.stdin !== undefined) {
         child.child.stdin.write(options.stdin);

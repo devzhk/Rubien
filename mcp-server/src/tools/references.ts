@@ -179,7 +179,10 @@ export function registerReferenceTools(server: McpServer): void {
           isError: true,
         };
       }
-      if (source === "-") {
+      // Trim before comparing: the CLI trims the source, so a bare " - "
+      // would otherwise slip past this guard and reach stdin routing (which
+      // hangs over MCP — the wrapper closes the child's stdin).
+      if (source?.trim() === "-") {
         return {
           content: [
             {
@@ -294,7 +297,11 @@ export function registerReferenceTools(server: McpServer): void {
       if (args.clearFields) {
         for (const f of args.clearFields) flags.push("--clear-field", f);
       }
-      if (args.properties && Object.keys(args.properties).length > 0) {
+      // Forward even an empty `{}`: the CLI routes any `--properties` through
+      // the unified applyReferenceEdit no-op path (writes nothing when the
+      // payload is empty), whereas dropping it would fall to the legacy
+      // update that unconditionally saves + notifies.
+      if (args.properties !== undefined) {
         flags.push("--properties", JSON.stringify(args.properties));
       }
       return runCliAsTool(["update", String(args.id), ...flags]);

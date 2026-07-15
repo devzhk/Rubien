@@ -298,8 +298,7 @@ export const SyncStatusDTO = z
   .passthrough(); // sync status is relatively fluid; keep forward-compat
 
 export const DeleteResultDTO = z.object({ deleted: z.string() });
-export const ImportResultDTO = z
-  .object({ imported: z.number().int(), file: z.string() })
-  .passthrough();
-
-export const CliErrorDTO = z.object({ error: z.string() });
+// (ImportResultDTO removed with the `import` subcommand; CliErrorDTO removed
+// with the verbatim-stderr change — errors are now raw envelope text, which
+// may be a structured `{error, ids, names}` / `{items, summary}` shape, not a
+// plain `{error}` object.)

@@ -1,12 +1,15 @@
 import { describe, it, expect } from "vitest";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 /**
  * End-to-end test: boot the built server over stdio, drive a minimal
- * JSON-RPC handshake (initialize → tools/list → tools/call rubien_styles_list),
- * and verify the server returns sane responses.
+ * JSON-RPC handshake (initialize → tools/list → tools/call), and verify the
+ * server returns sane responses — including a real WRITE (create_reference →
+ * unified envelope → delete_reference) against the actual CLI, so the CI job
+ * catches write-surface drift the mocked argv tests can't see.
  *
  * Gated on:
  *   - dist/index.js built (npm run build)
@@ -27,8 +30,11 @@ describe.skipIf(skipReason !== null)("e2e stdio JSON-RPC", () => {
   it(
     "initialize → tools/list returns the full Rubien tool catalog",
     async () => {
+      // Hermetic library so the real create/delete below never touches the
+      // dev library — a fresh temp root the CLI migrates on first use.
+      const libRoot = mkdtempSync(join(tmpdir(), "rubien-e2e-"));
       const child = spawn("node", [distIndex], {
-        env: { ...process.env, RUBIEN_CLI: swiftCli },
+        env: { ...process.env, RUBIEN_CLI: swiftCli, RUBIEN_LIBRARY_ROOT: libRoot },
         stdio: ["pipe", "pipe", "pipe"],
       });
 
@@ -101,12 +107,50 @@ describe.skipIf(skipReason !== null)("e2e stdio JSON-RPC", () => {
         expect(callResult.result.content).toBeDefined();
         expect(Array.isArray(callResult.result.content)).toBe(true);
         expect(callResult.result.isError).not.toBe(true);
+
+        // 5. A real WRITE round-trip against the CLI: create_reference (title
+        //    route) must return the unified {items,summary} envelope with a
+        //    created item, then delete_reference cleans it up. This is the
+        //    only place the advertised write surface is exercised end-to-end
+        //    (the argv/envelope unit tests mock the CLI).
+        const uniqueTitle = `e2e-write-${initResult.result.serverInfo?.name}-${child.pid}`;
+        const createResult = await rpcRequest(child, {
+          jsonrpc: "2.0",
+          id: 4,
+          method: "tools/call",
+          params: {
+            name: "rubien_create_reference",
+            arguments: { title: uniqueTitle },
+          },
+        });
+        expect(createResult.result.isError).not.toBe(true);
+        const envText = (createResult.result.content as Array<{ text: string }>)[0].text;
+        const envelope = JSON.parse(envText) as {
+          items: Array<{ status: string; reference?: { id: number } }>;
+          summary: { created: number };
+        };
+        expect(envelope.summary.created).toBe(1);
+        expect(envelope.items[0].status).toBe("created");
+        const newId = envelope.items[0].reference?.id;
+        expect(typeof newId).toBe("number");
+
+        const deleteResult = await rpcRequest(child, {
+          jsonrpc: "2.0",
+          id: 5,
+          method: "tools/call",
+          params: {
+            name: "rubien_delete_reference",
+            arguments: { ids: [newId] },
+          },
+        });
+        expect(deleteResult.result.isError).not.toBe(true);
       } finally {
         child.kill();
         await new Promise<void>((resolve) => child.once("close", () => resolve()));
+        rmSync(libRoot, { recursive: true, force: true });
       }
     },
-    15_000,
+    30_000,
   );
 });
 
