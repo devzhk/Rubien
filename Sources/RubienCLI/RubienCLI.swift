@@ -1164,7 +1164,7 @@ struct Cite: ParsableCommand {
 struct Properties: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "properties",
-        abstract: "List or manage property definitions, options, and per-reference values (covers tags via the built-in 'Tags' property)"
+        abstract: "List or manage property definitions and options; list per-reference values (write them via `rubien-cli update --properties`). Covers tags via the built-in 'Tags' property."
     )
 
     @Flag(name: .long, help: "Only visible property definitions (with list). Ignored when --id / --name is supplied — explicit selectors always win.")
@@ -1173,7 +1173,7 @@ struct Properties: ParsableCommand {
     @Flag(name: .long, help: "Create a new property definition")
     var create = false
 
-    @Option(name: .long, parsing: .singleValue, help: "Property name. With --create / --rename: target name (single value required). With list: repeatable filter selector (exact, case-sensitive). Errors with `unresolved-selectors` when any name doesn't match.")
+    @Option(name: .long, parsing: .singleValue, help: "Property name. With --create / --update: target name (single value required). With list: repeatable filter selector (exact, case-sensitive). Errors with `unresolved-selectors` when any name doesn't match.")
     var name: [String] = []
 
     @Option(name: .long, help: "Property type (with --create): string, url, number, singleSelect, multiSelect, date, checkbox")
@@ -1185,15 +1185,6 @@ struct Properties: ParsableCommand {
     @Option(name: .long, help: "Delete a property definition by ID (rejected for built-in defaults)")
     var delete: Int64?
 
-    @Flag(name: .long, help: "Rename a property definition")
-    var rename = false
-
-    @Flag(name: .long, help: "Mark a property as visible")
-    var show = false
-
-    @Flag(name: .long, help: "Mark a property as hidden")
-    var hide = false
-
     @Flag(name: .long, help: "Combined property update: rename and/or change visibility in one transaction (requires --id and at least one of --name / --set-visible)")
     var update = false
 
@@ -1202,9 +1193,6 @@ struct Properties: ParsableCommand {
 
     @Flag(name: .customLong("add-option"), help: "Append a select option (or, for the Tags property, create a new tag) (requires --id, --value, optional --color)")
     var addOption = false
-
-    @Flag(name: .customLong("rename-option"), help: "Rename a select option (requires --id, --from, --to). For Tags, --from is the stringified tag id. Bulk-updates affected reference rows.")
-    var renameOption = false
 
     @Flag(name: .customLong("update-option"), help: "Combined option update: rename and/or recolor in one transaction (requires --id and --option, at least one of --to / --color). For Tags, --option is the stringified tag id.")
     var updateOption = false
@@ -1218,16 +1206,13 @@ struct Properties: ParsableCommand {
     @Option(name: .long, parsing: .singleValue, help: "Property definition ID. With operations: single target. With list: repeatable filter selector. Errors with `unresolved-selectors` when any id doesn't exist.")
     var id: [Int64] = []
 
-    @Option(name: .long, help: "Option value. For multiSelect properties (incl. Tags) accepts comma-separated. With --set / --add-value / --remove-value / --add-option / --rename-option / --delete-option.")
+    @Option(name: .long, help: "Option value (with --add-option / --delete-option).")
     var value: String?
 
     @Option(name: .long, help: "Option color as hex (with --add-option, auto-assigned if omitted)")
     var color: String?
 
-    @Option(name: .customLong("from"), help: "Existing option value to rename (with --rename-option). For Tags, the stringified tag id.")
-    var fromValue: String?
-
-    @Option(name: .customLong("to"), help: "New option value (with --rename-option). For Tags, the new display name.")
+    @Option(name: .customLong("to"), help: "New option value (with --update-option). For Tags, the new display name.")
     var toValue: String?
 
     @Option(name: .customLong("replace-with"), help: "Replacement option for in-use values when deleting (with --delete-option). For Tags, the stringified id of another tag.")
@@ -1236,32 +1221,10 @@ struct Properties: ParsableCommand {
     @Flag(name: .customLong("clear-in-use"), help: "When deleting an in-use option (with --delete-option), clear it from affected references instead of refusing. Mutually exclusive with --replace-with.")
     var clearOptionInUse = false
 
-    @Flag(name: .long, help: "Upsert a property value on a reference (requires --reference, --id, --value). Replace semantics for multiSelect; pair with --add-value or --remove-value for incremental edits.")
-    var set = false
-
-    @Flag(name: .customLong("add-value"), help: "Additive multiSelect mode for --set (idempotent: re-adding present values is a no-op)")
-    var addValue = false
-
-    @Flag(name: .customLong("remove-value"), help: "Subtractive multiSelect mode for --set (idempotent: removing absent values is a no-op)")
-    var removeValue = false
-
-    @Flag(name: .long, help: "Clear a property value on a reference (requires --reference and --id)")
-    var clear = false
-
-    @Option(name: .long, help: "Reference ID (with --set, --clear, or to list that reference's property values)")
+    @Option(name: .long, help: "Reference ID — list that reference's property values (write them via `rubien-cli update --properties`)")
     var reference: Int64?
 
     func run() throws {
-        // --add-value and --remove-value are sub-modes of --set, mutually exclusive.
-        if (addValue || removeValue) && !set {
-            printJSONError("--add-value / --remove-value require --set")
-            throw ExitCode.failure
-        }
-        if addValue && removeValue {
-            printJSONError("--add-value and --remove-value are mutually exclusive")
-            throw ExitCode.failure
-        }
-
         if let deleteId = delete {
             let defs = try AppDatabase.shared.fetchAllPropertyDefinitions()
             guard let target = defs.first(where: { $0.id == deleteId }) else {
@@ -1304,44 +1267,6 @@ struct Properties: ParsableCommand {
             )
             try AppDatabase.shared.savePropertyDefinition(&prop)
             notifyLibraryChanged()
-            printJSON(try makePropertyDefinitionDTO(from: prop))
-            return
-        }
-
-        if rename {
-            guard let propId = try singleId(flag: "--rename"),
-                  let n = try singleName(flag: "--rename") else {
-                printJSONError("--rename requires --id and --name")
-                throw ExitCode.failure
-            }
-            let defs = try AppDatabase.shared.fetchAllPropertyDefinitions()
-            guard var prop = defs.first(where: { $0.id == propId }) else {
-                printJSONError("Property \(propId) not found")
-                throw ExitCode.failure
-            }
-            if prop.isDefault {
-                printJSONError("Cannot rename built-in property '\(prop.name)'")
-                throw ExitCode.failure
-            }
-            prop.name = n
-            try AppDatabase.shared.savePropertyDefinition(&prop)
-            notifyLibraryChanged()
-            printJSON(try makePropertyDefinitionDTO(from: prop))
-            return
-        }
-
-        if show || hide {
-            guard let propId = try singleId(flag: "--show / --hide") else {
-                printJSONError("--show / --hide requires --id")
-                throw ExitCode.failure
-            }
-            try AppDatabase.shared.togglePropertyVisibility(id: propId, visible: show)
-            notifyLibraryChanged()
-            let defs = try AppDatabase.shared.fetchAllPropertyDefinitions()
-            guard let prop = defs.first(where: { $0.id == propId }) else {
-                printJSONError("Property \(propId) not found")
-                throw ExitCode.failure
-            }
             printJSON(try makePropertyDefinitionDTO(from: prop))
             return
         }
@@ -1404,33 +1329,6 @@ struct Properties: ParsableCommand {
             return
         }
 
-        if renameOption {
-            guard let propId = try singleId(flag: "--rename-option"),
-                  let from = fromValue, let to = toValue else {
-                printJSONError("--rename-option requires --id, --from, and --to")
-                throw ExitCode.failure
-            }
-            let defs = try AppDatabase.shared.fetchAllPropertyDefinitions()
-            guard let prop = defs.first(where: { $0.id == propId }) else {
-                printJSONError("Property \(propId) not found")
-                throw ExitCode.failure
-            }
-            if prop.isDefault, !Self.optionsMutable(for: prop) {
-                printJSONError(typeFixedHintMessage(propertyName: prop.name))
-                throw ExitCode.failure
-            }
-            do {
-                try AppDatabase.shared.renamePropertyOption(propertyId: propId, from: from, to: to)
-            } catch let error as PropertyOptionError {
-                printJSONError(describePropertyOptionError(error))
-                throw ExitCode.failure
-            }
-            notifyLibraryChanged()
-            let updated = try AppDatabase.shared.fetchPropertyDefinition(id: propId)!
-            printJSON(try makePropertyDefinitionDTO(from: updated))
-            return
-        }
-
         if updateOption {
             guard let propId = try singleId(flag: "--update-option"), let opt = optionValue else {
                 printJSONError("--update-option requires --id and --option")
@@ -1486,100 +1384,6 @@ struct Properties: ParsableCommand {
             notifyLibraryChanged()
             let updated = try AppDatabase.shared.fetchPropertyDefinition(id: propId)!
             printJSON(try makePropertyDefinitionDTO(from: updated))
-            return
-        }
-
-        if set {
-            guard let refId = reference,
-                  let propId = try singleId(flag: "--set"),
-                  let v = value else {
-                printJSONError("--set requires --reference, --id, and --value")
-                throw ExitCode.failure
-            }
-            let defs = try AppDatabase.shared.fetchAllPropertyDefinitions()
-            guard let def = defs.first(where: { $0.id == propId }) else {
-                printJSONError("Property \(propId) not found")
-                throw ExitCode.failure
-            }
-            // Built-in properties back onto Reference fields, not the
-            // propertyValue table — writing one would appear to succeed but
-            // never render in `get`/`list`/the UI. Tags is the exception:
-            // setPropertyValue routes it through ReferenceTag transparently.
-            if def.isDefault, !def.isTags {
-                printJSONError("Cannot --set built-in property '\(def.name)'. Use `rubien-cli update` for built-in fields.")
-                throw ExitCode.failure
-            }
-            // --add-value / --remove-value paths: only meaningful for
-            // multiSelect (incl. Tags). Single-select replace is just --set.
-            if addValue || removeValue {
-                guard def.type == .multiSelect else {
-                    printJSONError("--add-value / --remove-value only apply to multiSelect properties")
-                    throw ExitCode.failure
-                }
-                let values = v.split(separator: ",")
-                    .map { $0.trimmingCharacters(in: .whitespaces) }
-                    .filter { !$0.isEmpty }
-                do {
-                    if addValue {
-                        try AppDatabase.shared.addPropertyValue(referenceId: refId, propertyId: propId, values: values)
-                    } else {
-                        try AppDatabase.shared.removePropertyValue(referenceId: refId, propertyId: propId, values: values)
-                    }
-                } catch let error as PropertyOptionError {
-                    printJSONError(describePropertyOptionError(error))
-                    throw ExitCode.failure
-                }
-                notifyLibraryChanged()
-                let mode = addValue ? "added" : "removed"
-                printJSON([
-                    "referenceId": "\(refId)",
-                    "propertyId": "\(propId)",
-                    "mode": mode,
-                    "values": values.joined(separator: ","),
-                ])
-                return
-            }
-            // Replace semantics: encode multiSelect as JSON `[String]` so the
-            // UI decoder doesn't see a raw scalar (which it would silently
-            // treat as []). For Tags-routed properties the value reaching the
-            // DB is parsed back to ids inside setPropertyValue.
-            let stored: String
-            if def.type == .multiSelect {
-                let values = v.split(separator: ",")
-                    .map { $0.trimmingCharacters(in: .whitespaces) }
-                    .filter { !$0.isEmpty }
-                stored = PropertyValue.encodeMultiSelect(values)
-            } else {
-                stored = v
-            }
-            do {
-                try AppDatabase.shared.setPropertyValue(referenceId: refId, propertyId: propId, value: stored)
-            } catch let error as PropertyOptionError {
-                printJSONError(describePropertyOptionError(error))
-                throw ExitCode.failure
-            }
-            notifyLibraryChanged()
-            printJSON(["referenceId": "\(refId)", "propertyId": "\(propId)", "value": stored])
-            return
-        }
-
-        if clear {
-            guard let refId = reference, let propId = try singleId(flag: "--clear") else {
-                printJSONError("--clear requires --reference and --id")
-                throw ExitCode.failure
-            }
-            let defs = try AppDatabase.shared.fetchAllPropertyDefinitions()
-            guard let def = defs.first(where: { $0.id == propId }) else {
-                printJSONError("Property \(propId) not found")
-                throw ExitCode.failure
-            }
-            if def.isDefault, !def.isTags {
-                printJSONError("Cannot --clear built-in property '\(def.name)'. Use `rubien-cli update --clear-field <name>` for built-in fields.")
-                throw ExitCode.failure
-            }
-            try AppDatabase.shared.setPropertyValue(referenceId: refId, propertyId: propId, value: nil)
-            notifyLibraryChanged()
-            printJSON(["cleared": "\(refId):\(propId)"])
             return
         }
 

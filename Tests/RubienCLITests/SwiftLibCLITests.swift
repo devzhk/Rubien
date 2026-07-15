@@ -553,24 +553,9 @@ final class RubienCLITests: XCTestCase {
         }
     }
 
-    func testPropertiesRename() throws {
-        try skipIfBinaryMissing()
-        let original = "cli-rename-\(UUID().uuidString.prefix(8))"
-        let created = try runCLI(["properties", "--create", "--name", original, "--type", "string"])
-        guard let propId = parseId(from: Data(created.stdout.utf8)) else {
-            XCTFail("create failed")
-            return
-        }
-        defer { _ = try? runCLI(["properties", "--delete", String(propId)]) }
-
-        let renamed = original + "-renamed"
-        let result = try runCLI(["properties", "--rename", "--id", String(propId), "--name", renamed])
-        XCTAssertEqual(result.exitCode, 0)
-        let obj = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any]
-        XCTAssertEqual(obj?["name"] as? String, renamed)
-    }
-
-    func testPropertiesShowHide() throws {
+    /// Visibility round-trips through `properties --update --set-visible`
+    /// in both directions (hide, then show again).
+    func testPropertiesUpdateVisibilityRoundTrip() throws {
         try skipIfBinaryMissing()
         let created = try runCLI(["properties", "--create", "--name", "cli-vis-\(UUID().uuidString.prefix(8))", "--type", "string"])
         guard let propId = parseId(from: Data(created.stdout.utf8)) else {
@@ -579,12 +564,12 @@ final class RubienCLITests: XCTestCase {
         }
         defer { _ = try? runCLI(["properties", "--delete", String(propId)]) }
 
-        let hidden = try runCLI(["properties", "--hide", "--id", String(propId)])
+        let hidden = try runCLI(["properties", "--update", "--id", String(propId), "--set-visible", "false"])
         XCTAssertEqual(hidden.exitCode, 0)
         let hiddenObj = try JSONSerialization.jsonObject(with: Data(hidden.stdout.utf8)) as? [String: Any]
         XCTAssertEqual(hiddenObj?["isVisible"] as? Bool, false)
 
-        let shown = try runCLI(["properties", "--show", "--id", String(propId)])
+        let shown = try runCLI(["properties", "--update", "--id", String(propId), "--set-visible", "true"])
         XCTAssertEqual(shown.exitCode, 0)
         let shownObj = try JSONSerialization.jsonObject(with: Data(shown.stdout.utf8)) as? [String: Any]
         XCTAssertEqual(shownObj?["isVisible"] as? Bool, true)
@@ -607,7 +592,7 @@ final class RubienCLITests: XCTestCase {
         XCTAssertTrue(options.contains { ($0["value"] as? String) == "c" })
     }
 
-    func testPropertiesSetAndClearValueRoundTrip() throws {
+    func testUpdatePropertiesSetAndClearValueRoundTrip() throws {
         try skipIfBinaryMissing()
 
         // Create a reference
@@ -620,16 +605,17 @@ final class RubienCLITests: XCTestCase {
         defer { _ = try? runCLI(["delete", String(refId), "--force"]) }
 
         // Create a custom property
-        let propResult = try runCLI(["properties", "--create", "--name", "cli-val-\(UUID().uuidString.prefix(8))", "--type", "string"])
+        let propName = "cli-val-\(UUID().uuidString.prefix(8))"
+        let propResult = try runCLI(["properties", "--create", "--name", propName, "--type", "string"])
         guard let propId = parseId(from: Data(propResult.stdout.utf8)) else {
             XCTFail("create prop failed")
             return
         }
         defer { _ = try? runCLI(["properties", "--delete", String(propId)]) }
 
-        // Set a value
-        let setResult = try runCLI(["properties", "--set", "--reference", String(refId), "--id", String(propId), "--value", "hello"])
-        XCTAssertEqual(setResult.exitCode, 0)
+        // Set a value through the unified cell payload
+        let setResult = try runCLI(["update", String(refId), "--properties", "{\"\(propName)\": \"hello\"}"])
+        XCTAssertEqual(setResult.exitCode, 0, "stderr=\(setResult.stderr)")
 
         // Read back via --reference listing
         let listed = try runCLI(["properties", "--reference", String(refId)])
@@ -644,9 +630,9 @@ final class RubienCLITests: XCTestCase {
         let custom = getObj?["customProperties"] as? [[String: Any]] ?? []
         XCTAssertTrue(custom.contains { ($0["value"] as? String) == "hello" })
 
-        // Clear and confirm
-        let clearResult = try runCLI(["properties", "--clear", "--reference", String(refId), "--id", String(propId)])
-        XCTAssertEqual(clearResult.exitCode, 0)
+        // Clear via JSON null and confirm
+        let clearResult = try runCLI(["update", String(refId), "--properties", "{\"\(propName)\": null}"])
+        XCTAssertEqual(clearResult.exitCode, 0, "stderr=\(clearResult.stderr)")
         let afterClear = try runCLI(["properties", "--reference", String(refId)])
         let afterArr = try JSONSerialization.jsonObject(with: Data(afterClear.stdout.utf8)) as? [[String: Any]] ?? []
         XCTAssertFalse(afterArr.contains { ($0["propertyId"] as? String) == String(propId) })
@@ -668,24 +654,6 @@ final class RubienCLITests: XCTestCase {
         // Ensure it still exists
         let after = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
         XCTAssertTrue(after.contains { ($0["id"] as? String) == idStr })
-    }
-
-    func testPropertiesRenameDefaultPropertyIsRefused() throws {
-        try skipIfBinaryMissing()
-        let all = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
-        guard let defaultProp = all.first(where: { ($0["isDefault"] as? Bool) == true }),
-              let idStr = defaultProp["id"] as? String,
-              let originalName = defaultProp["name"] as? String else {
-            XCTFail("No default property seeded")
-            return
-        }
-
-        let result = try runCLI(["properties", "--rename", "--id", idStr, "--name", "Hijacked"])
-        XCTAssertNotEqual(result.exitCode, 0, "--rename on a built-in property should fail")
-
-        let after = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
-        let stillThere = after.first { ($0["id"] as? String) == idStr }
-        XCTAssertEqual(stillThere?["name"] as? String, originalName, "name must be unchanged")
     }
 
     /// Type is permanently locked from option mutations because it drives
@@ -738,9 +706,9 @@ final class RubienCLITests: XCTestCase {
         XCTAssertTrue(optionValues.contains(testValue), "added option must appear in the live options list")
     }
 
-    /// Renaming a Status option via the CLI bulk-updates the affected
-    /// reference rows. Smoke-tests the round-trip end-to-end against the
-    /// real binary.
+    /// Renaming a Status option via `--update-option` bulk-updates the
+    /// affected reference rows. Smoke-tests the round-trip end-to-end
+    /// against the real binary.
     func testPropertiesRenameOptionRoundTrip() throws {
         try skipIfBinaryMissing()
         let all = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
@@ -758,8 +726,8 @@ final class RubienCLITests: XCTestCase {
         _ = try runCLI(["properties", "--add-option", "--id", idStr, "--value", original])
 
         let result = try runCLI([
-            "properties", "--rename-option", "--id", idStr,
-            "--from", original, "--to", renamed,
+            "properties", "--update-option", "--id", idStr,
+            "--option", original, "--to", renamed,
         ])
         XCTAssertEqual(result.exitCode, 0, "rename must succeed: \(result.stderr)")
 
@@ -793,7 +761,7 @@ final class RubienCLITests: XCTestCase {
             _ = try? runCLI(["properties", "--delete", propId])
         }
 
-        let setResult = try runCLI(["properties", "--set", "--reference", String(refId), "--id", propId, "--value", "Alpha"])
+        let setResult = try runCLI(["update", String(refId), "--properties", "{\"\(propName)\": \"Alpha\"}"])
         XCTAssertEqual(setResult.exitCode, 0, "set failed: \(setResult.stderr)")
 
         let del = try runCLI(["properties", "--delete-option", "--id", propId, "--value", "Alpha", "--clear-in-use"])
@@ -829,41 +797,6 @@ final class RubienCLITests: XCTestCase {
             (result.stdout + result.stderr).lowercased().contains("either"),
             "error should explain the conflict: \(result.stdout) \(result.stderr)"
         )
-    }
-
-    func testPropertiesSetDefaultPropertyIsRefused() throws {
-        try skipIfBinaryMissing()
-
-        let addResult = try runCLI(["add", "--title", "CLI Default Guard \(UUID().uuidString.prefix(8))"])
-        guard let refId = parseId(from: Data(addResult.stdout.utf8)) else {
-            XCTFail("add failed")
-            return
-        }
-        defer { _ = try? runCLI(["delete", String(refId), "--force"]) }
-
-        // Pick a default property OTHER than Tags. Tags routes through
-        // setTags transparently and is intentionally writable via --set;
-        // the guard must still fire for column-backed defaults like DOI/Year.
-        let all = try JSONSerialization.jsonObject(with: Data(try runCLI(["properties"]).stdout.utf8)) as? [[String: Any]] ?? []
-        guard let defaultProp = all.first(where: {
-                  ($0["isDefault"] as? Bool) == true
-                      && ($0["defaultFieldKey"] as? String) != "tags"
-              }),
-              let defaultIdStr = defaultProp["id"] as? String else {
-            XCTFail("No non-Tags default property seeded")
-            return
-        }
-
-        let setResult = try runCLI(["properties", "--set",
-                                    "--reference", String(refId),
-                                    "--id", defaultIdStr,
-                                    "--value", "bogus"])
-        XCTAssertNotEqual(setResult.exitCode, 0, "--set on a column-backed built-in must fail")
-
-        let listed = try runCLI(["properties", "--reference", String(refId)])
-        let arr = try JSONSerialization.jsonObject(with: Data(listed.stdout.utf8)) as? [[String: Any]] ?? []
-        XCTAssertFalse(arr.contains { ($0["propertyId"] as? String) == defaultIdStr },
-                       "built-in property must not be stored as a propertyValue row")
     }
 
     // MARK: - Properties: --id / --name selectors
@@ -940,7 +873,7 @@ final class RubienCLITests: XCTestCase {
             return
         }
         defer { _ = try? runCLI(["properties", "--delete", String(propId)]) }
-        _ = try runCLI(["properties", "--hide", "--id", String(propId)])
+        _ = try runCLI(["properties", "--update", "--id", String(propId), "--set-visible", "false"])
 
         // --visible alone hides it.
         let visibleOnly = try runCLI(["properties", "--visible"])
@@ -955,12 +888,13 @@ final class RubienCLITests: XCTestCase {
         XCTAssertEqual(arr.first?["id"] as? String, String(propId))
     }
 
-    // MARK: - Properties: --add-value / --remove-value (Tags + custom multiSelect)
+    // MARK: - update --properties value writes (Tags + custom multiSelect)
 
-    /// Tags-property additive/subtractive flow end-to-end against the binary.
+    /// Tags additive/subtractive flow end-to-end against the binary via the
+    /// unified `update --properties` payload ({"Tags": {"add"/"remove": [ids]}}).
     /// Verifies idempotency (re-adding a tag is a no-op) and that the result
     /// flows back into `properties --reference`'s value.
-    func testPropertiesAddRemoveValueOnTagsProperty() throws {
+    func testUpdatePropertiesAddRemoveTagsRoundTrip() throws {
         try skipIfBinaryMissing()
 
         let addResult = try runCLI(["add", "--title", "CLI Tag-via-prop \(UUID().uuidString.prefix(8))"])
@@ -1019,12 +953,10 @@ final class RubienCLITests: XCTestCase {
             return Set(decoded)
         }
 
-        // --add-value: assign both tags to the reference (additive).
+        // add: assign both tags to the reference (additive).
         let assigned = try runCLI([
-            "properties", "--set", "--add-value",
-            "--reference", String(refId),
-            "--id", tagsIdStr,
-            "--value", "\(aId),\(bId)",
+            "update", String(refId),
+            "--properties", "{\"Tags\": {\"add\": [\"\(aId)\", \"\(bId)\"]}}",
         ])
         XCTAssertEqual(assigned.exitCode, 0, "stderr=\(assigned.stderr)")
         let after1 = try currentTagIds()
@@ -1033,38 +965,32 @@ final class RubienCLITests: XCTestCase {
 
         // Idempotent: re-adding aId is a no-op.
         let again = try runCLI([
-            "properties", "--set", "--add-value",
-            "--reference", String(refId),
-            "--id", tagsIdStr,
-            "--value", aId,
+            "update", String(refId),
+            "--properties", "{\"Tags\": {\"add\": [\"\(aId)\"]}}",
         ])
         XCTAssertEqual(again.exitCode, 0)
         let after2 = try currentTagIds()
         XCTAssertEqual(after2, after1, "re-adding an existing tag must be idempotent")
 
-        // --remove-value: drop one tag, keep the other.
+        // remove: drop one tag, keep the other.
         let removed = try runCLI([
-            "properties", "--set", "--remove-value",
-            "--reference", String(refId),
-            "--id", tagsIdStr,
-            "--value", aId,
+            "update", String(refId),
+            "--properties", "{\"Tags\": {\"remove\": [\"\(aId)\"]}}",
         ])
         XCTAssertEqual(removed.exitCode, 0)
         let after3 = try currentTagIds()
-        XCTAssertFalse(after3.contains(aId), "tag A must be gone after --remove-value")
+        XCTAssertFalse(after3.contains(aId), "tag A must be gone after remove")
         XCTAssertTrue(after3.contains(bId), "tag B must remain")
 
         // Idempotent: removing absent tag is a no-op.
         let removeAgain = try runCLI([
-            "properties", "--set", "--remove-value",
-            "--reference", String(refId),
-            "--id", tagsIdStr,
-            "--value", aId,
+            "update", String(refId),
+            "--properties", "{\"Tags\": {\"remove\": [\"\(aId)\"]}}",
         ])
         XCTAssertEqual(removeAgain.exitCode, 0)
     }
 
-    func testPropertiesSetMultiSelectEncodesJSON() throws {
+    func testUpdatePropertiesMultiSelectEncodesJSON() throws {
         try skipIfBinaryMissing()
 
         let addResult = try runCLI(["add", "--title", "CLI Multi Test \(UUID().uuidString.prefix(8))"])
@@ -1074,8 +1000,9 @@ final class RubienCLITests: XCTestCase {
         }
         defer { _ = try? runCLI(["delete", String(refId), "--force"]) }
 
+        let propName = "cli-multi-\(UUID().uuidString.prefix(8))"
         let propResult = try runCLI(["properties", "--create",
-                                     "--name", "cli-multi-\(UUID().uuidString.prefix(8))",
+                                     "--name", propName,
                                      "--type", "multiSelect",
                                      "--options", "todo,doing,done"])
         guard let propId = parseId(from: Data(propResult.stdout.utf8)) else {
@@ -1084,13 +1011,11 @@ final class RubienCLITests: XCTestCase {
         }
         defer { _ = try? runCLI(["properties", "--delete", String(propId)]) }
 
-        // Pass comma-separated values; CLI must store them as JSON-encoded [String]
-        // so the app's multi-select decoder can read them.
-        let setResult = try runCLI(["properties", "--set",
-                                    "--reference", String(refId),
-                                    "--id", String(propId),
-                                    "--value", "todo,doing"])
-        XCTAssertEqual(setResult.exitCode, 0)
+        // Pass a JSON array; the engine must store it as JSON-encoded [String]
+        // so the app's multi-select decoder can read it.
+        let setResult = try runCLI(["update", String(refId),
+                                    "--properties", "{\"\(propName)\": [\"todo\", \"doing\"]}"])
+        XCTAssertEqual(setResult.exitCode, 0, "stderr=\(setResult.stderr)")
 
         let listed = try runCLI(["properties", "--reference", String(refId)])
         let arr = try JSONSerialization.jsonObject(with: Data(listed.stdout.utf8)) as? [[String: Any]] ?? []
@@ -1103,7 +1028,10 @@ final class RubienCLITests: XCTestCase {
         XCTAssertEqual(decoded, ["todo", "doing"])
     }
 
-    func testPropertiesClearUnknownPropertyIsRefused() throws {
+    /// Clearing an unknown property id through the cell payload fails loudly
+    /// with the unresolved-selectors envelope, ids-form (complements the
+    /// names-form coverage above).
+    func testUpdatePropertiesClearUnknownPropertyIdIsRefused() throws {
         try skipIfBinaryMissing()
 
         let addResult = try runCLI(["add", "--title", "CLI Clear Guard \(UUID().uuidString.prefix(8))"])
@@ -1113,14 +1041,13 @@ final class RubienCLITests: XCTestCase {
         }
         defer { _ = try? runCLI(["delete", String(refId), "--force"]) }
 
-        let result = try runCLI(["properties", "--clear",
-                                 "--reference", String(refId),
-                                 "--id", "999999999"])
-        XCTAssertNotEqual(result.exitCode, 0, "--clear with an unknown property id must fail")
-        let errData = Data(result.stderr.utf8)
-        if let errJson = try? JSONSerialization.jsonObject(with: errData) as? [String: Any] {
-            XCTAssertNotNil(errJson["error"], "stderr should be a JSON error object")
-        }
+        let result = try runCLI(["update", String(refId),
+                                 "--properties", "{\"999999999\": null}"])
+        XCTAssertNotEqual(result.exitCode, 0, "clearing an unknown property id must fail")
+        let env = try JSONSerialization.jsonObject(with: Data(result.stderr.utf8)) as? [String: Any]
+        XCTAssertEqual(env?["error"] as? String, "unresolved-selectors")
+        XCTAssertEqual(env?["ids"] as? [String], ["999999999"])
+        XCTAssertEqual(env?["names"] as? [String], [])
     }
 
     func testAddBibTeXDedupePreservesExistingCustomProperties() throws {
@@ -1151,8 +1078,9 @@ final class RubienCLITests: XCTestCase {
         let refId = refIdInt
         defer { _ = try? runCLI(["delete", String(refId), "--force"]) }
 
+        let propName = "cli-dedupe-prop-\(UUID().uuidString.prefix(8))"
         let propResult = try runCLI(["properties", "--create",
-                                     "--name", "cli-dedupe-prop-\(UUID().uuidString.prefix(8))",
+                                     "--name", propName,
                                      "--type", "string"])
         guard let propId = parseId(from: Data(propResult.stdout.utf8)) else {
             XCTFail("create prop failed")
@@ -1160,11 +1088,9 @@ final class RubienCLITests: XCTestCase {
         }
         defer { _ = try? runCLI(["properties", "--delete", String(propId)]) }
 
-        let setResult = try runCLI(["properties", "--set",
-                                    "--reference", String(refId),
-                                    "--id", String(propId),
-                                    "--value", "preserve-me"])
-        XCTAssertEqual(setResult.exitCode, 0)
+        let setResult = try runCLI(["update", String(refId),
+                                    "--properties", "{\"\(propName)\": \"preserve-me\"}"])
+        XCTAssertEqual(setResult.exitCode, 0, "stderr=\(setResult.stderr)")
 
         // 2. Re-add the same BibTeX entry. saveReference should dedupe onto the
         // existing row; the echoed ReferenceDTO must surface the existing
@@ -1507,17 +1433,31 @@ final class RubienCLITests: XCTestCase {
         XCTAssertEqual(options.first(where: { ($0["value"] as? String) == tagValue })?["color"] as? String, "#123456")
     }
 
-    /// Old `--rename` / `--show` / `--hide` / `--rename-option` still work (additive rule).
-    func testLegacyPropertyMutationFlagsStillWork() throws {
+    /// Phase-D cutover: the legacy property mutation flags were removed —
+    /// `--update` / `--update-option` / `update --properties` replace them.
+    func testRemovedLegacyPropertyFlagsAreRejected() throws {
         try skipIfBinaryMissing()
-        let pid = try createProperty(name: "Legacy-\(UUID().uuidString.prefix(6))", type: "singleSelect", options: "a,b")
-        XCTAssertEqual(try runCLI(["properties", "--rename", "--id", String(pid), "--name", "Legacy2"]).exitCode, 0)
-        XCTAssertEqual(try runCLI(["properties", "--hide", "--id", String(pid)]).exitCode, 0)
-        XCTAssertEqual(try runCLI(["properties", "--show", "--id", String(pid)]).exitCode, 0)
-        let renamed = try runCLI(["properties", "--rename-option", "--id", String(pid), "--from", "a", "--to", "alpha"])
-        XCTAssertEqual(renamed.exitCode, 0, "stderr=\(renamed.stderr)")
-        let options = try XCTUnwrap((JSONSerialization.jsonObject(with: Data(renamed.stdout.utf8)) as? [String: Any])?["options"] as? [[String: Any]])
-        XCTAssertTrue(options.contains { ($0["label"] as? String) == "alpha" })
+        let original = "Legacy-\(UUID().uuidString.prefix(6))"
+        let pid = try createProperty(name: original, type: "singleSelect", options: "a,b")
+        let removedForms: [[String]] = [
+            ["properties", "--rename", "--id", String(pid), "--name", "Legacy2"],
+            ["properties", "--show", "--id", String(pid)],
+            ["properties", "--hide", "--id", String(pid)],
+            ["properties", "--rename-option", "--id", String(pid), "--from", "a", "--to", "alpha"],
+            ["properties", "--set", "--reference", "1", "--id", String(pid), "--value", "a"],
+            ["properties", "--set", "--add-value", "--reference", "1", "--id", String(pid), "--value", "a"],
+            ["properties", "--set", "--remove-value", "--reference", "1", "--id", String(pid), "--value", "a"],
+            ["properties", "--clear", "--reference", "1", "--id", String(pid)],
+        ]
+        for form in removedForms {
+            let result = try runCLI(form)
+            XCTAssertNotEqual(result.exitCode, 0,
+                              "removed form must error: \(form.joined(separator: " "))")
+        }
+        // The failed calls must not have touched the property.
+        let after = try runCLI(["properties", "--id", String(pid)])
+        let arr = try JSONSerialization.jsonObject(with: Data(after.stdout.utf8)) as? [[String: Any]] ?? []
+        XCTAssertEqual(arr.first?["name"] as? String, original, "property must be unchanged")
     }
 
     // MARK: - list --view (phase C3)
