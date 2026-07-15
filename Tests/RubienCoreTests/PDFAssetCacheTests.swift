@@ -114,6 +114,34 @@ final class PDFAssetCacheTests: XCTestCase {
         XCTAssertNil(row?["materializedAt"] as String?)
     }
 
+    func testConditionalDematerializeDoesNotRemoveNewerMaterialization() async throws {
+        try makeRef(id: 1)
+        let firstSource = try makeFakePDF(name: "first-source.pdf")
+        let secondSource = try makeFakePDF(name: "second-source.pdf")
+        let cache = PDFAssetCache(db: db, storageRoot: tmpRoot)
+        _ = try await cache.materialize(
+            referenceId: 1,
+            sourceURL: firstSource,
+            originalFilename: "first.pdf",
+            assetVersion: 1
+        )
+        let observedEntry = try await cache.metadataFor(referenceId: 1)
+        let observed = try XCTUnwrap(observedEntry)
+        let newer = try await cache.materialize(
+            referenceId: 1,
+            sourceURL: secondSource,
+            originalFilename: "second.pdf",
+            assetVersion: 2
+        )
+
+        let changed = try await cache.dematerializeIfUnchanged(observed)
+        let currentPath = try await cache.pathFor(referenceId: 1)
+
+        XCTAssertFalse(changed)
+        XCTAssertEqual(currentPath, newer.localURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: newer.localURL.path))
+    }
+
     func testMetadataForReturnsRowEvenWhenNotMaterialized() async throws {
         try makeRef(id: 1)
         try await db.dbWriter.write { db in

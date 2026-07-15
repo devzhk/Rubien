@@ -9,6 +9,7 @@ import RubienSync
 struct RubienApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var syncCoordinator = SyncCoordinator(appDatabase: AppDatabase.shared)
+    @StateObject private var pdfDownloadCoordinator = PDFDownloadCoordinator()
     #if canImport(Sparkle)
     @State private var updateController = UpdateController()
     #endif
@@ -23,6 +24,7 @@ struct RubienApp: App {
             // crashes with "No ObservableObject of type SyncCoordinator
             // found" during state restoration.
             ContentView()
+                .environmentObject(pdfDownloadCoordinator)
                 .environment(\.syncCoordinator, syncCoordinator)
                 #if canImport(Sparkle)
                 .environment(updateController)

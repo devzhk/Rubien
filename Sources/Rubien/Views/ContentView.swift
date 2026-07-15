@@ -1,11 +1,8 @@
 #if os(macOS)
 import SwiftUI
 import Combine
-import os
 import RubienCore
 import RubienPDFKit
-
-private let pdfDownloadLog = Logger(subsystem: "Rubien", category: "pdf-download")
 
 enum SidebarItem: Hashable {
     case allReferences
@@ -292,6 +289,7 @@ final class LibraryViewModel: ObservableObject {
     /// flows can kick the PDF upload-queue drainer immediately. Weak to
     /// avoid retain cycles — the coordinator outlives the view model.
     weak var syncCoordinator: SyncCoordinator?
+    weak var pdfDownloadCoordinator: PDFDownloadCoordinator?
 
     init(db: AppDatabase = .shared) {
         self.db = db
@@ -512,6 +510,7 @@ final class LibraryViewModel: ObservableObject {
         let ids = refs.compactMap(\.id)
         do {
             let pdfPaths = try db.deleteReferencesReturningPDFPaths(ids: ids)
+            pdfDownloadCoordinator?.referencesWereDeleted(ids)
             for path in pdfPaths {
                 PDFService.deletePDF(at: path)
             }
@@ -553,36 +552,6 @@ final class LibraryViewModel: ObservableObject {
         } catch {
             errorMessage = "Save failed: \(error.localizedDescription)"
             return nil
-        }
-    }
-
-    /// Failures are logged silently rather than routed through `errorMessage`, because
-    /// that channel drives a modal alert and would interrupt the user after the import
-    /// sheet has already dismissed. The work runs detached so the GRDB writer queue
-    /// never blocks the main actor.
-    ///
-    /// `pdfURLOverride` lets the caller (currently Add-by-Identifier) bypass the
-    /// arXiv/OpenAlex resolver when the manual-entry resolver already scraped a
-    /// PDF URL from the venue page — e.g. OpenReview / CVF / PMLR papers that
-    /// have no DOI to feed OpenAlex.
-    func downloadPDFInBackground(
-        for reference: Reference,
-        id: Int64,
-        pdfURLOverride: String? = nil
-    ) {
-        let db = self.db
-        let coordinator = self.syncCoordinator
-        Task.detached(priority: .userInitiated) {
-            do {
-                let newPath = try await PDFDownloadService.downloadPDF(
-                    for: reference,
-                    overrideURL: pdfURLOverride
-                )
-                try db.attachImportedPDFs(rowIds: [id], filenames: [newPath])
-                Task { await coordinator?.kickPDFUploadDrainer() }
-            } catch {
-                pdfDownloadLog.error("Background PDF download failed: \(error.localizedDescription, privacy: .public)")
-            }
         }
     }
 
@@ -851,6 +820,7 @@ final class LibraryViewModel: ObservableObject {
 
 struct ContentView: View {
     @StateObject private var viewModel = LibraryViewModel()
+    @EnvironmentObject private var pdfDownloadCoordinator: PDFDownloadCoordinator
     @Environment(\.syncCoordinator) private var syncCoordinator: SyncCoordinator?
     #if canImport(Sparkle)
     @Environment(UpdateController.self) private var updateController
@@ -859,9 +829,6 @@ struct ContentView: View {
     @State private var showPropertyManager = false
     @State private var showInspector = true
     @State private var inspectorWidth: CGFloat = 380
-    /// Outlives the conditional inspector so in-flight PDF work remains locked
-    /// if the panel is hidden and reopened before the operation completes.
-    @State private var pdfOperations = ReferenceDetailPDFOperationRegistry()
     @State private var showAddReference = false
     @State private var addReferenceInitialType: ReferenceType = .journalArticle
     @State private var showAddReferenceFlow = false
@@ -1068,7 +1035,10 @@ struct ContentView: View {
                     onCreateTag: { name in viewModel.createTag(name: name) },
                     onDeleteTag: { tagId in viewModel.deleteTag(id: tagId) },
                     deleteTagUnlessInUse: { tagId in viewModel.probeDeleteTag(id: tagId) },
-                    pdfOperations: $pdfOperations,
+                    pdfOperations: Binding(
+                        get: { pdfDownloadCoordinator.operations },
+                        set: { pdfDownloadCoordinator.operations = $0 }
+                    ),
                     propertyDefs: Binding(
                         get: { viewModel.propertyDefs },
                         set: { viewModel.propertyDefs = $0 }
@@ -1248,9 +1218,9 @@ struct ContentView: View {
                     var r = ref
                     let result = viewModel.saveReference(&r)
                     if downloadPDF, result != nil, let id = r.id {
-                        viewModel.downloadPDFInBackground(
-                            for: r,
-                            id: id,
+                        pdfDownloadCoordinator.download(
+                            reference: r,
+                            referenceID: id,
                             pdfURLOverride: pdfURLOverride
                         )
                     }
@@ -1364,55 +1334,67 @@ struct ContentView: View {
             )
         }
         .overlay(alignment: .bottomTrailing) {
-            if let notice = pendingQueueNotice {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(alignment: .top, spacing: 10) {
-                        Image(systemName: "tray.full.fill")
-                            .foregroundStyle(.orange)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(notice.title)
-                                .font(.headline)
-                            Text(notice.message)
-                                .font(.callout)
-                                .foregroundStyle(.primary)
-                                .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .trailing, spacing: 12) {
+                if let notice = pendingQueueNotice {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: "tray.full.fill")
+                                .foregroundStyle(.orange)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(notice.title)
+                                    .font(.headline)
+                                Text(notice.message)
+                                    .font(.callout)
+                                    .foregroundStyle(.primary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer(minLength: 8)
+                            Button {
+                                pendingQueueNotice = nil
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.caption.weight(.semibold))
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
                         }
-                        Spacer(minLength: 8)
-                        Button {
-                            pendingQueueNotice = nil
-                        } label: {
-                            Image(systemName: "xmark")
-                                .font(.caption.weight(.semibold))
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.secondary)
-                    }
 
-                    HStack {
-                        Button(String(localized: "Open pending queue", bundle: .module)) {
-                            pendingQueueNotice = nil
-                            scopedPendingMetadataIntakes = nil
-                            showPendingMetadataQueue = true
-                        }
-                        .buttonStyle(SLPrimaryButtonStyle())
+                        HStack {
+                            Button(String(localized: "Open pending queue", bundle: .module)) {
+                                pendingQueueNotice = nil
+                                scopedPendingMetadataIntakes = nil
+                                showPendingMetadataQueue = true
+                            }
+                            .buttonStyle(SLPrimaryButtonStyle())
 
-                        Button(String(localized: "Later", bundle: .module)) {
-                            pendingQueueNotice = nil
+                            Button(String(localized: "Later", bundle: .module)) {
+                                pendingQueueNotice = nil
+                            }
+                            .buttonStyle(SLSecondaryButtonStyle())
                         }
-                        .buttonStyle(SLSecondaryButtonStyle())
                     }
+                    .padding(14)
+                    .frame(maxWidth: 360, alignment: .leading)
+                    .background(Color(NSColor.controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
+                    .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color(NSColor.separatorColor).opacity(0.5), lineWidth: 0.5))
+                    .shadow(color: .black.opacity(0.15), radius: 12, y: 6)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
-                .padding(14)
-                .frame(maxWidth: 360, alignment: .leading)
-                .background(Color(NSColor.controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
-                .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color(NSColor.separatorColor).opacity(0.5), lineWidth: 0.5))
-                .shadow(color: .black.opacity(0.15), radius: 12, y: 6)
-                .padding(.trailing, 20)
-                .padding(.bottom, 20)
-                .transition(.move(edge: .trailing).combined(with: .opacity))
+
+                if !pdfDownloadCoordinator.orderedActivities.isEmpty {
+                    PDFDownloadActivityPanel(
+                        activities: pdfDownloadCoordinator.orderedActivities,
+                        onRetry: pdfDownloadCoordinator.retry,
+                        onDismiss: pdfDownloadCoordinator.dismiss
+                    )
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
             }
+            .padding(.trailing, 20)
+            .padding(.bottom, 20)
         }
         .animation(.easeInOut(duration: 0.2), value: pendingQueueNotice)
+        .animation(.easeInOut(duration: 0.2), value: pdfDownloadCoordinator.orderedActivities)
         .onChange(of: viewModel.references) { _, newRefs in
             guard let selectedId else { return }
             if !newRefs.contains(where: { $0.id == selectedId }) {
@@ -1443,6 +1425,8 @@ struct ContentView: View {
             // Hand the sync coordinator to the view model so import flows
             // inside the model can kick the PDF upload-queue drainer.
             viewModel.syncCoordinator = syncCoordinator
+            viewModel.pdfDownloadCoordinator = pdfDownloadCoordinator
+            pdfDownloadCoordinator.syncCoordinator = syncCoordinator
         }
     }
 
@@ -2137,6 +2121,132 @@ private struct FloatingProgressToast: View {
         }
         .padding(.top, 10)
         .allowsHitTesting(false)
+    }
+}
+
+private struct PDFDownloadActivityPanel: View {
+    let activities: [PDFDownloadActivity]
+    let onRetry: (Int64) -> Void
+    let onDismiss: (Int64) -> Void
+
+    var body: some View {
+        Group {
+            if activities.count > 3 {
+                ScrollView {
+                    activityRows
+                }
+                .frame(height: 260)
+            } else {
+                activityRows
+            }
+        }
+        .frame(width: 340)
+        .background(Color(NSColor.controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14)
+                .strokeBorder(Color(NSColor.separatorColor).opacity(0.5), lineWidth: 0.5)
+        }
+        .shadow(color: .black.opacity(0.15), radius: 12, y: 6)
+    }
+
+    private var activityRows: some View {
+        VStack(spacing: 0) {
+            ForEach(Array(activities.enumerated()), id: \.element.id) { index, activity in
+                if index > 0 {
+                    Divider()
+                }
+                activityRow(activity)
+            }
+        }
+    }
+
+    private func activityRow(_ activity: PDFDownloadActivity) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            statusIcon(for: activity.phase)
+                .frame(width: 16, height: 16)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(activity.referenceTitle)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                statusText(for: activity.phase)
+            }
+
+            Spacer(minLength: 8)
+
+            if case .failed = activity.phase {
+                Button(String(localized: "common.retry", bundle: .module)) {
+                    onRetry(activity.referenceID)
+                }
+                .buttonStyle(SLSecondaryButtonStyle())
+                .controlSize(.small)
+                .accessibilityLabel(String(
+                    format: String(localized: "content.pdfDownload.retry.accessibility", bundle: .module),
+                    activity.referenceTitle
+                ))
+
+                Button {
+                    onDismiss(activity.referenceID)
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help(String(localized: "common.close", bundle: .module))
+                .accessibilityLabel(String(
+                    format: String(localized: "content.pdfDownload.close.accessibility", bundle: .module),
+                    activity.referenceTitle
+                ))
+            }
+        }
+        .padding(12)
+        .accessibilityElement(children: .contain)
+    }
+
+    @ViewBuilder
+    private func statusIcon(for phase: PDFDownloadActivity.Phase) -> some View {
+        switch phase {
+        case .downloading:
+            ProgressView()
+                .controlSize(.mini)
+        case .succeeded:
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+        case .failed:
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
+        }
+    }
+
+    @ViewBuilder
+    private func statusText(for phase: PDFDownloadActivity.Phase) -> some View {
+        Group {
+            switch phase {
+            case .downloading:
+                Text(String(localized: "content.pdfDownload.downloading", bundle: .module))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            case .succeeded:
+                Text(String(localized: "content.pdfDownload.succeeded", bundle: .module))
+                    .font(.caption2)
+                    .foregroundStyle(.green)
+            case .failed(let message):
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(String(localized: "content.pdfDownload.failed", bundle: .module))
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.red)
+                    Text(message)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .help(message)
+                }
+            }
+        }
+        .accessibilityAddTraits(.updatesFrequently)
     }
 }
 

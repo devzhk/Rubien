@@ -171,4 +171,37 @@ public actor PDFAssetCache {
             )
         }
     }
+
+    /// Dematerialize only while the cache row still identifies the observed
+    /// asset. This compare-and-swap form protects stale-file repair from
+    /// deleting a newer materialization that arrived concurrently through
+    /// CloudKit or another process.
+    ///
+    /// Returns `false` when the row changed or was already dematerialized.
+    @discardableResult
+    public func dematerializeIfUnchanged(_ entry: CacheEntry) throws -> Bool {
+        guard entry.materializedAt != nil else { return false }
+        let changed = try db.dbWriter.write { db in
+            try db.execute(sql: """
+                UPDATE pdfCache
+                SET materializedAt = NULL
+                WHERE referenceId = ?
+                  AND localFilename = ?
+                  AND contentHash = ?
+                  AND assetVersion = ?
+                  AND materializedAt IS NOT NULL
+                """, arguments: [
+                    entry.referenceId,
+                    entry.localFilename,
+                    entry.contentHash,
+                    entry.assetVersion,
+                ])
+            return db.changesCount > 0
+        }
+        guard changed else { return false }
+
+        let url = storageRoot.appendingPathComponent(entry.localFilename)
+        try? FileManager.default.removeItem(at: url)
+        return true
+    }
 }
