@@ -1134,7 +1134,7 @@ struct ChatSurfaceView: View {
     /// One compact empty-state block inside the editor. Keeping the heading and
     /// affordances together avoids the visual gap created when they were separate
     /// siblings in the composer box.
-    private static let composerHintKeyWidth: CGFloat = 24
+    private static let composerHintKeyWidth: CGFloat = 30
     private static let composerHintColumnSpacing: CGFloat = 8
     private static let composerHintGridSpacing: CGFloat = 12
 
@@ -1168,6 +1168,7 @@ struct ChatSurfaceView: View {
     ) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: Self.composerHintColumnSpacing) {
             Text(key)
+                .lineLimit(1)
                 .frame(width: Self.composerHintKeyWidth, alignment: keyAlignment)
             Text(label)
         }
