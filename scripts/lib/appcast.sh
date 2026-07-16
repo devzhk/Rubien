@@ -9,7 +9,7 @@
 #   DMG_URL                 — public URL of the DMG on GitHub Releases
 #   ED_SIGNATURE            — base64 sparkle:edSignature from sign_update
 #   DMG_SIZE_BYTES          — file size in bytes
-#   MIN_SYSTEM_VERSION      — sparkle:minimumSystemVersion (e.g. 15.0)
+#   MIN_SYSTEM_VERSION      — sparkle:minimumSystemVersion (e.g. 14.4)
 #   RELEASE_NOTES_TEXT      — plain text release notes (escaped for CDATA)
 #   APPCAST_PATH            — path to Docs/appcast.xml (or staging-appcast.xml)
 

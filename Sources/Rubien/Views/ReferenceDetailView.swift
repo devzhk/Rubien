@@ -1695,7 +1695,7 @@ private struct EditPencilButton: View {
         .buttonStyle(.plain)
         .help(help)
         .accessibilityLabel(help)
-        .pointerStyle(.link)
+        .linkPointerStyle()
         .onHover { isHovered = $0 }
         .animation(.easeOut(duration: 0.12), value: isHovered)
     }

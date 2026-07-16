@@ -51,7 +51,7 @@ PDF auto-download supports arXiv, bioRxiv, medRxiv, eLife, open-access papers wi
 ## Requirements
 
 **For the app (Mac):**
-- macOS 15 (Sequoia) or later to run
+- macOS 14.4 (Sonoma) or later to run
 - Apple Silicon
 - Xcode 16.3+ to build from source (GRDB 7.10 declares `swift-tools-version: 6.1`)
 

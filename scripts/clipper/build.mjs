@@ -19,10 +19,11 @@ await build({
   entryPoints: [resolve(here, 'src/clipper-defuddle.js')],
   bundle: true,
   format: 'iife',
-  // macOS 15 Sequoia ships Safari 18 / WebKit 620+. Target this
-  // explicitly so esbuild doesn't downlevel syntax it doesn't need to
-  // (e.g. Promise.withResolvers, iterator helpers).
-  target: 'safari18',
+  // The macOS 14.4 Sonoma deployment floor ships Safari 17.4 (WebKit 618).
+  // Target that WKWebView explicitly so esbuild down-levels any syntax newer
+  // than 17.4 (e.g. iterator helpers) that Defuddle or its deps might emit —
+  // a Safari-18 target would let such syntax reach a 14.x WKWebView and throw.
+  target: 'safari17.4',
   minify: true,
   outfile,
   // Banner makes the file's purpose obvious when someone opens the raw

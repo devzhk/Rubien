@@ -30,13 +30,16 @@ struct UpdateIndicator: View {
 
     /// The app's effective accent lightened ~10% toward white (slightly lower
     /// saturation, a touch lighter) so the pill reads less heavy than a full
-    /// accent fill while keeping the white label legible. Derived from
-    /// `Color.accentColor` — the app-injected accent, custom or system — so it
-    /// tracks accent changes via SwiftUI invalidation. Safe as a plain `Capsule`
-    /// fill: unlike the glass material, a filled shape doesn't drop out on
-    /// appearance changes.
+    /// accent fill while keeping the white label legible. Read from
+    /// `AccentColorManager` (the custom-or-system accent source of truth) rather
+    /// than the environment's `Color.accentColor`: it is `@Observable`, so the
+    /// pill still tracks accent changes, and it stays a concrete color — the
+    /// macOS 14.x `mixedTowardWhite` fallback bridges through `NSColor`, which
+    /// would otherwise drop a SwiftUI-injected custom accent back to the system
+    /// one. Safe as a plain `Capsule` fill: unlike the glass material, a filled
+    /// shape doesn't drop out on appearance changes.
     private var softAccent: Color {
-        .accentColor.mix(with: .white, by: 0.1)
+        AccentColorManager.shared.effectiveColor.mixedTowardWhite(by: 0.1)
     }
 }
 

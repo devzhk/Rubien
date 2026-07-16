@@ -441,7 +441,7 @@ private struct ViewEditorSheet: View {
         }
         .frame(width: ViewIconGrid.preferredWidth, alignment: .leading)
         .padding(20)
-        .presentationSizing(.fitted)
+        .fittedPresentation()
     }
 
     private func save() {

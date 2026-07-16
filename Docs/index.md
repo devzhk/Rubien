@@ -4,7 +4,7 @@ A native macOS reference manager.
 
 **Latest release:** see the [Releases page](https://github.com/devzhk/Rubien/releases/latest).
 
-System requirements: macOS 15.0 (Sequoia) or later.
+System requirements: macOS 14.4 (Sonoma) or later.
 
 ---
 

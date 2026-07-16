@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "Rubien",
     defaultLocalization: "en",
-    platforms: [.macOS("15.0")],
+    platforms: [.macOS("14.4")],
     products: [
         .library(name: "RubienCore", targets: ["RubienCore"]),
         .library(name: "RubienSync", targets: ["RubienSync"]),

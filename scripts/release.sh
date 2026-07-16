@@ -206,7 +206,31 @@ DMG_PATH="$PROJECT_DIR/build/$VERSIONED_DMG"
 # public-repo move, when it pointed at an equally-absent private-repo asset.
 DMG_URL="https://github.com/${RELEASES_REPO}/releases/download/v${VERSION}/${VERSIONED_DMG}"
 export VERSION BUILD_NUMBER DMG_PATH DMG_URL ED_SIGNATURE DMG_SIZE_BYTES
-export MIN_SYSTEM_VERSION="15.0"
+export MIN_SYSTEM_VERSION="14.4"
+
+# The macOS deployment floor is hand-maintained in three places that must agree:
+# Package.swift's `.macOS(...)`, `LSMinimumSystemVersion` in build-app.sh (baked
+# into the DMG's Info.plist), and MIN_SYSTEM_VERSION above (→ appcast's
+# sparkle:minimumSystemVersion via lib/appcast.sh). They silently drifted once —
+# build-app.sh shipped 14.4 while the binary was compiled for 15.0 — so verify,
+# don't derive: compare the three literals and fail loudly on any mismatch or
+# unparseable value (e.g. a `.macOS(.v15)` form this grep can't read).
+pkg_min="$(sed -nE 's/.*\.macOS\("([0-9]+(\.[0-9]+)*)"\).*/\1/p' "$PROJECT_DIR/Package.swift" | head -1)"
+plist_min="$(grep -A1 'LSMinimumSystemVersion' "$SCRIPT_DIR/build-app.sh" | sed -nE 's@.*<string>([0-9]+(\.[0-9]+)*)</string>.*@\1@p' | head -1)"
+if [[ -z "$pkg_min" || -z "$plist_min" ]]; then
+    echo "✗ Could not parse the macOS floor from Package.swift ('$pkg_min') or build-app.sh ('$plist_min')." >&2
+    echo "  If Package.swift now uses a .macOS(.vNN) form, update this check in release.sh." >&2
+    exit 1
+fi
+if [[ "$pkg_min" != "$MIN_SYSTEM_VERSION" || "$plist_min" != "$MIN_SYSTEM_VERSION" ]]; then
+    echo "✗ macOS deployment-floor drift — these three must match:" >&2
+    echo "    Package.swift  .macOS(...)             = $pkg_min" >&2
+    echo "    build-app.sh   LSMinimumSystemVersion  = $plist_min" >&2
+    echo "    release.sh     MIN_SYSTEM_VERSION       = $MIN_SYSTEM_VERSION" >&2
+    echo "  See AGENTS.md 'Pinned versions' → macOS." >&2
+    exit 1
+fi
+
 export RELEASE_NOTES_TEXT="${RELEASE_NOTES_TEXT:-Rubien ${VERSION} (Beta). See GitHub release notes for details.}"
 
 # 13. Update appcast
