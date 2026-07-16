@@ -30,6 +30,13 @@ enum PDFReaderMetrics {
     ) -> CGFloat {
         min(max(width + translation, range.lowerBound), range.upperBound)
     }
+
+    static func restoredSidebarWidth(_ storedWidth: CGFloat?) -> CGFloat {
+        sidebarWidth(
+            afterTrailingEdgeTranslation: 0,
+            from: storedWidth ?? defaultSidebarWidth,
+            in: sidebarWidthRange)
+    }
 }
 
 enum AnnotationTool: String, CaseIterable {
@@ -424,8 +431,8 @@ struct PDFReaderView: View {
     @StateObject private var viewModel: PDFReaderViewModel
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
-    @State private var showOutlineSidebar = true
-    @State private var outlineSidebarWidth: CGFloat = PDFReaderMetrics.defaultSidebarWidth
+    @State private var showOutlineSidebar: Bool
+    @State private var outlineSidebarWidth: CGFloat
     @State private var outlineDragOffset: CGFloat = 0
     @State private var outlineSidebarTab: PDFSidebarTab = .outline
     @State private var isEditingPage = false
@@ -448,6 +455,9 @@ struct PDFReaderView: View {
 
     init(reference: Reference, pdfURL: URL, onClose: (() -> Void)? = nil) {
         self.onClose = onClose
+        self._showOutlineSidebar = State(initialValue: RubienPreferences.pdfReaderSidebarVisible)
+        self._outlineSidebarWidth = State(initialValue: PDFReaderMetrics.restoredSidebarWidth(
+            RubienPreferences.pdfReaderSidebarWidth))
         self._showChatSidebar = State(initialValue: RubienPreferences.assistantSidebarVisible)
         self._viewModel = StateObject(wrappedValue: PDFReaderViewModel(reference: reference, pdfURL: pdfURL))
         // Live session from the user's Assistant settings via the shared production
@@ -490,6 +500,7 @@ struct PDFReaderView: View {
                                 from: outlineSidebarWidth,
                                 in: PDFReaderMetrics.sidebarWidthRange
                             )
+                            RubienPreferences.pdfReaderSidebarWidth = outlineSidebarWidth
                             outlineDragOffset = 0
                         }
                     )
@@ -641,6 +652,9 @@ struct PDFReaderView: View {
         // closure — don't leak stale note text into the next selection's popover.
         .onChange(of: viewModel.stagedSelectionText) { _, _ in
             noteMarkdownForSelection = ""
+        }
+        .onChange(of: showOutlineSidebar) { _, visible in
+            RubienPreferences.pdfReaderSidebarVisible = visible
         }
     }
 

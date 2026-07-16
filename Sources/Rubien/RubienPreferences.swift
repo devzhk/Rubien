@@ -231,6 +231,56 @@ enum RubienPreferences {
         }
     }
 
+    /// Per-reader left-sidebar state. PDF and web keep separate values because
+    /// their sidebars contain different tools and users may size them differently.
+    /// These preferences are local to this Mac and seed newly opened windows.
+    static let pdfReaderSidebarVisibleKey = "Rubien.reader.pdf.sidebarVisible"
+    static let pdfReaderSidebarWidthKey = "Rubien.reader.pdf.sidebarWidth"
+    static let webReaderSidebarVisibleKey = "Rubien.reader.web.sidebarVisible"
+    static let webReaderSidebarWidthKey = "Rubien.reader.web.sidebarWidth"
+
+    static var pdfReaderSidebarVisible: Bool {
+        get { sidebarVisibility(forKey: pdfReaderSidebarVisibleKey) }
+        set { UserDefaults.standard.set(newValue, forKey: pdfReaderSidebarVisibleKey) }
+    }
+
+    static var pdfReaderSidebarWidth: CGFloat? {
+        get { sidebarWidth(forKey: pdfReaderSidebarWidthKey) }
+        set { setSidebarWidth(newValue, forKey: pdfReaderSidebarWidthKey) }
+    }
+
+    static var webReaderSidebarVisible: Bool {
+        get { sidebarVisibility(forKey: webReaderSidebarVisibleKey) }
+        set { UserDefaults.standard.set(newValue, forKey: webReaderSidebarVisibleKey) }
+    }
+
+    static var webReaderSidebarWidth: CGFloat? {
+        get { sidebarWidth(forKey: webReaderSidebarWidthKey) }
+        set { setSidebarWidth(newValue, forKey: webReaderSidebarWidthKey) }
+    }
+
+    private static func sidebarVisibility(forKey key: String) -> Bool {
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: key) == nil { return true }
+        return defaults.bool(forKey: key)
+    }
+
+    private static func sidebarWidth(forKey key: String) -> CGFloat? {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: key) != nil else { return nil }
+        let width = defaults.double(forKey: key)
+        guard width.isFinite, width > 0 else { return nil }
+        return CGFloat(width)
+    }
+
+    private static func setSidebarWidth(_ width: CGFloat?, forKey key: String) {
+        guard let width, width.isFinite, width > 0 else {
+            UserDefaults.standard.removeObject(forKey: key)
+            return
+        }
+        UserDefaults.standard.set(Double(width), forKey: key)
+    }
+
     // MARK: - Activity
 
     static let recordReadingActivityKey = "Rubien.activity.recordReading"

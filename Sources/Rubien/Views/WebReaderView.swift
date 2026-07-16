@@ -27,7 +27,8 @@ struct WebSelectionSnapshot: Equatable {
 }
 
 enum WebReaderMetrics {
-    static let annotationSidebarMinWidth: CGFloat = 225
+    static let annotationSidebarWidthRange: ClosedRange<CGFloat> = 225...400
+    static let annotationSidebarMinWidth = annotationSidebarWidthRange.lowerBound
     static let defaultAnnotationSidebarWidth: CGFloat = 225
     static let defaultChatPanelWidth = AssistantSidebarMetrics.minimumWidth
     static let chatTrailingInset: CGFloat = 12
@@ -60,6 +61,12 @@ enum WebReaderMetrics {
         contentMinimumWidth(chatVisible: chatVisible)
             + (annotationSidebarVisible ? annotationSidebarMinWidth : 0)
             + (chatVisible ? chatPanelWidth + chatTrailingInset : 0)
+    }
+
+    static func restoredAnnotationSidebarWidth(_ storedWidth: CGFloat?) -> CGFloat {
+        min(
+            max(storedWidth ?? defaultAnnotationSidebarWidth, annotationSidebarWidthRange.lowerBound),
+            annotationSidebarWidthRange.upperBound)
     }
 }
 
@@ -1674,7 +1681,8 @@ struct WebReaderView: View {
     @StateObject private var viewModel: WebReaderViewModel
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
-    @State private var showAnnotationSidebar = true
+    @State private var showAnnotationSidebar: Bool
+    @State private var annotationSidebarWidth: CGFloat
     @State private var showChatSidebar: Bool
     @State private var chatPanelWidth: CGFloat = WebReaderMetrics.defaultChatPanelWidth
     /// Note-draft text for the selection popover. Lifted from the deleted WebSelectionActionBar
@@ -1693,6 +1701,9 @@ struct WebReaderView: View {
 
     init(reference: Reference, onClose: (() -> Void)? = nil) {
         self.onClose = onClose
+        self._showAnnotationSidebar = State(initialValue: RubienPreferences.webReaderSidebarVisible)
+        self._annotationSidebarWidth = State(initialValue: WebReaderMetrics.restoredAnnotationSidebarWidth(
+            RubienPreferences.webReaderSidebarWidth))
         self._showChatSidebar = State(initialValue: RubienPreferences.assistantSidebarVisible)
         self._viewModel = StateObject(wrappedValue: WebReaderViewModel(reference: reference))
 
@@ -1719,8 +1730,19 @@ struct WebReaderView: View {
                 WebAnnotationSidebarView(viewModel: viewModel)
                     .frame(
                         minWidth: WebReaderMetrics.annotationSidebarMinWidth,
-                        idealWidth: WebReaderMetrics.defaultAnnotationSidebarWidth,
-                        maxWidth: 400)
+                        idealWidth: annotationSidebarWidth,
+                        maxWidth: WebReaderMetrics.annotationSidebarWidthRange.upperBound)
+                    .background {
+                        GeometryReader { geometry in
+                            Color.clear
+                                .onAppear {
+                                    rememberAnnotationSidebarWidth(geometry.size.width)
+                                }
+                                .onChange(of: geometry.size.width) { _, width in
+                                    rememberAnnotationSidebarWidth(width)
+                                }
+                        }
+                    }
                     .overlay(alignment: .trailing) {
                         LinearGradient(
                             colors: [.clear, Color.black.opacity(colorScheme == .dark ? 0.18 : 0.06)],
@@ -1849,6 +1871,9 @@ struct WebReaderView: View {
                 showAnnotationSidebar = true
             }
         }
+        .onChange(of: showAnnotationSidebar) { _, visible in
+            RubienPreferences.webReaderSidebarVisible = visible
+        }
         .navigationTitle(viewModel.reference.title)
         .alert(String(localized: "Refresh", bundle: .module), isPresented: Binding(
             get: { viewModel.extractionUserMessage != nil },
@@ -1866,6 +1891,14 @@ struct WebReaderView: View {
     private func setChatSidebarVisible(_ visible: Bool, persist: Bool = true) {
         showChatSidebar = visible
         if persist { RubienPreferences.assistantSidebarVisible = visible }
+    }
+
+    private func rememberAnnotationSidebarWidth(_ width: CGFloat) {
+        guard WebReaderMetrics.annotationSidebarWidthRange.contains(width),
+              abs(width - annotationSidebarWidth) >= 0.5
+        else { return }
+        annotationSidebarWidth = width
+        RubienPreferences.webReaderSidebarWidth = width
     }
 
     /// The window-width floor for the panels that are actually visible right now —

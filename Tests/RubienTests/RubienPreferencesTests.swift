@@ -14,10 +14,10 @@ final class RubienPreferencesTests: XCTestCase {
 
     private var savedPDFAssetSyncEnabled: Bool?
     private var savedThemeRaw: String?
-    /// Snapshot of every assistant key touched by these tests, so the shared
+    /// Snapshot of every preference key touched by these tests, so the shared
     /// standard suite is restored verbatim (including the "unset" state) on tearDown.
-    private var savedAssistant: [String: Any] = [:]
-    private var assistantKeys: [String] {
+    private var savedPreferences: [String: Any] = [:]
+    private var preferenceKeys: [String] {
         [
             RubienPreferences.assistantModelKey,
             RubienPreferences.assistantEffortKey,
@@ -32,6 +32,10 @@ final class RubienPreferencesTests: XCTestCase {
             RubienPreferences.assistantCodexSandboxKey,
             RubienPreferences.assistantCodexBinaryPathKey,
             RubienPreferences.assistantSidebarVisibleKey,
+            RubienPreferences.pdfReaderSidebarVisibleKey,
+            RubienPreferences.pdfReaderSidebarWidthKey,
+            RubienPreferences.webReaderSidebarVisibleKey,
+            RubienPreferences.webReaderSidebarWidthKey,
         ]
     }
 
@@ -49,8 +53,8 @@ final class RubienPreferencesTests: XCTestCase {
         savedThemeRaw = UserDefaults.standard.string(forKey: themeKey)
         UserDefaults.standard.removeObject(forKey: themeKey)
 
-        for key in assistantKeys {
-            if let value = UserDefaults.standard.object(forKey: key) { savedAssistant[key] = value }
+        for key in preferenceKeys {
+            if let value = UserDefaults.standard.object(forKey: key) { savedPreferences[key] = value }
             UserDefaults.standard.removeObject(forKey: key)
         }
     }
@@ -72,14 +76,14 @@ final class RubienPreferencesTests: XCTestCase {
         }
         savedThemeRaw = nil
 
-        for key in assistantKeys {
-            if let value = savedAssistant[key] {
+        for key in preferenceKeys {
+            if let value = savedPreferences[key] {
                 UserDefaults.standard.set(value, forKey: key)
             } else {
                 UserDefaults.standard.removeObject(forKey: key)
             }
         }
-        savedAssistant.removeAll()
+        savedPreferences.removeAll()
         super.tearDown()
     }
 
@@ -246,6 +250,23 @@ final class RubienPreferencesTests: XCTestCase {
         XCTAssertFalse(RubienPreferences.assistantSidebarVisible)
         RubienPreferences.assistantSidebarVisible = true
         XCTAssertTrue(RubienPreferences.assistantSidebarVisible)
+    }
+
+    func testReaderSidebarPreferencesDefaultAndRoundTrip() {
+        XCTAssertTrue(RubienPreferences.pdfReaderSidebarVisible)
+        XCTAssertNil(RubienPreferences.pdfReaderSidebarWidth)
+        XCTAssertTrue(RubienPreferences.webReaderSidebarVisible)
+        XCTAssertNil(RubienPreferences.webReaderSidebarWidth)
+
+        RubienPreferences.pdfReaderSidebarVisible = false
+        RubienPreferences.pdfReaderSidebarWidth = 276.5
+        RubienPreferences.webReaderSidebarVisible = false
+        RubienPreferences.webReaderSidebarWidth = 312
+
+        XCTAssertFalse(RubienPreferences.pdfReaderSidebarVisible)
+        XCTAssertEqual(RubienPreferences.pdfReaderSidebarWidth, 276.5)
+        XCTAssertFalse(RubienPreferences.webReaderSidebarVisible)
+        XCTAssertEqual(RubienPreferences.webReaderSidebarWidth, 312)
     }
 }
 #endif

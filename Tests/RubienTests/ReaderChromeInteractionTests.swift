@@ -77,6 +77,15 @@ final class ReaderChromeInteractionTests: XCTestCase {
             WebReaderMetrics.annotationSidebarMinWidth)
     }
 
+    func testReaderSidebarStoredWidthsAreClampedToSupportedRanges() {
+        XCTAssertEqual(PDFReaderMetrics.restoredSidebarWidth(nil), 225)
+        XCTAssertEqual(PDFReaderMetrics.restoredSidebarWidth(150), 200)
+        XCTAssertEqual(PDFReaderMetrics.restoredSidebarWidth(450), 400)
+        XCTAssertEqual(WebReaderMetrics.restoredAnnotationSidebarWidth(nil), 225)
+        XCTAssertEqual(WebReaderMetrics.restoredAnnotationSidebarWidth(150), 225)
+        XCTAssertEqual(WebReaderMetrics.restoredAnnotationSidebarWidth(450), 400)
+    }
+
     func testWebReaderNotesAndAssistantFitDefaultReaderWidth() {
         XCTAssertLessThanOrEqual(
             WebReaderMetrics.minimumReadableWidth(
