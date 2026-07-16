@@ -416,5 +416,23 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.4.0</title>
+            <description sparkle:format="plain-text"><![CDATA[• New Home puts the library-wide Assistant first, with actionable paper recommendations and one-click access to the full Library.
+• Reading Activity adds estimated active reading time, streaks, a calendar heatmap, recent papers, and private iCloud sync without storing prompts or transcripts.
+• Reader Assistant sidebars now remember their open state and width, with improved sizing and typography.
+• APS Physical Review links from journals.aps.org now resolve metadata and PDF downloads directly from DOI-bearing URLs.
+• The companion MCP server now returns clear update guidance instead of disconnecting when rubien-cli is missing or outdated, and adds Reading Activity access.]]></description>
+            <pubDate>Thu, 16 Jul 2026 21:56:05 +0000</pubDate>
+            <sparkle:version>28</sparkle:version>
+            <sparkle:shortVersionString>0.4.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.4.0/Rubien-0.4.0.dmg"
+                sparkle:edSignature="7Pk46yYk3j7oihBmZ9WalxIWTCN1FFxpuGXPeE+sw2lTNnG4xEslGj1lIlAZ3mkNEQ5gqqoGEADv/0cjRDV+BQ=="
+                length="13368870"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
