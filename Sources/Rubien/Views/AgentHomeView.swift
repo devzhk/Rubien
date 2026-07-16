@@ -158,13 +158,6 @@ private struct ReadingActivityPanel: View {
         .onDisappear {
             notificationReloadTask?.cancel()
         }
-        .popover(isPresented: $showingInfo) {
-            Text("Reading time is estimated while a Rubien PDF or web reader is the active foreground window. It is saved about once per active minute and on pause or close. Paper-days under 60 seconds are excluded. Activity metadata syncs when iCloud sync is enabled; simultaneous reading on two devices may overlap.")
-                .font(.callout)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(16)
-                .frame(width: 330)
-        }
     }
 
     private var panelContent: some View {
@@ -177,6 +170,17 @@ private struct ReadingActivityPanel: View {
                 }
                 .buttonStyle(AgentHomeHoverButtonStyle())
                 .help("About reading activity")
+                .popover(
+                    isPresented: $showingInfo,
+                    attachmentAnchor: .rect(.bounds),
+                    arrowEdge: .trailing
+                ) {
+                    Text("Rubien estimates reading time while its PDF or web reader is the active window. Sessions under one minute are excluded; activity syncs through iCloud when enabled.")
+                        .font(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(14)
+                        .frame(width: 280)
+                }
             }
 
             if !RubienPreferences.recordReadingActivity {
