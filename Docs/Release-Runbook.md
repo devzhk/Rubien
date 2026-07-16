@@ -46,13 +46,15 @@ The source repo `devzhk/Rubien` is **private**, but Sparkle downloads update DMG
 
 ## Per-release procedure
 
-Prereqs: `gh` authenticated, release-preparation changes committed and pushed to `origin/main`, CI green for that exact commit, `CODESIGN_IDENTITY` exported, working tree clean on `main`, EdDSA private key in Keychain, and the `RubienNotary` notarytool profile in the login Keychain (from One-time setup §4 — it persists across releases; you do **not** re-run `store-credentials` each time).
+Host prerequisites: `gh` authenticated, the Developer ID identity available, the EdDSA private key in Keychain, and the `RubienNotary` notarytool profile in the login Keychain (from One-time setup §4 — it persists across releases; you do **not** re-run `store-credentials` each time). Steps 1–3 establish the repository prerequisites: release-preparation changes committed and pushed to `origin/main`, CI green for that exact commit, and a clean synchronized `main`.
+
+The order is strict: **prepare and commit → push and pass exact-SHA CI → sign and publish on the interactive host → verify Mac and Linux artifacts → publish any coupled npm package**. Do not start signing while release-preparation commits exist only locally.
 
 > **Run the release on the interactive host — not from a sandboxed agent (e.g. Codex).** Signing (Developer ID + Sparkle EdDSA keys), notarization (the `RubienNotary` Keychain profile), the `build/` writes, and `git push` all need access a read-only sandbox denies. A sandboxed agent that cannot read the login Keychain will report `RubienNotary` (or the signing identity) as **missing** when it is in fact present — that is a sandbox limitation, not a setup gap. Drive `./scripts/release.sh` from Claude Code running on the host, or hand that step to the maintainer. (Verify a suspected-missing profile the real way: `xcrun notarytool history --keychain-profile RubienNotary` on the host — success means it is there.)
 
 ```bash
 # 1. Start from a clean, current main
-git status
+git status --short --branch
 git checkout main
 git pull --ff-only
 
@@ -60,6 +62,8 @@ git pull --ff-only
 $EDITOR VERSION       # e.g. 0.1.0 → 0.1.1
 $EDITOR BUILD.txt     # increment by 1
 ./scripts/generate-cli-version.sh   # regenerate checked-in GeneratedVersion.swift — CI fails if it drifts
+# If mcp-server changed, complete its npm version check below before committing.
+# Also stage any coupled package-version files changed for this release.
 git add VERSION BUILD.txt Sources/RubienCLI/GeneratedVersion.swift
 git commit -m "chore: bump version to X.Y.Z (build N)"
 
@@ -68,24 +72,40 @@ git push origin main
 RELEASE_SHA="$(git rev-parse HEAD)"
 CI_RUN_ID="$(gh run list --workflow=ci.yml --commit "$RELEASE_SHA" \
     --limit 1 --json databaseId --jq '.[0].databaseId')"
-# If CI_RUN_ID is empty, wait a few seconds and repeat the assignment above.
+# If CI_RUN_ID is empty, first allow for dispatch delay and repeat the lookup.
+# For a docs-only push skipped by paths-ignore, run the following, wait for the
+# run to appear, and repeat the lookup. The dispatched run still uses main HEAD:
+# gh workflow run ci.yml --ref main
 test -n "$CI_RUN_ID"
 gh run watch "$CI_RUN_ID" --exit-status
-gh run view "$CI_RUN_ID" --json headSha,conclusion
-# Continue only when headSha == $RELEASE_SHA and conclusion == "success".
+test "$(gh run view "$CI_RUN_ID" --json headSha --jq .headSha)" = "$RELEASE_SHA"
+test "$(gh run view "$CI_RUN_ID" --json conclusion --jq .conclusion)" = "success"
+test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+test -z "$(git status --porcelain)"
+git status --short --branch
 
 # 4. Set the Developer ID identity in your shell
 export CODESIGN_IDENTITY="Developer ID Application: <Your Name> (9TXK4V3SS8)"
 
-# 5. Run release.sh
-./scripts/release.sh
+# 5. Pass this release's notes inline and run release.sh
+# Replace the example bullets; do not reuse an exported value from an older release.
+RELEASE_NOTES_TEXT=$'• This release change\n• Another release change' ./scripts/release.sh
 
 # 6. Wait for notarization (5-15 minutes). The script blocks.
 
-# 7. Confirm
+# 7. Confirm the Mac publication
 # - https://github.com/devzhk/Rubien-releases/releases/latest shows the new DMG (public host)
 # - https://devzhk.github.io/Rubien/appcast.xml has the new <item>
+# - The private source repo has the matching vX.Y.Z tag
 # - Within ~24 hours, existing installs see the "Update ready" indicator
+
+# 8. Watch the Linux CLI run printed by release.sh, then inspect all assets
+LINUX_RUN_ID="paste the run ID printed by release.sh here"
+gh run watch "$LINUX_RUN_ID" --exit-status
+gh release view "v$(tr -d '[:space:]' < VERSION)" \
+    --repo devzhk/Rubien-releases --json assets --jq '.assets[].name'
+# Expect the versioned DMG, Linux .tar.gz, and Linux .tar.gz.sig.
+# Copy the dSYM zip path printed by build-app.sh to durable private storage.
 ```
 
 **You must bump `VERSION` (if the marketing version is changing) and `BUILD.txt` (every release) before running — `release.sh` does not bump them for you. Then run `./scripts/generate-cli-version.sh` and commit the regenerated `Sources/RubienCLI/GeneratedVersion.swift` alongside the bump; the file is checked in and CI's "Verify generated CLI version is in sync" step fails the build if it drifts from `VERSION` + `BUILD.txt`. Push that commit and watch the CI run for its exact SHA to a successful conclusion. If CI fails, or no run exists for that SHA, stop: fix the issue in a new commit, push, and watch again. A green run for an older commit and local test results are not substitutes.**
@@ -167,13 +187,24 @@ gh run watch
 
 ## Publish the MCP server to npm (after the release is live)
 
-Gated on **G1**: the just-cut release must be live and its `rubien-cli` must report `build >= 8` (`rubien-cli version`). Only then:
+The npm package is versioned and published separately from the app. If `mcp-server` changed, perform this check **before** the pre-release commit and exact-SHA CI gate:
 
 ```bash
-cd mcp-server && npm publish
+node -p "require('./mcp-server/package.json').version"
+npm view rubien-mcp-server version
 ```
 
-This runs `prepublishOnly` (build + tests) first, and prompts for npm 2FA. The published package is platform-agnostic; it resolves `rubien-cli` at runtime on the user's host.
+If both commands report the same version, that npm version is already occupied: bump `mcp-server/package.json`, the two root-package version entries in `mcp-server/package-lock.json`, and `SERVER_INFO.version` in `mcp-server/src/server.ts` together. Update version-specific comments/tests as needed, then run `npm run build` and `npm test` in `mcp-server/`; commit, push, and include the result in the exact-SHA CI gate above.
+
+After `release.sh`, wait until the Mac release is live **and** the dispatched Linux CLI workflow has attached its signed tarball. Verify the released CLI's `rubien-cli version` build satisfies `MIN_CLI_BUILD` in `mcp-server/src/versionGuard.ts`. Only then:
+
+```bash
+cd mcp-server
+npm publish
+npm view rubien-mcp-server version
+```
+
+The final command must report the version just published. `npm publish` runs `prepublishOnly` (build + tests) first and prompts for npm 2FA. The package is platform-agnostic; it resolves `rubien-cli` at runtime on the user's host.
 
 ## Staging end-to-end test (before significant updater changes)
 
