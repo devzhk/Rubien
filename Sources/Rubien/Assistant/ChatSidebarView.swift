@@ -2,6 +2,11 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+private enum ChatSurfaceTypography {
+    /// Secondary interface text stays one step below 14-point conversation text.
+    static let controlFontSize: CGFloat = 13
+}
+
 // MARK: - Chat sidebar (Phase 2c)
 //
 // The per-reader-window Assistant sidebar: header (provider + Web toggle + session
@@ -325,7 +330,7 @@ struct ChatSurfaceView: View {
     ) -> some View {
         Button(action: action) {
             Label(title, systemImage: systemName)
-                .font(.system(size: ComposerTextView.messageFontSize, weight: .medium))
+                .font(.system(size: ChatSurfaceTypography.controlFontSize, weight: .medium))
                 .foregroundStyle(Color.primary.opacity(0.72))
                 .padding(.horizontal, 7)
                 .frame(height: 28)
@@ -980,7 +985,7 @@ struct ChatSurfaceView: View {
             + Text(Image(systemName: "chevron.down"))
                 .font(.system(size: 9, weight: .medium))
                 .foregroundStyle(.secondary))
-            .font(.system(size: ComposerTextView.messageFontSize))
+            .font(.system(size: ChatSurfaceTypography.controlFontSize))
     }
 
     // MARK: Provider (backend) selector
@@ -1027,7 +1032,7 @@ struct ChatSurfaceView: View {
             + Text(Image(systemName: "chevron.down"))
                 .font(.system(size: 9, weight: .medium))
                 .foregroundStyle(.secondary))
-            .font(.system(size: ComposerTextView.messageFontSize))
+            .font(.system(size: ChatSurfaceTypography.controlFontSize))
     }
 
     // MARK: Model + effort selector (maps to `--model` / `--effort`)
@@ -1131,7 +1136,7 @@ struct ChatSurfaceView: View {
             + Text(Image(systemName: "chevron.down"))
                 .font(.system(size: 9, weight: .medium))
                 .foregroundStyle(.secondary)
-        return text.font(.system(size: ComposerTextView.messageFontSize))
+        return text.font(.system(size: ChatSurfaceTypography.controlFontSize))
     }
 
     /// One compact empty-state block inside the editor. Keeping the heading and
@@ -1144,7 +1149,7 @@ struct ChatSurfaceView: View {
     private var composerEmptyGuidance: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(configuration.isHome ? "Ask Rubien:" : "Chat about document:")
-                .font(.system(size: ComposerTextView.messageFontSize, weight: .medium))
+                .font(.system(size: ChatSurfaceTypography.controlFontSize, weight: .medium))
             HStack(alignment: .top, spacing: Self.composerHintGridSpacing) {
                 VStack(alignment: .leading, spacing: 3) {
                     composerHint("⌘↩", "Send")
@@ -1175,7 +1180,7 @@ struct ChatSurfaceView: View {
                 .frame(width: Self.composerHintKeyWidth, alignment: keyAlignment)
             Text(label)
         }
-        .font(.system(size: ComposerTextView.messageFontSize))
+        .font(.system(size: ChatSurfaceTypography.controlFontSize))
     }
 
     private var composerEditor: some View {
@@ -1542,11 +1547,11 @@ struct ChatSurfaceView: View {
 // MARK: - Floating card (Phase 3a)
 
 enum AssistantSidebarMetrics {
-    /// The composer's 14-point single-line control row is the limiting intrinsic
+    /// The composer's 13-point single-line control row is the limiting intrinsic
     /// width. This floor keeps the default Agent / provider / model / effort
     /// labels and send control from crowding or forcing the panel wider than its
     /// resize binding reports.
-    static let minimumWidth: CGFloat = 440
+    static let minimumWidth: CGFloat = 420
     static let maximumWidth: CGFloat = 900
     static let widthRange: ClosedRange<CGFloat> = minimumWidth...maximumWidth
 }
@@ -1927,7 +1932,7 @@ private struct PlainQuickStartText: View {
     var body: some View {
         Button(action: action) {
             Text(text)
-                .font(.system(size: ComposerTextView.messageFontSize))
+                .font(.system(size: ChatSurfaceTypography.controlFontSize))
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.leading, 25)
