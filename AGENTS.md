@@ -138,9 +138,9 @@ Five test targets:
 
 ## Releases
 
-Before preparing, cutting, verifying, recovering, or publishing any Rubien release, read `Docs/Release-Runbook.md` in full and follow its order exactly. It is the single source of truth for versioning, CI gating (including the narrow docs-only exception), release notes, interactive-host requirements, signing/notarization, artifact hosting and verification, dSYM retention, Linux CLI publication, and the coupled MCP npm package.
+Before preparing, cutting, verifying, recovering, or publishing any Rubien release, read `Docs/Release-Runbook.md` in full and follow its order exactly. It is the single source of truth for versioning, CI gating (including the narrow docs-only exception), release notes, agent-approval and host-access requirements, signing/notarization, artifact hosting and verification, dSYM retention, Linux CLI publication, and the coupled MCP npm package.
 
-Do not run the signed release pipeline from a sandboxed agent. If release behavior or policy changes, update `Docs/Release-Runbook.md` rather than duplicating the procedure here.
+An agent may run the signed release pipeline only after explicit user approval and must use the elevated host access required by the runbook. If release behavior or policy changes, update `Docs/Release-Runbook.md` rather than duplicating the procedure here.
 
 ## Development workflow for non-trivial changes
 

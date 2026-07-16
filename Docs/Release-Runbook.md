@@ -48,9 +48,9 @@ The source repo `devzhk/Rubien` is **private**, but Sparkle downloads update DMG
 
 Host prerequisites: `gh` authenticated, the Developer ID identity available, the EdDSA private key in Keychain, and the `RubienNotary` notarytool profile in the login Keychain (from One-time setup §4 — it persists across releases; you do **not** re-run `store-credentials` each time). Steps 1–3 establish the repository prerequisites: release-preparation changes committed and pushed to `origin/main`, the CI gate satisfied, and a clean synchronized `main`.
 
-The order is strict: **prepare and commit → push and satisfy the CI gate → sign and publish on the interactive host → verify Mac and Linux artifacts → publish any coupled npm package**. Normally the green run must match `HEAD` exactly. The only exception is a descendant containing Markdown-only documentation changes after an already-green release-preparation SHA; the commands below prove that no release input changed. Do not start signing while release-preparation commits exist only locally.
+The order is strict: **prepare and commit → push and satisfy the CI gate → obtain explicit approval and sign/publish with host access → verify Mac and Linux artifacts → publish any coupled npm package**. Normally the green run must match `HEAD` exactly. The only exception is a descendant containing Markdown-only documentation changes after an already-green release-preparation SHA; the commands below prove that no release input changed. Do not start signing while release-preparation commits exist only locally.
 
-> **Run the release on the interactive host — not from a sandboxed agent (e.g. Codex).** Signing (Developer ID + Sparkle EdDSA keys), notarization (the `RubienNotary` Keychain profile), the `build/` writes, and `git push` all need access a read-only sandbox denies. A sandboxed agent that cannot read the login Keychain will report `RubienNotary` (or the signing identity) as **missing** when it is in fact present — that is a sandbox limitation, not a setup gap. Drive `./scripts/release.sh` from Claude Code running on the host, or hand that step to the maintainer. (Verify a suspected-missing profile the real way: `xcrun notarytool history --keychain-profile RubienNotary` on the host — success means it is there.)
+> **An agent may run the signed release pipeline only after the user explicitly approves the release command.** Before requesting approval, show the exact version/build and release notes and confirm the release-preparation SHA passed the CI gate. The approval authorizes the consequential effects of `release.sh`: signed build and notarization, an appcast commit and push, a source tag, a public GitHub release, and Linux-release workflow dispatch. Run it with elevated/unsandboxed host access so it can read the Developer ID and Sparkle EdDSA keys, use the `RubienNotary` login-Keychain profile, write `build/`, access the network, and update Git/GitHub. A failed credential check inside the ordinary sandbox does **not** prove a credential is missing; repeat the read-only preflight with approved host access. Once explicit approval is recorded, no separate interactive-host handoff is required.
 
 ```bash
 # 1. Start from a clean, current main
@@ -90,6 +90,8 @@ test -z "$(git status --porcelain)"
 git status --short --branch
 
 # 4. Set the Developer ID identity in your shell
+# If an agent is driving the release, show the exact version/build, notes, and
+# external effects above and obtain explicit user approval before continuing.
 export CODESIGN_IDENTITY="Developer ID Application: <Your Name> (9TXK4V3SS8)"
 
 # 5. Pass this release's notes inline and run release.sh
