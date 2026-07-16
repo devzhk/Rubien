@@ -363,12 +363,18 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
     // MARK: - Cover-image capture & injection (Fix 4)
 
     /// Returns the best-guess cover image URL from the live DOM as an absolute string,
-    /// or empty string if none found. Priority: og:image / twitter:image (trusted page
-    /// metadata, no size gate), then a size-gated scan of header / cover / hero <img>
-    /// elements (rejects sub-200×150 candidates so site logos aren't picked).
+    /// or empty string if none found. Priority: og:image / twitter:image unless its
+    /// filename identifies a brand asset, then a size-gated scan of header / cover /
+    /// hero <img> elements. The same brand-asset guard applies to both paths.
     static let coverImageCaptureJS = #"""
     (function() {
       function abs(u) { try { return new URL(u, document.URL).toString(); } catch(_) { return u || ''; } }
+      function looksLikeBrandAsset(u) {
+        var pathname = '';
+        try { pathname = new URL(u, document.URL).pathname || ''; } catch(_) { pathname = String(u || '').split(/[?#]/)[0]; }
+        var filename = pathname.substring(pathname.lastIndexOf('/') + 1);
+        return /(?:^|[-_.])(logo|icon|favicon|avatar|brandmark|wordmark)(?=[-_.@\d]|$)/i.test(filename);
+      }
       function pickFromSrcset(srcset) {
         if (!srcset) return '';
         var parts = srcset.split(',').map(function(s) { return s.trim(); });
@@ -387,13 +393,13 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
         return w >= 200 && h >= 150;
       }
       var og = document.querySelector('meta[property="og:image"], meta[name="og:image"], meta[name="twitter:image"]');
-      if (og && og.content) return abs(og.content);
+      if (og && og.content && !looksLikeBrandAsset(og.content)) return abs(og.content);
       var candidates = document.querySelectorAll('header img, [class*="cover" i] img, [id*="cover" i] img, figure.cover img, .post-header img, .article-header img, article > figure:first-of-type img');
       for (var j = 0; j < candidates.length; j++) {
         var img = candidates[j];
         if (!bigEnough(img)) continue;
         var url = img.currentSrc || img.src || pickFromSrcset(img.getAttribute('srcset')) || img.getAttribute('data-src') || '';
-        if (url) return abs(url);
+        if (url && !looksLikeBrandAsset(url)) return abs(url);
       }
       return '';
     })()
@@ -408,6 +414,7 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
     ) -> String {
         guard let cover = coverImageURL?.trimmingCharacters(in: .whitespacesAndNewlines),
               !cover.isEmpty,
+              !isLikelyBrandAssetURL(cover),
               let coverURL = URL(string: cover) else { return html }
 
         let coverKey = imageEquivalenceKey(for: coverURL)
@@ -451,6 +458,48 @@ final class ReaderExtractionManager: NSObject, WKScriptMessageHandler {
             .replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "\"", with: "&quot;")
         return "<figure class=\"rubien-cover-image\"><img src=\"\(escaped)\" alt=\"\"></figure>\n" + html
+    }
+
+    /// Removes a legacy, Rubien-injected cover only when its URL identifies a
+    /// brand asset. Ordinary article images and legitimate injected covers are
+    /// left untouched. This lets older persisted clips benefit from improved
+    /// cover selection without mutating their stored snapshot.
+    nonisolated static func removingInjectedBrandCoverIfNeeded(from html: String) -> String {
+        let pattern = #"^\s*<figure\s+class="rubien-cover-image"\s*>\s*<img\s+src="([^"]+)"\s+alt=""\s*/?\s*>\s*</figure>\s*"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else {
+            return html
+        }
+        let ns = html as NSString
+        let fullRange = NSRange(location: 0, length: ns.length)
+        guard let match = regex.firstMatch(in: html, options: [], range: fullRange),
+              match.numberOfRanges >= 2,
+              match.range(at: 1).location != NSNotFound,
+              isLikelyBrandAssetURL(ns.substring(with: match.range(at: 1))) else {
+            return html
+        }
+        return ns.replacingCharacters(in: match.range(at: 0), with: "")
+    }
+
+    nonisolated private static func isLikelyBrandAssetURL(_ rawValue: String) -> Bool {
+        let unescaped = rawValue.replacingOccurrences(of: "&amp;", with: "&")
+        let decoded = unescaped.removingPercentEncoding ?? unescaped
+        let filename: String
+        if let url = URL(string: decoded), !url.lastPathComponent.isEmpty {
+            filename = url.lastPathComponent
+        } else {
+            let path = decoded.split(whereSeparator: { $0 == "?" || $0 == "#" }).first.map(String.init) ?? decoded
+            filename = (path as NSString).lastPathComponent
+        }
+        let pattern = #"(?:^|[-_.])(logo|icon|favicon|avatar|brandmark|wordmark)(?=[-_.@\d]|$)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else {
+            return false
+        }
+        let nsFilename = filename as NSString
+        return regex.firstMatch(
+            in: filename,
+            options: [],
+            range: NSRange(location: 0, length: nsFilename.length)
+        ) != nil
     }
 
     private static func imageEquivalenceKey(for url: URL) -> String {

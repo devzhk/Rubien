@@ -85,6 +85,15 @@ enum WebReaderMathRendering {
         ])
         return entries.joined(separator: ",\n                      ")
     }()
+
+    /// Kept as a standalone snippet so the invalid-LaTeX fallback can be
+    /// exercised without loading a WKWebView in unit tests.
+    static let dataLatexRenderAttemptJavaScript = """
+    try {
+      katex.render(latex, span, { displayMode: displayMode, throwOnError: true });
+      mathEl.replaceWith(span);
+    } catch (_) { /* leave <math> intact; browser falls back */ }
+    """
 }
 
 /// Keeps the hosting `NSWindow`'s resize floor in step with the web reader's visible
@@ -624,7 +633,7 @@ final class WebReaderViewModel: ObservableObject {
                     baseURL: reference.resolvedWebReaderURLString().flatMap(URL.init(string:))
                 )
             case .html:
-                bodyHTML = storedContent.body
+                bodyHTML = ReaderExtractionManager.removingInjectedBrandCoverIfNeeded(from: storedContent.body)
             }
 
             let html = Self.buildHTMLDocument(
@@ -1328,8 +1337,9 @@ final class WebReaderViewModel: ObservableObject {
                   // but temml drops LaTeX styling commands (\\textcolor, \\color, etc.)
                   // during the conversion. KaTeX's own renderer handles them, so we
                   // re-render from the preserved data-latex attribute. Per-element
-                  // try/catch: a single bad expression falls back to native MathML
-                  // rendering of the surviving <math>, doesn't break siblings.
+                  // try/catch plus throwOnError: a single bad preserved expression
+                  // falls back to native MathML rendering of the surviving <math>
+                  // instead of replacing it with KaTeX's visible error markup.
                   //
                   // Annotation safety: skip any <math> that contains a wrapped
                   // annotation span (data-annotation-id). wrapRange (above) does
@@ -1346,10 +1356,7 @@ final class WebReaderViewModel: ObservableObject {
                       if (!latex) continue;
                       const displayMode = mathEl.getAttribute('display') === 'block';
                       const span = document.createElement('span');
-                      try {
-                        katex.render(latex, span, { displayMode: displayMode, throwOnError: false });
-                        mathEl.replaceWith(span);
-                      } catch (_) { /* leave <math> intact; browser falls back */ }
+                      \(WebReaderMathRendering.dataLatexRenderAttemptJavaScript)
                     }
                   }
                   // Pass 2: legacy delimited-text path for clips whose source HTML

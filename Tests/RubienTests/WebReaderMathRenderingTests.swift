@@ -54,6 +54,37 @@ final class WebReaderMathRenderingTests: XCTestCase {
         )
     }
 
+    func testDataLatexRerenderOnlyReplacesSuccessfulKatexOutput() throws {
+        let context = try XCTUnwrap(JSContext())
+        let script = """
+        function attemptRender(shouldThrow) {
+          const mathEl = {
+            replaced: false,
+            replaceWith: function (_) { this.replaced = true; }
+          };
+          const span = {};
+          const latex = shouldThrow ? 'invalid' : 'valid';
+          const displayMode = false;
+          const katex = {
+            render: function (_, _, options) {
+              if (shouldThrow && options.throwOnError) {
+                throw new Error('invalid preserved LaTeX');
+              }
+            }
+          };
+          \(WebReaderMathRendering.dataLatexRenderAttemptJavaScript)
+          return mathEl.replaced;
+        }
+        JSON.stringify([attemptRender(false), attemptRender(true)]);
+        """
+
+        let value = context.evaluateScript(script)
+
+        XCTAssertNil(context.exception)
+        let json = try XCTUnwrap(value?.toString())
+        XCTAssertEqual(try JSONDecoder().decode([Bool].self, from: Data(json.utf8)), [true, false])
+    }
+
     private struct Delimiter: Codable, Equatable {
         let left: String
         let right: String
