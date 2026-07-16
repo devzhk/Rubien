@@ -19,8 +19,9 @@ This is the canonical registry. Other documentation should link here instead of 
 | ScienceDirect | `sciencedirect.com` | `/science/article/pii/<pii>` or `/science/article/abs/pii/<pii>` | `/science/article/pii/<pii>/pdfft` |
 | eLife | `elifesciences.org` | `/articles/<numeric-id>` | `/articles/<numeric-id>.pdf` |
 | eNeuro | `www.eneuro.org` | `/content/<volume>/<issue>/ENEURO.<id>` or `/content/early/<yyyy>/<mm>/<dd>/ENEURO.<id>`; `.abstract`, `.full`, and `.long` variants are accepted | `/content/eneuro/<volume>/<issue>/ENEURO.<id>.full.pdf` or `/content/eneuro/early/<yyyy>/<mm>/<dd>/ENEURO.<id>.full.pdf` |
+| APS Physical Review journals | `journals.aps.org` | `/<journal>/abstract/10.1103/<suffix>` or `/<journal>/accepted/10.1103/<suffix>` | `/<journal>/pdf/10.1103/<suffix>` → abstract URL |
 
-Rubien reads most pages from `citation_*` HTML metadata, then uses CrossRef to normalize records with a DOI. eLife uses its official API. PDF access depends on the publisher.
+Rubien reads most pages from `citation_*` HTML metadata, then uses CrossRef to normalize records with a DOI. eLife uses its official API. APS URLs resolve directly through their embedded DOI so Cloudflare-protected publisher HTML is not required. PDF access depends on the publisher.
 
 ## Requesting support for another site
 

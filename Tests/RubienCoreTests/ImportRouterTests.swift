@@ -78,6 +78,14 @@ final class ImportRouterTests: XCTestCase {
         XCTAssertEqual(route, .resolver(impliedDownloadPdf: true))
     }
 
+    func testAPSPDFURLWithoutExtensionImpliesDownload() {
+        let route = ImportRouter.classify(
+            source: "https://journals.aps.org/prl/pdf/10.1103/3v91-5pzf",
+            probe: noPaths
+        )
+        XCTAssertEqual(route, .resolver(impliedDownloadPdf: true))
+    }
+
     /// An explicit `--no-download-pdf` suppresses the implied download.
     func testExplicitFalseSuppressesImpliedDownload() {
         let route = ImportRouter.classify(

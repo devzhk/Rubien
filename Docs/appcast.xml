@@ -398,5 +398,23 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.3.6</title>
+            <description sparkle:format="plain-text"><![CDATA[• Now runs on macOS 14.4 (Sonoma) or later — previously required macOS 15 (Sequoia)
+• Library shows PDF download state for each reference
+• Assistant: opt in to connected tools
+• Codex: uses the first discovered model as the default
+• More reliable web reader article rendering]]></description>
+            <pubDate>Thu, 16 Jul 2026 01:47:26 +0000</pubDate>
+            <sparkle:version>27</sparkle:version>
+            <sparkle:shortVersionString>0.3.6</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.3.6/Rubien-0.3.6.dmg"
+                sparkle:edSignature="xgc2MNE3+JczTgwbYRdgRMYlQCQDplpUIJvF0YrD8pqHcVafxDJqPO9QrY2lWHRsOGpPPDxur2FYXLkPx2PDAg=="
+                length="12953153"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>

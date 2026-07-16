@@ -1106,9 +1106,8 @@ public enum MetadataFetcher {
     }
 
     /// Auto-detect identifier and fetch metadata; also surfaces a scraped PDF URL
-    /// when the identifier was a `.paperURL` and the host's landing page exposed
-    /// `citation_pdf_url` (e.g. OpenReview, CVF, PMLR — papers without DOIs that
-    /// would otherwise be unreachable for auto-download).
+    /// when the identifier was a `.paperURL` and the host exposes or has a
+    /// deterministic publisher PDF URL (e.g. OpenReview, CVF, PMLR, APS).
     ///
     /// Existing callers of `fetch(from:)` see no change; the CLI's `add --download-pdf`
     /// path uses this entry point so it can forward the URL to

@@ -40,6 +40,13 @@ final class PaperURLLiveSmokeTests: XCTestCase {
         )
     }
 
+    func testAPSLive() async throws {
+        try await smokeURL(
+            "https://journals.aps.org/prl/abstract/10.1103/3v91-5pzf",
+            expectedTitleContains: "directional photocurrent"
+        )
+    }
+
     func testELifeLive() async throws {
         try XCTSkipIf(ProcessInfo.processInfo.environment["RUBIEN_LIVE_TESTS"] != "1",
                       "Set RUBIEN_LIVE_TESTS=1 to run live smoke tests")

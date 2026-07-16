@@ -74,6 +74,24 @@ final class PaperURLRewriteTests: XCTestCase {
                        "https://elifesciences.org/articles/29515")
     }
 
+    func testAPSPDFRewrite() {
+        XCTAssertEqual(
+            rewrite("https://journals.aps.org/prl/pdf/10.1103/3v91-5pzf"),
+            "https://journals.aps.org/prl/abstract/10.1103/3v91-5pzf"
+        )
+    }
+
+    func testAPSAbstractAndAcceptedPagesStayAsIs() {
+        XCTAssertEqual(
+            rewrite("https://journals.aps.org/prl/abstract/10.1103/PhysRevLett.133.030001"),
+            "https://journals.aps.org/prl/abstract/10.1103/PhysRevLett.133.030001"
+        )
+        XCTAssertEqual(
+            rewrite("https://journals.aps.org/prl/accepted/10.1103/3v91-5pzf"),
+            "https://journals.aps.org/prl/accepted/10.1103/3v91-5pzf"
+        )
+    }
+
     func testENeuroLongPageRewrite() {
         XCTAssertEqual(
             rewrite("https://www.eneuro.org/content/9/2/ENEURO.0361-21.2022.long"),

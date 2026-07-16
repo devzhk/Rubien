@@ -2,33 +2,39 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, chmodSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { invokeCli, CliError, resolveCliPath } from "../src/cli.js";
+import { invokeCli, CliError, probeCliVersion, resolveCliPath } from "../src/cli.js";
 
 /**
- * Exercises the CLI wrapper's happy path + stderr-error contract using a
- * stub shell script in place of the real rubien-cli binary. Keeps the test
- * hermetic — no dependency on whether swift build has produced the binary.
+ * Stub shell script standing in for the real rubien-cli binary — keeps the
+ * tests hermetic, no dependency on whether swift build has produced it.
  */
+let scratch: string;
+let stubPath: string;
+let priorRubienCli: string | undefined;
+
+beforeEach(() => {
+  priorRubienCli = process.env.RUBIEN_CLI;
+  scratch = join(tmpdir(), `rubien-mcp-test-${Date.now()}-${Math.random()}`);
+  mkdirSync(scratch, { recursive: true });
+  stubPath = join(scratch, "rubien-cli-stub.sh");
+});
+
+afterEach(() => {
+  // installStub points RUBIEN_CLI at the (now-deleted) stub; restore it so
+  // the leak can't cross describes — or files in a reused vitest worker.
+  if (priorRubienCli === undefined) delete process.env.RUBIEN_CLI;
+  else process.env.RUBIEN_CLI = priorRubienCli;
+  rmSync(scratch, { recursive: true, force: true });
+});
+
+function installStub(body: string): void {
+  writeFileSync(stubPath, `#!/bin/bash\n${body}\n`, { mode: 0o755 });
+  chmodSync(stubPath, 0o755);
+  process.env.RUBIEN_CLI = stubPath;
+}
+
+/** Exercises the CLI wrapper's happy path + stderr-error contract. */
 describe("invokeCli", () => {
-  let scratch: string;
-  let stubPath: string;
-
-  beforeEach(() => {
-    scratch = join(tmpdir(), `rubien-mcp-test-${Date.now()}-${Math.random()}`);
-    mkdirSync(scratch, { recursive: true });
-    stubPath = join(scratch, "rubien-cli-stub.sh");
-  });
-
-  afterEach(() => {
-    rmSync(scratch, { recursive: true, force: true });
-  });
-
-  function installStub(body: string): void {
-    writeFileSync(stubPath, `#!/bin/bash\n${body}\n`, { mode: 0o755 });
-    chmodSync(stubPath, 0o755);
-    process.env.RUBIEN_CLI = stubPath;
-  }
-
   it("parses JSON stdout into a native object", async () => {
     installStub(`echo '{"id":1,"title":"hello"}'`);
     const result = await invokeCli(["get", "1"]);
@@ -107,6 +113,62 @@ describe("invokeCli", () => {
       bytes: number;
     };
     expect(result.bytes).toBe(0);
+  });
+});
+
+describe("probeCliVersion", () => {
+  it("classifies a version-reporting CLI as ok, noting the env override", async () => {
+    installStub(`if [ "$1" = "version" ]; then echo '{"version":"9.9.9","build":99}'; fi`);
+    const probe = await probeCliVersion();
+    expect(probe).toEqual({
+      kind: "ok",
+      info: { version: "9.9.9", build: 99 },
+      envOverride: true,
+    });
+  });
+
+  it("classifies garbage stdout (exit 0) as no-version, not a crash", async () => {
+    installStub(`echo 'not json at all'`);
+    const probe = await probeCliVersion();
+    expect(probe).toMatchObject({ kind: "no-version", path: stubPath });
+  });
+
+  it("classifies a nonzero exit (broken binary à la /usr/bin/false) as no-version", async () => {
+    installStub(`exit 1`);
+    const probe = await probeCliVersion();
+    expect(probe).toMatchObject({ kind: "no-version", path: stubPath });
+  });
+
+  it("classifies a missing RUBIEN_CLI target as not-found", async () => {
+    const prior = process.env.RUBIEN_CLI;
+    try {
+      process.env.RUBIEN_CLI = "/definitely/not/here/rubien-cli";
+      const probe = await probeCliVersion();
+      expect(probe).toMatchObject({ kind: "not-found", envOverride: true });
+      expect((probe as { detail: string }).detail).toContain(
+        "/definitely/not/here/rubien-cli",
+      );
+    } finally {
+      if (prior === undefined) delete process.env.RUBIEN_CLI;
+      else process.env.RUBIEN_CLI = prior;
+    }
+  });
+
+  it("classifies a hung binary as timeout at the RUBIEN_MCP_PROBE_TIMEOUT_MS deadline", async () => {
+    const prior = process.env.RUBIEN_MCP_PROBE_TIMEOUT_MS;
+    try {
+      process.env.RUBIEN_MCP_PROBE_TIMEOUT_MS = "200";
+      installStub(`sleep 5`);
+      const probe = await probeCliVersion();
+      expect(probe).toMatchObject({
+        kind: "timeout",
+        path: stubPath,
+        timeoutMs: 200,
+      });
+    } finally {
+      if (prior === undefined) delete process.env.RUBIEN_MCP_PROBE_TIMEOUT_MS;
+      else process.env.RUBIEN_MCP_PROBE_TIMEOUT_MS = prior;
+    }
   });
 });
 

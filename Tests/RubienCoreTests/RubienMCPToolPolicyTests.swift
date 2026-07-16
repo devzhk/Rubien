@@ -2,7 +2,7 @@ import XCTest
 @testable import RubienCore
 
 final class RubienMCPToolPolicyTests: XCTestCase {
-    func testCanonicalCatalogPartitionsTwentySevenTools() {
+    func testCanonicalCatalogPartitionsTwentyEightTools() {
         XCTAssertEqual(RubienMCPToolPolicy.readToolNames.count, 15)
         XCTAssertEqual(RubienMCPToolPolicy.writeToolNames.count, 13)
         XCTAssertEqual(RubienMCPToolPolicy.allToolNames.count, 28)

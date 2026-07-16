@@ -232,6 +232,51 @@ final class KnownPaperHostClassifyTests: XCTestCase {
         XCTAssertNil(classify("https://elifesciences.org/inside-elife/example"))
     }
 
+    // APS Physical Review journals
+    func testAPSCurrentDOIAbstract() {
+        XCTAssertEqual(
+            classify("https://journals.aps.org/prl/abstract/10.1103/3v91-5pzf"),
+            .aps
+        )
+    }
+    func testAPSLegacyDOIPDF() {
+        XCTAssertEqual(
+            classify("https://journals.aps.org/prl/pdf/10.1103/PhysRevLett.133.030001"),
+            .aps
+        )
+    }
+    func testAPSOtherPhysicalReviewJournal() {
+        XCTAssertEqual(
+            classify("https://journals.aps.org/pra/abstract/10.1103/PhysRevA.109.012345"),
+            .aps
+        )
+    }
+    func testAPSAcceptedPaper() {
+        XCTAssertEqual(
+            classify("https://journals.aps.org/prl/accepted/10.1103/3v91-5pzf"),
+            .aps
+        )
+    }
+    func testAPSRejectsNonArticlePagesAndOtherDOIPrefixes() {
+        XCTAssertNil(classify("https://journals.aps.org/prl/recent"))
+        XCTAssertNil(classify("https://journals.aps.org/prl/abstract/10.9999/example"))
+        XCTAssertNil(classify("https://journals.aps.org/prl/abstract/10.1103/example/references"))
+    }
+    func testAPSToleratesSingleTrailingSlash() {
+        XCTAssertEqual(
+            classify("https://journals.aps.org/prl/abstract/10.1103/3v91-5pzf/"),
+            .aps
+        )
+    }
+    func testAPSRejectsEmptyPathComponents() {
+        // Doubled slashes must not collapse into a valid article path —
+        // the landing URL is persisted verbatim on the Reference.
+        XCTAssertNil(classify("https://journals.aps.org//prl/abstract/10.1103/3v91-5pzf"))
+        XCTAssertNil(classify("https://journals.aps.org/prl//abstract/10.1103/3v91-5pzf"))
+        XCTAssertNil(classify("https://journals.aps.org/prl/abstract/10.1103//3v91-5pzf"))
+        XCTAssertNil(classify("https://journals.aps.org/prl/abstract/10.1103/3v91-5pzf//"))
+    }
+
     // eNeuro
     func testENeuroAssignedIssueArticle() {
         XCTAssertEqual(
