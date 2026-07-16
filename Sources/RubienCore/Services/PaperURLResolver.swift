@@ -53,14 +53,21 @@ public enum PaperURLResolver {
         // 3. Rewrite PDF URL → landing URL if applicable.
         let landingURL = rewritePDFURLToLanding(canonical, host: host)
 
-        // 4. Resolve publisher metadata. APS URLs carry an authoritative DOI
-        // in the path, so resolve them through CrossRef without fetching the
-        // Cloudflare-protected article page. eLife exposes a stable, keyless
-        // JSON API; the remaining hosts use the generic citation_* scraper.
+        // 4. Resolve publisher metadata. APS, Science, and ACS URLs carry an
+        // authoritative DOI in the path, so resolve them through CrossRef
+        // without fetching publisher pages that commonly reject automated
+        // clients. eLife exposes a stable, keyless JSON API; the remaining
+        // hosts use the generic citation_* scraper.
         let (scrapedReference, scrapedPDFURL): (Reference, String?)
         if host == .aps {
             (scrapedReference, scrapedPDFURL) = try await resolveAPS(
                 landingURL: landingURL,
+                crossrefFetcher: crossrefFetcher
+            )
+        } else if host == .science || host == .acs {
+            (scrapedReference, scrapedPDFURL) = try await resolveDOIPublisher(
+                landingURL: landingURL,
+                host: host,
                 crossrefFetcher: crossrefFetcher
             )
         } else if host == .eLife {
@@ -77,9 +84,9 @@ public enum PaperURLResolver {
         }
 
         // 5. Normalize scraper metadata through CrossRef when it carries a DOI.
-        // APS already resolved directly through CrossRef in step 4.
+        // DOI-bearing publisher paths already resolved directly in step 4.
         var finalReference = scrapedReference
-        if host != .aps,
+        if host != .aps, host != .science, host != .acs,
            let doi = scrapedReference.doi?.trimmingCharacters(in: .whitespacesAndNewlines),
            !doi.isEmpty {
             do {
@@ -143,6 +150,25 @@ public enum PaperURLResolver {
         return (reference, pdfURL)
     }
 
+    // MARK: - DOI-bearing publisher paths
+
+    private static func resolveDOIPublisher(
+        landingURL: URL,
+        host: KnownPaperHost,
+        crossrefFetcher: @Sendable (String) async throws -> Reference
+    ) async throws -> (Reference, String?) {
+        guard let article = doiPublisherArticle(from: landingURL, host: host),
+              let pdfURL = doiPublisherURL(for: article, pageKind: .pdf) else {
+            throw ResolveError.insufficientMetadata
+        }
+
+        var reference = try await crossrefFetcher(article.doi)
+        // Preserve the publisher page instead of CrossRef's doi.org URL. PDF
+        // and ePDF inputs have already been rewritten to the canonical landing.
+        reference.url = landingURL.absoluteString
+        return (reference, pdfURL.absoluteString)
+    }
+
     // MARK: - Citation-meta dispatch
 
     private static func resolveCitationMeta(
@@ -174,7 +200,8 @@ public enum PaperURLResolver {
                 return .conferencePaper
             case .aclAnthology:
                 return meta.conferenceTitle != nil ? .conferencePaper : .journalArticle
-            case .ieeeXplore, .acmDL, .nature, .springer, .scienceDirect, .eLife, .eNeuro, .aps:
+            case .ieeeXplore, .acmDL, .nature, .springer, .scienceDirect,
+                 .science, .acs, .aanda, .eLife, .eNeuro, .aps:
                 if meta.journal != nil { return .journalArticle }
                 if meta.conferenceTitle != nil { return .conferencePaper }
                 return .journalArticle
@@ -387,7 +414,8 @@ public enum PaperURLResolver {
 internal enum KnownPaperHost: CaseIterable {
     case openReview, aclAnthology, cvfOpenAccess
     case neurIPS, neurIPSProceedings
-    case pmlr, ieeeXplore, acmDL, nature, springer, scienceDirect, eLife, eNeuro, aps
+    case pmlr, ieeeXplore, acmDL, nature, springer, scienceDirect
+    case science, acs, aanda, eLife, eNeuro, aps
 
     /// Returns the host bucket if the URL matches both a known host and a
     /// known path shape (landing OR PDF). Returns nil otherwise — callers
@@ -447,6 +475,16 @@ internal enum KnownPaperHost: CaseIterable {
             if matches(path, pattern: #"^/science/article/.+/pdfft$"#) { return .scienceDirect }
             if matches(path, pattern: #"^/science/article/(pii|abs/pii)/.+$"#) { return .scienceDirect }
             return nil
+        case "science.org":
+            return PaperURLResolver.doiPublisherArticle(from: canonical, host: .science) == nil
+                ? nil
+                : .science
+        case "pubs.acs.org":
+            return PaperURLResolver.doiPublisherArticle(from: canonical, host: .acs) == nil
+                ? nil
+                : .acs
+        case "aanda.org":
+            return PaperURLResolver.aandaArticle(from: canonical) == nil ? nil : .aanda
         case "elifesciences.org":
             if PaperURLResolver.eLifeArticleID(from: canonical) != nil { return .eLife }
             return nil
@@ -492,6 +530,27 @@ internal enum KnownPaperHost: CaseIterable {
 // MARK: - URL canonicalization
 
 internal extension PaperURLResolver {
+    enum DOIPublisherPageKind: Sendable {
+        case canonical, full, abstract, pdf, epdf
+    }
+
+    struct DOIPublisherArticle: Sendable {
+        let host: KnownPaperHost
+        let pageKind: DOIPublisherPageKind
+        let doi: String
+    }
+
+    enum AANDAPageKind: Sendable {
+        case fullHTML, abstract, pdf
+    }
+
+    struct AANDAArticle: Sendable {
+        let pageKind: AANDAPageKind
+        let year: String
+        let issue: String
+        let articleID: String
+    }
+
     enum APSPageKind: String, Sendable {
         case abstract, accepted, pdf
     }
@@ -531,6 +590,153 @@ internal extension PaperURLResolver {
         components.fragment = nil
 
         return components.url
+    }
+
+    /// Parse Science and ACS article paths. Both publishers use one DOI suffix
+    /// path component and expose canonical, full, abstract, PDF, and ePDF forms.
+    static func doiPublisherArticle(
+        from url: URL,
+        host: KnownPaperHost
+    ) -> DOIPublisherArticle? {
+        let expectedHost: String
+        let registrant: String
+        switch host {
+        case .science:
+            expectedHost = "science.org"
+            registrant = "10.1126"
+        case .acs:
+            expectedHost = "pubs.acs.org"
+            registrant = "10.1021"
+        default:
+            return nil
+        }
+
+        guard let canonical = canonicalize(url),
+              canonical.host == expectedHost else { return nil }
+        var path = canonical.path(percentEncoded: false)
+        guard path.hasPrefix("/") else { return nil }
+        if path.hasSuffix("/") { path.removeLast() }
+        let segments = path.split(separator: "/", omittingEmptySubsequences: false)
+            .dropFirst()
+            .map(String.init)
+
+        let pageKind: DOIPublisherPageKind
+        let doiRegistrant: String
+        let suffix: String
+        if segments.count == 3, segments[0] == "doi" {
+            pageKind = .canonical
+            doiRegistrant = segments[1]
+            suffix = segments[2]
+        } else if segments.count == 4, segments[0] == "doi" {
+            switch segments[1] {
+            case "full": pageKind = .full
+            case "abs": pageKind = .abstract
+            case "pdf": pageKind = .pdf
+            case "epdf": pageKind = .epdf
+            default: return nil
+            }
+            doiRegistrant = segments[2]
+            suffix = segments[3]
+        } else {
+            return nil
+        }
+
+        guard doiRegistrant == registrant,
+              !suffix.isEmpty,
+              suffix != ".",
+              suffix != ".." else { return nil }
+        return DOIPublisherArticle(
+            host: host,
+            pageKind: pageKind,
+            doi: "\(registrant)/\(suffix)"
+        )
+    }
+
+    static func doiPublisherPath(
+        for article: DOIPublisherArticle,
+        pageKind: DOIPublisherPageKind
+    ) -> String {
+        switch pageKind {
+        case .canonical: return "/doi/\(article.doi)"
+        case .full: return "/doi/full/\(article.doi)"
+        case .abstract: return "/doi/abs/\(article.doi)"
+        case .pdf: return "/doi/pdf/\(article.doi)"
+        case .epdf: return "/doi/epdf/\(article.doi)"
+        }
+    }
+
+    static func doiPublisherURL(
+        for article: DOIPublisherArticle,
+        pageKind: DOIPublisherPageKind
+    ) -> URL? {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = article.host == .science ? "www.science.org" : "pubs.acs.org"
+        components.path = doiPublisherPath(for: article, pageKind: pageKind)
+        return components.url
+    }
+
+    /// Parse Astronomy & Astrophysics full HTML, abstract, and PDF paths.
+    /// HTML paths duplicate the article ID as a directory and filename, while
+    /// PDF paths place `<article-id>.pdf` directly under the issue directory.
+    static func aandaArticle(from url: URL) -> AANDAArticle? {
+        guard let canonical = canonicalize(url),
+              canonical.host == "aanda.org" else { return nil }
+        var path = canonical.path(percentEncoded: false)
+        guard path.hasPrefix("/") else { return nil }
+        if path.hasSuffix("/") { path.removeLast() }
+        let segments = path.split(separator: "/", omittingEmptySubsequences: false)
+            .dropFirst()
+            .map(String.init)
+        guard segments.count >= 6,
+              segments[0] == "articles",
+              segments[1] == "aa" else { return nil }
+
+        let pageKind: AANDAPageKind
+        let year: String
+        let issue: String
+        let articleID: String
+        switch segments[2] {
+        case "full_html", "abs":
+            guard segments.count == 7,
+                  segments[6] == "\(segments[5]).html" else { return nil }
+            pageKind = segments[2] == "full_html" ? .fullHTML : .abstract
+            year = segments[3]
+            issue = segments[4]
+            articleID = segments[5]
+        case "pdf":
+            guard segments.count == 6, segments[5].hasSuffix(".pdf") else { return nil }
+            pageKind = .pdf
+            year = segments[3]
+            issue = segments[4]
+            articleID = String(segments[5].dropLast(4))
+        default:
+            return nil
+        }
+
+        let isASCIIDigit: (Character) -> Bool = { $0.isASCII && $0.isNumber }
+        guard year.count == 4, year.allSatisfy(isASCIIDigit),
+              issue.count == 2, issue.allSatisfy(isASCIIDigit),
+              articleID.hasPrefix("aa"), articleID.count > 2,
+              articleID.allSatisfy({ $0.isASCII && ($0.isLowercase || $0.isNumber || $0 == "-") })
+        else { return nil }
+        return AANDAArticle(
+            pageKind: pageKind,
+            year: year,
+            issue: issue,
+            articleID: articleID
+        )
+    }
+
+    static func aandaPath(for article: AANDAArticle, pageKind: AANDAPageKind) -> String {
+        switch pageKind {
+        case .fullHTML:
+            return "/articles/aa/full_html/\(article.year)/\(article.issue)/\(article.articleID)/\(article.articleID).html"
+        case .abstract:
+            return "/articles/aa/abs/\(article.year)/\(article.issue)/\(article.articleID)/\(article.articleID).html"
+        case .pdf:
+            return "/articles/aa/pdf/\(article.year)/\(article.issue)/\(article.articleID).pdf"
+        }
     }
 
     /// Parse APS Physical Review article URLs such as
@@ -600,12 +806,16 @@ internal extension PaperURLResolver {
 
 internal extension PaperURLResolver {
     /// True when `url` is `host`'s PDF form of an article link. The default
-    /// is a `.pdf` path extension; hosts whose PDF URLs lack one override
-    /// (APS uses a `/pdf/` path segment).
+    /// is a `.pdf` path extension; hosts whose PDF URLs lack one override.
     static func isPublisherPDFURL(_ url: URL, host: KnownPaperHost) -> Bool {
         switch host {
         case .aps:
             return apsArticle(from: url)?.pageKind == .pdf
+        case .science, .acs:
+            guard let article = doiPublisherArticle(from: url, host: host) else { return false }
+            return article.pageKind == .pdf || article.pageKind == .epdf
+        case .aanda:
+            return aandaArticle(from: url)?.pageKind == .pdf
         default:
             return url.pathExtension.lowercased() == "pdf"
         }
@@ -703,6 +913,20 @@ internal extension PaperURLResolver {
             // /science/article/pii/SXXXX/pdfft → /science/article/pii/SXXXX
             if path.hasSuffix("/pdfft") {
                 components.path = String(path.dropLast("/pdfft".count))
+            }
+
+        case .science, .acs:
+            if let article = doiPublisherArticle(from: canonical, host: host) {
+                components.host = article.host == .science ? "www.science.org" : "pubs.acs.org"
+                if article.pageKind == .pdf || article.pageKind == .epdf {
+                    components.path = doiPublisherPath(for: article, pageKind: .canonical)
+                }
+            }
+
+        case .aanda:
+            components.host = "www.aanda.org"
+            if let article = aandaArticle(from: canonical), article.pageKind == .pdf {
+                components.path = aandaPath(for: article, pageKind: .fullHTML)
             }
 
         case .eLife:

@@ -217,6 +217,96 @@ final class KnownPaperHostClassifyTests: XCTestCase {
         XCTAssertEqual(classify("https://www.sciencedirect.com/science/article/pii/S0123456789012345/pdfft"), .scienceDirect)
     }
 
+    // Science / AAAS
+    func testScienceFullArticle() {
+        XCTAssertEqual(
+            classify("https://www.science.org/doi/full/10.1126/sciadv.abn9545"),
+            .science
+        )
+    }
+    func testScienceCanonicalAndAbstractArticle() {
+        XCTAssertEqual(
+            classify("https://www.science.org/doi/10.1126/sciadv.abn9545"),
+            .science
+        )
+        XCTAssertEqual(
+            classify("https://www.science.org/doi/abs/10.1126/sciadv.abn9545"),
+            .science
+        )
+    }
+    func testSciencePDFVariants() {
+        XCTAssertEqual(
+            classify("https://www.science.org/doi/pdf/10.1126/sciadv.abn9545"),
+            .science
+        )
+        XCTAssertEqual(
+            classify("https://www.science.org/doi/epdf/10.1126/sciadv.abn9545"),
+            .science
+        )
+    }
+    func testScienceRejectsNonArticlesAndOtherDOIPrefixes() {
+        XCTAssertNil(classify("https://www.science.org/journal/sciadv"))
+        XCTAssertNil(classify("https://www.science.org/doi/full/10.9999/example"))
+        XCTAssertNil(classify("https://www.science.org/doi/full/10.1126/sciadv.abn9545/references"))
+    }
+
+    // American Chemical Society
+    func testACSFullArticle() {
+        XCTAssertEqual(
+            classify("https://pubs.acs.org/doi/full/10.1021/acscentsci.3c01275"),
+            .acs
+        )
+    }
+    func testACSCanonicalAndAbstractArticle() {
+        XCTAssertEqual(
+            classify("https://pubs.acs.org/doi/10.1021/acscentsci.3c01275"),
+            .acs
+        )
+        XCTAssertEqual(
+            classify("https://pubs.acs.org/doi/abs/10.1021/acscentsci.3c01275"),
+            .acs
+        )
+    }
+    func testACSPDFVariants() {
+        XCTAssertEqual(
+            classify("https://pubs.acs.org/doi/pdf/10.1021/acscentsci.3c01275"),
+            .acs
+        )
+        XCTAssertEqual(
+            classify("https://pubs.acs.org/doi/epdf/10.1021/acscentsci.3c01275"),
+            .acs
+        )
+    }
+    func testACSRejectsNonArticlesAndOtherDOIPrefixes() {
+        XCTAssertNil(classify("https://pubs.acs.org/journal/acscii"))
+        XCTAssertNil(classify("https://pubs.acs.org/doi/full/10.9999/example"))
+        XCTAssertNil(classify("https://pubs.acs.org/doi/full/10.1021/acscentsci.3c01275/references"))
+    }
+
+    // Astronomy & Astrophysics
+    func testAANDAFullHTMLAndAbstract() {
+        XCTAssertEqual(
+            classify("https://www.aanda.org/articles/aa/full_html/2026/02/aa57022-25/aa57022-25.html"),
+            .aanda
+        )
+        XCTAssertEqual(
+            classify("https://www.aanda.org/articles/aa/abs/2026/02/aa57022-25/aa57022-25.html"),
+            .aanda
+        )
+    }
+    func testAANDAPDF() {
+        XCTAssertEqual(
+            classify("https://www.aanda.org/articles/aa/pdf/2026/02/aa57022-25.pdf"),
+            .aanda
+        )
+    }
+    func testAANDARejectsNonArticlesAndMismatchedIdentifiers() {
+        XCTAssertNil(classify("https://www.aanda.org/"))
+        XCTAssertNil(classify("https://www.aanda.org/articles/aa/abs/2026/02/contents/contents.html"))
+        XCTAssertNil(classify("https://www.aanda.org/articles/aa/full_html/2026/02/aa57022-25/aa99999-25.html"))
+        XCTAssertNil(classify("https://www.aanda.org/articles/aa/ref/2026/02/aa57022-25/aa57022-25.html"))
+    }
+
     // eLife
     func testELifeArticle() {
         XCTAssertEqual(classify("https://elifesciences.org/articles/29515"), .eLife)

@@ -47,6 +47,27 @@ final class PaperURLLiveSmokeTests: XCTestCase {
         )
     }
 
+    func testScienceLive() async throws {
+        try await smokeURL(
+            "https://www.science.org/doi/full/10.1126/sciadv.abn9545",
+            expectedTitleContains: "machine learning enables interpretable discovery"
+        )
+    }
+
+    func testACSLive() async throws {
+        try await smokeURL(
+            "https://pubs.acs.org/doi/full/10.1021/acscentsci.3c01275",
+            expectedTitleContains: "opportunities and challenges"
+        )
+    }
+
+    func testAANDALive() async throws {
+        try await smokeURL(
+            "https://www.aanda.org/articles/aa/full_html/2026/02/aa57022-25/aa57022-25.html",
+            expectedTitleContains: "probing jet base emission"
+        )
+    }
+
     func testELifeLive() async throws {
         try XCTSkipIf(ProcessInfo.processInfo.environment["RUBIEN_LIVE_TESTS"] != "1",
                       "Set RUBIEN_LIVE_TESTS=1 to run live smoke tests")
