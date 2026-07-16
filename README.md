@@ -7,6 +7,9 @@
 Rubien is a native macOS reference manager built on one principle: **one library, two front doors.** A single local SQLite database holds every reference, tag, annotation, custom property, and view — and you reach it through either a Notion-style SwiftUI app for humans, or a scriptable `rubien-cli` for agents and automation. Both speak to the same store; neither is a second-class citizen. The icon — a cube whose faces are a Notion-style UI on one side and a terminal on the other — is the architecture in one image.
 
 The SwiftUI app is Mac-only. `rubien-cli` also runs on Linux — see [Linux CLI](#linux-cli).
+A browser-local, installable web port lives in [`web/`](web/) for cross-OS use
+without cloud sync. See [`Docs/Web-Port.md`](Docs/Web-Port.md) for scope and run
+commands.
 
 The name means *the keeper of borrowed knowledge.*
 
