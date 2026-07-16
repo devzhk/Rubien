@@ -3,6 +3,8 @@
 **Design:** `Docs/superpowers/specs/2026-07-15-agent-home-design.md`
 **Branch/worktree:** `codex/agent-home` / `/private/tmp/Rubien-agent-home`
 **Baseline:** `swift build` passes at `7e44b76`.
+**Status:** All checkpoints and visual-QA refinements implemented and verified
+2026-07-16.
 
 The feature lands as buildable checkpoints. Activity capture and Home remain
 unexposed until their data, privacy, and clear contracts are complete.
@@ -126,6 +128,23 @@ unexposed until their data, privacy, and clear contracts are complete.
    - current-generation recent papers
    - compact overlay and height-constrained internal scrolling
 6. Add empty/loading/offline/error states and accessibility/back-deployment QA.
+
+## D — Visual-QA refinements incorporated after the core checkpoints
+
+1. Use 14-point conversation/editor content and one shared 13-point size for
+   secondary chat guidance, shortcuts, selectors, suggestions, and Home header
+   actions.
+2. Keep fresh and docked Home composers at the same 700-point maximum width and
+   intrinsic height; apply the compact intrinsic height to reader composers and
+   a 420-point reader Assistant minimum width.
+3. Keep Home suggestions as a muted, caret-aligned vertical list above the fresh
+   composer with neutral-gray hover feedback.
+4. Render shared compact paper cards with title, truncated authors, year, and
+   type/badge metadata; shrink-wrap them up to the transcript-bubble maximum and
+   use neutral-gray hover feedback.
+5. Use exact state-backed 225-point defaults for PDF and web left sidebars,
+   persist width/visibility independently, clamp restored values, and migrate the
+   unreliable legacy web split-view width once.
 
 ## Verification and delivery
 

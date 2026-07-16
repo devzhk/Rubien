@@ -1,10 +1,11 @@
 # Agent Home and Reading Activity — Design Spec
 
 **Date:** 2026-07-15
-**Status:** Draft specification; key product decisions approved and technical
-review incorporated 2026-07-15
+**Status:** Implemented on `codex/agent-home`; technical review incorporated
+2026-07-15 and final visual-QA decisions reconciled 2026-07-16
 **Scope:** New default main-window Home destination, library-wide Assistant chat,
-and a Reading Activity panel. No implementation is included in this spec change.
+and a Reading Activity panel. Implementation checkpoints are recorded in the
+[implementation plan](../plans/2026-07-15-agent-home.md).
 
 ## 1. Summary
 
@@ -187,7 +188,7 @@ icon/title and no bottom separator. Only trailing **New** and **History** action
 remain, each rendered as an icon plus text with neutral hover feedback. Reader
 Assistant headers retain their existing title, icon, and separator.
 
-Keep the empty-state cluster at a comfortable maximum width around 720 points
+Keep the empty-state cluster at a comfortable maximum width of 700 points
 with responsive side margins. Typing, adding a mention, or attaching a file
 does not move it. When the first valid Send/Return action commits the user's
 message, the suggestions disappear and the transcript layout immediately docks
@@ -282,13 +283,14 @@ Initial suggestions:
 
 - **What should I read next?**
 - **Find recent papers in my field**
-- **Summarize what I’ve been reading this week**
+- **Summarize what we’ve been reading this week**
 
-Place these immediately below the composer in a centered wrapping row, falling
-back to a vertical stack when the chat column is narrow or accessibility text is
-large. They use low-emphasis button styling without heavy card chrome so the
-composer remains the strongest visual element. The composer precedes the
-suggestions in visual, keyboard, and VoiceOver order. Suggestions disappear as
+Place these immediately above the composer in a quiet, left-aligned vertical
+list whose text begins at the editor caret origin. They have no icon, bezel, or
+resting fill; a neutral-gray background appears on hover. Use secondary-text
+color and 13-point interface type so the 14-point composer text remains the
+strongest visual element. The suggestions precede the composer in visual,
+keyboard, and VoiceOver order. Suggestions disappear as
 soon as the first valid send commits the user message and return only for a new
 empty conversation.
 
@@ -314,16 +316,16 @@ short explanation, render a native **Paper cards** group in the transcript:
 ```text
 Paper cards
 ┌────────────────────────────────────────────────┐
-│ Paper A title                           PDF │
-│ 2025                                        │
+│ Paper A title                                  │
+│ Ada Author, Bo Author…          2025 · PDF     │
 └────────────────────────────────────────────────┘
 ┌────────────────────────────────────────────────┐
-│ Paper B title                           Web │
-│ 2024                                        │
+│ Paper B title                                  │
+│ Chen Author                     2024 · Web     │
 └────────────────────────────────────────────────┘
 ┌────────────────────────────────────────────────┐
-│ Paper C title                 Web candidate │
-│ 2026                                        │
+│ Paper C title                                  │
+│ Dev Author            2026 · Web candidate    │
 │ Open source                    Add to Rubien… │
 └────────────────────────────────────────────────┘
 ```
@@ -501,14 +503,13 @@ top/trailing margins and leading resize interaction where practical.
   feature. It also explains that time is estimated from foreground-reader state,
   saved about once per active minute plus pause/close, and may double-count
   simultaneous activity on two devices.
-- A quiet but visible coverage line says **Daily activity is tracked from Rubien
-  <shipping version> on upgraded devices** until the first clear. After a clear,
-  it instead says **Reading activity reset <localized date>; earlier activity is
-  excluded**. Independent Assistant clearing gives the AI card its own **Reset
-  <date>** period. These boundaries are not hidden only in a tooltip;
-  mixed-version devices can make pre-reset early periods incomplete.
-- When local capture is disabled, show **Recording off on this Mac** with a link
-  to the relevant Settings pane. Synced facts from other devices can still be
+- Before the first clear, do not add a permanent coverage sentence beneath the
+  header; the info popover explains when tracking began and how it works. After a
+  clear, show **Reading activity reset <localized date>; earlier activity is
+  excluded**. Independent Assistant clearing gives the AI card its own
+  **Since <date>** period.
+- When local capture is disabled, show **Recording off on this Mac**. The capture
+  control remains in Settings; synced facts from other devices can still be
   displayed.
 - No prominent goal, score, or judgmental empty-state language.
 
@@ -531,9 +532,9 @@ The approved label is **Papers read**, not **Papers completed** or a bare
 **Total**. Its help text says “Distinct papers kept active in Rubien's PDF or web
 reader for at least 60 seconds; this is an engagement threshold, not proof of
 completion. Deleted papers and activity before Rubien began tracking are not
-included.” The AI and streak cards also carry a short effective-period label:
-**Since tracking began** before a clear, or **Since <localized reset date>**
-afterward.
+included.” The AI card carries a short effective-period label: **Since tracking
+began** before a clear, or **Since <localized reset date>** afterward. The streak
+card uses its secondary line for **Longest <duration>**.
 
 Time cards visibly say **Estimated** and format the largest useful units, such as
 `10h 55m`; their help text defines active foreground time and gives the complete
@@ -1112,7 +1113,7 @@ accumulator.
 ### 11.3 Agent access
 
 Add a read-only `rubien_reading_activity` MCP tool backed by the same Core/CLI
-query. This makes **Summarize what I’ve been reading this week** truthful instead
+query. This makes **Summarize what we’ve been reading this week** truthful instead
 of asking the model to infer activity from reference metadata. The tool is
 called on demand; no activity snapshot is silently inserted into every Home
 prompt. When invoked inside an Assistant turn, its returned summary is sent to
@@ -1324,7 +1325,8 @@ must produce the same structured group and ordering.
   contrast over both light and dark Home backgrounds; its internal scroll area
   exposes normal keyboard and VoiceOver scrolling when height-constrained.
 - In a fresh conversation the quick suggestions precede the composer in visual,
-  keyboard, and VoiceOver order and retain that order when they wrap or stack.
+  keyboard, and VoiceOver order; long labels wrap within the vertical list
+  without changing that order.
 - Streamed Assistant answers should not announce every token; reuse or add a
   throttled completion announcement.
 - Home, Activity toggle, range control/navigation, recent rows, History, provider
@@ -1462,6 +1464,15 @@ familiar bottom edge and the suggestions disappear, without waiting for
 provider output. Populated History starts there as well; a new empty conversation
 restores the initial layout.
 
+Conversation and editor content use the transcript's 14-point base size.
+Secondary interface text—empty-state guidance, shortcut hints, Agent/provider/
+model/effort controls, Home suggestions, and **New**/**History**—uses one shared
+13-point size. The fresh and bottom-docked composers share the same 700-point
+maximum width and intrinsic-height footprint. Reader Assistant composers use
+that same compact height, while the reader Assistant panel has a 420-point
+minimum width so the single-line control row does not crowd or force an
+unreported expansion.
+
 ### D6 — Clickable native paper recommendations *(approved 2026-07-15)*
 
 When the agent recommends specific papers, it uses a bounded app-private,
@@ -1484,6 +1495,18 @@ height-constrained window introduces internal card scrolling. The implementation
 reuses Rubien's macOS 26 neutral glass treatment and macOS 14.4–15 visual-effect
 fallback rather than making the feature availability-dependent.
 
+### D8 — Reader sidebar parity and persistence *(revised 2026-07-16)*
+
+As a shared-reader visual-QA refinement, the PDF and web readers' left utility
+sidebars both default to 225 points when no saved choice exists. PDF remains
+resizable across 200–400 points; web remains resizable across 225–400 points.
+Each reader independently remembers its last width and visibility in device-local
+preferences and restores them in a new reader window; an already-open
+per-reference reader keeps its in-memory state. Both use an exact state-backed
+resize handle so the displayed width and the persisted width cannot diverge. A
+one-time preference migration discards the legacy web width that `HSplitView`
+could derive from automatic layout rather than an actual user drag.
+
 ## 16. Acceptance criteria
 
 - A new main window selects Home and shows library-scoped chat plus Activity.
@@ -1497,8 +1520,8 @@ fallback rather than making the feature availability-dependent.
   material fallback on macOS 14.4–15, with verified light/dark, Increase
   Contrast, keyboard-scroll, and VoiceOver behavior.
 - Every interactive Agent Home control has visible hover feedback: neutral gray
-  for ordinary buttons/tabs, and the established accent treatment for paper
-  cards and heatmap cells. Disabled controls remain visually inert.
+  for ordinary buttons, tabs, suggestions, and paper cards; the heatmap retains
+  its restrained accent expansion/glow. Disabled controls remain visually inert.
 - A fresh or newly reset Home conversation places the composer around 45% of
   the chat canvas height with suggestions immediately above and no competing
   hero. Drafting and attachments do not move it. The first valid Send/Return
@@ -1509,10 +1532,10 @@ fallback rather than making the feature availability-dependent.
   recoverable draft, while a post-commit provider failure remains in conversation
   layout. Reduce Motion, short-height, narrow-width, and accessibility-text
   behavior remain usable.
-- The three nonempty-library suggestions use the approved copy and precede the
-  composer in visual, keyboard, and VoiceOver order. They wrap or stack without
-  overtaking the composer, and the empty-library variants expose native Add and
-  Import actions.
+- The three nonempty-library suggestions use the approved copy and form a
+  left-aligned vertical list above the composer in visual, keyboard, and
+  VoiceOver order. Their text aligns with the editor caret, and the empty-library
+  variants expose native Add and Import actions.
 - The library-context seed asks the agent to present three papers by default for
   **What should I read next?** and requires exactly one presentation call whenever
   a response recommends specific papers, with all recommendations in that call and
