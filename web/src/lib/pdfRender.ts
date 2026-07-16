@@ -1,4 +1,5 @@
 import * as pdfjs from "pdfjs-dist";
+import type { RenderTask } from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.mjs?url";
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
@@ -10,7 +11,23 @@ export interface RenderedPDFPage {
   height: number;
 }
 
-export async function renderPDFPage(blob: Blob, requestedPage: number, canvas: HTMLCanvasElement): Promise<RenderedPDFPage> {
+export interface RenderPDFOptions {
+  // Reports the live RenderTask so the caller can `.cancel()` it (e.g. on
+  // unmount or a rapid page switch). pdf.js throws if two renders touch the
+  // same canvas concurrently, so cancellation is how callers stay serialized.
+  onRenderTask?: (task: RenderTask) => void;
+}
+
+export function isRenderCancelled(error: unknown): boolean {
+  return error instanceof Error && error.name === "RenderingCancelledException";
+}
+
+export async function renderPDFPage(
+  blob: Blob,
+  requestedPage: number,
+  canvas: HTMLCanvasElement,
+  options: RenderPDFOptions = {}
+): Promise<RenderedPDFPage> {
   const data = new Uint8Array(await blob.arrayBuffer());
   const loadingTask = pdfjs.getDocument({ data });
   const document = await loadingTask.promise;
@@ -32,7 +49,9 @@ export async function renderPDFPage(blob: Blob, requestedPage: number, canvas: H
 
     context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
     context.clearRect(0, 0, viewport.width, viewport.height);
-    await page.render({ canvas, canvasContext: context, viewport }).promise;
+    const renderTask = page.render({ canvas, canvasContext: context, viewport });
+    options.onRenderTask?.(renderTask);
+    await renderTask.promise;
     return {
       pageNumber,
       pageCount: document.numPages,

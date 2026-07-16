@@ -58,6 +58,7 @@ import {
 } from "./lib/model";
 import { resolveLocator } from "./lib/metadata";
 import { searchPDFText } from "./lib/pdfSearch";
+import { safeExternalURL } from "./lib/url";
 import {
   AnnotationRecord,
   AnnotationType,
@@ -66,8 +67,8 @@ import {
   FieldTarget,
   FilterOperator,
   FilterValue,
-  LibrarySnapshot,
   LibraryState,
+  SerializedLibrarySnapshot,
   MaterializedReference,
   PropertyDefinitionRecord,
   PropertyType,
@@ -175,7 +176,7 @@ export function App() {
         await addReferences(parsed);
         await refresh(parsed[0]?.id);
       } else {
-        await importSnapshot(parsed as LibrarySnapshot);
+        await importSnapshot(parsed as SerializedLibrarySnapshot);
         await refresh();
       }
     });
@@ -1297,6 +1298,7 @@ function ReaderPanel({
       <div className="reader-frame">
         {item.pdfFile ? (
           <PDFReader
+            key={item.pdfFile.id}
             file={item.pdfFile}
             annotations={item.annotations}
             annotationType={annotationType}
@@ -1330,8 +1332,8 @@ function ReaderPanel({
               }}
             />
           </label>
-          {item.reference.url ? (
-            <a className="text-button" href={item.reference.url} target="_blank" rel="noreferrer">
+          {safeExternalURL(item.reference.url) ? (
+            <a className="text-button" href={safeExternalURL(item.reference.url)} target="_blank" rel="noreferrer">
               <Globe size={15} />
               Open
             </a>
@@ -1412,6 +1414,18 @@ function PDFReader({
   const [dragStart, setDragStart] = useState<{ x: number; y: number } | undefined>();
   const [dragCurrent, setDragCurrent] = useState<{ x: number; y: number } | undefined>();
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const mountedRef = useRef(true);
+  // pdf.js rejects concurrent renders to the same canvas. Chain each render
+  // after the previous one settles (StrictMode double-mount, rapid page
+  // switches) so only one render touches the canvas at a time.
+  const renderChainRef = useRef<Promise<void>>(Promise.resolve());
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     const next = URL.createObjectURL(file.blob);
@@ -1421,26 +1435,34 @@ function PDFReader({
 
   useEffect(() => {
     let cancelled = false;
-    async function renderPage() {
-      if (!canvasRef.current) return;
+    let task: import("pdfjs-dist").RenderTask | undefined;
+    const run = renderChainRef.current.then(async () => {
+      if (cancelled || !canvasRef.current) return;
       setRendering(true);
       setError(undefined);
       try {
         const { renderPDFPage } = await import("./lib/pdfRender");
-        const rendered = await renderPDFPage(file.blob, selectedPage, canvasRef.current);
+        const rendered = await renderPDFPage(file.blob, selectedPage, canvasRef.current, {
+          onRenderTask: (t) => {
+            task = t;
+            if (cancelled) t.cancel();
+          }
+        });
         if (cancelled) return;
         setSelectedPage(rendered.pageNumber);
         setPageCount(rendered.pageCount);
         setPageSize({ width: rendered.width, height: rendered.height });
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+        const { isRenderCancelled } = await import("./lib/pdfRender");
+        if (!cancelled && !isRenderCancelled(err)) setError(err instanceof Error ? err.message : String(err));
       } finally {
         if (!cancelled) setRendering(false);
       }
-    }
-    renderPage();
+    });
+    renderChainRef.current = run.catch(() => undefined);
     return () => {
       cancelled = true;
+      task?.cancel();
     };
   }, [file.id, selectedPage]);
 
@@ -1464,18 +1486,22 @@ function PDFReader({
   }, [file.id]);
 
   async function indexPDF() {
+    if (!mountedRef.current) return;
     setIndexing(true);
     setError(undefined);
     try {
       const { extractPDFText } = await import("./lib/pdfText");
       const extracted = await extractPDFText(file.blob);
+      // Extraction is long; the user may have switched references or closed the
+      // reader by now. Persist the result, but only touch state if still mounted.
       await replacePDFTextPages(file.referenceId, file.id, extracted);
+      if (!mountedRef.current) return;
       setPages(extracted);
       setSelectedPage(extracted[0]?.pageNumber ?? 1);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (mountedRef.current) setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setIndexing(false);
+      if (mountedRef.current) setIndexing(false);
     }
   }
 
@@ -1623,12 +1649,17 @@ function StoredContentReader({ reference }: { reference: ReferenceRecord }) {
 }
 
 function WebPreview({ url }: { url: string }) {
+  const safe = safeExternalURL(url);
   return (
     <div className="web-preview">
       <Globe size={22} />
-      <a href={url} target="_blank" rel="noreferrer">
-        {url}
-      </a>
+      {safe ? (
+        <a href={safe} target="_blank" rel="noreferrer">
+          {url}
+        </a>
+      ) : (
+        <span>{url}</span>
+      )}
     </div>
   );
 }
@@ -1669,7 +1700,14 @@ function CopyBlock({ label, value }: { label: string; value: string }) {
         <strong>{label}</strong>
         <p>{value}</p>
       </div>
-      <button type="button" className="icon-button" title="Copy" onClick={() => navigator.clipboard.writeText(value)}>
+      <button
+        type="button"
+        className="icon-button"
+        title="Copy"
+        onClick={() => {
+          void navigator.clipboard?.writeText(value).catch(() => undefined);
+        }}
+      >
         <Check size={15} />
       </button>
     </div>
@@ -1846,5 +1884,7 @@ function downloadText(content: string, name: string, type: string) {
   anchor.href = url;
   anchor.download = name;
   anchor.click();
-  URL.revokeObjectURL(url);
+  // Revoking synchronously can abort the download before the browser has
+  // established the stream. Defer so the click is fully handled first.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
