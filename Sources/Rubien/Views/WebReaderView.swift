@@ -30,6 +30,8 @@ enum WebReaderMetrics {
     static let annotationSidebarWidthRange: ClosedRange<CGFloat> = 225...400
     static let annotationSidebarMinWidth = annotationSidebarWidthRange.lowerBound
     static let defaultAnnotationSidebarWidth: CGFloat = 225
+    static let sidebarVisibleDividerWidth: CGFloat = 1
+    static let sidebarResizeHitTargetWidth = ReaderResizeMetrics.hitTargetWidth
     static let defaultChatPanelWidth = AssistantSidebarMetrics.minimumWidth
     static let chatTrailingInset: CGFloat = 12
     static let minimumWindowHeight: CGFloat = 620
@@ -56,17 +58,33 @@ enum WebReaderMetrics {
     static func minimumReadableWidth(
         chatVisible: Bool,
         annotationSidebarVisible: Bool,
+        annotationSidebarWidth: CGFloat? = nil,
         chatPanelWidth: CGFloat
     ) -> CGFloat {
         contentMinimumWidth(chatVisible: chatVisible)
-            + (annotationSidebarVisible ? annotationSidebarMinWidth : 0)
+            + (annotationSidebarVisible
+                ? annotationSidebarWidth ?? annotationSidebarMinWidth
+                : 0)
             + (chatVisible ? chatPanelWidth + chatTrailingInset : 0)
     }
 
-    static func restoredAnnotationSidebarWidth(_ storedWidth: CGFloat?) -> CGFloat {
+    static func annotationSidebarWidth(
+        afterTrailingEdgeTranslation translation: CGFloat,
+        from width: CGFloat
+    ) -> CGFloat {
         min(
-            max(storedWidth ?? defaultAnnotationSidebarWidth, annotationSidebarWidthRange.lowerBound),
+            max(width + translation, annotationSidebarWidthRange.lowerBound),
             annotationSidebarWidthRange.upperBound)
+    }
+
+    static func restoredAnnotationSidebarWidth(_ storedWidth: CGFloat?) -> CGFloat {
+        annotationSidebarWidth(
+            afterTrailingEdgeTranslation: 0,
+            from: storedWidth ?? defaultAnnotationSidebarWidth)
+    }
+
+    static var sidebarResizeHitTargetOutset: CGFloat {
+        (sidebarResizeHitTargetWidth - sidebarVisibleDividerWidth) / 2
     }
 }
 
@@ -1683,6 +1701,7 @@ struct WebReaderView: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var showAnnotationSidebar: Bool
     @State private var annotationSidebarWidth: CGFloat
+    @State private var annotationSidebarDragOffset: CGFloat = 0
     @State private var showChatSidebar: Bool
     @State private var chatPanelWidth: CGFloat = WebReaderMetrics.defaultChatPanelWidth
     /// Note-draft text for the selection popover. Lifted from the deleted WebSelectionActionBar
@@ -1723,26 +1742,14 @@ struct WebReaderView: View {
     }
 
     var body: some View {
-        HSplitView {
+        HStack(spacing: 0) {
             // Annotations dock on the LEFT (the trailing edge belongs to the
             // floating assistant card — two right-side panels felt unbalanced).
             if showAnnotationSidebar {
                 WebAnnotationSidebarView(viewModel: viewModel)
-                    .frame(
-                        minWidth: WebReaderMetrics.annotationSidebarMinWidth,
-                        idealWidth: annotationSidebarWidth,
-                        maxWidth: WebReaderMetrics.annotationSidebarWidthRange.upperBound)
-                    .background {
-                        GeometryReader { geometry in
-                            Color.clear
-                                .onAppear {
-                                    rememberAnnotationSidebarWidth(geometry.size.width)
-                                }
-                                .onChange(of: geometry.size.width) { _, width in
-                                    rememberAnnotationSidebarWidth(width)
-                                }
-                        }
-                    }
+                    .frame(width: WebReaderMetrics.annotationSidebarWidth(
+                        afterTrailingEdgeTranslation: annotationSidebarDragOffset,
+                        from: annotationSidebarWidth))
                     .overlay(alignment: .trailing) {
                         LinearGradient(
                             colors: [.clear, Color.black.opacity(colorScheme == .dark ? 0.18 : 0.06)],
@@ -1752,6 +1759,30 @@ struct WebReaderView: View {
                         .frame(width: 6)
                         .allowsHitTesting(false)
                     }
+                    .transition(.move(edge: .leading))
+
+                ZStack {
+                    ReaderResizeHandle(
+                        onDragChanged: { translation in
+                            annotationSidebarDragOffset = translation
+                        },
+                        onDragEnded: { translation in
+                            annotationSidebarWidth = WebReaderMetrics.annotationSidebarWidth(
+                                afterTrailingEdgeTranslation: translation,
+                                from: annotationSidebarWidth)
+                            RubienPreferences.webReaderSidebarWidth = annotationSidebarWidth
+                            annotationSidebarDragOffset = 0
+                        })
+                        .frame(width: WebReaderMetrics.sidebarResizeHitTargetWidth)
+                        .frame(maxHeight: .infinity)
+
+                    Rectangle()
+                        .fill(Color(nsColor: .separatorColor).opacity(0.35))
+                        .frame(width: WebReaderMetrics.sidebarVisibleDividerWidth)
+                        .frame(maxHeight: .infinity)
+                        .allowsHitTesting(false)
+                }
+                .padding(.horizontal, -WebReaderMetrics.sidebarResizeHitTargetOutset)
             }
 
             ZStack(alignment: .top) {
@@ -1893,20 +1924,13 @@ struct WebReaderView: View {
         if persist { RubienPreferences.assistantSidebarVisible = visible }
     }
 
-    private func rememberAnnotationSidebarWidth(_ width: CGFloat) {
-        guard WebReaderMetrics.annotationSidebarWidthRange.contains(width),
-              abs(width - annotationSidebarWidth) >= 0.5
-        else { return }
-        annotationSidebarWidth = width
-        RubienPreferences.webReaderSidebarWidth = width
-    }
-
     /// The window-width floor for the panels that are actually visible right now —
     /// the root frame's `minWidth` and the NSWindow resize floor both track this.
     private var currentMinimumWindowWidth: CGFloat {
         WebReaderMetrics.minimumReadableWidth(
             chatVisible: showChatSidebar,
             annotationSidebarVisible: showAnnotationSidebar,
+            annotationSidebarWidth: annotationSidebarWidth,
             chatPanelWidth: chatPanelWidth)
     }
 

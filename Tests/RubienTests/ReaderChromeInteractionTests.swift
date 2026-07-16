@@ -84,6 +84,25 @@ final class ReaderChromeInteractionTests: XCTestCase {
         XCTAssertEqual(WebReaderMetrics.restoredAnnotationSidebarWidth(nil), 225)
         XCTAssertEqual(WebReaderMetrics.restoredAnnotationSidebarWidth(150), 225)
         XCTAssertEqual(WebReaderMetrics.restoredAnnotationSidebarWidth(450), 400)
+        XCTAssertEqual(
+            WebReaderMetrics.annotationSidebarWidth(
+                afterTrailingEdgeTranslation: 60,
+                from: WebReaderMetrics.defaultAnnotationSidebarWidth),
+            285)
+    }
+
+    func testWebReaderWindowFloorTracksRememberedSidebarWidth() {
+        let defaultFloor = WebReaderMetrics.minimumReadableWidth(
+            chatVisible: true,
+            annotationSidebarVisible: true,
+            annotationSidebarWidth: 225,
+            chatPanelWidth: WebReaderMetrics.defaultChatPanelWidth)
+        let widerFloor = WebReaderMetrics.minimumReadableWidth(
+            chatVisible: true,
+            annotationSidebarVisible: true,
+            annotationSidebarWidth: 325,
+            chatPanelWidth: WebReaderMetrics.defaultChatPanelWidth)
+        XCTAssertEqual(widerFloor - defaultFloor, 100)
     }
 
     func testWebReaderNotesAndAssistantFitDefaultReaderWidth() {
