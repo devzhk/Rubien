@@ -977,7 +977,7 @@ struct ChatSurfaceView: View {
             + Text(Image(systemName: "chevron.down"))
                 .font(.system(size: 9, weight: .medium))
                 .foregroundStyle(.secondary))
-            .font(.system(size: 12))
+            .font(.system(size: ComposerTextView.messageFontSize))
     }
 
     // MARK: Provider (backend) selector
@@ -1024,7 +1024,7 @@ struct ChatSurfaceView: View {
             + Text(Image(systemName: "chevron.down"))
                 .font(.system(size: 9, weight: .medium))
                 .foregroundStyle(.secondary))
-            .font(.system(size: 12))
+            .font(.system(size: ComposerTextView.messageFontSize))
     }
 
     // MARK: Model + effort selector (maps to `--model` / `--effort`)
@@ -1128,7 +1128,7 @@ struct ChatSurfaceView: View {
             + Text(Image(systemName: "chevron.down"))
                 .font(.system(size: 9, weight: .medium))
                 .foregroundStyle(.secondary)
-        return text.font(.system(size: 12))
+        return text.font(.system(size: ComposerTextView.messageFontSize))
     }
 
     /// One compact empty-state block inside the editor. Keeping the heading and
