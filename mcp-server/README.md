@@ -18,7 +18,7 @@ The server is only a wrapper. It needs **Node.js ≥ 20** and the `rubien-cli` b
   ```
   Tarball: <https://github.com/devzhk/Rubien-releases/releases>. Don't put the bare binary on `PATH` alone — it loses its resource bundles.
 
-At startup the server checks the CLI's build and exits with an update instruction if it's too old. Update via Rubien.app / Sparkle on Mac, or `rubien-cli self-update` on Linux.
+The server checks the CLI's build (`MIN_CLI_BUILD`). In stdio mode it starts either way: if the CLI is missing or too old, every tool call returns the update instruction as its result, re-checked per call — so updating Rubien mid-session recovers on the next call, with no client restart. (Versions ≤ 0.3.0 exited at startup instead, which Claude Desktop rendered as an opaque "Server disconnected" — see [Troubleshooting](#troubleshooting-server-disconnected-in-claude-desktop).) In `--http` mode the server still exits at startup, where stderr is visible in your terminal. Update via Rubien.app / Sparkle on Mac, or `rubien-cli self-update` on Linux.
 
 ## Install
 
@@ -54,9 +54,16 @@ The `npx -y rubien-mcp-server` install is **unpinned**, so there is nothing to r
 1. **Update Rubien first** — Sparkle on Mac (Rubien → Settings → Check Now), `rubien-cli self-update` on Linux. The server needs the new `rubien-cli`.
 2. **Restart your MCP client** — quit/reopen Claude Desktop, or start a new Claude Code session. The respawned server is the latest release.
 
-The pairing is guarded in one direction: a new server against a too-old Rubien **exits at startup with an update instruction** (`MIN_CLI_BUILD`), so a half-upgrade fails fast instead of half-working. The other direction is why upgrading matters — an old server against a new Rubien breaks at tool-call time when it shells subcommands that no longer exist (server < 0.3.0 vs Rubien ≥ 0.4.0: the 0.4.0 CLI cutover removed `import`, `add --identifier`, `views --query`, and the legacy `properties` write flags that 0.1.x/0.2.x servers shell out to; those server versions are deprecated on npm for this reason).
+The pairing is guarded in one direction: a new server against a too-old Rubien **refuses every tool call with an update instruction** (`MIN_CLI_BUILD`), so a half-upgrade fails loudly instead of half-working. The other direction is why upgrading matters — an old server against a new Rubien breaks at tool-call time when it shells subcommands that no longer exist (server < 0.3.0 vs Rubien ≥ 0.4.0: the 0.4.0 CLI cutover removed `import`, `add --identifier`, `views --query`, and the legacy `properties` write flags that 0.1.x/0.2.x servers shell out to; those server versions are deprecated on npm for this reason).
 
 If a stale `npx` cache ever keeps serving an old version after a restart, clear it (`rm -rf ~/.npm/_npx`) or pin `rubien-mcp-server@latest` in the config. HTTP mode (below) runs as a long-lived process you started yourself — it does not auto-upgrade; restart it after updating Rubien.
+
+### Troubleshooting: "Server disconnected" in Claude Desktop
+
+Claude Desktop never shows an MCP server's stderr — the actual error is in `~/Library/Logs/Claude/mcp-server-rubien.log`. Two known causes, both typically surfacing right after a reboot, because Claude Desktop only respawns MCP servers when the app itself relaunches:
+
+- **Stale Rubien vs auto-upgraded server.** The unpinned `npx -y` install picks up new server releases at respawn; if Rubien.app hasn't been updated, the log shows `needs build >= N`. Fix: open Rubien.app and let Sparkle update it. Server ≥ 0.3.1 no longer disconnects for this — the instruction is returned to Claude on each tool call instead — but older servers exited at startup with only this log line as evidence.
+- **No network at spawn.** `npx` resolves the package version against the npm registry on *every* spawn, even with a warm cache. If Claude Desktop launches at login before Wi-Fi/VPN is up, the spawn fails (`ENOTFOUND`/`ECONNREFUSED registry.npmjs.org` in the log) and Claude Desktop does not retry. Fix: quit and reopen Claude Desktop once online. To remove the network dependency entirely, install globally and point the config at the absolute path (`npm install -g rubien-mcp-server`, then `which rubien-mcp-server`) — at the cost of upgrading by hand with `npm update -g rubien-mcp-server`.
 
 ## claude.ai web (remote MCP server)
 

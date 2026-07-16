@@ -9,6 +9,9 @@ vi.mock("../src/toolHelpers.js", async (importOriginal) => {
     runCliAsTool: vi.fn(async (args: string[]) => ({
       content: [{ type: "text", text: JSON.stringify({ echoedArgs: args }) }],
     })),
+    // Pass buildServer's registration-seam version gate — these tests assert
+    // argv shaping, not CLI compatibility (that's gate-invariant.test.ts).
+    cliGateError: vi.fn(async () => null),
   };
 });
 

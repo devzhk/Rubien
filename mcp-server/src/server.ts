@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { cliGateError } from "./toolHelpers.js";
 import { registerReferenceTools } from "./tools/references.js";
 import { registerCitationTools } from "./tools/citations.js";
 import { registerIOTools } from "./tools/io.js";
@@ -10,7 +11,7 @@ import { registerReadTools } from "./tools/read.js";
 
 export const SERVER_INFO = {
   name: "rubien-mcp-server",
-  version: "0.3.0",
+  version: "0.3.1",
 } as const;
 
 export function buildServer(): McpServer {
@@ -18,6 +19,7 @@ export function buildServer(): McpServer {
     capabilities: { tools: {} },
   });
 
+  gateAllTools(server);
   registerReferenceTools(server);
   registerCitationTools(server);
   registerIOTools(server);
@@ -31,4 +33,25 @@ export function buildServer(): McpServer {
   registerSyncTools(server);
 
   return server;
+}
+
+/**
+ * Prefix every tool registered after this call with the rubien-cli
+ * compatibility gate (cliGateError). Applied at the registration seam so the
+ * invariant is structural: every tool shells out to rubien-cli, so none can
+ * do anything useful with an incompatible one, and a future bespoke handler
+ * that skips runCliAsTool (like rubien_render_pdf_page's typed-image path)
+ * cannot silently ship ungated. test/gate-invariant.test.ts enforces this
+ * across the whole catalog.
+ */
+function gateAllTools(server: McpServer): void {
+  const original = server.registerTool.bind(server);
+  // registerTool's generic signature doesn't survive a wrapping assignment;
+  // the cast is contained here.
+  server.registerTool = ((name, config, handler) =>
+    original(name, config, (async (...handlerArgs: unknown[]) => {
+      const gateError = await cliGateError();
+      if (gateError) return gateError;
+      return (handler as (...a: unknown[]) => unknown)(...handlerArgs);
+    }) as typeof handler)) as typeof server.registerTool;
 }

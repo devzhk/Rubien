@@ -144,24 +144,74 @@ export async function invokeCliTyped<T>(args: string[], options: CliOptions = {}
   return (await invokeCli(args, options)) as T;
 }
 
+/** Discriminated outcome of probing `rubien-cli version`. `envOverride` is
+ *  true when the binary came from $RUBIEN_CLI — failure messages must then
+ *  point at the override, since updating Rubien.app won't change anything. */
+export type CliProbe =
+  | { kind: "ok"; info: CliVersion; envOverride: boolean }
+  /** Binary missing: RUBIEN_CLI stale, app not installed, or bare-PATH miss. */
+  | { kind: "not-found"; detail: string; envOverride: boolean }
+  /** Probe was killed at the deadline — the binary hung or is very slow. */
+  | { kind: "timeout"; path: string; timeoutMs: number; envOverride: boolean }
+  /** Ran but produced no parseable {version, build}: a CLI old enough to
+   *  lack the `version` subcommand, or a broken binary. */
+  | { kind: "no-version"; path: string; envOverride: boolean };
+
+/** Generous because the first exec of a signed binary after a reboot can be
+ *  slowed by cold caches and Gatekeeper assessment; `rubien-cli version`
+ *  itself is trivial (prints constants, never opens the database). The env
+ *  override exists for tests. */
+const PROBE_TIMEOUT_MS = 15_000;
+
+function probeTimeoutMs(): number {
+  const env = Number(process.env.RUBIEN_MCP_PROBE_TIMEOUT_MS);
+  return Number.isFinite(env) && env > 0 ? env : PROBE_TIMEOUT_MS;
+}
+
 /**
- * Probe `rubien-cli version` with a short timeout. Returns the parsed
- * {version, build} or null on any failure (missing subcommand on an old CLI,
- * non-zero exit, malformed output, timeout). Never throws.
+ * Probe `rubien-cli version` and classify the outcome. Never throws — the
+ * result feeds evaluateCliProbe (versionGuard.ts), which turns it into a
+ * startup log line or a per-tool-call error message.
  */
-export async function getCliVersion(): Promise<CliVersion | null> {
+export async function probeCliVersion(): Promise<CliProbe> {
+  const envOverride = Boolean(process.env.RUBIEN_CLI?.length);
+  let cliPath: string;
   try {
-    const result = await invokeCli(["version"], { timeoutMs: 5_000 });
+    cliPath = resolveCliPath();
+  } catch (err) {
+    return { kind: "not-found", detail: (err as Error).message, envOverride };
+  }
+  const timeoutMs = probeTimeoutMs();
+  try {
+    const { stdout } = await execFileAsync(cliPath, ["version"], {
+      timeout: timeoutMs,
+      maxBuffer: 1024 * 1024,
+    });
+    const parsed: unknown = JSON.parse(stdout.trim());
     if (
-      result &&
-      typeof result === "object" &&
-      typeof (result as Record<string, unknown>).version === "string" &&
-      typeof (result as Record<string, unknown>).build === "number"
+      parsed &&
+      typeof parsed === "object" &&
+      typeof (parsed as Record<string, unknown>).version === "string" &&
+      typeof (parsed as Record<string, unknown>).build === "number"
     ) {
-      return result as unknown as CliVersion;
+      return { kind: "ok", info: parsed as unknown as CliVersion, envOverride };
     }
-    return null;
-  } catch {
-    return null;
+    return { kind: "no-version", path: cliPath, envOverride };
+  } catch (err: unknown) {
+    const e = err as { code?: number | string; killed?: boolean };
+    if (e.code === "ENOENT") {
+      return {
+        kind: "not-found",
+        detail: `no rubien-cli at ${cliPath}`,
+        envOverride,
+      };
+    }
+    // execFile sets killed:true when IT terminated the child at `timeout`;
+    // a child that died of its own signal (e.g. SIGSEGV) has killed:false
+    // and falls through to no-version.
+    if (e.killed === true) {
+      return { kind: "timeout", path: cliPath, timeoutMs, envOverride };
+    }
+    return { kind: "no-version", path: cliPath, envOverride };
   }
 }

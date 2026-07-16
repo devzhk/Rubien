@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -148,6 +148,83 @@ describe.skipIf(skipReason !== null)("e2e stdio JSON-RPC", () => {
         child.kill();
         await new Promise<void>((resolve) => child.once("close", () => resolve()));
         rmSync(libRoot, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
+});
+
+// Degraded mode needs only the built dist — the "CLI" is a stub script that
+// flips from build 18 to build 99 when a marker file appears, standing in
+// for the user updating Rubien.app mid-session.
+describe.skipIf(!existsSync(distIndex))("e2e stdio degraded mode (version gate)", () => {
+  it(
+    "serves the catalog with a too-old CLI, errors per tool call, and recovers once the CLI updates",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "rubien-guard-e2e-"));
+      const marker = join(dir, "cli-updated");
+      const child = spawn("node", [distIndex], {
+        env: {
+          ...process.env,
+          RUBIEN_CLI: join(process.cwd(), "test", "fixtures", "stub-cli-upgradeable.sh"),
+          RUBIEN_STUB_MARKER: marker,
+        },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+
+      try {
+        const initResult = await rpcRequest(child, {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2024-11-05",
+            capabilities: {},
+            clientInfo: { name: "vitest", version: "0.0.0" },
+          },
+        });
+        expect(initResult.result).toBeDefined();
+        sendMessage(child, { jsonrpc: "2.0", method: "notifications/initialized" });
+
+        // The catalog is fully advertised even while degraded — the client
+        // must see a healthy server, not "Server disconnected".
+        const toolsResult = await rpcRequest(child, {
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/list",
+        });
+        expect(
+          (toolsResult.result.tools as Array<{ name: string }>).length,
+        ).toBe(27);
+
+        // Every call returns the update instruction as tool text.
+        const degraded = await rpcRequest(child, {
+          jsonrpc: "2.0",
+          id: 3,
+          method: "tools/call",
+          params: { name: "rubien_list_views", arguments: {} },
+        });
+        expect(degraded.result.isError).toBe(true);
+        const degradedText = (degraded.result.content as Array<{ text: string }>)[0].text;
+        expect(degradedText).toContain("needs build >= 26");
+        expect(degradedText).toMatch(/Update Rubien\.app/);
+
+        // "Update Rubien.app" mid-session → the very next call recovers,
+        // with no server or client restart.
+        writeFileSync(marker, "");
+        const recovered = await rpcRequest(child, {
+          jsonrpc: "2.0",
+          id: 4,
+          method: "tools/call",
+          params: { name: "rubien_list_views", arguments: {} },
+        });
+        expect(recovered.result.isError).not.toBe(true);
+        const recoveredText = (recovered.result.content as Array<{ text: string }>)[0].text;
+        expect(JSON.parse(recoveredText)).toEqual([]);
+      } finally {
+        child.kill();
+        await new Promise<void>((resolve) => child.once("close", () => resolve()));
+        rmSync(dir, { recursive: true, force: true });
       }
     },
     30_000,

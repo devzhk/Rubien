@@ -1,4 +1,28 @@
 import { CliError, invokeCli, type CliOptions } from "./cli.js";
+import { ensureCliCompatible } from "./versionGuard.js";
+
+/** An `isError` CallToolResult carrying plain text. */
+export function errorResult(text: string) {
+  return {
+    content: [{ type: "text" as const, text }],
+    isError: true,
+  };
+}
+
+/**
+ * Version gate applied to every registered tool by buildServer (server.ts):
+ * when rubien-cli is missing or too old, return the update instruction as an
+ * `isError` tool result instead of failing some other way. Stdio clients
+ * (Claude Desktop) hide server stderr behind a generic "Server disconnected",
+ * so tool-call text is the only surface the user actually sees; the gate
+ * re-probes on every failing call, so updating Rubien mid-session recovers
+ * without a client restart. Returns null when the CLI is compatible.
+ */
+export async function cliGateError() {
+  const guard = await ensureCliCompatible();
+  if (guard.ok) return null;
+  return errorResult(guard.message);
+}
 
 /**
  * Invoke rubien-cli and wrap the result as a CallToolResult. Errors from the
@@ -20,10 +44,7 @@ export async function runCliAsTool(args: string[], options: CliOptions = {}) {
     };
   } catch (err: unknown) {
     if (err instanceof CliError) {
-      return {
-        content: [{ type: "text" as const, text: err.message }],
-        isError: true,
-      };
+      return errorResult(err.message);
     }
     throw err;
   }

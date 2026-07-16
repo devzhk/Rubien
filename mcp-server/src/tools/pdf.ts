@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CliError, invokeCliTyped } from "../cli.js";
-import { flagsFromOptions, runCliAsTool } from "../toolHelpers.js";
+import { errorResult, flagsFromOptions, runCliAsTool } from "../toolHelpers.js";
 
 interface PdfPageImageResult {
   id: number;
@@ -95,10 +95,7 @@ export function registerPdfTools(server: McpServer): void {
         };
       } catch (err: unknown) {
         if (err instanceof CliError) {
-          return {
-            content: [{ type: "text" as const, text: err.message }],
-            isError: true,
-          };
+          return errorResult(err.message);
         }
         throw err;
       }
