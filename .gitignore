@@ -22,6 +22,9 @@ build/
 # === Node.js ===
 node_modules/
 scripts/note-editor/node_modules/
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo
 WordAddinNpm/node_modules/
 
 # === Cached binaries ===

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Rubien">
+  <rect width="128" height="128" rx="24" fill="#f6f5f2"/>
+  <path d="M28 34 64 14l36 20v42L64 98 28 76Z" fill="#ffffff" stroke="#1f2528" stroke-width="5" stroke-linejoin="round"/>
+  <path d="M28 34 64 54v44L28 76Z" fill="#146c5f"/>
+  <path d="M100 34 64 54v44l36-22Z" fill="#3066be"/>
+  <path d="M28 34 64 54l36-20-36-20Z" fill="#ffcc66"/>
+  <path d="M43 50h21M43 64h16M43 78h20" stroke="#ffffff" stroke-width="5" stroke-linecap="round"/>
+  <path d="M76 52h12M76 66h12M76 80h8" stroke="#ffffff" stroke-width="5" stroke-linecap="round"/>
+</svg>

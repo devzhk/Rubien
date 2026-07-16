@@ -1,0 +1,18 @@
+{
+  "name": "Rubien Web",
+  "short_name": "Rubien",
+  "description": "A browser-local, cross-OS Rubien reference manager without cloud sync.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f6f5f2",
+  "theme_color": "#146c5f",
+  "icons": [
+    {
+      "src": "/rubien-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
