@@ -1325,6 +1325,322 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertFalse(controller.isResponding)
     }
 
+    func testMessagesSentWhileRespondingQueueAndMergeIntoNextTurn() async {
+        let provider = MockAgentProvider()
+        let sink = SpyTranscriptSink()
+        let controller = makeController(provider: provider, sink: sink)
+
+        controller.send("initial question")
+        let firstTask = controller.turnTask
+        await provider.waitUntilStreaming()
+        provider.emit(.sessionStarted(sessionID: "s1"))
+        await waitUntil { controller.liveSessionID == "s1" }
+
+        XCTAssertTrue(controller.canSend(draft: "first follow-up"))
+        controller.send("first follow-up")
+        controller.send("second follow-up")
+
+        XCTAssertEqual(controller.queuedMessageCount, 2)
+        XCTAssertEqual(provider.requests.count, 1, "queued input must not overlap the live provider turn")
+
+        provider.emit(.turnCompleted(usage: nil))
+        provider.finishStream()
+        await firstTask?.value
+        await provider.waitUntilStreaming()
+
+        XCTAssertEqual(provider.requests.count, 2)
+        XCTAssertEqual(provider.lastRequest?.prompt, "first follow-up\n\nsecond follow-up")
+        XCTAssertEqual(provider.lastRequest?.resumeSessionID, "s1")
+        XCTAssertEqual(controller.queuedMessageCount, 0, "the admitted merged batch leaves the queue")
+        XCTAssertTrue(sink.calls.contains(.addUserMessage("first follow-up\n\nsecond follow-up")))
+
+        let followUpTask = controller.turnTask
+        provider.finishStream()
+        await followUpTask?.value
+    }
+
+    func testQueuedMessagesCanBeEditedAndDeletedBeforeDispatch() async {
+        let provider = MockAgentProvider()
+        let controller = makeController(provider: provider, sink: SpyTranscriptSink())
+
+        controller.send("initial question")
+        let firstTask = controller.turnTask
+        await provider.waitUntilStreaming()
+        provider.emit(.sessionStarted(sessionID: "s1"))
+        await waitUntil { controller.liveSessionID == "s1" }
+
+        controller.send("first follow-up")
+        controller.send("delete this follow-up")
+        let queued = controller.queuedMessages
+        XCTAssertEqual(queued.map(\.text), ["first follow-up", "delete this follow-up"])
+
+        XCTAssertEqual(
+            controller.beginQueuedMessageEdit(id: queued[0].id),
+            "first follow-up")
+        XCTAssertNil(
+            controller.beginQueuedMessageEdit(id: queued[1].id),
+            "a second edit cannot replace an unsaved transaction")
+        XCTAssertTrue(controller.updateQueuedMessageEdit(
+            id: queued[0].id,
+            text: "revised follow-up"))
+        XCTAssertTrue(controller.commitQueuedMessageEdit(id: queued[0].id))
+        controller.removeQueuedMessage(id: queued[1].id)
+        XCTAssertEqual(controller.queuedMessages.map(\.text), ["revised follow-up"])
+
+        provider.finishStream()
+        await firstTask?.value
+        await provider.waitUntilStreaming()
+
+        XCTAssertEqual(provider.requests.count, 2)
+        XCTAssertEqual(provider.lastRequest?.prompt, "revised follow-up")
+
+        let followUpTask = controller.turnTask
+        provider.finishStream()
+        await followUpTask?.value
+    }
+
+    func testOpenQueuedEditPausesDispatchUntilCommitted() async {
+        let provider = MockAgentProvider()
+        let sink = SpyTranscriptSink()
+        let controller = makeController(provider: provider, sink: sink)
+
+        controller.send("initial question")
+        let firstTask = controller.turnTask
+        await provider.waitUntilStreaming()
+        provider.emit(.sessionStarted(sessionID: "s1"))
+        await waitUntil { controller.liveSessionID == "s1" }
+
+        controller.send("original follow-up")
+        let queuedID = controller.queuedMessages[0].id
+        XCTAssertEqual(
+            controller.beginQueuedMessageEdit(id: queuedID),
+            "original follow-up")
+        XCTAssertTrue(controller.updateQueuedMessageEdit(
+            id: queuedID,
+            text: "revised but not saved"))
+        XCTAssertFalse(controller.canSend(draft: "another message"))
+        XCTAssertFalse(controller.interruptAndSendQueued())
+        XCTAssertEqual(provider.cancelCount, 0)
+
+        provider.finishStream()
+        await firstTask?.value
+
+        XCTAssertFalse(controller.isResponding)
+        XCTAssertEqual(controller.queuedMessageCount, 1)
+        XCTAssertEqual(provider.requests.count, 1, "an open editor pauses automatic dispatch")
+        XCTAssertFalse(sink.calls.contains(.addUserMessage("original follow-up")))
+        XCTAssertFalse(controller.canSend(draft: ""))
+
+        XCTAssertTrue(controller.commitQueuedMessageEdit(id: queuedID))
+        let followUpTask = controller.turnTask
+        await provider.waitUntilStreaming()
+
+        XCTAssertEqual(provider.requests.count, 2)
+        XCTAssertEqual(provider.lastRequest?.prompt, "revised but not saved")
+        XCTAssertEqual(controller.queuedMessageCount, 0)
+
+        provider.finishStream()
+        await followUpTask?.value
+    }
+
+    func testIncrementalQueuedEditPreservesMentionBetweenChanges() async throws {
+        let provider = MockAgentProvider()
+        let controller = makeController(provider: provider, sink: SpyTranscriptSink())
+        let bert = ChatReference(id: 42, title: "BERT", authors: "Devlin et al.")
+        let token = PaperMentions.token(for: bert)
+        let raw = "  Before \(token) after"
+        let tokenRange = try XCTUnwrap(raw.range(of: token))
+        let lowerOffset = raw.distance(from: raw.startIndex, to: tokenRange.lowerBound)
+        let upperOffset = raw.distance(from: raw.startIndex, to: tokenRange.upperBound)
+        let selection = PaperMentionSelection(
+            reference: bert,
+            range: lowerOffset..<upperOffset)
+
+        controller.send("initial question")
+        let firstTask = controller.turnTask
+        await provider.waitUntilStreaming()
+        provider.emit(.sessionStarted(sessionID: "s1"))
+        await waitUntil { controller.liveSessionID == "s1" }
+
+        controller.send(raw, mentionedReferences: [selection])
+        let queuedID = controller.queuedMessages[0].id
+        XCTAssertEqual(controller.beginQueuedMessageEdit(id: queuedID), raw)
+        XCTAssertTrue(controller.updateQueuedMessageEdit(
+            id: queuedID,
+            text: "  Please Before \(token) after"))
+        XCTAssertTrue(controller.updateQueuedMessageEdit(
+            id: queuedID,
+            text: "  Please Before \(token) after today"))
+        XCTAssertTrue(controller.commitQueuedMessageEdit(id: queuedID))
+
+        provider.finishStream()
+        await firstTask?.value
+        let followUpTask = controller.turnTask
+        await provider.waitUntilStreaming()
+
+        let prompt = try XCTUnwrap(provider.lastRequest?.prompt)
+        XCTAssertTrue(prompt.hasPrefix("Please Before \(token) after today"))
+        XCTAssertTrue(prompt.contains(#""id":42"#))
+
+        provider.finishStream()
+        await followUpTask?.value
+    }
+
+    func testGateRefusedQueuedBatchRemainsRetryable() async {
+        let gate = AssistantTurnGate()
+        let provider = MockAgentProvider()
+        let sink = SpyTranscriptSink()
+        let controller = makeController(provider: provider, sink: sink, gate: gate)
+
+        await runTurn(
+            controller,
+            provider: provider,
+            send: "first",
+            events: [.sessionStarted(sessionID: "s1"), .turnCompleted(usage: nil)])
+
+        controller.send("current response")
+        let currentTask = controller.turnTask
+        await provider.waitUntilStreaming()
+        provider.emit(.sessionStarted(sessionID: "s2"))
+        await waitUntil { controller.liveSessionID == "s2" }
+        controller.send("queued retry")
+
+        let held = await gate.tryAcquire(provider: .claude, sessionID: "s2")
+        XCTAssertTrue(held, "the live turn holds s1 while its rotated s2 can be occupied")
+
+        provider.finishStream()
+        await currentTask?.value
+        await waitUntil { controller.busyElsewhere }
+
+        XCTAssertEqual(provider.requests.count, 2)
+        XCTAssertEqual(controller.queuedMessageCount, 1)
+        XCTAssertFalse(sink.calls.contains(.addUserMessage("queued retry")))
+
+        let queuedID = controller.queuedMessages[0].id
+        XCTAssertEqual(controller.beginQueuedMessageEdit(id: queuedID), "queued retry")
+        XCTAssertFalse(controller.canSend(draft: ""))
+        controller.cancelQueuedMessageEdit(id: queuedID)
+        XCTAssertEqual(
+            provider.requests.count,
+            2,
+            "cancelling an edit after gate refusal must still require an explicit retry")
+        XCTAssertEqual(controller.queuedMessageCount, 1)
+
+        await gate.release(provider: .claude, sessionID: "s2")
+        controller.send("")
+        let retryTask = controller.turnTask
+        await provider.waitUntilStreaming()
+
+        XCTAssertEqual(provider.requests.count, 3)
+        XCTAssertEqual(provider.lastRequest?.prompt, "queued retry")
+        XCTAssertEqual(controller.queuedMessageCount, 0)
+        XCTAssertEqual(
+            sink.calls.filter { $0 == .addUserMessage("queued retry") }.count,
+            1)
+
+        provider.finishStream()
+        await retryTask?.value
+    }
+
+    func testSendCannotQueueDuplicateBeforeInitialTurnIsAdmitted() async {
+        let provider = MockAgentProvider()
+        let controller = makeController(provider: provider, sink: SpyTranscriptSink())
+
+        controller.send("retained Home draft")
+        XCTAssertTrue(controller.isAwaitingTurnAdmission)
+        XCTAssertFalse(controller.canSend(draft: "retained Home draft"))
+
+        controller.send("retained Home draft")
+        XCTAssertEqual(controller.queuedMessageCount, 0)
+
+        let task = controller.turnTask
+        await provider.waitUntilStreaming()
+        XCTAssertFalse(controller.isAwaitingTurnAdmission)
+        provider.finishStream()
+        await task?.value
+        XCTAssertEqual(provider.requests.count, 1)
+    }
+
+    func testInterruptAndSendQueuedCancelsCurrentTurnThenStartsFollowUp() async {
+        let provider = MockAgentProvider()
+        let sink = SpyTranscriptSink()
+        let controller = makeController(provider: provider, sink: sink)
+
+        controller.send("initial question")
+        let firstTask = controller.turnTask
+        await provider.waitUntilStreaming()
+        provider.emit(.sessionStarted(sessionID: "s1"))
+        await waitUntil { controller.liveSessionID == "s1" }
+        controller.send("please focus on the result")
+
+        controller.interruptAndSendQueued()
+        await firstTask?.value
+        await provider.waitUntilStreaming()
+
+        XCTAssertEqual(provider.cancelCount, 1)
+        XCTAssertTrue(sink.notices.contains { $0.contains("Interrupted") })
+        XCTAssertEqual(provider.requests.count, 2)
+        XCTAssertEqual(provider.lastRequest?.prompt, "please focus on the result")
+        XCTAssertTrue(controller.isResponding)
+
+        let followUpTask = controller.turnTask
+        provider.finishStream()
+        await followUpTask?.value
+    }
+
+    func testNewConversationDiscardsQueuedMessagesFromCancelledTurn() async {
+        let provider = MockAgentProvider()
+        let controller = makeController(provider: provider, sink: SpyTranscriptSink())
+
+        controller.send("initial question")
+        let oldTask = controller.turnTask
+        await provider.waitUntilStreaming()
+        controller.send("do not carry this forward")
+        XCTAssertEqual(controller.queuedMessageCount, 1)
+
+        controller.newConversation()
+        await oldTask?.value
+
+        XCTAssertEqual(controller.queuedMessageCount, 0)
+        XCTAssertFalse(controller.hasQueuedMessages)
+        XCTAssertEqual(provider.requests.count, 1, "reset must not auto-dispatch the discarded queue")
+    }
+
+    func testHistoryResumeCannotDispatchQueueToOutgoingSession() async {
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Rubien-attribution-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+        let provider = MockAgentProvider()
+        let controller = ChatSessionController(
+            provider: provider,
+            transcript: SpyTranscriptSink(),
+            conversationContext: .library,
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"),
+            gate: AssistantTurnGate(),
+            initialAvailability: .installed(version: "test", path: "/fake/claude"),
+            attributionStore: AssistantSessionAttributionStore(fileURL: storeURL))
+
+        controller.send("outgoing turn")
+        let outgoingTask = controller.turnTask
+        await provider.waitUntilStreaming()
+        provider.emit(.sessionStarted(sessionID: "outgoing-session"))
+        await waitUntil { controller.liveSessionID == "outgoing-session" }
+        controller.send("queued for the outgoing session")
+
+        controller.resume(AgentSessionSummary(
+            id: "history-session",
+            preview: "History",
+            date: Date()))
+        XCTAssertTrue(controller.isResuming)
+        provider.finishStream()
+        await outgoingTask?.value
+        await waitUntil { !controller.isResuming }
+
+        XCTAssertEqual(provider.requests.count, 1)
+        XCTAssertEqual(controller.queuedMessageCount, 0, "adopting History discards outgoing queued input")
+        XCTAssertEqual(controller.liveSessionID, "history-session")
+    }
+
     func testNewConversationResetsTranscriptAndSession() async {
         let provider = MockAgentProvider()
         let sink = SpyTranscriptSink()

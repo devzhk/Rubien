@@ -89,6 +89,16 @@ final class ChatSessionController: ObservableObject {
     // MARK: Published UI state
     @Published private(set) var isResponding = false
     @Published private(set) var isResuming = false
+    /// True between accepting a send and the global turn gate admitting it. Queueing
+    /// is enabled only after admission, so a retained Home draft cannot be submitted
+    /// a second time during this short window.
+    @Published private(set) var isAwaitingTurnAdmission = false
+    /// User messages accepted while a turn is running. They stay off the transcript
+    /// until the current response ends, then all messages waiting at that boundary
+    /// are merged into one follow-up turn.
+    var queuedMessageCount: Int { queuedUserMessages.count }
+    var hasQueuedMessages: Bool { !queuedUserMessages.isEmpty }
+    var hasActiveQueuedMessageEdit: Bool { queuedMessageEdit != nil }
     @Published private(set) var turnOutcome = AssistantTurnOutcome(
         generation: 0,
         phase: .idle)
@@ -263,6 +273,42 @@ final class ChatSessionController: ObservableObject {
     /// preventing a later preference change from counting the conversation.
     private var assistantActivityStartConsumed = false
 
+    struct QueuedMessagePreview: Identifiable, Equatable {
+        let id: UUID
+        let text: String
+    }
+
+    private struct QueuedUserMessage {
+        let id: UUID
+        var rawText: String
+        var mentionSelections: [PaperMentionSelection]
+        let stagedSelection: StagedSelection?
+    }
+
+    /// A controller-owned edit transaction keeps the queued item unchanged until
+    /// Save, while mention ranges are reconciled incrementally as the field changes.
+    /// Automatic follow-up dispatch pauses for the lifetime of this transaction.
+    private struct QueuedMessageEdit {
+        let id: UUID
+        var rawText: String
+        var mentionSelections: [PaperMentionSelection]
+    }
+
+    @Published private var queuedUserMessages: [QueuedUserMessage] = []
+    private var queuedMessageEdit: QueuedMessageEdit?
+    /// True only when turn finalization wanted to dispatch the queue but an open
+    /// edit transaction intentionally paused it. Gate refusal is a distinct idle
+    /// state and must still require an explicit Send retry.
+    private var queuedDispatchDeferredByEdit = false
+
+    var queuedMessages: [QueuedMessagePreview] {
+        queuedUserMessages.map {
+            QueuedMessagePreview(
+                id: $0.id,
+                text: $0.rawText.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+    }
+
     private enum AttachmentStagingInput: Sendable {
         case file(URL)
         case imageData(Data, suggestedName: String)
@@ -355,13 +401,18 @@ final class ChatSessionController: ObservableObject {
     }
 
     func canSend(draft: String) -> Bool {
-        canSendWithCurrentAvailability
-            && !isResponding
-            && !isResuming
-            && !isStagingAttachments
-            && !hasAttachmentRehomeFailure
-            && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                || hasReadyAttachments)
+        guard canSendWithCurrentAvailability,
+              !isResuming,
+              !isStagingAttachments,
+              !hasAttachmentRehomeFailure,
+              !hasActiveQueuedMessageEdit
+        else { return false }
+
+        let hasText = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        // Attachments cannot be staged while a turn is live, and an attachment from
+        // the current turn must never be silently reused by a queued follow-up.
+        if isResponding { return !isAwaitingTurnAdmission && hasText }
+        return hasText || hasReadyAttachments || hasQueuedMessages
     }
 
     static func acceptsImageBytes(existing: Int64, adding: Int64) -> Bool {
@@ -521,7 +572,9 @@ final class ChatSessionController: ObservableObject {
         }
     }
 
-    /// Send a user turn. No-ops when neither text nor a ready attachment is present.
+    /// Send a user turn. While the assistant is responding, a text message is queued
+    /// instead; every message waiting when that response ends is merged into the next
+    /// provider turn. No-ops when there is no sendable or already-queued content.
     func send(
         _ rawText: String,
         mentionedReferences: [PaperMentionSelection] = [],
@@ -529,17 +582,62 @@ final class ChatSessionController: ObservableObject {
     ) {
         // Ranges belong to the composer snapshot, before user-facing whitespace
         // normalization. Validate identity first; trimming can shift every token.
-        let mentions = PaperMentions.selectionsStillPresent(
+        let mentionSelections = PaperMentions.selectionsStillPresent(
             in: rawText,
             from: mentionedReferences
-        ).map(\.reference)
+        )
+        let mentions = mentionSelections.map(\.reference)
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard canSend(draft: text) else { return }
+
+        if isResponding {
+            enqueueUserMessage(
+                rawText: rawText,
+                mentionSelections: mentionSelections,
+                stagedSelection: stagedSelection)
+            // Queue admission is durable for this in-memory conversation, so the
+            // composer can clear immediately instead of waiting for the next turn's
+            // gate acquisition. Any staged quote is captured with the queued item.
+            stagedSelection = nil
+            onCommitted?()
+            return
+        }
+
+        // A rare cross-window gate refusal leaves its automatic follow-up queued.
+        // Pressing Send retries it; any newly-entered text joins that same batch.
+        if hasQueuedMessages {
+            if !text.isEmpty {
+                enqueueUserMessage(
+                    rawText: rawText,
+                    mentionSelections: mentionSelections,
+                    stagedSelection: stagedSelection)
+                stagedSelection = nil
+                onCommitted?()
+            }
+            startQueuedTurnIfNeeded()
+            return
+        }
+
+        startTurn(
+            visibleText: composeUserMessage(text),
+            mentionedReferences: mentions,
+            consumeStagedSelectionOnAdmission: true,
+            onCommitted: onCommitted)
+    }
+
+    private func startTurn(
+        visibleText visible: String,
+        mentionedReferences mentions: [ChatReference],
+        consumeStagedSelectionOnAdmission: Bool,
+        queuedBatchCount: Int = 0,
+        onCommitted: (() -> Void)? = nil
+    ) {
 
         generation += 1
         let gen = generation
         cancelledTurnGeneration = nil
         isResponding = true
+        isAwaitingTurnAdmission = true
         turnOutcome = AssistantTurnOutcome(generation: gen, phase: .responding)
         statusText = "Responding…"
         busyElsewhere = false
@@ -548,7 +646,6 @@ final class ChatSessionController: ObservableObject {
         // fresh conversation (unkeyed, always admitted).
         let resumeID = liveSessionID
         let attachments = pendingAttachments
-        let visible = composeUserMessage(text)
         let providerPrompt = AssistantAttachmentManifest.providerPrompt(
             visibleText: visible,
             attachments: attachments,
@@ -589,6 +686,11 @@ final class ChatSessionController: ObservableObject {
                 await self.gate.release(provider: kind, sessionID: resumeID)
                 return
             }
+            self.isAwaitingTurnAdmission = false
+            if queuedBatchCount > 0 {
+                let consumed = min(queuedBatchCount, self.queuedUserMessages.count)
+                self.queuedUserMessages.removeFirst(consumed)
+            }
             self.hasMessages = true
             self.pendingPaperPresentations.removeAll()
             self.seenPaperPresentationCallIDs.removeAll()
@@ -601,7 +703,9 @@ final class ChatSessionController: ObservableObject {
             self.renderUserMessage(payload)
             self.pendingAttachments.removeAll()
             self.attachmentIssues.removeAll()
-            self.stagedSelection = nil
+            if consumeStagedSelectionOnAdmission {
+                self.stagedSelection = nil
+            }
             // The UI may keep a fresh Home draft until this exact point so a
             // gate-refused attempt remains retryable. Notify only after admission
             // and the user row are committed — never merely when `send` is called.
@@ -628,6 +732,128 @@ final class ChatSessionController: ObservableObject {
             await self.gate.release(provider: kind, sessionID: resumeID)
             self.finalize(gen: gen, terminalPhase: terminalPhase)
         }
+    }
+
+    private func enqueueUserMessage(
+        rawText: String,
+        mentionSelections: [PaperMentionSelection],
+        stagedSelection: StagedSelection?
+    ) {
+        queuedUserMessages.append(QueuedUserMessage(
+            id: UUID(),
+            rawText: rawText,
+            mentionSelections: mentionSelections,
+            stagedSelection: stagedSelection))
+    }
+
+    /// Start an edit transaction and return the exact untrimmed composer text. The
+    /// queued item remains authoritative until the transaction is committed.
+    func beginQueuedMessageEdit(id: UUID) -> String? {
+        guard !isAwaitingTurnAdmission,
+              queuedMessageEdit == nil,
+              let message = queuedUserMessages.first(where: { $0.id == id })
+        else { return nil }
+
+        queuedMessageEdit = QueuedMessageEdit(
+            id: id,
+            rawText: message.rawText,
+            mentionSelections: message.mentionSelections)
+        return message.rawText
+    }
+
+    /// Reconcile one editor snapshot into the active transaction. Calling this for
+    /// every field change preserves mention identities across edits on both sides of
+    /// a token; edits through the token still remove that structured identity.
+    @discardableResult
+    func updateQueuedMessageEdit(id: UUID, text rawText: String) -> Bool {
+        guard !isAwaitingTurnAdmission,
+              var edit = queuedMessageEdit,
+              edit.id == id
+        else { return false }
+
+        edit.mentionSelections = PaperMentions.reconciling(
+            edit.mentionSelections,
+            from: edit.rawText,
+            to: rawText)
+        edit.rawText = rawText
+        queuedMessageEdit = edit
+        return true
+    }
+
+    @discardableResult
+    func commitQueuedMessageEdit(id: UUID) -> Bool {
+        guard !isAwaitingTurnAdmission,
+              let edit = queuedMessageEdit,
+              edit.id == id,
+              let index = queuedUserMessages.firstIndex(where: { $0.id == id })
+        else { return false }
+
+        let text = edit.rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return false }
+        var message = queuedUserMessages[index]
+        let mentions = PaperMentions.selectionsStillPresent(
+            in: edit.rawText,
+            from: edit.mentionSelections)
+        message.rawText = edit.rawText
+        message.mentionSelections = mentions
+        queuedUserMessages[index] = message
+        let shouldResumeDeferredDispatch = queuedDispatchDeferredByEdit
+        queuedMessageEdit = nil
+        if shouldResumeDeferredDispatch { startQueuedTurnIfNeeded() }
+        return true
+    }
+
+    func cancelQueuedMessageEdit(id: UUID) {
+        guard queuedMessageEdit?.id == id else { return }
+        let shouldResumeDeferredDispatch = queuedDispatchDeferredByEdit
+        queuedMessageEdit = nil
+        if shouldResumeDeferredDispatch { startQueuedTurnIfNeeded() }
+    }
+
+    func removeQueuedMessage(id: UUID) {
+        guard !isAwaitingTurnAdmission else { return }
+        let endedEdit = queuedMessageEdit?.id == id
+        if endedEdit { queuedMessageEdit = nil }
+        queuedUserMessages.removeAll { $0.id == id }
+        if queuedUserMessages.isEmpty {
+            queuedDispatchDeferredByEdit = false
+        } else if endedEdit, queuedDispatchDeferredByEdit {
+            startQueuedTurnIfNeeded()
+        }
+    }
+
+    /// Snapshot the messages waiting at this response boundary. They remain in the
+    /// queue until the global resume gate admits the turn, so a cross-window refusal
+    /// is retryable instead of dropping user input. New sends are intentionally
+    /// disabled during the tiny admission window; once admitted, later messages
+    /// queue for the following round. An open edit transaction also pauses dispatch.
+    private func startQueuedTurnIfNeeded() {
+        guard !isResponding,
+              !isResuming,
+              !queuedUserMessages.isEmpty
+        else { return }
+        guard queuedMessageEdit == nil else {
+            queuedDispatchDeferredByEdit = true
+            return
+        }
+        queuedDispatchDeferredByEdit = false
+        let batch = queuedUserMessages
+        startTurn(
+            visibleText: batch.map {
+                composeUserMessage(
+                    $0.rawText.trimmingCharacters(in: .whitespacesAndNewlines),
+                    stagedSelection: $0.stagedSelection)
+            }.joined(separator: "\n\n"),
+            // The manifest boundary owns validation, de-duplication, and the
+            // per-turn cap for both immediate and merged sends.
+            mentionedReferences: batch.flatMap {
+                PaperMentions.selectionsStillPresent(
+                    in: $0.rawText,
+                    from: $0.mentionSelections
+                ).map(\.reference)
+            },
+            consumeStagedSelectionOnAdmission: false,
+            queuedBatchCount: batch.count)
     }
 
     /// Searches the user's library for the composer's `@paper` popover. The
@@ -661,6 +887,19 @@ final class ChatSessionController: ObservableObject {
         renderNotice("_Interrupted._")
     }
 
+    /// Escape-key action for a live turn with queued input. The normal finalization
+    /// path releases the current turn's gate and immediately starts the queued batch.
+    @discardableResult
+    func interruptAndSendQueued() -> Bool {
+        guard isResponding,
+              !isAwaitingTurnAdmission,
+              !hasActiveQueuedMessageEdit,
+              hasQueuedMessages
+        else { return false }
+        stop()
+        return true
+    }
+
     /// Window teardown (reader closing): kill any in-flight turn's process group
     /// without touching the (about-to-vanish) transcript. The running turn task
     /// holds `self` strongly until its stream ends, so this must be called
@@ -683,6 +922,10 @@ final class ChatSessionController: ObservableObject {
         attachmentIssues.removeAll()
         isRehomingAttachments = false
         hasAttachmentRehomeFailure = false
+        queuedUserMessages.removeAll()
+        queuedMessageEdit = nil
+        queuedDispatchDeferredByEdit = false
+        isAwaitingTurnAdmission = false
         Task { await attachmentStore.removePending(capturedAttachments) }
     }
 
@@ -733,9 +976,13 @@ final class ChatSessionController: ObservableObject {
         renderSeq = 0
         isResponding = false
         isResuming = false
+        isAwaitingTurnAdmission = false
         statusText = nil
         busyElsewhere = false
         pendingApprovals.removeAll()
+        queuedUserMessages.removeAll()
+        queuedMessageEdit = nil
+        queuedDispatchDeferredByEdit = false
         stagedSelection = nil
         resolvedModel = nil
         pendingPaperPresentations.removeAll()
@@ -1381,10 +1628,12 @@ final class ChatSessionController: ObservableObject {
         turnOutcome = AssistantTurnOutcome(generation: gen, phase: phase)
         cancelledTurnGeneration = nil
         isResponding = false
+        isAwaitingTurnAdmission = false
         statusText = nil
         pendingApprovals.removeAll()
         toolDetails.removeAll()
         turnTask = nil
+        startQueuedTurnIfNeeded()
     }
 
     /// A turn refused by the gate (busy in another window): surface it and re-enable the
@@ -1395,6 +1644,7 @@ final class ChatSessionController: ObservableObject {
         renderNotice("This conversation is busy in another window. Try again in a moment.")
         turnOutcome = AssistantTurnOutcome(generation: gen, phase: .idle)
         isResponding = false
+        isAwaitingTurnAdmission = false
         statusText = nil
         turnTask = nil
     }
@@ -1448,7 +1698,14 @@ final class ChatSessionController: ObservableObject {
     /// and the agent see the quoted passage above the question, with its page
     /// number when the passage came from a PDF (§5.4).
     private func composeUserMessage(_ text: String) -> String {
-        guard let staged = stagedSelection else { return text }
+        composeUserMessage(text, stagedSelection: stagedSelection)
+    }
+
+    private func composeUserMessage(
+        _ text: String,
+        stagedSelection staged: StagedSelection?
+    ) -> String {
+        guard let staged else { return text }
         let selection = staged.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !selection.isEmpty else { return text }
         var quoted = selection

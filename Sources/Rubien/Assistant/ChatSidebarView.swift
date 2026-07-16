@@ -96,6 +96,9 @@ struct ChatSurfaceConfiguration {
 }
 
 struct ChatSurfaceView: View {
+    private static let homeContentMaxWidth: CGFloat = 700
+    private static let queuedMessageRowHeight: CGFloat = 54
+
     @ObservedObject var session: ChatSessionController
     let renderer: ChatTranscriptController
     @Binding var draft: String
@@ -135,6 +138,8 @@ struct ChatSurfaceView: View {
     /// admits the turn. This snapshot lets the commit observer clear only the exact
     /// draft that was submitted; a refused turn therefore remains fully retryable.
     @State private var pendingFreshHomeDraft: String?
+    @State private var editingQueuedMessageID: UUID?
+    @State private var queuedMessageEditDraft = ""
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
@@ -189,7 +194,25 @@ struct ChatSurfaceView: View {
             scheduleMentionRefresh()
         }
         .onChange(of: draftSelection) { _, _ in scheduleMentionRefresh() }
+        .onChange(of: session.queuedMessages) { _, messages in
+            guard let editingQueuedMessageID,
+                  !messages.contains(where: { $0.id == editingQueuedMessageID })
+            else { return }
+            cancelQueuedMessageEdit()
+        }
+        .onExitCommand {
+            if editingQueuedMessageID != nil {
+                cancelQueuedMessageEdit()
+                return
+            }
+            // The composer consumes Escape first when its mention popover is open.
+            // Otherwise make interrupt-and-send work from the transcript and other
+            // controls too, not only while the text editor owns focus.
+            guard activeMentionQuery == nil else { return }
+            _ = interruptAndSendQueuedIfPossible()
+        }
         .onDisappear {
+            cancelQueuedMessageEdit()
             mentionSearchTask?.cancel()
             mentionRefreshTask?.cancel()
         }
@@ -410,7 +433,7 @@ struct ChatSurfaceView: View {
     /// layouts; sending changes only its vertical position.
     private var homeComposer: some View {
         composer
-            .frame(maxWidth: 700)
+            .frame(maxWidth: Self.homeContentMaxWidth)
             .frame(maxWidth: .infinity, alignment: .center)
     }
 
@@ -440,7 +463,7 @@ struct ChatSurfaceView: View {
                         // Match the composer width. PlainQuickStartText's 25-point
                         // leading inset then lands on the editor caret origin:
                         // composer padding 10 + box padding 10 + text inset 5.
-                        .frame(maxWidth: 700)
+                        .frame(maxWidth: Self.homeContentMaxWidth)
                     }
                     homeComposer
                 }
@@ -650,6 +673,9 @@ struct ChatSurfaceView: View {
         )
         .padding(.horizontal, 10)
         .padding(.top, 8)
+        .frame(maxWidth: configuration.isHome ? Self.homeContentMaxWidth : .infinity)
+        .frame(maxWidth: .infinity, alignment: .center)
+        .padding(.horizontal, configuration.isHome ? 24 : 0)
     }
 
     private func selectionChip(_ selection: ChatSessionController.StagedSelection) -> some View {
@@ -698,6 +724,9 @@ struct ChatSurfaceView: View {
 
     private var composer: some View {
         VStack(spacing: 4) {
+            if session.hasQueuedMessages {
+                queuedMessageTray
+            }
             composerBox
             statusLine
         }
@@ -706,6 +735,146 @@ struct ChatSurfaceView: View {
         // Size from the SwiftUI text sizer in `composerEditor` in both placements
         // so the reader composer stays as compact as Agent Home.
         .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var queuedMessageTray: some View {
+        let messages = session.queuedMessages
+        let visibleRows = min(messages.count, 3)
+        let viewportHeight = CGFloat(visibleRows) * Self.queuedMessageRowHeight
+            + CGFloat(max(0, visibleRows - 1)) * 5
+        return ScrollView(.vertical) {
+            LazyVStack(spacing: 5) {
+                ForEach(messages) { message in
+                    queuedMessageRow(message)
+                }
+            }
+        }
+        .scrollIndicators(.automatic)
+        .frame(height: viewportHeight)
+        .accessibilityLabel("Queued messages")
+    }
+
+    @ViewBuilder
+    private func queuedMessageRow(
+        _ message: ChatSessionController.QueuedMessagePreview
+    ) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.turn.down.right")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+
+            if editingQueuedMessageID == message.id {
+                TextField("Edit queued message", text: $queuedMessageEditDraft, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                    .lineLimit(1...2)
+                    .onChange(of: queuedMessageEditDraft) { _, text in
+                        guard editingQueuedMessageID == message.id else { return }
+                        _ = session.updateQueuedMessageEdit(id: message.id, text: text)
+                    }
+
+                Button(action: saveQueuedMessageEdit) {
+                    Image(systemName: "checkmark")
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(HeaderControlButtonStyle())
+                .disabled(queuedMessageEditDraft.trimmingCharacters(
+                    in: .whitespacesAndNewlines).isEmpty
+                    || session.isAwaitingTurnAdmission)
+                .help("Save queued message")
+
+                Button(action: cancelQueuedMessageEdit) {
+                    Image(systemName: "xmark")
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(HeaderControlButtonStyle())
+                .help("Cancel editing")
+            } else {
+                Text(message.text)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+
+                if session.isResponding {
+                    Button {
+                        session.interruptAndSendQueued()
+                    } label: {
+                        Label("Steer", systemImage: "arrow.turn.down.right")
+                            .font(.system(size: 11.5, weight: .regular))
+                            .foregroundStyle(.secondary)
+                            .frame(height: 24)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(HeaderControlButtonStyle())
+                    .disabled(session.isAwaitingTurnAdmission
+                        || editingQueuedMessageID != nil)
+                    .help("Interrupt the response and send all queued messages")
+                }
+
+                Button {
+                    guard let rawText = session.beginQueuedMessageEdit(id: message.id)
+                    else { return }
+                    editingQueuedMessageID = message.id
+                    queuedMessageEditDraft = rawText
+                } label: {
+                    Label("Edit", systemImage: "pencil")
+                        .font(.system(size: 11.5, weight: .regular))
+                        .foregroundStyle(.secondary)
+                        .frame(height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(HeaderControlButtonStyle())
+                .disabled(session.isAwaitingTurnAdmission
+                    || editingQueuedMessageID != nil)
+                .help("Edit queued message")
+
+                Button {
+                    session.removeQueuedMessage(id: message.id)
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                        .font(.system(size: 11.5, weight: .regular))
+                        .foregroundStyle(.secondary)
+                        .frame(height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(HeaderControlButtonStyle())
+                .disabled(session.isAwaitingTurnAdmission)
+                .help("Delete queued message")
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: Self.queuedMessageRowHeight)
+        .background(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(Color(nsColor: .textBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .stroke(Color.primary.opacity(0.10), lineWidth: 0.8)
+        )
+    }
+
+    private func saveQueuedMessageEdit() {
+        guard let id = editingQueuedMessageID,
+              session.updateQueuedMessageEdit(id: id, text: queuedMessageEditDraft),
+              session.commitQueuedMessageEdit(id: id)
+        else { return }
+        editingQueuedMessageID = nil
+        queuedMessageEditDraft = ""
+    }
+
+    private func cancelQueuedMessageEdit() {
+        if let id = editingQueuedMessageID {
+            session.cancelQueuedMessageEdit(id: id)
+        }
+        editingQueuedMessageID = nil
+        queuedMessageEditDraft = ""
     }
 
     /// The message box, Claude-chat style: the editor on top, then a bottom control
@@ -1226,43 +1395,70 @@ struct ChatSurfaceView: View {
         .padding(.vertical, 2)
     }
 
-    /// The send/stop control: an accent rounded-corner square (Claude-style squircle)
-    /// with a white glyph.
+    /// Compact interrupt + send controls. During a response the arrow remains active
+    /// so messages can queue; Stop ends the response and the queued batch starts next.
     private static let sendButtonShape = RoundedRectangle(cornerRadius: 8, style: .continuous)
 
-    @ViewBuilder private var composerButton: some View {
-        if session.isResponding {
-            Button {
-                session.stop()
-            } label: {
-                Image(systemName: "stop.fill")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 27, height: 27)
-                    .background(Self.sendButtonShape.fill(Color.accentColor))
-                    .contentShape(Self.sendButtonShape)
+    private var composerButton: some View {
+        HStack(spacing: 5) {
+            if session.isResponding {
+                Button {
+                    session.stop()
+                } label: {
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Color.primary.opacity(0.72))
+                        .frame(width: 27, height: 27)
+                        .background(Self.sendButtonShape.fill(Color.primary.opacity(0.07)))
+                        .contentShape(Self.sendButtonShape)
+                }
+                .buttonStyle(.plain)
+                .disabled(session.isAwaitingTurnAdmission)
+                .help(session.hasActiveQueuedMessageEdit
+                    ? "Stop response; finish editing to send queued messages"
+                    : session.hasQueuedMessages
+                        ? "Interrupt and send queued messages (Esc)"
+                        : "Stop response")
             }
-            .buttonStyle(.plain)
-            .help("Stop")
-        } else {
-            let canSend = session.canSend(draft: draft)
-            Button {
-                sendDraft()
-            } label: {
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 27, height: 27)
-                    .background(Self.sendButtonShape.fill(canSend ? Color.accentColor : Color.accentColor.opacity(0.5)))
-                    .contentShape(Self.sendButtonShape)
-            }
-            .buttonStyle(.plain)
-            // No .keyboardShortcut here — ComposerNSTextView.performKeyEquivalent
-            // owns ⌘↩ (a key equivalent on the button is the loose-matching pass
-            // that made ⇧↩ send by accident).
-            .disabled(!canSend)
-            .help(canSend ? "Send (⌘↩)" : "Enter a message or add an attachment")
+
+            sendButton
         }
+    }
+
+    private var sendButton: some View {
+        let canSend = session.canSend(draft: draft)
+        return Button {
+            sendDraft()
+        } label: {
+            Image(systemName: "arrow.up")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 27, height: 27)
+                .background(Self.sendButtonShape.fill(
+                    canSend ? Color.accentColor : Color.accentColor.opacity(0.5)))
+                .contentShape(Self.sendButtonShape)
+        }
+        .buttonStyle(.plain)
+        // No .keyboardShortcut here — ComposerNSTextView.performKeyEquivalent
+        // owns ⌘↩ (a key equivalent on the button is the loose-matching pass
+        // that made ⇧↩ send by accident).
+        .disabled(!canSend)
+        .help(sendButtonHelp(canSend: canSend))
+    }
+
+    private func sendButtonHelp(canSend: Bool) -> String {
+        if session.hasActiveQueuedMessageEdit {
+            return "Save or cancel the queued edit"
+        }
+        guard canSend else { return "Enter a message or add an attachment" }
+        if session.isResponding {
+            return "Queue message (⌘↩)"
+        }
+        if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           session.hasQueuedMessages {
+            return "Send queued messages"
+        }
+        return "Send (⌘↩)"
     }
 
     @ViewBuilder private var statusLine: some View {
@@ -1270,6 +1466,18 @@ struct ChatSurfaceView: View {
             statusText("Loading conversation…", systemImage: "clock.arrow.circlepath")
         } else if session.busyElsewhere {
             statusText("Busy in another window", systemImage: "exclamationmark.triangle")
+        } else if session.isResponding, session.queuedMessageCount > 0 {
+            statusText(
+                "Responding… · \(session.queuedMessageCount) \(session.queuedMessageCount == 1 ? "message" : "messages") queued",
+                systemImage: "text.badge.plus")
+        } else if session.hasActiveQueuedMessageEdit {
+            statusText(
+                "Finish editing to send queued messages",
+                systemImage: "pencil")
+        } else if session.queuedMessageCount > 0 {
+            statusText(
+                "\(session.queuedMessageCount) \(session.queuedMessageCount == 1 ? "message" : "messages") queued — press Send to retry",
+                systemImage: "text.badge.plus")
         } else if let status = session.statusText {
             statusText(status, systemImage: "ellipsis")
         }
@@ -1505,10 +1713,17 @@ struct ChatSurfaceView: View {
             guard activeMentionQuery != nil, !mentionResults.isEmpty else { return false }
             moveMentionSelection(by: -1)
         case .escape:
-            guard activeMentionQuery != nil else { return false }
-            dismissMentionPopover()
+            if activeMentionQuery != nil {
+                dismissMentionPopover()
+            } else {
+                return interruptAndSendQueuedIfPossible()
+            }
         }
         return true
+    }
+
+    private func interruptAndSendQueuedIfPossible() -> Bool {
+        session.interruptAndSendQueued()
     }
 
     private func moveMentionSelection(by delta: Int) {
