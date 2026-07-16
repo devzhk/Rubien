@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { defaultViews, emptyReference } from "../lib/model";
 import { LibraryState } from "../lib/types";
-import { applyView, materializeReferences } from "../lib/viewEngine";
+import { applyView, groupItems, materializeReferences } from "../lib/viewEngine";
 
 describe("view engine", () => {
   it("filters, searches, and sorts local references", () => {
@@ -179,5 +179,74 @@ describe("view engine", () => {
 
     const visible = applyView(materializeReferences(state), view, "cross-platform");
     expect(visible.map((item) => item.reference.id)).toEqual(["r1"]);
+  });
+
+  it("matches isAnyOf against an individual tag on a multi-tagged reference", () => {
+    const [view] = defaultViews();
+    const state: LibraryState = {
+      references: [
+        emptyReference({ id: "r1", title: "Multi-tagged" }),
+        emptyReference({ id: "r2", title: "Other tag" })
+      ],
+      tags: [
+        { id: "t1", name: "urgent", color: "#007AFF", dateModified: "2026-01-01T00:00:00.000Z" },
+        { id: "t2", name: "todo", color: "#34C759", dateModified: "2026-01-01T00:00:00.000Z" },
+        { id: "t3", name: "later", color: "#FF9500", dateModified: "2026-01-01T00:00:00.000Z" }
+      ],
+      referenceTags: [
+        { id: "rt1", referenceId: "r1", tagId: "t1" },
+        { id: "rt2", referenceId: "r1", tagId: "t2" },
+        { id: "rt3", referenceId: "r2", tagId: "t3" }
+      ],
+      properties: [],
+      propertyValues: [],
+      views: [],
+      annotations: [],
+      files: [],
+      pdfTextPages: []
+    };
+
+    const filtered = applyView(materializeReferences(state), {
+      ...view,
+      filters: [
+        {
+          target: { kind: "builtin", value: "tags" },
+          op: "isAnyOf",
+          value: { kind: "selectKeys", value: ["urgent"] }
+        }
+      ]
+    }, "");
+
+    // "urgent, todo" must satisfy isAnyOf:["urgent"] even though the joined
+    // display string never equals a single option.
+    expect(filtered.map((item) => item.reference.id)).toEqual(["r1"]);
+  });
+
+  it("groups references by a builtin field", () => {
+    const [view] = defaultViews();
+    const state: LibraryState = {
+      references: [
+        emptyReference({ id: "r1", title: "A", referenceType: "Book" }),
+        emptyReference({ id: "r2", title: "B", referenceType: "Journal Article" }),
+        emptyReference({ id: "r3", title: "C", referenceType: "Book" })
+      ],
+      tags: [],
+      referenceTags: [],
+      properties: [],
+      propertyValues: [],
+      views: [],
+      annotations: [],
+      files: [],
+      pdfTextPages: []
+    };
+
+    const grouped = groupItems(materializeReferences(state), {
+      ...view,
+      groupBy: { target: { kind: "builtin", value: "referenceType" }, collapsed: [], showEmpty: false }
+    });
+
+    const byLabel = Object.fromEntries(grouped.map((group) => [group.label, group.items.map((item) => item.reference.id)]));
+    expect(byLabel.Book).toEqual(["r1", "r3"]);
+    expect(byLabel["Journal Article"]).toEqual(["r2"]);
   });
 });

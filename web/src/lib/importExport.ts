@@ -1,5 +1,6 @@
 import { emptyReference, id, nowISO, parseAuthors, stripBibTeXBraces } from "./model";
-import { LibrarySnapshot, ReferenceRecord, ReferenceType } from "./types";
+import { ReferenceRecord, ReferenceType, SerializedLibrarySnapshot } from "./types";
+import { safeExternalURL } from "./url";
 import { extractReadableHTML } from "./webExtract";
 
 const bibtexTypeMap: Record<string, ReferenceType> = {
@@ -15,10 +16,10 @@ const bibtexTypeMap: Record<string, ReferenceType> = {
   misc: "Other"
 };
 
-export function parseImportFile(name: string, text: string): ReferenceRecord[] | LibrarySnapshot {
+export function parseImportFile(name: string, text: string): ReferenceRecord[] | SerializedLibrarySnapshot {
   const lower = name.toLowerCase();
   if (lower.endsWith(".json")) {
-    return JSON.parse(text) as LibrarySnapshot;
+    return JSON.parse(text) as SerializedLibrarySnapshot;
   }
   if (lower.endsWith(".md") || lower.endsWith(".markdown")) return [parseMarkdownDocument(name, text)];
   if (lower.endsWith(".html") || lower.endsWith(".htm")) return [parseHTMLDocument(name, text)];
@@ -79,7 +80,7 @@ export function parseBibTeX(source: string): ReferenceRecord[] {
       issue: fields.number,
       pages: fields.pages,
       doi: cleanDOI(fields.doi),
-      url: fields.url,
+      url: safeExternalURL(fields.url),
       abstract: fields.abstract,
       dateAdded: date,
       dateModified: date,
@@ -104,7 +105,7 @@ export function parseRIS(source: string): ReferenceRecord[] {
     const match = /^([A-Z0-9]{2})\s+-\s?(.*)$/.exec(line);
     if (!match) continue;
     const [, key, value] = match;
-    if (key === "TY") current = { TY: [value] };
+    if (key === "TY") current = { TY: [value.trim()] };
     else if (key === "ER") {
       records.push(current);
       current = {};
@@ -112,11 +113,19 @@ export function parseRIS(source: string): ReferenceRecord[] {
       current[key] = [...(current[key] ?? []), value.trim()];
     }
   }
+  // Push a trailing record that lacks a closing `ER` tag (truncated file, or
+  // an exporter that omits the final `ER`) — otherwise it is silently dropped.
+  if (Object.keys(current).length > 0) records.push(current);
   return records.map((fields) => {
     const date = nowISO();
     const title = first(fields.TI) ?? first(fields.T1) ?? first(fields.CT) ?? "Untitled";
     const issued = first(fields.PY) ?? first(fields.Y1) ?? first(fields.DA);
     const type = first(fields.TY)?.toUpperCase();
+    // RIS `SN` carries an ISSN for serials and an ISBN otherwise. Route it to
+    // the matching field so a round-trip (export writes ISSN into SN) restores
+    // it correctly instead of turning every journal's ISSN into an ISBN.
+    const serialNumber = first(fields.SN);
+    const isJournal = risType(type) === "Journal Article";
     return emptyReference({
       id: id("ref"),
       title,
@@ -127,7 +136,7 @@ export function parseRIS(source: string): ReferenceRecord[] {
       issue: first(fields.IS),
       pages: [first(fields.SP), first(fields.EP)].filter(Boolean).join("-") || first(fields.PG),
       doi: cleanDOI(first(fields.DO)),
-      url: first(fields.UR),
+      url: safeExternalURL(first(fields.UR)),
       abstract: first(fields.AB) ?? first(fields.N2),
       dateAdded: date,
       dateModified: date,
@@ -136,7 +145,8 @@ export function parseRIS(source: string): ReferenceRecord[] {
       metadataSource: "ris",
       verificationStatus: "legacy",
       publisher: first(fields.PB),
-      isbn: first(fields.SN),
+      isbn: isJournal ? undefined : serialNumber,
+      issn: isJournal ? serialNumber : undefined,
       issuedMonth: monthFromRIS(issued),
       language: first(fields.LA)
     });
@@ -199,7 +209,7 @@ export function exportRIS(references: ReferenceRecord[]): string {
     .join("\n\n");
 }
 
-export function snapshotJSON(snapshot: LibrarySnapshot): string {
+export function snapshotJSON(snapshot: SerializedLibrarySnapshot): string {
   return JSON.stringify({ ...snapshot, exportedAt: nowISO(), format: "rubien-web-v1" }, null, 2);
 }
 
@@ -404,7 +414,10 @@ function uniqueKey(ref: ReferenceRecord, used: Set<string>): string {
 }
 
 function escapeBibTeX(value: string): string {
-  return value.replace(/[{}]/g, "");
+  // Strip our own brace grouping, then backslash-escape the LaTeX specials so
+  // the exported .bib compiles in real BibTeX. `stripBibTeXBraces` unescapes
+  // `\x` back to `x` on re-import, so this round-trips within Rubien too.
+  return value.replace(/[{}]/g, "").replace(/([&%#_$])/g, "\\$1");
 }
 
 function push(lines: string[], key: string, value?: string): void {

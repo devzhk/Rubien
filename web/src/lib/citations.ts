@@ -4,11 +4,11 @@ function last(author?: AuthorName): string {
   return author?.family || author?.given || "Unknown";
 }
 
-function initials(given: string): string {
-  return given
+function initials(given: string | undefined): string {
+  return (given ?? "")
     .split(/\s+/)
     .filter(Boolean)
-    .map((part) => `${part[0].toUpperCase()}.`)
+    .map((part) => `${part[0]!.toUpperCase()}.`)
     .join(" ");
 }
 

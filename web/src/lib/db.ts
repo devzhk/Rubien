@@ -2,13 +2,13 @@ import Dexie, { Table } from "dexie";
 import {
   AnnotationRecord,
   DatabaseViewRecord,
-  LibrarySnapshot,
   LibraryState,
   PDFTextPageRecord,
   PropertyDefinitionRecord,
   PropertyValueRecord,
   ReferenceRecord,
   ReferenceTagRecord,
+  SerializedLibrarySnapshot,
   StoredFileRecord,
   TagRecord
 } from "./types";
@@ -102,14 +102,13 @@ export async function addReferences(references: ReferenceRecord[]): Promise<void
 }
 
 export async function deleteReference(referenceId: string): Promise<void> {
-  const files = await db.files.where("referenceId").equals(referenceId).toArray();
   await db.transaction("rw", [db.references, db.referenceTags, db.propertyValues, db.annotations, db.files, db.pdfTextPages], async () => {
     await db.references.delete(referenceId);
     await db.referenceTags.where("referenceId").equals(referenceId).delete();
     await db.propertyValues.where("referenceId").equals(referenceId).delete();
     await db.annotations.where("referenceId").equals(referenceId).delete();
     await db.pdfTextPages.where("referenceId").equals(referenceId).delete();
-    await Promise.all(files.map((file) => db.files.delete(file.id)));
+    await db.files.where("referenceId").equals(referenceId).delete();
   });
 }
 
@@ -179,7 +178,6 @@ export async function deleteAnnotation(annotationId: string): Promise<void> {
 }
 
 export async function attachPDF(referenceId: string, file: File): Promise<StoredFileRecord> {
-  const existing = await db.files.where("referenceId").equals(referenceId).toArray();
   const stored: StoredFileRecord = {
     id: id("file"),
     referenceId,
@@ -190,7 +188,7 @@ export async function attachPDF(referenceId: string, file: File): Promise<Stored
     createdAt: nowISO()
   };
   await db.transaction("rw", db.references, db.files, db.pdfTextPages, async () => {
-    await Promise.all(existing.map((item) => db.files.delete(item.id)));
+    await db.files.where("referenceId").equals(referenceId).delete();
     await db.pdfTextPages.where("referenceId").equals(referenceId).delete();
     await db.files.put(stored);
     const reference = await db.references.get(referenceId);
@@ -234,13 +232,25 @@ export async function markReferenceRead(reference: ReferenceRecord): Promise<voi
   await db.references.put({
     ...reference,
     lastReadAt: nowISO(),
-    readCount: reference.readCount + 1,
+    // Imported/foreign records may lack readCount; guard against NaN.
+    readCount: (reference.readCount ?? 0) + 1,
     dateModified: nowISO()
   });
 }
 
-export async function exportSnapshot(): Promise<LibrarySnapshot> {
+export async function exportSnapshot(): Promise<SerializedLibrarySnapshot> {
   const state = await loadLibraryState();
+  const files = await Promise.all(
+    state.files.map(async (file) => ({
+      id: file.id,
+      referenceId: file.referenceId,
+      name: file.name,
+      type: file.type,
+      size: file.size,
+      dataBase64: await blobToBase64(file.blob),
+      createdAt: file.createdAt
+    }))
+  );
   return {
     references: state.references,
     tags: state.tags,
@@ -248,14 +258,25 @@ export async function exportSnapshot(): Promise<LibrarySnapshot> {
     properties: state.properties,
     propertyValues: state.propertyValues,
     views: state.views,
-    annotations: state.annotations
+    annotations: state.annotations,
+    files,
+    pdfTextPages: state.pdfTextPages
   };
 }
 
-export async function importSnapshot(snapshot: LibrarySnapshot): Promise<void> {
+export async function importSnapshot(snapshot: SerializedLibrarySnapshot): Promise<void> {
+  const files: StoredFileRecord[] = (snapshot.files ?? []).map((file) => ({
+    id: file.id,
+    referenceId: file.referenceId,
+    name: file.name,
+    type: file.type,
+    size: file.size,
+    blob: base64ToBlob(file.dataBase64, file.type),
+    createdAt: file.createdAt
+  }));
   await db.transaction(
     "rw",
-    [db.references, db.tags, db.referenceTags, db.properties, db.propertyValues, db.views, db.annotations],
+    [db.references, db.tags, db.referenceTags, db.properties, db.propertyValues, db.views, db.annotations, db.files, db.pdfTextPages],
     async () => {
       await db.references.bulkPut(snapshot.references ?? []);
       await db.tags.bulkPut(snapshot.tags ?? []);
@@ -264,6 +285,25 @@ export async function importSnapshot(snapshot: LibrarySnapshot): Promise<void> {
       await db.propertyValues.bulkPut(snapshot.propertyValues ?? []);
       await db.views.bulkPut(snapshot.views ?? []);
       await db.annotations.bulkPut(snapshot.annotations ?? []);
+      if (files.length) await db.files.bulkPut(files);
+      if (snapshot.pdfTextPages?.length) await db.pdfTextPages.bulkPut(snapshot.pdfTextPages);
     }
   );
+}
+
+export async function blobToBase64(blob: Blob): Promise<string> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+export function base64ToBlob(data: string, type: string): Blob {
+  const binary = atob(data);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type });
 }

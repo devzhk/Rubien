@@ -1,4 +1,4 @@
-import { emptyReference, id, nowISO, parseAuthors } from "./model";
+import { emptyReference, id, parseAuthors } from "./model";
 import { AuthorName, ReferenceRecord } from "./types";
 
 export async function resolveLocator(input: string): Promise<ReferenceRecord> {

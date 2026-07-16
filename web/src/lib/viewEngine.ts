@@ -169,10 +169,17 @@ function evaluateFilter(item: MaterializedReference, filter: ViewFilter): boolea
     case "lessThan":
     case "lessOrEqual":
       return compareNumerically(raw, filter.value, filter.op);
-    case "isAnyOf":
-      return filterValues.map(normalize).includes(normalized);
-    case "isNoneOf":
-      return !filterValues.map(normalize).includes(normalized);
+    case "isAnyOf": {
+      // Multi-value fields (tags) expose an array; `normalized` collapses them
+      // to "a, b" which never equals a single option. Match per-value so a
+      // reference tagged "urgent, todo" satisfies isAnyOf:["urgent"].
+      const wanted = filterValues.map(normalize);
+      return valueList(raw).map(normalize).some((entry) => wanted.includes(entry));
+    }
+    case "isNoneOf": {
+      const wanted = filterValues.map(normalize);
+      return !valueList(raw).map(normalize).some((entry) => wanted.includes(entry));
+    }
     case "containsAnyOf":
       return filterValues.some((candidate) => valueList(raw).map(normalize).includes(normalize(candidate)));
     case "containsNoneOf":

@@ -66,7 +66,10 @@ export function normalizeSpace(value: string): string {
 }
 
 export function stripBibTeXBraces(value: string): string {
-  if (!value.includes("{")) return value.trim();
+  // No braces: still undo the backslash-escaping of LaTeX specials that
+  // `escapeBibTeX` applies on export, so an export→import round-trip is
+  // lossless. (The brace-processing path below already unescapes `\x`.)
+  if (!value.includes("{")) return value.replace(/\\([&%#$_])/g, "$1").trim();
   let result = "";
   let escaped = false;
   for (const char of value) {

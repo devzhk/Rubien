@@ -276,6 +276,27 @@ export interface LibrarySnapshot {
   annotations: AnnotationRecord[];
 }
 
+// A file record whose Blob is base64-encoded so it survives JSON serialization.
+// PDFs are opaque binary; without this the JSON "backup" silently omits them.
+export interface SerializedFileRecord {
+  id: string;
+  referenceId: string;
+  name: string;
+  type: string;
+  size: number;
+  dataBase64: string;
+  createdAt: string;
+}
+
+// The on-disk JSON export shape: the metadata snapshot plus attached PDFs and
+// their extracted text, so a snapshot is a complete, portable backup. `files`
+// and `pdfTextPages` are optional for forward/backward compatibility with
+// older metadata-only exports.
+export interface SerializedLibrarySnapshot extends LibrarySnapshot {
+  files?: SerializedFileRecord[];
+  pdfTextPages?: PDFTextPageRecord[];
+}
+
 export interface LibraryState extends LibrarySnapshot {
   files: StoredFileRecord[];
   pdfTextPages: PDFTextPageRecord[];
