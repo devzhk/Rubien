@@ -1,6 +1,7 @@
 import { Readability, isProbablyReaderable } from "@mozilla/readability";
 import { emptyReference, id, parseAuthors } from "./model";
 import { ReferenceRecord } from "./types";
+import { safeFetchURL } from "./url";
 
 export interface ExtractedWebReference {
   reference: ReferenceRecord;
@@ -8,7 +9,11 @@ export interface ExtractedWebReference {
 }
 
 export async function fetchReadableURL(url: string): Promise<ExtractedWebReference> {
-  const response = await fetch(url, {
+  // Only http(s) — never issue a request to file:/data:/etc. from a
+  // user-supplied capture URL.
+  const target = safeFetchURL(url);
+  if (!target) throw new Error(`Refusing to fetch ${url}: only http and https URLs are supported.`);
+  const response = await fetch(target, {
     headers: { Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" }
   });
   if (!response.ok) throw new Error(`Could not fetch ${url}: HTTP ${response.status}`);
@@ -16,7 +21,7 @@ export async function fetchReadableURL(url: string): Promise<ExtractedWebReferen
   if (contentType && !contentType.includes("html") && !contentType.includes("xml") && !contentType.includes("text/plain")) {
     throw new Error(`Fetched ${url}, but it is ${contentType}, not readable HTML.`);
   }
-  return extractReadableHTML(await response.text(), url);
+  return extractReadableHTML(await response.text(), target);
 }
 
 export function extractReadableHTML(html: string, sourceUrl?: string, fallbackTitle = "Captured web page"): ExtractedWebReference {
