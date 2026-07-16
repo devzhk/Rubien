@@ -46,17 +46,35 @@ final class ReaderChromeInteractionTests: XCTestCase {
 
     func testPDFSidebarWidthClampsTrailingEdgeDragToRange() {
         XCTAssertEqual(
-            PDFReaderMetrics.sidebarWidth(afterTrailingEdgeTranslation: -500, from: 240, in: 200...400),
+            PDFReaderMetrics.sidebarWidth(
+                afterTrailingEdgeTranslation: -500,
+                from: PDFReaderMetrics.defaultSidebarWidth,
+                in: PDFReaderMetrics.sidebarWidthRange),
             200
         )
         XCTAssertEqual(
-            PDFReaderMetrics.sidebarWidth(afterTrailingEdgeTranslation: 500, from: 240, in: 200...400),
+            PDFReaderMetrics.sidebarWidth(
+                afterTrailingEdgeTranslation: 500,
+                from: PDFReaderMetrics.defaultSidebarWidth,
+                in: PDFReaderMetrics.sidebarWidthRange),
             400
         )
         XCTAssertEqual(
-            PDFReaderMetrics.sidebarWidth(afterTrailingEdgeTranslation: 60, from: 240, in: 200...400),
-            300
+            PDFReaderMetrics.sidebarWidth(
+                afterTrailingEdgeTranslation: 60,
+                from: PDFReaderMetrics.defaultSidebarWidth,
+                in: PDFReaderMetrics.sidebarWidthRange),
+            280
         )
+    }
+
+    func testReaderSidebarsUseNarrowerDefaultsWithinTheirResizeFloors() {
+        XCTAssertEqual(PDFReaderMetrics.defaultSidebarWidth, 220)
+        XCTAssertTrue(PDFReaderMetrics.sidebarWidthRange.contains(PDFReaderMetrics.defaultSidebarWidth))
+        XCTAssertEqual(WebReaderMetrics.defaultAnnotationSidebarWidth, 280)
+        XCTAssertGreaterThanOrEqual(
+            WebReaderMetrics.defaultAnnotationSidebarWidth,
+            WebReaderMetrics.annotationSidebarMinWidth)
     }
 
     func testWebReaderNotesAndAssistantFitDefaultReaderWidth() {

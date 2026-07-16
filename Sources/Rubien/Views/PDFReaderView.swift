@@ -14,6 +14,8 @@ enum PDFSidebarTab: String, CaseIterable {
 }
 
 enum PDFReaderMetrics {
+    static let defaultSidebarWidth: CGFloat = 220
+    static let sidebarWidthRange: ClosedRange<CGFloat> = 200...400
     static let sidebarVisibleDividerWidth: CGFloat = 4
     static let sidebarResizeHitTargetWidth = ReaderResizeMetrics.hitTargetWidth
 
@@ -423,7 +425,7 @@ struct PDFReaderView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
     @State private var showOutlineSidebar = true
-    @State private var outlineSidebarWidth: CGFloat = 240
+    @State private var outlineSidebarWidth: CGFloat = PDFReaderMetrics.defaultSidebarWidth
     @State private var outlineDragOffset: CGFloat = 0
     @State private var outlineSidebarTab: PDFSidebarTab = .outline
     @State private var isEditingPage = false
@@ -471,7 +473,10 @@ struct PDFReaderView: View {
             // Left sidebar: TOC / Info
             if showOutlineSidebar {
                 PDFReaderSidebarView(reference: viewModel.reference, viewModel: viewModel, selectedTab: $outlineSidebarTab)
-                    .frame(width: min(max(outlineSidebarWidth + outlineDragOffset, 200), 400))
+                    .frame(width: PDFReaderMetrics.sidebarWidth(
+                        afterTrailingEdgeTranslation: outlineDragOffset,
+                        from: outlineSidebarWidth,
+                        in: PDFReaderMetrics.sidebarWidthRange))
                     .transition(.move(edge: .leading))
 
                 ZStack {
@@ -483,7 +488,7 @@ struct PDFReaderView: View {
                             outlineSidebarWidth = PDFReaderMetrics.sidebarWidth(
                                 afterTrailingEdgeTranslation: translation,
                                 from: outlineSidebarWidth,
-                                in: 200...400
+                                in: PDFReaderMetrics.sidebarWidthRange
                             )
                             outlineDragOffset = 0
                         }

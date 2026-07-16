@@ -28,6 +28,7 @@ struct WebSelectionSnapshot: Equatable {
 
 enum WebReaderMetrics {
     static let annotationSidebarMinWidth: CGFloat = 260
+    static let defaultAnnotationSidebarWidth: CGFloat = 280
     static let defaultChatPanelWidth = AssistantSidebarMetrics.minimumWidth
     static let chatTrailingInset: CGFloat = 12
     static let minimumWindowHeight: CGFloat = 620
@@ -1716,7 +1717,10 @@ struct WebReaderView: View {
             // floating assistant card — two right-side panels felt unbalanced).
             if showAnnotationSidebar {
                 WebAnnotationSidebarView(viewModel: viewModel)
-                    .frame(minWidth: WebReaderMetrics.annotationSidebarMinWidth, idealWidth: 300, maxWidth: 400)
+                    .frame(
+                        minWidth: WebReaderMetrics.annotationSidebarMinWidth,
+                        idealWidth: WebReaderMetrics.defaultAnnotationSidebarWidth,
+                        maxWidth: 400)
                     .overlay(alignment: .trailing) {
                         LinearGradient(
                             colors: [.clear, Color.black.opacity(colorScheme == .dark ? 0.18 : 0.06)],
