@@ -17,8 +17,8 @@ Implemented in the web client:
 - Saved-view search, field filters, status filters, column visibility, sort,
   grouping, and tag scoped views. Filters cover built-in fields and custom
   text, URL, number, select, multi-select, date, and checkbox properties.
-- BibTeX, RIS, Markdown, saved HTML, plain-text, and Rubien Web JSON
-  import/export.
+- Import from BibTeX, RIS, Markdown, saved HTML, plain-text, and Rubien Web
+  JSON. Export to BibTeX, RIS, and Rubien Web JSON.
 - Local PDF attachment and in-browser PDF preview.
 - Local PDF text extraction, persisted page text, page-scoped PDF search, and
   library-wide search over indexed PDF text.
@@ -48,7 +48,7 @@ Intentionally not included:
 
 ```bash
 cd web
-npm install
+npm ci
 npm run dev
 ```
 
@@ -56,6 +56,7 @@ Build and tests:
 
 ```bash
 cd web
+npm run typecheck
 npm run test
 npm run build
 ```
@@ -73,4 +74,6 @@ offline reloads after the first successful load; local library data stays in the
 same browser profile's IndexedDB.
 
 The browser library is local to the browser profile. Use Export -> JSON snapshot
-to move it between machines or browsers.
+to move it between machines or browsers. The JSON snapshot is a complete backup:
+it embeds attached PDFs (base64-encoded) and their extracted page text alongside
+the reference metadata, so importing it into a fresh profile restores everything.
