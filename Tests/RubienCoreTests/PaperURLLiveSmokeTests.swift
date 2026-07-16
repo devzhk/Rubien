@@ -9,7 +9,13 @@ final class PaperURLLiveSmokeTests: XCTestCase {
     /// Pass a non-empty `expectedTitleContains` to also assert the title substring;
     /// pass `""` to skip the contains-check (opt-out convention for URLs whose
     /// title text may change over time).
-    private func smokeURL(_ s: String, expectedTitleContains: String, file: StaticString = #file, line: UInt = #line) async throws {
+    @discardableResult
+    private func smokeURL(
+        _ s: String,
+        expectedTitleContains: String,
+        file: StaticString = #file,
+        line: UInt = #line
+    ) async throws -> PaperURLResolver.Outcome {
         try XCTSkipIf(ProcessInfo.processInfo.environment["RUBIEN_LIVE_TESTS"] != "1",
                       "Set RUBIEN_LIVE_TESTS=1 to run live smoke tests")
         let url = URL(string: s)!
@@ -21,6 +27,7 @@ final class PaperURLLiveSmokeTests: XCTestCase {
                           file: file, line: line)
         }
         XCTAssertFalse(outcome.reference.authors.isEmpty, file: file, line: line)
+        return outcome
     }
 
     // EDITOR: Update these URLs (and expected titles) with real, stable
@@ -48,10 +55,14 @@ final class PaperURLLiveSmokeTests: XCTestCase {
     }
 
     func testScienceLive() async throws {
-        try await smokeURL(
+        let outcome = try await smokeURL(
             "https://www.science.org/doi/full/10.1126/sciadv.abn9545",
             expectedTitleContains: "machine learning enables interpretable discovery"
         )
+        let abstract = try XCTUnwrap(outcome.reference.abstract)
+        XCTAssertTrue(abstract.contains("H₂"))
+        XCTAssertTrue(abstract.contains("10⁴"))
+        XCTAssertFalse(abstract.contains("\n"))
     }
 
     func testACSLive() async throws {

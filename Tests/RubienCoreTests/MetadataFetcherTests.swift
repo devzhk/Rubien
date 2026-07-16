@@ -58,6 +58,50 @@ final class MetadataFetcherTests: XCTestCase {
         XCTAssertEqual(reference.authors, [AuthorName.parse("Doe, Jane")])
     }
 
+    // MARK: - CrossRef parsing
+
+    func testParseCrossrefResponseNormalizesPrettyPrintedJATSScripts() throws {
+        let rawAbstract = """
+        <jats:p>
+            Gas permeabilities of H
+            <jats:sub>2</jats:sub>
+            , O
+            <jats:sub>2</jats:sub>
+            , CO
+            <jats:sub>2</jats:sub>
+            , and CH
+            <jats:sub>4</jats:sub>
+            exceed 10
+            <jats:sup>4</jats:sup>
+            and 10
+            <jats:sup>5</jats:sup>
+            Barrers.
+        </jats:p>
+        """
+        let payload: [String: Any] = [
+            "status": "ok",
+            "message": [
+                "DOI": "10.1126/sciadv.abn9545",
+                "type": "journal-article",
+                "title": ["A Test Paper"],
+                "author": [["given": "Test", "family": "Author"]],
+                "abstract": rawAbstract,
+                "published-print": ["date-parts": [[2022]]]
+            ]
+        ]
+        let json = try JSONSerialization.data(withJSONObject: payload)
+
+        let reference = try MetadataFetcher.parseCrossrefResponse(
+            json,
+            doi: "10.1126/sciadv.abn9545"
+        )
+
+        XCTAssertEqual(
+            reference.abstract,
+            "Gas permeabilities of H₂, O₂, CO₂, and CH₄ exceed 10⁴ and 10⁵ Barrers."
+        )
+    }
+
     // MARK: - CrossRef CJK Author Name Tests
 
     func testParseCrossrefResponseSwapsCJKAuthorNames() throws {
