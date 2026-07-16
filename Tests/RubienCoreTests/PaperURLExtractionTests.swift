@@ -31,6 +31,14 @@ final class PaperURLExtractionTests: XCTestCase {
         }
     }
 
+    func testAPSAbstractExtractsAsPaperURL() {
+        let input = "https://journals.aps.org/prl/abstract/10.1103/3v91-5pzf"
+        guard case .paperURL(let url) = extract(input) else {
+            return XCTFail("Expected .paperURL")
+        }
+        XCTAssertEqual(url.absoluteString, input)
+    }
+
     func testELifeArticleExtractsAsPaperURL() {
         guard case .paperURL = extract("https://elifesciences.org/articles/29515") else {
             return XCTFail("Expected .paperURL")

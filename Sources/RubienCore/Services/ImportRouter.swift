@@ -19,9 +19,11 @@ public enum ImportRouter {
         case existingPath(isDirectory: Bool)
         /// A resolver route: a bare identifier (DOI / arXiv / PMID / PMCID /
         /// ISBN) or a known paper-host URL. `impliedDownloadPdf` is true only
-        /// for a registered-host `.pdf` URL where the caller did not explicitly
-        /// pass `downloadPdf: false` — the caller handed us a PDF link, so
-        /// resolving to metadata-only would silently drop it (§5.2 step 2).
+        /// for a registered-host PDF URL (`PaperURLResolver.isPublisherPDFURL`:
+        /// a `.pdf` path extension, or a host-specific PDF path shape) where
+        /// the caller did not explicitly pass `downloadPdf: false` — the caller
+        /// handed us a PDF link, so resolving to metadata-only would silently
+        /// drop it (§5.2 step 2).
         case resolver(impliedDownloadPdf: Bool)
         /// A URL with a `.pdf` / `.md` / `.markdown` path extension on an
         /// *unregistered* host → download-then-import (materializer) route.
@@ -43,7 +45,7 @@ public enum ImportRouter {
 
     /// Classify `source`. `explicitDownloadPdf` is the caller's tri-state
     /// `downloadPdf` flag (nil = unset); it only affects the implied-`true`
-    /// rule on a registered `.pdf` URL. `probe` checks whether a bare (non-URL)
+    /// rule on a registered-host PDF URL. `probe` checks whether a bare (non-URL)
     /// string names an existing local path — defaults to `FileManager`, and is
     /// injectable so the routing matrix runs without touching disk.
     public static func classify(
@@ -78,11 +80,11 @@ public enum ImportRouter {
         if let url = URL(string: source),
            let scheme = url.scheme?.lowercased(),
            scheme == "http" || scheme == "https" {
-            if KnownPaperHost.classify(url) != nil {
+            if let host = KnownPaperHost.classify(url) {
                 // Registered paper host → resolver route (incl. the resolver's
-                // own PDF-URL → landing rewrite). A `.pdf` link implies
+                // own PDF-URL → landing rewrite). A PDF link implies
                 // downloadPdf: true unless the caller explicitly said false.
-                let isPDFLink = pathExtension(of: url) == "pdf"
+                let isPDFLink = PaperURLResolver.isPublisherPDFURL(url, host: host)
                 let implied = isPDFLink && (explicitDownloadPdf != false)
                 return .resolver(impliedDownloadPdf: implied)
             }

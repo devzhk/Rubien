@@ -53,11 +53,17 @@ public enum PaperURLResolver {
         // 3. Rewrite PDF URL → landing URL if applicable.
         let landingURL = rewritePDFURLToLanding(canonical, host: host)
 
-        // 4. Resolve publisher metadata. eLife exposes a stable, keyless JSON
-        // API with an explicit versioned PDF URL; the remaining hosts use the
-        // generic citation_* meta-tag scraper.
+        // 4. Resolve publisher metadata. APS URLs carry an authoritative DOI
+        // in the path, so resolve them through CrossRef without fetching the
+        // Cloudflare-protected article page. eLife exposes a stable, keyless
+        // JSON API; the remaining hosts use the generic citation_* scraper.
         let (scrapedReference, scrapedPDFURL): (Reference, String?)
-        if host == .eLife {
+        if host == .aps {
+            (scrapedReference, scrapedPDFURL) = try await resolveAPS(
+                landingURL: landingURL,
+                crossrefFetcher: crossrefFetcher
+            )
+        } else if host == .eLife {
             (scrapedReference, scrapedPDFURL) = try await resolveELife(
                 landingURL: landingURL,
                 session: session
@@ -70,9 +76,11 @@ public enum PaperURLResolver {
             )
         }
 
-        // 5. If DOI present, re-fetch via CrossRef.
+        // 5. Normalize scraper metadata through CrossRef when it carries a DOI.
+        // APS already resolved directly through CrossRef in step 4.
         var finalReference = scrapedReference
-        if let doi = scrapedReference.doi?.trimmingCharacters(in: .whitespacesAndNewlines),
+        if host != .aps,
+           let doi = scrapedReference.doi?.trimmingCharacters(in: .whitespacesAndNewlines),
            !doi.isEmpty {
             do {
                 let crossref = try await crossrefFetcher(doi)
@@ -111,6 +119,30 @@ public enum PaperURLResolver {
         return Outcome(reference: finalReference, scrapedPDFURL: scrapedPDFURL)
     }
 
+    // MARK: - APS DOI path
+
+    private static func resolveAPS(
+        landingURL: URL,
+        crossrefFetcher: @Sendable (String) async throws -> Reference
+    ) async throws -> (Reference, String?) {
+        guard let article = apsArticle(from: landingURL) else {
+            throw ResolveError.insufficientMetadata
+        }
+
+        var reference = try await crossrefFetcher(article.doi)
+        // Preserve the publisher page the user supplied instead of CrossRef's
+        // doi.org/link.aps.org URL. PDF inputs have already been rewritten to
+        // the corresponding abstract page.
+        reference.url = landingURL.absoluteString
+
+        // Accepted-paper pages do not consistently expose a version-of-record
+        // PDF yet. Published abstract pages have the stable sibling /pdf/ URL.
+        let pdfURL = article.pageKind == .abstract
+            ? apsURL(for: article, pageKind: .pdf)?.absoluteString
+            : nil
+        return (reference, pdfURL)
+    }
+
     // MARK: - Citation-meta dispatch
 
     private static func resolveCitationMeta(
@@ -142,7 +174,7 @@ public enum PaperURLResolver {
                 return .conferencePaper
             case .aclAnthology:
                 return meta.conferenceTitle != nil ? .conferencePaper : .journalArticle
-            case .ieeeXplore, .acmDL, .nature, .springer, .scienceDirect, .eLife, .eNeuro:
+            case .ieeeXplore, .acmDL, .nature, .springer, .scienceDirect, .eLife, .eNeuro, .aps:
                 if meta.journal != nil { return .journalArticle }
                 if meta.conferenceTitle != nil { return .conferencePaper }
                 return .journalArticle
@@ -355,7 +387,7 @@ public enum PaperURLResolver {
 internal enum KnownPaperHost: CaseIterable {
     case openReview, aclAnthology, cvfOpenAccess
     case neurIPS, neurIPSProceedings
-    case pmlr, ieeeXplore, acmDL, nature, springer, scienceDirect, eLife, eNeuro
+    case pmlr, ieeeXplore, acmDL, nature, springer, scienceDirect, eLife, eNeuro, aps
 
     /// Returns the host bucket if the URL matches both a known host and a
     /// known path shape (landing OR PDF). Returns nil otherwise — callers
@@ -430,6 +462,8 @@ internal enum KnownPaperHost: CaseIterable {
                 return .eNeuro
             }
             return nil
+        case "journals.aps.org":
+            return PaperURLResolver.apsArticle(from: canonical) == nil ? nil : .aps
         default:
             return nil
         }
@@ -458,6 +492,16 @@ internal enum KnownPaperHost: CaseIterable {
 // MARK: - URL canonicalization
 
 internal extension PaperURLResolver {
+    enum APSPageKind: String, Sendable {
+        case abstract, accepted, pdf
+    }
+
+    struct APSArticle: Sendable {
+        let journalSlug: String
+        let pageKind: APSPageKind
+        let doi: String
+    }
+
     static func canonicalize(_ url: URL) -> URL? {
         guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
 
@@ -489,6 +533,56 @@ internal extension PaperURLResolver {
         return components.url
     }
 
+    /// Parse APS Physical Review article URLs such as
+    /// `/prl/abstract/10.1103/3v91-5pzf`. APS DOI suffixes are one path
+    /// component in both the legacy (`PhysRevLett.133.030001`) and current
+    /// opaque-ID formats (`3v91-5pzf`).
+    static func apsArticle(from url: URL) -> APSArticle? {
+        guard let canonical = canonicalize(url),
+              canonical.host == "journals.aps.org" else { return nil }
+
+        // Split preserving empty components so doubled slashes
+        // (`/prl//abstract/...`) are rejected rather than collapsed —
+        // the abstract/accepted landing URL is persisted verbatim on the
+        // Reference. A single trailing slash is tolerated (common paste
+        // artifact). `path(percentEncoded: false)` rather than the deprecated
+        // `path`, which silently strips trailing slashes on Darwin.
+        var path = canonical.path(percentEncoded: false)
+        guard path.hasPrefix("/") else { return nil }
+        if path.hasSuffix("/") { path.removeLast() }
+        let segments = path.split(separator: "/", omittingEmptySubsequences: false)
+            .dropFirst()  // leading root slash yields an empty first component
+            .map(String.init)
+        guard segments.count == 4,
+              !segments[0].isEmpty,
+              segments[0].allSatisfy({ $0.isASCII && ($0.isLowercase || $0.isNumber || $0 == "-") }),
+              let pageKind = APSPageKind(rawValue: segments[1]),
+              segments[2] == "10.1103",
+              !segments[3].isEmpty,
+              segments[3] != ".",
+              segments[3] != ".." else { return nil }
+
+        return APSArticle(
+            journalSlug: segments[0],
+            pageKind: pageKind,
+            doi: "10.1103/\(segments[3])"
+        )
+    }
+
+    /// Single source of the APS path template `/<journal>/<kind>/10.1103/<suffix>`,
+    /// shared by `apsURL(for:pageKind:)` and the PDF → landing rewrite.
+    static func apsPath(for article: APSArticle, pageKind: APSPageKind) -> String {
+        "/\(article.journalSlug)/\(pageKind.rawValue)/\(article.doi)"
+    }
+
+    static func apsURL(for article: APSArticle, pageKind: APSPageKind) -> URL? {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "journals.aps.org"
+        components.path = apsPath(for: article, pageKind: pageKind)
+        return components.url
+    }
+
     static func eLifeArticleID(from url: URL) -> String? {
         guard let canonical = canonicalize(url),
               canonical.host == "elifesciences.org" else { return nil }
@@ -505,6 +599,18 @@ internal extension PaperURLResolver {
 // MARK: - PDF → landing rewrite
 
 internal extension PaperURLResolver {
+    /// True when `url` is `host`'s PDF form of an article link. The default
+    /// is a `.pdf` path extension; hosts whose PDF URLs lack one override
+    /// (APS uses a `/pdf/` path segment).
+    static func isPublisherPDFURL(_ url: URL, host: KnownPaperHost) -> Bool {
+        switch host {
+        case .aps:
+            return apsArticle(from: url)?.pageKind == .pdf
+        default:
+            return url.pathExtension.lowercased() == "pdf"
+        }
+    }
+
     static let neurIPSRewriteRegex = try! NSRegularExpression(
         pattern: #"(/paper_files/paper/\d+/)file/(.+)-Paper(.*)\.pdf$"#
     )
@@ -623,6 +729,13 @@ internal extension PaperURLResolver {
                     break
                 }
                 components.path = "/" + segments.joined(separator: "/")
+            }
+
+        case .aps:
+            // /<journal>/pdf/10.1103/<suffix>
+            //   → /<journal>/abstract/10.1103/<suffix>
+            if let article = apsArticle(from: canonical), article.pageKind == .pdf {
+                components.path = apsPath(for: article, pageKind: .abstract)
             }
         }
 
