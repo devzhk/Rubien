@@ -61,6 +61,14 @@ test('window.RubienChat exposes the full contract', async () => {
   }
 })
 
+test('transcript uses the native scrollbar with a muted color', async () => {
+  const { doc } = await boot()
+  const css = [...doc.querySelectorAll('style')].map((style) => style.textContent).join('\n')
+  assert.match(css, /#transcript\{[^}]*scrollbar-color:var\(--chat-scroll-thumb\) transparent/)
+  assert.doesNotMatch(css, /#transcript::-webkit-scrollbar/)
+  assert.match(css, /--chat-scroll-thumb:\s*rgba\(/)
+})
+
 test('user message renders markdown + KaTeX immediately', async () => {
   const { R, T } = await boot()
   R.addUserMessage('# H\n\nInline $E=mc^2$ and $$\\int_0^1 x^2\\,dx = \\tfrac13$$\n\n- a\n- b\n\n**bold**')
@@ -201,6 +209,17 @@ test('paper groups are chronological, bounded, inert, and expose explicit native
   assert.ok(children.indexOf(group) > children.findIndex((row) => row.classList.contains('chat-msg-user')))
   assert.ok(children.indexOf(group) < children.findIndex((row) => row.classList.contains('chat-notice')),
     'later transcript rows do not replace or move the paper group')
+})
+
+test('paper cards use a responsive two-column grid and neutral actions', async () => {
+  const { doc } = await boot()
+  const css = [...doc.querySelectorAll('style')].map((style) => style.textContent).join('\n')
+
+  assert.match(css, /\.chat-paper-group\{[^}]*width:var\(--chat-row-max-width\)/)
+  assert.match(css, /\.chat-paper-list\{[^}]*display:grid[^}]*grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/)
+  assert.match(css, /\.chat-paper-card\{[^}]*width:100%/)
+  assert.match(css, /@media\(max-width:540px\)\{\.chat-paper-list\{grid-template-columns:minmax\(0,1fr\)\}/)
+  assert.match(css, /\.chat-paper-action\{[^}]*border:0[^}]*color:var\(--chat-fg-muted\)[^}]*background:var\(--chat-chip-bg\)/)
 })
 
 test('paper groups restore in seq order and survive later turns', async () => {
