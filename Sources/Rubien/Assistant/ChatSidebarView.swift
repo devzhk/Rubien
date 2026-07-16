@@ -406,7 +406,6 @@ struct ChatSurfaceView: View {
     private var homeComposer: some View {
         composer
             .frame(maxWidth: 700)
-            .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .center)
     }
 
@@ -698,6 +697,10 @@ struct ChatSurfaceView: View {
             statusLine
         }
         .padding(10)
+        // The AppKit-backed editor has no useful intrinsic height of its own.
+        // Size from the SwiftUI text sizer in `composerEditor` in both placements
+        // so the reader composer stays as compact as Agent Home.
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     /// The message box, Claude-chat style: the editor on top, then a bottom control
@@ -1539,9 +1542,11 @@ struct ChatSurfaceView: View {
 // MARK: - Floating card (Phase 3a)
 
 enum AssistantSidebarMetrics {
-    /// The composer's single-line control row is the limiting intrinsic width.
-    /// Keep the card at or above this floor so its input box never clips.
-    static let minimumWidth: CGFloat = 380
+    /// The composer's 14-point single-line control row is the limiting intrinsic
+    /// width. This floor keeps the default Agent / provider / model / effort
+    /// labels and send control from crowding or forcing the panel wider than its
+    /// resize binding reports.
+    static let minimumWidth: CGFloat = 440
     static let maximumWidth: CGFloat = 900
     static let widthRange: ClosedRange<CGFloat> = minimumWidth...maximumWidth
 }
