@@ -112,6 +112,14 @@ gh release view "v$(tr -d '[:space:]' < VERSION)" \
 
 Only after that gate is green is `release.sh` the single entry point: it calls `scripts/build-app.sh` (which assembles + signs + embeds Sparkle, then builds the DMG), notarizes, signs the appcast item with `sign_update`, prepends the item to `Docs/appcast.xml`, commits + pushes the appcast change, tags the source commit on the private repo, and creates the GitHub release with the DMG on the public `devzhk/Rubien-releases` repo via `gh release create --repo`. Its later appcast push is part of publication; it is not a substitute for pushing and validating the release-preparation commit before signing starts.
 
+## Environment and signing invariants
+
+- **Pass `RELEASE_NOTES_TEXT` fresh on every invocation.** `release.sh` reads it from the environment and uses it for both the GitHub release and appcast description. A value left exported from an earlier release silently republishes the old notes. Prefer the inline assignment in step 5; otherwise `unset RELEASE_NOTES_TEXT` before composing the new value.
+- **Use ANSI-C syntax for multi-line notes, not a pasted heredoc.** Pass `RELEASE_NOTES_TEXT=$'• line one\n• line two' ./scripts/release.sh`. A pasted `RELEASE_NOTES_TEXT="$(cat <<'NOTES' … NOTES)"` can hang at `dquote cmdsubst heredoc>` when terminal indentation prevents the terminator from landing at column zero.
+- **Export the exact Developer ID identity before running.** Missing or incorrect `CODESIGN_IDENTITY` (`Developer ID Application: … (9TXK4V3SS8)`) can ad-hoc-sign the payload (`Signature=adhoc`) and make notarization fail only after the expensive build.
+- **Sparkle is controlled by the default-enabled `Sparkle` package trait.** DMG builds include it; a future Mac App Store flavor opts out with `swift build --disable-default-traits`. Keep every `import Sparkle` inside `#if canImport(Sparkle)` so both the trait-disabled flavor and Linux compile without the product.
+- **Never sign with `codesign --deep`.** Sign components in `scripts/lib/codesign.sh` order: `Installer.xpc → Downloader.xpc → Autoupdate → Updater.app → Sparkle.framework`, then the app. `Downloader.xpc` requires `--preserve-metadata=entitlements`; mistakes surface later as opaque “Failed to gain authorization” XPC errors.
+
 ## Artifact-size guardrails
 
 `scripts/build-app.sh release` makes release size deterministic rather than
@@ -126,12 +134,14 @@ inheriting user-specific Xcode scheme state:
   UUID-matched dSYMs are preserved in a compressed, UUID-keyed archive under
   `build/dSYMs/Rubien-<version>-<build>-<uuid-hash>.dSYMs.zip`.
   The build fails if the architecture is not exactly `arm64`, a matching dSYM
-  is missing, or `__LLVM_COV` / `__llvm_prf_*` is present.
+  is missing, or `__LLVM_COV` / `__llvm_prf_*` is present. Never overwrite a
+  different UUID archive for the same version/build.
 - The DMG uses APFS + ULFO/LZFSE. The custom mounted-volume icon remains by
   design; it is the Rubien disk icon shown after mounting.
 - The `.dmg` file itself does not receive a Finder ResourceFork icon. Resource
   forks are not part of GitHub/HTTP file uploads, and `du` counts them even
-  though users never download them.
+  though users never download them. Do not re-add `NSWorkspace.setIcon` for
+  the downloaded DMG; keep the intentional mounted-volume icon via `--volicon`.
 
 After a release build, these checks should succeed before notarization:
 
@@ -283,8 +293,8 @@ Avoid losing both anchors simultaneously by storing them in independent failure 
 
 ## File locations
 
-- `VERSION` — marketing version string, becomes `CFBundleShortVersionString`.
-- `BUILD.txt` — monotonic build counter, becomes `CFBundleVersion`. Named with the `.txt` extension because APFS is case-insensitive by default and a bare `BUILD` file would alias the `build/` output directory.
+- `VERSION` — marketing version string, becomes `CFBundleShortVersionString`. Use SemVer `0.x` while in alpha and advance to `1.0.0` for the first stable release.
+- `BUILD.txt` — monotonic build counter, becomes `CFBundleVersion`. Sparkle uses this counter—not the marketing version—to decide whether an update is newer. Named with the `.txt` extension because APFS is case-insensitive by default and a bare `BUILD` file would alias the `build/` output directory.
 - `.sparkle-public-key` — gitignored; base64 EdDSA public key (private key in Keychain + backups).
 - `Docs/appcast.xml` — production Sparkle feed (served by GitHub Pages from the private repo; its `<enclosure>` DMG URLs point at the public `devzhk/Rubien-releases` repo).
 - `Docs/staging-appcast.xml` — staging feed for end-to-end tests.
