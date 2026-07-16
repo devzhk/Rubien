@@ -40,7 +40,11 @@ struct MCPCommand: ParsableCommand {
     var readOnly = false
 
     func run() throws {
-        let server = MCPServer(tools: readOnly ? MCPToolCatalog.readOnlyTools : MCPToolCatalog.allTools)
+        var tools = readOnly ? MCPToolCatalog.readOnlyTools : MCPToolCatalog.allTools
+        if ProcessInfo.processInfo.environment["RUBIEN_APP_PRESENTATION"] == "1" {
+            tools += MCPAppPresentationToolCatalog.tools
+        }
+        let server = MCPServer(tools: tools)
         server.serve()
     }
 }
@@ -149,6 +153,17 @@ final class MCPServer {
             return
         } catch {
             writeResponse(id: id, result: Self.errorResult(String(describing: error)))
+            return
+        }
+
+        if let directHandler = tool.directHandler {
+            do {
+                writeResponse(id: id, result: try directHandler(arguments))
+            } catch let err as MCPToolError {
+                writeResponse(id: id, result: Self.errorResult(err.message))
+            } catch {
+                writeResponse(id: id, result: Self.errorResult(String(describing: error)))
+            }
             return
         }
 
@@ -407,6 +422,19 @@ private final class BoundedPipeCapture: @unchecked Sendable {
 /// because the native server is a thin CLI proxy.
 private enum MCPJSONSchemaValidator {
     static func validate(_ value: Any, against schema: [String: Any], path: String) throws {
+        if let alternatives = schema["oneOf"] as? [[String: Any]] {
+            let matchCount = alternatives.reduce(into: 0) { count, alternative in
+                if (try? validate(value, against: alternative, path: path)) != nil {
+                    count += 1
+                }
+            }
+            guard matchCount == 1 else {
+                throw MCPToolError.invalidArguments(
+                    "`\(path)` must match exactly one allowed shape"
+                )
+            }
+        }
+
         if let alternatives = schema["anyOf"] as? [[String: Any]] {
             if alternatives.contains(where: { (try? validate(value, against: $0, path: path)) != nil }) {
                 return
@@ -445,6 +473,9 @@ private enum MCPJSONSchemaValidator {
             guard let string = value as? String else { throw typeError(path, expected: "a string") }
             if let minimum = schema["minLength"] as? NSNumber, string.count < minimum.intValue {
                 throw MCPToolError.invalidArguments("`\(path)` must contain at least \(minimum) character(s)")
+            }
+            if let maximum = schema["maxLength"] as? NSNumber, string.count > maximum.intValue {
+                throw MCPToolError.invalidArguments("`\(path)` must contain at most \(maximum) character(s)")
             }
 
         case "array":
@@ -533,6 +564,9 @@ struct MCPTool {
     /// block (true only for `rubien_render_pdf_page`).
     let isImage: Bool
     let buildArgv: ([String: Any]) throws -> [String]
+    /// App-private tools can execute in the MCP host without introducing a
+    /// standalone CLI command. Public tools keep using the re-entrant child.
+    let directHandler: (([String: Any]) throws -> [String: Any])?
 
     init(
         name: String,
@@ -544,12 +578,16 @@ struct MCPTool {
         timeout: TimeInterval = 60,
         wrapsTextExport: Bool = false,
         isImage: Bool,
-        buildArgv: @escaping ([String: Any]) throws -> [String]
+        buildArgv: @escaping ([String: Any]) throws -> [String],
+        validatesPublicPolicy: Bool = true,
+        directHandler: (([String: Any]) throws -> [String: Any])? = nil
     ) {
-        precondition(
-            RubienMCPToolPolicy.access(for: name) == access,
-            "MCP tool \(name) is missing from, or disagrees with, RubienMCPToolPolicy"
-        )
+        if validatesPublicPolicy {
+            precondition(
+                RubienMCPToolPolicy.access(for: name) == access,
+                "MCP tool \(name) is missing from, or disagrees with, RubienMCPToolPolicy"
+            )
+        }
         self.name = name
         self.description = description
         var normalizedSchema = inputSchema
@@ -567,6 +605,7 @@ struct MCPTool {
         self.wrapsTextExport = wrapsTextExport
         self.isImage = isImage
         self.buildArgv = buildArgv
+        self.directHandler = directHandler
     }
 
     var definition: [String: Any] {

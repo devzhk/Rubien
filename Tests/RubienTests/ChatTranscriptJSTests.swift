@@ -84,6 +84,29 @@ final class ChatTranscriptJSTests: XCTestCase {
         XCTAssertEqual(nilPayload, ToolChipPayload(name: "Write", detail: nil, status: .denied))
     }
 
+    func testAddPaperGroupIsBoundedAndJSONEscaped() throws {
+        let items = (1...12).map { index -> ChatPaper in
+            let title = index == 1 ? tricky : "Paper \(index)"
+            let authors: String? = index == 1 ? "Ada Lovelace, Grace Hopper" : nil
+            return ChatPaper(
+                kind: .library,
+                referenceId: Int64(index),
+                url: nil,
+                title: title,
+                authors: authors,
+                year: 2026,
+                badge: "PDF")
+        }
+        let call = ChatTranscriptJS.addPaperGroup(ChatPaperGroup(items: items))
+        let arg = try extractArgument(from: call, fn: "addPaperGroup")
+        let group = try JSONDecoder().decode(ChatPaperGroup.self, from: Data(arg.utf8))
+        XCTAssertEqual(group.items.count, 10)
+        XCTAssertEqual(group.items.first?.title, tricky)
+        XCTAssertEqual(group.items.first?.authors, "Ada Lovelace, Grace Hopper")
+        XCTAssertFalse(arg.contains("</script>"))
+        XCTAssertFalse(arg.unicodeScalars.contains(Unicode.Scalar(0x2028)!))
+    }
+
     // MARK: - loadTranscript
 
     func testLoadTranscriptArrayRoundTrip() throws {
@@ -91,6 +114,10 @@ final class ChatTranscriptJSTests: XCTestCase {
             ChatRenderMessage(role: .user, body: "hi \"there\"\n</script>", seq: 0),
             ChatRenderMessage(role: .assistant, body: "answer", turnStatus: .interrupted, seq: 1),
             ChatRenderMessage(role: .tool, body: #"{"name":"x","detail":null,"status":"started"}"#, seq: 2),
+            ChatRenderMessage(
+                role: .paper,
+                body: #"{"items":[{"badge":"PDF","kind":"library","referenceId":7,"title":"Seven"}]}"#,
+                seq: 3),
         ]
         let call = ChatTranscriptJS.loadTranscript(messages)
         let arg = try extractArgument(from: call, fn: "loadTranscript")
@@ -164,8 +191,8 @@ final class ChatTranscriptJSTests: XCTestCase {
     }
 
     func testEnumRawValuesMatchContract() {
-        XCTAssertEqual([ChatRole.user, .assistant, .tool, .notice].map(\.rawValue),
-                       ["user", "assistant", "tool", "notice"])
+        XCTAssertEqual([ChatRole.user, .assistant, .tool, .notice, .paper].map(\.rawValue),
+                       ["user", "assistant", "tool", "notice", "paper"])
         XCTAssertEqual([ToolChipStatus.started, .completed, .denied].map(\.rawValue),
                        ["started", "completed", "denied"])
         XCTAssertEqual([ChatTheme.light, .dark].map(\.rawValue), ["light", "dark"])

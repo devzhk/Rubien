@@ -24,6 +24,10 @@ struct MCPContentChannel: Sendable, Equatable {
     /// and codex's `mcpToolCall.server` match in the History attribution scan.
     /// A rename here renames them all; a hardcoded copy would silently break.
     static let serverName = "rubien"
+    /// Opts the bundled native server into Rubien-owned transcript presentation
+    /// tools. Both provider launch paths must pass this exact environment entry.
+    static let appPresentationEnvironmentKey = "RUBIEN_APP_PRESENTATION"
+    static let appPresentationEnvironmentValue = "1"
 
     /// The `--mcp-config` payload claude reads to spawn our server. `--mcp-config`
     /// accepts a JSON *string* (verified against claude 2.1.201: "Load MCP servers
@@ -35,7 +39,12 @@ struct MCPContentChannel: Sendable, Equatable {
                 Self.serverName: [
                     "command": cliURL.path,
                     "args": ["mcp"],
-                    "env": ["RUBIEN_LIBRARY_ROOT": libraryRoot.path],
+                    "env": [
+                        "RUBIEN_LIBRARY_ROOT": libraryRoot.path,
+                        // Enables the app-only structured paper-card capability.
+                        // Normal native and Node MCP catalogs remain unchanged.
+                        Self.appPresentationEnvironmentKey: Self.appPresentationEnvironmentValue,
+                    ],
                 ],
             ],
         ]

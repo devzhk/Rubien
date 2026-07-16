@@ -6,6 +6,11 @@ struct SidebarView: View {
     let databaseViews: [DatabaseView]
     let titleKeywords: [(word: String, count: Int)]
     @Binding var selection: SidebarItem
+    let isHomeSelected: Bool
+    let homeIsResponding: Bool
+    let homeNeedsApproval: Bool
+    let homeUnreadOutcome: AssistantTurnOutcome.Phase?
+    let onSelectHome: () -> Void
     let referenceCount: Int
     let onCreateView: (_ name: String, _ icon: String) -> Void
     let onDeleteView: (Int64) -> Void
@@ -71,13 +76,39 @@ struct SidebarView: View {
         VStack(spacing: 0) {
         OverlayScrollView {
             VStack(spacing: 20) {
+                sidebarSection {
+                    SidebarRow(
+                        icon: "sparkles",
+                        label: "Home",
+                        isSelected: isHomeSelected,
+                        trailing: {
+                            Group {
+                                if homeNeedsApproval {
+                                    Image(systemName: "exclamationmark.circle.fill")
+                                        .foregroundStyle(.orange)
+                                } else if homeIsResponding {
+                                    ProgressView().controlSize(.small)
+                                } else if homeUnreadOutcome == .failed {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .foregroundStyle(.red)
+                                } else if homeUnreadOutcome == .succeeded {
+                                    Circle()
+                                        .fill(Color.accentColor)
+                                        .frame(width: 7, height: 7)
+                                        .accessibilityLabel("New Assistant response")
+                                }
+                            }
+                        },
+                        action: onSelectHome)
+                }
+
                 // Default "All References" view
                 if let defaultView {
                     sidebarSection {
                         SidebarRow(
                             icon: defaultView.icon,
                             label: defaultView.name,
-                            isSelected: selection == .view(defaultView.id!),
+                            isSelected: !isHomeSelected && selection == .view(defaultView.id!),
                             trailing: { countBadge(referenceCount) }
                         ) {
                             selection = .view(defaultView.id!)
@@ -115,7 +146,7 @@ struct SidebarView: View {
                             SidebarRow(
                                 icon: view.icon,
                                 label: view.name,
-                                isSelected: selection == .view(view.id!)
+                                isSelected: !isHomeSelected && selection == .view(view.id!)
                             ) {
                                 selection = .view(view.id!)
                             }

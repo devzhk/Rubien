@@ -1,5 +1,6 @@
 #if os(macOS)
 import AppKit
+import CoreFoundation
 import SwiftUI
 import WebKit
 import RubienCore
@@ -8,18 +9,25 @@ import RubienCore
 /// the `scripts/chat-renderer/` esbuild bundle) in a `WKWebView`. Mirrors
 /// `RichNoteEditorView`: a fresh web view (no pooling needed for the sidebar),
 /// transparent background, magnification off, and a `Coordinator` that bridges the
-/// three JS→Swift messages (`chatReady`, `openExternalLink`, `copyCode`).
+/// JS→Swift messages (`chatReady`, validated links, paper actions, and copy code).
 ///
 /// The `ChatTranscriptController` (owned by the host view) drives the Swift→JS
 /// direction. If `ChatTranscript.html` is missing (the parallel JS bundle may not
 /// be built yet), the view loads blank and logs — it never crashes.
 struct ChatTranscriptView: NSViewRepresentable {
     @ObservedObject var controller: ChatTranscriptController
+    var onOpenReference: ((Int64) -> Void)? = nil
+    var onOpenPaperSource: ((String) -> Void)? = nil
+    var onAddPaperSource: ((String) -> Void)? = nil
 
     private static let logger = RubienLogger(subsystem: "com.rubien.app", category: "AssistantChat")
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(controller: controller)
+        Coordinator(
+            controller: controller,
+            onOpenReference: onOpenReference,
+            onOpenPaperSource: onOpenPaperSource,
+            onAddPaperSource: onAddPaperSource)
     }
 
     func makeNSView(context: Context) -> WKWebView {
@@ -28,6 +36,9 @@ struct ChatTranscriptView: NSViewRepresentable {
         let contentController = WKUserContentController()
         contentController.add(coord, name: "chatReady")
         contentController.add(coord, name: "openExternalLink")
+        contentController.add(coord, name: "openPaperReference")
+        contentController.add(coord, name: "openPaperSource")
+        contentController.add(coord, name: "addPaperSource")
         contentController.add(coord, name: "copyCode")
 
         let config = WKWebViewConfiguration()
@@ -48,8 +59,13 @@ struct ChatTranscriptView: NSViewRepresentable {
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
-        // Theme and content are pushed imperatively through the controller; nothing
-        // to reconcile from SwiftUI state here.
+        // Theme and content are pushed imperatively through the controller. Keep
+        // action closures current because the representable's Coordinator may
+        // outlive the particular ContentView value that first created it.
+        context.coordinator.updateCallbacks(
+            onOpenReference: onOpenReference,
+            onOpenPaperSource: onOpenPaperSource,
+            onAddPaperSource: onAddPaperSource)
     }
 
     static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
@@ -75,11 +91,30 @@ struct ChatTranscriptView: NSViewRepresentable {
 
     final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
         let controller: ChatTranscriptController
+        private var onOpenReference: ((Int64) -> Void)?
+        private var onOpenPaperSource: ((String) -> Void)?
+        private var onAddPaperSource: ((String) -> Void)?
 
-        private static let logger = RubienLogger(subsystem: "com.rubien.app", category: "AssistantChat")
-
-        init(controller: ChatTranscriptController) {
+        init(
+            controller: ChatTranscriptController,
+            onOpenReference: ((Int64) -> Void)?,
+            onOpenPaperSource: ((String) -> Void)?,
+            onAddPaperSource: ((String) -> Void)?
+        ) {
             self.controller = controller
+            self.onOpenReference = onOpenReference
+            self.onOpenPaperSource = onOpenPaperSource
+            self.onAddPaperSource = onAddPaperSource
+        }
+
+        func updateCallbacks(
+            onOpenReference: ((Int64) -> Void)?,
+            onOpenPaperSource: ((String) -> Void)?,
+            onAddPaperSource: ((String) -> Void)?
+        ) {
+            self.onOpenReference = onOpenReference
+            self.onOpenPaperSource = onOpenPaperSource
+            self.onAddPaperSource = onAddPaperSource
         }
 
         // WKScriptMessageHandler delivers on the main thread; hop onto the main
@@ -98,7 +133,32 @@ struct ChatTranscriptView: NSViewRepresentable {
                 case "openExternalLink":
                     guard let dict = body as? [String: Any],
                           let urlString = dict["url"] as? String else { return }
-                    Self.handleOpenExternalLink(urlString)
+                    ChatExternalLinkOpener.open(urlString)
+
+                case "openPaperReference":
+                    guard let dict = body as? [String: Any],
+                          let number = dict["referenceId"] as? NSNumber,
+                          CFGetTypeID(number) != CFBooleanGetTypeID(),
+                          number.doubleValue.isFinite,
+                          number.doubleValue.rounded() == number.doubleValue,
+                          number.doubleValue > 0,
+                          number.doubleValue <= 9_007_199_254_740_991
+                    else { return }
+                    onOpenReference?(number.int64Value)
+
+                case "openPaperSource":
+                    guard let dict = body as? [String: Any],
+                          let urlString = dict["url"] as? String,
+                          ChatExternalLink.classify(urlString) != .reject
+                    else { return }
+                    onOpenPaperSource?(urlString)
+
+                case "addPaperSource":
+                    guard let dict = body as? [String: Any],
+                          let urlString = dict["url"] as? String,
+                          ChatExternalLink.classify(urlString) != .reject
+                    else { return }
+                    onAddPaperSource?(urlString)
 
                 case "copyCode":
                     guard let dict = body as? [String: Any],
@@ -111,33 +171,6 @@ struct ChatTranscriptView: NSViewRepresentable {
                     break
                 }
             }
-        }
-
-        /// Re-validate the scheme (http/https only) in Swift — never trust the JS
-        /// side alone — then open, confirming first for unusual hosts.
-        @MainActor
-        private static func handleOpenExternalLink(_ urlString: String) {
-            switch ChatExternalLink.classify(urlString) {
-            case .reject:
-                logger.error("openExternalLink rejected non-http(s)/hostless URL from renderer")
-            case .confirm:
-                guard let url = URL(string: urlString), confirmOpen(url) else { return }
-                NSWorkspace.shared.open(url)
-            case .open:
-                guard let url = URL(string: urlString) else { return }
-                NSWorkspace.shared.open(url)
-            }
-        }
-
-        @MainActor
-        private static func confirmOpen(_ url: URL) -> Bool {
-            let alert = NSAlert()
-            alert.messageText = String(localized: "Open this link?", bundle: .module)
-            alert.informativeText = url.absoluteString
-            alert.alertStyle = .warning
-            alert.addButton(withTitle: String(localized: "Open", bundle: .module))
-            alert.addButton(withTitle: String(localized: "Cancel", bundle: .module))
-            return alert.runModal() == .alertFirstButtonReturn
         }
 
         // MARK: - WKNavigationDelegate / WKUIDelegate
@@ -182,8 +215,39 @@ struct ChatTranscriptView: NSViewRepresentable {
         private func routeExternal(_ url: URL?) {
             guard let url, let scheme = url.scheme?.lowercased(),
                   scheme == "http" || scheme == "https" else { return }
-            MainActor.assumeIsolated { Self.handleOpenExternalLink(url.absoluteString) }
+            MainActor.assumeIsolated { ChatExternalLinkOpener.open(url.absoluteString) }
         }
+    }
+}
+
+/// One native open policy for ordinary transcript links and paper-card sources.
+/// Every call re-validates the HTTP(S) URL and confirms unusual hosts.
+@MainActor
+enum ChatExternalLinkOpener {
+    private static let logger = RubienLogger(
+        subsystem: "com.rubien.app", category: "AssistantChat")
+
+    static func open(_ urlString: String) {
+        switch ChatExternalLink.classify(urlString) {
+        case .reject:
+            logger.error("Rejected non-http(s)/hostless URL from transcript renderer")
+        case .confirm:
+            guard let url = URL(string: urlString), confirmOpen(url) else { return }
+            NSWorkspace.shared.open(url)
+        case .open:
+            guard let url = URL(string: urlString) else { return }
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private static func confirmOpen(_ url: URL) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = String(localized: "Open this link?", bundle: .module)
+        alert.informativeText = url.absoluteString
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: String(localized: "Open", bundle: .module))
+        alert.addButton(withTitle: String(localized: "Cancel", bundle: .module))
+        return alert.runModal() == .alertFirstButtonReturn
     }
 }
 #endif

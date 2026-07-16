@@ -68,8 +68,8 @@ describe.skipIf(skipReason !== null)("e2e stdio JSON-RPC", () => {
         expect(toolsResult.result).toBeDefined();
         const toolNames = (toolsResult.result.tools as Array<{ name: string }>)
           .map((t) => t.name);
-        // The 0.3.0 {op}_{target} catalog is exactly 27 tools.
-        expect(toolNames).toHaveLength(27);
+        // The 0.3.1 catalog is exactly 28 tools.
+        expect(toolNames).toHaveLength(28);
         // Spot-check a few from each category.
         expect(toolNames).toContain("rubien_search_references");
         expect(toolNames).toContain("rubien_list_references");
@@ -82,6 +82,7 @@ describe.skipIf(skipReason !== null)("e2e stdio JSON-RPC", () => {
         expect(toolNames).toContain("rubien_read_text");
         expect(toolNames).toContain("rubien_read_annotations");
         expect(toolNames).toContain("rubien_grep_text");
+        expect(toolNames).toContain("rubien_reading_activity");
         // Retired old-generation names must be gone.
         expect(toolNames).not.toContain("rubien_add");
         expect(toolNames).not.toContain("rubien_import");

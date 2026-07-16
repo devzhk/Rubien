@@ -424,6 +424,128 @@ function renderUserPayload(value) {
   return bubble
 }
 
+const MAX_PAPER_CARDS = 10
+
+function normalizePaperGroup(value) {
+  if (!value || typeof value !== 'object' || !Array.isArray(value.items)) return []
+  const seen = new Set()
+  const papers = []
+  for (const raw of value.items.slice(0, MAX_PAPER_CARDS)) {
+    if (!raw || typeof raw !== 'object') continue
+    if (typeof raw.title !== 'string' || typeof raw.badge !== 'string') continue
+    const title = raw.title.trim()
+    const badge = raw.badge.trim()
+    if (!title || title.length > 500 || !badge || badge.length > 64) continue
+    const authors = typeof raw.authors === 'string' ? raw.authors.trim() : null
+    if (authors != null && (!authors || authors.length > 1000)) continue
+    const year = Number.isInteger(raw.year) && raw.year >= 1 && raw.year <= 9999
+      ? raw.year
+      : null
+
+    if (raw.kind === 'library') {
+      const referenceId = raw.referenceId
+      if (!Number.isSafeInteger(referenceId) || referenceId <= 0) continue
+      const key = `library:${referenceId}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      papers.push({ kind: 'library', referenceId, title, authors, year, badge })
+      continue
+    }
+
+    if (raw.kind === 'web' && typeof raw.url === 'string' && raw.url.length <= 2048) {
+      let url
+      try {
+        const parsed = new URL(raw.url)
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') continue
+        if (!parsed.hostname) continue
+        url = parsed.href
+      } catch (_) {
+        continue
+      }
+      const key = `web:${url}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      papers.push({ kind: 'web', url, title, authors, year, badge })
+    }
+  }
+  return papers
+}
+
+function paperText(className, text) {
+  const span = document.createElement('span')
+  span.className = className
+  span.textContent = text
+  return span
+}
+
+function briefPaperAuthors(full) {
+  if (!full) return '—'
+  const authors = full.split(',').map((author) => author.trim()).filter(Boolean)
+  return authors.length > 2 ? `${authors.slice(0, 2).join(', ')}, et al.` : full
+}
+
+function makePaperCard(paper) {
+  const root = document.createElement(paper.kind === 'library' ? 'button' : 'div')
+  root.className = `chat-paper-card chat-paper-${paper.kind}`
+  root.title = paper.title
+
+  if (paper.kind === 'library') {
+    root.type = 'button'
+    root.dataset.referenceId = String(paper.referenceId)
+    root.setAttribute('aria-label', `Open ${paper.title}`)
+  }
+
+  root.appendChild(paperText('chat-paper-title', paper.title))
+  const metadata = document.createElement('span')
+  metadata.className = 'chat-paper-metadata'
+  const authors = paperText('chat-paper-authors', briefPaperAuthors(paper.authors))
+  if (paper.authors) authors.title = paper.authors
+  metadata.appendChild(authors)
+  const facts = document.createElement('span')
+  facts.className = 'chat-paper-facts'
+  facts.appendChild(paperText('chat-paper-year', paper.year == null ? '—' : String(paper.year)))
+  facts.appendChild(paperText('chat-paper-separator', '·'))
+  facts.appendChild(paperText('chat-paper-badge', paper.badge))
+  metadata.appendChild(facts)
+  root.appendChild(metadata)
+
+  if (paper.kind === 'web') {
+    const actions = document.createElement('span')
+    actions.className = 'chat-paper-actions'
+    const open = document.createElement('button')
+    open.type = 'button'
+    open.className = 'chat-paper-action chat-paper-open-source'
+    open.dataset.url = paper.url
+    open.textContent = 'Open source'
+    const add = document.createElement('button')
+    add.type = 'button'
+    add.className = 'chat-paper-action chat-paper-add-source'
+    add.dataset.url = paper.url
+    add.textContent = 'Add to Rubien…'
+    actions.appendChild(open)
+    actions.appendChild(add)
+    root.appendChild(actions)
+  }
+  return root
+}
+
+function makePaperGroup(value) {
+  const papers = normalizePaperGroup(value)
+  if (papers.length === 0) return null
+  const root = document.createElement('section')
+  root.className = 'chat-paper-group'
+  root.setAttribute('aria-label', 'Paper cards')
+  const heading = document.createElement('div')
+  heading.className = 'chat-paper-heading'
+  heading.textContent = 'Paper cards'
+  root.appendChild(heading)
+  const list = document.createElement('div')
+  list.className = 'chat-paper-list'
+  for (const paper of papers) list.appendChild(makePaperCard(paper))
+  root.appendChild(list)
+  return root
+}
+
 function cancelPendingRender() {
   if (rafHandle != null) {
     cancelAnimationFrame(rafHandle)
@@ -451,6 +573,17 @@ function scheduleStreamRender() {
 
 function appendRecord(m) {
   const role = m?.role
+  if (role === 'paper') {
+    let group
+    try {
+      group = JSON.parse(m?.body ?? '{}')
+    } catch (_) {
+      return
+    }
+    const row = makePaperGroup(group)
+    if (row) transcript.appendChild(row)
+    return
+  }
   if (role === 'tool') {
     let chip
     try {
@@ -536,6 +669,13 @@ const RubienChat = {
     followOrHint(true)
   },
 
+  addPaperGroup(group) {
+    const row = makePaperGroup(group)
+    if (!row) return
+    transcript.appendChild(row)
+    followOrHint(true)
+  },
+
   addNotice(markdown) {
     const n = makeNotice()
     n.body.innerHTML = renderMarkdown(String(markdown ?? ''))
@@ -552,6 +692,27 @@ const RubienChat = {
 
 function installDelegates() {
   transcript.addEventListener('click', (e) => {
+    const libraryPaper = e.target.closest('.chat-paper-library')
+    if (libraryPaper) {
+      e.preventDefault()
+      const referenceId = Number(libraryPaper.dataset.referenceId)
+      if (Number.isSafeInteger(referenceId) && referenceId > 0) {
+        post('openPaperReference', { referenceId })
+      }
+      return
+    }
+    const openSource = e.target.closest('.chat-paper-open-source')
+    if (openSource) {
+      e.preventDefault()
+      post('openPaperSource', { url: openSource.dataset.url || '' })
+      return
+    }
+    const addSource = e.target.closest('.chat-paper-add-source')
+    if (addSource) {
+      e.preventDefault()
+      post('addPaperSource', { url: addSource.dataset.url || '' })
+      return
+    }
     // Copy button on a code block.
     const copyBtn = e.target.closest('.chat-copy-btn')
     if (copyBtn) {

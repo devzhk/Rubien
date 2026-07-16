@@ -25,7 +25,7 @@ async function connectedClient() {
   return client;
 }
 
-/** The full 0.3.0 catalog — the {op}_{target} grid (spec §3). */
+/** The full 0.3.1 catalog. */
 const EXPECTED_CATALOG = [
   // references
   "rubien_search_references",
@@ -62,15 +62,17 @@ const EXPECTED_CATALOG = [
   "rubien_grep_text",
   // sync
   "rubien_get_sync_status",
+  // activity
+  "rubien_reading_activity",
 ].sort();
 
-describe("0.3.0 catalog", () => {
-  it("registers exactly the 27 {op}_{target} tools — no old names", async () => {
+describe("0.3.1 catalog", () => {
+  it("registers exactly the 28 tools — no old names", async () => {
     const client = await connectedClient();
     const tools = await client.listTools();
     const names = tools.tools.map((t) => t.name).sort();
     expect(names).toEqual(EXPECTED_CATALOG);
-    expect(names).toHaveLength(27);
+    expect(names).toHaveLength(28);
   });
 
   it("create_reference is non-destructive; delete tools are destructive", async () => {
@@ -233,6 +235,39 @@ describe("rubien_create_reference argv routing", () => {
     expect(both.isError).toBe(true);
     expect(JSON.stringify(both.content)).toContain("exactly one");
     expect(vi.mocked(runCliAsTool).mock.calls.length).toBe(before);
+  });
+});
+
+describe("rubien_reading_activity argv and result routing", () => {
+  it("invokes stats with the selected year and returns the CLI result", async () => {
+    const client = await connectedClient();
+    const result = await client.callTool({
+      name: "rubien_reading_activity",
+      arguments: { year: 2025 },
+    });
+
+    expect(vi.mocked(runCliAsTool)).toHaveBeenLastCalledWith([
+      "stats",
+      "--year",
+      "2025",
+    ]);
+    expect(result.isError).not.toBe(true);
+    const text = (result.content[0] as { type: "text"; text: string }).text;
+    expect(JSON.parse(text)).toEqual({
+      echoedArgs: ["stats", "--year", "2025"],
+    });
+  });
+
+  it("omits --year when the caller requests the current local year", async () => {
+    const client = await connectedClient();
+    const result = await client.callTool({
+      name: "rubien_reading_activity",
+      arguments: {},
+    });
+
+    expect(vi.mocked(runCliAsTool)).toHaveBeenLastCalledWith(["stats"]);
+    const text = (result.content[0] as { type: "text"; text: string }).text;
+    expect(JSON.parse(text)).toEqual({ echoedArgs: ["stats"] });
   });
 });
 

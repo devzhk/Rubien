@@ -7,11 +7,11 @@ describe("evaluateCliVersion", () => {
     expect(r.ok).toBe(true);
   });
 
-  it("rejects build 18 because it predates the unified write surface (build 26 floor)", () => {
+  it("rejects build 18 because it predates reading activity (build 28 floor)", () => {
     const r = evaluateCliVersion({ version: "0.2.3", build: 18 }, MIN_CLI_BUILD);
     expect(r.ok).toBe(false);
     expect(r.message).toContain("build 18");
-    expect(r.message).toContain(">= 26");
+    expect(r.message).toContain(">= 28");
     expect(r.message).toMatch(/Update Rubien\.app|download a newer rubien-cli/i);
   });
 

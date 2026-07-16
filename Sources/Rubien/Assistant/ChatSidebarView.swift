@@ -16,14 +16,87 @@ import UniformTypeIdentifiers
 // actions — but theme-adaptive (`Color.primary`-based tints, no forced light mode),
 // since this is a persistent pane, not a floating light-glass popover.
 
+/// The reader-facing wrapper owns its draft locally. The underlying surface is also
+/// used by Agent Home with an external draft binding, so leaving Home for Library and
+/// returning does not discard work in progress.
 struct ChatSidebarView: View {
     @ObservedObject var session: ChatSessionController
     let renderer: ChatTranscriptController
-    /// Collapses the sidebar (the reader wires this to its pane toggle; 2c-3).
-    /// nil hides the close button.
     var onClose: (() -> Void)? = nil
 
     @State private var draft = ""
+    @State private var selectedMentions: [PaperMentionSelection] = []
+
+    var body: some View {
+        ChatSurfaceView(
+            session: session,
+            renderer: renderer,
+            draft: $draft,
+            selectedMentions: $selectedMentions,
+            configuration: .reader(onClose: onClose))
+    }
+}
+
+/// Configuration for the shared, full-fidelity chat surface. Both placements use
+/// the same composer implementation (attachments, paste/drop, @paper mentions,
+/// provider/model/effort, web and approvals); only their empty state, history scope,
+/// and suggested-paper presentation differ.
+struct ChatSurfaceConfiguration {
+    enum Placement: Equatable {
+        case reader
+        case home
+    }
+
+    let placement: Placement
+    var onClose: (() -> Void)?
+    var onOpenReference: ((Int64) -> Void)?
+    var onOpenPaperSource: ((String) -> Void)?
+    var onAddPaperSource: ((String) -> Void)?
+    var libraryIsEmpty: Bool
+    var onAddPapers: (() -> Void)?
+    var onImportPDFs: (() -> Void)?
+
+    static func reader(onClose: (() -> Void)?) -> Self {
+        Self(
+            placement: .reader,
+            onClose: onClose,
+            onOpenReference: nil,
+            onOpenPaperSource: nil,
+            onAddPaperSource: nil,
+            libraryIsEmpty: false,
+            onAddPapers: nil,
+            onImportPDFs: nil)
+    }
+
+    static func home(
+        onOpenReference: @escaping (Int64) -> Void,
+        onOpenPaperSource: @escaping (String) -> Void,
+        onAddPaperSource: @escaping (String) -> Void,
+        libraryIsEmpty: Bool,
+        onAddPapers: @escaping () -> Void,
+        onImportPDFs: @escaping () -> Void
+    ) -> Self {
+        Self(
+            placement: .home,
+            onClose: nil,
+            onOpenReference: onOpenReference,
+            onOpenPaperSource: onOpenPaperSource,
+            onAddPaperSource: onAddPaperSource,
+            libraryIsEmpty: libraryIsEmpty,
+            onAddPapers: onAddPapers,
+            onImportPDFs: onImportPDFs)
+    }
+
+    var isHome: Bool { placement == .home }
+}
+
+struct ChatSurfaceView: View {
+    @ObservedObject var session: ChatSessionController
+    let renderer: ChatTranscriptController
+    @Binding var draft: String
+    @Binding var selectedMentions: [PaperMentionSelection]
+    let configuration: ChatSurfaceConfiguration
+
     @State private var showingHistory = false
     @State private var modelMenuHovered = false
     @State private var providerMenuHovered = false
@@ -41,7 +114,6 @@ struct ChatSidebarView: View {
     @State private var activeMentionQuery: PaperMentionQuery?
     @State private var mentionResults: [ChatReference] = []
     @State private var selectedMentionIndex = 0
-    @State private var selectedMentions: [PaperMentionSelection] = []
     /// Exact draft already reconciled by a programmatic completion. Its next
     /// `onChange` must not apply the same edit a second time.
     @State private var reconciledDraft: String?
@@ -50,12 +122,22 @@ struct ChatSidebarView: View {
     @State private var mentionRefreshTask: Task<Void, Never>?
     @State private var mentionSearchTask: Task<Void, Never>?
     @State private var mentionSearchInProgress = false
+    /// A Home History pick starts docking immediately while the asynchronous
+    /// attribution lookup loads its transcript. `hasMessages` becomes authoritative
+    /// as soon as the resume is adopted.
+    @State private var homeResumeRequested = false
+    /// Fresh Home sends retain their draft until the global turn gate actually
+    /// admits the turn. This snapshot lets the commit observer clear only the exact
+    /// draft that was submitted; a refused turn therefore remains fully retryable.
+    @State private var pendingFreshHomeDraft: String?
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         VStack(spacing: 0) {
             header
-            hairline
+            if !configuration.isHome {
+                hairline
+            }
             content
         }
         .frame(minWidth: AssistantSidebarMetrics.minimumWidth)
@@ -71,6 +153,21 @@ struct ChatSidebarView: View {
             if session.stagedSelection != nil { focusComposerSoon() }
         }
         .onChange(of: colorScheme) { _, new in renderer.setTheme(new == .dark ? .dark : .light) }
+        .onChange(of: session.hasMessages) { _, hasMessages in
+            guard configuration.isHome else { return }
+            if hasMessages {
+                homeResumeRequested = false
+                if let submitted = pendingFreshHomeDraft {
+                    // Preserve edits made during the very short gate-acquisition
+                    // window; clear only the exact draft that was committed.
+                    if draft == submitted || draft.isEmpty { resetDraft() }
+                    pendingFreshHomeDraft = nil
+                }
+            } else {
+                homeResumeRequested = false
+                pendingFreshHomeDraft = nil
+            }
+        }
         // Selection→Ask while the pane is already open — each Ask bumps the token
         // (even re-Asking the same passage), which focuses the composer (§5.4).
         .onChange(of: session.composerFocusRequest) { _, _ in focusComposerSoon() }
@@ -97,31 +194,63 @@ struct ChatSidebarView: View {
 
     private var header: some View {
         HStack(spacing: 2) {
-            HStack(spacing: 5) {
-                // Same chat glyph as the reader's "Assistant" toolbar button + the
-                // empty state, so the feature reads consistently everywhere.
-                Image(systemName: "bubble.left.and.text.bubble.right")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color.primary.opacity(0.80))
-                Text("Assistant")
-                    .font(.system(size: 12, weight: .semibold))
+            if !configuration.isHome {
+                HStack(spacing: 5) {
+                    // Same glyph as the reader's Assistant toolbar button.
+                    Image(systemName: "bubble.left.and.text.bubble.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.primary.opacity(0.80))
+                    Text("Assistant")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .padding(.leading, 4)
             }
-            .padding(.leading, 4)
             Spacer()
-            iconButton("square.and.pencil", help: "New conversation") {
+            let newConversation = {
                 session.newConversation()
                 resetDraft()
+                homeResumeRequested = false
+                pendingFreshHomeDraft = nil
             }
-            iconButton("clock.arrow.circlepath", help: "History — resume a past conversation") {
-                showingHistory = true
+            if configuration.isHome {
+                labeledHeaderButton(
+                    "square.and.pencil",
+                    title: "New",
+                    help: "New conversation",
+                    action: newConversation)
+            } else {
+                iconButton(
+                    "square.and.pencil",
+                    help: "New conversation",
+                    action: newConversation)
             }
-            .popover(isPresented: $showingHistory, arrowEdge: .bottom) {
-                ChatHistoryPopover(session: session) {
-                    showingHistory = false
-                    resetDraft()
+            if configuration.isHome {
+                labeledHeaderButton(
+                    "clock.arrow.circlepath",
+                    title: "History",
+                    help: "Home conversation history") {
+                    showingHistory = true
+                }
+                .popover(isPresented: $showingHistory, arrowEdge: .bottom) {
+                    HomeChatHistoryPopover(session: session) {
+                        showingHistory = false
+                        resetDraft()
+                        pendingFreshHomeDraft = nil
+                        homeResumeRequested = true
+                    }
+                }
+            } else {
+                iconButton("clock.arrow.circlepath", help: "History — resume a past conversation") {
+                    showingHistory = true
+                }
+                .popover(isPresented: $showingHistory, arrowEdge: .bottom) {
+                    ChatHistoryPopover(session: session) {
+                        showingHistory = false
+                        resetDraft()
+                    }
                 }
             }
-            if let onClose {
+            if let onClose = configuration.onClose {
                 iconButton("xmark", help: "Close the assistant sidebar") { onClose() }
             }
         }
@@ -188,6 +317,24 @@ struct ChatSidebarView: View {
         .help(help)
     }
 
+    private func labeledHeaderButton(
+        _ systemName: String,
+        title: String,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: systemName)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Color.primary.opacity(0.72))
+                .padding(.horizontal, 7)
+                .frame(height: 28)
+                .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        }
+        .buttonStyle(HeaderControlButtonStyle())
+        .help(help)
+    }
+
     /// 0.5 pt hairline rule, the popovers' separator idiom (theme-adaptive tint).
     private var hairline: some View {
         Rectangle()
@@ -198,30 +345,128 @@ struct ChatSidebarView: View {
     // MARK: Content
 
     @ViewBuilder private var content: some View {
-        ZStack {
-            // Kept in the hierarchy while covered so the WebView is loaded
-            // and ready the moment the first turn starts streaming.
-            ChatTranscriptView(controller: renderer)
-            if !session.hasMessages {
-                startPage
+        if configuration.isHome {
+            if homeConversationIsDocked {
+                ChatTranscriptView(
+                    controller: renderer,
+                    onOpenReference: configuration.onOpenReference,
+                    onOpenPaperSource: configuration.onOpenPaperSource,
+                    onAddPaperSource: configuration.onAddPaperSource)
+                if let approval = session.pendingApproval {
+                    approvalCard(approval)
+                }
+                if let setup = assistantSetupCopy {
+                    assistantSetupBlock(setup)
+                        .padding(.horizontal, 10)
+                        .padding(.top, 8)
+                }
+                homeComposer
+                    .padding(.horizontal, 24)
+            } else {
+                homeStartPage
             }
+        } else {
+            ZStack {
+                // Kept in the hierarchy while covered so the WebView is loaded
+                // and ready the moment the first turn starts streaming.
+                ChatTranscriptView(
+                    controller: renderer,
+                    onOpenReference: configuration.onOpenReference,
+                    onOpenPaperSource: configuration.onOpenPaperSource,
+                    onAddPaperSource: configuration.onAddPaperSource)
+                if !session.hasMessages {
+                    startPage
+                }
+            }
+            if let approval = session.pendingApproval {
+                approvalCard(approval)
+            }
+            if let selection = session.stagedSelection {
+                selectionChip(selection)
+            }
+            // A known-not-ready backend while a conversation is showing — the start page
+            // (the setup card's only other home) is hidden once hasMessages is true, so
+            // surface the reason + Recheck above the composer. Covers a signed-out user
+            // resuming a History conversation, or the CLI signing out mid-session.
+            if session.hasMessages, let setup = assistantSetupCopy {
+                assistantSetupBlock(setup)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 8)
+            }
+            composer
         }
-        if let approval = session.pendingApproval {
-            approvalCard(approval)
-        }
-        if let selection = session.stagedSelection {
-            selectionChip(selection)
-        }
-        // A known-not-ready backend while a conversation is showing — the start page
-        // (the setup card's only other home) is hidden once hasMessages is true, so
-        // surface the reason + Recheck above the composer. Covers a signed-out user
-        // resuming a History conversation, or the CLI signing out mid-session.
-        if session.hasMessages, let setup = assistantSetupCopy {
-            assistantSetupBlock(setup)
-                .padding(.horizontal, 10)
-                .padding(.top, 8)
-        }
+    }
+
+    private var homeConversationIsDocked: Bool {
+        session.hasMessages || homeResumeRequested
+    }
+
+    /// Home keeps one composer footprint across the empty and transcript
+    /// layouts; sending changes only its vertical position.
+    private var homeComposer: some View {
         composer
+            .frame(maxWidth: 700)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .center)
+    }
+
+    /// A fresh Home keeps the complete composer near the visual center while its
+    /// three quieter quick starts sit immediately above it.
+    private var homeStartPage: some View {
+        GeometryReader { geometry in
+            ScrollView(.vertical) {
+                VStack(spacing: 8) {
+                    if let setup = assistantSetupCopy {
+                        assistantSetupBlock(setup)
+                            .frame(maxWidth: 680)
+                    } else {
+                        VStack(spacing: 7) {
+                            if configuration.libraryIsEmpty {
+                                homeNativeAction(
+                                    "Add papers", action: configuration.onAddPapers)
+                                homeNativeAction(
+                                    "Import PDFs", action: configuration.onImportPDFs)
+                                homeSuggestion("Help me choose a field to explore")
+                            } else {
+                                homeSuggestion("What should I read next?")
+                                homeSuggestion("Find recent papers in my field")
+                                homeSuggestion("Summarize what we’ve been reading this week")
+                            }
+                        }
+                        // Match the composer width. PlainQuickStartText's 25-point
+                        // leading inset then lands on the editor caret origin:
+                        // composer padding 10 + box padding 10 + text inset 5.
+                        .frame(maxWidth: 700)
+                    }
+                    homeComposer
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.horizontal, 24)
+                .padding(.top, homeStartTopPadding(for: geometry.size.height))
+                .padding(.bottom, 24)
+            }
+            .scrollIndicators(.automatic)
+        }
+    }
+
+    /// The starts occupy roughly 14% of an ordinary canvas, so placing the cluster
+    /// around 24% keeps the composer's top edge near its former ~38% position. The
+    /// surrounding ScrollView is the backstop for attachments and short windows.
+    private func homeStartTopPadding(for availableHeight: CGFloat) -> CGFloat {
+        let preferred = availableHeight * 0.24
+        let roomAwareMaximum = max(24, availableHeight - 260)
+        return max(24, min(preferred, roomAwareMaximum))
+    }
+
+    private func homeSuggestion(_ prompt: String) -> some View {
+        PlainQuickStartText(text: prompt) { session.send(prompt) }
+    }
+
+    private func homeNativeAction(
+        _ title: String,
+        action: (() -> Void)?
+    ) -> some View {
+        PlainQuickStartText(text: title) { action?() }
     }
 
     // MARK: Quick-start page (fresh conversation)
@@ -477,16 +722,38 @@ struct ChatSidebarView: View {
             }
         }
         .padding(10)
-        .background(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+        .background {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(Color(nsColor: .textBackgroundColor))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .stroke(
-                    isDropTargeted ? Color.accentColor : Color.primary.opacity(0.12),
-                    lineWidth: isDropTargeted ? 1.5 : 1)
-        )
+                // A neutral lift plus a very restrained accent halo gives the
+                // composer a luminous edge without turning it into a heavy card.
+                .shadow(
+                    color: .black.opacity(colorScheme == .dark ? 0.24 : 0.09),
+                    radius: 9,
+                    y: 4)
+                .shadow(
+                    color: Color.accentColor.opacity(
+                        isDropTargeted ? 0.24 : (configuration.isHome ? 0.09 : 0.055)),
+                    radius: isDropTargeted ? 13 : 11)
+        }
+        .overlay {
+            let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+            if isDropTargeted {
+                shape.stroke(Color.accentColor, lineWidth: 1.5)
+            } else {
+                shape.stroke(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(colorScheme == .dark ? 0.10 : 0.62),
+                            Color.accentColor.opacity(colorScheme == .dark ? 0.16 : 0.10),
+                            Color.primary.opacity(colorScheme == .dark ? 0.16 : 0.09),
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing),
+                    lineWidth: 0.8)
+            }
+        }
+        .animation(.easeOut(duration: 0.16), value: isDropTargeted)
         // Catches drops on the box outside the editor (tray, control row, padding);
         // drops on the editor itself are routed by `ComposerNSTextView`, which sits
         // in front of this destination in AppKit's hit-testing.
@@ -873,8 +1140,8 @@ struct ChatSidebarView: View {
 
     private var composerEmptyGuidance: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Chat about document:")
-                .font(.system(size: 12, weight: .medium))
+            Text(configuration.isHome ? "Ask Rubien:" : "Chat about document:")
+                .font(.system(size: ComposerTextView.messageFontSize, weight: .medium))
             HStack(alignment: .top, spacing: Self.composerHintGridSpacing) {
                 VStack(alignment: .leading, spacing: 3) {
                     composerHint("⌘↩", "Send")
@@ -904,7 +1171,7 @@ struct ChatSidebarView: View {
                 .frame(width: Self.composerHintKeyWidth, alignment: keyAlignment)
             Text(label)
         }
-        .font(.system(size: 12))
+        .font(.system(size: ComposerTextView.messageFontSize))
     }
 
     private var composerEditor: some View {
@@ -914,7 +1181,7 @@ struct ChatSidebarView: View {
             // to the max — a bare TextEditor fills any height it is offered. The
             // trailing space makes a trailing newline count as a line.
             Text(draft.isEmpty ? " " : draft + " ")
-                .font(.body)
+                .font(.system(size: ComposerTextView.messageFontSize))
                 .padding(.horizontal, 5)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .opacity(0)
@@ -990,7 +1257,9 @@ struct ChatSidebarView: View {
     }
 
     @ViewBuilder private var statusLine: some View {
-        if session.busyElsewhere {
+        if session.isResuming {
+            statusText("Loading conversation…", systemImage: "clock.arrow.circlepath")
+        } else if session.busyElsewhere {
             statusText("Busy in another window", systemImage: "exclamationmark.triangle")
         } else if let status = session.statusText {
             statusText(status, systemImage: "ellipsis")
@@ -1014,8 +1283,24 @@ struct ChatSidebarView: View {
         }
         let text = draft
         let mentions = selectedMentions
-        resetDraft()
-        session.send(text, mentionedReferences: mentions)
+        if configuration.isHome, !session.hasMessages {
+            // The controller publishes `hasMessages` only after the global gate
+            // admits and commits the user turn. Until then, retain the exact draft,
+            // attachments, and mention state so a gate refusal is retryable.
+            pendingFreshHomeDraft = text
+            // The Binding belongs to ContentView, not this transient Home subtree.
+            // If the user switches to Library during gate acquisition, this still
+            // clears the committed text while preserving any later edit.
+            let externalDraft = $draft
+            session.send(text, mentionedReferences: mentions) {
+                if externalDraft.wrappedValue == text {
+                    externalDraft.wrappedValue = ""
+                }
+            }
+        } else {
+            resetDraft()
+            session.send(text, mentionedReferences: mentions)
+        }
         editorFocusRequests += 1
     }
 
@@ -1303,6 +1588,64 @@ extension Color {
 
 // MARK: - History popover (2c-6)
 
+/// Home history is deliberately narrower than the reader history browser: the
+/// controller's library-context listing filters provider sessions through Rubien's
+/// content-free attribution store, so unrelated CLI conversations never appear.
+private struct HomeChatHistoryPopover: View {
+    let session: ChatSessionController
+    let onResumed: () -> Void
+
+    @State private var sessions: [AgentSessionSummary]?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Home conversations")
+                .font(.system(size: 12, weight: .semibold))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+            Divider()
+            Group {
+                if let sessions {
+                    if sessions.isEmpty {
+                        Text("No Rubien Home conversations yet.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .padding(14)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        ScrollView {
+                            VStack(spacing: 0) {
+                                ForEach(sessions) { summary in
+                                    HistoryRow(summary: summary) {
+                                        session.resume(summary)
+                                        onResumed()
+                                    }
+                                }
+                            }
+                        }
+                        .frame(height: min(CGFloat(sessions.count) * HistoryRow.height, 340))
+                    }
+                } else {
+                    HStack {
+                        Spacer()
+                        ProgressView().controlSize(.small)
+                        Spacer()
+                    }
+                    .padding(.vertical, 16)
+                }
+            }
+            Divider()
+            Text("Only conversations started from Rubien Home are shown.")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+        }
+        .frame(width: 320)
+        .task { sessions = await session.listRecentSessions(limit: 25) }
+    }
+}
+
 /// Browses the active provider's OWN sessions for this working folder (§5.3) and
 /// `--resume`s a pick. Rubien stores no transcripts (D5); this is a light read of
 /// the runtime's session store. Recents load lazily when the popover opens; typing
@@ -1565,7 +1908,36 @@ private struct HistoryRow: View {
     }
 }
 
-// MARK: - Quick-start suggestion row
+// MARK: - Quick-start suggestions
+
+/// Home keeps the composer as the only card-like object. Suggestions are plain
+/// text affordances with no icon, bezel, fill, or resting boundary. Hover uses
+/// the same quiet neutral-gray background as Rubien's other borderless buttons.
+private struct PlainQuickStartText: View {
+    let text: String
+    let action: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(text)
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 25)
+                .padding(.trailing, 10)
+                .padding(.vertical, 6)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(hovered ? Color.primary.opacity(0.06) : Color.clear)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .animation(.easeOut(duration: 0.14), value: hovered)
+    }
+}
 
 /// One tappable suggestion on the fresh-conversation start page: icon + prompt in
 /// a hairline-bordered rounded row with a hover highlight.

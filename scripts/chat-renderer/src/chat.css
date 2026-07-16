@@ -17,6 +17,8 @@
   --chat-code-block-fg: #eaeaf0;
   --chat-chip-bg: #f4f4f6;
   --chat-chip-border: #e2e2e6;
+  --chat-paper-bg: transparent;
+  --chat-paper-hover: rgba(0, 0, 0, 0.06);
   --chat-notice-fg: #7a5c00;
   --chat-notice-bg: #fff8e6;
   --chat-status-started: #8a8a90;
@@ -26,6 +28,7 @@
   --chat-radius: 12px;
   --chat-gap: 12px;
   --chat-pad: 10px 13px;
+  --chat-row-max-width: 92%;
   --chat-font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
   --chat-mono: "SF Mono", ui-monospace, Menlo, Monaco, "Cascadia Code", monospace;
 }
@@ -46,6 +49,8 @@
     --chat-code-block-fg: #eaeaf0;
     --chat-chip-bg: #2a2a2e;
     --chat-chip-border: #3a3a3e;
+    --chat-paper-bg: transparent;
+    --chat-paper-hover: rgba(255, 255, 255, 0.07);
     --chat-notice-fg: #ffd780;
     --chat-notice-bg: #3a2f10;
     --chat-status-started: #8a8a90;
@@ -69,6 +74,8 @@
   --chat-code-block-fg: #eaeaf0;
   --chat-chip-bg: #2a2a2e;
   --chat-chip-border: #3a3a3e;
+  --chat-paper-bg: transparent;
+  --chat-paper-hover: rgba(255, 255, 255, 0.07);
   --chat-notice-fg: #ffd780;
   --chat-notice-bg: #3a2f10;
   --chat-status-started: #8a8a90;
@@ -121,7 +128,7 @@ body {
 
 .chat-bubble {
   box-sizing: border-box;
-  max-width: 92%;
+  max-width: var(--chat-row-max-width);
   padding: var(--chat-pad);
   border-radius: var(--chat-radius);
   overflow-wrap: anywhere;
@@ -342,6 +349,136 @@ body {
   background: rgba(255, 255, 255, 0.22);
 }
 
+/* --- Paper cards --- */
+
+.chat-paper-group {
+  align-self: flex-start;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  width: fit-content;
+  max-width: var(--chat-row-max-width);
+}
+
+.chat-paper-heading {
+  padding: 0 2px;
+  color: var(--chat-fg-muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.chat-paper-list {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.chat-paper-card {
+  -webkit-appearance: none;
+  appearance: none;
+  box-sizing: border-box;
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--chat-border);
+  border-radius: 10px;
+  color: var(--chat-fg);
+  background: var(--chat-paper-bg);
+  font: inherit;
+  text-align: left;
+}
+
+button.chat-paper-card {
+  cursor: pointer;
+}
+
+.chat-paper-card:hover,
+.chat-paper-card:focus-visible {
+  background: var(--chat-paper-hover);
+  border-color: color-mix(in srgb, var(--chat-fg) 16%, var(--chat-border));
+}
+
+.chat-paper-card:focus-visible,
+.chat-paper-action:focus-visible {
+  outline: 2px solid var(--chat-link);
+  outline-offset: 2px;
+}
+
+.chat-paper-title {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 12.5px;
+  font-weight: 590;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.chat-paper-metadata {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--chat-fg-muted);
+  font-size: 10.5px;
+}
+
+.chat-paper-authors {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-paper-facts {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.chat-paper-separator {
+  opacity: 0.65;
+}
+
+.chat-paper-badge {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-paper-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 1px;
+}
+
+.chat-paper-action {
+  -webkit-appearance: none;
+  appearance: none;
+  padding: 3px 8px;
+  border: 1px solid var(--chat-border);
+  border-radius: 7px;
+  color: var(--chat-link);
+  background: transparent;
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 560;
+  cursor: pointer;
+}
+
+.chat-paper-action:hover {
+  background: var(--chat-paper-hover);
+}
+
 /* --- Tool calls --- */
 
 .chat-tool-group {
@@ -349,7 +486,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: var(--chat-gap);
-  max-width: 92%;
+  max-width: var(--chat-row-max-width);
 }
 
 .chat-tool-history {
@@ -410,7 +547,7 @@ body {
   font-size: 12.5px;
   color: var(--chat-fg-muted);
   align-self: flex-start;
-  max-width: 92%;
+  max-width: var(--chat-row-max-width);
 }
 
 .chat-tool-group .chat-tool-chip {

@@ -113,6 +113,9 @@ final class SyncSchemaInvariantTests: XCTestCase {
         case .propertyDefinition: return PropertyDefinition.allFieldNames
         case .propertyValue:      return PropertyValue.allFieldNames
         case .databaseView:       return DatabaseView.allFieldNames
+        case .readingActivity:    return ReadingActivity.allFieldNames
+        case .assistantActivity:  return AssistantActivity.allFieldNames
+        case .activityEpoch:      return ActivityEpoch.allFieldNames
         case .referencePDF:       return ReferencePDFRecord.allFieldNames
         }
     }

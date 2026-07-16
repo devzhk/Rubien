@@ -31,6 +31,19 @@ final class AssistantContextTests: XCTestCase {
         XCTAssertTrue(seed.contains("untitled"))
     }
 
+    func testLibrarySeedIsLibraryWideAndRequestsStructuredPaperPresentation() {
+        let seed = AssistantContext.seed(for: AssistantConversationContext.library)
+        XCTAssertTrue(seed.contains("library assistant"))
+        XCTAssertTrue(seed.contains("rubien_present_papers"))
+        XCTAssertTrue(seed.contains("must make exactly one"))
+        XCTAssertTrue(seed.contains("every recommendation"))
+        XCTAssertTrue(seed.contains("include the authors when known"))
+        XCTAssertTrue(seed.contains("Do not link recommended paper titles in Markdown"))
+        XCTAssertTrue(seed.contains("never in the tool arguments"))
+        XCTAssertTrue(seed.lowercased().contains("untrusted"))
+        XCTAssertFalse(seed.contains("reference ID"))
+    }
+
     func testSeedCollapsesInjectedNewlinesInMetadata() {
         // A hostile title must not break the one-line seed / inject a multi-line
         // instruction ahead of the untrusted-data label.

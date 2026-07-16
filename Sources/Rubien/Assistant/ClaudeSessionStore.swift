@@ -113,9 +113,11 @@ struct ClaudeSessionStore {
     /// event mapping: user text → user rows, assistant text → assistant rows,
     /// an assistant message's `tool_use` blocks → completed tool-chip rows right
     /// after its text (their results arrived later, but the chips belong to the
-    /// message that invoked them). Meta/sidechain entries and tool-result-only
-    /// user turns render nothing, exactly as they do live. Returns `[]` when the
-    /// file is missing/unreadable — the caller falls back to the preview notice.
+    /// message that invoked them). Successful paper presentations merge once at
+    /// the end of each turn; malformed ones remain visible tool rows. Other
+    /// tool-result-only user turns render nothing. Meta/sidechain entries remain
+    /// hidden. Returns `[]` when the file is missing/unreadable — the caller falls
+    /// back to the preview notice.
     /// Known fidelity limit: a tool the user DENIED restores as a completed chip
     /// (denials live in stream-only `permission_denials`, not the session file's
     /// message entries) — accepted for now; denials are rare in history.
@@ -125,6 +127,9 @@ struct ClaudeSessionStore {
         let managedRoot = AssistantManagedAttachmentPath.managedRoot(for: workspaceURL)
 
         var rows: [ChatRenderMessage] = []
+        var presentationOrdinals: [String: Int] = [:]
+        var pendingPresentations: [(callID: String, ordinal: Int, group: ChatPaperGroup)] = []
+        var nextPresentationOrdinal = 0
         func append(
             _ role: ChatRole,
             _ body: String,
@@ -134,10 +139,23 @@ struct ClaudeSessionStore {
                 role: role, body: body, seq: rows.count, attachments: attachments
             ))
         }
+        func flushPresentations() {
+            defer {
+                pendingPresentations.removeAll(keepingCapacity: true)
+                presentationOrdinals.removeAll(keepingCapacity: true)
+                nextPresentationOrdinal = 0
+            }
+            guard let group = ChatPaperPresentation.merge(pendingPresentations),
+                  let body = ChatPaperPresentation.encodeHistoryGroup(group)
+            else { return }
+            append(.paper, body)
+        }
         for line in content.split(separator: "\n", omittingEmptySubsequences: true) {
-            guard let obj = Self.parseLine(line),
-                  let entry = Self.conversationEntry(obj)
-            else { continue }
+            guard let obj = Self.parseLine(line) else { continue }
+            guard let entry = Self.conversationEntry(obj) else {
+                if obj["type"] as? String == "result" { flushPresentations() }
+                continue
+            }
             switch entry.type {
             case "user":
                 if let text = Self.messageText(entry.message) {
@@ -145,7 +163,32 @@ struct ClaudeSessionStore {
                         text, managedRoot: managedRoot, fileManager: fileManager
                     )
                     if !parsed.visibleText.isEmpty || !parsed.attachments.isEmpty {
+                        // A visible user message starts the next provider turn.
+                        // Publish any prior turn's accumulated recommendations
+                        // before it so History preserves transcript chronology.
+                        flushPresentations()
                         append(.user, parsed.visibleText, attachments: parsed.attachments)
+                    }
+                }
+                for block in (entry.message["content"] as? [[String: Any]]) ?? []
+                where block["type"] as? String == "tool_result" {
+                    guard let useID = block["tool_use_id"] as? String,
+                          let ordinal = presentationOrdinals[useID]
+                    else { continue }
+                    if block["is_error"] as? Bool == true {
+                        let chip = ToolChipPayload(
+                            name: ChatPaperPresentation.toolName,
+                            detail: "Paper presentation failed",
+                            status: .denied)
+                        append(.tool, ChatTranscriptJS.encodeArg(chip))
+                    } else if let group = ChatPaperPresentation.decodeToolResult(block["content"]) {
+                        pendingPresentations.append((useID, ordinal, group))
+                    } else {
+                        let chip = ToolChipPayload(
+                            name: ChatPaperPresentation.toolName,
+                            detail: "Paper presentation result was invalid",
+                            status: .completed)
+                        append(.tool, ChatTranscriptJS.encodeArg(chip))
                     }
                 }
             case "assistant":
@@ -155,6 +198,15 @@ struct ClaudeSessionStore {
                 for block in (entry.message["content"] as? [[String: Any]]) ?? []
                 where block["type"] as? String == "tool_use" {
                     guard let name = block["name"] as? String else { continue }
+                    if ChatPaperPresentation.isPresentationTool(name),
+                       let useID = block["id"] as? String
+                    {
+                        if presentationOrdinals[useID] == nil {
+                            presentationOrdinals[useID] = nextPresentationOrdinal
+                            nextPresentationOrdinal += 1
+                        }
+                        continue
+                    }
                     let chip = ToolChipPayload(
                         name: name,
                         detail: ClaudeStreamParser.summarize(block["input"]),
@@ -165,6 +217,7 @@ struct ClaudeSessionStore {
                 break
             }
         }
+        flushPresentations()
         return rows
     }
 

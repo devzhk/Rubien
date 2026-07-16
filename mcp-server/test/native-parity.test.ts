@@ -126,7 +126,7 @@ describe.skipIf(!existsSync(nativeCli))("native/npm MCP catalog parity", () => {
       );
 
     expect(project(native)).toEqual(project(npm as Array<Record<string, unknown>>));
-    expect(native).toHaveLength(27);
+    expect(native).toHaveLength(28);
   });
 
   it("matches representative JSON and text-export output shaping", async () => {

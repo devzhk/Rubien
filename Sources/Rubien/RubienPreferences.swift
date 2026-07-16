@@ -28,6 +28,9 @@ enum ColorSchemePreference: String, CaseIterable {
 }
 
 enum RubienPreferences {
+    private static let appGroupDefaults =
+        UserDefaults(suiteName: "9TXK4V3SS8.group.com.rubien.shared") ?? .standard
+
     /// 用于 CrossRef / OpenAlex API polite pool 的联系邮箱。
     /// CrossRef 要求提供真实 mailto 才能进入 polite pool（更快速率限制）。
     static let apiContactEmailKey = "Rubien.apiContactEmail"
@@ -226,6 +229,50 @@ enum RubienPreferences {
                 UserDefaults.standard.removeObject(forKey: readerWindowSizeKey)
             }
         }
+    }
+
+    // MARK: - Activity
+
+    static let recordReadingActivityKey = "Rubien.activity.recordReading"
+    static let recordAssistantActivityKey = "Rubien.activity.recordAssistant"
+    static let activityInstallationIdKey = "Rubien.activity.installationId"
+    static let activityHeatmapRangeKey = "Rubien.activity.heatmapRange"
+
+    /// Per-device capture controls. Turning one off stops new local facts but
+    /// does not hide facts already synced from this or another device.
+    static var recordReadingActivity: Bool {
+        get {
+            if appGroupDefaults.object(forKey: recordReadingActivityKey) == nil { return true }
+            return appGroupDefaults.bool(forKey: recordReadingActivityKey)
+        }
+        set { appGroupDefaults.set(newValue, forKey: recordReadingActivityKey) }
+    }
+
+    static var recordAssistantActivity: Bool {
+        get {
+            if appGroupDefaults.object(forKey: recordAssistantActivityKey) == nil { return true }
+            return appGroupDefaults.bool(forKey: recordAssistantActivityKey)
+        }
+        set { appGroupDefaults.set(newValue, forKey: recordAssistantActivityKey) }
+    }
+
+    /// Random stable installation component identity. It is never derived
+    /// from hardware and never written as a standalone synced record.
+    static var activityInstallationId: String {
+        if let stored = appGroupDefaults.string(forKey: activityInstallationIdKey),
+           !stored.isEmpty,
+           !stored.contains("/")
+        {
+            return stored
+        }
+        let created = UUID().uuidString.lowercased()
+        appGroupDefaults.set(created, forKey: activityInstallationIdKey)
+        return created
+    }
+
+    static var activityHeatmapRange: String {
+        get { appGroupDefaults.string(forKey: activityHeatmapRangeKey) ?? "quarter" }
+        set { appGroupDefaults.set(newValue, forKey: activityHeatmapRangeKey) }
     }
 
     /// Explicit path to the `claude` binary; empty/unset ⇒ auto-discovery (§5.5:

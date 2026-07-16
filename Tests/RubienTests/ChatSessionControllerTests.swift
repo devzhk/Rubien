@@ -1,5 +1,6 @@
 #if os(macOS)
 import XCTest
+import GRDB
 import RubienCore
 @testable import Rubien
 
@@ -27,6 +28,66 @@ final class ChatSessionControllerTests: XCTestCase {
             initialAvailability: initialAvailability)
     }
 
+    func testAssistantActivityCountsFreshConversationOnceAndNeverCountsResume() async throws {
+        let savedCapture = RubienPreferences.recordAssistantActivity
+        RubienPreferences.recordAssistantActivity = true
+        defer { RubienPreferences.recordAssistantActivity = savedCapture }
+
+        let database = try AppDatabase(DatabaseQueue(path: ":memory:"))
+        let provider = MockAgentProvider(kind: .claude)
+        let controller = ChatSessionController(
+            provider: provider,
+            transcript: SpyTranscriptSink(),
+            conversationContext: .library,
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"),
+            gate: AssistantTurnGate(),
+            initialAvailability: .installed(version: "test", path: "/fake/claude"),
+            activityDatabase: database)
+
+        await runTurn(
+            controller,
+            provider: provider,
+            send: "hello",
+            events: [
+                .sessionStarted(sessionID: "provider-1"),
+                .sessionStarted(sessionID: "provider-1-rotated"),
+                .turnCompleted(usage: nil),
+            ])
+        await waitUntil {
+            (try? database.fetchReadingActivityStatistics().trackedTotals.assistantSessions) == 1
+        }
+        XCTAssertEqual(
+            try database.fetchReadingActivityStatistics().trackedTotals.assistantSessions,
+            1)
+
+        controller.resume(AgentSessionSummary(
+            id: "old-provider-session",
+            preview: "Prior conversation",
+            date: Date()))
+        await runTurn(
+            controller,
+            provider: provider,
+            send: "continue",
+            events: [.sessionStarted(sessionID: "old-provider-session-rotated")])
+        try? await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(
+            try database.fetchReadingActivityStatistics().trackedTotals.assistantSessions,
+            1)
+
+        controller.newConversation()
+        await runTurn(
+            controller,
+            provider: provider,
+            send: "new topic",
+            events: [.sessionStarted(sessionID: "provider-2")])
+        await waitUntil {
+            (try? database.fetchReadingActivityStatistics().trackedTotals.assistantSessions) == 2
+        }
+        XCTAssertEqual(
+            try database.fetchReadingActivityStatistics().trackedTotals.assistantSessions,
+            2)
+    }
+
     /// Drive one full turn: send, wait for the provider stream, feed events, finish.
     private func runTurn(
         _ controller: ChatSessionController,
@@ -47,6 +108,204 @@ final class ChatSessionControllerTests: XCTestCase {
     private func waitUntil(_ condition: @escaping () -> Bool, ticks: Int = 200) async {
         var n = 0
         while !condition() && n < ticks { await Task.yield(); n += 1 }
+    }
+
+    func testTurnOutcomePublishesApprovalSuccessFailureAndCancellation() async {
+        struct Boom: Error {}
+        let provider = MockAgentProvider()
+        let controller = makeController(provider: provider, sink: SpyTranscriptSink())
+
+        controller.send("first")
+        XCTAssertEqual(controller.turnOutcome.phase, .responding)
+        let firstTask = controller.turnTask
+        await provider.waitUntilStreaming()
+        provider.emit(.approvalRequested(id: "approval", toolName: "Write", summary: "write"))
+        await waitUntil { controller.pendingApproval != nil }
+        XCTAssertEqual(controller.turnOutcome.phase, .approvalRequired)
+        controller.respond(to: controller.pendingApproval!, .allowOnce)
+        XCTAssertEqual(controller.turnOutcome.phase, .responding)
+        provider.emit(.turnCompleted(usage: nil))
+        provider.finishStream()
+        await firstTask?.value
+        XCTAssertEqual(controller.turnOutcome.phase, .succeeded)
+
+        controller.send("second")
+        let secondTask = controller.turnTask
+        await provider.waitUntilStreaming()
+        provider.failStream(Boom())
+        await secondTask?.value
+        XCTAssertEqual(controller.turnOutcome.phase, .failed)
+
+        controller.send("third")
+        let thirdTask = controller.turnTask
+        await provider.waitUntilStreaming()
+        controller.stop()
+        await thirdTask?.value
+        XCTAssertEqual(controller.turnOutcome.phase, .cancelled)
+    }
+
+    func testAttributionLookupBlocksSendUntilHistoryResumeIsAdopted() async {
+        let provider = MockAgentProvider()
+        let store = AssistantSessionAttributionStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("Rubien-attribution-\(UUID().uuidString).json"))
+        let controller = ChatSessionController(
+            provider: provider,
+            transcript: SpyTranscriptSink(),
+            conversationContext: .library,
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"),
+            gate: AssistantTurnGate(),
+            initialAvailability: .installed(version: "test", path: "/fake/claude"),
+            attributionStore: store)
+
+        controller.resume(AgentSessionSummary(
+            id: "history-session",
+            preview: "Earlier work",
+            date: Date()))
+        XCTAssertTrue(controller.isResuming)
+        XCTAssertFalse(controller.canSend(draft: "must not reach the old conversation"))
+        controller.send("must not reach the old conversation")
+        XCTAssertNil(controller.turnTask)
+        XCTAssertTrue(provider.requests.isEmpty)
+
+        await waitUntil { !controller.isResuming }
+        XCTAssertTrue(controller.hasMessages)
+        XCTAssertEqual(controller.liveSessionID, "history-session")
+    }
+
+    func testPaperPresentationsMergeByInvocationOrdinalAndPublishAfterProse() {
+        let sink = SpyTranscriptSink()
+        let controller = makeController(provider: MockAgentProvider(), sink: sink)
+        let first = ChatPaper(
+            kind: .library,
+            referenceId: 1,
+            url: nil,
+            title: "First",
+            year: 2024,
+            badge: "PDF"
+        )
+        let duplicate = ChatPaper(
+            kind: .library,
+            referenceId: 1,
+            url: nil,
+            title: "Duplicate title is ignored",
+            year: 2024,
+            badge: "PDF"
+        )
+        let second = ChatPaper(
+            kind: .web,
+            referenceId: nil,
+            url: "https://example.com/second",
+            title: "Second",
+            year: 2025,
+            badge: "Web candidate"
+        )
+
+        controller.handle(
+            .paperPresentation(
+                callID: "later",
+                ordinal: 1,
+                group: ChatPaperGroup(items: [duplicate, second])
+            ),
+            gen: controller.generation
+        )
+        controller.handle(
+            .paperPresentation(
+                callID: "earlier",
+                ordinal: 0,
+                group: ChatPaperGroup(items: [first])
+            ),
+            gen: controller.generation
+        )
+        controller.handle(
+            .paperPresentation(
+                callID: "earlier",
+                ordinal: 0,
+                group: ChatPaperGroup(items: [second])
+            ),
+            gen: controller.generation
+        )
+        XCTAssertFalse(sink.calls.contains { if case .addPaperGroup = $0 { return true }; return false })
+
+        controller.handle(
+            .assistantMessageCompleted(text: "Here are two papers."),
+            gen: controller.generation
+        )
+        XCTAssertFalse(
+            sink.calls.contains { if case .addPaperGroup = $0 { return true }; return false },
+            "prose may precede later presentation calls, so it cannot finalize the group")
+
+        controller.handle(.turnCompleted(usage: nil), gen: controller.generation)
+        let published = sink.calls.compactMap { call -> ChatPaperGroup? in
+            if case .addPaperGroup(let group) = call { return group }
+            return nil
+        }
+        XCTAssertEqual(published.last?.items.map(\.title), ["First", "Second"])
+
+        controller.handle(
+            .toolUseCompleted(name: "mcp__rubien__rubien_present_papers"),
+            gen: controller.generation
+        )
+        XCTAssertFalse(sink.calls.contains { call in
+            if case .addToolChip = call { return true }
+            return false
+        }, "the app-private presentation tool must not leave a redundant chip")
+
+        controller.replayTranscript()
+        let restored = sink.calls.compactMap { call -> [ChatRenderMessage]? in
+            if case .loadTranscript(let rows) = call { return rows }
+            return nil
+        }.last
+        XCTAssertTrue(restored?.contains(where: { $0.role == .paper }) ?? false)
+    }
+
+    func testPresentationAfterAssistantProseJoinsTurnAndMalformedResultStaysVisible() {
+        let sink = SpyTranscriptSink()
+        let controller = makeController(provider: MockAgentProvider(), sink: sink)
+        let paper = ChatPaper(
+            kind: .library,
+            referenceId: 8,
+            url: nil,
+            title: "Later paper",
+            year: nil,
+            badge: "Library")
+
+        controller.handle(
+            .assistantMessageCompleted(text: "I found another option."),
+            gen: controller.generation)
+        controller.handle(
+            .paperPresentation(
+                callID: "after-prose",
+                ordinal: 0,
+                group: ChatPaperGroup(items: [paper])),
+            gen: controller.generation)
+        controller.handle(
+            .toolUseCompleted(name: "mcp__rubien__rubien_present_papers"),
+            gen: controller.generation)
+        controller.handle(.turnCompleted(usage: nil), gen: controller.generation)
+
+        XCTAssertTrue(sink.calls.contains { call in
+            if case .addPaperGroup(let group) = call {
+                return group.items.map(\.title) == ["Later paper"]
+            }
+            return false
+        })
+
+        controller.handle(
+            .toolUseStarted(
+                name: "mcp__rubien__rubien_present_papers",
+                detail: nil),
+            gen: controller.generation)
+        controller.handle(
+            .toolUseCompleted(name: "mcp__rubien__rubien_present_papers"),
+            gen: controller.generation)
+        XCTAssertTrue(sink.calls.contains { call in
+            if case .addToolChip(let name, let detail, .completed) = call {
+                return ChatPaperPresentation.isPresentationTool(name)
+                    && detail == "Paper presentation result was invalid"
+            }
+            return false
+        })
     }
 
     private struct AttachmentFixture {
@@ -963,6 +1222,37 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertEqual(provider.requests.count, 1, "the busy turn never spawned a second process")
         XCTAssertFalse(controller.isResponding)
         XCTAssertFalse(sink.calls.contains(.addUserMessage("q2")), "a refused message must not be rendered")
+    }
+
+    func testCommitCallbackRunsOnlyAfterGateAdmission() async {
+        let gate = AssistantTurnGate()
+        let provider = MockAgentProvider()
+        let controller = makeController(
+            provider: provider,
+            sink: SpyTranscriptSink(),
+            gate: gate)
+
+        await runTurn(
+            controller,
+            provider: provider,
+            send: "first",
+            events: [.sessionStarted(sessionID: "s1"), .turnCompleted(usage: nil)])
+
+        let held = await gate.tryAcquire(provider: .claude, sessionID: "s1")
+        XCTAssertTrue(held)
+        var commits = 0
+        controller.send("refused") { commits += 1 }
+        await controller.turnTask?.value
+        XCTAssertEqual(commits, 0, "an attempted but gate-refused turn was never committed")
+
+        await gate.release(provider: .claude, sessionID: "s1")
+        controller.send("admitted") { commits += 1 }
+        let task = controller.turnTask
+        await provider.waitUntilStreaming()
+        provider.emit(.turnCompleted(usage: nil))
+        provider.finishStream()
+        await task?.value
+        XCTAssertEqual(commits, 1)
     }
 
     func testSeedIsResentWhenTheFirstTurnFailsBeforeASession() async {
@@ -2337,6 +2627,7 @@ final class SpyTranscriptSink: ChatTranscriptSink {
         case appendDelta(String)
         case commitAssistantMessage(String)
         case addToolChip(String, String?, ToolChipStatus)
+        case addPaperGroup(ChatPaperGroup)
         case addNotice(String)
         case setTheme(ChatTheme)
     }
@@ -2352,6 +2643,7 @@ final class SpyTranscriptSink: ChatTranscriptSink {
     func addToolChip(name: String, detail: String?, status: ToolChipStatus) {
         calls.append(.addToolChip(name, detail, status))
     }
+    func addPaperGroup(_ group: ChatPaperGroup) { calls.append(.addPaperGroup(group)) }
     func addNotice(_ markdown: String) { calls.append(.addNotice(markdown)) }
     func setTheme(_ mode: ChatTheme) { calls.append(.setTheme(mode)) }
 

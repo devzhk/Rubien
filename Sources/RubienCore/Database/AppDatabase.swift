@@ -52,7 +52,7 @@ public struct ReferenceMentionCandidate: Sendable, Equatable {
 public final class AppDatabase: Sendable {
     /// Bumped whenever a new migration is registered. Surfaced in
     /// `rubien-cli sync status` JSON for diagnostics.
-    public static let currentSchemaVersion = "v6"
+    public static let currentSchemaVersion = "v7"
 
     public let dbWriter: any DatabaseWriter
 
@@ -586,7 +586,167 @@ public final class AppDatabase: Sendable {
             try Self.applyV6Body(db)
         }
 
+        // v7 (2026-07): add mergeable per-installation reading counters,
+        // Rubien Assistant session activity, and independent reset epochs.
+        // These are new synced entities, but their triggers are deliberately
+        // installed here instead of changing `syncedTables`: that collection
+        // is part of the already-shipped v1 migration and must remain frozen.
+        migrator.registerMigration("v7") { db in
+            try Self.applyV7Body(db)
+        }
+
         return migrator
+    }
+
+    fileprivate static func applyV7Body(_ db: Database) throws {
+        try db.execute(sql: """
+            CREATE TABLE readingActivity (
+                installationId TEXT NOT NULL,
+                referenceId INTEGER NOT NULL REFERENCES reference(id) ON DELETE CASCADE,
+                localDay TEXT NOT NULL,
+                epochRevision INTEGER NOT NULL,
+                generation TEXT NOT NULL,
+                activeSeconds INTEGER NOT NULL CHECK (activeSeconds >= 0),
+                lastActiveAt DATETIME NOT NULL,
+                dateModified DATETIME NOT NULL,
+                PRIMARY KEY (generation, installationId, referenceId, localDay),
+                CHECK (length(localDay) = 10),
+                CHECK (instr(generation, '/') = 0),
+                CHECK (instr(installationId, '/') = 0)
+            )
+            """)
+        try db.create(
+            index: "readingActivity_generation_localDay_referenceId",
+            on: "readingActivity",
+            columns: ["generation", "localDay", "referenceId"]
+        )
+        try db.create(
+            index: "readingActivity_generation_lastActiveAt",
+            on: "readingActivity",
+            columns: ["generation", "lastActiveAt"]
+        )
+
+        try db.execute(sql: """
+            CREATE TABLE assistantActivity (
+                id TEXT NOT NULL PRIMARY KEY,
+                provider TEXT NOT NULL,
+                epochRevision INTEGER NOT NULL,
+                generation TEXT NOT NULL,
+                startedAt DATETIME NOT NULL,
+                localDay TEXT NOT NULL,
+                dateModified DATETIME NOT NULL,
+                CHECK (length(localDay) = 10),
+                CHECK (instr(generation, '/') = 0)
+            )
+            """)
+        try db.create(
+            index: "assistantActivity_generation_startedAt",
+            on: "assistantActivity",
+            columns: ["generation", "startedAt"]
+        )
+
+        try db.execute(sql: """
+            CREATE TABLE activityEpoch (
+                kind TEXT NOT NULL PRIMARY KEY CHECK (kind IN ('reading', 'assistant')),
+                revision INTEGER NOT NULL CHECK (revision >= 0),
+                generation TEXT NOT NULL CHECK (instr(generation, '/') = 0),
+                resetAt DATETIME,
+                dateModified DATETIME NOT NULL
+            )
+            """)
+
+        // Local-only state. Pending clear survives a crash between the epoch
+        // transaction and its eventual CloudKit acknowledgement; quarantine
+        // retains otherwise-valid pulled activity until its epoch/reference
+        // dependency becomes available.
+        try db.execute(sql: """
+            CREATE TABLE activityPendingClear (
+                kind TEXT NOT NULL PRIMARY KEY CHECK (kind IN ('reading', 'assistant')),
+                intentId TEXT NOT NULL,
+                revision INTEGER NOT NULL CHECK (revision >= 0),
+                generation TEXT NOT NULL,
+                resetAt DATETIME NOT NULL,
+                dateModified DATETIME NOT NULL
+            )
+            """)
+        try db.execute(sql: """
+            CREATE TABLE activityQuarantine (
+                recordName TEXT NOT NULL PRIMARY KEY,
+                entityType TEXT NOT NULL,
+                reason TEXT NOT NULL CHECK (reason IN ('epoch', 'reference')),
+                epochRevision INTEGER NOT NULL,
+                generation TEXT NOT NULL,
+                referenceId INTEGER,
+                recordData BLOB NOT NULL,
+                receivedAt DATETIME NOT NULL
+            )
+            """)
+        try db.create(
+            index: "activityQuarantine_entityType_referenceId_receivedAt",
+            on: "activityQuarantine",
+            columns: ["entityType", "referenceId", "receivedAt"]
+        )
+
+        // Stable tokens make fresh installs converge instead of each device
+        // inventing a distinct initial generation.
+        let now = Date()
+        for kind in ActivityKind.allCases {
+            var epoch = ActivityEpoch.initial(kind, dateModified: now)
+            try epoch.insert(db)
+        }
+
+        let applyingRemoteGuard =
+            "WHEN (SELECT value FROM syncSession WHERE key='applyingRemote') IS NULL"
+        let syncedActivityTables: [(table: String, newKey: String, oldKey: String)] = [
+            (
+                "readingActivity",
+                "NEW.generation || '/' || NEW.installationId || '/' || NEW.referenceId || '/' || NEW.localDay",
+                "OLD.generation || '/' || OLD.installationId || '/' || OLD.referenceId || '/' || OLD.localDay"
+            ),
+            ("assistantActivity", "NEW.id", "OLD.id"),
+            ("activityEpoch", "NEW.kind", "OLD.kind"),
+        ]
+
+        for entry in syncedActivityTables {
+            let markDirtyBody = """
+                INSERT INTO syncState(entityType, entityId, isDirty, pushInFlight)
+                    VALUES('\(entry.table)', \(entry.newKey), 1, 0)
+                    ON CONFLICT(entityType, entityId)
+                        DO UPDATE SET isDirty = 1, pushInFlight = 0;
+                """
+            for (suffix, event) in [("ai", "INSERT"), ("au", "UPDATE")] {
+                try db.execute(sql: """
+                    CREATE TRIGGER \(entry.table)_\(suffix) AFTER \(event) ON \(entry.table)
+                        \(applyingRemoteGuard)
+                    BEGIN
+                        \(markDirtyBody)
+                    END;
+                    """)
+            }
+            try db.execute(sql: """
+                CREATE TRIGGER \(entry.table)_ad AFTER DELETE ON \(entry.table)
+                    \(applyingRemoteGuard)
+                BEGIN
+                    INSERT INTO tombstone(entityType, entityId, deletedAt)
+                        VALUES('\(entry.table)', \(entry.oldKey), \(sqlNowISO8601))
+                        ON CONFLICT(entityType, entityId)
+                            DO UPDATE SET deletedAt = excluded.deletedAt;
+                    DELETE FROM syncState
+                        WHERE entityType='\(entry.table)' AND entityId=\(entry.oldKey);
+                END;
+                """)
+        }
+
+        // The epoch rows were intentionally seeded before triggers existed;
+        // queue them explicitly so a pre-v7 peer can later learn the baseline.
+        for kind in ActivityKind.allCases {
+            try db.execute(sql: """
+                INSERT INTO syncState(entityType, entityId, isDirty, pushInFlight)
+                    VALUES('activityEpoch', ?, 1, 0)
+                    ON CONFLICT(entityType, entityId)
+                        DO UPDATE SET isDirty = 1, pushInFlight = 0
+                """, arguments: [kind.rawValue])
+        }
     }
 
     fileprivate static func applyV5Body(_ db: Database) throws {
@@ -775,6 +935,14 @@ public final class AppDatabase: Sendable {
     public static func runV5MigrationForTesting(on queue: DatabaseQueue) throws {
         try queue.write { db in
             try Self.applyV5Body(db)
+        }
+    }
+
+    /// Test-only: applies the immutable v7 activity-schema body to a
+    /// v6-shaped queue. Used by `MigrationV7Tests` for the upgrade path.
+    public static func runV7MigrationForTesting(on queue: DatabaseQueue) throws {
+        try queue.write { db in
+            try Self.applyV7Body(db)
         }
     }
 

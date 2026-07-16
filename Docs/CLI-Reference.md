@@ -53,6 +53,8 @@ Linux needs system deps first — see [Linux CLI](../README.md#linux-cli). For d
 | `read text` | Read a reference's body text — its attached PDF or clipped web page — routed by what it has |
 | `read annotations` | List a reference's annotations, PDF and web merged (each item source-tagged) |
 | `grep` | Find where a reference's body text says something — PDF pages or web offsets — without retrieving the body (the lookup half of `read`) |
+| `stats` | Report tracked reading and Rubien Assistant activity; `--year` selects only the daily calendar slice |
+| `stats-clear` | Clear Reading or Assistant statistics behind an explicit `--yes` confirmation and synced reset boundary |
 | `styles` | List available citation styles |
 | `version` | Print the CLI marketing version and monotonic build number as JSON (`{"build":8,"version":"0.1.7"}`); the MCP server's version guard requires `build >= MIN_CLI_BUILD` |
 | `self-update` | (Linux) Download the latest signed release and replace `rubien-cli` in place after verifying an ed25519 signature; `--check` reports `{current, latest, updateAvailable}` as JSON and changes nothing. On macOS it is a no-op (Rubien.app/Sparkle manages the bundled CLI). |
@@ -61,7 +63,7 @@ Linux needs system deps first — see [Linux CLI](../README.md#linux-cli). For d
 | `pdf page-image` | Render a PDF page as a base64-encoded JPEG/PNG |
 | `pdf status` | Show PDF cache + upload-queue state for a reference (JSON only) |
 | `pdf download` | Fetch the open-access PDF for a reference and attach it (skip-if-attached; `--force` to replace) |
-| `mcp` | Run a Model Context Protocol server over stdio, exposing the full 27-tool library catalog by default or its 14 read-only tools with `--read-only` (the in-app Assistant channel; a Node-free replacement for `rubien-mcp-server`). Mac **and** Linux. |
+| `mcp` | Run a Model Context Protocol server over stdio, exposing the full 28-tool library catalog by default or its 15 read-only tools with `--read-only` (the in-app Assistant channel; a Node-free replacement for `rubien-mcp-server`). Mac **and** Linux. |
 | `sync status` | Inspect iCloud sync state (JSON only). **Mac-only** — Linux builds omit this subcommand entirely. |
 
 ---
@@ -1004,6 +1006,37 @@ for the next app launch.
 
 ---
 
+## stats
+
+```bash
+rubien-cli stats [--year <1970...9999>]
+```
+
+Returns the shared activity DTO used by the Home dashboard and
+`rubien_reading_activity`. Omitting `--year` selects the current local Gregorian
+year. The selected year affects only `yearActivity.dailyActivity`; tracked
+totals, the locale-defined current week, streaks, and recent papers cover the
+current retained generation since tracking began or the last clear.
+
+A paper-day qualifies after its per-installation components sum to at least 60
+estimated foreground-reader seconds. Sub-threshold paper-days are omitted. Once
+qualified, all accumulated seconds (including the first 60) contribute. Daily
+history and Rubien Assistant session statistics begin with the shipping version
+that introduced this feature; legacy open counts are not backfilled.
+
+## stats-clear
+
+```bash
+rubien-cli stats-clear --kind reading --yes
+rubien-cli stats-clear --kind assistant --yes
+```
+
+Clears only the selected activity category and returns `{"cleared":"reading"}`
+or `{"cleared":"assistant"}`. The reset boundary syncs when iCloud library sync
+is enabled; an offline peer can lose pre-clear activity when it later learns the
+boundary. The command returns after the local transaction and posts the normal
+cross-process library-change notification without waiting for CloudKit.
+
 ## mcp
 
 Run a **Model Context Protocol (MCP) server over stdio**, exposing Rubien's
@@ -1031,7 +1064,7 @@ printf '%s\n' \
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `--read-only` | Flag | off | Register only the 14 read-only tools. Without the flag, register all 27 tools (14 reads + 13 writes). |
+| `--read-only` | Flag | off | Register only the 15 read-only tools. Without the flag, register all 28 tools (15 reads + 13 writes). |
 
 **Protocol.** Speaks JSON-RPC 2.0 over stdio (newline-delimited messages, one
 per line): `initialize` (echoes the client's `protocolVersion`, advertises the
@@ -1040,10 +1073,9 @@ Notifications (`notifications/initialized`, etc.) get no response. Unknown
 methods return error `-32601`; unknown tools return `-32602`. Diagnostics go to
 stderr; stdout carries only protocol messages.
 
-**Tools.** The native catalog mirrors the npm server's 27-tool
-`{operation}_{target}` grid. Read tools carry `readOnlyHint: true`; writes carry
+**Tools.** The native catalog mirrors the npm server's 28-tool catalog. Read tools carry `readOnlyHint: true`; writes carry
 `readOnlyHint: false`; destructive mutations also carry
-`destructiveHint: true`. `--read-only` filters this catalog to the 14 reads.
+`destructiveHint: true`. `--read-only` filters this catalog to the 15 reads.
 
 | Surface | Tools |
 |---|---|
@@ -1052,6 +1084,7 @@ stderr; stdout carries only protocol messages.
 | Saved views | `rubien_list_views`, `rubien_create_view`, `rubien_update_view`, `rubien_delete_view` |
 | Citations + export | `rubien_cite`, `rubien_list_styles`, `rubien_export` |
 | PDFs + reading | `rubien_get_pdf_info`, `rubien_render_pdf_page`, `rubien_download_pdf`, `rubien_read_text`, `rubien_read_annotations`, `rubien_grep_text` |
+| Activity | `rubien_reading_activity` |
 | Sync | `rubien_get_sync_status` (the backing CLI command is Mac-only; a Linux call returns an in-band error) |
 
 The two potentially long intake calls, `rubien_create_reference` and

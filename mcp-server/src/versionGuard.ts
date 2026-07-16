@@ -1,12 +1,11 @@
 /**
  * The minimum rubien-cli build this server requires. Equals the build that
- * shipped the unified {op}_{target} surface (add --source one-door, update
- * --properties, properties --update/--update-option, list --view) that the
- * 0.3.0 catalog shells out to. Bump only when a future server release
+ * first shipped `stats`, which backs `rubien_reading_activity` in the 0.3.1
+ * catalog. Bump only when a future server release
  * genuinely needs a newer CLI feature; the released CLI's build must always
  * be >= this value.
  */
-export const MIN_CLI_BUILD = 26;
+export const MIN_CLI_BUILD = 28;
 
 export interface CliVersion {
   version: string;

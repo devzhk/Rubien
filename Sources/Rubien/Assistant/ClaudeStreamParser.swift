@@ -24,6 +24,8 @@ struct ClaudeStreamParser {
     /// tool_use_id → tool name, so a `tool_result` (which carries only the id) can
     /// emit `toolUseCompleted(name:)`. Bounded implicitly by a turn's tool count.
     private var toolNamesByUseID: [String: String] = [:]
+    private var presentationOrdinalsByUseID: [String: Int] = [:]
+    private var nextPresentationOrdinal = 0
 
     init() {}
 
@@ -99,7 +101,13 @@ struct ClaudeStreamParser {
                 if let text = block["text"] as? String { textParts.append(text) }
             case "tool_use":
                 let name = (block["name"] as? String) ?? "tool"
-                if let useID = block["id"] as? String { toolNamesByUseID[useID] = name }
+                if let useID = block["id"] as? String {
+                    toolNamesByUseID[useID] = name
+                    if ChatPaperPresentation.isPresentationTool(name) {
+                        presentationOrdinalsByUseID[useID] = nextPresentationOrdinal
+                        nextPresentationOrdinal += 1
+                    }
+                }
                 toolEvents.append(.toolUseStarted(name: name, detail: Self.summarize(block["input"])))
             default:
                 // `thinking` blocks and any future block type are ignored.
@@ -115,7 +123,7 @@ struct ClaudeStreamParser {
         return events
     }
 
-    private func parseUser(_ object: [String: Any]) -> [AgentEvent] {
+    private mutating func parseUser(_ object: [String: Any]) -> [AgentEvent] {
         // A `user` message carries tool_result block(s) — the completion side of a
         // tool chip. Map each to `toolUseCompleted` using the recalled name.
         guard let message = object["message"] as? [String: Any],
@@ -125,12 +133,29 @@ struct ClaudeStreamParser {
         for block in content where block["type"] as? String == "tool_result" {
             guard let useID = block["tool_use_id"] as? String else { continue }
             let name = toolNamesByUseID[useID] ?? "tool"
+            if ChatPaperPresentation.isPresentationTool(name),
+               block["is_error"] as? Bool != true,
+               let group = ChatPaperPresentation.decodeToolResult(block["content"]) {
+                let ordinal: Int
+                if let started = presentationOrdinalsByUseID[useID] {
+                    ordinal = started
+                } else {
+                    ordinal = nextPresentationOrdinal
+                    nextPresentationOrdinal += 1
+                    presentationOrdinalsByUseID[useID] = ordinal
+                }
+                events.append(.paperPresentation(
+                    callID: useID,
+                    ordinal: ordinal,
+                    group: group
+                ))
+            }
             events.append(.toolUseCompleted(name: name))
         }
         return events
     }
 
-    private func parseResult(_ object: [String: Any]) -> [AgentEvent] {
+    private mutating func parseResult(_ object: [String: Any]) -> [AgentEvent] {
         var events: [AgentEvent] = []
         // Re-capture the (rotated) session id from EVERY result (D5 / Risk #5),
         // even if unchanged — this is the only channel the controller has to learn
@@ -146,6 +171,9 @@ struct ClaudeStreamParser {
             }
         }
         events.append(.turnCompleted(usage: Self.parseUsage(object)))
+        toolNamesByUseID.removeAll(keepingCapacity: true)
+        presentationOrdinalsByUseID.removeAll(keepingCapacity: true)
+        nextPresentationOrdinal = 0
         return events
     }
 

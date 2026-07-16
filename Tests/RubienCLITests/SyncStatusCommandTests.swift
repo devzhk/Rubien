@@ -38,7 +38,7 @@ final class SyncStatusCommandTests: XCTestCase {
         }
 
         // schemaVersion must reflect the current AppDatabase migration tag.
-        XCTAssertEqual(json?["schemaVersion"] as? String, "v6",
+        XCTAssertEqual(json?["schemaVersion"] as? String, AppDatabase.currentSchemaVersion,
                        "schemaVersion should match AppDatabase.currentSchemaVersion")
     }
 

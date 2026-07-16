@@ -254,6 +254,48 @@ extension SyncEntityType {
             row.populate(record: record)
             return record
 
+        case .readingActivity:
+            guard let key = Self.splitReadingActivityID(entityId),
+                  let row = try ReadingActivity.fetchOne(
+                    db,
+                    sql: """
+                        SELECT * FROM readingActivity
+                        WHERE generation = ? AND installationId = ?
+                          AND referenceId = ? AND localDay = ?
+                        """,
+                    arguments: [key.generation, key.installationId, key.referenceId, key.localDay]
+                  )
+            else { return nil }
+            let record = Self.rehydrateOrNew(
+                systemFields: systemFields,
+                recordType: recordType,
+                recordName: qualifiedRecordName(entityId: entityId)
+            )
+            row.populate(record: record)
+            return record
+
+        case .assistantActivity:
+            guard let row = try AssistantActivity.fetchOne(db, key: entityId) else { return nil }
+            let record = Self.rehydrateOrNew(
+                systemFields: systemFields,
+                recordType: recordType,
+                recordName: qualifiedRecordName(entityId: entityId)
+            )
+            row.populate(record: record)
+            return record
+
+        case .activityEpoch:
+            guard let kind = ActivityKind(rawValue: entityId),
+                  let row = try ActivityEpoch.fetchOne(db, key: kind.rawValue)
+            else { return nil }
+            let record = Self.rehydrateOrNew(
+                systemFields: systemFields,
+                recordType: recordType,
+                recordName: qualifiedRecordName(entityId: entityId)
+            )
+            row.populate(record: record)
+            return record
+
         case .referencePDF:
             guard let id = Int64(entityId) else { return nil }
             let row: Row? = try Row.fetchOne(db,
@@ -325,7 +367,12 @@ extension SyncEntityType {
     /// systemFields and clear `isDirty` on a row this device never synced,
     /// silently dropping a pending local edit.
     @discardableResult
-    public func applyRemoteRecord(_ record: CKRecord, entityId: String, db: Database) throws -> Bool {
+    public func applyRemoteRecord(
+        _ record: CKRecord,
+        entityId: String,
+        db: Database,
+        stateStore: SyncStateStore = SyncStateStore()
+    ) throws -> Bool {
         // `entityId` is the caller-stripped local id (no "<type>:" prefix).
         // Don't read `record.recordID.recordName` directly — it carries the
         // prefixed form so `Int64(...)` would fail for every row.
@@ -512,6 +559,130 @@ extension SyncEntityType {
             row.id = id
             try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
 
+        case .readingActivity:
+            guard let row = ReadingActivity(record: record),
+                  row.entityId == entityId
+            else { return false }
+            if try Reference.fetchOne(db, id: row.referenceId) == nil,
+               try stateStore.hasTombstone(
+                    db,
+                    entityType: .reference,
+                    entityId: String(row.referenceId)
+               )
+            {
+                try Self.queueActivityDeletion(
+                    type: .readingActivity,
+                    entityId: entityId,
+                    recordName: record.recordID.recordName,
+                    stateStore: stateStore,
+                    db: db
+                )
+                return false
+            }
+            guard try Self.activityFactCanApply(
+                kind: .reading,
+                epochRevision: row.epochRevision,
+                generation: row.generation,
+                referenceId: row.referenceId,
+                db: db
+            ) else {
+                try Self.quarantine(row, recordName: record.recordID.recordName, db: db)
+                return true
+            }
+            let localSeconds = try Int64.fetchOne(
+                db,
+                sql: """
+                    SELECT activeSeconds FROM readingActivity
+                    WHERE generation = ? AND installationId = ?
+                      AND referenceId = ? AND localDay = ?
+                    """,
+                arguments: [row.generation, row.installationId, row.referenceId, row.localDay]
+            )
+            try Self.upsertReadingActivity(row, db: db)
+            if let localSeconds, localSeconds > row.activeSeconds {
+                try stateStore.adoptSystemFieldsKeepingDirty(
+                    db,
+                    entityType: .readingActivity,
+                    entityId: entityId,
+                    record: record
+                )
+                return false
+            }
+
+        case .assistantActivity:
+            guard let row = AssistantActivity(record: record, id: entityId) else { return false }
+            guard try Self.activityFactCanApply(
+                kind: .assistant,
+                epochRevision: row.epochRevision,
+                generation: row.generation,
+                referenceId: nil,
+                db: db
+            ) else {
+                try Self.quarantine(row, recordName: record.recordID.recordName, db: db)
+                return true
+            }
+            try Self.upsertAssistantActivity(row, db: db)
+
+        case .activityEpoch:
+            guard let incoming = ActivityEpoch(record: record),
+                  incoming.kind.rawValue == entityId,
+                  let local = try ActivityEpoch.fetchOne(db, key: incoming.kind.rawValue)
+            else { return false }
+
+            if let pending = try ActivityPendingClear.fetchOne(db, key: incoming.kind.rawValue) {
+                if pending.revision == incoming.revision,
+                   pending.generation == incoming.generation
+                {
+                    try incoming.update(db)
+                    _ = try ActivityPendingClear.deleteOne(db, key: incoming.kind.rawValue)
+                    try Self.replayQuarantinedActivity(
+                        epochKinds: Set([incoming.kind]),
+                        db: db
+                    )
+                    return true
+                }
+
+                if incoming.revision >= pending.revision {
+                    try Self.rebasePendingClear(
+                        pending,
+                        over: incoming,
+                        serverRecord: record,
+                        stateStore: stateStore,
+                        db: db
+                    )
+                } else {
+                    // Our Lamport revision already dominates this server value.
+                    // Keep the intent/pair, but adopt the current change tag so
+                    // the retry updates the existing stable epoch record.
+                    try stateStore.adoptSystemFieldsKeepingDirty(
+                        db,
+                        entityType: .activityEpoch,
+                        entityId: incoming.kind.rawValue,
+                        record: record
+                    )
+                }
+                return false
+            }
+
+            let incomingWins = incoming.revision > local.revision
+                || (incoming.revision == local.revision && incoming.generation > local.generation)
+            let samePair = incoming.revision == local.revision
+                && incoming.generation == local.generation
+            guard incomingWins || samePair else {
+                try stateStore.adoptSystemFieldsKeepingDirty(
+                    db,
+                    entityType: .activityEpoch,
+                    entityId: incoming.kind.rawValue,
+                    record: record
+                )
+                return false
+            }
+            try incoming.update(db)
+            try Self.replayQuarantinedActivity(
+                epochKinds: Set([incoming.kind]),
+                db: db
+            )
+
         case .referencePDF:
             // Backwards-compat wrapper around the two-step pipeline.
             // Production hot paths drive prepare/apply directly so the file
@@ -536,6 +707,48 @@ extension SyncEntityType {
         switch self {
         case .reference:
             if let id = Int64(entityId) {
+                let stateStore = SyncStateStore()
+                let materializedActivityIDs = try ReadingActivity.fetchAll(
+                    db,
+                    sql: "SELECT * FROM readingActivity WHERE referenceId = ?",
+                    arguments: [id]
+                ).map(\.entityId)
+                let quarantinedRecordNames = try String.fetchAll(
+                    db,
+                    sql: """
+                        SELECT recordName FROM activityQuarantine
+                        WHERE entityType = 'readingActivity' AND referenceId = ?
+                        """,
+                    arguments: [id]
+                )
+                var childEntityIDs = Set(materializedActivityIDs)
+                for recordName in quarantinedRecordNames {
+                    if let parsed = SyncEntityType.parseRecordName(recordName),
+                       parsed.0 == .readingActivity
+                    {
+                        childEntityIDs.insert(parsed.1)
+                    }
+                }
+                for childID in childEntityIDs {
+                    try stateStore.removeState(
+                        db,
+                        entityType: .readingActivity,
+                        entityId: childID
+                    )
+                    try stateStore.upsertTombstone(
+                        db,
+                        entityType: .readingActivity,
+                        entityId: childID,
+                        confirmedByServer: false
+                    )
+                }
+                try db.execute(
+                    sql: """
+                        DELETE FROM activityQuarantine
+                        WHERE entityType = 'readingActivity' AND referenceId = ?
+                        """,
+                    arguments: [id]
+                )
                 // Capture the PDF filename before delete; FK cascade will drop
                 // the pdfCache row, but the on-disk file in PDFs/ has no FK so
                 // it would persist forever. Also clear any orphan syncState /
@@ -593,6 +806,30 @@ extension SyncEntityType {
             if let id = Int64(entityId) { _ = try PropertyValue.deleteOne(db, key: id) }
         case .databaseView:
             if let id = Int64(entityId) { _ = try DatabaseView.deleteOne(db, key: id) }
+        case .readingActivity:
+            if let key = Self.splitReadingActivityID(entityId) {
+                try db.execute(
+                    sql: """
+                        DELETE FROM readingActivity
+                        WHERE generation = ? AND installationId = ?
+                          AND referenceId = ? AND localDay = ?
+                        """,
+                    arguments: [key.generation, key.installationId, key.referenceId, key.localDay]
+                )
+                try db.execute(
+                    sql: "DELETE FROM activityQuarantine WHERE recordName = ?",
+                    arguments: [qualifiedRecordName(entityId: entityId)]
+                )
+            }
+        case .assistantActivity:
+            _ = try AssistantActivity.deleteOne(db, key: entityId)
+            try db.execute(
+                sql: "DELETE FROM activityQuarantine WHERE recordName = ?",
+                arguments: [qualifiedRecordName(entityId: entityId)]
+            )
+        case .activityEpoch:
+            // Epoch rows are durable reset fences and are never removed.
+            break
         case .referencePDF:
             if let id = Int64(entityId) {
                 // Capture filename before delete so we can also nuke the file.
@@ -617,6 +854,547 @@ extension SyncEntityType {
               let tagId = Int64(parts[1])
         else { return nil }
         return (refId, tagId)
+    }
+
+    private static func splitReadingActivityID(
+        _ entityId: String
+    ) -> (generation: String, installationId: String, referenceId: Int64, localDay: LocalDay)? {
+        let parts = entityId.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 4,
+              !parts[0].isEmpty,
+              !parts[1].isEmpty,
+              let referenceId = Int64(parts[2]),
+              let localDay = LocalDay(rawValue: String(parts[3]))
+        else { return nil }
+        return (String(parts[0]), String(parts[1]), referenceId, localDay)
+    }
+
+    private static func activityFactCanApply(
+        kind: ActivityKind,
+        epochRevision: Int,
+        generation: String,
+        referenceId: Int64?,
+        db: Database
+    ) throws -> Bool {
+        guard let epoch = try ActivityEpoch.fetchOne(db, key: kind.rawValue),
+              epoch.revision == epochRevision,
+              epoch.generation == generation
+        else { return false }
+        if let referenceId {
+            return try Reference.fetchOne(db, id: referenceId) != nil
+        }
+        return true
+    }
+
+    /// Facts from a locally-cleared generation stay off CloudKit until the
+    /// stable epoch record has been saved/pulled and its exact pair is clean.
+    /// Returning false from the CKSyncEngine batch provider is safe because the
+    /// durable dirty row remains; the epoch acknowledgement transaction wakes
+    /// ingestion and re-enqueues it.
+    func activityFactIsPushEligible(db: Database, entityId: String) throws -> Bool {
+        let kind: ActivityKind
+        let revision: Int
+        let generation: String
+        switch self {
+        case .readingActivity:
+            guard let key = Self.splitReadingActivityID(entityId),
+                  let row = try ReadingActivity.fetchOne(
+                    db,
+                    sql: """
+                        SELECT * FROM readingActivity
+                        WHERE generation = ? AND installationId = ?
+                          AND referenceId = ? AND localDay = ?
+                        """,
+                    arguments: [key.generation, key.installationId, key.referenceId, key.localDay]
+                  )
+            else { return false }
+            kind = .reading
+            revision = row.epochRevision
+            generation = row.generation
+        case .assistantActivity:
+            guard let row = try AssistantActivity.fetchOne(db, key: entityId) else { return false }
+            kind = .assistant
+            revision = row.epochRevision
+            generation = row.generation
+        default:
+            return true
+        }
+
+        guard try ActivityPendingClear.fetchOne(db, key: kind.rawValue) == nil,
+              let epoch = try ActivityEpoch.fetchOne(db, key: kind.rawValue),
+              epoch.revision == revision,
+              epoch.generation == generation
+        else { return false }
+
+        return try Bool.fetchOne(
+            db,
+            sql: """
+                SELECT EXISTS(
+                    SELECT 1 FROM syncState
+                    WHERE entityType = 'activityEpoch' AND entityId = ?
+                      AND isDirty = 0 AND systemFields IS NOT NULL
+                )
+                """,
+            arguments: [kind.rawValue]
+        ) ?? false
+    }
+
+    private static func rebasePendingClear(
+        _ pending: ActivityPendingClear,
+        over incoming: ActivityEpoch,
+        serverRecord: CKRecord,
+        stateStore: SyncStateStore,
+        db: Database
+    ) throws {
+        let oldRevision = pending.revision
+        let oldGeneration = pending.generation
+        let nextRevision = max(oldRevision, incoming.revision) + 1
+        let nextGeneration = UUID().uuidString.lowercased()
+        let now = Date()
+
+        switch pending.kind {
+        case .reading:
+            let rows = try ReadingActivity.fetchAll(
+                db,
+                sql: """
+                    SELECT * FROM readingActivity
+                    WHERE epochRevision = ? AND generation = ?
+                    """,
+                arguments: [oldRevision, oldGeneration]
+            )
+            try db.execute(
+                sql: """
+                    UPDATE readingActivity
+                    SET epochRevision = ?, generation = ?, dateModified = ?
+                    WHERE epochRevision = ? AND generation = ?
+                    """,
+                arguments: [nextRevision, nextGeneration, now, oldRevision, oldGeneration]
+            )
+            for row in rows {
+                let oldID = row.entityId
+                let newID = "\(nextGeneration)/\(row.installationId)/\(row.referenceId)/\(row.localDay.rawValue)"
+                try stateStore.removeState(db, entityType: .readingActivity, entityId: oldID)
+                try stateStore.removeTombstone(db, entityType: .readingActivity, entityId: oldID)
+                try db.execute(
+                    sql: """
+                        INSERT INTO syncState(entityType, entityId, isDirty, pushInFlight)
+                        VALUES('readingActivity', ?, 1, 0)
+                        ON CONFLICT(entityType, entityId)
+                            DO UPDATE SET isDirty = 1, pushInFlight = 0
+                        """,
+                    arguments: [newID]
+                )
+            }
+
+        case .assistant:
+            let ids = try String.fetchAll(
+                db,
+                sql: """
+                    SELECT id FROM assistantActivity
+                    WHERE epochRevision = ? AND generation = ?
+                    """,
+                arguments: [oldRevision, oldGeneration]
+            )
+            try db.execute(
+                sql: """
+                    UPDATE assistantActivity
+                    SET epochRevision = ?, generation = ?, dateModified = ?
+                    WHERE epochRevision = ? AND generation = ?
+                    """,
+                arguments: [nextRevision, nextGeneration, now, oldRevision, oldGeneration]
+            )
+            for id in ids {
+                try db.execute(
+                    sql: """
+                        INSERT INTO syncState(entityType, entityId, isDirty, pushInFlight)
+                        VALUES('assistantActivity', ?, 1, 0)
+                        ON CONFLICT(entityType, entityId)
+                            DO UPDATE SET isDirty = 1, pushInFlight = 0
+                        """,
+                    arguments: [id]
+                )
+            }
+        }
+
+        var rebasedEpoch = ActivityEpoch(
+            kind: pending.kind,
+            revision: nextRevision,
+            generation: nextGeneration,
+            resetAt: pending.resetAt,
+            dateModified: now
+        )
+        try rebasedEpoch.update(db)
+
+        var rebasedPending = pending
+        rebasedPending.revision = nextRevision
+        rebasedPending.generation = nextGeneration
+        rebasedPending.dateModified = now
+        try rebasedPending.update(db)
+
+        try stateStore.adoptSystemFieldsKeepingDirty(
+            db,
+            entityType: .activityEpoch,
+            entityId: pending.kind.rawValue,
+            record: serverRecord
+        )
+    }
+
+    static func queueActivityDeletion(
+        type: SyncEntityType,
+        entityId: String,
+        recordName: String,
+        stateStore: SyncStateStore,
+        db: Database
+    ) throws {
+        try db.execute(
+            sql: "DELETE FROM activityQuarantine WHERE recordName = ?",
+            arguments: [recordName]
+        )
+        try stateStore.removeState(db, entityType: type, entityId: entityId)
+        try stateStore.upsertTombstone(
+            db,
+            entityType: type,
+            entityId: entityId,
+            confirmedByServer: false
+        )
+    }
+
+    static func reconcileActivityQuarantineAfterFetch(
+        stateStore: SyncStateStore,
+        db: Database
+    ) throws {
+        try replayQuarantinedActivity(all: true, db: db)
+        let rows = try Row.fetchAll(
+            db,
+            sql: "SELECT * FROM activityQuarantine ORDER BY receivedAt"
+        )
+        let decoder = JSONDecoder()
+
+        for row in rows {
+            let recordName: String = row["recordName"]
+            guard let (type, entityId) = SyncEntityType.parseRecordName(recordName),
+                  type == .readingActivity || type == .assistantActivity
+            else {
+                try db.execute(
+                    sql: "DELETE FROM activityQuarantine WHERE recordName = ?",
+                    arguments: [recordName]
+                )
+                continue
+            }
+
+            let data: Data = row["recordData"]
+            let kind: ActivityKind
+            let revision: Int
+            let generation: String
+            if type == .readingActivity {
+                guard let activity = try? decoder.decode(ReadingActivity.self, from: data) else {
+                    try queueActivityDeletion(
+                        type: type,
+                        entityId: entityId,
+                        recordName: recordName,
+                        stateStore: stateStore,
+                        db: db
+                    )
+                    continue
+                }
+                if try Reference.fetchOne(db, id: activity.referenceId) == nil {
+                    // didFetchRecordZoneChanges is the end-of-zone boundary:
+                    // a parent still absent now is permanent for this fetch.
+                    try queueActivityDeletion(
+                        type: type,
+                        entityId: entityId,
+                        recordName: recordName,
+                        stateStore: stateStore,
+                        db: db
+                    )
+                    continue
+                }
+                kind = .reading
+                revision = activity.epochRevision
+                generation = activity.generation
+            } else {
+                guard let activity = try? decoder.decode(AssistantActivity.self, from: data) else {
+                    try queueActivityDeletion(
+                        type: type,
+                        entityId: entityId,
+                        recordName: recordName,
+                        stateStore: stateStore,
+                        db: db
+                    )
+                    continue
+                }
+                kind = .assistant
+                revision = activity.epochRevision
+                generation = activity.generation
+            }
+
+            guard try ActivityPendingClear.fetchOne(db, key: kind.rawValue) == nil,
+                  let epoch = try ActivityEpoch.fetchOne(db, key: kind.rawValue),
+                  try Bool.fetchOne(
+                    db,
+                    sql: """
+                        SELECT EXISTS(
+                            SELECT 1 FROM syncState
+                            WHERE entityType = 'activityEpoch' AND entityId = ?
+                              AND isDirty = 0 AND systemFields IS NOT NULL
+                        )
+                        """,
+                    arguments: [kind.rawValue]
+                  ) == true
+            else { continue }
+
+            let isLosingPair = revision < epoch.revision
+                || (revision == epoch.revision && generation != epoch.generation)
+            if isLosingPair {
+                try queueActivityDeletion(
+                    type: type,
+                    entityId: entityId,
+                    recordName: recordName,
+                    stateStore: stateStore,
+                    db: db
+                )
+            }
+        }
+    }
+
+    private static func upsertReadingActivity(_ row: ReadingActivity, db: Database) throws {
+        try db.execute(
+            sql: """
+                INSERT INTO readingActivity
+                    (installationId, referenceId, localDay, epochRevision, generation,
+                     activeSeconds, lastActiveAt, dateModified)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(generation, installationId, referenceId, localDay)
+                DO UPDATE SET
+                    epochRevision = MAX(readingActivity.epochRevision, excluded.epochRevision),
+                    activeSeconds = MAX(readingActivity.activeSeconds, excluded.activeSeconds),
+                    lastActiveAt = MAX(readingActivity.lastActiveAt, excluded.lastActiveAt),
+                    dateModified = MAX(readingActivity.dateModified, excluded.dateModified)
+                """,
+            arguments: [
+                row.installationId, row.referenceId, row.localDay, row.epochRevision,
+                row.generation, row.activeSeconds, row.lastActiveAt, row.dateModified,
+            ]
+        )
+    }
+
+    private static func upsertAssistantActivity(_ row: AssistantActivity, db: Database) throws {
+        try db.execute(
+            sql: """
+                INSERT INTO assistantActivity
+                    (id, provider, epochRevision, generation, startedAt, localDay, dateModified)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    provider = CASE WHEN excluded.dateModified >= assistantActivity.dateModified
+                                    THEN excluded.provider ELSE assistantActivity.provider END,
+                    epochRevision = CASE WHEN excluded.dateModified >= assistantActivity.dateModified
+                                         THEN excluded.epochRevision ELSE assistantActivity.epochRevision END,
+                    generation = CASE WHEN excluded.dateModified >= assistantActivity.dateModified
+                                      THEN excluded.generation ELSE assistantActivity.generation END,
+                    startedAt = MIN(assistantActivity.startedAt, excluded.startedAt),
+                    localDay = CASE WHEN excluded.dateModified >= assistantActivity.dateModified
+                                    THEN excluded.localDay ELSE assistantActivity.localDay END,
+                    dateModified = MAX(assistantActivity.dateModified, excluded.dateModified)
+                """,
+            arguments: [
+                row.id, row.provider, row.epochRevision, row.generation,
+                row.startedAt, row.localDay, row.dateModified,
+            ]
+        )
+    }
+
+    private static func quarantine(
+        _ row: ReadingActivity,
+        recordName: String,
+        db: Database
+    ) throws {
+        let reason = try Reference.fetchOne(db, id: row.referenceId) == nil ? "reference" : "epoch"
+        try storeQuarantine(
+            recordName: recordName,
+            entityType: SyncEntityType.readingActivity.rawValue,
+            reason: reason,
+            epochRevision: row.epochRevision,
+            generation: row.generation,
+            referenceId: row.referenceId,
+            data: try JSONEncoder().encode(row),
+            db: db
+        )
+    }
+
+    private static func quarantine(
+        _ row: AssistantActivity,
+        recordName: String,
+        db: Database
+    ) throws {
+        try storeQuarantine(
+            recordName: recordName,
+            entityType: SyncEntityType.assistantActivity.rawValue,
+            reason: "epoch",
+            epochRevision: row.epochRevision,
+            generation: row.generation,
+            referenceId: nil,
+            data: try JSONEncoder().encode(row),
+            db: db
+        )
+    }
+
+    private static func storeQuarantine(
+        recordName: String,
+        entityType: String,
+        reason: String,
+        epochRevision: Int,
+        generation: String,
+        referenceId: Int64?,
+        data: Data,
+        db: Database
+    ) throws {
+        guard data.count <= 64 * 1024 else { return }
+        try db.execute(
+            sql: """
+                INSERT INTO activityQuarantine
+                    (recordName, entityType, reason, epochRevision, generation,
+                     referenceId, recordData, receivedAt)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(recordName) DO UPDATE SET
+                    entityType = excluded.entityType,
+                    reason = excluded.reason,
+                    epochRevision = excluded.epochRevision,
+                    generation = excluded.generation,
+                    referenceId = excluded.referenceId,
+                    recordData = excluded.recordData,
+                    receivedAt = excluded.receivedAt
+                """,
+            arguments: [
+                recordName, entityType, reason, epochRevision, generation,
+                referenceId, data, Date(),
+            ]
+        )
+    }
+
+    static func replayQuarantinedActivity(
+        referenceIds: Set<Int64> = [],
+        epochKinds: Set<ActivityKind> = [],
+        all: Bool = false,
+        db: Database
+    ) throws {
+        var rows: [Row] = []
+        if all {
+            rows = try Row.fetchAll(
+                db,
+                sql: "SELECT * FROM activityQuarantine ORDER BY receivedAt"
+            )
+        } else {
+            if !referenceIds.isEmpty {
+                let ids = referenceIds.sorted().map(String.init).joined(separator: ",")
+                rows += try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT * FROM activityQuarantine
+                        WHERE entityType = 'readingActivity'
+                          AND referenceId IN (\(ids))
+                        ORDER BY receivedAt
+                        """
+                )
+            }
+            if epochKinds.contains(.reading) {
+                rows += try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT * FROM activityQuarantine
+                        WHERE entityType = 'readingActivity'
+                        ORDER BY receivedAt
+                        """
+                )
+            }
+            if epochKinds.contains(.assistant) {
+                rows += try Row.fetchAll(
+                    db,
+                    sql: """
+                        SELECT * FROM activityQuarantine
+                        WHERE entityType = 'assistantActivity'
+                        ORDER BY receivedAt
+                        """
+                )
+            }
+        }
+
+        let decoder = JSONDecoder()
+        var seen = Set<String>()
+        for quarantined in rows {
+            let recordName: String = quarantined["recordName"]
+            guard seen.insert(recordName).inserted else { continue }
+            let entityType: String = quarantined["entityType"]
+            let data: Data = quarantined["recordData"]
+            let didApply: Bool
+            switch SyncEntityType(rawValue: entityType) {
+            case .readingActivity:
+                guard let activity = try? decoder.decode(ReadingActivity.self, from: data)
+                else { continue }
+                guard try activityFactCanApply(
+                        kind: .reading,
+                        epochRevision: activity.epochRevision,
+                        generation: activity.generation,
+                        referenceId: activity.referenceId,
+                        db: db
+                      ) else {
+                    if try Reference.fetchOne(db, id: activity.referenceId) != nil {
+                        try db.execute(
+                            sql: """
+                                UPDATE activityQuarantine SET reason = 'epoch'
+                                WHERE recordName = ?
+                                """,
+                            arguments: [recordName]
+                        )
+                    }
+                    continue
+                }
+                let localSeconds = try Int64.fetchOne(
+                    db,
+                    sql: """
+                        SELECT activeSeconds FROM readingActivity
+                        WHERE generation = ? AND installationId = ?
+                          AND referenceId = ? AND localDay = ?
+                        """,
+                    arguments: [
+                        activity.generation, activity.installationId,
+                        activity.referenceId, activity.localDay,
+                    ]
+                )
+                try upsertReadingActivity(activity, db: db)
+                if let localSeconds, localSeconds > activity.activeSeconds,
+                   let parsed = SyncEntityType.parseRecordName(recordName)
+                {
+                    try db.execute(
+                        sql: """
+                            UPDATE syncState SET isDirty = 1, pushInFlight = 0
+                            WHERE entityType = 'readingActivity' AND entityId = ?
+                            """,
+                        arguments: [parsed.1]
+                    )
+                }
+                didApply = true
+            case .assistantActivity:
+                guard let activity = try? decoder.decode(AssistantActivity.self, from: data),
+                      try activityFactCanApply(
+                        kind: .assistant,
+                        epochRevision: activity.epochRevision,
+                        generation: activity.generation,
+                        referenceId: nil,
+                        db: db
+                      )
+                else { continue }
+                try upsertAssistantActivity(activity, db: db)
+                didApply = true
+            default:
+                didApply = false
+            }
+            if didApply {
+                try db.execute(
+                    sql: "DELETE FROM activityQuarantine WHERE recordName = ?",
+                    arguments: [recordName]
+                )
+            }
+        }
     }
 
     /// Rehydrate the archived CKRecord if present AND its recordName matches

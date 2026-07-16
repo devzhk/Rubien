@@ -91,6 +91,7 @@ final class ReaderWindowManager {
         window.setContentSize(contentSize)
         window.center()
         registerWindow(window, title: title, forReferenceId: refId)
+        ReadingActivityWindowMonitor.shared.register(window: window, referenceId: refId, database: db)
     }
 
     /// Open (or re-activate) a Web reader window for the given reference.
@@ -131,6 +132,7 @@ final class ReaderWindowManager {
         window.setContentSize(contentSize)
         window.center()
         registerWindow(window, title: title, forReferenceId: refId)
+        ReadingActivityWindowMonitor.shared.register(window: window, referenceId: refId, database: db)
     }
 
     /// Returns true if a reader window is currently open for the given reference.
@@ -141,6 +143,7 @@ final class ReaderWindowManager {
     /// Close all reader windows (e.g. on app termination).
     func closeAll() {
         for (refId, window) in windows {
+            ReadingActivityWindowMonitor.shared.unregister(window: window)
             window.close()
             removeObserver(forReferenceId: refId)
         }
@@ -154,6 +157,7 @@ final class ReaderWindowManager {
     /// (timestamp bump + os.Logger trace on failure) and so tests can verify
     /// the wiring without spinning up an NSWindow.
     func recordReaderOpen(referenceId: Int64, db: AppDatabase) {
+        guard RubienPreferences.recordReadingActivity else { return }
         // Fire-and-forget. markReferenceRead is a dbWriter.write; if a sync
         // commit briefly holds the writer queue, a synchronous call from
         // the main actor would freeze "tap to open." The stamp is a usage
@@ -239,6 +243,7 @@ final class ReaderWindowManager {
             MainActor.assumeIsolated {
                 if let window = notification.object as? NSWindow {
                     RubienPreferences.readerWindowSize = window.contentRect(forFrameRect: window.frame).size
+                    ReadingActivityWindowMonitor.shared.unregister(window: window)
                 }
                 guard let self else { return }
                 self.windows.removeValue(forKey: refId)

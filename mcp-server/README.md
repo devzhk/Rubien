@@ -129,7 +129,7 @@ claude mcp add rubien -- node $(pwd)/dist/index.js        # Claude Code
 
 ## Tool catalog
 
-27 tools on the `{op}_{target}` grid — CRUD operations always carry the target suffix (`create_reference`, `update_property`); a bare verb appears only when the operation is unique and unambiguous (`cite`, `export`):
+28 tools — CRUD operations always carry the target suffix (`create_reference`, `update_property`); a bare verb appears only when the operation is unique and unambiguous (`cite`, `export`):
 
 | Surface | Tools |
 |---|---|
@@ -137,6 +137,7 @@ claude mcp add rubien -- node $(pwd)/dist/index.js        # Claude Code
 | Citations | `rubien_cite`, `rubien_list_styles` |
 | Export | `rubien_export` |
 | Reading | `rubien_read_text`, `rubien_read_annotations`, `rubien_grep_text` |
+| Activity | `rubien_reading_activity` |
 | PDFs | `rubien_get_pdf_info`, `rubien_render_pdf_page`, `rubien_download_pdf` |
 | Properties (columns + options, incl. Tags) | `rubien_list_properties`, `rubien_create_property`, `rubien_update_property`, `rubien_delete_property`, `rubien_create_option`, `rubien_update_option`, `rubien_delete_option` |
 | Saved views | `rubien_list_views`, `rubien_create_view`, `rubien_update_view`, `rubien_delete_view` |

@@ -55,6 +55,13 @@ enum ChatTranscriptJS {
         jsCall("addToolChip", [encodeArg(ToolChipPayload(name: name, detail: detail, status: status))])
     }
 
+    /// `addPaperGroup(group)` — a bounded, presentation-only card row.
+    static func addPaperGroup(_ group: ChatPaperGroup) -> String {
+        let bounded = ChatPaperPresentation.validatedGroup(group)
+            ?? ChatPaperGroup(items: [])
+        return jsCall("addPaperGroup", [encodeArg(bounded)])
+    }
+
     /// `addNotice(markdown)`.
     static func addNotice(_ markdown: String) -> String {
         jsCall("addNotice", [encodeArg(markdown)])

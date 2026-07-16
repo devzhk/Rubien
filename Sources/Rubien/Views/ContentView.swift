@@ -1,6 +1,7 @@
 #if os(macOS)
 import SwiftUI
 import Combine
+import AppKit
 import RubienCore
 import RubienPDFKit
 
@@ -819,7 +820,15 @@ final class LibraryViewModel: ObservableObject {
 }
 
 struct ContentView: View {
-    @StateObject private var viewModel = LibraryViewModel()
+    private enum MainDestination { case home, library }
+    private struct SuggestedWebImport: Identifiable {
+        let id = UUID()
+        let url: String
+    }
+
+    @StateObject private var viewModel: LibraryViewModel
+    @StateObject private var homeRenderer: ChatTranscriptController
+    @StateObject private var homeSession: ChatSessionController
     @EnvironmentObject private var pdfDownloadCoordinator: PDFDownloadCoordinator
     @Environment(\.syncCoordinator) private var syncCoordinator: SyncCoordinator?
     #if canImport(Sparkle)
@@ -832,6 +841,7 @@ struct ContentView: View {
     @State private var showAddReference = false
     @State private var addReferenceInitialType: ReferenceType = .journalArticle
     @State private var showAddReferenceFlow = false
+    @State private var suggestedWebImport: SuggestedWebImport?
     @State private var addReferenceFileHandoff = DeferredSheetHandoff<[MaterializedImportSource]>()
     @State private var showBatchImport = false
     @State private var preparedMetadataImportsAfterBatchDismiss: [PreparedMetadataImport]?
@@ -847,6 +857,14 @@ struct ContentView: View {
     @State private var scopedPendingMetadataIntakes: [MetadataIntake]?
     @State private var pendingQueueNotice: PendingQueueNotice?
     @State private var columnVisibility = NavigationSplitViewVisibility.all
+    @State private var mainDestination: MainDestination = .home
+    @State private var homeDraft = ""
+    @State private var homeSelectedMentions: [PaperMentionSelection] = []
+    @State private var homeActivityRailVisible = true
+    @State private var homeActivityOverlayPresented = false
+    @State private var homeActivityWidth: CGFloat = 380
+    @State private var homeUsesCompactLayout = false
+    @State private var homeUnreadOutcome: AssistantTurnOutcome.Phase?
     @State private var selectedId: Int64?
     @State private var tableScrollRequest = 0
     @State private var columnConfigs: [ColumnConfig] = {
@@ -856,6 +874,17 @@ struct ContentView: View {
         }
         return decoded
     }()
+
+    @MainActor
+    init() {
+        let database = AppDatabase.shared
+        let renderer = ChatTranscriptController()
+        _viewModel = StateObject(wrappedValue: LibraryViewModel(db: database))
+        _homeRenderer = StateObject(wrappedValue: renderer)
+        _homeSession = StateObject(wrappedValue: ReaderChatSession.makeLibrary(
+            transcript: renderer,
+            database: database))
+    }
 
     private struct PendingQueueNotice: Identifiable, Equatable {
         let id = UUID()
@@ -881,6 +910,29 @@ struct ContentView: View {
         return viewModel.filteredReferences.first { $0.id == selectedId }
     }
 
+    private var homeHasAttention: Bool {
+        homeSession.pendingApproval != nil
+            || homeSession.isResponding
+            || homeUnreadOutcome == .succeeded
+            || homeUnreadOutcome == .failed
+    }
+
+    @ViewBuilder
+    private var homeAttentionIcon: some View {
+        if homeSession.pendingApproval != nil {
+            Image(systemName: "exclamationmark.circle.fill")
+                .foregroundStyle(.orange)
+        } else if homeSession.isResponding {
+            ProgressView().controlSize(.small)
+        } else if homeUnreadOutcome == .failed {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
+        } else {
+            Image(systemName: "sparkles")
+                .foregroundStyle(Color.accentColor)
+        }
+    }
+
     private var pendingMetadataIntakesForReview: [MetadataIntake] {
         PendingMetadataIntakePresentation.intakesForReview(
             observedPending: viewModel.pendingMetadataIntakes,
@@ -896,41 +948,43 @@ struct ContentView: View {
     @ViewBuilder
     private var leadingToolbarButtons: some View {
         Group {
-            Button {
-                showPropertyManager.toggle()
-            } label: {
-                Label("Manage Properties", systemImage: "slider.horizontal.3")
-            }
-            .help("Manage properties")
-            .popover(isPresented: $showPropertyManager) {
-                PropertyManagerPopover(
-                    propertyDefs: Binding(
-                        get: { viewModel.propertyDefs },
-                        set: { viewModel.propertyDefs = $0 }
-                    ),
-                    onToggleVisibility: { propId, visible in
-                        try? viewModel.db.togglePropertyVisibility(id: propId, visible: visible)
-                    },
-                    onDelete: { propId in
-                        try? viewModel.db.deletePropertyDefinition(id: propId)
-                    },
-                    onReorder: { orderedIds in
-                        try? viewModel.db.reorderProperties(orderedIds)
-                    },
-                    onCreateProperty: { name, type in
-                        let maxOrder = viewModel.propertyDefs.map(\.sortOrder).max() ?? 0
-                        var newProp = PropertyDefinition(
-                            name: name, type: type, sortOrder: maxOrder + 1, isDefault: false, isVisible: true
-                        )
-                        try? viewModel.db.savePropertyDefinition(&newProp)
-                    },
-                    onRenameProperty: { propId, newName in
-                        if var prop = viewModel.propertyDefs.first(where: { $0.id == propId }) {
-                            prop.name = newName
-                            try? viewModel.db.savePropertyDefinition(&prop)
+            if mainDestination == .library {
+                Button {
+                    showPropertyManager.toggle()
+                } label: {
+                    Label("Manage Properties", systemImage: "slider.horizontal.3")
+                }
+                .help("Manage properties")
+                .popover(isPresented: $showPropertyManager) {
+                    PropertyManagerPopover(
+                        propertyDefs: Binding(
+                            get: { viewModel.propertyDefs },
+                            set: { viewModel.propertyDefs = $0 }
+                        ),
+                        onToggleVisibility: { propId, visible in
+                            try? viewModel.db.togglePropertyVisibility(id: propId, visible: visible)
+                        },
+                        onDelete: { propId in
+                            try? viewModel.db.deletePropertyDefinition(id: propId)
+                        },
+                        onReorder: { orderedIds in
+                            try? viewModel.db.reorderProperties(orderedIds)
+                        },
+                        onCreateProperty: { name, type in
+                            let maxOrder = viewModel.propertyDefs.map(\.sortOrder).max() ?? 0
+                            var newProp = PropertyDefinition(
+                                name: name, type: type, sortOrder: maxOrder + 1, isDefault: false, isVisible: true
+                            )
+                            try? viewModel.db.savePropertyDefinition(&newProp)
+                        },
+                        onRenameProperty: { propId, newName in
+                            if var prop = viewModel.propertyDefs.first(where: { $0.id == propId }) {
+                                prop.name = newName
+                                try? viewModel.db.savePropertyDefinition(&prop)
+                            }
                         }
-                    }
-                )
+                    )
+                }
             }
 
             Button {
@@ -1070,7 +1124,17 @@ struct ContentView: View {
             SidebarView(
                 databaseViews: viewModel.databaseViews,
                 titleKeywords: viewModel.titleKeywords,
-                selection: $viewModel.selectedSidebar,
+                selection: Binding(
+                    get: { viewModel.selectedSidebar },
+                    set: {
+                        viewModel.selectedSidebar = $0
+                        mainDestination = .library
+                    }),
+                isHomeSelected: mainDestination == .home,
+                homeIsResponding: homeSession.isResponding,
+                homeNeedsApproval: homeSession.pendingApproval != nil,
+                homeUnreadOutcome: homeUnreadOutcome,
+                onSelectHome: { mainDestination = .home },
                 referenceCount: viewModel.references.count,
                 onCreateView: { name, icon in viewModel.createDatabaseView(name: name, icon: icon) },
                 onDeleteView: { viewModel.deleteDatabaseView(id: $0) },
@@ -1079,7 +1143,25 @@ struct ContentView: View {
             )
             .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 300)
         } detail: {
-            ReferenceTableView(
+            if mainDestination == .home {
+                AgentHomeView(
+                    session: homeSession,
+                    renderer: homeRenderer,
+                    database: viewModel.db,
+                    draft: $homeDraft,
+                    selectedMentions: $homeSelectedMentions,
+                    activityRailVisible: $homeActivityRailVisible,
+                    activityOverlayPresented: $homeActivityOverlayPresented,
+                    activityWidth: $homeActivityWidth,
+                    onOpenReference: openReader,
+                    onOpenPaperSource: { ChatExternalLinkOpener.open($0) },
+                    onAddPaperSource: beginSuggestedWebImport,
+                    libraryIsEmpty: viewModel.references.isEmpty,
+                    onAddPapers: { showAddReferenceFlow = true },
+                    onImportPDFs: { showAddReferenceFlow = true },
+                    onCompactLayoutChange: { homeUsesCompactLayout = $0 })
+            } else {
+                ReferenceTableView(
                 references: viewModel.filteredReferences,
                 tagMap: viewModel.referenceTagMap,
                 allTags: viewModel.tags,
@@ -1151,6 +1233,7 @@ struct ContentView: View {
                 }
             }
             .animation(.easeInOut(duration: 0.22), value: showInspector)
+            }
         }
         .toolbar(content: {
             // Clear center item: anchors the toolbar layout so the trailing
@@ -1195,7 +1278,37 @@ struct ContentView: View {
             #endif
             // Trailing toggle for the details panel, pushed to the far-right edge
             // by the clear principal item at the top of this toolbar.
-            ToolbarItem(placement: .primaryAction) { detailsToggleButton }
+            if mainDestination == .library {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    if columnVisibility == .detailOnly, homeHasAttention {
+                        Button { mainDestination = .home } label: { homeAttentionIcon }
+                            .help(homeSession.pendingApproval != nil
+                                ? "Assistant approval needed"
+                                : "Open Home Assistant")
+                    }
+                    detailsToggleButton
+                }
+            } else {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        if homeUsesCompactLayout {
+                            homeActivityOverlayPresented.toggle()
+                        } else {
+                            homeActivityRailVisible.toggle()
+                        }
+                    } label: {
+                        Label(
+                            "Activity",
+                            systemImage: (homeUsesCompactLayout && homeActivityOverlayPresented)
+                                || (!homeUsesCompactLayout && homeActivityRailVisible)
+                                ? "chart.bar.fill"
+                                : "chart.bar")
+                    }
+                    .help(homeUsesCompactLayout
+                        ? "Show reading activity"
+                        : "Toggle reading activity")
+                }
+            }
         })
         .sheet(isPresented: $showAddReference) {
             AddReferenceView(
@@ -1237,14 +1350,17 @@ struct ContentView: View {
                     )
                 },
                 onSaveWebsite: { ref in
-                    var r = ref
-                    let result = viewModel.saveManualReference(&r, reviewedBy: "web-import")
-                    confirmAndReveal(r, result: result)
+                    saveReviewedWebsite(ref)
                 },
                 onFiles: { sources in
                     addReferenceFileHandoff.stage(sources)
                 }
             )
+        }
+        .sheet(item: $suggestedWebImport) { importRequest in
+            WebImportView(initialURL: importRequest.url) { ref in
+                saveReviewedWebsite(ref)
+            }
         }
         .sheet(isPresented: $showBatchImport, onDismiss: {
             guard let entries = preparedMetadataImportsAfterBatchDismiss else { return }
@@ -1288,7 +1404,7 @@ struct ContentView: View {
             if showSearch {
                 SearchOverlay(
                     db: viewModel.db,
-                    scope: viewModel.currentReferenceScope,
+                    scope: mainDestination == .home ? .all : viewModel.currentReferenceScope,
                     isPresented: $showSearch,
                     onSelect: { ref in
                         revealReference(ref)
@@ -1404,6 +1520,7 @@ struct ContentView: View {
 
         .onReceive(NotificationCenter.default.publisher(for: .rubienClipImported)) { note in
             guard let id = note.userInfo?[RubienClipImportedKeys.id] as? Int64 else { return }
+            mainDestination = .library
             selectedId = id
             columnVisibility = .all
         }
@@ -1421,12 +1538,37 @@ struct ContentView: View {
                 UserDefaults.standard.set(data, forKey: RubienPreferences.columnConfigsKey)
             }
         }
+        .onChange(of: mainDestination) { _, destination in
+            if destination == .library {
+                homeActivityOverlayPresented = false
+            } else {
+                homeUnreadOutcome = nil
+            }
+        }
+        .onChange(of: homeSession.turnOutcome) { _, outcome in
+            guard mainDestination == .library else {
+                homeUnreadOutcome = nil
+                return
+            }
+            switch outcome.phase {
+            case .succeeded, .failed:
+                homeUnreadOutcome = outcome.phase
+            case .responding, .approvalRequired:
+                // A new hidden turn supersedes any older unread terminal badge.
+                homeUnreadOutcome = nil
+            case .idle, .cancelled, .superseded:
+                break
+            }
+        }
         .onAppear {
             // Hand the sync coordinator to the view model so import flows
             // inside the model can kick the PDF upload-queue drainer.
             viewModel.syncCoordinator = syncCoordinator
             viewModel.pdfDownloadCoordinator = pdfDownloadCoordinator
             pdfDownloadCoordinator.syncCoordinator = syncCoordinator
+        }
+        .onDisappear {
+            homeSession.teardown()
         }
     }
 
@@ -1440,6 +1582,7 @@ struct ContentView: View {
 
     private func revealReference(_ reference: Reference) {
         guard let id = reference.id else { return }
+        mainDestination = .library
         // Land on the unfiltered .allReferences scope (which always renders the row) unless we're
         // already there. Never the default database view — its saved filters could hide the row.
         if case .allReferences = viewModel.selectedSidebar {} else {
@@ -2083,7 +2226,20 @@ struct ContentView: View {
             ReaderWindowManager.shared.openPDFReader(for: reference, db: viewModel.db)
         } else if reference.canOpenWebReader {
             ReaderWindowManager.shared.openWebReader(for: reference, db: viewModel.db)
+        } else {
+            revealReference(reference)
         }
+    }
+
+    private func beginSuggestedWebImport(_ urlString: String) {
+        guard ChatExternalLink.classify(urlString) != .reject else { return }
+        suggestedWebImport = SuggestedWebImport(url: urlString)
+    }
+
+    private func saveReviewedWebsite(_ reference: Reference) {
+        var saved = reference
+        let result = viewModel.saveManualReference(&saved, reviewedBy: "web-import")
+        confirmAndReveal(saved, result: result)
     }
 }
 

@@ -19,6 +19,9 @@ public enum SyncEntityType: String, CaseIterable, Sendable {
     case propertyDefinition = "propertyDefinition"
     case propertyValue      = "propertyValue"
     case databaseView       = "databaseView"
+    case readingActivity    = "readingActivity"
+    case assistantActivity  = "assistantActivity"
+    case activityEpoch      = "activityEpoch"
     case referencePDF       = "referencePDF"
 
     /// The CKRecord type name this entity pushes as. Mirrors
@@ -35,6 +38,9 @@ public enum SyncEntityType: String, CaseIterable, Sendable {
         case .propertyDefinition: return SyncConstants.RecordType.propertyDefinition
         case .propertyValue:      return SyncConstants.RecordType.propertyValue
         case .databaseView:       return SyncConstants.RecordType.databaseView
+        case .readingActivity:    return SyncConstants.RecordType.readingActivity
+        case .assistantActivity:  return SyncConstants.RecordType.assistantActivity
+        case .activityEpoch:      return SyncConstants.RecordType.activityEpoch
         case .referencePDF:       return SyncConstants.RecordType.referencePDF
         }
     }
@@ -51,11 +57,12 @@ public enum SyncEntityType: String, CaseIterable, Sendable {
     public var fkDependencyRank: Int {
         switch self {
         // Tier 0: no local FK deps
-        case .propertyDefinition, .databaseView:                  return 0
+        case .propertyDefinition, .databaseView, .activityEpoch:  return 0
         // Tier 1: FK to a tier-0 or no local FK
-        case .reference, .tag:                                    return 1
+        case .reference, .tag, .assistantActivity:                return 1
         // Tier 2: FK to reference and/or tag
-        case .referenceTag, .pdfAnnotation, .webAnnotation:       return 2
+        case .referenceTag, .pdfAnnotation, .webAnnotation,
+             .readingActivity:                                    return 2
         case .propertyValue:                                      return 2  // FK → reference + propertyDefinition
         case .metadataIntake:                                     return 2  // FK → reference (nullable)
         case .referencePDF:                                       return 2  // FK → reference (1:1 sibling)

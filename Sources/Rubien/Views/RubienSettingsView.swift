@@ -50,6 +50,11 @@ struct RubienSettingsView: View {
     @State private var defaultWebAccess = true
     @State private var defaultAutoApprove = false
     @State private var defaultLoadUserTools = false
+    @State private var recordReadingActivity = true
+    @State private var recordAssistantActivity = true
+    @State private var showClearReadingConfirmation = false
+    @State private var showClearAssistantConfirmation = false
+    @State private var activityStatusMessage: String?
     /// Latched at the start of an upload session so the indicator can render
     /// as "Uploading 4 of 31 PDFs to iCloud". Cleared back to nil when the
     /// queue reaches 0 so the next upload session re-latches with its own
@@ -77,6 +82,13 @@ struct RubienSettingsView: View {
                         systemImage: "bubble.left.and.text.bubble.right"
                     )
                 }
+            activityPane
+                .tabItem {
+                    Label(
+                        String(localized: "Activity", bundle: .module),
+                        systemImage: "chart.bar.xaxis"
+                    )
+                }
             iCloudSyncPane
                 .tabItem {
                     Label(
@@ -85,7 +97,119 @@ struct RubienSettingsView: View {
                     )
                 }
         }
-        .frame(width: 540, height: 460)
+        .frame(width: 540, height: 500)
+    }
+
+    @ViewBuilder
+    private var activityPane: some View {
+        Form {
+            Section {
+                Toggle(
+                    String(localized: "Record reading activity on this Mac", bundle: .module),
+                    isOn: $recordReadingActivity
+                )
+                Toggle(
+                    String(localized: "Record Rubien AI session statistics", bundle: .module),
+                    isOn: $recordAssistantActivity
+                )
+            } header: {
+                Text(String(localized: "Capture", bundle: .module))
+            } footer: {
+                Text(String(
+                    localized: "Reading time is estimated only while a Rubien PDF or web reader is the active foreground window. It is saved about once per active minute and on pause or close. Activity metadata follows library iCloud sync when sync is on; simultaneous reading on two devices may be counted twice.",
+                    bundle: .module
+                ))
+            }
+
+            Section {
+                Button(String(localized: "Clear Reading Activity…", bundle: .module), role: .destructive) {
+                    showClearReadingConfirmation = true
+                }
+                Button(String(localized: "Clear AI Session Statistics…", bundle: .module), role: .destructive) {
+                    showClearAssistantConfirmation = true
+                }
+                if let activityStatusMessage {
+                    Text(activityStatusMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } header: {
+                Text(String(localized: "Reset", bundle: .module))
+            } footer: {
+                Text(String(
+                    localized: "Clearing creates a synced reset boundary for only that category. Activity recorded offline on another device before it learns the reset may be excluded when it reconnects. Legacy Last Read and Read Count values are unchanged.",
+                    bundle: .module
+                ))
+            }
+        }
+        .formStyle(.grouped)
+        .task {
+            recordReadingActivity = RubienPreferences.recordReadingActivity
+            recordAssistantActivity = RubienPreferences.recordAssistantActivity
+        }
+        .onChange(of: recordReadingActivity) { _, value in
+            RubienPreferences.recordReadingActivity = value
+            ReadingActivityWindowMonitor.shared.refresh()
+        }
+        .onChange(of: recordAssistantActivity) { _, value in
+            RubienPreferences.recordAssistantActivity = value
+        }
+        .confirmationDialog(
+            String(localized: "Clear Reading Activity?", bundle: .module),
+            isPresented: $showClearReadingConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(String(localized: "Clear Reading Activity", bundle: .module), role: .destructive) {
+                clearActivity(.reading)
+            }
+            Button(String(localized: "Cancel", bundle: .module), role: .cancel) {}
+        } message: {
+            Text(String(
+                localized: "Papers read, estimated reading time, heatmap history, streaks, and recent-reading history will restart from now. This cannot be undone.",
+                bundle: .module
+            ))
+        }
+        .confirmationDialog(
+            String(localized: "Clear AI Session Statistics?", bundle: .module),
+            isPresented: $showClearAssistantConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(String(localized: "Clear AI Session Statistics", bundle: .module), role: .destructive) {
+                clearActivity(.assistant)
+            }
+            Button(String(localized: "Cancel", bundle: .module), role: .cancel) {}
+        } message: {
+            Text(String(
+                localized: "The AI session count will restart from now. Conversation history and provider attribution are not deleted.",
+                bundle: .module
+            ))
+        }
+    }
+
+    private func clearActivity(_ kind: ActivityKind) {
+        activityStatusMessage = String(localized: "Clearing…", bundle: .module)
+        Task {
+            do {
+                if kind == .reading {
+                    try await ReadingActivityWindowMonitor.shared.clearReadingActivity(
+                        in: AppDatabase.shared
+                    )
+                } else {
+                    _ = try await Task.detached(priority: .utility) {
+                        try AppDatabase.shared.clearActivity(kind: kind)
+                    }.value
+                }
+                NotificationCenter.default.post(name: .rubienActivityDidChange, object: nil)
+                activityStatusMessage = kind == .reading
+                    ? String(localized: "Reading activity cleared.", bundle: .module)
+                    : String(localized: "AI session statistics cleared.", bundle: .module)
+            } catch {
+                activityStatusMessage = String(
+                    format: String(localized: "Could not clear activity: %@", bundle: .module),
+                    error.localizedDescription
+                )
+            }
+        }
     }
 
     @ViewBuilder

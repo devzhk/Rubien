@@ -311,6 +311,9 @@ final class ComposerNSTextView: NSTextView {
 /// 5 pt line-fragment padding (the placeholder overlay aligns to it), growing with
 /// the ZStack sizer and scrolling internally past the frame cap.
 struct ComposerTextView: NSViewRepresentable {
+    /// Matches the transcript renderer's 14 px base message text.
+    static let messageFontSize: CGFloat = 14
+
     @Binding var text: String
     /// Character-offset selection in `text`. Offsets avoid retaining potentially
     /// invalid `String.Index` values while AppKit and SwiftUI bindings coalesce.
@@ -351,7 +354,7 @@ struct ComposerTextView: NSViewRepresentable {
         textView.usesFontPanel = false
         textView.drawsBackground = false
         textView.focusRingType = .none
-        textView.font = .preferredFont(forTextStyle: .body)
+        textView.font = .systemFont(ofSize: Self.messageFontSize)
         textView.textColor = .textColor
         textView.delegate = context.coordinator
         textView.string = text

@@ -13,6 +13,10 @@ enum ChatRole: String, Codable, Sendable, Equatable {
     case assistant
     case tool
     case notice
+    /// Bounded presentation metadata rendered as Rubien-owned paper cards and
+    /// retained in provider History. The body is a JSON `ChatPaperGroup`, never
+    /// markdown or arbitrary HTML.
+    case paper
 }
 
 /// Lifecycle of a tool-use chip. Mirrors the JS contract's chip `status`.
@@ -46,8 +50,8 @@ struct ChatUserMessagePayload: Codable, Sendable, Equatable {
 /// One persisted/rendered transcript message, matching the JS `loadTranscript`
 /// element shape `{role, body, turnStatus, seq, attachments}`.
 ///
-/// - `body`: markdown (user/assistant/notice) or a JSON string `{name,detail,status}`
-///   for `tool` rows (the restore-path analogue of a live `addToolChip`).
+/// - `body`: markdown (user/assistant/notice), a JSON string
+///   `{name,detail,status}` for `tool`, or a JSON `ChatPaperGroup` for `paper`.
 /// - `turnStatus`: `nil` for a normal turn. When nil the key is omitted from the
 ///   encoded JSON; the JS side treats a missing key and an explicit `null`
 ///   identically (`m?.turnStatus !== 'interrupted' …`), so synthesized `Codable`

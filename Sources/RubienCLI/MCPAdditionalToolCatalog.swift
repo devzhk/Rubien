@@ -10,6 +10,7 @@ enum MCPAdditionalToolCatalog {
         citeTool,
         listStylesTool,
         exportTool,
+        readingActivityTool,
         syncStatusTool,
     ]
 
@@ -106,6 +107,20 @@ enum MCPAdditionalToolCatalog {
         inputSchema: objectSchema(),
         isImage: false,
         buildArgv: { _ in ["sync", "status"] }
+    )
+
+    private static let readingActivityTool = MCPTool(
+        name: "rubien_reading_activity",
+        description: "Return Rubien's tracked reading and Assistant activity. A paper-day qualifies after at least 60 estimated foreground-reader seconds; only yearActivity is limited by `year`.",
+        inputSchema: objectSchema(properties: [
+            "year": ["type": "integer", "minimum": 1970, "maximum": 9999],
+        ]),
+        isImage: false,
+        buildArgv: { args in
+            var argv = ["stats"]
+            mcpAppendInt(&argv, "--year", try mcpInt(args, "year"))
+            return argv
+        }
     )
 
     // MARK: Reference writes

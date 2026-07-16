@@ -24,6 +24,7 @@ public enum RubienMCPToolPolicy {
         "rubien_read_annotations",
         "rubien_grep_text",
         "rubien_get_sync_status",
+        "rubien_reading_activity",
     ]
 
     public static let writeToolNames: Set<String> = [

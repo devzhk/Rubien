@@ -156,6 +156,13 @@ enum CodexInvocation {
             // outer MCP call off at its 60-second default.
             args += ["-c", "\(server).default_tools_approval_mode=writes"]
             args += ["-c", "\(server).tool_timeout_sec=310"]
+            // Keep the app-private paper-card tool in lockstep with Claude's
+            // inline MCP configuration. Without this flag Codex sees only the
+            // public catalog and can fall back only to Markdown paper links.
+            args += [
+                "-c",
+                #"\#(server).env.\#(MCPContentChannel.appPresentationEnvironmentKey)="\#(MCPContentChannel.appPresentationEnvironmentValue)""#,
+            ]
             if let root = libraryRoot, !root.isEmpty {
                 args += ["-c", "\(server).env.RUBIEN_LIBRARY_ROOT=\(root)"]
             }

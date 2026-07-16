@@ -40,6 +40,9 @@ public enum SyncConstants {
         public static let propertyDefinition = "CDPropertyDefinition"
         public static let propertyValue      = "CDPropertyValue"
         public static let databaseView       = "CDDatabaseView"
+        public static let readingActivity    = "CDReadingActivity"
+        public static let assistantActivity  = "CDAssistantActivity"
+        public static let activityEpoch      = "CDActivityEpoch"
         public static let referencePDF       = "CDReferencePDF"
     }
 

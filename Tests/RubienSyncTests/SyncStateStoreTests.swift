@@ -270,7 +270,11 @@ final class SyncStateStoreTests: XCTestCase {
                 confirmedByServer: false
             )
 
-            try self.store.markTombstoneConfirmed(db, entityId: "7")
+            try self.store.markTombstoneConfirmed(
+                db,
+                entityType: .reference,
+                entityId: "7"
+            )
             try self.store.compactTombstones(db, olderThan: Date())
 
             let count = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM tombstone") ?? -1

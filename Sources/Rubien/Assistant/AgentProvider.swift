@@ -139,6 +139,8 @@ enum AgentEvent: Sendable, Equatable {
     case toolUseStarted(name: String, detail: String?)
     /// A tool call produced a result (a `user` `tool_result` block).
     case toolUseCompleted(name: String)
+    /// Successful, bounded result from Rubien's app-private presentation tool.
+    case paperPresentation(callID: String, ordinal: Int, group: ChatPaperGroup)
     /// Claude's control protocol wants approval for a tool. `id` is the control
     /// `request_id`; answer with `respondToApproval(id:_:)`.
     case approvalRequested(id: String, toolName: String, summary: String)

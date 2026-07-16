@@ -48,7 +48,7 @@ final class MCPServerTests: XCTestCase {
         "rubien_list_styles", "rubien_export",
         "rubien_get_pdf_info", "rubien_render_pdf_page",
         "rubien_read_text", "rubien_read_annotations", "rubien_grep_text",
-        "rubien_get_sync_status",
+        "rubien_get_sync_status", "rubien_reading_activity",
     ]
 
     private let expectedWriteToolNames: Set<String> = [
@@ -87,12 +87,17 @@ final class MCPServerTests: XCTestCase {
 
     /// Feed newline-delimited JSON-RPC requests to `rubien-cli mcp` and collect
     /// the parsed responses (in order). Closing stdin drives the server to EOF.
-    private func runMCP(_ requestLines: [String], readOnly: Bool = true) throws -> [[String: Any]] {
+    private func runMCP(
+        _ requestLines: [String],
+        readOnly: Bool = true,
+        appPresentation: Bool = false
+    ) throws -> [[String: Any]] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: cliBinaryPath)
         process.arguments = readOnly ? ["mcp", "--read-only"] : ["mcp"]
         var env = ProcessInfo.processInfo.environment
         env["RUBIEN_LIBRARY_ROOT"] = testLibraryRoot.path
+        if appPresentation { env["RUBIEN_APP_PRESENTATION"] = "1" }
         process.environment = env
         let stdinPipe = Pipe(), stdoutPipe = Pipe(), stderrPipe = Pipe()
         process.standardInput = stdinPipe
@@ -174,7 +179,7 @@ final class MCPServerTests: XCTestCase {
         XCTAssertNotNil((result["capabilities"] as? [String: Any])?["tools"], "must advertise tools capability")
     }
 
-    func testReadOnlyToolsListAdvertisesTheFourteenReadTools() throws {
+    func testReadOnlyToolsListAdvertisesTheFifteenReadTools() throws {
         try skipIfBinaryMissing()
         let responses = try runMCP([req(id: 1, method: "tools/list")])
         let result = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
@@ -210,7 +215,166 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual((listProperties["view"] as? [String: Any])?["type"] as? String, "integer")
     }
 
-    func testFullToolsListAdvertisesCanonicalTwentySevenWithAccessAnnotations() throws {
+    func testAppPresentationModeAddsOnlyPrivatePaperTool() throws {
+        try skipIfBinaryMissing()
+        let publicResponses = try runMCP([req(id: 1, method: "tools/list")])
+        let appResponses = try runMCP(
+            [req(id: 1, method: "tools/list")],
+            appPresentation: true)
+        let publicTools = try XCTUnwrap(
+            (response(publicResponses, id: 1)?["result"] as? [String: Any])?["tools"] as? [[String: Any]])
+        let appTools = try XCTUnwrap(
+            (response(appResponses, id: 1)?["result"] as? [String: Any])?["tools"] as? [[String: Any]])
+        let publicNames = Set(publicTools.compactMap { $0["name"] as? String })
+        let appNames = Set(appTools.compactMap { $0["name"] as? String })
+
+        XCTAssertFalse(publicNames.contains("rubien_present_papers"))
+        XCTAssertEqual(appNames.subtracting(publicNames), ["rubien_present_papers"])
+        XCTAssertEqual(appNames.count, publicNames.count + 1)
+
+        let callResponses = try runMCP([
+            toolCall(id: 2, name: "rubien_present_papers", arguments: [
+                "items": [[
+                    "url": "https://example.com/paper",
+                    "title": "A Candidate",
+                    "authors": "Ada Lovelace, Grace Hopper",
+                    "year": 2026,
+                ]],
+            ]),
+        ], appPresentation: true)
+        let result = try XCTUnwrap(response(callResponses, id: 2)?["result"] as? [String: Any])
+        let content = try XCTUnwrap(result["content"] as? [[String: Any]])
+        let text = try XCTUnwrap(content.first?["text"] as? String)
+        let envelope = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+        let items = try XCTUnwrap(envelope["items"] as? [[String: Any]])
+        XCTAssertEqual(items.first?["title"] as? String, "A Candidate")
+        XCTAssertEqual(items.first?["authors"] as? String, "Ada Lovelace, Grace Hopper")
+        XCTAssertEqual(items.first?["badge"] as? String, "Web candidate")
+    }
+
+    func testAppPresentationRejectsMixedShapesExtraFieldsAndBooleanIntegers() throws {
+        try skipIfBinaryMissing()
+        let responses = try runMCP([
+            toolCall(id: 1, name: "rubien_present_papers", arguments: [
+                "items": [[
+                    "referenceId": 1,
+                    "url": "https://example.com/paper",
+                    "title": "Mixed shape",
+                ]],
+            ]),
+            toolCall(id: 2, name: "rubien_present_papers", arguments: [
+                "items": [[
+                    "url": "https://example.com/paper",
+                    "title": "Unexpected field",
+                    "reason": "not part of the card contract",
+                ]],
+            ]),
+            toolCall(id: 3, name: "rubien_present_papers", arguments: [
+                "items": [["referenceId": true]],
+            ]),
+            toolCall(id: 4, name: "rubien_present_papers", arguments: [
+                "items": [[
+                    "url": "https://example.com/paper",
+                    "title": "Boolean year",
+                    "year": true,
+                ]],
+            ]),
+            toolCall(id: 5, name: "rubien_present_papers", arguments: [
+                "items": [["referenceId": 0]],
+            ]),
+        ], appPresentation: true)
+
+        for id in 1...5 {
+            let result = try XCTUnwrap(response(responses, id: id)?["result"] as? [String: Any])
+            XCTAssertEqual(result["isError"] as? Bool, true, "request \(id) must be rejected: \(result)")
+        }
+    }
+
+    func testAppPresentationRejectsOverlongFieldsYearsAndItemCount() throws {
+        try skipIfBinaryMissing()
+        let overlongTitle = String(repeating: "t", count: 501)
+        let overlongAuthors = String(repeating: "a", count: 1_001)
+        let overlongURL = "https://example.com/" + String(repeating: "p", count: 2048)
+        let elevenItems: [[String: Any]] = (0..<11).map { index in
+            ["url": "https://example.com/\(index)", "title": "Paper \(index)"]
+        }
+        let responses = try runMCP([
+            toolCall(id: 1, name: "rubien_present_papers", arguments: [
+                "items": [["url": "https://example.com/paper", "title": overlongTitle]],
+            ]),
+            toolCall(id: 2, name: "rubien_present_papers", arguments: [
+                "items": [["url": overlongURL, "title": "Overlong URL"]],
+            ]),
+            toolCall(id: 3, name: "rubien_present_papers", arguments: [
+                "items": [["url": "https://example.com/zero", "title": "Zero year", "year": 0]],
+            ]),
+            toolCall(id: 4, name: "rubien_present_papers", arguments: [
+                "items": [["url": "https://example.com/future", "title": "Large year", "year": 10_000]],
+            ]),
+            toolCall(id: 5, name: "rubien_present_papers", arguments: ["items": elevenItems]),
+            toolCall(id: 6, name: "rubien_present_papers", arguments: [
+                "items": [[
+                    "url": "https://example.com/authors",
+                    "title": "Overlong authors",
+                    "authors": overlongAuthors,
+                ]],
+            ]),
+        ], appPresentation: true)
+
+        for id in 1...6 {
+            let result = try XCTUnwrap(response(responses, id: id)?["result"] as? [String: Any])
+            XCTAssertEqual(result["isError"] as? Bool, true, "request \(id) must be rejected: \(result)")
+        }
+    }
+
+    func testAppPresentationValidatesLibraryCardFieldsBeforeReturning() throws {
+        try skipIfBinaryMissing()
+        let longTitleID = try seedTitle(String(repeating: "L", count: 501))
+        let invalidYearID = try seedTitle("Invalid stored year")
+        let update = try runCLI(["update", String(invalidYearID), "--year", "10000"])
+        XCTAssertEqual(update.exitCode, 0, "seed update failed: \(update.stderr)")
+
+        let responses = try runMCP([
+            toolCall(id: 1, name: "rubien_present_papers", arguments: [
+                "items": [["referenceId": longTitleID]],
+            ]),
+            toolCall(id: 2, name: "rubien_present_papers", arguments: [
+                "items": [["referenceId": invalidYearID]],
+            ]),
+        ], appPresentation: true)
+
+        for id in 1...2 {
+            let result = try XCTUnwrap(response(responses, id: id)?["result"] as? [String: Any])
+            XCTAssertEqual(result["isError"] as? Bool, true, "request \(id) must be rejected: \(result)")
+        }
+    }
+
+    func testAppPresentationRejectsOutputOver64KiB() throws {
+        try skipIfBinaryMissing()
+        // Each title is only a few Swift Characters (so it satisfies maxLength)
+        // but contains enough combining scalars to make the encoded MCP text
+        // collectively exceed the result-byte ceiling.
+        let combiningTitle = "A" + String(repeating: "\u{0301}", count: 7_000)
+        XCTAssertLessThanOrEqual(combiningTitle.count, 500)
+        let items: [[String: Any]] = (0..<10).map { index in
+            [
+                "url": "https://example.com/paper/\(index)",
+                "title": combiningTitle + "-\(index)",
+            ]
+        }
+        let encodedItems = try JSONSerialization.data(withJSONObject: ["items": items])
+        XCTAssertGreaterThan(encodedItems.count, 64 * 1_024)
+        let responses = try runMCP([
+            toolCall(id: 1, name: "rubien_present_papers", arguments: ["items": items]),
+        ], appPresentation: true)
+        let result = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
+        XCTAssertEqual(result["isError"] as? Bool, true, "oversized output must be rejected: \(result)")
+        let text = try XCTUnwrap((result["content"] as? [[String: Any]])?.first?["text"] as? String)
+        XCTAssertTrue(text.contains("64 KiB"), text)
+    }
+
+    func testFullToolsListAdvertisesCanonicalTwentyEightWithAccessAnnotations() throws {
         try skipIfBinaryMissing()
         let responses = try runMCP([req(id: 1, method: "tools/list")], readOnly: false)
         let tools = try XCTUnwrap(
@@ -220,7 +384,7 @@ final class MCPServerTests: XCTestCase {
             (tool["name"] as? String).map { ($0, tool) }
         })
         XCTAssertEqual(Set(byName.keys), expectedReadToolNames.union(expectedWriteToolNames))
-        XCTAssertEqual(byName.count, 27)
+        XCTAssertEqual(byName.count, 28)
 
         for name in expectedReadToolNames {
             XCTAssertEqual((byName[name]?["annotations"] as? [String: Any])?["readOnlyHint"] as? Bool, true, name)

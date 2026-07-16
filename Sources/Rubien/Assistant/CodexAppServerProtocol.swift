@@ -82,6 +82,8 @@ struct CodexAppServerParser {
     /// itemId → chip display name, so an `item/completed` (which may omit the friendly
     /// name) completes the right chip. Bounded by a turn's tool count.
     private var toolNamesByItemID: [String: String] = [:]
+    private var presentationOrdinalsByItemID: [String: Int] = [:]
+    private var nextPresentationOrdinal = 0
 
     /// The most recent per-turn usage (`thread/tokenUsage/updated.last` — NOT `.total`,
     /// which is thread-cumulative and would inflate later turns). Attached at
@@ -156,6 +158,9 @@ struct CodexAppServerParser {
         case "turn/completed":
             let usage = lastUsage
             lastUsage = nil
+            toolNamesByItemID.removeAll(keepingCapacity: true)
+            presentationOrdinalsByItemID.removeAll(keepingCapacity: true)
+            nextPresentationOrdinal = 0
             return [.turnCompleted(usage: usage)]
 
         case "error":
@@ -181,7 +186,13 @@ struct CodexAppServerParser {
     private mutating func parseItemStarted(_ params: [String: Any]) -> [AgentEvent] {
         guard let item = params["item"] as? [String: Any] else { return [] }
         guard let name = Self.toolChipName(item) else { return [] }  // non-tool items: no chip
-        if let id = item["id"] as? String { toolNamesByItemID[id] = name }
+        if let id = item["id"] as? String {
+            toolNamesByItemID[id] = name
+            if ChatPaperPresentation.isPresentationTool(name) {
+                presentationOrdinalsByItemID[id] = nextPresentationOrdinal
+                nextPresentationOrdinal += 1
+            }
+        }
         return [.toolUseStarted(name: name, detail: Self.toolChipDetail(item))]
     }
 
@@ -203,6 +214,22 @@ struct CodexAppServerParser {
         if Self.toolChipStatus(status) == .denied {
             let reason = (item["aggregatedOutput"] as? String).map(Self.trim) ?? (status ?? "failed").capitalized
             return [.toolDenied(name: recalled, reason: reason)]
+        }
+        if ChatPaperPresentation.isPresentationTool(recalled),
+           let group = ChatPaperPresentation.decodeToolResult(item["result"]) {
+            let itemID = (item["id"] as? String) ?? "presentation-\(nextPresentationOrdinal)"
+            let ordinal: Int
+            if let started = presentationOrdinalsByItemID[itemID] {
+                ordinal = started
+            } else {
+                ordinal = nextPresentationOrdinal
+                nextPresentationOrdinal += 1
+                presentationOrdinalsByItemID[itemID] = ordinal
+            }
+            return [
+                .paperPresentation(callID: itemID, ordinal: ordinal, group: group),
+                .toolUseCompleted(name: recalled),
+            ]
         }
         return [.toolUseCompleted(name: recalled)]
     }
@@ -565,17 +592,33 @@ enum CodexAppServerProtocol {
     /// `thread/read {includeTurns:true}` result → renderable rows (read-only preview).
     /// Walks the items in order, mirroring the LIVE event mapping: userMessage →
     /// user row, agentMessage → assistant row, tool items → a completed (or denied)
-    /// chip; reasoning/plan/other items render nothing, as they do live.
+    /// chip; successful paper calls merge into one bounded paper row at the end
+    /// of their turn; reasoning/plan/other items render nothing, as they do live.
     static func decodeThreadTranscript(
         _ result: [String: Any],
         managedAttachmentsRoot: URL? = nil
     ) -> [ChatRenderMessage] {
         var rows: [ChatRenderMessage] = []
-        for item in threadItems(result) {
-            if let row = transcriptRow(
-                item, seq: rows.count, managedAttachmentsRoot: managedAttachmentsRoot
-            ) {
-                rows.append(row)
+        for turn in threadTurns(result) {
+            let items = (turn["items"] as? [[String: Any]]) ?? []
+            var presentations: [(callID: String, ordinal: Int, group: ChatPaperGroup)] = []
+            for (ordinal, item) in items.enumerated() {
+                if let group = paperPresentationGroup(item) {
+                    let callID = (item["id"] as? String) ?? "history-presentation-\(ordinal)"
+                    presentations.append((callID, ordinal, group))
+                    continue
+                }
+                if let row = transcriptRow(
+                    item, seq: rows.count, managedAttachmentsRoot: managedAttachmentsRoot
+                ) {
+                    rows.append(row)
+                }
+            }
+            if let group = ChatPaperPresentation.merge(presentations),
+               let body = ChatPaperPresentation.encodeHistoryGroup(group)
+            {
+                rows.append(ChatRenderMessage(
+                    role: .paper, body: body, seq: rows.count))
             }
         }
         return rows
@@ -607,9 +650,12 @@ enum CodexAppServerProtocol {
     /// Every item across a `thread/read` result's turns, in order — the ONE walk
     /// of the wire shape both the transcript decoder and the attribution scan use.
     private static func threadItems(_ result: [String: Any]) -> [[String: Any]] {
-        guard let thread = result["thread"] as? [String: Any],
-              let turns = thread["turns"] as? [[String: Any]] else { return [] }
-        return turns.flatMap { ($0["items"] as? [[String: Any]]) ?? [] }
+        threadTurns(result).flatMap { ($0["items"] as? [[String: Any]]) ?? [] }
+    }
+
+    private static func threadTurns(_ result: [String: Any]) -> [[String: Any]] {
+        guard let thread = result["thread"] as? [String: Any] else { return [] }
+        return thread["turns"] as? [[String: Any]] ?? []
     }
 
     /// One summary from `thread/list`'s `data[]` or a search hit's `.thread`. `id`
@@ -748,6 +794,14 @@ enum CodexAppServerProtocol {
                 status: CodexAppServerParser.toolChipStatus(item["status"] as? String))
             return ChatRenderMessage(role: .tool, body: ChatTranscriptJS.encodeArg(chip), seq: seq)
         }
+    }
+
+    private static func paperPresentationGroup(_ item: [String: Any]) -> ChatPaperGroup? {
+        guard let name = CodexAppServerParser.toolChipName(item),
+              ChatPaperPresentation.isPresentationTool(name),
+              CodexAppServerParser.toolChipStatus(item["status"] as? String) == .completed
+        else { return nil }
+        return ChatPaperPresentation.decodeToolResult(item["result"])
     }
 
     /// Join a userMessage `content[]`'s text elements (skips non-text, e.g. images).

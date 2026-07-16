@@ -24,6 +24,31 @@ enum ReaderChatSession {
         transcript: ChatTranscriptController,
         database: AppDatabase = .shared
     ) -> ChatSessionController {
+        make(
+            context: .reference(ChatReference(
+                id: reference.id ?? 0,
+                title: reference.title,
+                authors: reference.authors.displayString)),
+            transcript: transcript,
+            database: database)
+    }
+
+    /// Main-window Home uses the same provider/content-channel composition as
+    /// reader assistants, differing only in its library-wide seed and history scope.
+    @MainActor
+    static func makeLibrary(
+        transcript: ChatTranscriptController,
+        database: AppDatabase = .shared
+    ) -> ChatSessionController {
+        make(context: .library, transcript: transcript, database: database)
+    }
+
+    @MainActor
+    private static func make(
+        context: AssistantConversationContext,
+        transcript: ChatTranscriptController,
+        database: AppDatabase
+    ) -> ChatSessionController {
         // The MCP library channel is shared by both backends, so whichever runtime is
         // active reads and, with approval, updates the live Rubien library.
         let contentChannel = MCPContentChannel.resolveBundled()
@@ -76,10 +101,7 @@ enum ReaderChatSession {
         return ChatSessionController(
             provider: providerFactory(initialKind),
             transcript: transcript,
-            reference: ChatReference(
-                id: reference.id ?? 0,
-                title: reference.title,
-                authors: reference.authors.displayString),
+            conversationContext: context,
             workspaceURL: AssistantContext.ensureWorkspace(RubienPreferences.assistantWorkspaceURL),
             webAccess: initial.webAccess,
             loadUserTools: initial.loadUserTools,
@@ -103,7 +125,9 @@ enum ReaderChatSession {
                         doi: $0.doi
                     )
                 }
-            })
+            },
+            activityDatabase: database,
+            attributionStore: .shared)
     }
 }
 #endif

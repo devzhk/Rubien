@@ -91,6 +91,13 @@ final class ChatTranscriptController: ObservableObject {
         evaluateOrEnqueue(ChatTranscriptJS.addToolChip(name: name, detail: detail, status: status))
     }
 
+    /// Add a chronological suggested-paper row. Invalid/empty groups are
+    /// rejected before they can cross into the WebView.
+    func addPaperGroup(_ group: ChatPaperGroup) {
+        guard let bounded = ChatPaperPresentation.validatedGroup(group) else { return }
+        evaluateOrEnqueue(ChatTranscriptJS.addPaperGroup(bounded))
+    }
+
     /// Add an inline notice row (markdown).
     func addNotice(_ markdown: String) {
         evaluateOrEnqueue(ChatTranscriptJS.addNotice(markdown))

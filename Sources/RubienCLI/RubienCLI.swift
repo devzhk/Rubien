@@ -36,6 +36,8 @@ struct RubienCLI: AsyncParsableCommand {
             Export.self,
             Views.self,
             Pdf.self,
+            Stats.self,
+            StatsClear.self,
             MCPCommand.self,
         ]
 #if os(macOS)
@@ -1480,6 +1482,58 @@ struct Properties: ParsableCommand {
             options.append(SelectOption(value: v, color: color))
         }
         return options
+    }
+}
+
+// MARK: - Activity statistics
+
+struct Stats: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "stats",
+        abstract: "Report tracked reading and Rubien Assistant activity as JSON."
+    )
+
+    @Option(name: .long, help: "Gregorian activity year (1970...9999). Defaults to the current local year.")
+    var year: Int?
+
+    mutating func validate() throws {
+        if let year, !(1970 ... 9999).contains(year) {
+            throw ValidationError("--year must be between 1970 and 9999")
+        }
+    }
+
+    func run() throws {
+        let statistics = try AppDatabase.shared.fetchReadingActivityStatistics(year: year)
+        printJSON(statistics)
+    }
+}
+
+struct StatsClear: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "stats-clear",
+        abstract: "Clear one tracked activity category using a synced reset boundary."
+    )
+
+    @Option(name: .long, help: "Activity category: reading or assistant.")
+    var kind: String
+
+    @Flag(name: .long, help: "Confirm the destructive clear.")
+    var yes = false
+
+    mutating func validate() throws {
+        guard ActivityKind(rawValue: kind) != nil else {
+            throw ValidationError("--kind must be 'reading' or 'assistant'")
+        }
+        guard yes else {
+            throw ValidationError("stats-clear requires --yes")
+        }
+    }
+
+    func run() throws {
+        let activityKind = ActivityKind(rawValue: kind)!
+        try AppDatabase.shared.clearActivity(kind: activityKind)
+        notifyLibraryChanged()
+        printJSON(["cleared": activityKind.rawValue])
     }
 }
 

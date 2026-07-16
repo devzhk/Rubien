@@ -562,6 +562,12 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                     case .referenceTag:
                         sourceTable = type.rawValue
                         idExpression = "referenceId || '\(SyncConstants.pivotSeparator)' || tagId"
+                    case .readingActivity:
+                        sourceTable = type.rawValue
+                        idExpression = "generation || '/' || installationId || '/' || referenceId || '/' || localDay"
+                    case .activityEpoch:
+                        sourceTable = type.rawValue
+                        idExpression = "kind"
                     case .referencePDF:
                         // No `referencePDF` SQLite table exists — the wire
                         // format is synthesized from `pdfCache` rows.
@@ -641,10 +647,12 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         case .didSendChanges:
             noteSend(inFlight: false)
 
+        case .didFetchRecordZoneChanges:
+            await reconcileActivityQuarantineAfterFetch()
+
         case .fetchedDatabaseChanges,
              .sentDatabaseChanges,
-             .willFetchRecordZoneChanges,
-             .didFetchRecordZoneChanges:
+             .willFetchRecordZoneChanges:
             // Lifecycle events we currently only observe. UI
             // syncing-indicator updates will hook in here in a later
             // commit.
@@ -652,6 +660,19 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
 
         @unknown default:
             log.error("unhandled CKSyncEngine.Event case — a newer OS added a variant we don't know about")
+        }
+    }
+
+    private func reconcileActivityQuarantineAfterFetch() async {
+        do {
+            try await appDatabase.dbWriter.write { [stateStore] db in
+                try SyncEntityType.reconcileActivityQuarantineAfterFetch(
+                    stateStore: stateStore,
+                    db: db
+                )
+            }
+        } catch {
+            log.error("activity quarantine reconciliation failed: \(error.localizedDescription, privacy: .public)")
         }
     }
 
@@ -682,6 +703,10 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                     guard let (entityType, entityId) = SyncEntityType.parseRecordName(recordID.recordName) else {
                         return nil
                     }
+                    guard try entityType.activityFactIsPushEligible(
+                        db: db,
+                        entityId: entityId
+                    ) else { return nil }
                     let systemFields = try stateStore.loadSystemFields(
                         db,
                         entityType: entityType,
@@ -911,6 +936,8 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         db: Database
     ) throws -> BatchOutcome {
         var local = BatchOutcome(displacedFilenames: [], appliedPDFRecordIDs: [])
+        var appliedReferenceIDs = Set<Int64>()
+        var changedEpochKinds = Set<ActivityKind>()
         try stateStore.setApplyingRemote(db)
 
         for record in sortedMods {
@@ -944,7 +971,17 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                 continue
             }
 
-            let applied = try type.applyRemoteRecord(record, entityId: entityId, db: db)
+            let applied = try type.applyRemoteRecord(
+                record,
+                entityId: entityId,
+                db: db,
+                stateStore: stateStore
+            )
+            if type == .reference, applied, let referenceID = Int64(entityId) {
+                appliedReferenceIDs.insert(referenceID)
+            } else if type == .activityEpoch, let kind = ActivityKind(rawValue: entityId) {
+                changedEpochKinds.insert(kind)
+            }
             if applied {
                 try stateStore.markPulled(
                     db,
@@ -954,6 +991,12 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                 )
             }
         }
+
+        try SyncEntityType.replayQuarantinedActivity(
+            referenceIds: appliedReferenceIDs,
+            epochKinds: changedEpochKinds,
+            db: db
+        )
 
         for deletion in deletions {
             guard let type = SyncEntityType.forRecordType(deletion.recordType) else { continue }
@@ -1047,6 +1090,20 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                         entityId: entityId,
                         record: saved
                     )
+                    if type == .activityEpoch,
+                       let epoch = ActivityEpoch(record: saved),
+                       epoch.kind.rawValue == entityId
+                    {
+                        // A clear is acknowledged only by the save of this
+                        // exact epoch pair. A later/rebased intent remains.
+                        try db.execute(
+                            sql: """
+                                DELETE FROM activityPendingClear
+                                WHERE kind = ? AND revision = ? AND generation = ?
+                                """,
+                            arguments: [epoch.kind.rawValue, epoch.revision, epoch.generation]
+                        )
+                    }
                 }
             } catch {
                 log.error("markPushed failed: \(error.localizedDescription, privacy: .public)")
@@ -1058,17 +1115,26 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         // We don't purge immediately — keeping the tombstone live a while
         // longer lets any in-flight duplicate edit for the same record
         // lose at `.unknownItem` rather than resurrecting the row.
-        for deletedID in event.deletedRecordIDs {
-            guard let entityId = SyncEntityType.parseRecordName(deletedID.recordName)?.1 else {
-                log.error("skipping malformed deleted recordName \(deletedID.recordName, privacy: .public)")
-                continue
+        let confirmedDeletes: [(SyncEntityType, String)] = event.deletedRecordIDs.compactMap { recordID in
+            guard let parsed = SyncEntityType.parseRecordName(recordID.recordName) else {
+                log.error("skipping malformed deleted recordName \(recordID.recordName, privacy: .public)")
+                return nil
             }
+            return parsed
+        }
+        if !confirmedDeletes.isEmpty {
             do {
                 try await appDatabase.dbWriter.write { [stateStore] db in
-                    try stateStore.markTombstoneConfirmed(db, entityId: entityId)
+                    for (type, entityId) in confirmedDeletes {
+                        try stateStore.markTombstoneConfirmed(
+                            db,
+                            entityType: type,
+                            entityId: entityId
+                        )
+                    }
                 }
             } catch {
-                log.error("removeTombstone failed: \(error.localizedDescription, privacy: .public)")
+                log.error("mark tombstones confirmed failed: \(error.localizedDescription, privacy: .public)")
             }
         }
 
@@ -1204,7 +1270,12 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                     displaced = try SyncEntityType.applyPreparedReferencePDF(prepared, db: db)
                     applied = true
                 } else {
-                    applied = try type.applyRemoteRecord(serverRecord, entityId: entityId, db: db)
+                    applied = try type.applyRemoteRecord(
+                        serverRecord,
+                        entityId: entityId,
+                        db: db,
+                        stateStore: stateStore
+                    )
                     displaced = nil
                 }
                 if applied {
@@ -1213,6 +1284,12 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                         entityType: type,
                         entityId: entityId,
                         record: serverRecord
+                    )
+                }
+                if type == .activityEpoch, let kind = ActivityKind(rawValue: entityId) {
+                    try SyncEntityType.replayQuarantinedActivity(
+                        epochKinds: Set([kind]),
+                        db: db
                     )
                 }
                 try stateStore.clearApplyingRemote(db)

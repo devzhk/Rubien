@@ -27,11 +27,20 @@ async function boot() {
   const html = readFileSync(htmlPath, 'utf-8')
   const dom = new JSDOM(html, { runScripts: 'dangerously', pretendToBeVisual: true })
   const { window } = dom
-  const posts = { openExternalLink: [], copyCode: [] }
+  const posts = {
+    openExternalLink: [],
+    openPaperReference: [],
+    openPaperSource: [],
+    addPaperSource: [],
+    copyCode: [],
+  }
   window.webkit = {
     messageHandlers: {
       chatReady: { postMessage: () => {} },
       openExternalLink: { postMessage: (m) => posts.openExternalLink.push(m) },
+      openPaperReference: { postMessage: (m) => posts.openPaperReference.push(m) },
+      openPaperSource: { postMessage: (m) => posts.openPaperSource.push(m) },
+      addPaperSource: { postMessage: (m) => posts.addPaperSource.push(m) },
       copyCode: { postMessage: (m) => posts.copyCode.push(m) },
     },
   }
@@ -46,7 +55,8 @@ test('window.RubienChat exposes the full contract', async () => {
   const { R } = await boot()
   assert.ok(R && typeof R === 'object', 'window.RubienChat installed')
   for (const m of ['reset', 'loadTranscript', 'addUserMessage', 'beginAssistantMessage',
-    'appendDelta', 'commitAssistantMessage', 'addToolChip', 'addNotice', 'setTheme']) {
+    'appendDelta', 'commitAssistantMessage', 'addToolChip', 'addPaperGroup',
+    'addNotice', 'setTheme']) {
     assert.equal(typeof R[m], 'function', `RubienChat.${m} is a function`)
   }
 })
@@ -135,6 +145,83 @@ test('tool chips + notices render with status variants', async () => {
   assert.ok(T().querySelector('.chat-tool-denied'))
   assert.ok(T().querySelector('.chat-notice'))
   assert.match(T().querySelector('.chat-tool-name').textContent, /rubien_read_text/)
+})
+
+test('paper groups are chronological, bounded, inert, and expose explicit native actions', async () => {
+  const { window, R, T, posts } = await boot()
+  R.addUserMessage('Recommend papers')
+  R.addPaperGroup({ items: [
+    {
+      kind: 'library', referenceId: 7,
+      title: '<img src=x onerror=alert(1)> A very long library title',
+      authors: 'Yiyou Sun, Xinyang Han, Weichen Zhang',
+      badge: 'PDF',
+    },
+    {
+      kind: 'web', url: 'https://example.com/paper', title: 'Web paper',
+      year: 2025, badge: 'Web candidate',
+    },
+    ...Array.from({ length: 12 }, (_, i) => ({
+      kind: 'library', referenceId: 100 + i, title: `Extra ${i}`, year: 2020, badge: 'Library',
+    })),
+  ] })
+  R.addNotice('Later transcript content')
+  await tick()
+
+  const group = T().querySelector('.chat-paper-group')
+  assert.ok(group)
+  assert.equal(group.getAttribute('aria-label'), 'Paper cards')
+  assert.equal(group.querySelector('.chat-paper-heading').textContent, 'Paper cards')
+  assert.equal(group.querySelectorAll('.chat-paper-card').length, 10, 'the bridge caps a group at ten')
+  const library = group.querySelector('.chat-paper-library')
+  assert.equal(library.title, '<img src=x onerror=alert(1)> A very long library title')
+  assert.equal(library.querySelector('.chat-paper-title').textContent,
+    '<img src=x onerror=alert(1)> A very long library title')
+  assert.equal(library.querySelectorAll('img').length, 0, 'title is inserted with textContent only')
+  assert.equal(library.querySelector('.chat-paper-authors').textContent,
+    'Yiyou Sun, Xinyang Han, et al.')
+  assert.equal(library.querySelector('.chat-paper-authors').title,
+    'Yiyou Sun, Xinyang Han, Weichen Zhang')
+  assert.equal(library.querySelector('.chat-paper-year').textContent, '—')
+  assert.equal(library.querySelector('.chat-paper-badge').textContent, 'PDF')
+  assert.equal(posts.addPaperSource.length, 0, 'rendering never auto-imports a web result')
+
+  library.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }))
+  assert.equal(posts.openPaperReference.at(-1)?.referenceId, 7)
+  assert.equal(typeof posts.openPaperReference.at(-1)?.referenceId, 'number')
+
+  group.querySelector('.chat-paper-open-source')
+    .dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }))
+  assert.equal(posts.openPaperSource.at(-1)?.url, 'https://example.com/paper')
+  group.querySelector('.chat-paper-add-source')
+    .dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }))
+  assert.equal(posts.addPaperSource.at(-1)?.url, 'https://example.com/paper')
+
+  const children = [...T().children]
+  assert.ok(children.indexOf(group) > children.findIndex((row) => row.classList.contains('chat-msg-user')))
+  assert.ok(children.indexOf(group) < children.findIndex((row) => row.classList.contains('chat-notice')),
+    'later transcript rows do not replace or move the paper group')
+})
+
+test('paper groups restore in seq order and survive later turns', async () => {
+  const { R, T } = await boot()
+  const paperBody = JSON.stringify({ items: [
+    { kind: 'library', referenceId: 9, title: 'Persistent paper', year: 2024, badge: 'PDF' },
+  ] })
+  R.loadTranscript([
+    { role: 'assistant', body: 'First answer', seq: 0 },
+    { role: 'paper', body: paperBody, seq: 1 },
+    { role: 'user', body: 'A later turn', seq: 2 },
+    { role: 'assistant', body: 'Later answer', seq: 3 },
+  ])
+  await tick()
+  const children = [...T().children]
+  assert.deepEqual(children.map((node) => node.classList.contains('chat-paper-group')
+    ? 'paper'
+    : node.classList.contains('chat-msg-user') ? 'user' : 'assistant'),
+  ['assistant', 'paper', 'user', 'assistant'])
+  assert.equal(T().querySelectorAll('.chat-paper-group').length, 1)
+  assert.match(T().textContent, /Persistent paper/)
 })
 
 test('consecutive tool calls fold after two and keep the latest call visible', async () => {
@@ -323,7 +410,8 @@ test('http link click routes to Swift; reset clears transcript', async () => {
 
   R.reset()
   await tick()
-  assert.equal(T().querySelectorAll('.chat-msg, .chat-notice, .chat-tool-chip').length, 0, 'reset cleared transcript')
+  assert.equal(T().querySelectorAll('.chat-msg, .chat-notice, .chat-tool-chip, .chat-paper-group').length,
+    0, 'reset cleared transcript')
 })
 
 // jsdom has no layout engine (scrollHeight/clientHeight/scrollTop are 0), so fake a

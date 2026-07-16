@@ -24,6 +24,7 @@ final class MCPContentChannelTests: XCTestCase {
         XCTAssertEqual(rubien?["args"] as? [String], ["mcp"])
         let env = rubien?["env"] as? [String: String]
         XCTAssertEqual(env?["RUBIEN_LIBRARY_ROOT"], channel.libraryRoot.path)
+        XCTAssertEqual(env?["RUBIEN_APP_PRESENTATION"], "1")
     }
 
     func testConfigArgumentIsSingleLineAndRoundTrips() throws {

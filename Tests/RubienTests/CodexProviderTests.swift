@@ -149,6 +149,8 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertTrue(argv.containsPair("-c", #"mcp_servers.rubien.args=["mcp"]"#))
         XCTAssertTrue(argv.containsPair("-c", "mcp_servers.rubien.default_tools_approval_mode=writes"))
         XCTAssertTrue(argv.containsPair("-c", "mcp_servers.rubien.tool_timeout_sec=310"))
+        XCTAssertTrue(argv.containsPair(
+            "-c", #"mcp_servers.rubien.env.RUBIEN_APP_PRESENTATION="1""#))
         XCTAssertTrue(argv.containsPair("-c", "mcp_servers.rubien.env.RUBIEN_LIBRARY_ROOT=/tmp/lib"))
         XCTAssertFalse(argv.contains("-c tools.web_search=false"), "web on by default")
     }

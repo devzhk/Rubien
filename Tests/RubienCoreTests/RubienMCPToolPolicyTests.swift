@@ -3,9 +3,9 @@ import XCTest
 
 final class RubienMCPToolPolicyTests: XCTestCase {
     func testCanonicalCatalogPartitionsTwentySevenTools() {
-        XCTAssertEqual(RubienMCPToolPolicy.readToolNames.count, 14)
+        XCTAssertEqual(RubienMCPToolPolicy.readToolNames.count, 15)
         XCTAssertEqual(RubienMCPToolPolicy.writeToolNames.count, 13)
-        XCTAssertEqual(RubienMCPToolPolicy.allToolNames.count, 27)
+        XCTAssertEqual(RubienMCPToolPolicy.allToolNames.count, 28)
         XCTAssertTrue(
             RubienMCPToolPolicy.readToolNames.isDisjoint(with: RubienMCPToolPolicy.writeToolNames)
         )

@@ -196,11 +196,39 @@ public struct SyncStateStore: Sendable {
         }
     }
 
+    /// Adopt the server's current change tag without conceding a local merge.
+    /// Grow-only counters and rebased reset intents use this after consuming a
+    /// `.serverRecordChanged` payload: the next retry must mutate the server's
+    /// record, while `isDirty` remains set for that retry.
+    public func adoptSystemFieldsKeepingDirty(
+        _ db: Database,
+        entityType: SyncEntityType,
+        entityId: String,
+        record: CKRecord
+    ) throws {
+        let systemFields = Self.archiveSystemFields(of: record)
+        try db.execute(sql: """
+            INSERT INTO \(SQL.stateTable)
+                (entityType, entityId, systemFields, isDirty, pushInFlight)
+                VALUES(?, ?, ?, 1, 0)
+                ON CONFLICT(entityType, entityId)
+                    DO UPDATE SET
+                        systemFields = excluded.systemFields,
+                        isDirty = 1,
+                        pushInFlight = 0
+            """, arguments: [
+                entityType.rawValue,
+                entityId,
+                systemFields,
+            ])
+    }
+
     /// All pending tombstones. Used on startup to enqueue deletions that
     /// were written locally but hadn't made it to the engine state yet.
     public func tombstones(_ db: Database) throws -> [(SyncEntityType, String)] {
         let rows = try Row.fetchAll(db, sql: """
             SELECT entityType, entityId FROM \(SQL.tombstoneTable)
+            WHERE confirmedByServer = 0
             """)
         return rows.compactMap { row in
             guard
@@ -249,12 +277,26 @@ public struct SyncStateStore: Sendable {
     /// deletions. Confirmed tombstones are eligible for GC.
     public func markTombstoneConfirmed(
         _ db: Database,
+        entityType: SyncEntityType,
         entityId: String
     ) throws {
         try db.execute(sql: """
             UPDATE \(SQL.tombstoneTable) SET confirmedByServer = 1
-                WHERE entityId = ?
-            """, arguments: [entityId])
+                WHERE entityType = ? AND entityId = ?
+            """, arguments: [entityType.rawValue, entityId])
+    }
+
+    public func hasTombstone(
+        _ db: Database,
+        entityType: SyncEntityType,
+        entityId: String
+    ) throws -> Bool {
+        try Bool.fetchOne(db, sql: """
+            SELECT EXISTS(
+                SELECT 1 FROM \(SQL.tombstoneTable)
+                WHERE entityType = ? AND entityId = ?
+            )
+            """, arguments: [entityType.rawValue, entityId]) ?? false
     }
 
     /// Purge a tombstone after the server has confirmed the delete (or has
