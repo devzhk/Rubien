@@ -325,7 +325,7 @@ struct ChatSurfaceView: View {
     ) -> some View {
         Button(action: action) {
             Label(title, systemImage: systemName)
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(size: ComposerTextView.messageFontSize, weight: .medium))
                 .foregroundStyle(Color.primary.opacity(0.72))
                 .padding(.horizontal, 7)
                 .frame(height: 28)
@@ -1922,7 +1922,7 @@ private struct PlainQuickStartText: View {
     var body: some View {
         Button(action: action) {
             Text(text)
-                .font(.system(size: 13))
+                .font(.system(size: ComposerTextView.messageFontSize))
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.leading, 25)
