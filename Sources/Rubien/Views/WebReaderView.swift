@@ -1720,6 +1720,7 @@ struct WebReaderView: View {
 
     init(reference: Reference, onClose: (() -> Void)? = nil) {
         self.onClose = onClose
+        RubienPreferences.migrateReaderSidebarPreferencesIfNeeded()
         self._showAnnotationSidebar = State(initialValue: RubienPreferences.webReaderSidebarVisible)
         self._annotationSidebarWidth = State(initialValue: WebReaderMetrics.restoredAnnotationSidebarWidth(
             RubienPreferences.webReaderSidebarWidth))

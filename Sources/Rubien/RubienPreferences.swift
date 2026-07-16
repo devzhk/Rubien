@@ -238,6 +238,18 @@ enum RubienPreferences {
     static let pdfReaderSidebarWidthKey = "Rubien.reader.pdf.sidebarWidth"
     static let webReaderSidebarVisibleKey = "Rubien.reader.web.sidebarVisible"
     static let webReaderSidebarWidthKey = "Rubien.reader.web.sidebarWidth"
+    static let readerSidebarPersistenceVersionKey = "Rubien.reader.sidebarPersistenceVersion"
+
+    /// The first web-width implementation observed `HSplitView` layout and could
+    /// save AppKit's automatic allocation as if the user had dragged the divider.
+    /// Discard that one unreliable value once; widths written by the exact bound
+    /// resize handle introduced in version 1 are genuine user choices.
+    static func migrateReaderSidebarPreferencesIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard defaults.integer(forKey: readerSidebarPersistenceVersionKey) < 1 else { return }
+        defaults.removeObject(forKey: webReaderSidebarWidthKey)
+        defaults.set(1, forKey: readerSidebarPersistenceVersionKey)
+    }
 
     static var pdfReaderSidebarVisible: Bool {
         get { sidebarVisibility(forKey: pdfReaderSidebarVisibleKey) }

@@ -36,6 +36,7 @@ final class RubienPreferencesTests: XCTestCase {
             RubienPreferences.pdfReaderSidebarWidthKey,
             RubienPreferences.webReaderSidebarVisibleKey,
             RubienPreferences.webReaderSidebarWidthKey,
+            RubienPreferences.readerSidebarPersistenceVersionKey,
         ]
     }
 
@@ -267,6 +268,20 @@ final class RubienPreferencesTests: XCTestCase {
         XCTAssertEqual(RubienPreferences.pdfReaderSidebarWidth, 276.5)
         XCTAssertFalse(RubienPreferences.webReaderSidebarVisible)
         XCTAssertEqual(RubienPreferences.webReaderSidebarWidth, 312)
+    }
+
+    func testReaderSidebarMigrationDropsOnlyLegacyWebWidthOnce() {
+        RubienPreferences.pdfReaderSidebarWidth = 275
+        RubienPreferences.webReaderSidebarWidth = 304
+
+        RubienPreferences.migrateReaderSidebarPreferencesIfNeeded()
+
+        XCTAssertEqual(RubienPreferences.pdfReaderSidebarWidth, 275)
+        XCTAssertNil(RubienPreferences.webReaderSidebarWidth)
+
+        RubienPreferences.webReaderSidebarWidth = 290
+        RubienPreferences.migrateReaderSidebarPreferencesIfNeeded()
+        XCTAssertEqual(RubienPreferences.webReaderSidebarWidth, 290)
     }
 }
 #endif
