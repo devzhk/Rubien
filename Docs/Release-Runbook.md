@@ -46,35 +46,51 @@ The source repo `devzhk/Rubien` is **private**, but Sparkle downloads update DMG
 
 ## Per-release procedure
 
-Prereqs: `gh` authenticated, `CODESIGN_IDENTITY` exported, working tree clean on `main`, EdDSA private key in Keychain, and the `RubienNotary` notarytool profile in the login Keychain (from One-time setup §4 — it persists across releases; you do **not** re-run `store-credentials` each time).
+Prereqs: `gh` authenticated, release-preparation changes committed and pushed to `origin/main`, CI green for that exact commit, `CODESIGN_IDENTITY` exported, working tree clean on `main`, EdDSA private key in Keychain, and the `RubienNotary` notarytool profile in the login Keychain (from One-time setup §4 — it persists across releases; you do **not** re-run `store-credentials` each time).
 
 > **Run the release on the interactive host — not from a sandboxed agent (e.g. Codex).** Signing (Developer ID + Sparkle EdDSA keys), notarization (the `RubienNotary` Keychain profile), the `build/` writes, and `git push` all need access a read-only sandbox denies. A sandboxed agent that cannot read the login Keychain will report `RubienNotary` (or the signing identity) as **missing** when it is in fact present — that is a sandbox limitation, not a setup gap. Drive `./scripts/release.sh` from Claude Code running on the host, or hand that step to the maintainer. (Verify a suspected-missing profile the real way: `xcrun notarytool history --keychain-profile RubienNotary` on the host — success means it is there.)
 
 ```bash
-# 1. Clean state on main
+# 1. Start from a clean, current main
 git status
-git checkout main && git pull
+git checkout main
+git pull --ff-only
 
 # 2. Bump the marketing version (if needed) and the build counter
 $EDITOR VERSION       # e.g. 0.1.0 → 0.1.1
 $EDITOR BUILD.txt     # increment by 1
 ./scripts/generate-cli-version.sh   # regenerate checked-in GeneratedVersion.swift — CI fails if it drifts
+git add VERSION BUILD.txt Sources/RubienCLI/GeneratedVersion.swift
+git commit -m "chore: bump version to X.Y.Z (build N)"
 
-# 3. Set the Developer ID identity in your shell
+# 3. Push release prep and require green CI for this exact commit
+git push origin main
+RELEASE_SHA="$(git rev-parse HEAD)"
+CI_RUN_ID="$(gh run list --workflow=ci.yml --commit "$RELEASE_SHA" \
+    --limit 1 --json databaseId --jq '.[0].databaseId')"
+# If CI_RUN_ID is empty, wait a few seconds and repeat the assignment above.
+test -n "$CI_RUN_ID"
+gh run watch "$CI_RUN_ID" --exit-status
+gh run view "$CI_RUN_ID" --json headSha,conclusion
+# Continue only when headSha == $RELEASE_SHA and conclusion == "success".
+
+# 4. Set the Developer ID identity in your shell
 export CODESIGN_IDENTITY="Developer ID Application: <Your Name> (9TXK4V3SS8)"
 
-# 4. Run release.sh
+# 5. Run release.sh
 ./scripts/release.sh
 
-# 5. Wait for notarization (5-15 minutes). The script blocks.
+# 6. Wait for notarization (5-15 minutes). The script blocks.
 
-# 6. Confirm
+# 7. Confirm
 # - https://github.com/devzhk/Rubien-releases/releases/latest shows the new DMG (public host)
 # - https://devzhk.github.io/Rubien/appcast.xml has the new <item>
 # - Within ~24 hours, existing installs see the "Update ready" indicator
 ```
 
-**You must bump `VERSION` (if the marketing version is changing) and `BUILD.txt` (every release) before running — `release.sh` does not bump them for you. Then run `./scripts/generate-cli-version.sh` and commit the regenerated `Sources/RubienCLI/GeneratedVersion.swift` alongside the bump; the file is checked in and CI's "Verify generated CLI version is in sync" step fails the build if it drifts from `VERSION` + `BUILD.txt`.** `release.sh` is then the single entry point: it calls `scripts/build-app.sh` (which assembles + signs + embeds Sparkle, then builds the DMG), notarizes, signs the appcast item with `sign_update`, prepends the item to `Docs/appcast.xml`, commits + pushes the appcast change, tags the source commit on the private repo, and creates the GitHub release with the DMG on the public `devzhk/Rubien-releases` repo via `gh release create --repo`.
+**You must bump `VERSION` (if the marketing version is changing) and `BUILD.txt` (every release) before running — `release.sh` does not bump them for you. Then run `./scripts/generate-cli-version.sh` and commit the regenerated `Sources/RubienCLI/GeneratedVersion.swift` alongside the bump; the file is checked in and CI's "Verify generated CLI version is in sync" step fails the build if it drifts from `VERSION` + `BUILD.txt`. Push that commit and watch the CI run for its exact SHA to a successful conclusion. If CI fails, or no run exists for that SHA, stop: fix the issue in a new commit, push, and watch again. A green run for an older commit and local test results are not substitutes.**
+
+Only after that gate is green is `release.sh` the single entry point: it calls `scripts/build-app.sh` (which assembles + signs + embeds Sparkle, then builds the DMG), notarizes, signs the appcast item with `sign_update`, prepends the item to `Docs/appcast.xml`, commits + pushes the appcast change, tags the source commit on the private repo, and creates the GitHub release with the DMG on the public `devzhk/Rubien-releases` repo via `gh release create --repo`. Its later appcast push is part of publication; it is not a substitute for pushing and validating the release-preparation commit before signing starts.
 
 ## Artifact-size guardrails
 
