@@ -68,7 +68,7 @@ describe.skipIf(skipReason !== null)("e2e stdio JSON-RPC", () => {
         expect(toolsResult.result).toBeDefined();
         const toolNames = (toolsResult.result.tools as Array<{ name: string }>)
           .map((t) => t.name);
-        // The 0.3.1 catalog is exactly 28 tools.
+        // The 0.3.2 catalog is exactly 28 tools.
         expect(toolNames).toHaveLength(28);
         // Spot-check a few from each category.
         expect(toolNames).toContain("rubien_search_references");

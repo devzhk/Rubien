@@ -28,7 +28,7 @@ async function connectedClient() {
   return client;
 }
 
-/** The full 0.3.1 catalog. */
+/** The full 0.3.2 catalog. */
 const EXPECTED_CATALOG = [
   // references
   "rubien_search_references",
@@ -69,7 +69,7 @@ const EXPECTED_CATALOG = [
   "rubien_reading_activity",
 ].sort();
 
-describe("0.3.1 catalog", () => {
+describe("0.3.2 catalog", () => {
   it("registers exactly the 28 tools — no old names", async () => {
     const client = await connectedClient();
     const tools = await client.listTools();

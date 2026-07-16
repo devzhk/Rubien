@@ -2,7 +2,7 @@ import { probeCliVersion, type CliProbe } from "./cli.js";
 
 /**
  * The minimum rubien-cli build this server requires. Equals the build that
- * first shipped `stats`, which backs `rubien_reading_activity` in the 0.3.1
+ * first shipped `stats`, which backs `rubien_reading_activity` in the 0.3.2
  * catalog. Bump only when a future server release
  * genuinely needs a newer CLI feature; the released CLI's build must always
  * be >= this value.

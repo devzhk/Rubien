@@ -12,7 +12,7 @@ import { registerActivityTools } from "./tools/activity.js";
 
 export const SERVER_INFO = {
   name: "rubien-mcp-server",
-  version: "0.3.1",
+  version: "0.3.2",
 } as const;
 
 export function buildServer(): McpServer {
