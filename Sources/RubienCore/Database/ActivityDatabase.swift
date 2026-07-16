@@ -3,7 +3,7 @@ import GRDB
 
 extension AppDatabase {
     /// Update this constant in the release that first ships activity capture.
-    public static let activityTrackingIntroducedInVersion = "0.3.7"
+    public static let activityTrackingIntroducedInVersion = "0.4.0"
 
     /// Gregorian calendar with the caller's locale/time-zone/week rules.
     public static func activityCalendar(basedOn source: Calendar = .current) -> Calendar {

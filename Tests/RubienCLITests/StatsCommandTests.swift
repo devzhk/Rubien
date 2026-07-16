@@ -169,7 +169,7 @@ final class StatsCommandTests: XCTestCase {
         XCTAssertNotNil(json["streaks"] as? [String: Any])
         XCTAssertNotNil(json["recentPapers"] as? [[String: Any]])
         let coverage = try XCTUnwrap(json["coverage"] as? [String: Any])
-        XCTAssertEqual(coverage["trackingIntroducedInVersion"] as? String, "0.3.7")
+        XCTAssertEqual(coverage["trackingIntroducedInVersion"] as? String, "0.4.0")
         XCTAssertTrue(coverage.keys.contains("readingResetAt"))
         XCTAssertTrue(coverage.keys.contains("assistantResetAt"))
     }
