@@ -405,11 +405,11 @@ public enum MetadataFetcher {
             }
         }()
 
-        // Abstract (strip JATS XML tags)
+        // Abstract (convert JATS inline scripts, strip markup, normalize the
+        // publisher's pretty-printing whitespace)
         let abstract: String? = {
             guard let raw = result["abstract"] as? String else { return nil }
-            let stripped = raw.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
-            return stripped.trimmingCharacters(in: .whitespacesAndNewlines)
+            return plainTextFromCrossrefJATS(raw)
         }()
 
         // Journal
@@ -430,6 +430,99 @@ public enum MetadataFetcher {
             abstract: abstract,
             referenceType: referenceType
         )
+    }
+
+    private static let crossrefSubscriptRegex = try! NSRegularExpression(
+        pattern: #"<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?sub\b[^>]*>\s*([^<]*?)\s*</(?:[A-Za-z_][A-Za-z0-9_.-]*:)?sub\s*>"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let crossrefSuperscriptRegex = try! NSRegularExpression(
+        pattern: #"<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?sup\b[^>]*>\s*([^<]*?)\s*</(?:[A-Za-z_][A-Za-z0-9_.-]*:)?sup\s*>"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let subscriptCharacterMap: [Character: Character] = Dictionary(
+        uniqueKeysWithValues: zip(
+            Array("0123456789+-=()"),
+            Array("₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎")
+        )
+    )
+
+    private static let superscriptCharacterMap: [Character: Character] = Dictionary(
+        uniqueKeysWithValues: zip(
+            Array("0123456789+-=()"),
+            Array("⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾")
+        )
+    )
+
+    /// CrossRef abstracts are JATS fragments, often pretty-printed with line
+    /// breaks and indentation around inline tags. Removing tags alone turns
+    /// `H<sub>2</sub>` into a multi-line `H 2`. Preserve numeric script
+    /// semantics with Unicode and normalize only formatting whitespace.
+    private static func plainTextFromCrossrefJATS(_ raw: String) -> String {
+        var text = replacingJATSScriptElements(
+            in: raw,
+            regex: crossrefSubscriptRegex,
+            characterMap: subscriptCharacterMap,
+            fallbackMarker: "_"
+        )
+        text = replacingJATSScriptElements(
+            in: text,
+            regex: crossrefSuperscriptRegex,
+            characterMap: superscriptCharacterMap,
+            fallbackMarker: "^"
+        )
+        text = text.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+        text = CitationMetaScraper.decodeHTMLEntities(text)
+        text = text.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        text = text.replacingOccurrences(
+            of: #"\s+([₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾])"#,
+            with: "$1",
+            options: .regularExpression
+        )
+        text = text.replacingOccurrences(
+            of: #"\s+([_^]\()"#,
+            with: "$1",
+            options: .regularExpression
+        )
+        text = text.replacingOccurrences(
+            of: #"\s+([,.;:!?%\)\]\}])"#,
+            with: "$1",
+            options: .regularExpression
+        )
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func replacingJATSScriptElements(
+        in text: String,
+        regex: NSRegularExpression,
+        characterMap: [Character: Character],
+        fallbackMarker: Character
+    ) -> String {
+        let result = NSMutableString(string: text)
+        let matches = regex.matches(
+            in: text,
+            range: NSRange(text.startIndex..., in: text)
+        )
+        for match in matches.reversed() {
+            guard match.numberOfRanges > 1 else { continue }
+            let rawContent = result.substring(with: match.range(at: 1))
+            let content = CitationMetaScraper.decodeHTMLEntities(rawContent)
+                .components(separatedBy: .whitespacesAndNewlines)
+                .joined()
+            guard !content.isEmpty else {
+                result.replaceCharacters(in: match.range, with: "")
+                continue
+            }
+
+            let mapped = content.compactMap { characterMap[$0] }
+            let replacement = mapped.count == content.count
+                ? String(mapped)
+                : "\(fallbackMarker)(\(content))"
+            result.replaceCharacters(in: match.range, with: replacement)
+        }
+        return String(result)
     }
 
     // MARK: - PMID → PubMed API

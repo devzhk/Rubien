@@ -192,6 +192,131 @@ final class PaperURLResolverTests: XCTestCase {
         )
     }
 
+    // MARK: - DOI-bearing publisher paths (no publisher-page fetch)
+
+    func testScienceArticleResolvesThroughCrossrefWithoutFetchingPublisherHTML() async throws {
+        let input = "https://www.science.org/doi/full/10.1126/sciadv.abn9545"
+        let recorder = CrossrefDOIRecorder()
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: input)!,
+            session: StubURLProtocol.makeSession(),
+            crossrefFetcher: { doi in
+                await recorder.record(doi)
+                return Reference(
+                    title: "Machine learning enables interpretable discovery of innovative polymers",
+                    authors: [AuthorName(given: "Jason", family: "Yang")],
+                    doi: doi,
+                    url: "https://doi.org/\(doi)"
+                )
+            }
+        )
+
+        XCTAssertTrue(StubURLProtocol.requests.isEmpty, "Science HTML should not be fetched")
+        let resolvedDOIs = await recorder.values
+        XCTAssertEqual(resolvedDOIs, ["10.1126/sciadv.abn9545"])
+        XCTAssertEqual(outcome.reference.url, input)
+        XCTAssertEqual(outcome.reference.doi, "10.1126/sciadv.abn9545")
+        XCTAssertEqual(
+            outcome.scrapedPDFURL,
+            "https://www.science.org/doi/pdf/10.1126/sciadv.abn9545"
+        )
+    }
+
+    func testACSArticleResolvesThroughCrossrefWithoutFetchingPublisherHTML() async throws {
+        let input = "https://pubs.acs.org/doi/full/10.1021/acscentsci.3c01275"
+        let recorder = CrossrefDOIRecorder()
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: input)!,
+            session: StubURLProtocol.makeSession(),
+            crossrefFetcher: { doi in
+                await recorder.record(doi)
+                return Reference(
+                    title: "Opportunities and Challenges for Machine Learning-Assisted Enzyme Engineering",
+                    authors: [AuthorName(given: "Jason", family: "Yang")],
+                    doi: doi,
+                    url: "https://doi.org/\(doi)"
+                )
+            }
+        )
+
+        XCTAssertTrue(StubURLProtocol.requests.isEmpty, "ACS HTML should not be fetched")
+        let resolvedDOIs = await recorder.values
+        XCTAssertEqual(resolvedDOIs, ["10.1021/acscentsci.3c01275"])
+        XCTAssertEqual(outcome.reference.url, input)
+        XCTAssertEqual(outcome.reference.doi, "10.1021/acscentsci.3c01275")
+        XCTAssertEqual(
+            outcome.scrapedPDFURL,
+            "https://pubs.acs.org/doi/pdf/10.1021/acscentsci.3c01275"
+        )
+    }
+
+    func testDOIPublisherPDFInputRewritesBeforeResolution() async throws {
+        let sciencePDF = "https://www.science.org/doi/epdf/10.1126/sciadv.abn9545"
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: sciencePDF)!,
+            session: StubURLProtocol.makeSession(),
+            crossrefFetcher: { doi in
+                Reference(
+                    title: "Machine learning enables interpretable discovery of innovative polymers",
+                    authors: [AuthorName(given: "Jason", family: "Yang")],
+                    doi: doi
+                )
+            }
+        )
+
+        XCTAssertTrue(StubURLProtocol.requests.isEmpty, "Science HTML should not be fetched")
+        XCTAssertEqual(
+            outcome.reference.url,
+            "https://www.science.org/doi/10.1126/sciadv.abn9545"
+        )
+        XCTAssertEqual(outcome.scrapedPDFURL, "https://www.science.org/doi/pdf/10.1126/sciadv.abn9545")
+    }
+
+    // MARK: - Astronomy & Astrophysics citation metadata
+
+    func testAANDAArticleResolvesCitationMetadataAndPDF() async throws {
+        let input = "https://www.aanda.org/articles/aa/full_html/2026/02/aa57022-25/aa57022-25.html"
+        StubURLProtocol.stub(
+            input,
+            body: """
+            <html><head>
+              <meta name="citation_journal_title" content="Astronomy &amp; Astrophysics">
+              <meta name="citation_publisher" content="EDP Sciences">
+              <meta name="citation_author" content="Saurabh Saurabh">
+              <meta name="citation_author" content="Hendrik Müller">
+              <meta name="citation_title" content="Probing jet base emission of M87* with the 2021 Event Horizon Telescope observations">
+              <meta name="citation_publication_date" content="2026/02/01">
+              <meta name="citation_volume" content="706">
+              <meta name="citation_firstpage" content="A27">
+              <meta name="citation_doi" content="10.1051/0004-6361/202557022">
+              <meta name="citation_pdf_url" content="https://www.aanda.org/articles/aa/pdf/2026/02/aa57022-25.pdf">
+            </head><body></body></html>
+            """
+        )
+
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: input)!,
+            session: StubURLProtocol.makeSession(),
+            crossrefFetcher: { _ in throw URLError(.notConnectedToInternet) }
+        )
+
+        XCTAssertEqual(StubURLProtocol.requests.map(\.url), [URL(string: input)!])
+        XCTAssertEqual(outcome.reference.title, "Probing jet base emission of M87* with the 2021 Event Horizon Telescope observations")
+        XCTAssertEqual(outcome.reference.authors.count, 2)
+        XCTAssertEqual(outcome.reference.year, 2026)
+        XCTAssertEqual(outcome.reference.journal, "Astronomy & Astrophysics")
+        XCTAssertEqual(outcome.reference.volume, "706")
+        XCTAssertEqual(outcome.reference.pages, "A27")
+        XCTAssertEqual(outcome.reference.doi, "10.1051/0004-6361/202557022")
+        XCTAssertEqual(outcome.reference.url, input)
+        XCTAssertEqual(outcome.reference.referenceType, .journalArticle)
+        XCTAssertEqual(outcome.reference.metadataSource, .publisherCitationMeta)
+        XCTAssertEqual(
+            outcome.scrapedPDFURL,
+            "https://www.aanda.org/articles/aa/pdf/2026/02/aa57022-25.pdf"
+        )
+    }
+
     // MARK: - Content-Type rejection
 
     func testNonHTMLContentTypeRejected() async {

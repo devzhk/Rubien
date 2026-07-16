@@ -64,6 +64,49 @@ final class PaperURLRewriteTests: XCTestCase {
                        "https://sciencedirect.com/science/article/pii/SXXXX")
     }
 
+    func testSciencePDFVariantsRewriteToCanonicalLanding() {
+        XCTAssertEqual(
+            rewrite("https://www.science.org/doi/pdf/10.1126/sciadv.abn9545"),
+            "https://www.science.org/doi/10.1126/sciadv.abn9545"
+        )
+        XCTAssertEqual(
+            rewrite("https://www.science.org/doi/epdf/10.1126/sciadv.abn9545"),
+            "https://www.science.org/doi/10.1126/sciadv.abn9545"
+        )
+    }
+
+    func testScienceFullLandingRetainsWorkingWWWHost() {
+        XCTAssertEqual(
+            rewrite("https://www.science.org/doi/full/10.1126/sciadv.abn9545"),
+            "https://www.science.org/doi/full/10.1126/sciadv.abn9545"
+        )
+    }
+
+    func testACSPDFVariantsRewriteToCanonicalLanding() {
+        XCTAssertEqual(
+            rewrite("https://pubs.acs.org/doi/pdf/10.1021/acscentsci.3c01275"),
+            "https://pubs.acs.org/doi/10.1021/acscentsci.3c01275"
+        )
+        XCTAssertEqual(
+            rewrite("https://pubs.acs.org/doi/epdf/10.1021/acscentsci.3c01275"),
+            "https://pubs.acs.org/doi/10.1021/acscentsci.3c01275"
+        )
+    }
+
+    func testAANDAPDFRewrite() {
+        XCTAssertEqual(
+            rewrite("https://www.aanda.org/articles/aa/pdf/2026/02/aa57022-25.pdf"),
+            "https://www.aanda.org/articles/aa/full_html/2026/02/aa57022-25/aa57022-25.html"
+        )
+    }
+
+    func testAANDAFullHTMLRetainsWorkingWWWHost() {
+        XCTAssertEqual(
+            rewrite("https://www.aanda.org/articles/aa/full_html/2026/02/aa57022-25/aa57022-25.html"),
+            "https://www.aanda.org/articles/aa/full_html/2026/02/aa57022-25/aa57022-25.html"
+        )
+    }
+
     func testELifePDFRewrite() {
         XCTAssertEqual(rewrite("https://www.elifesciences.org/articles/29515.pdf"),
                        "https://elifesciences.org/articles/29515")

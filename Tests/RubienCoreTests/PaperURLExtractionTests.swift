@@ -31,6 +31,30 @@ final class PaperURLExtractionTests: XCTestCase {
         }
     }
 
+    func testScienceArticleExtractsAsPaperURL() {
+        guard case .paperURL = extract(
+            "https://www.science.org/doi/full/10.1126/sciadv.abn9545"
+        ) else {
+            return XCTFail("Expected .paperURL")
+        }
+    }
+
+    func testACSArticleExtractsAsPaperURL() {
+        guard case .paperURL = extract(
+            "https://pubs.acs.org/doi/full/10.1021/acscentsci.3c01275"
+        ) else {
+            return XCTFail("Expected .paperURL")
+        }
+    }
+
+    func testAANDAArticleExtractsAsPaperURL() {
+        guard case .paperURL = extract(
+            "https://www.aanda.org/articles/aa/full_html/2026/02/aa57022-25/aa57022-25.html"
+        ) else {
+            return XCTFail("Expected .paperURL")
+        }
+    }
+
     func testAPSAbstractExtractsAsPaperURL() {
         let input = "https://journals.aps.org/prl/abstract/10.1103/3v91-5pzf"
         guard case .paperURL(let url) = extract(input) else {
