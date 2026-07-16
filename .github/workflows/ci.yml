@@ -23,6 +23,12 @@ jobs:
     # by Nov 2, 2025. macos-latest is avoided so version skew is
     # explicit, not silent.
     runs-on: macos-26
+    # Cap runaway hangs. `swift test` here intermittently deadlocks (a flaky
+    # WKWebView/CLI-test race); healthy runs finish in ~4 min, but an unbounded
+    # hang burns GitHub's 6h default on a 10x-billed macOS runner — two of those
+    # is what tripped the Actions spending limit. 10 min passes every healthy run
+    # while capping a hang at 10 min instead of 360.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Build
@@ -33,6 +39,8 @@ jobs:
   linux:
     name: Linux (x86_64)
     runs-on: ubuntu-22.04
+    # Backstop against a runaway; this job normally finishes in ~6 min.
+    timeout-minutes: 10
     # Pinned to the latest stable Swift line as of 2026-05. The
     # major.minor tag (no patch) picks up 6.3.x bugfixes automatically,
     # so this only needs a manual bump when 6.4 ships. Floor for this
@@ -76,6 +84,8 @@ jobs:
     # catalog. Catches server/CLI drift (renamed subcommands, envelope shape,
     # version-guard skew) that neither side's isolated suite can see.
     runs-on: ubuntu-22.04
+    # Backstop against a runaway; this job normally finishes in ~6 min.
+    timeout-minutes: 10
     container: swift:6.3-jammy
     steps:
       - uses: actions/checkout@v4
