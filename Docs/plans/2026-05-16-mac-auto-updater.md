@@ -8,7 +8,7 @@
 
 **Tech Stack:** Swift 6.1+ (Package Traits), SwiftUI, Observation framework, Sparkle 2.7+, Apple Developer ID + notarytool, GitHub Releases + GitHub Pages, XCTest.
 
-**Spec:** `Docs/superpowers/specs/2026-05-16-mac-auto-updater-design.md`. Refer to it for design rationale on every choice below.
+**Spec:** `Docs/specs/2026-05-16-mac-auto-updater-design.md`. Refer to it for design rationale on every choice below.
 
 ---
 
@@ -2041,7 +2041,7 @@ branch and push the appcast + create the gh release."
 ```markdown
 # Release Runbook
 
-This is the operator runbook for cutting a Rubien release. The design rationale lives in `Docs/superpowers/specs/2026-05-16-mac-auto-updater-design.md`.
+This is the operator runbook for cutting a Rubien release. The design rationale lives in `Docs/specs/2026-05-16-mac-auto-updater-design.md`.
 
 ## One-time setup
 
@@ -2299,7 +2299,7 @@ There is no commit step here — `release.sh` already pushed the appcast commit.
 
 ## Self-review (writing-plans skill checklist)
 
-Spot-checked against the spec at `Docs/superpowers/specs/2026-05-16-mac-auto-updater-design.md`:
+Spot-checked against the spec at `Docs/specs/2026-05-16-mac-auto-updater-design.md`:
 
 - **Sparkle 2.7+ as SPM dep with trait gating** → Tasks 1, 2 ✓
 - **Background check + silent download + custom UI** → Tasks 10, 11, 14, 15, 16, 17, 18 ✓

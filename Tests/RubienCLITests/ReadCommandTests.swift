@@ -3,7 +3,7 @@ import Foundation
 import GRDB
 
 /// Contract tests for `rubien-cli read text` / `read annotations` — the
-/// kind-agnostic read family (spec: Docs/superpowers/specs/2026-07-11-…).
+/// kind-agnostic read family (spec: Docs/specs/2026-07-11-…).
 /// Black-box like the rest of RubienCLITests: drive the built binary with an
 /// isolated RUBIEN_LIBRARY_ROOT. Web content / annotations / pdfCache states
 /// have no CLI write path, so they are seeded directly into the test library

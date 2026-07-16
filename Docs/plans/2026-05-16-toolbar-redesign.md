@@ -8,7 +8,7 @@
 
 **Tech Stack:** SwiftUI on macOS 15.0 (Sequoia), Swift 6 toolchain. Uses `.unified(showsTitle: true)` window style.
 
-**Spec:** `Docs/superpowers/specs/2026-05-16-toolbar-redesign-design.md`
+**Spec:** `Docs/specs/2026-05-16-toolbar-redesign-design.md`
 
 ---
 

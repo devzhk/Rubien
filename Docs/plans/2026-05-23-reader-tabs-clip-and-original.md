@@ -646,7 +646,7 @@ Expected modifications:
 - `Sources/Rubien/Services/ClipperWebMetadataExtractor.swift` (1 line — same rename at the setter)
 
 Expected new files:
-- `Docs/superpowers/plans/2026-05-23-reader-tabs-clip-and-original.md` (this plan)
+- `Docs/plans/2026-05-23-reader-tabs-clip-and-original.md` (this plan)
 
 NOT expected:
 - Changes to the database schema or `Reference` model
@@ -659,7 +659,7 @@ NOT expected:
 git add Sources/Rubien/Views/WebReaderView.swift \
         Sources/Rubien/ReaderExtraction/ReaderExtractionManager.swift \
         Sources/Rubien/Services/ClipperWebMetadataExtractor.swift \
-        Docs/superpowers/plans/2026-05-23-reader-tabs-clip-and-original.md
+        Docs/plans/2026-05-23-reader-tabs-clip-and-original.md
 
 git commit -m "$(cat <<'EOF'
 reader: collapse Clipped/Live tabs into Clip+Refresh, add Original tab

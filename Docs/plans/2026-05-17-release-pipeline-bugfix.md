@@ -6,7 +6,7 @@
 
 ## Context
 
-Following the Mac auto-updater implementation plan (`Docs/superpowers/plans/2026-05-16-mac-auto-updater.md`), Phases 1–9 are merged onto `main` and Phase 0 operator prerequisites are complete (Developer ID cert installed, `RubienNotary` profile stored, GitHub Pages workflow committed at `04326c3`).
+Following the Mac auto-updater implementation plan (`Docs/plans/2026-05-16-mac-auto-updater.md`), Phases 1–9 are merged onto `main` and Phase 0 operator prerequisites are complete (Developer ID cert installed, `RubienNotary` profile stored, GitHub Pages workflow committed at `04326c3`).
 
 Before running Phase 10's staging dry run (build → notarize → staple → install on a separate Mac mini → exercise the Sparkle update flow against `staging-appcast.xml`), a preflight pass on `scripts/release.sh` + `scripts/build-app.sh` + `scripts/lib/appcast.sh` found three real bugs and one cosmetic comment issue. Two of the bugs are silently masked by Tahoe's case-insensitive APFS; one would actively break the staging test.
 

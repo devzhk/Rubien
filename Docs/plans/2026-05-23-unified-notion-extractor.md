@@ -826,7 +826,7 @@ Expected new files:
 - `scripts/clipper-test/diagnose-notion-inventory.mjs` (probe from Task 1)
 - `scripts/clipper-test/diagnose-notion-novel.mjs` (probe from Task 1)
 - `scripts/clipper-test/diagnose-notion-toggle.mjs` (probe from Task 1 — definitive evidence for the pre-expansion lifecycle decision)
-- `Docs/superpowers/plans/2026-05-23-unified-notion-extractor.md` (this plan)
+- `Docs/plans/2026-05-23-unified-notion-extractor.md` (this plan)
 
 NOT expected:
 - Any change to `Sources/Rubien/ReaderExtraction/ReaderExtractionManager.swift` (discriminator stays in working tree)
@@ -847,7 +847,7 @@ git add scripts/clipper/src/clipper-defuddle.js \
         scripts/clipper-test/diagnose-notion-inline.mjs \
         scripts/clipper-test/diagnose-notion-novel.mjs \
         scripts/clipper-test/diagnose-notion-toggle.mjs \
-        Docs/superpowers/plans/2026-05-23-unified-notion-extractor.md
+        Docs/plans/2026-05-23-unified-notion-extractor.md
 
 git commit -m "$(cat <<'EOF'
 clipper: unified Notion per-host extractor (replaces piecemeal normalizers)

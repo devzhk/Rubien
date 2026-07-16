@@ -8,7 +8,7 @@
 
 **Tech Stack:** Swift 6 (native `Regex`, String.Index-only slicing), GRDB seeding in tests (feature-1 harness), TypeScript+zod (mcp-server).
 
-**Spec:** `Docs/superpowers/specs/2026-07-11-unified-grep-text-design.md` (approved; governs on conflict).
+**Spec:** `Docs/specs/2026-07-11-unified-grep-text-design.md` (approved; governs on conflict).
 
 ## Global Constraints
 

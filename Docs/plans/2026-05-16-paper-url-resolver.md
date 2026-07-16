@@ -8,7 +8,7 @@
 
 **Architecture:** Two new files in `RubienCore/Services/` — `PaperURLResolver.swift` (orchestrator) and `CitationMetaScraper.swift` (generic `<meta name="citation_*">` HTML parser). Both ship together because `CitationMetaScraper` references `KnownPaperHost` and a shared `fetchHTML` helper defined in `PaperURLResolver.swift`. Pure `URLSession` + HTML parsing; works in `rubien-cli` too. The new `MetadataFetcher.Identifier.paperURL` case routes through `PaperURLResolver.resolve`, which may re-fetch via CrossRef when a DOI is found, then merges using existing `MetadataResolution.mergeReference`. CVF gets a separate BibTeX adapter (inline in `PaperURLResolver.swift`) since CVF pages don't expose `citation_*` meta. Optional PDF auto-download threads a `pdfURLOverride: String?` through a new `ManualEntryOutcome` wrapper and the existing callback chain — no `Reference` field changes, no `MetadataResolutionResult` enum shape changes, no migrations.
 
-**Tech Stack:** Swift 6 (strict concurrency, Sendable, region-based isolation), GRDB 7.10, macOS 15 deployment, Foundation `URLSession`, `XCTest` for tests. Spec lives at `Docs/superpowers/specs/2026-05-16-paper-url-resolver-design.md` — read it first if you haven't.
+**Tech Stack:** Swift 6 (strict concurrency, Sendable, region-based isolation), GRDB 7.10, macOS 15 deployment, Foundation `URLSession`, `XCTest` for tests. Spec lives at `Docs/specs/2026-05-16-paper-url-resolver-design.md` — read it first if you haven't.
 
 **Pre-flight check before starting:**
 

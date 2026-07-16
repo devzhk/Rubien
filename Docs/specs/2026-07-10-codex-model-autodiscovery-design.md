@@ -1,7 +1,7 @@
 # Codex model & effort auto-discovery — design
 
 - **Date:** 2026-07-10 (v2 — revised after codex review, gpt-5.6 config-default @ medium, job task-mrfdx04v-mykh1d: verdict SOUND-WITH-FIXES, all 10 findings dispositioned below)
-- **Status:** Implemented (merged to main `5122840`, 2026-07-11; see `Docs/superpowers/plans/2026-07-10-codex-model-autodiscovery.md`). **Post-implementation UX pivot (user, 2026-07-10):** the §3 "Codex default = omit the model param" decision was replaced after live use — the picker now shows **concrete models only**, seeding a fresh conversation to the last-picked model (else the first discovered one) and **remembering model/effort picks** (`selectModel`/`selectEffort` persist). The omit-model wire behavior survives only as the transient pre-seed fallback; `resolvedModel` readback and everything else in §4 shipped as designed.
+- **Status:** Implemented (merged to main `5122840`, 2026-07-11; see `Docs/plans/2026-07-10-codex-model-autodiscovery.md`). **Post-implementation UX pivot (user, 2026-07-10):** the §3 "Codex default = omit the model param" decision was replaced after live use — the picker now shows **concrete models only**, seeding a fresh conversation to the last-picked model (else the first discovered one) and **remembering model/effort picks** (`selectModel`/`selectEffort` persist). The omit-model wire behavior survives only as the transient pre-seed fallback; `resolvedModel` readback and everything else in §4 shipped as designed.
 - **Area:** Assistant chat sidebar (`Sources/Rubien/Assistant/`)
 - **Related:** `2026-07-06-codex-app-server-phase3b-design.md`, `2026-07-04-assistant-chat-sidebar-design.md`
 - **Memory:** `[[assistant-chat-sidebar]]`

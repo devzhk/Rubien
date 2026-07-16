@@ -546,7 +546,7 @@ For each agent finding, decide fix vs skip. Apply fixes inline; do not bundle dr
 
 - [ ] **Step 1: Dispatch codex-rescue on the staged + unstaged diff**
 
-Prompt: "Review the uncommitted diff that implements the library-window main-thread lag fix described in `Docs/superpowers/plans/2026-05-21-library-window-main-thread-lag.md`. Verify: (1) the `\.syncCoordinator` environment key swap is structurally correct (no view that reads `.status` was downgraded by accident); (2) the throttle windows do not introduce a perceptible first-emit lag for the search / sidebar-click path; (3) the regression test actually measures what it claims (no false-green from the seed-row priming step)."
+Prompt: "Review the uncommitted diff that implements the library-window main-thread lag fix described in `Docs/plans/2026-05-21-library-window-main-thread-lag.md`. Verify: (1) the `\.syncCoordinator` environment key swap is structurally correct (no view that reads `.status` was downgraded by accident); (2) the throttle windows do not introduce a perceptible first-emit lag for the search / sidebar-click path; (3) the regression test actually measures what it claims (no false-green from the seed-row priming step)."
 
 ### Task 5.3: Final build + test + commit
 
@@ -565,7 +565,7 @@ git add Sources/Rubien/Sync/SyncCoordinatorEnvironment.swift \
         Sources/Rubien/Views/ReferenceDetailView.swift \
         Tests/RubienTests/SyncCoordinatorEnvironmentTests.swift \
         Tests/RubienTests/LibraryViewModelThrottleTests.swift \
-        Docs/superpowers/plans/2026-05-21-library-window-main-thread-lag.md
+        Docs/plans/2026-05-21-library-window-main-thread-lag.md
 git commit -m "$(cat <<'EOF'
 Library window: kill main-thread storm that lags PDF reader during sync
 

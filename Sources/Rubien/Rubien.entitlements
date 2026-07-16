@@ -7,7 +7,7 @@
 	     which the App Sandbox forbids (children inherit the sandbox and cannot
 	     exec external binaries). CloudKit + the App-Group library are
 	     independent of the sandbox and unaffected — see
-	     Docs/superpowers/specs/2026-07-04-assistant-chat-sidebar-design.md §D1.
+	     Docs/specs/2026-07-04-assistant-chat-sidebar-design.md §D1.
 	     Hardened Runtime (applied at codesign time) is retained for notarization. -->
 	<key>com.apple.security.application-groups</key>
 	<array>

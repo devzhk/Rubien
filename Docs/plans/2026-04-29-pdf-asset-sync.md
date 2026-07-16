@@ -8,7 +8,7 @@
 
 **Tech Stack:** Swift 5.10+, SwiftUI, GRDB 7, CKSyncEngine + `CKAsset`, swift-argument-parser (CLI), XCTest.
 
-**Spec:** `Docs/superpowers/specs/2026-04-29-pdf-asset-sync-design.md`. Refer to it for design rationale on every choice below.
+**Spec:** `Docs/specs/2026-04-29-pdf-asset-sync-design.md`. Refer to it for design rationale on every choice below.
 
 ---
 

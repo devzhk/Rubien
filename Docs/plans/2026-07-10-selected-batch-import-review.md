@@ -541,7 +541,7 @@ git commit -m "feat(app): confirm selected pending metadata"
 
 **Files:**
 - Modify only files required by verification findings.
-- Update: `Docs/superpowers/specs/2026-07-10-selected-batch-import-review-design.md` status if implementation matches the approved design.
+- Update: `Docs/specs/2026-07-10-selected-batch-import-review-design.md` status if implementation matches the approved design.
 
 **Interfaces:**
 - No new interfaces; this task verifies all previous ones compose correctly.

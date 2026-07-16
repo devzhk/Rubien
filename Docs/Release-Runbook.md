@@ -1,6 +1,6 @@
 # Release Runbook
 
-Operator runbook for cutting a Rubien release. The design rationale lives in `Docs/superpowers/specs/2026-05-16-mac-auto-updater-design.md`; this document is the recipe.
+Operator runbook for cutting a Rubien release. The design rationale lives in `Docs/specs/2026-05-16-mac-auto-updater-design.md`; this document is the recipe.
 
 ## Where releases are hosted (two repos)
 

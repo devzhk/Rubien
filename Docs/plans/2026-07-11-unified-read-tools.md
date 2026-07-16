@@ -8,7 +8,7 @@
 
 **Tech Stack:** Swift 6 / swift-argument-parser 1.7 / GRDB 7.10 (RubienCore), TypeScript + zod (mcp-server, Node ≥ 20), XCTest black-box CLI tests, vitest.
 
-**Spec:** `Docs/superpowers/specs/2026-07-11-unified-read-tools-design.md` (approved 2026-07-11). The spec governs on any conflict.
+**Spec:** `Docs/specs/2026-07-11-unified-read-tools-design.md` (approved 2026-07-11). The spec governs on any conflict.
 
 ## Global Constraints
 
@@ -104,7 +104,7 @@ import Foundation
 import GRDB
 
 /// Contract tests for `rubien-cli read text` / `read annotations` — the
-/// kind-agnostic read family (spec: Docs/superpowers/specs/2026-07-11-…).
+/// kind-agnostic read family (spec: Docs/specs/2026-07-11-…).
 /// Black-box like the rest of RubienCLITests: drive the built binary with an
 /// isolated RUBIEN_LIBRARY_ROOT. Web content / annotations / pdfCache states
 /// have no CLI write path, so they are seeded directly into the test library
@@ -1296,8 +1296,8 @@ If a test pins the old seed text (`rg -n "rubien_pdf_text" Tests/`), update its 
 - [ ] **Step 2: ChatSidebarHarness demo events** (~44-46): `"rubien_pdf_text"` → `"rubien_read_text"` (both yield lines).
 - [ ] **Step 3: Sweep + classify.**
 
-Run: `rg -n "rubien_pdf_text|rubien_web_get|rubien_annotations_list|rubien_web_annotations" --iglob '!Docs/superpowers/**' .` and `rg -n '"web", "get"|"pdf", "text"|pdf text|web annotations' scripts/ Docs/ mcp-server/ Sources/ Tests/`
-Expected after fixes: hits only in `Docs/CLI-Reference.md` + `mcp-server/README.md` (Task 7 territory) and `Docs/superpowers/` historical specs. Known classification (verify, then apply):
+Run: `rg -n "rubien_pdf_text|rubien_web_get|rubien_annotations_list|rubien_web_annotations" --iglob '!Docs/**' .` and `rg -n '"web", "get"|"pdf", "text"|pdf text|web annotations' scripts/ Docs/ mcp-server/ Sources/ Tests/`
+Expected after fixes: hits only in `Docs/CLI-Reference.md` + `mcp-server/README.md` (Task 7 territory) and `Docs/` historical specs. Known classification (verify, then apply):
 - **Migrate** (demo surfaces that display tool names): `ChatSidebarHarness.swift:44-46`, `AssistantRendererHarness.swift:~80` — rename to `rubien_read_text`.
 - **Whitelist** (opaque test payload — the tests exercise transcript/renderer parsing, not tools): `ClaudeSessionStoreTests.swift:269,290`, `CodexAppServerProtocolTests.swift:436`, `ChatSessionControllerTests.swift`, `ChatTranscriptJSTests.swift`, `scripts/chat-renderer/test/integration.test.js:~82`. Leave them unless a rename is a trivial string swap that keeps the test green.
 Anything else found: fix production/doc sites, and list every classification decision in the task report.

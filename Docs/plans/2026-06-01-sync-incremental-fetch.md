@@ -8,7 +8,7 @@
 
 **Tech Stack:** Swift 6 (strict concurrency, actors, `@MainActor`), CloudKit `CKSyncEngine`, AppKit `NSApplication`, GRDB 7, XCTest.
 
-**Reference spec:** `Docs/superpowers/specs/2026-06-01-sync-incremental-fetch-design.md`
+**Reference spec:** `Docs/specs/2026-06-01-sync-incremental-fetch-design.md`
 
 ---
 
@@ -798,7 +798,7 @@ with:
 Under "## Known follow-ups", add a bullet:
 
 ```
-- **Push-driven live fetch (Layer B).** Today incremental remote changes arrive only on launch / foreground / a ~90s idle poll (`SyncConstants.idleFetchInterval`). True push-driven sync needs the `aps-environment` entitlement (dev/release split like `icloud-container-environment`), Push enabled on the `com.rubien.app` App ID, and on-device verification that a Developer-ID DMG build actually receives CloudKit silent pushes. Planned with the iOS port. See `Docs/superpowers/specs/2026-06-01-sync-incremental-fetch-design.md`.
+- **Push-driven live fetch (Layer B).** Today incremental remote changes arrive only on launch / foreground / a ~90s idle poll (`SyncConstants.idleFetchInterval`). True push-driven sync needs the `aps-environment` entitlement (dev/release split like `icloud-container-environment`), Push enabled on the `com.rubien.app` App ID, and on-device verification that a Developer-ID DMG build actually receives CloudKit silent pushes. Planned with the iOS port. See `Docs/specs/2026-06-01-sync-incremental-fetch-design.md`.
 ```
 
 - [ ] **Step 3: Commit**

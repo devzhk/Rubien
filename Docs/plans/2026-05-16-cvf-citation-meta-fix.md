@@ -6,7 +6,7 @@
 
 **Architecture:** Drop the special-case CVF BibTeX adapter (`PaperURLResolver.resolveCVF`) and route CVF through the standard `resolveCitationMeta` path used by the other 9 hosts. The original spec assumed CVF pages had no `citation_*` meta tags and a `<pre>` BibTeX block — both assumptions are false on real CVF pages across all venues sampled (CVPR 2018, 2019, 2025). The real pages have `citation_*` meta tags that pass the strong evidence gate cleanly.
 
-**Tech Stack:** Swift 6, GRDB 7.10, macOS 15. Same as the parent feature (`Docs/superpowers/plans/2026-05-16-paper-url-resolver.md`).
+**Tech Stack:** Swift 6, GRDB 7.10, macOS 15. Same as the parent feature (`Docs/plans/2026-05-16-paper-url-resolver.md`).
 
 **Pre-flight check before starting:**
 

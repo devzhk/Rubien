@@ -78,7 +78,7 @@ CODESIGN_ENABLED="${CODESIGN_ENABLED:-1}"
 # Outer app entitlements: App Group + Sparkle XPC mach-lookup + iCloud/CloudKit
 # + file access. NOTE: the App Sandbox is deliberately absent so the app can
 # spawn the Claude Code / Codex CLI runtimes for the Assistant sidebar (see
-# Docs/superpowers/specs/2026-07-04-assistant-chat-sidebar-design.md §D1);
+# Docs/specs/2026-07-04-assistant-chat-sidebar-design.md §D1);
 # CloudKit + the App-Group library are unaffected, and Hardened Runtime
 # (--options runtime, below) is retained for notarization. Default points at the
 # in-repo plist; override via env var for custom builds. Without this, the outer

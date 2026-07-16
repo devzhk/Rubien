@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-03
 **Status:** Approved design, two Codex passes incorporated; pending implementation plan (writing-plans next).
-**Supersedes:** `Docs/superpowers/plans/2026-06-01-bundle-mcp-server-in-app.md` (the "bundle the server inside Rubien.app via esbuild" approach — rejected during brainstorming because it couples server releases to signed-DMG cadence and does nothing for Linux).
+**Supersedes:** `Docs/plans/2026-06-01-bundle-mcp-server-in-app.md` (the "bundle the server inside Rubien.app via esbuild" approach — rejected during brainstorming because it couples server releases to signed-DMG cadence and does nothing for Linux).
 **Reviewed:** Two Codex (gpt-5.5) passes. (1) Design review of the verbal design — verdict PROCEED-WITH-CHANGES; its five findings are folded in and marked **[Codex #N]**. (2) Review of this written spec — verdict REVISE-SPEC; its additional findings are folded in and marked **[Codex spec-rev]**.
 
 ---

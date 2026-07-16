@@ -5,9 +5,9 @@
 **Base reviewed:** `unified-write-tools` at `f81e6d9b0aa7`
 **Companion contracts:**
 
-- `Docs/superpowers/specs/2026-07-14-unified-write-tools-design.md`
-- `Docs/superpowers/specs/2026-07-04-assistant-chat-sidebar-design.md`
-- `Docs/superpowers/specs/2026-07-06-codex-app-server-phase3b-design.md`
+- `Docs/specs/2026-07-14-unified-write-tools-design.md`
+- `Docs/specs/2026-07-04-assistant-chat-sidebar-design.md`
+- `Docs/specs/2026-07-06-codex-app-server-phase3b-design.md`
 
 ## Outcome
 

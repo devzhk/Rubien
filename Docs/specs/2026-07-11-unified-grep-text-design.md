@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-11
 **Status:** Draft for review
-**Context:** Feature 2 of the two-feature arc. Feature 1 (unified read tools, merged at `880ddc6`) established the routing conventions this reuses: the four-state PDF availability probe, `source`/`available`, PDF-wins + param-implied source selection. This spec **supersedes** `Docs/superpowers/specs/2026-06-26-pdf-grep-design.md` (PDF-only draft, never implemented); its PDF matcher design is absorbed here. Nothing named `rubien_pdf_search` / `pdf search` ever ships.
+**Context:** Feature 2 of the two-feature arc. Feature 1 (unified read tools, merged at `880ddc6`) established the routing conventions this reuses: the four-state PDF availability probe, `source`/`available`, PDF-wins + param-implied source selection. This spec **supersedes** `Docs/specs/2026-06-26-pdf-grep-design.md` (PDF-only draft, never implemented); its PDF matcher design is absorbed here. Nothing named `rubien_pdf_search` / `pdf search` ever ships.
 
 ## 1. Motivation
 

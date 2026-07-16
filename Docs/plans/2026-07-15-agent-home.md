@@ -1,6 +1,6 @@
 # Agent Home and Reading Activity — Implementation Plan
 
-**Design:** `Docs/superpowers/specs/2026-07-15-agent-home-design.md`
+**Design:** `Docs/specs/2026-07-15-agent-home-design.md`
 **Branch/worktree:** `codex/agent-home` / `/private/tmp/Rubien-agent-home`
 **Baseline:** `swift build` passes at `7e44b76`.
 **Status:** All checkpoints and visual-QA refinements implemented and verified

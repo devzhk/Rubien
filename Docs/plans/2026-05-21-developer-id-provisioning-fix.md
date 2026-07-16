@@ -145,7 +145,7 @@ Main flow update:
 +| Mac, embedded helper (`/Applications/Rubien.app/Contents/Helpers/rubien-cli`) | `~/Library/Group Containers/9TXK4V3SS8.group.com.rubien.shared/Rubien/library.sqlite` |
 ```
 
-### Edit 9 — `Docs/superpowers/specs/2026-05-16-mac-auto-updater-design.md:129` (cosmetic)
+### Edit 9 — `Docs/specs/2026-05-16-mac-auto-updater-design.md:129` (cosmetic)
 
 ```diff
 -- Shared `9TXK4V3SS8.com.rubien.shared` App Group — library, PDF storage, sync state sidecar all colocated regardless of channel.

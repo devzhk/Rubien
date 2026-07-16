@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-11
 **Status:** Draft for review
-**Context:** Feature 1 of a two-feature arc. Feature 2 (unified body-text grep, `rubien_grep_text`) builds on the routing and conventions established here; its earlier PDF-only draft is `Docs/superpowers/specs/2026-06-26-pdf-grep-design.md`, to be revised separately.
+**Context:** Feature 1 of a two-feature arc. Feature 2 (unified body-text grep, `rubien_grep_text`) builds on the routing and conventions established here; its earlier PDF-only draft is `Docs/specs/2026-06-26-pdf-grep-design.md`, to be revised separately.
 
 ## 1. Motivation
 

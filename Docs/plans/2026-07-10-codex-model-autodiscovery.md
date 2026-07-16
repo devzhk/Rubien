@@ -8,7 +8,7 @@
 
 **Tech Stack:** Swift 6 / SwiftUI (macOS 15 target), JSON-RPC 2.0 over stdio against `codex app-server`, XCTest with the `fake-codex-app-server.py` fixture harness.
 
-**Spec:** `Docs/superpowers/specs/2026-07-10-codex-model-autodiscovery-design.md` (committed as `611dc19`). Read it before starting; §7 maps the codex-review findings each design point answers.
+**Spec:** `Docs/specs/2026-07-10-codex-model-autodiscovery-design.md` (committed as `611dc19`). Read it before starting; §7 maps the codex-review findings each design point answers.
 
 ## Global Constraints
 
@@ -1896,12 +1896,12 @@ Verify, in a PDF or web reader with the chat panel open and backend = Codex:
 
 - [ ] **Step 3: Update the spec's status line**
 
-In `Docs/superpowers/specs/2026-07-10-codex-model-autodiscovery-design.md`, change the `- **Status:**` line to `Implemented (see Docs/superpowers/plans/2026-07-10-codex-model-autodiscovery.md)`.
+In `Docs/specs/2026-07-10-codex-model-autodiscovery-design.md`, change the `- **Status:**` line to `Implemented (see Docs/plans/2026-07-10-codex-model-autodiscovery.md)`.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add Docs/superpowers/specs/2026-07-10-codex-model-autodiscovery-design.md
+git add Docs/specs/2026-07-10-codex-model-autodiscovery-design.md
 git commit -m "docs(assistant): mark codex model auto-discovery spec implemented"
 ```
 

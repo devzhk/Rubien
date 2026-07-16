@@ -81,7 +81,7 @@ Expected: the existing materializer suite plus the new GitHub PDF/Markdown cases
 git add Sources/RubienCore/Services/ImportSourceMaterializer.swift \
   Tests/RubienCoreTests/ImportSourceMaterializerTests.swift \
   Docs/CLI-Reference.md \
-  Docs/superpowers/plans/2026-07-10-github-blob-import-links.md
+  Docs/plans/2026-07-10-github-blob-import-links.md
 git commit -m "feat(import): support GitHub blob file links"
 ```
 

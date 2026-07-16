@@ -8,7 +8,7 @@
 
 **Tech Stack:** Swift 6, SwiftUI (macOS 15), GRDB (untouched here), XCTest. SF Symbols for the curated glyphs.
 
-**Spec:** `Docs/superpowers/specs/2026-06-07-view-icon-picker-design.md`
+**Spec:** `Docs/specs/2026-06-07-view-icon-picker-design.md`
 **Codex review of spec:** `/tmp/view-icon-spec-review.md` (its two corrections — Duplicate must carry the icon; `editingView == nil` is ambiguous → use an explicit mode enum — are baked into this plan).
 
 ---
@@ -609,13 +609,13 @@ the immutable migration column default in `AppDatabase.swift`, which is expected
 
 - [ ] **Step 3: Mark the spec implemented**
 
-In `Docs/superpowers/specs/2026-06-07-view-icon-picker-design.md`, change the
+In `Docs/specs/2026-06-07-view-icon-picker-design.md`, change the
 `**Status:**` line to `Implemented (<commit-sha>)`.
 
 - [ ] **Step 4: Commit the doc update**
 
 ```bash
-git add Docs/superpowers/specs/2026-06-07-view-icon-picker-design.md
+git add Docs/specs/2026-06-07-view-icon-picker-design.md
 git commit -m "docs(views): mark icon-picker spec implemented" \
            -m "Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 ```

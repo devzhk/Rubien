@@ -230,8 +230,8 @@ git add Sources/Rubien/Sync/SyncCoordinatorEnvironment.swift \
         Tests/RubienTests/SyncCoordinatorEnvironmentTests.swift \
         Tests/RubienTests/LibraryViewModelThrottleTests.swift \
         Tests/RubienTests/SyncStatusIconTests.swift \
-        Docs/superpowers/plans/2026-05-21-library-window-main-thread-lag.md \
-        Docs/superpowers/plans/2026-05-21-sync-status-icon-pulse-render-server-saturation.md
+        Docs/plans/2026-05-21-library-window-main-thread-lag.md \
+        Docs/plans/2026-05-21-sync-status-icon-pulse-render-server-saturation.md
 git commit -m "$(cat <<'EOF'
 Library window: fix PDF reader scroll lag during active iCloud sync
 

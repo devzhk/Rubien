@@ -1,7 +1,7 @@
 # Unified Write Tools & `{op}_{target}` Catalog — Implementation Plan
 
 **Date:** 2026-07-14 (v4 — three codex plan reviews: 12 → 7 → 4 findings [final round: no blockers]; all incorporated)
-**Spec:** `Docs/superpowers/specs/2026-07-14-unified-write-tools-design.md` (Draft v6 — 4 codex review rounds; user-blessed 2026-07-14 incl. the 6 product calls + the `views_query`→`list_references {view}` fold).
+**Spec:** `Docs/specs/2026-07-14-unified-write-tools-design.md` (Draft v6 — 4 codex review rounds; user-blessed 2026-07-14 incl. the 6 product calls + the `views_query`→`list_references {view}` fold).
 
 **Shape (the review's core correction):** the old C→D ordering broke the repo between commits — every CLI removal orphaned the checked-in npm server, which still shells the removed argv. So the plan is now **additive phases → one atomic cutover commit**: A–C add every new capability while old forms keep working; D is the single commit that removes old surfaces *and* ships the npm catalog *and* bumps the build/version guards — the repo is never in a state where a checked-in component calls a missing surface. Same-stroke/lockstep, interpreted at repo scope.
 

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Swift 6, SwiftUI/AppKit (macOS 15), Foundation/UniformTypeIdentifiers, ImageIO/CoreGraphics, Claude stream-JSON, Codex app-server JSON-RPC, XCTest, JavaScript/DOMPurify renderer tests under Node.js.
 
-**Spec:** `Docs/superpowers/specs/2026-07-12-assistant-attachments-design.md` (commit `06e8edf`). Read it before starting.
+**Spec:** `Docs/specs/2026-07-12-assistant-attachments-design.md` (commit `06e8edf`). Read it before starting.
 
 ## Global Constraints
 

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Swift 6.x, GRDB 7.10, SwiftUI/AppKit (app tasks), swift-argument-parser (CLI), TypeScript + zod + vitest (mcp-server).
 
-**Spec:** `Docs/superpowers/specs/2026-07-09-markdown-import-design.md` — read it first; it holds the rationale for every rule below.
+**Spec:** `Docs/specs/2026-07-09-markdown-import-design.md` — read it first; it holds the rationale for every rule below.
 
 ## Global Constraints
 

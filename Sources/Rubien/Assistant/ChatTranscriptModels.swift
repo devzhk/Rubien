@@ -3,7 +3,7 @@ import Foundation
 // MARK: - Render model types
 //
 // These types are the pure-data contract between Swift and the `window.RubienChat`
-// JS renderer (see `Docs/superpowers/specs/2026-07-04-assistant-chat-sidebar-design.md`
+// JS renderer (see `Docs/specs/2026-07-04-assistant-chat-sidebar-design.md`
 // §5.2). They are deliberately AppKit-free and NOT `#if os(macOS)`-gated so the unit
 // tests (and any future Linux CLI surface) can use them without a WebView.
 
