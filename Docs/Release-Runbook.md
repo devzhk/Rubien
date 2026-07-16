@@ -46,9 +46,9 @@ The source repo `devzhk/Rubien` is **private**, but Sparkle downloads update DMG
 
 ## Per-release procedure
 
-Host prerequisites: `gh` authenticated, the Developer ID identity available, the EdDSA private key in Keychain, and the `RubienNotary` notarytool profile in the login Keychain (from One-time setup §4 — it persists across releases; you do **not** re-run `store-credentials` each time). Steps 1–3 establish the repository prerequisites: release-preparation changes committed and pushed to `origin/main`, CI green for that exact commit, and a clean synchronized `main`.
+Host prerequisites: `gh` authenticated, the Developer ID identity available, the EdDSA private key in Keychain, and the `RubienNotary` notarytool profile in the login Keychain (from One-time setup §4 — it persists across releases; you do **not** re-run `store-credentials` each time). Steps 1–3 establish the repository prerequisites: release-preparation changes committed and pushed to `origin/main`, the CI gate satisfied, and a clean synchronized `main`.
 
-The order is strict: **prepare and commit → push and pass exact-SHA CI → sign and publish on the interactive host → verify Mac and Linux artifacts → publish any coupled npm package**. Do not start signing while release-preparation commits exist only locally.
+The order is strict: **prepare and commit → push and satisfy the CI gate → sign and publish on the interactive host → verify Mac and Linux artifacts → publish any coupled npm package**. Normally the green run must match `HEAD` exactly. The only exception is a descendant containing Markdown-only documentation changes after an already-green release-preparation SHA; the commands below prove that no release input changed. Do not start signing while release-preparation commits exist only locally.
 
 > **Run the release on the interactive host — not from a sandboxed agent (e.g. Codex).** Signing (Developer ID + Sparkle EdDSA keys), notarization (the `RubienNotary` Keychain profile), the `build/` writes, and `git push` all need access a read-only sandbox denies. A sandboxed agent that cannot read the login Keychain will report `RubienNotary` (or the signing identity) as **missing** when it is in fact present — that is a sandbox limitation, not a setup gap. Drive `./scripts/release.sh` from Claude Code running on the host, or hand that step to the maintainer. (Verify a suspected-missing profile the real way: `xcrun notarytool history --keychain-profile RubienNotary` on the host — success means it is there.)
 
@@ -67,19 +67,24 @@ $EDITOR BUILD.txt     # increment by 1
 git add VERSION BUILD.txt Sources/RubienCLI/GeneratedVersion.swift
 git commit -m "chore: bump version to X.Y.Z (build N)"
 
-# 3. Push release prep and require green CI for this exact commit
+# 3. Push release prep and satisfy the CI gate
 git push origin main
 RELEASE_SHA="$(git rev-parse HEAD)"
 CI_RUN_ID="$(gh run list --workflow=ci.yml --commit "$RELEASE_SHA" \
     --limit 1 --json databaseId --jq '.[0].databaseId')"
-# If CI_RUN_ID is empty, first allow for dispatch delay and repeat the lookup.
-# For a docs-only push skipped by paths-ignore, run the following, wait for the
-# run to appear, and repeat the lookup. The dispatched run still uses main HEAD:
-# gh workflow run ci.yml --ref main
-test -n "$CI_RUN_ID"
-gh run watch "$CI_RUN_ID" --exit-status
-test "$(gh run view "$CI_RUN_ID" --json headSha --jq .headSha)" = "$RELEASE_SHA"
-test "$(gh run view "$CI_RUN_ID" --json conclusion --jq .conclusion)" = "success"
+if [ -n "$CI_RUN_ID" ]; then
+    gh run watch "$CI_RUN_ID" --exit-status
+    test "$(gh run view "$CI_RUN_ID" --json headSha --jq .headSha)" = "$RELEASE_SHA"
+    test "$(gh run view "$CI_RUN_ID" --json conclusion --jq .conclusion)" = "success"
+else
+    # CI intentionally skips Markdown-only pushes. Reuse the latest green CI
+    # only if every file since that validated SHA ends in .md. If this test
+    # fails, wait for/find the exact-SHA run instead; never broaden the exception.
+    VALIDATED_SHA="$(gh run list --workflow=ci.yml --branch main --status success \
+        --limit 1 --json headSha --jq '.[0].headSha')"
+    test -n "$VALIDATED_SHA"
+    test -z "$(git diff --name-only "$VALIDATED_SHA"..HEAD | rg -v '\.md$')"
+fi
 test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
 test -z "$(git status --porcelain)"
 git status --short --branch
@@ -108,7 +113,7 @@ gh release view "v$(tr -d '[:space:]' < VERSION)" \
 # Copy the dSYM zip path printed by build-app.sh to durable private storage.
 ```
 
-**You must bump `VERSION` (if the marketing version is changing) and `BUILD.txt` (every release) before running — `release.sh` does not bump them for you. Then run `./scripts/generate-cli-version.sh` and commit the regenerated `Sources/RubienCLI/GeneratedVersion.swift` alongside the bump; the file is checked in and CI's "Verify generated CLI version is in sync" step fails the build if it drifts from `VERSION` + `BUILD.txt`. Push that commit and watch the CI run for its exact SHA to a successful conclusion. If CI fails, or no run exists for that SHA, stop: fix the issue in a new commit, push, and watch again. A green run for an older commit and local test results are not substitutes.**
+**You must bump `VERSION` (if the marketing version is changing) and `BUILD.txt` (every release) before running — `release.sh` does not bump them for you. Then run `./scripts/generate-cli-version.sh` and commit the regenerated `Sources/RubienCLI/GeneratedVersion.swift` alongside the bump; the file is checked in and CI's "Verify generated CLI version is in sync" step fails the build if it drifts from `VERSION` + `BUILD.txt`. Push that commit and watch the CI run for its exact SHA to a successful conclusion. If CI fails, stop: fix the issue in a new commit, push, and watch again. A green run for an older commit and local test results are not substitutes unless `HEAD` is a Markdown-only descendant and the explicit diff check above passes.**
 
 Only after that gate is green is `release.sh` the single entry point: it calls `scripts/build-app.sh` (which assembles + signs + embeds Sparkle, then builds the DMG), notarizes, signs the appcast item with `sign_update`, prepends the item to `Docs/appcast.xml`, commits + pushes the appcast change, tags the source commit on the private repo, and creates the GitHub release with the DMG on the public `devzhk/Rubien-releases` repo via `gh release create --repo`. Its later appcast push is part of publication; it is not a substitute for pushing and validating the release-preparation commit before signing starts.
 
