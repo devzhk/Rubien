@@ -14,7 +14,7 @@ enum PDFSidebarTab: String, CaseIterable {
 }
 
 enum PDFReaderMetrics {
-    static let defaultSidebarWidth: CGFloat = 220
+    static let defaultSidebarWidth: CGFloat = 225
     static let sidebarWidthRange: ClosedRange<CGFloat> = 200...400
     static let sidebarVisibleDividerWidth: CGFloat = 4
     static let sidebarResizeHitTargetWidth = ReaderResizeMetrics.hitTargetWidth

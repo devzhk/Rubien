@@ -64,15 +64,15 @@ final class ReaderChromeInteractionTests: XCTestCase {
                 afterTrailingEdgeTranslation: 60,
                 from: PDFReaderMetrics.defaultSidebarWidth,
                 in: PDFReaderMetrics.sidebarWidthRange),
-            280
+            285
         )
     }
 
     func testReaderSidebarsUseNarrowerDefaultsWithinTheirResizeFloors() {
-        XCTAssertEqual(PDFReaderMetrics.defaultSidebarWidth, 220)
+        XCTAssertEqual(PDFReaderMetrics.defaultSidebarWidth, 225)
         XCTAssertTrue(PDFReaderMetrics.sidebarWidthRange.contains(PDFReaderMetrics.defaultSidebarWidth))
-        XCTAssertEqual(WebReaderMetrics.defaultAnnotationSidebarWidth, 280)
-        XCTAssertGreaterThanOrEqual(
+        XCTAssertEqual(WebReaderMetrics.defaultAnnotationSidebarWidth, 225)
+        XCTAssertEqual(
             WebReaderMetrics.defaultAnnotationSidebarWidth,
             WebReaderMetrics.annotationSidebarMinWidth)
     }

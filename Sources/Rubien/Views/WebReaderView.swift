@@ -27,8 +27,8 @@ struct WebSelectionSnapshot: Equatable {
 }
 
 enum WebReaderMetrics {
-    static let annotationSidebarMinWidth: CGFloat = 260
-    static let defaultAnnotationSidebarWidth: CGFloat = 280
+    static let annotationSidebarMinWidth: CGFloat = 225
+    static let defaultAnnotationSidebarWidth: CGFloat = 225
     static let defaultChatPanelWidth = AssistantSidebarMetrics.minimumWidth
     static let chatTrailingInset: CGFloat = 12
     static let minimumWindowHeight: CGFloat = 620
