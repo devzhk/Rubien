@@ -11,6 +11,49 @@ enum ActivityHeatmapRange: String, CaseIterable, Identifiable, Hashable {
     var title: String { rawValue.capitalized }
 }
 
+enum ActivityHeatmapCalendar {
+    static func interval(
+        for range: ActivityHeatmapRange,
+        anchor: Date,
+        calendar: Calendar
+    ) -> DateInterval {
+        switch range {
+        case .month:
+            return calendar.dateInterval(of: .month, for: anchor)!
+        case .quarter:
+            return calendar.dateInterval(of: .quarter, for: anchor)!
+        case .year:
+            return calendar.dateInterval(of: .year, for: anchor)!
+        }
+    }
+
+    static func date(
+        byMoving anchor: Date,
+        in range: ActivityHeatmapRange,
+        direction: Int,
+        calendar: Calendar
+    ) -> Date? {
+        let component: Calendar.Component
+        let amount: Int
+        switch range {
+        case .month: component = .month; amount = direction
+        case .quarter: component = .month; amount = 3 * direction
+        case .year: component = .year; amount = direction
+        }
+        return calendar.date(byAdding: component, value: amount, to: anchor)
+    }
+
+    static func monthLabelDate(
+        forWeekStarting weekStart: Date,
+        within interval: DateInterval,
+        calendar: Calendar
+    ) -> Date? {
+        guard weekStart >= interval.start, weekStart < interval.end else { return nil }
+        guard calendar.component(.day, from: weekStart) <= 7 else { return nil }
+        return weekStart
+    }
+}
+
 struct AgentHomeView: View {
     @ObservedObject var session: ChatSessionController
     let renderer: ChatTranscriptController
@@ -122,7 +165,9 @@ private struct ReadingActivityPanel: View {
     @State private var recentPaperCards: [Int64: ChatPaper] = [:]
 
     private var calendar: Calendar { AppDatabase.activityCalendar() }
-    private var interval: DateInterval { Self.interval(for: range, anchor: anchor, calendar: calendar) }
+    private var interval: DateInterval {
+        ActivityHeatmapCalendar.interval(for: range, anchor: anchor, calendar: calendar)
+    }
 
     var body: some View {
         ViewThatFits(in: .vertical) {
@@ -384,14 +429,12 @@ private struct ReadingActivityPanel: View {
     }
 
     private func moveAnchor(_ direction: Int) {
-        let component: Calendar.Component
-        let amount: Int
-        switch range {
-        case .month: component = .month; amount = direction
-        case .quarter: component = .weekOfYear; amount = 13 * direction
-        case .year: component = .year; amount = direction
-        }
-        if let moved = calendar.date(byAdding: component, value: amount, to: anchor) {
+        if let moved = ActivityHeatmapCalendar.date(
+            byMoving: anchor,
+            in: range,
+            direction: direction,
+            calendar: calendar
+        ) {
             anchor = min(moved, Date())
         }
     }
@@ -446,19 +489,6 @@ private struct ReadingActivityPanel: View {
                 year: reference.year,
                 badge: badge))
         })
-    }
-
-    static func interval(for range: ActivityHeatmapRange, anchor: Date, calendar: Calendar) -> DateInterval {
-        switch range {
-        case .month:
-            return calendar.dateInterval(of: .month, for: anchor)!
-        case .quarter:
-            let week = calendar.dateInterval(of: .weekOfYear, for: anchor)!
-            let start = calendar.date(byAdding: .weekOfYear, value: -12, to: week.start)!
-            return DateInterval(start: start, end: week.end)
-        case .year:
-            return calendar.dateInterval(of: .year, for: anchor)!
-        }
     }
 }
 
@@ -623,6 +653,7 @@ private struct HeatmapGrid: View {
     var body: some View {
         let activityByDay = Dictionary(
             uniqueKeysWithValues: dailyActivity.map { ($0.localDay, $0) })
+        let visibleWeeks = weeks
         VStack(spacing: 7) {
             GeometryReader { geometry in
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -642,12 +673,13 @@ private struct HeatmapGrid: View {
                         }
 
                         HStack(alignment: .top, spacing: metrics.daySpacing) {
-                            ForEach(Array(weeks.enumerated()), id: \.offset) { index, week in
+                            ForEach(visibleWeeks.indices, id: \.self) { index in
+                                let week = visibleWeeks[index]
                                 let containsHoveredDay = week.contains {
                                     LocalDay(date: $0, calendar: calendar) == hoveredDay?.day
                                 }
                                 VStack(alignment: .leading, spacing: metrics.daySpacing) {
-                                    Text(monthLabel(for: week, index: index))
+                                    Text(monthLabel(for: week))
                                         .font(.system(
                                             size: metrics.labelFontSize,
                                             weight: .medium))
@@ -762,12 +794,12 @@ private struct HeatmapGrid: View {
                 : (isFuture ? "Future date" : "Outside the selected range"))
     }
 
-    private func monthLabel(for week: [Date], index: Int) -> String {
-        let labelDate: Date?
-        if index == 0 {
-            labelDate = week.first(where: { $0 >= interval.start }) ?? week.first
-        } else {
-            labelDate = week.first(where: { calendar.component(.day, from: $0) == 1 })
+    private func monthLabel(for week: [Date]) -> String {
+        let labelDate = week.first.flatMap {
+            ActivityHeatmapCalendar.monthLabelDate(
+                forWeekStarting: $0,
+                within: interval,
+                calendar: calendar)
         }
         return labelDate?.formatted(.dateTime.month(.abbreviated)) ?? ""
     }

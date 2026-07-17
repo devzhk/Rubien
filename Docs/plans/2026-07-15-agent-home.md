@@ -123,7 +123,7 @@ unexposed until their data, privacy, and clear contracts are complete.
 4. Add hidden-turn progress/approval/unread/error attention indicators.
 5. Add the top-pinned, content-height neutral glass Activity card:
    - metric grid and coverage labels
-   - Month / rolling 13-week Quarter / Year heatmap
+   - Month / calendar Quarter / Year heatmap
    - fixed Levels 1–5 and exact accessible daily detail
    - current-generation recent papers
    - compact overlay and height-constrained internal scrolling

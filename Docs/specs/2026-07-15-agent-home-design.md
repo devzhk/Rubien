@@ -54,8 +54,9 @@ transcripts, or reader focus-event timeline for statistics.
    stores metadata only; unrelated Claude/Codex conversations and provider-owned
    transcript/history behavior are excluded.
 9. **The heatmap offers Month, Quarter, and Year ranges.** Quarter is the default
-   and means a rolling 13-week window. Daily intensity uses fixed estimated-time
-   bands so the same color always means the same amount of active reading.
+   and means the calendar quarter containing the anchor date. Daily intensity
+   uses fixed estimated-time bands so the same color always means the same
+   amount of active reading.
 10. **A fresh Home conversation leads with the composer.** The composer sits
     near the visual center of the chat canvas, with quieter initial suggestions
     directly above it. Committing the first valid user message immediately hides
@@ -545,20 +546,21 @@ including the first 60, contribute.
 ### 7.3 Calendar heatmap
 
 - A compact segmented control offers **Month**, **Quarter**, and **Year**.
-  **Quarter** is the default for a new installation and means a rolling 13
-  locale-aware calendar weeks ending with the week that contains the anchor
-  date; it is not restricted to calendar Q1–Q4. The exact inclusive date range,
-  such as **Apr 20 – Jul 19, 2026**, is always visible beside the navigation.
+  **Quarter** is the default for a new installation and means the calendar
+  quarter containing the anchor date (Q1–Q4). The exact inclusive date range,
+  such as **Apr 1 – Jun 30, 2026**, is always visible beside the navigation.
 - Month is the calendar month containing the anchor date. Year is the Gregorian
   calendar year containing it. Previous/next navigation shifts by one calendar
-  month, 13 weeks, or one calendar year respectively. Forward navigation stops
-  at the window containing today, and future cells in that current window are
-  visually unavailable rather than presented as zero-reading days.
+  month, three calendar months, or one calendar year respectively. Forward
+  navigation stops at the window containing today, and future cells in that
+  current window are visually unavailable rather than presented as zero-reading
+  days.
 - Switching granularity preserves the anchor date. The selected granularity is
   persisted with observable SwiftUI state and defaults to Quarter; the viewed
   anchor is per main window, starts at today, and is not persisted in v1.
-- Columns are weeks and rows are locale-aware weekdays, with month labels where
-  useful for the selected range.
+- Columns are weeks and rows are locale-aware weekdays. A month label appears
+  above the first week column that starts within that month, avoiding a label
+  over a leading cell from the prior month.
 - The complete grid is centered in the Activity card whenever it fits. Month,
   Quarter, and Year all use the same 12-point rounded squares, spacing, and hover
   behavior; wider ranges scroll horizontally rather than changing cell scale.
@@ -1436,13 +1438,12 @@ and reset revision/generation only. Provider histories remain available for
 History navigation but do not contribute statistics; unrelated Claude/Codex
 conversations in the same workspace never count.
 
-### D4 — Month, rolling-quarter, and year heatmap *(approved 2026-07-15)*
+### D4 — Month, calendar-quarter, and year heatmap *(revised 2026-07-16)*
 
 The heatmap uses a compact Month/Quarter/Year segmented control with Quarter as
-the default. Quarter is a rolling 13-week window rather than calendar Q1–Q4,
-which avoids filling much of the default view with future dates early in a
-calendar quarter. The selection persists, navigation preserves an anchor date,
-and the UI always shows the exact date range. Intensity is the fixed daily amount
+the default. Quarter is the calendar Q1–Q4 window containing the anchor date.
+The selection persists, navigation preserves an anchor date, and the UI always
+shows the exact date range. Intensity is the fixed daily amount
 of estimated active time across qualified paper-days. Each paper-day below one
 minute is unqualified; Levels 1–5 are `1–<15m`, `15–<30m`, `30–<60m`, `1–<2h`, and
 `2h+`. It never rescales by range or reading history. The exact time and
@@ -1591,7 +1592,7 @@ could derive from automatic layout rather than an actual user drag.
 - Same-installation writes and conflicts take monotonic maxima; different
   installation components sum without losing increments. Simultaneous-device
   time is intentionally double-counted and every duration is labeled Estimated.
-- Month, rolling 13-week Quarter, and Year windows preserve their anchor across
+- Month, calendar Quarter, and Year windows preserve their anchor across
   range changes, navigate by their defined intervals, stop forward navigation
   at the current window, remember the selected granularity, and distinguish
   future cells from zero-reading days. Daily intensity excludes every
