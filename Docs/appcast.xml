@@ -450,5 +450,21 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.4.2</title>
+            <description sparkle:format="plain-text"><![CDATA[• Customize the complete Home and Reader Assistant prompts in Settings, with built-in defaults and one-click reset.
+• Open saved papers, web articles, and other Assistant-referenced sources through generalized native document cards.
+• Reading Activity’s Quarter view now follows actual calendar quarters.]]></description>
+            <pubDate>Fri, 17 Jul 2026 05:56:30 +0000</pubDate>
+            <sparkle:version>30</sparkle:version>
+            <sparkle:shortVersionString>0.4.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.4.2/Rubien-0.4.2.dmg"
+                sparkle:edSignature="A1YspLAEsrr/lIYsfMAuG7Ag7IkfmdhSrLlEt5WZ5PcgT1AvRLLPIb5PYBsef10Wu7PNbxyaUmzKzqVwWYDzCQ=="
+                length="13451082"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
