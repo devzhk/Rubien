@@ -120,12 +120,13 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertTrue(events.contains(.assistantDelta(text: "Hel")))
         XCTAssertTrue(events.contains(.assistantDelta(text: "lo")))
         XCTAssertTrue(events.contains(.assistantMessageCompleted(text: "Hello")))
-        guard case .turnCompleted(let usage)? = events.last else {
+        guard case .turnCompleted(let completion)? = events.last else {
             return XCTFail("expected turnCompleted last, got \(String(describing: events.last))")
         }
-        XCTAssertEqual(usage?.inputTokens, 100)
-        XCTAssertEqual(usage?.outputTokens, 5)
-        XCTAssertEqual(usage?.cacheReadTokens, 20)
+        XCTAssertEqual(completion.outcome, .succeeded)
+        XCTAssertEqual(completion.usage?.inputTokens, 100)
+        XCTAssertEqual(completion.usage?.outputTokens, 5)
+        XCTAssertEqual(completion.usage?.cacheReadTokens, 20)
     }
 
     // MARK: Invocation (argv injection)
@@ -151,8 +152,42 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertTrue(argv.containsPair("-c", "mcp_servers.rubien.tool_timeout_sec=310"))
         XCTAssertTrue(argv.containsPair(
             "-c", #"mcp_servers.rubien.env.RUBIEN_APP_PRESENTATION="1""#))
+        XCTAssertTrue(argv.containsPair(
+            "-c", #"mcp_servers.rubien.env.RUBIEN_APP_SCHEDULING="1""#))
         XCTAssertTrue(argv.containsPair("-c", "mcp_servers.rubien.env.RUBIEN_LIBRARY_ROOT=/tmp/lib"))
         XCTAssertFalse(argv.contains("-c tools.web_search=false"), "web on by default")
+    }
+
+    func testScheduledInvocationUsesReadOnlyRubienCatalog() {
+        let argv = CodexInvocation.arguments(
+            rubienCLIPath: "/Applications/Rubien.app/Contents/Helpers/rubien-cli",
+            libraryRoot: "/tmp/lib",
+            webAccess: true,
+            readOnlyLibrary: true,
+            disabledMCPServerNames: ["github", "rubien", "sites-design-picker"]
+        )
+        XCTAssertTrue(argv.containsPair("--disable", "apps"))
+        XCTAssertTrue(argv.containsPair("--disable", "plugins"))
+        XCTAssertTrue(argv.containsPair("-c", "mcp_servers.github.enabled=false"))
+        XCTAssertTrue(argv.containsPair("-c", "mcp_servers.sites-design-picker.enabled=false"))
+        XCTAssertTrue(argv.containsPair("-c", "mcp_servers.rubien.enabled=true"))
+        XCTAssertTrue(argv.containsPair("-c", #"mcp_servers.rubien.args=["mcp","--read-only"]"#))
+        XCTAssertFalse(argv.contains("mcp_servers.rubien.default_tools_approval_mode=writes"))
+        XCTAssertFalse(argv.contains {
+            $0.contains("mcp_servers.rubien.env.RUBIEN_APP_SCHEDULING")
+        })
+    }
+
+    func testConfiguredMCPServerNameParserRejectsUnsafeNames() {
+        XCTAssertEqual(
+            CodexInvocation.configuredMCPServerNames(
+                from: #"[{"name":"github"},{"name":"sites-design-picker"}]"#
+            ),
+            ["github", "sites-design-picker"]
+        )
+        XCTAssertNil(CodexInvocation.configuredMCPServerNames(
+            from: #"[{"name":"unsafe.name"}]"#
+        ))
     }
 
     func testUserToolsOptInEnablesCodexAppsAndKeepsRubienInjection() async throws {
@@ -454,6 +489,7 @@ final class CodexProviderTests: XCTestCase {
             if case .assistantDelta = event { provider.cancel() }   // the stop button
         }
         XCTAssertTrue(events.containsTurnCompleted, "the interrupted turn still ends its stream")
+        XCTAssertEqual(events.turnCompletion?.outcome, .interrupted)
 
         // The server must have survived the stop: a follow-up turn reuses it.
         try writeConfig(["assistantText": "still alive threads={threadStarts}"], into: workspace)
@@ -1380,6 +1416,13 @@ private func withTimeout<Value: Sendable>(
 private extension Array where Element == AgentEvent {
     var containsTurnCompleted: Bool {
         contains { if case .turnCompleted = $0 { return true }; return false }
+    }
+
+    var turnCompletion: AgentTurnCompletion? {
+        for event in reversed() {
+            if case .turnCompleted(let completion) = event { return completion }
+        }
+        return nil
     }
 }
 

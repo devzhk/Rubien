@@ -90,7 +90,8 @@ final class MCPServerTests: XCTestCase {
     private func runMCP(
         _ requestLines: [String],
         readOnly: Bool = true,
-        appPresentation: Bool = false
+        appPresentation: Bool = false,
+        appScheduling: Bool = false
     ) throws -> [[String: Any]] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: cliBinaryPath)
@@ -98,6 +99,7 @@ final class MCPServerTests: XCTestCase {
         var env = ProcessInfo.processInfo.environment
         env["RUBIEN_LIBRARY_ROOT"] = testLibraryRoot.path
         if appPresentation { env["RUBIEN_APP_PRESENTATION"] = "1" }
+        if appScheduling { env["RUBIEN_APP_SCHEDULING"] = "1" }
         process.environment = env
         let stdinPipe = Pipe(), stdoutPipe = Pipe(), stderrPipe = Pipe()
         process.standardInput = stdinPipe
@@ -271,6 +273,119 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(external["title"] as? String, "Rubien Engineering Notes")
         XCTAssertEqual(external["authors"] as? String, "Ada Lovelace, Grace Hopper")
         XCTAssertEqual(external["badge"] as? String, "Web candidate")
+    }
+
+    func testAppSchedulingModeAddsCreateToolOnlyToInteractiveCatalog() throws {
+        try skipIfBinaryMissing()
+        let publicResponses = try runMCP(
+            [req(id: 1, method: "tools/list")],
+            readOnly: false)
+        let appResponses = try runMCP(
+            [req(id: 1, method: "tools/list")],
+            readOnly: false,
+            appScheduling: true)
+        let scheduledRunResponses = try runMCP(
+            [req(id: 1, method: "tools/list")],
+            readOnly: true,
+            appPresentation: true,
+            appScheduling: true)
+
+        func tools(in responses: [[String: Any]]) throws -> [[String: Any]] {
+            try XCTUnwrap(
+                (response(responses, id: 1)?["result"] as? [String: Any])?["tools"]
+                    as? [[String: Any]]
+            )
+        }
+
+        let publicTools = try tools(in: publicResponses)
+        let appTools = try tools(in: appResponses)
+        let scheduledRunTools = try tools(in: scheduledRunResponses)
+        let publicNames = Set(publicTools.compactMap { $0["name"] as? String })
+        let appNames = Set(appTools.compactMap { $0["name"] as? String })
+        let scheduledRunNames = Set(scheduledRunTools.compactMap { $0["name"] as? String })
+
+        XCTAssertFalse(publicNames.contains("rubien_create_scheduled_job"))
+        XCTAssertEqual(appNames.subtracting(publicNames), ["rubien_create_scheduled_job"])
+        XCTAssertFalse(scheduledRunNames.contains("rubien_create_scheduled_job"))
+
+        let definition = try XCTUnwrap(
+            appTools.first { $0["name"] as? String == "rubien_create_scheduled_job" }
+        )
+        let annotations = try XCTUnwrap(definition["annotations"] as? [String: Any])
+        XCTAssertEqual(annotations["readOnlyHint"] as? Bool, false)
+        XCTAssertEqual(annotations["destructiveHint"] as? Bool, false)
+        XCTAssertEqual(annotations["idempotentHint"] as? Bool, false)
+
+        let callResponses = try runMCP([
+            toolCall(id: 2, name: "rubien_create_scheduled_job", arguments: [
+                "name": "Morning papers",
+                "prompt": "Find relevant papers released in the last day",
+                "weekdays": ["mon", "wed", "fri"],
+                "time": "08:05",
+                "provider": "codex",
+                "enabled": false,
+                "webAccess": false,
+                "notifyOnCompletion": false,
+            ]),
+        ], readOnly: false, appScheduling: true)
+        let created = try XCTUnwrap(
+            try successfulToolJSON(callResponses, id: 2) as? [String: Any]
+        )
+        XCTAssertEqual(created["name"] as? String, "Morning papers")
+        XCTAssertEqual(created["weekdays"] as? [String], ["mon", "wed", "fri"])
+        XCTAssertEqual(created["localTime"] as? String, "08:05")
+        XCTAssertEqual(created["provider"] as? String, "codex")
+        XCTAssertEqual(created["enabled"] as? Bool, false)
+        XCTAssertEqual(created["webAccess"] as? Bool, false)
+        XCTAssertEqual(created["notifyOnCompletion"] as? Bool, false)
+
+        let listed = try runCLI(["jobs", "list"])
+        XCTAssertEqual(listed.exitCode, 0, listed.stderr)
+        let jobs = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(listed.stdout.utf8)) as? [[String: Any]]
+        )
+        XCTAssertEqual(jobs.count, 1)
+        XCTAssertEqual(jobs.first?["id"] as? String, created["id"] as? String)
+    }
+
+    func testAppSchedulingToolValidatesArgumentsWithoutCreatingAJob() throws {
+        try skipIfBinaryMissing()
+        let base: [String: Any] = [
+            "name": "Invalid",
+            "prompt": "Should not be created",
+            "weekdays": ["mon"],
+            "time": "08:00",
+        ]
+        var invalidTime = base
+        invalidTime["time"] = "8:00"
+        var invalidWeekday = base
+        invalidWeekday["weekdays"] = ["monday"]
+        var invalidProvider = base
+        invalidProvider["provider"] = "other"
+        var unknownArgument = base
+        unknownArgument["unexpected"] = true
+        var nonBoolean = base
+        nonBoolean["enabled"] = 1
+
+        let responses = try runMCP([
+            toolCall(id: 1, name: "rubien_create_scheduled_job", arguments: invalidTime),
+            toolCall(id: 2, name: "rubien_create_scheduled_job", arguments: invalidWeekday),
+            toolCall(id: 3, name: "rubien_create_scheduled_job", arguments: invalidProvider),
+            toolCall(id: 4, name: "rubien_create_scheduled_job", arguments: unknownArgument),
+            toolCall(id: 5, name: "rubien_create_scheduled_job", arguments: nonBoolean),
+        ], readOnly: false, appScheduling: true)
+
+        for id in 1...5 {
+            let result = try XCTUnwrap(response(responses, id: id)?["result"] as? [String: Any])
+            XCTAssertEqual(result["isError"] as? Bool, true, "request \(id) must fail")
+        }
+
+        let listed = try runCLI(["jobs", "list"])
+        XCTAssertEqual(listed.exitCode, 0, listed.stderr)
+        let jobs = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(listed.stdout.utf8)) as? [[String: Any]]
+        )
+        XCTAssertTrue(jobs.isEmpty)
     }
 
     func testAppPresentationRejectsMixedShapesExtraFieldsAndBooleanIntegers() throws {

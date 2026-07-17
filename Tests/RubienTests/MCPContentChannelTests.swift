@@ -25,6 +25,7 @@ final class MCPContentChannelTests: XCTestCase {
         let env = rubien?["env"] as? [String: String]
         XCTAssertEqual(env?["RUBIEN_LIBRARY_ROOT"], channel.libraryRoot.path)
         XCTAssertEqual(env?["RUBIEN_APP_PRESENTATION"], "1")
+        XCTAssertEqual(env?["RUBIEN_APP_SCHEDULING"], "1")
     }
 
     func testConfigArgumentIsSingleLineAndRoundTrips() throws {
@@ -37,6 +38,16 @@ final class MCPContentChannelTests: XCTestCase {
         let rubien = (parsed?["mcpServers"] as? [String: Any])?["rubien"] as? [String: Any]
         XCTAssertEqual(rubien?["command"] as? String, channel.cliURL.path)
         XCTAssertEqual(rubien?["args"] as? [String], ["mcp"])
+    }
+
+    func testScheduledConfigUsesReadOnlyCatalog() throws {
+        let channel = makeChannel()
+        let arg = try XCTUnwrap(channel.configArgument(readOnly: true))
+        let parsed = try JSONSerialization.jsonObject(with: Data(arg.utf8)) as? [String: Any]
+        let rubien = (parsed?["mcpServers"] as? [String: Any])?["rubien"] as? [String: Any]
+        XCTAssertEqual(rubien?["args"] as? [String], ["mcp", "--read-only"])
+        let env = rubien?["env"] as? [String: String]
+        XCTAssertNil(env?["RUBIEN_APP_SCHEDULING"])
     }
 
     // MARK: argv injection

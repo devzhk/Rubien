@@ -2,6 +2,26 @@
 import Foundation
 import RubienCore
 
+enum AssistantProviderFactory {
+    static func make(
+        _ kind: AgentProviderKind,
+        contentChannel: MCPContentChannel?
+    ) -> any AgentProvider {
+        switch kind {
+        case .claude:
+            ClaudeCodeProvider(
+                executableOverride: RubienPreferences.assistantBinaryPath,
+                contentChannel: contentChannel
+            )
+        case .codex:
+            CodexProvider(
+                executableOverride: RubienPreferences.assistantCodexBinaryPath,
+                contentChannel: contentChannel
+            )
+        }
+    }
+}
+
 // MARK: - Production reader-session factory (Phase 2c)
 //
 // The one place a reader window builds its live assistant session from the current
@@ -57,16 +77,7 @@ enum ReaderChatSession {
         // the composer's provider picker (`switchProvider`). Each provider takes its
         // OWN binary-path override (the `claude` vs `codex` executables differ).
         let providerFactory: (AgentProviderKind) -> any AgentProvider = { kind in
-            switch kind {
-            case .claude:
-                return ClaudeCodeProvider(
-                    executableOverride: RubienPreferences.assistantBinaryPath,
-                    contentChannel: contentChannel)
-            case .codex:
-                return CodexProvider(
-                    executableOverride: RubienPreferences.assistantCodexBinaryPath,
-                    contentChannel: contentChannel)
-            }
+            AssistantProviderFactory.make(kind, contentChannel: contentChannel)
         }
 
         // The live pref snapshot for a backend, re-read on every fresh conversation so

@@ -55,6 +55,7 @@ Linux needs system deps first — see [Linux CLI](../README.md#linux-cli). For d
 | `grep` | Find where a reference's body text says something — PDF pages or web offsets — without retrieving the body (the lookup half of `read`) |
 | `stats` | Report tracked reading and Rubien Assistant activity; `--year` selects only the daily calendar slice |
 | `stats-clear` | Clear Reading or Assistant statistics behind an explicit `--yes` confirmation and synced reset boundary |
+| `jobs` | Manage local scheduled Assistant jobs and inspect their run history |
 | `styles` | List available citation styles |
 | `version` | Print the CLI marketing version and monotonic build number as JSON (`{"build":8,"version":"0.1.7"}`); the MCP server's version guard requires `build >= MIN_CLI_BUILD` |
 | `self-update` | (Linux) Download the latest signed release and replace `rubien-cli` in place after verifying an ed25519 signature; `--check` reports `{current, latest, updateAvailable}` as JSON and changes nothing. On macOS it is a no-op (Rubien.app/Sparkle manages the bundled CLI). |
@@ -1036,6 +1037,44 @@ or `{"cleared":"assistant"}`. The reset boundary syncs when iCloud library sync
 is enabled; an offline peer can lose pre-clear activity when it later learns the
 boundary. The command returns after the local transaction and posts the normal
 cross-process library-change notification without waiting for CloudKit.
+
+## jobs
+
+Manage scheduled Assistant jobs stored locally in `library.sqlite`. Schedules do
+not sync through iCloud and execute only while the Rubien app is open on that Mac.
+The app catches up the most recent missed occurrence when it next launches or wakes.
+
+```bash
+rubien-cli jobs list
+rubien-cli jobs get <job-id>
+rubien-cli jobs create --name "Morning papers" \
+  --prompt "Find relevant papers released in the last 24 hours" \
+  --weekdays daily --time 08:00 --provider claude
+rubien-cli jobs update <job-id> --weekdays mon,wed,fri --time 07:30
+rubien-cli jobs enable <job-id> --enabled false
+rubien-cli jobs runs --job-id <job-id> --limit 20
+rubien-cli jobs delete <job-id>
+```
+
+`--weekdays` accepts comma-separated weekday names (`mon` through `sun`) or
+`daily`, `weekdays`, and `weekends`. `--time` is a local 24-hour wall-clock time
+in `HH:mm` form. Providers are `claude` and `codex`. Creation also supports
+`--model`, `--effort`, `--paused`, `--no-web-access`, and `--no-notify`.
+`jobs update` accepts the same definition fields; boolean values use explicit
+`true`/`false` options (`--enabled`, `--web-access`, and
+`--notify-on-completion`). Pass an empty string to `--model` or `--effort` to
+clear that override.
+
+The JSON job shape includes `id`, `name`, `prompt`, `weekdayMask`, `weekdays`,
+`localTime`, `enabled`, provider options, `nextRunAt`, `createdAt`, and
+`dateModified`. Run rows include their trigger, local occurrence key, lifecycle
+timestamps, status, provider session ID, failure kind, and unread state.
+
+> **Storage-root warning:** the signed app and bundled CLI helper share the App
+> Group library, but `swift run rubien-cli` normally uses
+> `~/Library/Application Support/Rubien/`. When managing the installed app's
+> schedules from a development CLI, set `RUBIEN_LIBRARY_ROOT` to the app's active
+> root explicitly; otherwise you will create jobs in a different library.
 
 ## mcp
 

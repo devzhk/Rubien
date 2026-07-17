@@ -69,6 +69,16 @@ struct AssistantTurnOutcome: Equatable {
     let phase: Phase
 }
 
+/// Result of preflighting and opening a scheduled run's provider transcript.
+/// Callers distinguish a genuinely missing result from a request invalidated by
+/// a newer navigation action, so stale preflights do not permanently disable a
+/// valid Recent Runs row.
+enum ScheduledResultResumeResult: Equatable {
+    case opened
+    case unavailable
+    case superseded
+}
+
 // MARK: - Per-window chat session controller (Phase 2c)
 //
 // One per reader window. Owns the conversation's in-memory state (nothing is
@@ -724,11 +734,24 @@ final class ChatSessionController: ObservableObject {
             // the first delta. Pre-opening pinned the bubble ABOVE tool chips
             // when claude ran tools before its first text, so the answer
             // rendered above the chips that produced it (wrong chronology).
-            var terminalPhase = AssistantTurnOutcome.Phase.succeeded
+            // A cleanly-ended stream is not itself proof that the provider turn
+            // succeeded. Both runtimes can close their streams normally after a
+            // failed/interrupted terminal event, and a missing terminal event is
+            // incomplete protocol data, so start fail-closed and only promote an
+            // explicit successful completion.
+            var terminalPhase = AssistantTurnOutcome.Phase.failed
             do {
                 // `turnProvider`, not `self.provider`: the latter may have been swapped
                 // by a switchProvider that raced this turn (see the pin comment above).
                 for try await event in turnProvider.send(turn: request) {
+                    if case .turnCompleted(let completion) = event {
+                        switch completion.outcome {
+                        case .succeeded:
+                            terminalPhase = .succeeded
+                        case .failed, .interrupted:
+                            terminalPhase = .failed
+                        }
+                    }
                     self.handle(event, gen: gen)
                 }
             } catch {
@@ -1102,7 +1125,7 @@ final class ChatSessionController: ObservableObject {
     /// factory is absent (tests / DEBUG harness). The prior transcript is dropped
     /// (nothing persisted — D5); History can resume a Codex thread later. A real
     /// switch also becomes the default backend for future conversations.
-    func switchProvider(to kind: AgentProviderKind) {
+    func switchProvider(to kind: AgentProviderKind, persistAsDefault: Bool = true) {
         guard !isStagingAttachments,
               !hasAttachmentRehomeFailure,
               let providerFactory,
@@ -1121,7 +1144,9 @@ final class ChatSessionController: ObservableObject {
         // stale result landing in the gap before the recheck below runs must not write
         // the wrong backend's availability. The scheduled recheck bumps this again.
         availabilityProbeToken += 1
-        RubienPreferences.assistantProvider = kind
+        if persistAsDefault {
+            RubienPreferences.assistantProvider = kind
+        }
         resetConversationState(attachments: .preserveAndRehome)
         liveSessionID = nil
         seedSent = false
@@ -1236,9 +1261,89 @@ final class ChatSessionController: ObservableObject {
         resume(summary, attribution: nil)
     }
 
+    /// Open a completed scheduled job only when the provider still has its
+    /// transcript. Scheduled-run rows and notifications promise a result, unlike
+    /// the general History picker (which can still fall back to a preview notice),
+    /// so a pruned or unreadable provider session must not replace the current
+    /// conversation with an empty, misleading resume.
+    ///
+    /// The transcript is read before any conversation state changes. Callers can
+    /// therefore leave the run unread and route back to Recent Runs when this
+    /// returns `.unavailable`. A superseded preflight is reported separately so
+    /// callers do not mistake navigation races for a permanently missing result.
+    func resumeScheduledResult(
+        _ summary: AgentSessionSummary,
+        providerKind targetProviderKind: AgentProviderKind
+    ) async -> ScheduledResultResumeResult {
+        resumeRequestGeneration += 1
+        let requestGeneration = resumeRequestGeneration
+        let originalProviderKind = providerKind
+        let expectedWorkspaceURL = workspaceURL
+        let requiresProviderSwitch = targetProviderKind != originalProviderKind
+        let transcriptProvider: any AgentProvider
+        if requiresProviderSwitch {
+            guard let providerFactory else {
+                isResuming = false
+                return .unavailable
+            }
+            transcriptProvider = providerFactory(targetProviderKind)
+        } else {
+            transcriptProvider = provider
+        }
+        isResuming = true
+
+        let history = await transcriptProvider.sessionTranscript(
+            sessionID: summary.id,
+            workspaceURL: expectedWorkspaceURL
+        )
+        if requiresProviderSwitch {
+            transcriptProvider.shutdown()
+        }
+        guard requestGeneration == resumeRequestGeneration,
+              originalProviderKind == providerKind,
+              expectedWorkspaceURL == workspaceURL
+        else { return .superseded }
+        guard !history.isEmpty else {
+            isResuming = false
+            return .unavailable
+        }
+
+        let attribution: AssistantSessionAttributionStore.Attribution?
+        if let attributionStore {
+            attribution = await attributionStore.attribution(
+                sessionID: summary.id,
+                provider: targetProviderKind,
+                workspaceURL: expectedWorkspaceURL
+            )
+            guard requestGeneration == resumeRequestGeneration,
+                  originalProviderKind == providerKind,
+                  expectedWorkspaceURL == workspaceURL
+            else { return .superseded }
+        } else {
+            attribution = nil
+        }
+
+        if requiresProviderSwitch {
+            // The expensive/fallible transcript read has succeeded, so replacing
+            // the current Home conversation is now safe. The prefetched rows are
+            // handed directly to resume; the new provider need not read them again.
+            switchProvider(to: targetProviderKind, persistAsDefault: false)
+            guard providerKind == targetProviderKind else {
+                isResuming = false
+                // The transcript exists; a transient local guard (for example,
+                // attachment staging/rehome) prevented the provider switch. Let
+                // the caller retry without disabling this valid result row.
+                return .superseded
+            }
+        }
+        resume(summary, attribution: attribution, restoredHistory: history)
+        return .opened
+    }
+
     private func resume(
         _ summary: AgentSessionSummary,
-        attribution: AssistantSessionAttributionStore.Attribution?
+        attribution: AssistantSessionAttributionStore.Attribution?,
+        restoredHistory: [ChatRenderMessage]? = nil
     ) {
         resetConversationState(attachments: .discard)
         rubienConversationID = attribution?.conversationId ?? UUID()
@@ -1254,6 +1359,10 @@ final class ChatSessionController: ObservableObject {
         liveSessionID = summary.id
         seedSent = true
         hasMessages = true
+        if let restoredHistory {
+            restoreResumeHistory(restoredHistory)
+            return
+        }
         // Restore the conversation's content from the provider's own store (D5 —
         // Rubien still persists nothing). The read is asynchronous but fast (one
         // file); the epoch drops a stale load when another resume/newConversation
@@ -1271,20 +1380,21 @@ final class ChatSessionController: ObservableObject {
                 self.renderNotice("_Resumed a previous conversation:_ “\(summary.preview)”")
                 return
             }
-            // Prepend the history to anything rendered while it loaded (a quick
-            // follow-up send's user row and stream), re-sequenced, and re-render
-            // the pane from the merged log. If a turn is streaming, its partial
-            // deltas are lost to the reset and the bubble re-opens lazily on the
-            // next delta — the same accepted tradeoff as a mid-stream pane toggle.
-            let tail = self.renderLog
-            self.renderLog = []
-            self.renderSeq = 0
-            for row in history + tail {
-                self.appendToLog(row.role, row.body, attachments: row.attachments)
-            }
-            self.transcript.reset()
-            self.transcript.loadTranscript(self.renderLog)
+            self.restoreResumeHistory(history)
         }
+    }
+
+    /// Prepend restored provider history to rows that may have arrived while the
+    /// asynchronous read was in flight, then re-render with fresh sequence IDs.
+    private func restoreResumeHistory(_ history: [ChatRenderMessage]) {
+        let tail = renderLog
+        renderLog = []
+        renderSeq = 0
+        for row in history + tail {
+            appendToLog(row.role, row.body, attachments: row.attachments)
+        }
+        transcript.reset()
+        transcript.loadTranscript(renderLog)
     }
 
     /// Answer a pending Claude approval; the turn continues on the same stream and the
@@ -1680,6 +1790,7 @@ final class ChatSessionController: ObservableObject {
     static func isUnknownRubienTool(_ toolName: String) -> Bool {
         guard let bare = bareRubienToolName(toolName) else { return false }
         return bare != ChatPaperPresentation.toolName
+            && RubienAppSchedulingContract.access(for: bare) == nil
             && RubienMCPToolPolicy.access(for: bare) == nil
     }
 

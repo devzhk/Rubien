@@ -134,7 +134,9 @@ enum CodexInvocation {
         rubienCLIPath: String?,
         libraryRoot: String?,
         webAccess: Bool,
-        loadUserTools: Bool = false
+        loadUserTools: Bool = false,
+        readOnlyLibrary: Bool = false,
+        disabledMCPServerNames: [String] = []
     ) -> [String] {
         var args = ["app-server"]
         if !loadUserTools {
@@ -143,18 +145,36 @@ enum CodexInvocation {
         if !webAccess {
             args += ["-c", "tools.web_search=false"]
         }
+        if readOnlyLibrary {
+            // Unlike Claude, app-server has no strict MCP-config flag. Resolve
+            // the effective catalog before launch, disable plugins/connectors,
+            // and pin every remaining ambient server off by name. The injected
+            // canonical Rubien server is re-enabled below.
+            args += ["--disable", "plugins"]
+            for name in disabledMCPServerNames where name != MCPContentChannel.serverName {
+                args += ["-c", "mcp_servers.\(name).enabled=false"]
+            }
+        }
         if let cli = rubienCLIPath, !cli.isEmpty {
             // Values are parsed as TOML with a raw-string fallback, so bare paths are
             // safe; the args array must stay valid TOML. The key is the canonical
             // server name — the same one History attribution matches against.
             let server = "mcp_servers.\(MCPContentChannel.serverName)"
+            args += ["-c", "\(server).enabled=true"]
             args += ["-c", "\(server).command=\(cli)"]
-            args += ["-c", #"\#(server).args=["mcp"]"#]
+            args += [
+                "-c",
+                readOnlyLibrary
+                    ? #"\#(server).args=["mcp","--read-only"]"#
+                    : #"\#(server).args=["mcp"]"#,
+            ]
             // The native catalog annotates all 14 reads and 13 writes. Prompt
             // for every non-read tool, and allow the two long intake routes to
             // use their own five-minute child timeout without Codex cutting the
             // outer MCP call off at its 60-second default.
-            args += ["-c", "\(server).default_tools_approval_mode=writes"]
+            if !readOnlyLibrary {
+                args += ["-c", "\(server).default_tools_approval_mode=writes"]
+            }
             args += ["-c", "\(server).tool_timeout_sec=310"]
             // Keep the app-private paper-card tool in lockstep with Claude's
             // inline MCP configuration. Without this flag Codex sees only the
@@ -163,11 +183,36 @@ enum CodexInvocation {
                 "-c",
                 #"\#(server).env.\#(MCPContentChannel.appPresentationEnvironmentKey)="\#(MCPContentChannel.appPresentationEnvironmentValue)""#,
             ]
+            if !readOnlyLibrary {
+                args += [
+                    "-c",
+                    #"\#(server).env.\#(RubienAppSchedulingContract.environmentKey)="\#(RubienAppSchedulingContract.environmentValue)""#,
+                ]
+            }
             if let root = libraryRoot, !root.isEmpty {
                 args += ["-c", "\(server).env.RUBIEN_LIBRARY_ROOT=\(root)"]
             }
         }
         return args
+    }
+
+    static func configuredMCPServerNames(from json: String) -> [String]? {
+        guard let data = json.data(using: .utf8),
+              let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return nil }
+        let validName = try? NSRegularExpression(pattern: "^[A-Za-z0-9_-]+$")
+        var names = Set<String>()
+        for row in rows {
+            guard let name = row["name"] as? String,
+                  !name.isEmpty,
+                  validName?.firstMatch(
+                      in: name,
+                      range: NSRange(name.startIndex..., in: name)
+                  ) != nil
+            else { return nil }
+            names.insert(name)
+        }
+        return names.sorted()
     }
 
     /// The shared minimal ALLOWLISTED environment. `HOME` (in the shared allowlist)
@@ -232,11 +277,12 @@ private actor CodexAppServerConnection {
     private struct SpawnConfiguration: Equatable {
         let webAccess: Bool
         let loadUserTools: Bool
+        let readOnlyLibrary: Bool
 
         /// A fresh History-only server uses the normal web default and isolated Apps
         /// posture. If a turn follows with different settings it will respawn once.
         static let historyDefault = SpawnConfiguration(
-            webAccess: true, loadUserTools: false)
+            webAccess: true, loadUserTools: false, readOnlyLibrary: false)
     }
 
     /// One spawned `codex app-server` + its JSON-RPC bookkeeping. Reference type,
@@ -338,7 +384,8 @@ private actor CodexAppServerConnection {
             srv = try await ensureServer(
                 configuration: SpawnConfiguration(
                     webAccess: request.webAccess,
-                    loadUserTools: request.loadUserTools),
+                    loadUserTools: request.loadUserTools,
+                    readOnlyLibrary: request.executionMode == .scheduled),
                 workspaceURL: request.workspaceURL)
         } catch let error as AgentProviderError {
             turn = nil
@@ -576,13 +623,30 @@ private actor CodexAppServerConnection {
         guard let executable = CodexProvider.resolveExecutable(override: executableOverride) else {
             throw AgentProviderError.executableNotFound(executableOverride ?? "codex")
         }
+        let environment = CodexInvocation.environment(
+            binaryDirectory: (executable as NSString).deletingLastPathComponent)
+        let disabledMCPServerNames: [String]
+        if configuration.readOnlyLibrary {
+            guard let catalog = AgentBinaryProbe.run(
+                executablePath: executable,
+                arguments: ["mcp", "list", "--json"],
+                environment: environment,
+                timeout: 5,
+                workingDirectory: workspaceURL.path
+            ), let names = CodexInvocation.configuredMCPServerNames(from: catalog) else {
+                throw AgentProviderError.isolationUnavailable
+            }
+            disabledMCPServerNames = names
+        } else {
+            disabledMCPServerNames = []
+        }
         let arguments = CodexInvocation.arguments(
             rubienCLIPath: contentChannel?.cliURL.path,
             libraryRoot: contentChannel?.libraryRoot.path,
             webAccess: configuration.webAccess,
-            loadUserTools: configuration.loadUserTools)
-        let environment = CodexInvocation.environment(
-            binaryDirectory: (executable as NSString).deletingLastPathComponent)
+            loadUserTools: configuration.loadUserTools,
+            readOnlyLibrary: configuration.readOnlyLibrary,
+            disabledMCPServerNames: disabledMCPServerNames)
 
         serverGeneration += 1
         let process = try SpawnedAgentProcess.spawn(

@@ -34,17 +34,26 @@ struct MCPContentChannel: Sendable, Equatable {
     /// from JSON files or strings"), so this is passed inline — no temp file to
     /// write, track, or clean up.
     var configJSON: [String: Any] {
-        [
+        configJSON(readOnly: false)
+    }
+
+    func configJSON(readOnly: Bool) -> [String: Any] {
+        var environment = [
+            "RUBIEN_LIBRARY_ROOT": libraryRoot.path,
+            // Enables the app-only structured paper-card capability.
+            // Normal native and Node MCP catalogs remain unchanged.
+            Self.appPresentationEnvironmentKey: Self.appPresentationEnvironmentValue,
+        ]
+        if !readOnly {
+            environment[RubienAppSchedulingContract.environmentKey]
+                = RubienAppSchedulingContract.environmentValue
+        }
+        return [
             "mcpServers": [
                 Self.serverName: [
                     "command": cliURL.path,
-                    "args": ["mcp"],
-                    "env": [
-                        "RUBIEN_LIBRARY_ROOT": libraryRoot.path,
-                        // Enables the app-only structured paper-card capability.
-                        // Normal native and Node MCP catalogs remain unchanged.
-                        Self.appPresentationEnvironmentKey: Self.appPresentationEnvironmentValue,
-                    ],
+                    "args": readOnly ? ["mcp", "--read-only"] : ["mcp"],
+                    "env": environment,
                 ],
             ],
         ]
@@ -53,9 +62,9 @@ struct MCPContentChannel: Sendable, Equatable {
     /// The inline `--mcp-config` argument value: compact, single-line JSON.
     /// Returns nil only if serialization somehow fails (unreachable for this
     /// fixed, string-only shape).
-    func configArgument() -> String? {
+    func configArgument(readOnly: Bool = false) -> String? {
         guard let data = try? JSONSerialization.data(
-            withJSONObject: configJSON, options: [.sortedKeys, .withoutEscapingSlashes]
+            withJSONObject: configJSON(readOnly: readOnly), options: [.sortedKeys, .withoutEscapingSlashes]
         ) else { return nil }
         return String(decoding: data, as: UTF8.self)
     }

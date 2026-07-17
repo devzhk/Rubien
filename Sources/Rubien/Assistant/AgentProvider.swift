@@ -30,6 +30,13 @@ enum CodexSandbox: String, Codable, Sendable, Equatable {
     case workspaceWrite
 }
 
+/// Scheduled turns have no person present to approve tools. Providers use this
+/// mode to pin their approval posture and expose Rubien's read-only MCP catalog.
+enum AgentExecutionMode: String, Codable, Sendable, Equatable {
+    case interactive
+    case scheduled
+}
+
 /// One user turn to run. Prompt + approval responses ride the process **stdin**;
 /// continuity is the runtime's `--resume`.
 struct AgentTurnRequest: Sendable, Equatable {
@@ -62,6 +69,8 @@ struct AgentTurnRequest: Sendable, Equatable {
     /// `--effort <low|medium|high|xhigh|max>` (verified 2.1.201). Codex (Phase 3):
     /// maps to `model_reasoning_effort`.
     let effortOverride: String?
+    /// Interactive chat or unattended scheduled execution.
+    let executionMode: AgentExecutionMode
 
     init(
         workspaceURL: URL,
@@ -73,7 +82,8 @@ struct AgentTurnRequest: Sendable, Equatable {
         loadUserTools: Bool = false,
         codexSandbox: CodexSandbox = .readOnly,
         modelOverride: String? = nil,
-        effortOverride: String? = nil
+        effortOverride: String? = nil,
+        executionMode: AgentExecutionMode = .interactive
     ) {
         self.workspaceURL = workspaceURL
         self.resumeSessionID = resumeSessionID
@@ -85,6 +95,7 @@ struct AgentTurnRequest: Sendable, Equatable {
         self.codexSandbox = codexSandbox
         self.modelOverride = modelOverride
         self.effortOverride = effortOverride
+        self.executionMode = executionMode
     }
 }
 
@@ -119,6 +130,22 @@ struct AgentUsage: Sendable, Equatable {
     }
 }
 
+/// The provider's authoritative terminal disposition for a turn. This is kept
+/// separate from process/stream termination: both runtimes can end their event
+/// stream normally after reporting a failed or interrupted turn.
+enum AgentTurnOutcome: Sendable, Equatable {
+    case succeeded
+    case failed
+    case interrupted
+}
+
+/// Terminal turn metadata carried as one associated value so existing consumers
+/// that only need to recognize `.turnCompleted` remain source-compatible.
+struct AgentTurnCompletion: Sendable, Equatable {
+    let outcome: AgentTurnOutcome
+    let usage: AgentUsage?
+}
+
 /// A single event streamed out of a running turn. The mapping from the runtime's
 /// stream-json lines is in `ClaudeStreamParser` (§4.2).
 enum AgentEvent: Sendable, Equatable {
@@ -147,11 +174,22 @@ enum AgentEvent: Sendable, Equatable {
     /// A tool was denied — a `result` `permission_denials[]` entry (Claude) or a
     /// Codex sandbox block (Phase 3).
     case toolDenied(name: String, reason: String)
-    /// The turn finished (`result`). Composer re-enables.
-    case turnCompleted(usage: AgentUsage?)
+    /// The turn finished (`result` / `turn/completed`). Composer re-enables.
+    case turnCompleted(AgentTurnCompletion)
     /// An out-of-band notice surfaced as chat content: a rate-limit warning, a
     /// non-zero exit, an auth problem, etc.
     case providerNotice(String)
+
+    /// Compatibility constructor for callers and test doubles whose completed
+    /// turn is successful by definition.
+    static func turnCompleted(usage: AgentUsage?) -> AgentEvent {
+        .turnCompleted(AgentTurnCompletion(outcome: .succeeded, usage: usage))
+    }
+
+    /// Constructor used by provider parsers, where terminal status is explicit.
+    static func turnCompleted(outcome: AgentTurnOutcome, usage: AgentUsage?) -> AgentEvent {
+        .turnCompleted(AgentTurnCompletion(outcome: outcome, usage: usage))
+    }
 }
 
 /// The user's answer to a Claude `approvalRequested`.
@@ -412,6 +450,8 @@ enum AgentProviderError: LocalizedError, Equatable, Sendable {
     /// A staged attachment vanished, became unreadable, or no longer has a
     /// provider-supported representation before the turn could start.
     case attachmentUnreadable(String)
+    /// Scheduled Codex could not enumerate and disable ambient MCP servers.
+    case isolationUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -421,6 +461,8 @@ enum AgentProviderError: LocalizedError, Equatable, Sendable {
             return "The assistant process could not be started (error \(code))."
         case .attachmentUnreadable(let name):
             return "The attachment \(name) could not be read before sending."
+        case .isolationUnavailable:
+            return "Codex's configured tools could not be isolated for this scheduled run."
         }
     }
 }

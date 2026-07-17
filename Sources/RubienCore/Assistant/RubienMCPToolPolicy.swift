@@ -64,3 +64,18 @@ public enum RubienMCPToolPolicy {
         return nil
     }
 }
+
+/// Shared contract for scheduling tools exposed only inside Rubien's
+/// interactive Assistant content channel. Keeping the enablement key and access
+/// classification here prevents the MCP host and approval gate from drifting.
+/// This deliberately remains outside the public native/Node MCP policy above.
+public enum RubienAppSchedulingContract {
+    public static let environmentKey = "RUBIEN_APP_SCHEDULING"
+    public static let environmentValue = "1"
+    public static let createToolName = "rubien_create_scheduled_job"
+    public static let createToolAccess = RubienMCPToolAccess.write
+
+    public static func access(for toolName: String) -> RubienMCPToolAccess? {
+        toolName == createToolName ? createToolAccess : nil
+    }
+}
