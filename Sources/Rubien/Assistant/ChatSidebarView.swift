@@ -45,7 +45,7 @@ struct ChatSidebarView: View {
 /// Configuration for the shared, full-fidelity chat surface. Both placements use
 /// the same composer implementation (attachments, paste/drop, @paper mentions,
 /// provider/model/effort, web and approvals); only their empty state, history scope,
-/// and suggested-paper presentation differ.
+/// and suggested-document presentation differ.
 struct ChatSurfaceConfiguration {
     enum Placement: Equatable {
         case reader

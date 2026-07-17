@@ -13,7 +13,7 @@ enum ChatRole: String, Codable, Sendable, Equatable {
     case assistant
     case tool
     case notice
-    /// Bounded presentation metadata rendered as Rubien-owned paper cards and
+    /// Bounded presentation metadata rendered as Rubien-owned document cards and
     /// retained in provider History. The body is a JSON `ChatPaperGroup`, never
     /// markdown or arbitrary HTML.
     case paper

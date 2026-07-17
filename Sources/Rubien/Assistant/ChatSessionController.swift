@@ -1530,7 +1530,7 @@ final class ChatSessionController: ObservableObject {
                 // failure visible instead of silently swallowing the tool row.
                 renderToolChip(ToolChipPayload(
                     name: name,
-                    detail: detail ?? "Paper presentation result was invalid",
+                    detail: detail ?? "Document-card presentation result was invalid",
                     status: .completed))
                 break
             }

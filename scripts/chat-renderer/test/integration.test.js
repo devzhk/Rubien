@@ -178,8 +178,8 @@ test('paper groups are chronological, bounded, inert, and expose explicit native
 
   const group = T().querySelector('.chat-paper-group')
   assert.ok(group)
-  assert.equal(group.getAttribute('aria-label'), 'Paper cards')
-  assert.equal(group.querySelector('.chat-paper-heading').textContent, 'Paper cards')
+  assert.equal(group.getAttribute('aria-label'), 'Document cards')
+  assert.equal(group.querySelector('.chat-paper-heading').textContent, 'Document cards')
   assert.equal(group.querySelectorAll('.chat-paper-card').length, 10, 'the bridge caps a group at ten')
   const library = group.querySelector('.chat-paper-library')
   assert.equal(library.title, '<img src=x onerror=alert(1)> A very long library title')
@@ -211,7 +211,7 @@ test('paper groups are chronological, bounded, inert, and expose explicit native
     'later transcript rows do not replace or move the paper group')
 })
 
-test('paper cards use a responsive two-column grid and neutral actions', async () => {
+test('document cards use a responsive two-column grid and neutral actions', async () => {
   const { doc } = await boot()
   const css = [...doc.querySelectorAll('style')].map((style) => style.textContent).join('\n')
 

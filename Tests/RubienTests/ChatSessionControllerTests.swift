@@ -243,7 +243,7 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertEqual(published.last?.items.map(\.title), ["First", "Second"])
 
         controller.handle(
-            .toolUseCompleted(name: "mcp__rubien__rubien_present_papers"),
+            .toolUseCompleted(name: "mcp__rubien__rubien_present_document_cards"),
             gen: controller.generation
         )
         XCTAssertFalse(sink.calls.contains { call in
@@ -280,7 +280,7 @@ final class ChatSessionControllerTests: XCTestCase {
                 group: ChatPaperGroup(items: [paper])),
             gen: controller.generation)
         controller.handle(
-            .toolUseCompleted(name: "mcp__rubien__rubien_present_papers"),
+            .toolUseCompleted(name: "mcp__rubien__rubien_present_document_cards"),
             gen: controller.generation)
         controller.handle(.turnCompleted(usage: nil), gen: controller.generation)
 
@@ -293,16 +293,16 @@ final class ChatSessionControllerTests: XCTestCase {
 
         controller.handle(
             .toolUseStarted(
-                name: "mcp__rubien__rubien_present_papers",
+                name: "mcp__rubien__rubien_present_document_cards",
                 detail: nil),
             gen: controller.generation)
         controller.handle(
-            .toolUseCompleted(name: "mcp__rubien__rubien_present_papers"),
+            .toolUseCompleted(name: "mcp__rubien__rubien_present_document_cards"),
             gen: controller.generation)
         XCTAssertTrue(sink.calls.contains { call in
             if case .addToolChip(let name, let detail, .completed) = call {
                 return ChatPaperPresentation.isPresentationTool(name)
-                    && detail == "Paper presentation result was invalid"
+                    && detail == "Document-card presentation result was invalid"
             }
             return false
         })

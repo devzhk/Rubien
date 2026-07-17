@@ -215,8 +215,16 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual((listProperties["view"] as? [String: Any])?["type"] as? String, "integer")
     }
 
-    func testAppPresentationModeAddsOnlyPrivatePaperTool() throws {
+    func testAppPresentationModeAddsOnlyPrivateDocumentCardTool() throws {
         try skipIfBinaryMissing()
+        let savedWebID = try seedTitle("Saved Rubien Blog Post")
+        let update = try runCLI([
+            "update", String(savedWebID),
+            "--type", "Web Page",
+            "--url", "https://example.com/blog/saved-rubien-post",
+        ])
+        XCTAssertEqual(update.exitCode, 0, "seed update failed: \(update.stderr)")
+
         let publicResponses = try runMCP([req(id: 1, method: "tools/list")])
         let appResponses = try runMCP(
             [req(id: 1, method: "tools/list")],
@@ -228,18 +236,22 @@ final class MCPServerTests: XCTestCase {
         let publicNames = Set(publicTools.compactMap { $0["name"] as? String })
         let appNames = Set(appTools.compactMap { $0["name"] as? String })
 
-        XCTAssertFalse(publicNames.contains("rubien_present_papers"))
-        XCTAssertEqual(appNames.subtracting(publicNames), ["rubien_present_papers"])
+        XCTAssertFalse(publicNames.contains("rubien_present_document_cards"))
+        XCTAssertFalse(appNames.contains("rubien_present_papers"))
+        XCTAssertEqual(appNames.subtracting(publicNames), ["rubien_present_document_cards"])
         XCTAssertEqual(appNames.count, publicNames.count + 1)
 
         let callResponses = try runMCP([
-            toolCall(id: 2, name: "rubien_present_papers", arguments: [
-                "items": [[
-                    "url": "https://example.com/paper",
-                    "title": "A Candidate",
-                    "authors": "Ada Lovelace, Grace Hopper",
-                    "year": 2026,
-                ]],
+            toolCall(id: 2, name: "rubien_present_document_cards", arguments: [
+                "items": [
+                    ["referenceId": savedWebID],
+                    [
+                        "url": "https://example.com/blog/rubien-notes",
+                        "title": "Rubien Engineering Notes",
+                        "authors": "Ada Lovelace, Grace Hopper",
+                        "year": 2026,
+                    ],
+                ],
             ]),
         ], appPresentation: true)
         let result = try XCTUnwrap(response(callResponses, id: 2)?["result"] as? [String: Any])
@@ -248,39 +260,47 @@ final class MCPServerTests: XCTestCase {
         let envelope = try XCTUnwrap(
             JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
         let items = try XCTUnwrap(envelope["items"] as? [[String: Any]])
-        XCTAssertEqual(items.first?["title"] as? String, "A Candidate")
-        XCTAssertEqual(items.first?["authors"] as? String, "Ada Lovelace, Grace Hopper")
-        XCTAssertEqual(items.first?["badge"] as? String, "Web candidate")
+        XCTAssertEqual(items.count, 2)
+        let saved = try XCTUnwrap(items.first { ($0["referenceId"] as? NSNumber)?.intValue == savedWebID })
+        XCTAssertEqual(saved["kind"] as? String, "library")
+        XCTAssertEqual(saved["title"] as? String, "Saved Rubien Blog Post")
+        XCTAssertEqual(saved["badge"] as? String, "Web")
+
+        let external = try XCTUnwrap(items.first { $0["kind"] as? String == "web" })
+        XCTAssertNil(external["referenceId"])
+        XCTAssertEqual(external["title"] as? String, "Rubien Engineering Notes")
+        XCTAssertEqual(external["authors"] as? String, "Ada Lovelace, Grace Hopper")
+        XCTAssertEqual(external["badge"] as? String, "Web candidate")
     }
 
     func testAppPresentationRejectsMixedShapesExtraFieldsAndBooleanIntegers() throws {
         try skipIfBinaryMissing()
         let responses = try runMCP([
-            toolCall(id: 1, name: "rubien_present_papers", arguments: [
+            toolCall(id: 1, name: "rubien_present_document_cards", arguments: [
                 "items": [[
                     "referenceId": 1,
                     "url": "https://example.com/paper",
                     "title": "Mixed shape",
                 ]],
             ]),
-            toolCall(id: 2, name: "rubien_present_papers", arguments: [
+            toolCall(id: 2, name: "rubien_present_document_cards", arguments: [
                 "items": [[
                     "url": "https://example.com/paper",
                     "title": "Unexpected field",
                     "reason": "not part of the card contract",
                 ]],
             ]),
-            toolCall(id: 3, name: "rubien_present_papers", arguments: [
+            toolCall(id: 3, name: "rubien_present_document_cards", arguments: [
                 "items": [["referenceId": true]],
             ]),
-            toolCall(id: 4, name: "rubien_present_papers", arguments: [
+            toolCall(id: 4, name: "rubien_present_document_cards", arguments: [
                 "items": [[
                     "url": "https://example.com/paper",
                     "title": "Boolean year",
                     "year": true,
                 ]],
             ]),
-            toolCall(id: 5, name: "rubien_present_papers", arguments: [
+            toolCall(id: 5, name: "rubien_present_document_cards", arguments: [
                 "items": [["referenceId": 0]],
             ]),
         ], appPresentation: true)
@@ -300,20 +320,20 @@ final class MCPServerTests: XCTestCase {
             ["url": "https://example.com/\(index)", "title": "Paper \(index)"]
         }
         let responses = try runMCP([
-            toolCall(id: 1, name: "rubien_present_papers", arguments: [
+            toolCall(id: 1, name: "rubien_present_document_cards", arguments: [
                 "items": [["url": "https://example.com/paper", "title": overlongTitle]],
             ]),
-            toolCall(id: 2, name: "rubien_present_papers", arguments: [
+            toolCall(id: 2, name: "rubien_present_document_cards", arguments: [
                 "items": [["url": overlongURL, "title": "Overlong URL"]],
             ]),
-            toolCall(id: 3, name: "rubien_present_papers", arguments: [
+            toolCall(id: 3, name: "rubien_present_document_cards", arguments: [
                 "items": [["url": "https://example.com/zero", "title": "Zero year", "year": 0]],
             ]),
-            toolCall(id: 4, name: "rubien_present_papers", arguments: [
+            toolCall(id: 4, name: "rubien_present_document_cards", arguments: [
                 "items": [["url": "https://example.com/future", "title": "Large year", "year": 10_000]],
             ]),
-            toolCall(id: 5, name: "rubien_present_papers", arguments: ["items": elevenItems]),
-            toolCall(id: 6, name: "rubien_present_papers", arguments: [
+            toolCall(id: 5, name: "rubien_present_document_cards", arguments: ["items": elevenItems]),
+            toolCall(id: 6, name: "rubien_present_document_cards", arguments: [
                 "items": [[
                     "url": "https://example.com/authors",
                     "title": "Overlong authors",
@@ -336,10 +356,10 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(update.exitCode, 0, "seed update failed: \(update.stderr)")
 
         let responses = try runMCP([
-            toolCall(id: 1, name: "rubien_present_papers", arguments: [
+            toolCall(id: 1, name: "rubien_present_document_cards", arguments: [
                 "items": [["referenceId": longTitleID]],
             ]),
-            toolCall(id: 2, name: "rubien_present_papers", arguments: [
+            toolCall(id: 2, name: "rubien_present_document_cards", arguments: [
                 "items": [["referenceId": invalidYearID]],
             ]),
         ], appPresentation: true)
@@ -366,7 +386,7 @@ final class MCPServerTests: XCTestCase {
         let encodedItems = try JSONSerialization.data(withJSONObject: ["items": items])
         XCTAssertGreaterThan(encodedItems.count, 64 * 1_024)
         let responses = try runMCP([
-            toolCall(id: 1, name: "rubien_present_papers", arguments: ["items": items]),
+            toolCall(id: 1, name: "rubien_present_document_cards", arguments: ["items": items]),
         ], appPresentation: true)
         let result = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
         XCTAssertEqual(result["isError"] as? Bool, true, "oversized output must be rejected: \(result)")

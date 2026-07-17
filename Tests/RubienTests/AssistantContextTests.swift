@@ -31,16 +31,18 @@ final class AssistantContextTests: XCTestCase {
         XCTAssertTrue(seed.contains("untitled"))
     }
 
-    func testLibrarySeedIsLibraryWideAndRequestsStructuredPaperPresentation() {
+    func testLibrarySeedIsDocumentWideAndRequestsNativeDocumentCards() {
         let seed = AssistantContext.seed(for: AssistantConversationContext.library)
         XCTAssertEqual(seed, AssistantContext.defaultPrompt(for: .library))
         XCTAssertTrue(seed.contains("library assistant"))
-        XCTAssertTrue(seed.contains("rubien_present_papers"))
+        XCTAssertTrue(seed.contains("web articles, blog posts"))
+        XCTAssertTrue(seed.contains("rubien_present_document_cards"))
         XCTAssertTrue(seed.contains("must make exactly one"))
-        XCTAssertTrue(seed.contains("every recommendation"))
-        XCTAssertTrue(seed.contains("include the authors when known"))
-        XCTAssertTrue(seed.contains("Do not link recommended paper titles in Markdown"))
-        XCTAssertTrue(seed.contains("never in the tool arguments"))
+        XCTAssertTrue(seed.contains("every such document"))
+        XCTAssertTrue(seed.contains("up to 10 documents"))
+        XCTAssertTrue(seed.contains("offer to continue with another batch"))
+        XCTAssertTrue(seed.contains("instead of Markdown links"))
+        XCTAssertTrue(seed.contains("Passing mentions"))
         XCTAssertTrue(seed.lowercased().contains("untrusted"))
         XCTAssertFalse(seed.contains("reference ID"))
     }
@@ -48,6 +50,9 @@ final class AssistantContextTests: XCTestCase {
     func testDefaultPromptsAreVisibleForBothSettingsSurfaces() {
         XCTAssertTrue(AssistantContext.defaultPrompt(for: .library).contains("library assistant"))
         XCTAssertTrue(AssistantContext.defaultPrompt(for: .reader).contains("reading assistant"))
+        XCTAssertTrue(
+            AssistantContext.defaultPrompt(for: .reader)
+                .contains("rubien_present_document_cards"))
         XCTAssertTrue(
             AssistantContext.defaultPrompt(for: .reader)
                 .contains(AssistantContext.readerReferencePlaceholder))
@@ -59,7 +64,7 @@ final class AssistantContextTests: XCTestCase {
             promptOverride: "Answer in Chinese and keep comparisons concise.")
 
         XCTAssertEqual(seed, "Answer in Chinese and keep comparisons concise.")
-        XCTAssertFalse(seed.contains("rubien_present_papers"))
+        XCTAssertFalse(seed.contains("rubien_present_document_cards"))
     }
 
     func testReaderPromptOverrideRendersReferencePlaceholder() {

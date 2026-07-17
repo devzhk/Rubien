@@ -8,6 +8,19 @@ public enum RubienMCPToolAccess: Sendable, Equatable {
     case write
 }
 
+/// Shared wire contract for the presentation tool exposed only inside Rubien's
+/// Assistant content channel. This deliberately remains outside the public MCP
+/// policy sets below.
+public enum RubienAppPresentationContract {
+    public static let toolName = "rubien_present_document_cards"
+    public static let maximumItemCount = 10
+    public static let maximumResultBytes = 64 * 1_024
+    public static let maximumTitleLength = 500
+    public static let maximumAuthorsLength = 1_000
+    public static let maximumBadgeLength = 64
+    public static let maximumURLBytes = 2_048
+}
+
 public enum RubienMCPToolPolicy {
     public static let readToolNames: Set<String> = [
         "rubien_search_references",

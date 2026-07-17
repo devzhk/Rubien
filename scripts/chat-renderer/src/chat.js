@@ -534,10 +534,10 @@ function makePaperGroup(value) {
   if (papers.length === 0) return null
   const root = document.createElement('section')
   root.className = 'chat-paper-group'
-  root.setAttribute('aria-label', 'Paper cards')
+  root.setAttribute('aria-label', 'Document cards')
   const heading = document.createElement('div')
   heading.className = 'chat-paper-heading'
-  heading.textContent = 'Paper cards'
+  heading.textContent = 'Document cards'
   root.appendChild(heading)
   const list = document.createElement('div')
   list.className = 'chat-paper-list'

@@ -7,7 +7,7 @@ import RubienCore
 final class ChatPaperPresentationTests: XCTestCase {
     func testClaudeSuccessfulPresentationDecodesTypedCards() {
         var parser = ClaudeStreamParser()
-        _ = parser.parse(line: #"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"paper-call","name":"mcp__rubien__rubien_present_papers","input":{"items":[{"referenceId":7}]}}]}}"#)
+        _ = parser.parse(line: #"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"paper-call","name":"mcp__rubien__rubien_present_document_cards","input":{"items":[{"referenceId":7}]}}]}}"#)
         let events = parser.parse(line: #"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"paper-call","is_error":false,"content":"{\"items\":[{\"kind\":\"library\",\"referenceId\":7,\"title\":\"Paper Seven\",\"authors\":\"Ada Lovelace, Grace Hopper\",\"year\":2026,\"badge\":\"PDF\"}]}"}]}}"#)
 
         XCTAssertEqual(events.count, 2)
@@ -23,7 +23,7 @@ final class ChatPaperPresentationTests: XCTestCase {
 
     func testCodexSuccessfulPresentationDecodesTypedCards() {
         var parser = CodexAppServerParser()
-        let line = #"{"method":"item/completed","params":{"item":{"type":"mcpToolCall","id":"call-1","server":"rubien","tool":"rubien_present_papers","status":"completed","result":{"content":[{"type":"text","text":"{\"items\":[{\"kind\":\"web\",\"url\":\"https://example.com/paper\",\"title\":\"A Web Paper\",\"badge\":\"Web candidate\"}]}"}]}}}}"#
+        let line = #"{"method":"item/completed","params":{"item":{"type":"mcpToolCall","id":"call-1","server":"rubien","tool":"rubien_present_document_cards","status":"completed","result":{"content":[{"type":"text","text":"{\"items\":[{\"kind\":\"web\",\"url\":\"https://example.com/paper\",\"title\":\"A Web Paper\",\"badge\":\"Web candidate\"}]}"}]}}}}"#
         let events = parser.parse(line: line)
 
         XCTAssertEqual(events.count, 2)
@@ -36,9 +36,11 @@ final class ChatPaperPresentationTests: XCTestCase {
     }
 
     func testPresentationToolIsSilentReadButNotPublicPolicy() {
-        XCTAssertTrue(ChatSessionController.isSilentReadTool("rubien/rubien_present_papers"))
-        XCTAssertFalse(ChatSessionController.isUnknownRubienTool("mcp__rubien__rubien_present_papers"))
-        XCTAssertNil(RubienMCPToolPolicy.access(for: "rubien_present_papers"))
+        XCTAssertTrue(ChatSessionController.isSilentReadTool("rubien/rubien_present_document_cards"))
+        XCTAssertFalse(ChatSessionController.isUnknownRubienTool("mcp__rubien__rubien_present_document_cards"))
+        XCTAssertNil(RubienMCPToolPolicy.access(for: "rubien_present_document_cards"))
+        XCTAssertFalse(ChatPaperPresentation.isPresentationTool("rubien_present_papers"))
+        XCTAssertTrue(ChatSessionController.isUnknownRubienTool("rubien_present_papers"))
     }
 
     func testClaudeHistoryReconstructsPaperRowWithoutToolChip() throws {
@@ -54,7 +56,7 @@ final class ChatPaperPresentationTests: XCTestCase {
         try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
         let lines = [
             "{\"type\":\"user\",\"cwd\":\"\(workspace.path)\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"recommend\"}]}}",
-            #"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"paper-a","name":"mcp__rubien__rubien_present_papers","input":{"items":[{"referenceId":7}]}},{"type":"tool_use","id":"paper-b","name":"mcp__rubien__rubien_present_papers","input":{"items":[{"url":"https://example.com/web","title":"Web Paper"}]}}]}}"#,
+            #"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"paper-a","name":"mcp__rubien__rubien_present_document_cards","input":{"items":[{"referenceId":7}]}},{"type":"tool_use","id":"paper-b","name":"mcp__rubien__rubien_present_document_cards","input":{"items":[{"url":"https://example.com/web","title":"Web Paper"}]}}]}}"#,
             #"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"paper-b","is_error":false,"content":"{\"items\":[{\"kind\":\"library\",\"referenceId\":7,\"title\":\"Duplicate Seven\",\"year\":2026,\"badge\":\"PDF\"},{\"kind\":\"web\",\"url\":\"https://example.com/web\",\"title\":\"Web Paper\",\"badge\":\"Web candidate\"}]}"},{"type":"tool_result","tool_use_id":"paper-a","is_error":false,"content":"{\"items\":[{\"kind\":\"library\",\"referenceId\":7,\"title\":\"Paper Seven\",\"year\":2026,\"badge\":\"PDF\"}]}"}]}}"#,
             #"{"type":"assistant","message":{"content":[{"type":"text","text":"Here are the papers."}]}}"#,
         ]
@@ -80,7 +82,7 @@ final class ChatPaperPresentationTests: XCTestCase {
                             "type": "mcpToolCall",
                             "id": "paper-a",
                             "server": "rubien",
-                            "tool": "rubien_present_papers",
+                            "tool": "rubien_present_document_cards",
                             "status": "completed",
                             "result": [
                                 "content": [[
@@ -93,7 +95,7 @@ final class ChatPaperPresentationTests: XCTestCase {
                             "type": "mcpToolCall",
                             "id": "paper-b",
                             "server": "rubien",
-                            "tool": "rubien_present_papers",
+                            "tool": "rubien_present_document_cards",
                             "status": "completed",
                             "result": [
                                 "content": [[
@@ -123,7 +125,7 @@ final class ChatPaperPresentationTests: XCTestCase {
                         "type": "mcpToolCall",
                         "id": "bad-paper",
                         "server": "rubien",
-                        "tool": "rubien_present_papers",
+                        "tool": "rubien_present_document_cards",
                         "status": "completed",
                         "result": ["content": [["type": "text", "text": "not json"]]],
                     ]],
@@ -144,7 +146,7 @@ final class ChatPaperPresentationTests: XCTestCase {
             isDirectory: true)
         try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
         let claudeLines = [
-            #"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"bad-paper","name":"mcp__rubien__rubien_present_papers","input":{}}]}}"#,
+            #"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"bad-paper","name":"mcp__rubien__rubien_present_document_cards","input":{}}]}}"#,
             #"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"bad-paper","is_error":false,"content":"not json"}]}}"#,
         ]
         try Data(claudeLines.joined(separator: "\n").utf8).write(
@@ -154,7 +156,7 @@ final class ChatPaperPresentationTests: XCTestCase {
         XCTAssertEqual(claudeRows.map(\.role), [.tool])
 
         var parser = ClaudeStreamParser()
-        _ = parser.parse(line: #"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"bad-paper","name":"mcp__rubien__rubien_present_papers","input":{}}]}}"#)
+        _ = parser.parse(line: #"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"bad-paper","name":"mcp__rubien__rubien_present_document_cards","input":{}}]}}"#)
         let events = parser.parse(line: #"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"bad-paper","is_error":false,"content":"not json"}]}}"#)
         XCTAssertEqual(events.count, 1)
         guard case .toolUseCompleted(let name) = events[0] else {

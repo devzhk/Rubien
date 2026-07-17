@@ -4,18 +4,18 @@ import RubienCore
 /// Optional catalog exposed only by Rubien's embedded Assistant content channel.
 /// It is intentionally absent from the public native/Node catalogs and CLI docs.
 enum MCPAppPresentationToolCatalog {
-    static let toolName = "rubien_present_papers"
-    private static let maximumItemCount = 10
-    private static let maximumTitleLength = 500
-    private static let maximumAuthorsLength = 1_000
-    private static let maximumURLBytes = 2048
-    private static let maximumOutputBytes = 64 * 1_024
+    static let toolName = RubienAppPresentationContract.toolName
+    private static let maximumItemCount = RubienAppPresentationContract.maximumItemCount
+    private static let maximumTitleLength = RubienAppPresentationContract.maximumTitleLength
+    private static let maximumAuthorsLength = RubienAppPresentationContract.maximumAuthorsLength
+    private static let maximumURLBytes = RubienAppPresentationContract.maximumURLBytes
+    private static let maximumOutputBytes = RubienAppPresentationContract.maximumResultBytes
 
-    static let tools = [presentPapersTool]
+    static let tools = [presentDocumentCardsTool]
 
-    private static let presentPapersTool = MCPTool(
+    private static let presentDocumentCardsTool = MCPTool(
         name: toolName,
-        description: "Present every paper recommended in this response as clickable Rubien cards. When recommending one or more specific papers, call this tool exactly once with all of them. Include authors for web papers when known; do not put reasons in the arguments.",
+        description: "Present every openable document intentionally referenced in this response as clickable Rubien cards. Call this tool exactly once with up to \(maximumItemCount) saved library documents and external web documents the user should be able to open. Include authors and year for web documents when known; keep explanations and reasons in response prose, never in the arguments.",
         inputSchema: [
             "type": "object",
             "properties": [
@@ -148,7 +148,7 @@ enum MCPAppPresentationToolCatalog {
                   !rawTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             else {
                 throw MCPToolError.invalidArguments(
-                    "Web items require an HTTP(S) URL of at most \(maximumURLBytes) bytes and a title of 1...\(maximumTitleLength) characters"
+                    "Web documents require an HTTP(S) URL of at most \(maximumURLBytes) bytes and a title of 1...\(maximumTitleLength) characters"
                 )
             }
             let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)

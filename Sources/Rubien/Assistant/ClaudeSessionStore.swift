@@ -113,7 +113,7 @@ struct ClaudeSessionStore {
     /// event mapping: user text → user rows, assistant text → assistant rows,
     /// an assistant message's `tool_use` blocks → completed tool-chip rows right
     /// after its text (their results arrived later, but the chips belong to the
-    /// message that invoked them). Successful paper presentations merge once at
+    /// message that invoked them). Successful document-card presentations merge once at
     /// the end of each turn; malformed ones remain visible tool rows. Other
     /// tool-result-only user turns render nothing. Meta/sidechain entries remain
     /// hidden. Returns `[]` when the file is missing/unreadable — the caller falls
@@ -178,7 +178,7 @@ struct ClaudeSessionStore {
                     if block["is_error"] as? Bool == true {
                         let chip = ToolChipPayload(
                             name: ChatPaperPresentation.toolName,
-                            detail: "Paper presentation failed",
+                            detail: "Document-card presentation failed",
                             status: .denied)
                         append(.tool, ChatTranscriptJS.encodeArg(chip))
                     } else if let group = ChatPaperPresentation.decodeToolResult(block["content"]) {
@@ -186,7 +186,7 @@ struct ClaudeSessionStore {
                     } else {
                         let chip = ToolChipPayload(
                             name: ChatPaperPresentation.toolName,
-                            detail: "Paper presentation result was invalid",
+                            detail: "Document-card presentation result was invalid",
                             status: .completed)
                         append(.tool, ChatTranscriptJS.encodeArg(chip))
                     }

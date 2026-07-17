@@ -1,4 +1,5 @@
 import Foundation
+import RubienCore
 
 /// A presentation-only paper chosen by the agent. It contains no reason or
 /// arbitrary HTML; Rubien owns the card heading, badge, and activation behavior.
@@ -59,13 +60,13 @@ struct ChatPaperGroup: Codable, Sendable, Equatable {
 }
 
 enum ChatPaperPresentation {
-    static let toolName = "rubien_present_papers"
-    static let maximumResultBytes = 64 * 1_024
-    static let maximumItemCount = 10
-    static let maximumTitleLength = 500
-    static let maximumAuthorsLength = 1_000
-    static let maximumBadgeLength = 64
-    static let maximumURLBytes = 2_048
+    static let toolName = RubienAppPresentationContract.toolName
+    static let maximumResultBytes = RubienAppPresentationContract.maximumResultBytes
+    static let maximumItemCount = RubienAppPresentationContract.maximumItemCount
+    static let maximumTitleLength = RubienAppPresentationContract.maximumTitleLength
+    static let maximumAuthorsLength = RubienAppPresentationContract.maximumAuthorsLength
+    static let maximumBadgeLength = RubienAppPresentationContract.maximumBadgeLength
+    static let maximumURLBytes = RubienAppPresentationContract.maximumURLBytes
 
     static func isPresentationTool(_ name: String) -> Bool {
         name == toolName

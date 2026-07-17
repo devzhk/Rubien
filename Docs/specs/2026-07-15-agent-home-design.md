@@ -19,9 +19,10 @@ saved views remain one click away under a Library section, with their current
 table, filters, columns, and reference-detail behavior unchanged.
 
 The activity panel shows compact metrics, a calendar heatmap, and recent papers.
-When the agent recommends specific papers, Home can also render validated native
-paper rows inside the transcript so the recommendation leads directly to a
-reader or an explicit web/import action.
+When the agent intentionally points to openable documents—including academic
+papers, web articles, and blog posts—Home renders validated native document cards
+inside the transcript so the reference leads directly to a reader or an explicit
+web/import action.
 Rubien already stores `Reference.lastReadAt` and an approximate `readCount`, but
 those aggregates cannot reconstruct daily history. The proposed data addition
 is therefore deliberately bounded: one monotonic active-seconds component per
@@ -61,9 +62,9 @@ transcripts, or reader focus-event timeline for statistics.
     near the visual center of the chat canvas, with quieter initial suggestions
     directly above it. Committing the first valid user message immediately hides
     the suggestions and moves the composer to the normal bottom-docked position.
-11. **Agent-recommended papers are native, actionable transcript content.** A
-    validated library recommendation opens its PDF/Web Reader; a web-only
-    candidate opens its source and offers an explicit Add to Rubien flow.
+11. **Agent-referenced documents are native, actionable transcript content.** A
+    validated saved document opens its PDF/Web Reader; an external web document
+    opens its source and offers an explicit Add to Rubien flow.
 12. **Reading Activity is a top-pinned floating card, not a full-height
     inspector.** Its neutral glass surface hugs its content and leaves the Home
     canvas visible beneath it.
@@ -312,10 +313,10 @@ behavior.
 
 When the agent answers a request such as **What should I read next?**, it should
 normally recommend three papers unless the user requests another count. After a
-short explanation, render a native **Paper cards** group in the transcript:
+short explanation, render a native **Document cards** group in the transcript:
 
 ```text
-Paper cards
+Document cards
 ┌────────────────────────────────────────────────┐
 │ Paper A title                                  │
 │ Ada Author, Bo Author…          2025 · PDF     │
@@ -372,8 +373,8 @@ ordinary transcript link. Card text is created with DOM `textContent`, never
 untrusted HTML.
 
 The agent selects cards through the app-private, read-only
-`rubien_present_papers` contract in §11.4. Within one Assistant turn, all
-successfully decoded calls contribute to one pending **Paper cards** group.
+`rubien_present_document_cards` contract in §11.4. Within one Assistant turn, all
+successfully decoded calls contribute to one pending **Document cards** group.
 Merge calls by invocation order and items by input order, stable-deduplicate
 across the entire turn, and retain at most the first ten unique items. Hold that
 group until the corresponding final Assistant message is committed, then render
@@ -382,13 +383,14 @@ turn ends without final prose, render the group at turn completion rather than
 losing it. Every successfully decoded presentation call replaces its redundant
 generic tool chip; malformed/failed calls remain ordinary tool failures and
 contribute no items. Live rendering and both provider-History decoders use the
-same invocation ordering, deduplication, and per-turn cap. The library-context
-seed tells the agent to make exactly one presentation call whenever it recommends
-specific papers, but the merge rule keeps repeated noncompliant calls deterministic;
+same invocation ordering, deduplication, and per-turn cap. Both built-in seeds
+tell the agent to make exactly one presentation call whenever it intentionally
+refers the user to openable documents, but the merge rule keeps repeated
+noncompliant calls deterministic;
 plain Markdown remains a safe fallback if a provider does not comply.
 
 Provider-owned History remains the transcript source. Claude and Codex History
-decoders reconstruct paper groups from successful `rubien_present_papers` calls
+decoders reconstruct document-card groups from successful `rubien_present_document_cards` calls
 and re-resolve library IDs. A reference deleted since the conversation is shown
 as unavailable rather than opening a different paper; web candidates retain only
 their source metadata from provider History. Rubien adds no transcript or card
@@ -1144,14 +1146,14 @@ drop-in compatible: update the native Swift catalog/handler and the Node
 TypeScript schema/registration/handler, catalog and policy/parity tests, server
 README/tool counts, `MIN_CLI_BUILD`, and package/server versioning together.
 
-### 11.4 App-private structured paper presentation
+### 11.4 App-private structured document-card presentation
 
-`rubien_present_papers` is an MCP tool on the provider wire, but it is a private
+`rubien_present_document_cards` is an MCP tool on the provider wire, but it is a private
 Rubien-app presentation capability rather than a general library API. It has no
 standalone `rubien-cli` command and is not registered by the public Node MCP
 package or a normal `rubien-cli mcp` launch. It lets an agent running inside
-Rubien explicitly identify the papers it chose without encoding actions in
-prose. The input is:
+Rubien explicitly identify every openable saved or external web document it
+intentionally references without encoding actions in prose. The input is:
 
 ```json
 {
@@ -1191,7 +1193,7 @@ prose. The input is:
 }
 ```
 
-Rubien owns and localizes the fixed **Paper cards** heading; the agent cannot
+Rubien owns and localizes the fixed **Document cards** heading; the agent cannot
 override it. Preserve input order and stable-deduplicate repeated library IDs and
 web-card deduplication keys. A web card retains its validated original URL as its
 activation URL; its separate deduplication key lowercases scheme and host,
@@ -1386,7 +1388,7 @@ controls, and both clear paths are complete.
 - Shared production session factory with reader convenience wrapper.
 - Parameterized chat copy, suggestions, mention exclusion, and History scope.
 - Home session owner that survives destination switches.
-- App-private `rubien_present_papers` native capability, bounded provider-event
+- App-private `rubien_present_document_cards` native capability, bounded provider-event
   decoding, structured render-log/History reconstruction, and optional-catalog/
   security tests.
 
@@ -1397,7 +1399,7 @@ controls, and both clear paths are complete.
 - Mode-aware center content and toolbar.
 - Centered fresh-conversation composer, subordinate suggestions, and the
   content-start transition to a bottom-docked composer.
-- Native paper groups, validated open/add bridges, and shared reader-opening
+- Native document-card groups, validated open/add bridges, and shared reader-opening
   policy.
 - Top-pinned, content-hugging glass Activity card, responsive height/width,
   metrics, Month/Quarter/Year heatmap, recent rows, and empty/error states.
@@ -1474,11 +1476,12 @@ that same compact height, while the reader Assistant panel has a 420-point
 minimum width so the single-line control row does not crowd or force an
 unreported expansion.
 
-### D6 — Clickable native paper recommendations *(approved 2026-07-15)*
+### D6 — Clickable native document references *(approved 2026-07-15)*
 
-When the agent recommends specific papers, it uses a bounded app-private,
-read-only presentation capability and Rubien renders canonical native paper rows
-after the explanation. Existing library papers open the local PDF Reader when available,
+When the agent intentionally points the user to specific openable documents, it
+uses a bounded app-private, read-only presentation capability and Rubien renders
+canonical native document cards after the explanation. Existing library documents
+open the local PDF Reader when available,
 then the Web Reader, then fall back to a Library reveal. Web-only candidates
 open their validated source externally and expose an explicit **Add to Rubien…**
 flow; they are never imported merely because the model mentioned them. Typed
@@ -1521,7 +1524,7 @@ could derive from automatic layout rather than an actual user drag.
   material fallback on macOS 14.4–15, with verified light/dark, Increase
   Contrast, keyboard-scroll, and VoiceOver behavior.
 - Every interactive Agent Home control has visible hover feedback: neutral gray
-  for ordinary buttons, tabs, suggestions, and paper cards; the heatmap retains
+  for ordinary buttons, tabs, suggestions, and document cards; the heatmap retains
   its restrained accent expansion/glow. Disabled controls remain visually inert.
 - A fresh or newly reset Home conversation places the composer around 45% of
   the chat canvas height with suggestions immediately above and no competing
@@ -1537,11 +1540,12 @@ could derive from automatic layout rather than an actual user drag.
   left-aligned vertical list above the composer in visual, keyboard, and
   VoiceOver order. Their text aligns with the editor caret, and the empty-library
   variants expose native Add and Import actions.
-- The library-context seed asks the agent to present three papers by default for
-  **What should I read next?** and requires exactly one presentation call whenever
-  a response recommends specific papers, with all recommendations in that call and
-  no Markdown links on their titles. One or
-  more successful `rubien_present_papers` calls nevertheless render exactly one
+- The library-context seed asks the agent to present three documents by default for
+  **What should I read next?** Both built-in seeds require exactly one presentation
+  call whenever a response intentionally refers the user to openable documents,
+  with every such document in that call and cards replacing Markdown links as the
+  navigation affordance. One or
+  more successful `rubien_present_document_cards` calls nevertheless render exactly one
   ordered native group after the final explanation (or at turn completion if no
   final prose arrives) and do not leave redundant successful tool chips. Calls
   merge by call-start ordinal, then item index; repeated events with the same call
@@ -1551,13 +1555,13 @@ could derive from automatic layout rather than an actual user drag.
   rejects agent-supplied heading, reason, or venue fields.
   Plain Markdown remains the non-interactive fallback when the provider does not
   call the tool.
-- A library paper card re-fetches its integer ID and opens PDF → Web → Library
+- A saved document card re-fetches its integer ID and opens PDF → Web → Library
   reveal through one shared policy. A deleted/stale ID cannot open another row.
   A web candidate passes HTTP(S) safety checks, opens only on explicit **Open
   source**, and enters the existing reviewed intake only on explicit **Add to
   Rubien…**; a model mention alone causes no import or download.
 - A normal `rubien-cli mcp` launch and the public Node server do not advertise
-  `rubien_present_papers`; Rubien's native helper with
+  `rubien_present_document_cards`; Rubien's native helper with
   `RUBIEN_APP_PRESENTATION=1` advertises exactly that optional tool. There is no
   standalone CLI command. Its input/result decoder rejects malformed or
   oversized data and caps the merged per-turn group at ten unique items.

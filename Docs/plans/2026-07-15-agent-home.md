@@ -96,7 +96,7 @@ unexposed until their data, privacy, and clear contracts are complete.
    week/streaks/recents retain their documented scopes.
 5. Update `Docs/CLI-Reference.md` and MCP README/tool counts.
 
-## B — Shared Assistant context and native paper presentation
+## B — Shared Assistant context and native document-card presentation
 
 1. Replace the reader-only context contract with `AssistantConversationContext`
    (`library`, `reference`, `unclassifiedResume`) and a shared production session
@@ -104,12 +104,12 @@ unexposed until their data, privacy, and clear contracts are complete.
 2. Hoist Home session, renderer, complete composer draft, turn outcome, and
    attention state above destination switching.
 3. Add the local content-free attribution store and context-aware History scopes.
-4. Add the app-private optional `rubien_present_papers` native catalog only when
+4. Add the app-private optional `rubien_present_document_cards` native catalog only when
    `RUBIEN_APP_PRESENTATION=1`.
 5. Add bounded typed provider events with call ID + invocation ordinal; merge one
    per-turn group, stable-deduplicate, cap at ten, and reconstruct identically in
    Claude/Codex History.
-6. Add `ChatPaperGroup` renderer items and validated JS→Swift activation bridges.
+6. Add bounded renderer items and validated JS→Swift document-card activation bridges.
 7. Extract one shared PDF→Web→Library reader-opening policy and use it for cards
    and recent papers.
 
@@ -139,7 +139,7 @@ unexposed until their data, privacy, and clear contracts are complete.
    a 420-point reader Assistant minimum width.
 3. Keep Home suggestions as a muted, caret-aligned vertical list above the fresh
    composer with neutral-gray hover feedback.
-4. Render shared compact paper cards with title, truncated authors, year, and
+4. Render shared compact document cards with title, truncated authors, year, and
    type/badge metadata; shrink-wrap them up to the transcript-bubble maximum and
    use neutral-gray hover feedback.
 5. Use exact state-backed 225-point defaults for PDF and web left sidebars,
