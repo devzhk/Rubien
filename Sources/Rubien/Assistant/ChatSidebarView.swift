@@ -39,7 +39,11 @@ struct ChatSidebarView: View {
             renderer: renderer,
             draft: $draft,
             selectedMentions: $selectedMentions,
-            configuration: .reader(onClose: onClose))
+            configuration: .reader(
+                onClose: onClose,
+                onOpenReference: ReaderChatPaperActions.openReference,
+                onOpenPaperSource: ReaderChatPaperActions.openSource,
+                onAddPaperSource: ReaderChatPaperActions.addSource))
     }
 }
 
@@ -55,9 +59,9 @@ struct ChatSurfaceConfiguration {
 
     let placement: Placement
     var onClose: (() -> Void)?
-    var onOpenReference: ((Int64) -> Void)?
-    var onOpenPaperSource: ((String) -> Void)?
-    var onAddPaperSource: ((String) -> Void)?
+    let onOpenReference: (Int64) -> Void
+    let onOpenPaperSource: (String) -> Void
+    let onAddPaperSource: (String) -> Void
     var libraryIsEmpty: Bool
     var onAddPapers: (() -> Void)?
     var onImportPDFs: (() -> Void)?
@@ -65,13 +69,18 @@ struct ChatSurfaceConfiguration {
     var onOpenScheduledRun: ((ScheduledJobRun) -> Void)?
     var scheduledJobsPresentation: Binding<ScheduledJobsPresentation?>?
 
-    static func reader(onClose: (() -> Void)?) -> Self {
+    static func reader(
+        onClose: (() -> Void)?,
+        onOpenReference: @escaping (Int64) -> Void,
+        onOpenPaperSource: @escaping (String) -> Void,
+        onAddPaperSource: @escaping (String) -> Void
+    ) -> Self {
         Self(
             placement: .reader,
             onClose: onClose,
-            onOpenReference: nil,
-            onOpenPaperSource: nil,
-            onAddPaperSource: nil,
+            onOpenReference: onOpenReference,
+            onOpenPaperSource: onOpenPaperSource,
+            onAddPaperSource: onAddPaperSource,
             libraryIsEmpty: false,
             onAddPapers: nil,
             onImportPDFs: nil,

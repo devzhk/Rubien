@@ -5,6 +5,66 @@ import RubienCore
 
 @MainActor
 final class ChatPaperPresentationTests: XCTestCase {
+    func testReaderConfigurationForwardsPaperCardActions() {
+        var openedReference: Int64?
+        var openedSource: String?
+        var addedSource: String?
+        let configuration = ChatSurfaceConfiguration.reader(
+            onClose: nil,
+            onOpenReference: { openedReference = $0 },
+            onOpenPaperSource: { openedSource = $0 },
+            onAddPaperSource: { addedSource = $0 })
+
+        configuration.onOpenReference(42)
+        configuration.onOpenPaperSource("https://example.com/paper")
+        configuration.onAddPaperSource("https://example.com/add")
+
+        XCTAssertEqual(openedReference, 42)
+        XCTAssertEqual(openedSource, "https://example.com/paper")
+        XCTAssertEqual(addedSource, "https://example.com/add")
+    }
+
+    func testReaderPaperActionWaitsForAndTargetsOneContentWindow() {
+        var openWindowRequests = 0
+        let router = ContentWindowNotificationRouter(
+            activateApplication: {},
+            openContentWindow: { openWindowRequests += 1 },
+            activateWindow: { _ in })
+        let window = NSWindow()
+        let delivered = expectation(description: "paper action delivered")
+        let observer = NotificationCenter.default.addObserver(
+            forName: .rubienOpenAssistantPaperReference,
+            object: nil,
+            queue: .main
+        ) { note in
+            XCTAssertEqual(
+                note.userInfo?[ChatPaperActionNotificationKeys.referenceID] as? Int64,
+                42)
+            XCTAssertTrue(note.object as? NSWindow === window)
+            delivered.fulfill()
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        ReaderChatPaperActions.openReference(41, router: router)
+        ReaderChatPaperActions.openReference(42, router: router)
+        XCTAssertEqual(openWindowRequests, 1)
+
+        router.windowAvailable(window)
+        wait(for: [delivered], timeout: 1)
+    }
+
+    func testReaderAddSourceRejectsUnsafeURLBeforeOpeningContentWindow() {
+        var openWindowRequests = 0
+        let router = ContentWindowNotificationRouter(
+            activateApplication: {},
+            openContentWindow: { openWindowRequests += 1 },
+            activateWindow: { _ in })
+
+        ReaderChatPaperActions.addSource("file:///tmp/paper.pdf", router: router)
+
+        XCTAssertEqual(openWindowRequests, 0)
+    }
+
     func testClaudeSuccessfulPresentationDecodesTypedCards() {
         var parser = ClaudeStreamParser()
         _ = parser.parse(line: #"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"paper-call","name":"mcp__rubien__rubien_present_document_cards","input":{"items":[{"referenceId":7}]}}]}}"#)

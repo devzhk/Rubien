@@ -175,48 +175,81 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         ] as? String
         DispatchQueue.main.async {
             guard let runID else { return }
-            ScheduledJobNotificationRouter.shared.open(runID: runID)
+            ContentWindowNotificationRouter.shared.openScheduledRun(runID: runID)
         }
         completionHandler()
     }
 }
 
 @MainActor
-final class ScheduledJobNotificationRouter {
-    static let shared = ScheduledJobNotificationRouter()
-    private var pendingRunID: String?
+final class ContentWindowNotificationRouter {
+    static let shared = ContentWindowNotificationRouter()
+
+    private struct PendingNotification {
+        let name: Notification.Name
+        let userInfo: [AnyHashable: Any]
+    }
+
+    private var pendingNotifications: [PendingNotification] = []
     private let contentWindows = NSHashTable<NSWindow>.weakObjects()
+    private let activateApplication: @MainActor () -> Void
+    private let openContentWindow: @MainActor () -> Void
+    private let activateWindow: @MainActor (NSWindow) -> Void
 
-    private init() {}
+    init(
+        activateApplication: @escaping @MainActor () -> Void = {
+            NSApp.activate(ignoringOtherApps: true)
+        },
+        openContentWindow: @escaping @MainActor () -> Void = {
+            NSApp.sendAction(Selector(("newWindow:")), to: nil, from: nil)
+        },
+        activateWindow: @escaping @MainActor (NSWindow) -> Void = {
+            $0.makeKeyAndOrderFront(nil)
+        }
+    ) {
+        self.activateApplication = activateApplication
+        self.openContentWindow = openContentWindow
+        self.activateWindow = activateWindow
+    }
 
-    func open(runID: String) {
-        pendingRunID = runID
-        NSApp.activate(ignoringOtherApps: true)
+    func openScheduledRun(runID: String) {
+        post(
+            name: .rubienOpenScheduledJobRun,
+            userInfo: [ScheduledJobNotifications.runIDKey: runID])
+    }
+
+    func post(name: Notification.Name, userInfo: [AnyHashable: Any]) {
+        // A newer request of the same kind supersedes one that is still waiting
+        // for a content window (matching the old scheduled-run router behavior).
+        let wasWaitingForContentWindow = !pendingNotifications.isEmpty
+        pendingNotifications.removeAll { $0.name == name }
+        pendingNotifications.append(PendingNotification(name: name, userInfo: userInfo))
+        activateApplication()
         let candidates = contentWindows.allObjects.filter { $0.isVisible && $0.canBecomeKey }
         if let target = candidates.first(where: { $0 === NSApp.keyWindow })
             ?? candidates.first {
-            deliver(to: target)
-        } else {
-            NSApp.sendAction(Selector(("newWindow:")), to: nil, from: nil)
+            deliverPending(to: target)
+        } else if !wasWaitingForContentWindow {
+            openContentWindow()
         }
     }
 
     func windowAvailable(_ window: NSWindow) {
         contentWindows.add(window)
-        guard pendingRunID != nil else { return }
-        window.makeKeyAndOrderFront(nil)
-        deliver(to: window)
+        guard !pendingNotifications.isEmpty else { return }
+        deliverPending(to: window)
     }
 
-    private func deliver(to window: NSWindow) {
-        guard let runID = pendingRunID else { return }
-        pendingRunID = nil
-        window.makeKeyAndOrderFront(nil)
-        NotificationCenter.default.post(
-            name: .rubienOpenScheduledJobRun,
-            object: window,
-            userInfo: [ScheduledJobNotifications.runIDKey: runID]
-        )
+    private func deliverPending(to window: NSWindow) {
+        let notifications = pendingNotifications
+        pendingNotifications.removeAll(keepingCapacity: true)
+        activateWindow(window)
+        for notification in notifications {
+            NotificationCenter.default.post(
+                name: notification.name,
+                object: window,
+                userInfo: notification.userInfo)
+        }
     }
 }
 

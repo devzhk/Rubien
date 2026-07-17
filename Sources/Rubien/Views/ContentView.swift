@@ -1496,6 +1496,23 @@ struct ContentView: View {
             selectedId = id
             columnVisibility = .all
         }
+        .onReceive(NotificationCenter.default.publisher(for: .rubienOpenAssistantPaperReference)) { note in
+            guard let target = note.object as? NSWindow,
+                  hostingWindowBox.window === target
+            else { return }
+            guard let id = note.userInfo?[ChatPaperActionNotificationKeys.referenceID] as? Int64,
+                  let reference = try? viewModel.db.fetchReferences(ids: [id]).first
+            else { return }
+            openReader(for: reference)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .rubienAddAssistantPaperSource)) { note in
+            guard let target = note.object as? NSWindow,
+                  hostingWindowBox.window === target
+            else { return }
+            guard let urlString = note.userInfo?[ChatPaperActionNotificationKeys.sourceURL] as? String
+            else { return }
+            beginSuggestedReferenceImport(urlString)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .rubienOpenScheduledJobRun)) { note in
             if let target = note.object as? NSWindow,
                hostingWindowBox.window !== target {
@@ -2261,6 +2278,10 @@ struct ContentView: View {
 
     private func openReader(for referenceID: Int64) {
         guard let reference = try? viewModel.db.fetchReferences(ids: [referenceID]).first else { return }
+        openReader(for: reference)
+    }
+
+    private func openReader(for reference: Reference) {
         if reference.hasPDFInCache(in: viewModel.db) {
             ReaderWindowManager.shared.openPDFReader(for: reference, db: viewModel.db)
         } else if reference.canOpenWebReader {
@@ -2335,7 +2356,7 @@ private struct HostingWindowCapture: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {
         box.window = nsView.window
         if let window = nsView.window {
-            ScheduledJobNotificationRouter.shared.windowAvailable(window)
+            ContentWindowNotificationRouter.shared.windowAvailable(window)
         }
     }
 
@@ -2354,7 +2375,7 @@ private struct HostingWindowCapture: NSViewRepresentable {
             super.viewDidMoveToWindow()
             box?.window = window
             if let window {
-                ScheduledJobNotificationRouter.shared.windowAvailable(window)
+                ContentWindowNotificationRouter.shared.windowAvailable(window)
             }
         }
     }
