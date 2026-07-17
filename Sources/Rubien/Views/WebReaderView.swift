@@ -124,7 +124,10 @@ enum WebReaderMathRendering {
             .joined(separator: "|")
         guard html.range(of: "<br", options: .caseInsensitive) != nil,
               let breakRegex = try? NSRegularExpression(
-                  pattern: #"<br\b[^>]*>"#,
+                  // Quoted attribute values may legally contain `>`. Match
+                  // them atomically so normalization cannot expose part of an
+                  // attribute value as live article markup.
+                  pattern: #"<br(?=[\t\n\f\r />])(?:[^<>"']|"[^"]*"|'[^']*')*>"#,
                   options: .caseInsensitive
               ),
               let environmentRegex = try? NSRegularExpression(

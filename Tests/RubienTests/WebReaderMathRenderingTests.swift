@@ -72,6 +72,27 @@ final class WebReaderMathRenderingTests: XCTestCase {
         XCTAssertEqual(WebReaderMathRendering.normalizingLegacyDisplayMath(in: html), html)
     }
 
+    func testLegacyDisplayMathNormalizationConsumesQuotedGreaterThanInBreakAttributes() {
+        let html = #"<p>\begin{equation}a<br title="> <em>must stay inert</em>" data-note='x > y'>b\end{equation}</p>"#
+
+        let normalized = WebReaderMathRendering.normalizingLegacyDisplayMath(in: html)
+
+        XCTAssertEqual(normalized, #"<p>\begin{equation}a"# + "\n" + #"b\end{equation}</p>"#)
+        XCTAssertFalse(normalized.contains("<em>"))
+        XCTAssertFalse(normalized.contains("must stay inert"))
+    }
+
+    func testLegacyDisplayMathNormalizationLeavesBreakLikeCustomElementsUntouched() {
+        let inputs = [
+            #"<p>\begin{equation}a<br-custom>b\end{equation}</p>"#,
+            #"<p>\begin{equation}a<br"# + "\u{00A0}" + #"custom>b\end{equation}</p>"#,
+        ]
+
+        for html in inputs {
+            XCTAssertEqual(WebReaderMathRendering.normalizingLegacyDisplayMath(in: html), html)
+        }
+    }
+
     func testLatexPreprocessorRemovesNonvisualLabelsOnly() throws {
         let context = try XCTUnwrap(JSContext())
         let script = """
