@@ -37,12 +37,8 @@ final class AssistantContextTests: XCTestCase {
         XCTAssertTrue(seed.contains("library assistant"))
         XCTAssertTrue(seed.contains("web articles, blog posts"))
         XCTAssertTrue(seed.contains("rubien_present_document_cards"))
-        XCTAssertTrue(seed.contains("must make exactly one"))
-        XCTAssertTrue(seed.contains("every such document"))
-        XCTAssertTrue(seed.contains("up to 10 documents"))
-        XCTAssertTrue(seed.contains("offer to continue with another batch"))
         XCTAssertTrue(seed.contains("instead of Markdown links"))
-        XCTAssertTrue(seed.contains("Passing mentions"))
+        XCTAssertTrue(seed.contains("Incidental mentions"))
         XCTAssertTrue(seed.lowercased().contains("untrusted"))
         XCTAssertFalse(seed.contains("reference ID"))
     }
@@ -56,6 +52,12 @@ final class AssistantContextTests: XCTestCase {
         XCTAssertTrue(
             AssistantContext.defaultPrompt(for: .reader)
                 .contains(AssistantContext.readerReferencePlaceholder))
+        XCTAssertTrue(
+            AssistantContext.defaultPrompt(for: .reader)
+                .contains("Annotations are optional context"))
+        XCTAssertTrue(
+            AssistantContext.defaultPrompt(for: .reader)
+                .contains("not by default"))
     }
 
     func testLibraryPromptOverrideReplacesVisibleDefault() {

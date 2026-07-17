@@ -384,9 +384,9 @@ losing it. Every successfully decoded presentation call replaces its redundant
 generic tool chip; malformed/failed calls remain ordinary tool failures and
 contribute no items. Live rendering and both provider-History decoders use the
 same invocation ordering, deduplication, and per-turn cap. Both built-in seeds
-tell the agent to make exactly one presentation call whenever it intentionally
-refers the user to openable documents, but the merge rule keeps repeated
-noncompliant calls deterministic;
+identify the presentation tool as the navigation affordance for openable document
+references; the tool description and schema carry the call shape and batching
+limit. The merge rule keeps repeated noncompliant calls deterministic;
 plain Markdown remains a safe fallback if a provider does not comply.
 
 Provider-owned History remains the transcript source. Claude and Codex History
@@ -1540,11 +1540,10 @@ could derive from automatic layout rather than an actual user drag.
   left-aligned vertical list above the composer in visual, keyboard, and
   VoiceOver order. Their text aligns with the editor caret, and the empty-library
   variants expose native Add and Import actions.
-- The library-context seed asks the agent to present three documents by default for
-  **What should I read next?** Both built-in seeds require exactly one presentation
-  call whenever a response intentionally refers the user to openable documents,
-  with every such document in that call and cards replacing Markdown links as the
-  navigation affordance. One or
+- Both built-in seeds remain minimal: they identify
+  `rubien_present_document_cards` as the replacement for Markdown navigation when
+  the agent points to an openable document. The tool description and schema carry
+  batching and argument details. One or
   more successful `rubien_present_document_cards` calls nevertheless render exactly one
   ordered native group after the final explanation (or at turn completion if no
   final prose arrives) and do not leave redundant successful tool chips. Calls
