@@ -15,7 +15,7 @@ enum MCPAppPresentationToolCatalog {
 
     private static let presentDocumentCardsTool = MCPTool(
         name: toolName,
-        description: "Present every openable document intentionally referenced in this response as clickable Rubien cards. Call this tool exactly once with up to \(maximumItemCount) saved library documents and external web documents the user should be able to open. Include authors and year for web documents when known; keep explanations and reasons in response prose, never in the arguments.",
+        description: "Present every openable document intentionally referenced in this response as clickable Rubien cards. Call this tool exactly once with up to \(maximumItemCount) saved library documents and external document URLs the user should be able to open. Include authors and year for external documents when known; Rubien classifies each URL as a paper, PDF/document, or web candidate. Keep explanations and reasons in response prose, never in the arguments.",
         inputSchema: [
             "type": "object",
             "properties": [
@@ -179,7 +179,7 @@ enum MCPAppPresentationToolCatalog {
                 "kind": "web",
                 "url": rawURL,
                 "title": title,
-                "badge": "Web candidate",
+                "badge": RubienAppPresentationContract.externalCandidateBadge(for: rawURL),
             ]
             if let authors { card["authors"] = authors }
             if let year { card["year"] = year }

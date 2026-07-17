@@ -5,6 +5,30 @@ import XCTest
 import RubienCore
 
 final class AddReferenceSourceSheetModelTests: XCTestCase {
+    func testSuggestedArxivCardStartsInMetadataFlow() {
+        let input = "https://arxiv.org/abs/2606.24597"
+
+        let state = AddReferenceFlowState(initialInput: input)
+
+        XCTAssertEqual(state.step, .metadata(input))
+    }
+
+    func testSuggestedOrdinaryWebCardStartsInWebClipFlow() {
+        let input = "https://example.com/article"
+
+        let state = AddReferenceFlowState(initialInput: input)
+
+        XCTAssertEqual(state.step, .website(input))
+    }
+
+    func testSuggestedPDFCardStartsInPrefilledSourceFlow() {
+        let input = "https://arxiv.org/pdf/2501.01234.pdf"
+
+        let state = AddReferenceFlowState(initialInput: input)
+
+        XCTAssertEqual(state.step, .source(input))
+    }
+
     func testMetadataRouteAdvancesWithinUnifiedFlow() {
         let input = "https://arxiv.org/abs/2606.05405"
         var state = AddReferenceFlowState()

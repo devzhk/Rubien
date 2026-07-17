@@ -90,7 +90,7 @@ enum ChatPaperPresentation {
     /// and the JS bridge must stay bounded even if that history was edited.
     static func validatedGroup(_ group: ChatPaperGroup) -> ChatPaperGroup? {
         var seen = Set<String>()
-        let valid = group.items.prefix(maximumItemCount).filter { paper in
+        let valid = group.items.prefix(maximumItemCount).compactMap { paper -> ChatPaper? in
             let title = paper.title.trimmingCharacters(in: .whitespacesAndNewlines)
             let badge = paper.badge.trimmingCharacters(in: .whitespacesAndNewlines)
             let authors = paper.authors?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -100,12 +100,12 @@ enum ChatPaperPresentation {
                   !badge.isEmpty,
                   badge.count <= maximumBadgeLength,
                   paper.year.map({ (1...9_999).contains($0) }) ?? true
-            else { return false }
+            else { return nil }
             switch paper.kind {
             case .library:
                 guard paper.referenceId.map({ $0 > 0 }) == true
                     && paper.url == nil
-                else { return false }
+                else { return nil }
             case .web:
                 guard paper.referenceId == nil,
                       let raw = paper.url,
@@ -114,9 +114,24 @@ enum ChatPaperPresentation {
                       let scheme = url.scheme?.lowercased(),
                       ["http", "https"].contains(scheme),
                       url.host != nil
-                else { return false }
+                else { return nil }
             }
-            return seen.insert(paper.id).inserted
+            guard seen.insert(paper.id).inserted else { return nil }
+            guard paper.kind == .web, let url = paper.url else { return paper }
+
+            // Provider history is durable input and older sessions serialized
+            // every external document as "Web candidate". Re-derive the badge
+            // from the current intake router so restored arXiv/publisher cards
+            // gain the same classification as newly presented cards.
+            return ChatPaper(
+                kind: .web,
+                referenceId: nil,
+                url: url,
+                title: title,
+                authors: authors,
+                year: paper.year,
+                badge: RubienAppPresentationContract.externalCandidateBadge(for: url)
+            )
         }
         return valid.isEmpty ? nil : ChatPaperGroup(items: valid)
     }

@@ -35,6 +35,14 @@ final class ChatPaperPresentationTests: XCTestCase {
         XCTAssertEqual(group.items.first?.url, "https://example.com/paper")
     }
 
+    func testRestoredArxivCardUsesCurrentPaperCandidateBadge() throws {
+        let body = #"{"items":[{"kind":"web","url":"https://arxiv.org/abs/2606.24597","title":"A Fresh Paper","badge":"Web candidate"}]}"#
+
+        let group = try XCTUnwrap(ChatPaperPresentation.decodeHistoryGroup(body))
+
+        XCTAssertEqual(group.items.first?.badge, "Paper candidate")
+    }
+
     func testPresentationToolIsSilentReadButNotPublicPolicy() {
         XCTAssertTrue(ChatSessionController.isSilentReadTool("rubien/rubien_present_document_cards"))
         XCTAssertFalse(ChatSessionController.isUnknownRubienTool("mcp__rubien__rubien_present_document_cards"))

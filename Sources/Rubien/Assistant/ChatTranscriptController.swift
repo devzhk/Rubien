@@ -95,7 +95,7 @@ final class ChatTranscriptController: ObservableObject {
     /// rejected before they can cross into the WebView.
     func addPaperGroup(_ group: ChatPaperGroup) {
         guard let bounded = ChatPaperPresentation.validatedGroup(group) else { return }
-        evaluateOrEnqueue(ChatTranscriptJS.addPaperGroup(bounded))
+        evaluateOrEnqueue(ChatTranscriptJS.addValidatedPaperGroup(bounded))
     }
 
     /// Add an inline notice row (markdown).

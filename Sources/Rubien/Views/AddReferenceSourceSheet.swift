@@ -93,13 +93,23 @@ struct AddReferenceSourceSheetState {
 
 struct AddReferenceSourceSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var state = AddReferenceSourceSheetState()
+    @State private var state: AddReferenceSourceSheetState
     @State private var acquisitionError: String?
     @State private var routingTask: Task<Void, Never>?
     @FocusState private var inputFocused: Bool
 
     let allowsFileImports: Bool
     let onRoute: (AddReferenceSourceRoute) -> Void
+
+    init(
+        initialInput: String = "",
+        allowsFileImports: Bool,
+        onRoute: @escaping (AddReferenceSourceRoute) -> Void
+    ) {
+        _state = State(initialValue: AddReferenceSourceSheetState(typedInput: initialInput))
+        self.allowsFileImports = allowsFileImports
+        self.onRoute = onRoute
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {

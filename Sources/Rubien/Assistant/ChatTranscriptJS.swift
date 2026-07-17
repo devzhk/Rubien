@@ -59,7 +59,14 @@ enum ChatTranscriptJS {
     static func addPaperGroup(_ group: ChatPaperGroup) -> String {
         let bounded = ChatPaperPresentation.validatedGroup(group)
             ?? ChatPaperGroup(items: [])
-        return jsCall("addPaperGroup", [encodeArg(bounded)])
+        return addValidatedPaperGroup(bounded)
+    }
+
+    /// Controller boundary for a group it has already validated. Keeping this
+    /// separate avoids repeating URL classification and badge derivation while
+    /// the standalone builder above remains fail-closed for tests and callers.
+    static func addValidatedPaperGroup(_ group: ChatPaperGroup) -> String {
+        jsCall("addPaperGroup", [encodeArg(group)])
     }
 
     /// `addNotice(markdown)`.

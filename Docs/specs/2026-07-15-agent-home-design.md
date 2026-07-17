@@ -327,7 +327,7 @@ Document cards
 └────────────────────────────────────────────────┘
 ┌────────────────────────────────────────────────┐
 │ Paper C title                                  │
-│ Dev Author            2026 · Web candidate    │
+│ Dev Author          2026 · Paper candidate    │
 │ Open source                    Add to Rubien… │
 └────────────────────────────────────────────────┘
 ```
@@ -339,7 +339,7 @@ presentation contract carries no reason or other agent-authored card copy. Full
 title and author metadata remain available in hover/help text; a missing year
 displays a localized em dash rather than an invented value. Cards are transparent
 at rest and use the same neutral-gray hover feedback as Recently Read, without an
-accent hover fill. The entire library row is a button; web-only rows use
+accent hover fill. The entire library row is a button; external rows use
 explicit **Open source** and **Add to Rubien…** actions so clicking a citation
 does not unexpectedly mutate the library.
 
@@ -354,14 +354,15 @@ unfiltered All References and explain that no readable source is available.
 Extract that policy from the existing `ContentView.openReader`/recent-row paths
 rather than duplicating it. Existing reader-window reuse still applies.
 
-For a paper found on the web but not yet in the library, **Open source** routes
+For a document found on the web but not yet in the library, **Open source** routes
 its absolute HTTP(S) URL through the existing external-link classifier and opens
 it outside the transcript WebView. **Add to Rubien…** re-validates the URL in
-Swift and enters the existing URL intake/review flow; it never saves or downloads
-on the model's authority alone. After an accepted import completes, use the same
-reader-opening policy for the new/existing deduplicated reference. PDF download
-and write approvals retain their current progress, confirmation, and failure
-behavior.
+Swift and enters the existing URL intake/review flow: recognized paper URLs go
+through metadata resolution, direct supported files go through file intake, and
+ordinary pages remain web clips. It never saves or downloads on the model's
+authority alone. After an accepted import completes, use the same reader-opening
+policy for the new/existing deduplicated reference. PDF download and write
+approvals retain their current progress, confirmation, and failure behavior.
 
 Do not implement these actions as model-authored `rubien://` Markdown links and
 do not loosen the renderer's HTTP(S)-only Markdown sanitizer. Add a structured
@@ -392,7 +393,7 @@ plain Markdown remains a safe fallback if a provider does not comply.
 Provider-owned History remains the transcript source. Claude and Codex History
 decoders reconstruct document-card groups from successful `rubien_present_document_cards` calls
 and re-resolve library IDs. A reference deleted since the conversation is shown
-as unavailable rather than opening a different paper; web candidates retain only
+as unavailable rather than opening a different paper; external candidates retain only
 their source metadata from provider History. Rubien adds no transcript or card
 table, and cards do not affect activity statistics.
 
@@ -1206,9 +1207,12 @@ first occurrence wins. Do not reuse the publisher-specific
 For a library item, the server requires an existing
 reference and returns canonical current title, compact authors, nullable year, and per-device
 reader availability from which Rubien derives the badge. It never exposes a
-local PDF path. For a web item, require an absolute host-bearing HTTP(S) URL,
-title, and optional authors/year, then derive the **Web candidate** badge;
-presentation does not fetch the URL or claim the supplied metadata was verified.
+local PDF path. For an external item, require an absolute host-bearing HTTP(S)
+URL, title, and optional authors/year. Rubien—not the agent—derives its badge
+through the shared Add Reference router: **Paper candidate** for
+metadata-resolvable paper URLs, **PDF candidate** or **Document candidate** for
+supported file URLs, and **Web candidate** for ordinary pages. Presentation does
+not fetch the URL or claim the supplied metadata was verified.
 
 Host the tool in a separate optional native catalog, conceptually
 `MCPAppPresentationToolCatalog`, so `MCPToolCatalog.allTools`, its exact public
@@ -1321,7 +1325,7 @@ must produce the same structured group and ordering.
   contrast-aware borders, and an accessible reading-day list are all exposed.
 - Each paper recommendation is one keyboard-focusable action with a combined
   VoiceOver label covering title, authors, year, badge, and the result of
-  activation. Web candidates expose **Open source** and **Add to
+  activation. External candidates expose **Open source** and **Add to
   Rubien…** as distinct actions.
 - Respect Increase Contrast, Differentiate Without Color, Reduce Motion, and
   large accessibility text sizes.
@@ -1556,9 +1560,10 @@ could derive from automatic layout rather than an actual user drag.
   call the tool.
 - A saved document card re-fetches its integer ID and opens PDF → Web → Library
   reveal through one shared policy. A deleted/stale ID cannot open another row.
-  A web candidate passes HTTP(S) safety checks, opens only on explicit **Open
-  source**, and enters the existing reviewed intake only on explicit **Add to
-  Rubien…**; a model mention alone causes no import or download.
+  An external candidate passes HTTP(S) safety checks, opens only on explicit
+  **Open source**, and enters metadata, supported-file, or reviewed web intake
+  according to Rubien's classification only on explicit **Add to Rubien…**; a
+  model mention alone causes no import or download.
 - A normal `rubien-cli mcp` launch and the public Node server do not advertise
   `rubien_present_document_cards`; Rubien's native helper with
   `RUBIEN_APP_PRESENTATION=1` advertises exactly that optional tool. There is no

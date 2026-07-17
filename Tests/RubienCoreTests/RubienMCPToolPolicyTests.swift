@@ -16,4 +16,31 @@ final class RubienMCPToolPolicyTests: XCTestCase {
         XCTAssertEqual(RubienMCPToolPolicy.access(for: "rubien_get_reference"), .read)
         XCTAssertEqual(RubienMCPToolPolicy.access(for: "rubien_update_reference"), .write)
     }
+
+    func testExternalDocumentBadgeMatchesAddReferenceRouting() {
+        XCTAssertEqual(
+            RubienAppPresentationContract.externalCandidateBadge(
+                for: "https://arxiv.org/abs/2606.24597"
+            ),
+            "Paper candidate"
+        )
+        XCTAssertEqual(
+            RubienAppPresentationContract.externalCandidateBadge(
+                for: "https://example.com/paper.pdf"
+            ),
+            "PDF candidate"
+        )
+        XCTAssertEqual(
+            RubienAppPresentationContract.externalCandidateBadge(
+                for: "https://example.com/notes.md"
+            ),
+            "Document candidate"
+        )
+        XCTAssertEqual(
+            RubienAppPresentationContract.externalCandidateBadge(
+                for: "https://example.com/article"
+            ),
+            "Web candidate"
+        )
+    }
 }

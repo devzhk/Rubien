@@ -253,6 +253,10 @@ final class MCPServerTests: XCTestCase {
                         "authors": "Ada Lovelace, Grace Hopper",
                         "year": 2026,
                     ],
+                    [
+                        "url": "https://arxiv.org/abs/2606.24597",
+                        "title": "A Fresh arXiv Paper",
+                    ],
                 ],
             ]),
         ], appPresentation: true)
@@ -262,17 +266,26 @@ final class MCPServerTests: XCTestCase {
         let envelope = try XCTUnwrap(
             JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
         let items = try XCTUnwrap(envelope["items"] as? [[String: Any]])
-        XCTAssertEqual(items.count, 2)
+        XCTAssertEqual(items.count, 3)
         let saved = try XCTUnwrap(items.first { ($0["referenceId"] as? NSNumber)?.intValue == savedWebID })
         XCTAssertEqual(saved["kind"] as? String, "library")
         XCTAssertEqual(saved["title"] as? String, "Saved Rubien Blog Post")
         XCTAssertEqual(saved["badge"] as? String, "Web")
 
-        let external = try XCTUnwrap(items.first { $0["kind"] as? String == "web" })
-        XCTAssertNil(external["referenceId"])
-        XCTAssertEqual(external["title"] as? String, "Rubien Engineering Notes")
-        XCTAssertEqual(external["authors"] as? String, "Ada Lovelace, Grace Hopper")
-        XCTAssertEqual(external["badge"] as? String, "Web candidate")
+        let externalWeb = try XCTUnwrap(items.first {
+            $0["title"] as? String == "Rubien Engineering Notes"
+        })
+        XCTAssertEqual(externalWeb["kind"] as? String, "web")
+        XCTAssertNil(externalWeb["referenceId"])
+        XCTAssertEqual(externalWeb["authors"] as? String, "Ada Lovelace, Grace Hopper")
+        XCTAssertEqual(externalWeb["badge"] as? String, "Web candidate")
+
+        let externalPaper = try XCTUnwrap(items.first {
+            $0["title"] as? String == "A Fresh arXiv Paper"
+        })
+        XCTAssertEqual(externalPaper["kind"] as? String, "web")
+        XCTAssertNil(externalPaper["referenceId"])
+        XCTAssertEqual(externalPaper["badge"] as? String, "Paper candidate")
     }
 
     func testAppSchedulingModeAddsCreateToolOnlyToInteractiveCatalog() throws {

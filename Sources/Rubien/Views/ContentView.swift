@@ -821,7 +821,7 @@ final class LibraryViewModel: ObservableObject {
 
 struct ContentView: View {
     private enum MainDestination { case home, library }
-    private struct SuggestedWebImport: Identifiable {
+    private struct SuggestedReferenceImport: Identifiable {
         let id = UUID()
         let url: String
     }
@@ -842,7 +842,7 @@ struct ContentView: View {
     @State private var showAddReference = false
     @State private var addReferenceInitialType: ReferenceType = .journalArticle
     @State private var showAddReferenceFlow = false
-    @State private var suggestedWebImport: SuggestedWebImport?
+    @State private var suggestedReferenceImport: SuggestedReferenceImport?
     @State private var addReferenceFileHandoff = DeferredSheetHandoff<[MaterializedImportSource]>()
     @State private var showBatchImport = false
     @State private var preparedMetadataImportsAfterBatchDismiss: [PreparedMetadataImport]?
@@ -1159,7 +1159,7 @@ struct ContentView: View {
                     scheduledJobsPresentation: $scheduledJobsPresentation,
                     onOpenReference: openReader,
                     onOpenPaperSource: { ChatExternalLinkOpener.open($0) },
-                    onAddPaperSource: beginSuggestedWebImport,
+                    onAddPaperSource: beginSuggestedReferenceImport,
                     libraryIsEmpty: viewModel.references.isEmpty,
                     onAddPapers: { showAddReferenceFlow = true },
                     onImportPDFs: { showAddReferenceFlow = true },
@@ -1325,47 +1325,14 @@ struct ContentView: View {
                 initialReferenceType: addReferenceInitialType
             )
         }
-        .sheet(isPresented: $showAddReferenceFlow, onDismiss: {
-            guard let sources = addReferenceFileHandoff.takeAfterDismiss() else { return }
-            importFilesWithMetadata(sources)
-        }) {
-            AddReferenceFlowSheet(
-                allowsFileImports: !viewModel.isImporting,
-                resolver: metadataResolver,
-                onSaveMetadata: { ref, downloadPDF, pdfURLOverride in
-                    var r = ref
-                    let result = viewModel.saveReference(&r)
-                    if downloadPDF, result != nil, let id = r.id {
-                        pdfDownloadCoordinator.download(
-                            reference: r,
-                            referenceID: id,
-                            pdfURLOverride: pdfURLOverride
-                        )
-                    }
-                    confirmAndReveal(r, result: result)
-                },
-                onQueueMetadata: { result, input in
-                    queueResolutionResult(
-                        result,
-                        options: MetadataPersistenceOptions(
-                            sourceKind: .manualEntry,
-                            originalInput: input
-                        ),
-                        successMessage: String(localized: "Queued for review", bundle: .module)
-                    )
-                },
-                onSaveWebsite: { ref in
-                    saveReviewedWebsite(ref)
-                },
-                onFiles: { sources in
-                    addReferenceFileHandoff.stage(sources)
-                }
-            )
+        .sheet(isPresented: $showAddReferenceFlow, onDismiss: finishDeferredReferenceImport) {
+            addReferenceFlowSheet()
         }
-        .sheet(item: $suggestedWebImport) { importRequest in
-            WebImportView(initialURL: importRequest.url) { ref in
-                saveReviewedWebsite(ref)
-            }
+        .sheet(
+            item: $suggestedReferenceImport,
+            onDismiss: finishDeferredReferenceImport
+        ) { importRequest in
+            addReferenceFlowSheet(initialInput: importRequest.url)
         }
         .sheet(isPresented: $showBatchImport, onDismiss: {
             guard let entries = preparedMetadataImportsAfterBatchDismiss else { return }
@@ -2303,9 +2270,48 @@ struct ContentView: View {
         }
     }
 
-    private func beginSuggestedWebImport(_ urlString: String) {
+    private func beginSuggestedReferenceImport(_ urlString: String) {
         guard ChatExternalLink.classify(urlString) != .reject else { return }
-        suggestedWebImport = SuggestedWebImport(url: urlString)
+        suggestedReferenceImport = SuggestedReferenceImport(url: urlString)
+    }
+
+    private func finishDeferredReferenceImport() {
+        guard let sources = addReferenceFileHandoff.takeAfterDismiss() else { return }
+        importFilesWithMetadata(sources)
+    }
+
+    private func addReferenceFlowSheet(initialInput: String = "") -> some View {
+        AddReferenceFlowSheet(
+            initialInput: initialInput,
+            allowsFileImports: !viewModel.isImporting,
+            resolver: metadataResolver,
+            onSaveMetadata: { ref, downloadPDF, pdfURLOverride in
+                var r = ref
+                let result = viewModel.saveReference(&r)
+                if downloadPDF, result != nil, let id = r.id {
+                    pdfDownloadCoordinator.download(
+                        reference: r,
+                        referenceID: id,
+                        pdfURLOverride: pdfURLOverride
+                    )
+                }
+                confirmAndReveal(r, result: result)
+            },
+            onQueueMetadata: { result, input in
+                queueResolutionResult(
+                    result,
+                    options: MetadataPersistenceOptions(
+                        sourceKind: .manualEntry,
+                        originalInput: input
+                    ),
+                    successMessage: String(localized: "Queued for review", bundle: .module)
+                )
+            },
+            onSaveWebsite: saveReviewedWebsite,
+            onFiles: { sources in
+                addReferenceFileHandoff.stage(sources)
+            }
+        )
     }
 
     private func saveReviewedWebsite(_ reference: Reference) {

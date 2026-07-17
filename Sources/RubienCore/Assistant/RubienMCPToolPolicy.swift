@@ -1,3 +1,5 @@
+import Foundation
+
 /// Canonical access policy for Rubien's native MCP catalog.
 ///
 /// Keep this list in lockstep with the native and npm MCP catalogs. Both the
@@ -19,6 +21,26 @@ public enum RubienAppPresentationContract {
     public static let maximumAuthorsLength = 1_000
     public static let maximumBadgeLength = 64
     public static let maximumURLBytes = 2_048
+
+    /// External cards are still unverified candidates, but their badge should
+    /// reflect the intake path Rubien will use when the user chooses Add. This
+    /// keeps a recognized paper URL from looking (and later behaving) like a
+    /// generic web clip.
+    public static func externalCandidateBadge(for rawURL: String) -> String {
+        switch AddReferenceInputRouter.classify(rawURL, probe: { _ in
+            ImportRouter.PathProbe(exists: false, isDirectory: false)
+        }) {
+        case .metadata:
+            return "Paper candidate"
+        case .file:
+            guard let url = URL(string: rawURL) else { return "Document candidate" }
+            return url.pathExtension.caseInsensitiveCompare("pdf") == .orderedSame
+                ? "PDF candidate"
+                : "Document candidate"
+        case .website, .invalid:
+            return "Web candidate"
+        }
+    }
 }
 
 public enum RubienMCPToolPolicy {
