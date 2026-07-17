@@ -496,5 +496,20 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.5.1</title>
+            <description sparkle:format="plain-text"><![CDATA[• Fixed paper cards in the reader Assistant so library papers, source links, and Add to Rubien actions respond reliably.
+• Aligned Agent Home section headings for a cleaner layout.]]></description>
+            <pubDate>Fri, 17 Jul 2026 20:18:19 +0000</pubDate>
+            <sparkle:version>33</sparkle:version>
+            <sparkle:shortVersionString>0.5.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.5.1/Rubien-0.5.1.dmg"
+                sparkle:edSignature="oV7m+jVWzdGtH75KJ407iyoayJ3j391a8gEeKdX16Yf6/9FEB2BwCJkb/s1gYy1Do97Z0af1XLw+Py0SH9vRBQ=="
+                length="13750025"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
