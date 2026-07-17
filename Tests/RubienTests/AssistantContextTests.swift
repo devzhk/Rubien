@@ -33,6 +33,7 @@ final class AssistantContextTests: XCTestCase {
 
     func testLibrarySeedIsLibraryWideAndRequestsStructuredPaperPresentation() {
         let seed = AssistantContext.seed(for: AssistantConversationContext.library)
+        XCTAssertEqual(seed, AssistantContext.defaultPrompt(for: .library))
         XCTAssertTrue(seed.contains("library assistant"))
         XCTAssertTrue(seed.contains("rubien_present_papers"))
         XCTAssertTrue(seed.contains("must make exactly one"))
@@ -44,67 +45,97 @@ final class AssistantContextTests: XCTestCase {
         XCTAssertFalse(seed.contains("reference ID"))
     }
 
-    func testLibraryCustomInstructionsAreAppendedWithoutReplacingBuiltInContract() {
-        let seed = AssistantContext.seed(
-            for: .library,
-            customInstructions: "Answer in Chinese and keep comparisons concise.")
-
-        XCTAssertTrue(seed.contains("rubien_present_papers"))
-        XCTAssertTrue(seed.lowercased().contains("untrusted"))
-        XCTAssertTrue(seed.contains("Answer in Chinese and keep comparisons concise."))
-        let customEnd = try? XCTUnwrap(
-            seed.range(of: "--- End user custom instructions ---")?.upperBound)
-        let precedenceStart = try? XCTUnwrap(
-            seed.range(of: "Rubien's built-in requirements above take precedence")?.lowerBound)
-        XCTAssertNotNil(customEnd)
-        XCTAssertNotNil(precedenceStart)
-        if let customEnd, let precedenceStart {
-            XCTAssertLessThan(customEnd, precedenceStart)
-        }
+    func testDefaultPromptsAreVisibleForBothSettingsSurfaces() {
+        XCTAssertTrue(AssistantContext.defaultPrompt(for: .library).contains("library assistant"))
+        XCTAssertTrue(AssistantContext.defaultPrompt(for: .reader).contains("reading assistant"))
+        XCTAssertTrue(
+            AssistantContext.defaultPrompt(for: .reader)
+                .contains(AssistantContext.readerReferencePlaceholder))
     }
 
-    func testReaderCustomInstructionsPreserveReferenceContext() {
+    func testLibraryPromptOverrideReplacesVisibleDefault() {
+        let seed = AssistantContext.seed(
+            for: .library,
+            promptOverride: "Answer in Chinese and keep comparisons concise.")
+
+        XCTAssertEqual(seed, "Answer in Chinese and keep comparisons concise.")
+        XCTAssertFalse(seed.contains("rubien_present_papers"))
+    }
+
+    func testReaderPromptOverrideRendersReferencePlaceholder() {
         let seed = AssistantContext.seed(
             for: .reference(ChatReference(id: 9, title: "A Paper", authors: "A. Author")),
-            customInstructions: "Act as a skeptical peer reviewer.")
+            promptOverride: "Review {{reference}} as a skeptical peer reviewer.")
 
         XCTAssertTrue(seed.contains("reference ID 9"))
         XCTAssertTrue(seed.contains("A Paper"))
-        XCTAssertTrue(seed.contains("rubien_read_text"))
-        XCTAssertTrue(seed.contains("Act as a skeptical peer reviewer."))
+        XCTAssertTrue(seed.contains("A. Author"))
+        XCTAssertTrue(seed.contains("skeptical peer reviewer"))
+        XCTAssertFalse(seed.contains(AssistantContext.readerReferencePlaceholder))
     }
 
-    func testWhitespaceOnlyCustomInstructionsLeaveSeedUnchanged() {
+    func testReaderPromptWithoutPlaceholderStillAppendsReferenceContext() {
+        let seed = AssistantContext.seed(
+            for: .reference(ChatReference(id: 9, title: "A Paper", authors: "A. Author")),
+            promptOverride: "Act as a skeptical peer reviewer.")
+
+        XCTAssertTrue(seed.hasPrefix("Act as a skeptical peer reviewer."))
+        XCTAssertTrue(seed.contains("Current Rubien document: reference ID 9"))
+        XCTAssertTrue(seed.lowercased().contains("untrusted"))
+    }
+
+    func testReaderPromptExpansionStaysBoundedAndKeepsCompleteReferenceContext() {
+        let repeatedPlaceholders = String(
+            repeating: AssistantContext.readerReferencePlaceholder,
+            count: 2_000)
+        let seed = AssistantContext.seed(
+            for: .reference(ChatReference(
+                id: 42,
+                title: String(repeating: "Long title ", count: 40),
+                authors: String(repeating: "Author ", count: 40))),
+            promptOverride: repeatedPlaceholders)
+
+        XCTAssertLessThanOrEqual(seed.count, AssistantContext.promptCharacterLimit)
+        XCTAssertLessThanOrEqual(seed.utf8.count, AssistantContext.promptUTF8Limit)
+        XCTAssertTrue(seed.contains("reference ID 42"))
+        XCTAssertTrue(seed.contains("Long title"), "the required context must not be cut mid-descriptor")
+    }
+
+    func testWhitespaceOnlyPromptOverrideLeavesSeedUnchanged() {
+        let libraryDefault = AssistantContext.defaultPrompt(for: .library)
         XCTAssertEqual(
-            AssistantContext.seed(for: .library, customInstructions: "  \n\t "),
-            AssistantContext.seed(for: .library))
+            AssistantContext.seed(for: .library, promptOverride: "  \n\t "),
+            libraryDefault)
+        XCTAssertEqual(
+            AssistantContext.effectivePrompt("  \n\t ", for: .library),
+            libraryDefault,
+            "Settings must redisplay the default when a blank edit clears the override")
     }
 
-    func testCustomInstructionsAreBoundedBeforePromptComposition() {
+    func testPromptOverrideIsBoundedBeforeProviderDispatch() {
         let accepted = String(
             repeating: "x",
-            count: AssistantContext.customInstructionsCharacterLimit)
+            count: AssistantContext.promptCharacterLimit)
         let overLimit = accepted + "tail-must-not-reach-provider"
-        let seed = AssistantContext.seed(for: .library, customInstructions: overLimit)
+        let seed = AssistantContext.seed(for: .library, promptOverride: overLimit)
 
-        XCTAssertTrue(seed.contains(accepted))
-        XCTAssertFalse(seed.contains("tail-must-not-reach-provider"))
+        XCTAssertEqual(seed, accepted)
     }
 
-    func testCustomInstructionsRespectUTF8ByteLimit() {
+    func testPromptOverrideRespectsUTF8ByteLimit() {
         let familyEmoji = "👨‍👩‍👧‍👦"
         let raw = String(repeating: familyEmoji, count: 2_000)
-        let limited = AssistantContext.limitedCustomInstructions(raw)
+        let limited = AssistantContext.limitedPrompt(raw)
 
         XCTAssertLessThanOrEqual(
             limited.utf8.count,
-            AssistantContext.customInstructionsUTF8Limit)
+            AssistantContext.promptUTF8Limit)
         XCTAssertLessThan(limited.count, raw.count, "the byte limit, not the character limit, truncates")
     }
 
-    func testCustomInstructionsStripNULBeforeProviderDispatch() {
-        let limited = AssistantContext.limitedCustomInstructions("before\0after")
-        let seed = AssistantContext.seed(for: .library, customInstructions: "before\0after")
+    func testPromptOverrideStripsNULBeforeProviderDispatch() {
+        let limited = AssistantContext.limitedPrompt("before\0after")
+        let seed = AssistantContext.seed(for: .library, promptOverride: "before\0after")
 
         XCTAssertEqual(limited, "beforeafter")
         XCTAssertFalse(seed.contains("\0"))

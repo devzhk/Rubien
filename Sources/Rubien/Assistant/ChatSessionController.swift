@@ -32,8 +32,8 @@ extension ChatTranscriptController: ChatTranscriptSink {}
 // MARK: - Conversation defaults
 
 /// A snapshot of the user's Assistant defaults (Settings ▸ Assistant) applied to a
-/// FRESH conversation: model / effort / web / approval / tool posture / custom
-/// instructions. A new reader window reads these at construction;
+/// FRESH conversation: model / effort / web / approval / tool posture / prompt
+/// override. A new reader window reads these at construction;
 /// `newConversation()` re-reads them (via an injected provider) so a changed default
 /// is adopted in an open window without reopening it.
 struct AssistantConversationDefaults: Equatable {
@@ -47,8 +47,8 @@ struct AssistantConversationDefaults: Equatable {
     /// The Codex OS-sandbox mode to seed (ignored by Claude conversations). Defaulted
     /// so Claude-only call sites and tests stay unchanged.
     var codexSandbox: CodexSandbox = .readOnly
-    /// Surface-specific user preferences appended to Rubien's fixed seed.
-    var customInstructions: String? = nil
+    /// Surface-specific full-prompt override. `nil` selects Rubien's current default.
+    var promptOverride: String? = nil
 }
 
 /// Structured lifecycle for Home's hidden-turn attention UI. The generation
@@ -120,7 +120,7 @@ final class ChatSessionController: ObservableObject {
     @Published private(set) var loadUserTools: Bool
     /// Surface-specific Settings text snapshotted with the conversation. It is sent
     /// only as part of the first-turn seed and never mutates a live provider session.
-    private var customInstructions: String?
+    private var promptOverride: String?
     @Published private(set) var availability: AgentAvailability?
     @Published private(set) var statusText: String?
     /// The requested resume session is busy in another window (§4.1) — the composer
@@ -351,7 +351,7 @@ final class ChatSessionController: ObservableObject {
         gate: AssistantTurnGate = .shared,
         webAccess: Bool = true,
         loadUserTools: Bool = false,
-        customInstructions: String? = nil,
+        promptOverride: String? = nil,
         modelOverride: String? = "opus",
         effortOverride: String? = "high",
         autoApprove: Bool = false,
@@ -378,7 +378,7 @@ final class ChatSessionController: ObservableObject {
         self.gate = gate
         self.webAccess = webAccess
         self.loadUserTools = loadUserTools
-        self.customInstructions = customInstructions
+        self.promptOverride = promptOverride
         self.modelOverride = modelOverride
         self.effortOverride = effortOverride
         self.autoApprove = autoApprove
@@ -665,7 +665,7 @@ final class ChatSessionController: ObservableObject {
             attachments: attachments,
             seed: seedSent ? nil : AssistantContext.seed(
                 for: activeConversationContext,
-                customInstructions: customInstructions),
+                promptOverride: promptOverride),
             webAccess: webAccess,
             loadUserTools: loadUserTools,
             codexSandbox: codexSandbox,
@@ -1144,7 +1144,7 @@ final class ChatSessionController: ObservableObject {
         autoApprove = defaults.autoApprove
         loadUserTools = defaults.loadUserTools
         codexSandbox = defaults.codexSandbox
-        customInstructions = defaults.customInstructions
+        promptOverride = defaults.promptOverride
     }
 
     /// The runtime's own recent sessions for this conversation's working folder, for

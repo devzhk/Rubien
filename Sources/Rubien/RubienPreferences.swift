@@ -136,34 +136,49 @@ enum RubienPreferences {
         AssistantContext.workspaceURL(override: assistantWorkspacePath)
     }
 
-    /// Optional additive instructions for new Home/library conversations. The
-    /// built-in Rubien seed remains fixed; this text is appended as user preferences.
-    static let assistantLibraryInstructionsKey = "Rubien.assistant.instructions.library"
+    /// Optional full-prompt override for new Home/library conversations. `nil`
+    /// means Rubien's current default prompt, which Settings displays in full.
+    static let assistantLibraryPromptOverrideKey = "Rubien.assistant.prompt.library"
 
-    static var assistantLibraryInstructions: String? {
-        get { assistantInstructions(forKey: assistantLibraryInstructionsKey) }
-        set { setAssistantInstructions(newValue, forKey: assistantLibraryInstructionsKey) }
+    static var assistantLibraryPromptOverride: String? {
+        get { assistantPromptOverride(forKey: assistantLibraryPromptOverrideKey) }
+        set {
+            setAssistantPromptOverride(
+                newValue,
+                forKey: assistantLibraryPromptOverrideKey,
+                defaultPrompt: AssistantContext.defaultPrompt(for: .library))
+        }
     }
 
-    /// Optional additive instructions for new PDF/web reader conversations.
-    static let assistantReaderInstructionsKey = "Rubien.assistant.instructions.reader"
+    /// Optional full-prompt template override for new PDF/web reader conversations.
+    static let assistantReaderPromptOverrideKey = "Rubien.assistant.prompt.reader"
 
-    static var assistantReaderInstructions: String? {
-        get { assistantInstructions(forKey: assistantReaderInstructionsKey) }
-        set { setAssistantInstructions(newValue, forKey: assistantReaderInstructionsKey) }
+    static var assistantReaderPromptOverride: String? {
+        get { assistantPromptOverride(forKey: assistantReaderPromptOverrideKey) }
+        set {
+            setAssistantPromptOverride(
+                newValue,
+                forKey: assistantReaderPromptOverrideKey,
+                defaultPrompt: AssistantContext.defaultPrompt(for: .reader))
+        }
     }
 
-    private static func assistantInstructions(forKey key: String) -> String? {
+    private static func assistantPromptOverride(forKey key: String) -> String? {
         guard let stored = UserDefaults.standard.string(forKey: key) else { return nil }
-        let value = AssistantContext.limitedCustomInstructions(stored)
+        let value = AssistantContext.limitedPrompt(stored)
         guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return value
     }
 
-    private static func setAssistantInstructions(_ value: String?, forKey key: String) {
+    private static func setAssistantPromptOverride(
+        _ value: String?,
+        forKey key: String,
+        defaultPrompt: String
+    ) {
         if let value {
-            let limited = AssistantContext.limitedCustomInstructions(value)
-            guard !limited.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            let limited = AssistantContext.limitedPrompt(value)
+            guard !limited.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  limited != defaultPrompt else {
                 UserDefaults.standard.removeObject(forKey: key)
                 return
             }

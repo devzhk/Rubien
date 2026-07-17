@@ -846,10 +846,10 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertTrue(controller.loadUserTools)
     }
 
-    func testNewConversationAdoptsLatestSurfaceCustomInstructions() async throws {
+    func testNewConversationAdoptsLatestSurfacePromptOverride() async throws {
         var current = AssistantConversationDefaults(
             model: "opus", effort: "high", webAccess: true, autoApprove: false,
-            customInstructions: "Use the original reading preference.")
+            promptOverride: "Use the original reading prompt for {{reference}}.")
         let provider = MockAgentProvider()
         let controller = ChatSessionController(
             provider: provider,
@@ -857,11 +857,11 @@ final class ChatSessionControllerTests: XCTestCase {
             reference: ChatReference(id: 1, title: "T", authors: ""),
             workspaceURL: URL(fileURLWithPath: "/tmp/ws"),
             gate: AssistantTurnGate(),
-            customInstructions: current.customInstructions,
+            promptOverride: current.promptOverride,
             defaultsProvider: { _ in current },
             initialAvailability: .installed(version: "test", path: "/fake/claude"))
 
-        current.customInstructions = "Use the updated reading preference."
+        current.promptOverride = "Use the updated reading prompt for {{reference}}."
         controller.newConversation()
         await runTurn(
             controller,
@@ -870,9 +870,9 @@ final class ChatSessionControllerTests: XCTestCase {
             events: [.turnCompleted(usage: nil)])
 
         let seed = try XCTUnwrap(provider.lastRequest?.seed)
-        XCTAssertTrue(seed.contains("Use the updated reading preference."))
-        XCTAssertFalse(seed.contains("Use the original reading preference."))
-        XCTAssertTrue(seed.contains("reference ID 1"), "the fixed reader context remains intact")
+        XCTAssertTrue(seed.contains("Use the updated reading prompt for reference ID 1"))
+        XCTAssertFalse(seed.contains("Use the original reading prompt"))
+        XCTAssertTrue(seed.contains("reference ID 1"), "the reader placeholder is rendered")
     }
 
     // MARK: Provider switch (Phase 3b-3)
@@ -902,7 +902,7 @@ final class ChatSessionControllerTests: XCTestCase {
                 return AssistantConversationDefaults(model: "gpt-5.5", effort: "medium", webAccess: false,
                                                      autoApprove: true, loadUserTools: true,
                                                      codexSandbox: .workspaceWrite,
-                                                     customInstructions: "Use the switched-provider preference.")
+                                                     promptOverride: "Use the switched-provider prompt.")
             }
         }
         let controller = ChatSessionController(
@@ -936,7 +936,7 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertEqual(codex.lastRequest?.loadUserTools, true)
         XCTAssertEqual(codex.lastRequest?.codexSandbox, .workspaceWrite)
         XCTAssertTrue(
-            codex.lastRequest?.seed?.contains("Use the switched-provider preference.") == true)
+            codex.lastRequest?.seed?.contains("Use the switched-provider prompt.") == true)
         XCTAssertTrue(claude.requests.isEmpty, "the old provider gets no turns")
         codex.finishStream()
         await controller.turnTask?.value

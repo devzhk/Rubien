@@ -25,8 +25,8 @@ final class RubienPreferencesTests: XCTestCase {
             RubienPreferences.assistantAutoApproveKey,
             RubienPreferences.assistantLoadUserToolsKey,
             RubienPreferences.assistantWorkspacePathKey,
-            RubienPreferences.assistantLibraryInstructionsKey,
-            RubienPreferences.assistantReaderInstructionsKey,
+            RubienPreferences.assistantLibraryPromptOverrideKey,
+            RubienPreferences.assistantReaderPromptOverrideKey,
             RubienPreferences.assistantBinaryPathKey,
             RubienPreferences.assistantProviderKey,
             RubienPreferences.assistantCodexModelKey,
@@ -152,8 +152,8 @@ final class RubienPreferencesTests: XCTestCase {
         XCTAssertTrue(RubienPreferences.assistantWebAccess)
         XCTAssertFalse(RubienPreferences.assistantAutoApprove)
         XCTAssertNil(RubienPreferences.assistantWorkspacePath)
-        XCTAssertNil(RubienPreferences.assistantLibraryInstructions)
-        XCTAssertNil(RubienPreferences.assistantReaderInstructions)
+        XCTAssertNil(RubienPreferences.assistantLibraryPromptOverride)
+        XCTAssertNil(RubienPreferences.assistantReaderPromptOverride)
         XCTAssertNil(RubienPreferences.assistantBinaryPath)
     }
 
@@ -168,22 +168,37 @@ final class RubienPreferencesTests: XCTestCase {
         XCTAssertTrue(RubienPreferences.assistantAutoApprove)
         RubienPreferences.assistantWorkspacePath = "/tmp/ws"
         XCTAssertEqual(RubienPreferences.assistantWorkspacePath, "/tmp/ws")
-        RubienPreferences.assistantLibraryInstructions = "Prefer concise comparisons."
+        RubienPreferences.assistantLibraryPromptOverride = "Prefer concise comparisons."
         XCTAssertEqual(
-            RubienPreferences.assistantLibraryInstructions,
+            RubienPreferences.assistantLibraryPromptOverride,
             "Prefer concise comparisons.")
-        RubienPreferences.assistantReaderInstructions = "Challenge unsupported claims."
+        RubienPreferences.assistantReaderPromptOverride = "Challenge unsupported claims."
         XCTAssertEqual(
-            RubienPreferences.assistantReaderInstructions,
+            RubienPreferences.assistantReaderPromptOverride,
             "Challenge unsupported claims.")
-        RubienPreferences.assistantLibraryInstructions = String(
+        RubienPreferences.assistantLibraryPromptOverride = String(
             repeating: "z",
-            count: AssistantContext.customInstructionsCharacterLimit + 1)
+            count: AssistantContext.promptCharacterLimit + 1)
         XCTAssertEqual(
-            RubienPreferences.assistantLibraryInstructions?.count,
-            AssistantContext.customInstructionsCharacterLimit)
+            RubienPreferences.assistantLibraryPromptOverride?.count,
+            AssistantContext.promptCharacterLimit)
         RubienPreferences.assistantBinaryPath = "/usr/local/bin/claude"
         XCTAssertEqual(RubienPreferences.assistantBinaryPath, "/usr/local/bin/claude")
+    }
+
+    func testAssistantDefaultPromptsClearStoredOverrides() {
+        RubienPreferences.assistantLibraryPromptOverride = "Custom Home prompt"
+        RubienPreferences.assistantReaderPromptOverride = "Custom Reader prompt"
+
+        RubienPreferences.assistantLibraryPromptOverride = AssistantContext.defaultPrompt(for: .library)
+        RubienPreferences.assistantReaderPromptOverride = AssistantContext.defaultPrompt(for: .reader)
+
+        XCTAssertNil(RubienPreferences.assistantLibraryPromptOverride)
+        XCTAssertNil(RubienPreferences.assistantReaderPromptOverride)
+        XCTAssertNil(UserDefaults.standard.object(
+            forKey: RubienPreferences.assistantLibraryPromptOverrideKey))
+        XCTAssertNil(UserDefaults.standard.object(
+            forKey: RubienPreferences.assistantReaderPromptOverrideKey))
     }
 
     func testAssistantPathOverridesTreatEmptyAsUnset() {
@@ -191,17 +206,17 @@ final class RubienPreferencesTests: XCTestCase {
         RubienPreferences.assistantWorkspacePath = ""
         XCTAssertNil(RubienPreferences.assistantWorkspacePath, "empty override clears to nil (use default)")
 
-        RubienPreferences.assistantLibraryInstructions = "Home preference"
-        RubienPreferences.assistantLibraryInstructions = " \n\t "
+        RubienPreferences.assistantLibraryPromptOverride = "Home prompt"
+        RubienPreferences.assistantLibraryPromptOverride = " \n\t "
         XCTAssertNil(
-            RubienPreferences.assistantLibraryInstructions,
-            "whitespace-only Home instructions clear to the built-in prompt")
+            RubienPreferences.assistantLibraryPromptOverride,
+            "whitespace-only Home prompt clears to the built-in prompt")
 
-        RubienPreferences.assistantReaderInstructions = "Reader preference"
-        RubienPreferences.assistantReaderInstructions = nil
+        RubienPreferences.assistantReaderPromptOverride = "Reader prompt"
+        RubienPreferences.assistantReaderPromptOverride = nil
         XCTAssertNil(
-            RubienPreferences.assistantReaderInstructions,
-            "nil reader instructions clear to the built-in prompt")
+            RubienPreferences.assistantReaderPromptOverride,
+            "nil reader prompt clears to the built-in prompt")
 
         RubienPreferences.assistantBinaryPath = "/bin/claude"
         RubienPreferences.assistantBinaryPath = ""
