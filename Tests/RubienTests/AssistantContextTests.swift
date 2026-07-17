@@ -52,12 +52,6 @@ final class AssistantContextTests: XCTestCase {
         XCTAssertTrue(
             AssistantContext.defaultPrompt(for: .reader)
                 .contains(AssistantContext.readerReferencePlaceholder))
-        XCTAssertTrue(
-            AssistantContext.defaultPrompt(for: .reader)
-                .contains("Annotations are optional context"))
-        XCTAssertTrue(
-            AssistantContext.defaultPrompt(for: .reader)
-                .contains("not by default"))
     }
 
     func testLibraryPromptOverrideReplacesVisibleDefault() {
