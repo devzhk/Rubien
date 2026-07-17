@@ -466,5 +466,20 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.4.3</title>
+            <description sparkle:format="plain-text"><![CDATA[• Web Reader now renders LaTeX display equations reliably in legacy clips, including equations containing line breaks or labels.
+• Newly submitted arXiv papers can now be imported before the arXiv API and OpenAlex indexes catch up.]]></description>
+            <pubDate>Fri, 17 Jul 2026 14:52:39 +0000</pubDate>
+            <sparkle:version>31</sparkle:version>
+            <sparkle:shortVersionString>0.4.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.4.3/Rubien-0.4.3.dmg"
+                sparkle:edSignature="kRXeC2FK512dkJgif38ccNwydOsTIdZq6LG87Kv46gbwhBHArg6pF//qr+pY2zBWvGEC5nt20DBPTpO60FXPAw=="
+                length="13462919"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
