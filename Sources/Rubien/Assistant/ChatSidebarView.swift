@@ -516,6 +516,8 @@ struct ChatSurfaceView: View {
                             }
                         }
                         .buttonStyle(.plain)
+                        .padding(.leading, 10)
+                        .frame(maxWidth: Self.homeContentMaxWidth, alignment: .leading)
                         VStack(spacing: 2) {
                             ForEach(scheduledJobs.upcomingJobs) { job in
                                 Button {
@@ -554,6 +556,8 @@ struct ChatSurfaceView: View {
                     } else {
                         if configuration.scheduledJobs?.upcomingJobs.isEmpty == false {
                             homeSectionTitle("Suggestions")
+                                .padding(.leading, 10)
+                                .frame(maxWidth: Self.homeContentMaxWidth, alignment: .leading)
                         }
                         VStack(spacing: 7) {
                             if configuration.libraryIsEmpty {
@@ -612,8 +616,6 @@ struct ChatSurfaceView: View {
             .foregroundStyle(.tertiary)
             .textCase(.uppercase)
             .tracking(0.5)
-            .frame(maxWidth: Self.homeContentMaxWidth, alignment: .leading)
-            .padding(.horizontal, 10)
     }
 
     private func homeNativeAction(
