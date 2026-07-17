@@ -481,5 +481,20 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.5.0</title>
+            <description sparkle:format="plain-text"><![CDATA[• Add scheduled Assistant jobs with management, execution history, and CLI support.
+• Correctly classify external paper cards and import arXiv and publisher links as papers rather than web clips.]]></description>
+            <pubDate>Fri, 17 Jul 2026 19:28:43 +0000</pubDate>
+            <sparkle:version>32</sparkle:version>
+            <sparkle:shortVersionString>0.5.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.5.0/Rubien-0.5.0.dmg"
+                sparkle:edSignature="z3kGYQFXY45w5WNULgG2gl3kjno0g3Mwias+YhVftgemnaO+hUGDmOjP8k0J1YhJBt9/yJ9ow8L81s/dRuYFAA=="
+                length="13745349"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
