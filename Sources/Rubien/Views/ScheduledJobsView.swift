@@ -1,4 +1,5 @@
 #if os(macOS)
+import AppKit
 import SwiftUI
 import RubienCore
 import UserNotifications
@@ -366,6 +367,7 @@ private struct ScheduledJobRow: View {
 }
 
 private struct ScheduledJobEditor: View {
+    @Environment(\.scenePhase) private var scenePhase
     @ObservedObject var coordinator: ScheduledJobCoordinator
     let job: ScheduledJob?
     let onDismiss: () -> Void
@@ -378,8 +380,13 @@ private struct ScheduledJobEditor: View {
     @State private var provider: ScheduledJobProvider
     @State private var model: String
     @State private var effort: String
+    @State private var codexModels: [CodexModelInfo] = []
+    @State private var codexCatalogLoaded = false
+    @State private var codexCatalogAvailable = true
+    @State private var codexCatalogLoadGeneration = 0
     @State private var webAccess: Bool
     @State private var notifyOnCompletion: Bool
+    @State private var notificationAuthorizationStatus: UNAuthorizationStatus?
     @State private var errorMessage: String?
 
     init(
@@ -402,10 +409,23 @@ private struct ScheduledJobEditor: View {
         let defaultProvider = ScheduledJobProvider(RubienPreferences.assistantProvider)
         let initialProvider = job?.provider ?? defaultProvider
         _provider = State(initialValue: initialProvider)
-        _model = State(initialValue: job?.model ?? Self.defaultModel(for: initialProvider))
-        _effort = State(initialValue: job?.effort ?? Self.defaultEffort(for: initialProvider))
-        _webAccess = State(initialValue: job?.webAccess ?? RubienPreferences.assistantWebAccess)
-        _notifyOnCompletion = State(initialValue: job?.notifyOnCompletion ?? true)
+        _model = State(initialValue: ScheduledJobEditorOptions.initialOverride(
+            savedValue: job?.model,
+            defaultValue: Self.defaultModel(for: initialProvider),
+            isEditing: job != nil
+        ))
+        _effort = State(initialValue: ScheduledJobEditorOptions.initialOverride(
+            savedValue: job?.effort,
+            defaultValue: Self.defaultEffort(for: initialProvider),
+            isEditing: job != nil
+        ))
+        _webAccess = State(initialValue: ScheduledJobEditorOptions.initialWebSearch(
+            savedValue: job?.webAccess,
+            preference: RubienPreferences.assistantWebAccess
+        ))
+        _notifyOnCompletion = State(initialValue: ScheduledJobEditorOptions.initialNotifyOnCompletion(
+            savedValue: job?.notifyOnCompletion
+        ))
     }
 
     var body: some View {
@@ -446,17 +466,68 @@ private struct ScheduledJobEditor: View {
 
                 Section("Assistant") {
                     Picker("Provider", selection: $provider) {
+                        if !ScheduledJobProvider.knownCases.contains(provider) {
+                            Text(provider.displayName).tag(provider)
+                        }
                         ForEach(ScheduledJobProvider.knownCases, id: \.self) { provider in
                             Text(provider.displayName).tag(provider)
                         }
                     }
-                    TextField("Model override (optional)", text: $model)
-                    TextField("Effort override (optional)", text: $effort)
-                    Toggle("Web access", isOn: $webAccess)
+                    Picker("Model", selection: modelSelection) {
+                        ForEach(modelChoices, id: \.value) { choice in
+                            Text(choice.label).tag(choice.value)
+                        }
+                    }
+                    .disabled(provider.agentProviderKind == nil)
+
+                    Picker("Effort", selection: $effort) {
+                        ForEach(effortChoices, id: \.value) { choice in
+                            Text(choice.label).tag(choice.value)
+                        }
+                    }
+                    .disabled(provider.agentProviderKind == nil)
+
+                    if provider == .codex, codexCatalogLoaded, !codexCatalogAvailable {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Label(
+                                "Couldn’t load models from Codex. The saved or default model will be used.",
+                                systemImage: "exclamationmark.triangle"
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            Spacer()
+                            Button("Retry") {
+                                Task { await loadCodexCatalog(forceReload: true) }
+                            }
+                            .controlSize(.small)
+                        }
+                    }
+
+                    Toggle("Web search", isOn: $webAccess)
                 }
 
                 Section {
                     Toggle("Notify when finished", isOn: $notifyOnCompletion)
+
+                    if notifyOnCompletion, notificationAuthorizationStatus == .denied {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Label(
+                                "Notifications are disabled in System Settings.",
+                                systemImage: "exclamationmark.triangle"
+                            )
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            Spacer()
+                            Button("Open Settings", action: openNotificationSettings)
+                                .controlSize(.small)
+                        }
+                    } else if notifyOnCompletion, notificationAuthorizationStatus == .notDetermined {
+                        Text(isEnabled
+                             ? "Rubien will request notification permission after you save this job."
+                             : "Rubien will request notification permission when you enable this job.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 } footer: {
                     Text("Scheduled jobs run only while Rubien is open on this Mac. Library access is read-only.")
                 }
@@ -469,16 +540,47 @@ private struct ScheduledJobEditor: View {
         }
         .frame(width: 520, height: 650)
         .onChange(of: provider) { _, newProvider in
-            model = Self.defaultModel(for: newProvider)
+            model = Self.defaultModel(for: newProvider, codexModels: codexModels)
             effort = Self.defaultEffort(for: newProvider)
+            ensureEffortIsSupported()
         }
-        .task {
-            guard job == nil, ScheduledJobNotifications.isAvailable else { return }
-            let settings = await UNUserNotificationCenter.current().notificationSettings()
-            if settings.authorizationStatus == .denied {
-                notifyOnCompletion = false
-            }
+        .task(id: provider) {
+            guard provider == .codex else { return }
+            await loadCodexCatalog()
         }
+        .task(id: notifyOnCompletion) {
+            guard notifyOnCompletion else { return }
+            await refreshNotificationAuthorizationStatus()
+        }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active, notifyOnCompletion else { return }
+            Task { await refreshNotificationAuthorizationStatus() }
+        }
+    }
+
+    private var modelChoices: [(label: String, value: String)] {
+        ScheduledJobEditorOptions.modelRows(
+            provider: provider,
+            codexModels: codexModels,
+            current: model,
+            catalogLoaded: codexCatalogLoaded
+        )
+    }
+
+    private var effortChoices: [(label: String, value: String)] {
+        ScheduledJobEditorOptions.effortRows(
+            provider: provider,
+            codexModels: codexModels,
+            model: model,
+            current: effort
+        )
+    }
+
+    private var modelSelection: Binding<String> {
+        Binding(
+            get: { model },
+            set: { selectModel($0) }
+        )
     }
 
     private func weekdayButton(_ weekday: ScheduledWeekday) -> some View {
@@ -531,10 +633,66 @@ private struct ScheduledJobEditor: View {
         }
     }
 
-    private static func defaultModel(for provider: ScheduledJobProvider) -> String {
+    private func loadCodexCatalog(forceReload: Bool = false) async {
+        codexCatalogLoadGeneration += 1
+        let generation = codexCatalogLoadGeneration
+        let catalog = await CodexModelCatalog.shared.catalog(
+            executableOverride: RubienPreferences.assistantCodexBinaryPath,
+            forceReload: forceReload
+        )
+        guard !Task.isCancelled,
+              generation == codexCatalogLoadGeneration,
+              provider == .codex
+        else { return }
+        codexModels = catalog.visibleModels
+        codexCatalogAvailable = catalog.fetchedOK
+        codexCatalogLoaded = true
+
+        guard provider == .codex, job == nil else { return }
+        if model.isEmpty, let first = codexModels.first {
+            model = first.id
+        }
+        ensureEffortIsSupported()
+    }
+
+    private func selectModel(_ value: String) {
+        guard value != model else { return }
+        model = value
+        guard provider == .codex,
+              let selected = codexModels.first(where: { $0.id == value })
+        else { return }
+        effort = selected.defaultEffort ?? selected.efforts.first?.value ?? effort
+    }
+
+    private func ensureEffortIsSupported() {
+        guard provider == .codex,
+              let selected = codexModels.first(where: { $0.id == model }),
+              !selected.efforts.isEmpty,
+              !selected.efforts.contains(where: { $0.value == effort })
+        else { return }
+        effort = selected.defaultEffort ?? selected.efforts[0].value
+    }
+
+    private func openNotificationSettings() {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension"
+        ) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    private func refreshNotificationAuthorizationStatus() async {
+        guard ScheduledJobNotifications.isAvailable else { return }
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        notificationAuthorizationStatus = settings.authorizationStatus
+    }
+
+    private static func defaultModel(
+        for provider: ScheduledJobProvider,
+        codexModels: [CodexModelInfo] = []
+    ) -> String {
         switch provider {
         case .claude: RubienPreferences.assistantModel
-        case .codex: RubienPreferences.assistantCodexModel ?? ""
+        case .codex: RubienPreferences.assistantCodexModel ?? codexModels.first?.id ?? ""
         case .unknown: ""
         }
     }
@@ -545,6 +703,91 @@ private struct ScheduledJobEditor: View {
         case .codex: RubienPreferences.assistantCodexEffort
         case .unknown: ""
         }
+    }
+}
+
+enum ScheduledJobEditorOptions {
+    static func initialOverride(
+        savedValue: String?,
+        defaultValue: String,
+        isEditing: Bool
+    ) -> String {
+        if isEditing { return savedValue ?? "" }
+        return savedValue ?? defaultValue
+    }
+
+    static func initialWebSearch(savedValue: Bool?, preference: Bool) -> Bool {
+        savedValue ?? preference
+    }
+
+    static func initialNotifyOnCompletion(savedValue: Bool?) -> Bool {
+        savedValue ?? true
+    }
+
+    static func modelRows(
+        provider: ScheduledJobProvider,
+        codexModels: [CodexModelInfo],
+        current: String,
+        catalogLoaded: Bool
+    ) -> [(label: String, value: String)] {
+        switch provider {
+        case .claude:
+            var rows = AssistantModelOptions.models(for: .claude)
+            if current.isEmpty {
+                rows.insert((label: "Claude default", value: ""), at: 0)
+            } else if !rows.contains(where: { $0.value == current }) {
+                rows.append((label: "\(current) — not offered by this Claude", value: current))
+            }
+            return rows
+        case .codex:
+            var rows = AssistantModelOptions.codexModelRows(
+                models: codexModels,
+                pinned: current.isEmpty ? nil : current
+            ).map { (label: $0.label, value: $0.value ?? "") }
+            if current.isEmpty, !rows.isEmpty {
+                rows.insert((label: "Codex default", value: ""), at: 0)
+            }
+            if rows.isEmpty {
+                rows.append((
+                    label: catalogLoaded ? "Codex default" : "Loading Codex models…",
+                    value: ""
+                ))
+            }
+            return rows
+        case .unknown:
+            return [(label: current.isEmpty ? "Provider default" : current, value: current)]
+        }
+    }
+
+    static func effortRows(
+        provider: ScheduledJobProvider,
+        codexModels: [CodexModelInfo],
+        model: String,
+        current: String
+    ) -> [(label: String, value: String)] {
+        let rows: [(label: String, value: String)]
+        let unavailableLabel: String
+        switch provider {
+        case .claude:
+            rows = AssistantModelOptions.efforts(for: .claude)
+            unavailableLabel = "not offered by this Claude"
+        case .codex:
+            let governing = codexModels.first(where: { $0.id == model })
+            rows = AssistantModelOptions.codexEffortRows(governing: governing)
+            unavailableLabel = governing.map { "not offered by \($0.displayName)" } ?? "saved value"
+        case .unknown:
+            return [(label: current.isEmpty ? "Provider default" : current, value: current)]
+        }
+        if current.isEmpty {
+            return [(label: "\(provider.displayName) default", value: "")] + rows
+        }
+        guard !rows.contains(where: { $0.value == current }) else {
+            return rows
+        }
+        return rows + [(
+            label: "\(CodexEffortInfo.label(for: current)) — \(unavailableLabel)",
+            value: current
+        )]
     }
 }
 
