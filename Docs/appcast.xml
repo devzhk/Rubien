@@ -434,5 +434,21 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.4.1</title>
+            <description sparkle:format="plain-text"><![CDATA[• Queue, edit, delete, or steer follow-up messages while the assistant responds.
+• Improve assistant paper cards, scrolling, approval layout, and Reading Activity help.
+• Add support for Science, ACS Publications, and Astronomy & Astrophysics paper links.]]></description>
+            <pubDate>Fri, 17 Jul 2026 00:20:44 +0000</pubDate>
+            <sparkle:version>29</sparkle:version>
+            <sparkle:shortVersionString>0.4.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.4.1/Rubien-0.4.1.dmg"
+                sparkle:edSignature="WzjwAQ4KB2uvq38fWzakV8pAjOwy43JTRDuSoLZRtelqxZbhvbCuJB8h9dUb10SgTyjr2etVOwI9GI5kQP2YBA=="
+                length="13440917"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
