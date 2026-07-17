@@ -456,9 +456,11 @@ private struct ScheduledJobEditor: View {
 
                 Section("Schedule") {
                     HStack(spacing: 6) {
+                        Spacer(minLength: 0)
                         ForEach(ScheduledWeekday.allCases, id: \.self) { weekday in
                             weekdayButton(weekday)
                         }
+                        Spacer(minLength: 0)
                     }
                     DatePicker("Time", selection: $time, displayedComponents: .hourAndMinute)
                     Toggle("Enabled", isOn: $isEnabled)
@@ -538,7 +540,7 @@ private struct ScheduledJobEditor: View {
             }
             .formStyle(.grouped)
         }
-        .frame(width: 520, height: 650)
+        .frame(width: 440, height: 650)
         .onChange(of: provider) { _, newProvider in
             model = Self.defaultModel(for: newProvider, codexModels: codexModels)
             effort = Self.defaultEffort(for: newProvider)
@@ -599,13 +601,6 @@ private struct ScheduledJobEditor: View {
                     selected ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.045),
                     in: RoundedRectangle(cornerRadius: 5, style: .continuous)
                 )
-                .overlay {
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .stroke(
-                            selected ? Color.accentColor.opacity(0.38) : Color.primary.opacity(0.08),
-                            lineWidth: 1
-                        )
-                }
                 .foregroundStyle(selected ? Color.accentColor : Color.primary.opacity(0.76))
         }
         .buttonStyle(.plain)
