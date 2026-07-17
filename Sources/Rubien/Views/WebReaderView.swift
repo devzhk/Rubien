@@ -112,11 +112,69 @@ enum WebReaderMathRendering {
         return entries.joined(separator: ",\n                      ")
     }()
 
+    /// Legacy clips can contain a source `<br>` in the middle of a display
+    /// environment (usually where the TeX used `\\`). KaTeX auto-render scans
+    /// one text node at a time, so the element splits the delimiter pair and
+    /// leaves the whole environment visible as source text. Preserve breaks
+    /// everywhere else, but turn those internal tags into text newlines before
+    /// the article HTML is parsed into a DOM.
+    static func normalizingLegacyDisplayMath(in html: String) -> String {
+        let environments = displayEnvironments
+            .map(NSRegularExpression.escapedPattern(for:))
+            .joined(separator: "|")
+        guard html.range(of: "<br", options: .caseInsensitive) != nil,
+              let breakRegex = try? NSRegularExpression(
+                  pattern: #"<br\b[^>]*>"#,
+                  options: .caseInsensitive
+              ),
+              let environmentRegex = try? NSRegularExpression(
+                  pattern: #"\\begin\{(\#(environments))\}.*?\\end\{\1\}"#,
+                  options: .dotMatchesLineSeparators
+              ) else {
+            return html
+        }
+
+        let source = html as NSString
+        let matches = environmentRegex.matches(
+            in: html,
+            range: NSRange(location: 0, length: source.length)
+        )
+        var normalized = html
+        for match in matches.reversed() {
+            let environmentSource = source.substring(with: match.range)
+            let replacement = breakRegex.stringByReplacingMatches(
+                in: environmentSource,
+                range: NSRange(
+                    location: 0,
+                    length: (environmentSource as NSString).length
+                ),
+                withTemplate: "\n"
+            )
+            if replacement != environmentSource {
+                normalized = (normalized as NSString).replacingCharacters(
+                    in: match.range,
+                    with: replacement
+                )
+            }
+        }
+        return normalized
+    }
+
+    /// KaTeX does not implement LaTeX cross-reference state, so `\label` has
+    /// no reader-visible meaning and otherwise renders as a red unsupported
+    /// command. Keep all other source intact for KaTeX.
+    static let latexPreprocessorFunctionJavaScript = #"""
+    function rubienPrepareLatexForRendering(latex) {
+      return String(latex || '').replace(/\\label\s*\{[^{}]*\}/g, '');
+    }
+    """#
+
     /// Kept as a standalone snippet so the invalid-LaTeX fallback can be
     /// exercised without loading a WKWebView in unit tests.
     static let dataLatexRenderAttemptJavaScript = """
+    const preparedLatex = rubienPrepareLatexForRendering(latex);
     try {
-      katex.render(latex, span, { displayMode: displayMode, throwOnError: true });
+      katex.render(preparedLatex, span, { displayMode: displayMode, throwOnError: true });
       mathEl.replaceWith(span);
     } catch (_) { /* leave <math> intact; browser falls back */ }
     """
@@ -783,7 +841,7 @@ final class WebReaderViewModel: ObservableObject {
         let url = htmlEscape(urlRaw)
         let showURLInMeta = !urlRaw.isEmpty && !metaSiteAndURLAreRedundant(site: siteRaw, url: urlRaw)
         let eyebrow = htmlEscape(eyebrowText)
-        let bodyHTML = articleBodyHTML
+        let bodyHTML = WebReaderMathRendering.normalizingLegacyDisplayMath(in: articleBodyHTML)
         let articleHeaderHTML = omitArticleHeader ? "" : """
               <header class="article-header">
                 <div class="eyebrow">\(eyebrow)</div>
@@ -1355,6 +1413,7 @@ final class WebReaderViewModel: ObservableObject {
 
               let mathRendered = false;
               function renderMath() {
+                \(WebReaderMathRendering.latexPreprocessorFunctionJavaScript)
                 if (mathRendered) return;
                 if (typeof renderMathInElement !== 'function') return;
                 try {
@@ -1401,6 +1460,7 @@ final class WebReaderViewModel: ObservableObject {
                       \(WebReaderMathRendering.autoRenderDelimiterEntriesJavaScript)
                     ],
                     throwOnError: false,
+                    preProcess: rubienPrepareLatexForRendering,
                     ignoredTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],
                     ignoredClasses: ['katex']
                   });
