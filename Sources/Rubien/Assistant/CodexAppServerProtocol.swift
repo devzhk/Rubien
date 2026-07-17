@@ -161,7 +161,16 @@ struct CodexAppServerParser {
             toolNamesByItemID.removeAll(keepingCapacity: true)
             presentationOrdinalsByItemID.removeAll(keepingCapacity: true)
             nextPresentationOrdinal = 0
-            return [.turnCompleted(usage: usage)]
+            let turn = params["turn"] as? [String: Any]
+            let outcome = Self.turnOutcome(turn?["status"] as? String)
+            var events: [AgentEvent] = []
+            if outcome == .failed,
+               let error = turn?["error"] as? [String: Any],
+               let message = error["message"] as? String, !message.isEmpty {
+                events.append(.providerNotice(message))
+            }
+            events.append(.turnCompleted(outcome: outcome, usage: usage))
+            return events
 
         case "error":
             // Transient (`willRetry:true`) errors are heartbeats — don't spam the
@@ -182,6 +191,17 @@ struct CodexAppServerParser {
     }
 
     // MARK: Item handling
+
+    /// `turn/completed` is terminal even when its embedded status says the model
+    /// failed or was interrupted. Unknown/malformed statuses fail closed.
+    static func turnOutcome(_ status: String?) -> AgentTurnOutcome {
+        switch status?.lowercased() {
+        case "completed": .succeeded
+        case "interrupted": .interrupted
+        case "failed": .failed
+        default: .failed
+        }
+    }
 
     private mutating func parseItemStarted(_ params: [String: Any]) -> [AgentEvent] {
         guard let item = params["item"] as? [String: Any] else { return [] }

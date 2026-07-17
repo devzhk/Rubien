@@ -38,17 +38,22 @@ struct MCPContentChannel: Sendable, Equatable {
     }
 
     func configJSON(readOnly: Bool) -> [String: Any] {
-        [
+        var environment = [
+            "RUBIEN_LIBRARY_ROOT": libraryRoot.path,
+            // Enables the app-only structured paper-card capability.
+            // Normal native and Node MCP catalogs remain unchanged.
+            Self.appPresentationEnvironmentKey: Self.appPresentationEnvironmentValue,
+        ]
+        if !readOnly {
+            environment[RubienAppSchedulingContract.environmentKey]
+                = RubienAppSchedulingContract.environmentValue
+        }
+        return [
             "mcpServers": [
                 Self.serverName: [
                     "command": cliURL.path,
                     "args": readOnly ? ["mcp", "--read-only"] : ["mcp"],
-                    "env": [
-                        "RUBIEN_LIBRARY_ROOT": libraryRoot.path,
-                        // Enables the app-only structured paper-card capability.
-                        // Normal native and Node MCP catalogs remain unchanged.
-                        Self.appPresentationEnvironmentKey: Self.appPresentationEnvironmentValue,
-                    ],
+                    "env": environment,
                 ],
             ],
         ]

@@ -84,9 +84,11 @@ final class CodexAppServerProtocolTests: XCTestCase {
         XCTAssertTrue(completed[0].contains("spike-ok"), "completed text was \(completed[0])")
 
         // Ends with a turnCompleted carrying usage (from tokenUsage.last).
-        guard case .turnCompleted(let usage)? = events.last else {
+        guard case .turnCompleted(let completion)? = events.last else {
             return XCTFail("expected .turnCompleted last, got \(String(describing: events.last))")
         }
+        let usage = completion.usage
+        XCTAssertEqual(completion.outcome, .succeeded)
         XCTAssertEqual(usage?.outputTokens, 7)
         XCTAssertEqual(usage?.inputTokens, 17435)
         XCTAssertEqual(usage?.cacheReadTokens, 1920)
@@ -192,8 +194,8 @@ final class CodexAppServerProtocolTests: XCTestCase {
         // A later empty `.last` must CLEAR the prior usage, not leave it stale.
         _ = parser.parse(line: #"{"jsonrpc":"2.0","method":"thread/tokenUsage/updated","params":{"tokenUsage":{"last":{}}}}"#)
         let done = parser.parse(line: #"{"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"status":"completed"}}}"#)
-        guard case .turnCompleted(let usage)? = done.first else { return XCTFail("expected turnCompleted") }
-        XCTAssertNil(usage)
+        guard case .turnCompleted(let completion)? = done.first else { return XCTFail("expected turnCompleted") }
+        XCTAssertNil(completion.usage)
     }
 
     func testMalformedApprovalIdProducesNoUnanswerableCard() {
@@ -264,10 +266,10 @@ final class CodexAppServerProtocolTests: XCTestCase {
         """#
         XCTAssertTrue(parser.parse(line: usageLine).isEmpty, "tokenUsage is accumulated, not emitted")
         let done = parser.parse(line: #"{"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"status":"completed"}}}"#)
-        guard case .turnCompleted(let usage)? = done.first else { return XCTFail("expected turnCompleted") }
-        XCTAssertEqual(usage?.inputTokens, 120)
-        XCTAssertEqual(usage?.outputTokens, 34)
-        XCTAssertEqual(usage?.cacheReadTokens, 5)
+        guard case .turnCompleted(let completion)? = done.first else { return XCTFail("expected turnCompleted") }
+        XCTAssertEqual(completion.usage?.inputTokens, 120)
+        XCTAssertEqual(completion.usage?.outputTokens, 34)
+        XCTAssertEqual(completion.usage?.cacheReadTokens, 5)
     }
 
     func testUsageResetsBetweenTurns() {
@@ -276,11 +278,36 @@ final class CodexAppServerProtocolTests: XCTestCase {
         _ = parser.parse(line: #"{"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"status":"completed"}}}"#)
         // A second turn with NO usage frame must not inherit the first turn's usage.
         let done = parser.parse(line: #"{"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"status":"completed"}}}"#)
-        guard case .turnCompleted(let usage)? = done.first else { return XCTFail("expected turnCompleted") }
-        XCTAssertNil(usage)
+        guard case .turnCompleted(let completion)? = done.first else { return XCTFail("expected turnCompleted") }
+        XCTAssertNil(completion.usage)
     }
 
     // MARK: Failure + tolerance
+
+    func testTurnCompletionPreservesFailureAndInterruption() {
+        var parser = CodexAppServerParser()
+        let failed = parser.parse(line: #"{"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"status":"failed","error":{"message":"model failed"}}}}"#)
+        XCTAssertEqual(failed.first, .providerNotice("model failed"))
+        guard case .turnCompleted(let failedCompletion)? = failed.last else {
+            return XCTFail("expected failed completion")
+        }
+        XCTAssertEqual(failedCompletion.outcome, .failed)
+
+        let interrupted = parser.parse(line: #"{"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"status":"interrupted"}}}"#)
+        guard case .turnCompleted(let interruptedCompletion)? = interrupted.last else {
+            return XCTFail("expected interrupted completion")
+        }
+        XCTAssertEqual(interruptedCompletion.outcome, .interrupted)
+    }
+
+    func testMalformedTurnCompletionFailsClosed() {
+        var parser = CodexAppServerParser()
+        let events = parser.parse(line: #"{"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"status":"futureStatus"}}}"#)
+        guard case .turnCompleted(let completion)? = events.last else {
+            return XCTFail("expected completion")
+        }
+        XCTAssertEqual(completion.outcome, .failed)
+    }
 
     func testTerminalErrorNoticesButTransientRetryIsSilent() {
         var parser = CodexAppServerParser()

@@ -15,12 +15,17 @@ final class ScheduledJobCoordinator: ObservableObject {
     @Published private(set) var recentRuns: [ScheduledJobRun] = []
     @Published private(set) var unreadRunCount = 0
     @Published private(set) var activeRun: ScheduledJobRun?
+    /// Result sessions proven missing from the provider during this app launch.
+    /// Keeping the refusal in memory prevents Recent Runs from continuing to offer
+    /// an Open Result action that has already failed its transcript preflight.
+    @Published private(set) var unavailableResultRunIDs: Set<String> = []
 
     private let database: AppDatabase
     private let runner: ScheduledJobRunner
     private let now: () -> Date
     private let calendar: () -> Calendar
     private let completionNotifier: (ScheduledJob, ScheduledJobRun) -> Void
+    private let notificationAuthorizationRequester: () -> Void
     private let usesBackgroundScheduler: Bool
     private let logger = RubienLogger(
         subsystem: "com.rubien.assistant",
@@ -31,6 +36,7 @@ final class ScheduledJobCoordinator: ObservableObject {
     private var dueRetryNotBefore: Date?
     private var executionTask: Task<Void, Never>?
     private var started = false
+    private var didRequestNotificationAuthorization = false
     private var observers: [NSObjectProtocol] = []
     private var libraryChangeCancellable: AnyCancellable?
 
@@ -57,6 +63,9 @@ final class ScheduledJobCoordinator: ObservableObject {
         now: @escaping () -> Date = Date.init,
         calendar: @escaping () -> Calendar = { .autoupdatingCurrent },
         completionNotifier: @escaping (ScheduledJob, ScheduledJobRun) -> Void = { _, _ in },
+        notificationAuthorizationRequester: @escaping () -> Void = {
+            ScheduledJobNotifications.requestAuthorization()
+        },
         usesBackgroundScheduler: Bool = true
     ) {
         self.database = database
@@ -64,6 +73,7 @@ final class ScheduledJobCoordinator: ObservableObject {
         self.now = now
         self.calendar = calendar
         self.completionNotifier = completionNotifier
+        self.notificationAuthorizationRequester = notificationAuthorizationRequester
         self.usesBackgroundScheduler = usesBackgroundScheduler
     }
 
@@ -112,7 +122,6 @@ final class ScheduledJobCoordinator: ObservableObject {
             calendar: calendar()
         )
         didMutate()
-        requestNotificationAuthorizationIfNeeded()
         return job
     }
 
@@ -125,7 +134,6 @@ final class ScheduledJobCoordinator: ObservableObject {
             calendar: calendar()
         )
         didMutate()
-        requestNotificationAuthorizationIfNeeded()
         return job
     }
 
@@ -138,7 +146,6 @@ final class ScheduledJobCoordinator: ObservableObject {
             calendar: calendar()
         )
         didMutate()
-        if isEnabled { requestNotificationAuthorizationIfNeeded() }
         return job
     }
 
@@ -154,7 +161,8 @@ final class ScheduledJobCoordinator: ObservableObject {
     }
 
     func cancelActiveRun() {
-        runner.cancel()
+        guard let runID = activeRun?.id else { return }
+        runner.cancel(runID: runID)
     }
 
     func markRunRead(id: String) {
@@ -167,9 +175,14 @@ final class ScheduledJobCoordinator: ObservableObject {
         refresh()
     }
 
-    private func didMutate() {
-        dueRetryNotBefore = nil
+    func markResultUnavailable(id: String) {
+        unavailableResultRunIDs.insert(id)
+    }
+
+    private func didMutate(resetDueRetry: Bool = true) {
+        if resetDueRetry { dueRetryNotBefore = nil }
         refresh()
+        requestNotificationAuthorizationIfNeeded()
         scanForDueJobs()
     }
 
@@ -315,21 +328,19 @@ final class ScheduledJobCoordinator: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 MainActor.assumeIsolated {
-                    self?.refresh()
-                    self?.scanForDueJobs()
+                    // The broadcaster covers every CLI/MCP library mutation, not
+                    // only schedules, so preserve a genuine claim-failure backoff.
+                    self?.didMutate(resetDueRetry: false)
                 }
             }
     }
 
     private func requestNotificationAuthorizationIfNeeded() {
-        guard ScheduledJobNotifications.isAvailable,
+        guard !didRequestNotificationAuthorization,
               jobs.contains(where: { $0.isEnabled && $0.notifyOnCompletion })
         else { return }
-        Task {
-            _ = try? await UNUserNotificationCenter.current().requestAuthorization(
-                options: [.alert, .sound]
-            )
-        }
+        didRequestNotificationAuthorization = true
+        notificationAuthorizationRequester()
     }
 }
 
@@ -339,18 +350,36 @@ enum ScheduledJobNotifications {
     /// a raw SwiftPM executable because it has no application bundle proxy.
     static var isAvailable: Bool { Bundle.main.bundleURL.pathExtension == "app" }
 
+    static func requestAuthorization() {
+        guard isAvailable else { return }
+        Task {
+            _ = try? await UNUserNotificationCenter.current().requestAuthorization(
+                options: [.alert, .sound]
+            )
+        }
+    }
+
     static func post(job: ScheduledJob, run: ScheduledJobRun) {
         guard isAvailable else { return }
         let content = UNMutableNotificationContent()
         switch run.status {
         case .succeeded:
-            content.title = "Scheduled job finished"
+            content.title = String(
+                localized: "scheduled.notification.finished",
+                bundle: .module
+            )
             content.body = job.name
         case .cancelled:
-            content.title = "Scheduled job cancelled"
+            content.title = String(
+                localized: "scheduled.notification.cancelled",
+                bundle: .module
+            )
             content.body = job.name
         case .failed:
-            content.title = "Scheduled job failed"
+            content.title = String(
+                localized: "scheduled.notification.failed",
+                bundle: .module
+            )
             content.body = job.name
         case .pending, .running, .unknown:
             return

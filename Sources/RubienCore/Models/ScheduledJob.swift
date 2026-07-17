@@ -108,7 +108,10 @@ public enum ScheduledJobRunStatus: Codable, Hashable, Sendable {
     }
 
     public var isActive: Bool {
-        self == .pending || self == .running
+        switch self {
+        case .pending, .running, .unknown: true
+        case .succeeded, .failed, .cancelled: false
+        }
     }
 
     public var isTerminal: Bool {
@@ -439,6 +442,11 @@ public struct ScheduledJobRun: Identifiable, Codable, Hashable, Sendable {
     public var providerSessionId: String?
     public var failureKind: ScheduledJobFailureKind?
     public var isUnread: Bool
+
+    /// The latest execution activity used to order and display run history.
+    public var activityAt: Date {
+        finishedAt ?? startedAt ?? scheduledFor
+    }
 
     public enum Columns: String, ColumnExpression {
         case id, jobId, trigger, occurrenceKey, scheduledFor, startedAt, finishedAt

@@ -37,16 +37,22 @@ extension AppDatabase {
         calendar: Calendar = .current
     ) throws -> ScheduledJob {
         let definition = try normalizedScheduledJobDefinition(proposedDefinition)
-        let nextRunAt = definition.isEnabled
-            ? definition.recurrence.nextOccurrence(after: now, calendar: calendar)
-            : nil
-        guard !definition.isEnabled || nextRunAt != nil else {
-            throw ScheduledJobError.invalidRecurrence
-        }
 
         return try dbWriter.write { db in
             guard let existing = try ScheduledJob.fetchOne(db, key: id) else {
                 throw ScheduledJobError.notFound
+            }
+            let nextRunAt = definition.isEnabled
+                ? try Self.nextUnclaimedOccurrence(
+                    for: id,
+                    recurrence: definition.recurrence,
+                    after: now,
+                    calendar: calendar,
+                    in: db
+                )
+                : nil
+            guard !definition.isEnabled || nextRunAt != nil else {
+                throw ScheduledJobError.invalidRecurrence
             }
             let job = ScheduledJob(
                 id: id,
@@ -73,8 +79,17 @@ extension AppDatabase {
             }
             job.isEnabled = isEnabled
             job.nextRunAt = isEnabled
-                ? job.recurrence.nextOccurrence(after: now, calendar: calendar)
+                ? try Self.nextUnclaimedOccurrence(
+                    for: id,
+                    recurrence: job.recurrence,
+                    after: now,
+                    calendar: calendar,
+                    in: db
+                )
                 : nil
+            guard !isEnabled || job.nextRunAt != nil else {
+                throw ScheduledJobError.invalidRecurrence
+            }
             job.dateModified = now
             try job.update(db)
             return job
@@ -87,7 +102,8 @@ extension AppDatabase {
                 db,
                 sql: """
                     SELECT COUNT(*) FROM scheduledJobRun
-                    WHERE jobId = ? AND status IN ('pending', 'running')
+                    WHERE jobId = ?
+                      AND status NOT IN ('succeeded', 'failed', 'cancelled')
                     """,
                 arguments: [id]
             ) ?? 0
@@ -140,7 +156,7 @@ extension AppDatabase {
                 sql: """
                     SELECT * FROM scheduledJobRun
                     WHERE jobId = ?
-                    ORDER BY scheduledFor DESC, id DESC
+                    ORDER BY COALESCE(finishedAt, startedAt, scheduledFor) DESC, id DESC
                     LIMIT ?
                     """,
                 arguments: [jobId, limit]
@@ -214,19 +230,20 @@ extension AppDatabase {
                    latest >= current {
                     continue
                 }
-                var nextRunAt = recurrence.nextOccurrence(after: now, calendar: calendar)
+                var nextRunAt = try Self.nextUnclaimedOccurrence(
+                    for: job.id,
+                    recurrence: recurrence,
+                    after: now,
+                    calendar: calendar,
+                    in: db
+                )
                 if let latest, latest >= job.dateModified {
-                    let key = LocalDay(date: latest, calendar: calendar).rawValue
-                    let alreadyRan = try Bool.fetchOne(
-                        db,
-                        sql: """
-                            SELECT EXISTS(
-                                SELECT 1 FROM scheduledJobRun
-                                WHERE jobId = ? AND occurrenceKey = ?
-                            )
-                            """,
-                        arguments: [job.id, key]
-                    ) ?? false
+                    let key = Self.occurrenceKey(for: latest, calendar: calendar)
+                    let alreadyRan = try Self.hasClaimedOccurrence(
+                        jobId: job.id,
+                        occurrenceKey: key,
+                        in: db
+                    )
                     if !alreadyRan { nextRunAt = latest }
                 }
                 try db.execute(
@@ -265,19 +282,20 @@ extension AppDatabase {
                 } else {
                     scheduledFor = storedNextRunAt
                 }
-                let occurrenceKey = LocalDay(date: scheduledFor, calendar: calendar).rawValue
-                let alreadyClaimed = try Bool.fetchOne(
-                    db,
-                    sql: """
-                        SELECT EXISTS(
-                            SELECT 1 FROM scheduledJobRun
-                            WHERE jobId = ? AND occurrenceKey = ?
-                        )
-                        """,
-                    arguments: [job.id, occurrenceKey]
-                ) ?? false
+                let occurrenceKey = Self.occurrenceKey(for: scheduledFor, calendar: calendar)
+                let alreadyClaimed = try Self.hasClaimedOccurrence(
+                    jobId: job.id,
+                    occurrenceKey: occurrenceKey,
+                    in: db
+                )
 
-                job.nextRunAt = job.recurrence.nextOccurrence(after: now, calendar: calendar)
+                job.nextRunAt = try Self.nextUnclaimedOccurrence(
+                    for: job.id,
+                    recurrence: job.recurrence,
+                    after: now,
+                    calendar: calendar,
+                    in: db
+                )
                 try db.execute(
                     sql: "UPDATE scheduledJob SET nextRunAt = ? WHERE id = ?",
                     arguments: [job.nextRunAt, job.id]
@@ -416,7 +434,7 @@ extension AppDatabase {
             sql: """
                 SELECT EXISTS(
                     SELECT 1 FROM scheduledJobRun
-                    WHERE status IN ('pending', 'running')
+                    WHERE status NOT IN ('succeeded', 'failed', 'cancelled')
                 )
                 """
         ) ?? false
@@ -462,7 +480,7 @@ extension AppDatabase {
             db,
             sql: """
                 SELECT * FROM scheduledJobRun
-                ORDER BY scheduledFor DESC, id DESC
+                ORDER BY COALESCE(finishedAt, startedAt, scheduledFor) DESC, id DESC
                 LIMIT ?
                 """,
             arguments: [limit]
@@ -474,6 +492,55 @@ extension AppDatabase {
             db,
             sql: "SELECT COUNT(*) FROM scheduledJobRun WHERE isUnread = 1"
         ) ?? 0
+    }
+
+    /// Scheduled occurrence identity is always Gregorian, regardless of the
+    /// user's display-calendar preference, while retaining the calendar's
+    /// current time zone so travel continues to follow local wall time.
+    private static func occurrenceKey(for date: Date, calendar sourceCalendar: Calendar) -> String {
+        let calendar = activityCalendar(basedOn: sourceCalendar)
+        return LocalDay(date: date, calendar: calendar).rawValue
+    }
+
+    private static func hasClaimedOccurrence(
+        jobId: String,
+        occurrenceKey: String,
+        in db: Database
+    ) throws -> Bool {
+        try Bool.fetchOne(
+            db,
+            sql: """
+                SELECT EXISTS(
+                    SELECT 1 FROM scheduledJobRun
+                    WHERE jobId = ? AND occurrenceKey = ?
+                )
+                """,
+            arguments: [jobId, occurrenceKey]
+        ) ?? false
+    }
+
+    /// Finds the first future local-day occurrence that this job has not
+    /// consumed. Edits and re-enables therefore never advertise a same-day
+    /// deadline that the uniqueness constraint would silently discard.
+    private static func nextUnclaimedOccurrence(
+        for jobId: String,
+        recurrence: ScheduledRecurrence,
+        after date: Date,
+        calendar: Calendar,
+        in db: Database
+    ) throws -> Date? {
+        var cursor = date
+        while let candidate = recurrence.nextOccurrence(after: cursor, calendar: calendar) {
+            let key = occurrenceKey(for: candidate, calendar: calendar)
+            let alreadyClaimed = try hasClaimedOccurrence(
+                jobId: jobId,
+                occurrenceKey: key,
+                in: db
+            )
+            if !alreadyClaimed { return candidate }
+            cursor = candidate
+        }
+        return nil
     }
 }
 

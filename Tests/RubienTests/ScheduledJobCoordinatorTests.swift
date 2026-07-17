@@ -45,6 +45,102 @@ final class ScheduledJobCoordinatorTests: XCTestCase {
     }
 
     @MainActor
+    func testRunNowThenImmediateCancelCannotLoseCancellation() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let calendar = utcCalendar()
+        let job = try database.createScheduledJob(
+            .init(
+                name: "Manual scan",
+                prompt: "Find papers",
+                recurrence: .init(weekdayMask: 127, localMinuteOfDay: 8 * 60),
+                provider: .claude,
+                notifyOnCompletion: false
+            ),
+            now: date("2026-07-13T07:00:00Z"),
+            calendar: calendar
+        )
+        let provider = CoordinatorProviderStub()
+        let runner = ScheduledJobRunner(
+            database: database,
+            providerFactory: { _ in provider },
+            workspaceProvider: { FileManager.default.temporaryDirectory },
+            attributionStore: nil
+        )
+        let coordinator = ScheduledJobCoordinator(
+            database: database,
+            runner: runner,
+            now: { self.date("2026-07-13T07:01:00Z") },
+            calendar: { calendar },
+            usesBackgroundScheduler: false
+        )
+
+        try coordinator.runNow(id: job.id)
+        let firstRunID = try XCTUnwrap(coordinator.activeRun?.id)
+        coordinator.cancelActiveRun()
+
+        try await waitUntil {
+            coordinator.recentRuns.first(where: { $0.id == firstRunID })?.status == .cancelled
+        }
+        XCTAssertEqual(provider.availabilityCallCount, 0)
+
+        try coordinator.runNow(id: job.id)
+        try await waitUntil { coordinator.recentRuns.first?.status == .succeeded }
+        XCTAssertEqual(provider.availabilityCallCount, 1)
+    }
+
+    @MainActor
+    func testExternalNotifyingJobRequestsNotificationAuthorization() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let calendar = utcCalendar()
+        let provider = CoordinatorProviderStub()
+        let runner = ScheduledJobRunner(
+            database: database,
+            providerFactory: { _ in provider },
+            workspaceProvider: { FileManager.default.temporaryDirectory },
+            attributionStore: nil
+        )
+        var authorizationRequestCount = 0
+        let coordinator = ScheduledJobCoordinator(
+            database: database,
+            runner: runner,
+            now: { self.date("2026-07-13T07:00:00Z") },
+            calendar: { calendar },
+            notificationAuthorizationRequester: {
+                authorizationRequestCount += 1
+            },
+            usesBackgroundScheduler: false
+        )
+        coordinator.start()
+        XCTAssertEqual(authorizationRequestCount, 0)
+
+        let job = try database.createScheduledJob(
+            .init(
+                name: "Externally created scan",
+                prompt: "Find papers",
+                recurrence: .init(weekdayMask: 127, localMinuteOfDay: 8 * 60),
+                provider: .claude,
+                notifyOnCompletion: true
+            ),
+            now: date("2026-07-13T07:00:00Z"),
+            calendar: calendar
+        )
+        LibraryChangeBroadcaster.shared.triggerLocalRefresh()
+
+        try await waitUntil {
+            coordinator.jobs.contains(where: { $0.id == job.id })
+                && authorizationRequestCount == 1
+        }
+
+        LibraryChangeBroadcaster.shared.triggerLocalRefresh()
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(
+            authorizationRequestCount,
+            1,
+            "unrelated external refreshes must not repeat the authorization request"
+        )
+    }
+
+    @MainActor
     private func waitUntil(
         timeout: Duration = .seconds(2),
         condition: @escaping @MainActor () -> Bool
@@ -73,9 +169,11 @@ final class ScheduledJobCoordinatorTests: XCTestCase {
 
 private final class CoordinatorProviderStub: AgentProvider, @unchecked Sendable {
     let kind: AgentProviderKind = .claude
+    private(set) var availabilityCallCount = 0
 
     func isAvailable() async -> AgentAvailability {
-        .installed(version: "test", path: "/test/provider")
+        availabilityCallCount += 1
+        return .installed(version: "test", path: "/test/provider")
     }
 
     func send(turn: AgentTurnRequest) -> AsyncThrowingStream<AgentEvent, Error> {

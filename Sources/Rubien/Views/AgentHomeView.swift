@@ -64,6 +64,7 @@ struct AgentHomeView: View {
     @Binding var activityRailVisible: Bool
     @Binding var activityOverlayPresented: Bool
     @Binding var activityWidth: CGFloat
+    @Binding var scheduledJobsPresentation: ScheduledJobsPresentation?
     let onOpenReference: (Int64) -> Void
     let onOpenPaperSource: (String) -> Void
     let onAddPaperSource: (String) -> Void
@@ -126,7 +127,8 @@ struct AgentHomeView: View {
                 onAddPapers: onAddPapers,
                 onImportPDFs: onImportPDFs,
                 scheduledJobs: scheduledJobs,
-                onOpenScheduledRun: onOpenScheduledRun))
+                onOpenScheduledRun: onOpenScheduledRun,
+                scheduledJobsPresentation: $scheduledJobsPresentation))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.chatSurface)
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))

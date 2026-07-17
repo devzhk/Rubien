@@ -110,6 +110,30 @@ final class ClaudeStreamParserTests: XCTestCase {
         XCTAssertTrue(parser.parse(line: #"{"type":"some_new_2027_event","data":1}"#).isEmpty)
     }
 
+    func testResultPreservesFailedAndInterruptedTerminalOutcomes() {
+        var parser = ClaudeStreamParser()
+        let failed = parser.parse(line: #"{"type":"result","subtype":"error_during_execution","is_error":true}"#)
+        guard case .turnCompleted(let failedCompletion)? = failed.last else {
+            return XCTFail("expected failed completion")
+        }
+        XCTAssertEqual(failedCompletion.outcome, .failed)
+
+        let interrupted = parser.parse(line: #"{"type":"result","subtype":"interrupted","is_error":true}"#)
+        guard case .turnCompleted(let interruptedCompletion)? = interrupted.last else {
+            return XCTFail("expected interrupted completion")
+        }
+        XCTAssertEqual(interruptedCompletion.outcome, .interrupted)
+    }
+
+    func testContradictoryClaudeResultFailsClosed() {
+        var parser = ClaudeStreamParser()
+        let events = parser.parse(line: #"{"type":"result","subtype":"error_max_turns","is_error":false}"#)
+        guard case .turnCompleted(let completion)? = events.last else {
+            return XCTFail("expected completion")
+        }
+        XCTAssertEqual(completion.outcome, .failed)
+    }
+
     // MARK: Control-protocol codec (stdin side)
 
     func testDecodeCanUseToolExtractsBookkeeping() throws {

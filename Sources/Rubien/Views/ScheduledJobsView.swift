@@ -4,10 +4,15 @@ import SwiftUI
 import RubienCore
 import UserNotifications
 
+struct ScheduledJobsPresentation: Equatable {
+    let message: String?
+}
+
 struct ScheduledJobsPopover: View {
     @ObservedObject var coordinator: ScheduledJobCoordinator
     let onOpenRun: (ScheduledJobRun) -> Void
     var initialEditorJob: ScheduledJob? = nil
+    var initialErrorMessage: String? = nil
 
     private enum Tab: String, CaseIterable, Identifiable {
         case recentRuns = "Recent Runs"
@@ -84,6 +89,7 @@ struct ScheduledJobsPopover: View {
         .frame(width: 440, height: 430)
         .onAppear {
             coordinator.refresh()
+            errorMessage = initialErrorMessage
             if let initialEditorJob {
                 editorTarget = .edit(initialEditorJob)
             }
@@ -125,11 +131,15 @@ struct ScheduledJobsPopover: View {
                         ScheduledRunRow(
                             run: run,
                             job: coordinator.job(id: run.jobId),
-                            onOpen: run.status == .succeeded && run.providerSessionId != nil ? {
-                                coordinator.markRunRead(id: run.id)
+                            resultUnavailable: coordinator.unavailableResultRunIDs.contains(run.id),
+                            onOpen: run.status == .succeeded
+                                && run.providerSessionId != nil
+                                && !coordinator.unavailableResultRunIDs.contains(run.id) ? {
                                 onOpenRun(run)
                             } : nil,
-                            onCancel: run.status.isActive ? { coordinator.cancelActiveRun() } : nil,
+                            onCancel: run.status == .pending || run.status == .running
+                                ? { coordinator.cancelActiveRun() }
+                                : nil,
                             onRunNow: run.status == .failed ? { runNow(jobID: run.jobId) } : nil
                         )
                         Divider().padding(.leading, 42)
@@ -222,6 +232,7 @@ struct ScheduledJobsPopover: View {
 private struct ScheduledRunRow: View {
     let run: ScheduledJobRun
     let job: ScheduledJob?
+    let resultUnavailable: Bool
     let onOpen: (() -> Void)?
     let onCancel: (() -> Void)?
     let onRunNow: (() -> Void)?
@@ -230,21 +241,8 @@ private struct ScheduledRunRow: View {
         HStack(alignment: .top, spacing: 10) {
             statusIcon
                 .frame(width: 20, height: 20)
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(job?.name ?? "Scheduled job")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                    if run.isUnread {
-                        Circle().fill(Color.accentColor).frame(width: 6, height: 6)
-                    }
-                }
-                Text(runDetail)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
+                .accessibilityHidden(true)
+            runSummary
             Spacer(minLength: 8)
             if let onCancel {
                 Button("Cancel", action: onCancel)
@@ -254,16 +252,42 @@ private struct ScheduledRunRow: View {
                 Button("Run Now", action: onRunNow)
                     .font(.caption)
                     .buttonStyle(.borderless)
-            } else if onOpen != nil {
-                Image(systemName: "chevron.right")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+            } else if let onOpen {
+                Button(
+                    String(localized: "scheduled.action.openResult", bundle: .module),
+                    action: onOpen
+                )
+                .font(.caption)
+                .buttonStyle(.borderless)
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .contentShape(Rectangle())
-        .onTapGesture { onOpen?() }
+    }
+
+    private var runSummary: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Text(job?.name ?? ScheduledJobFormatting.localized("scheduled.job.fallbackName"))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                if run.isUnread {
+                    Circle().fill(Color.accentColor).frame(width: 6, height: 6)
+                        .accessibilityHidden(true)
+                }
+            }
+            Text(ScheduledJobFormatting.runDetail(run, resultUnavailable: resultUnavailable))
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(ScheduledJobFormatting.runAccessibilityLabel(
+            run,
+            jobName: job?.name,
+            resultUnavailable: resultUnavailable
+        ))
     }
 
     @ViewBuilder private var statusIcon: some View {
@@ -281,20 +305,6 @@ private struct ScheduledRunRow: View {
         }
     }
 
-    private var runDetail: String {
-        let date = run.finishedAt ?? run.startedAt ?? run.scheduledFor
-        let time = date.formatted(date: .abbreviated, time: .shortened)
-        switch run.status {
-        case .pending: return "Waiting · \(time)"
-        case .running: return "Running · \(time)"
-        case .succeeded: return "Finished · \(time)"
-        case .failed:
-            let reason = run.failureKind.map(ScheduledJobFormatting.failureLabel) ?? "Failed"
-            return "\(reason) · \(time)"
-        case .cancelled: return "Cancelled · \(time)"
-        case .unknown(let value): return "\(value) · \(time)"
-        }
-    }
 }
 
 private struct ScheduledJobRow: View {
@@ -308,40 +318,29 @@ private struct ScheduledJobRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            Toggle("", isOn: Binding(
+            Toggle(ScheduledJobFormatting.localized("scheduled.accessibility.enableJob"), isOn: Binding(
                 get: { job.isEnabled },
                 set: onSetEnabled
             ))
             .labelsHidden()
+            .accessibilityLabel(String(
+                format: ScheduledJobFormatting.localized("scheduled.accessibility.enableNamedJob"),
+                locale: .current,
+                job.name
+            ))
             .toggleStyle(.switch)
             .controlSize(.mini)
             .padding(.top, 2)
 
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 6) {
-                    Text(job.name)
-                        .font(.system(size: 12, weight: .medium))
-                        .lineLimit(1)
-                    if isActive { ProgressView().controlSize(.mini) }
-                }
-                Text(ScheduledJobFormatting.scheduleLabel(job))
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
-                Text(job.provider.displayName)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                if let next = job.nextRunAt {
-                    Text("Next \(next.formatted(date: .abbreviated, time: .shortened))")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                } else {
-                    Text("Paused")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                }
+            Button(action: onEdit) {
+                jobSummary
             }
-            .contentShape(Rectangle())
-            .onTapGesture(perform: onEdit)
+            .buttonStyle(.plain)
+            .accessibilityLabel(ScheduledJobFormatting.jobAccessibilityLabel(
+                job,
+                isActive: isActive
+            ))
+            .accessibilityHint(ScheduledJobFormatting.localized("scheduled.accessibility.editHint"))
             Spacer(minLength: 6)
             Menu {
                 if let onCancel {
@@ -363,6 +362,31 @@ private struct ScheduledJobRow: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+    }
+
+    private var jobSummary: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                Text(job.name)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                if isActive {
+                    ProgressView().controlSize(.mini)
+                        .accessibilityHidden(true)
+                }
+            }
+            Text(ScheduledJobFormatting.scheduleLabel(job))
+                .font(.system(size: 10.5))
+                .foregroundStyle(.secondary)
+            Text(job.provider.displayName)
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+            Text(ScheduledJobFormatting.nextRunLabel(job))
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
     }
 }
 
@@ -619,6 +643,9 @@ private struct ScheduledJobEditor: View {
         }
         .animation(.easeOut(duration: 0.12), value: isHovered)
         .accessibilityLabel(ScheduledJobFormatting.fullWeekday(weekday))
+        .accessibilityValue(ScheduledJobFormatting.localized(
+            selected ? "scheduled.accessibility.selected" : "scheduled.accessibility.notSelected"
+        ))
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
@@ -807,15 +834,19 @@ enum ScheduledJobEditorOptions {
 }
 
 enum ScheduledJobFormatting {
+    static func localized(_ key: String) -> String {
+        String(localized: String.LocalizationValue(key), bundle: .module)
+    }
+
     static func scheduleLabel(_ job: ScheduledJob) -> String {
         let selected = ScheduledWeekday.allCases.filter { job.recurrence.contains($0) }
         let days: String
         if selected.count == 7 {
-            days = "Every day"
+            days = localized("scheduled.recurrence.everyDay")
         } else if selected == [.monday, .tuesday, .wednesday, .thursday, .friday] {
-            days = "Weekdays"
+            days = localized("scheduled.recurrence.weekdays")
         } else if selected == [.saturday, .sunday] {
-            days = "Weekends"
+            days = localized("scheduled.recurrence.weekends")
         } else {
             days = selected.map(shortWeekday).joined(separator: ", ")
         }
@@ -825,43 +856,121 @@ enum ScheduledJobFormatting {
         components.hour = hour
         components.minute = minute
         let date = Calendar.current.date(from: components) ?? Date()
-        return "\(days) at \(date.formatted(date: .omitted, time: .shortened))"
+        return String(
+            format: localized("scheduled.recurrence.atTime"),
+            locale: .current,
+            days,
+            date.formatted(date: .omitted, time: .shortened)
+        )
     }
 
     static func shortWeekday(_ weekday: ScheduledWeekday) -> String {
         switch weekday {
-        case .monday: "Mon"
-        case .tuesday: "Tue"
-        case .wednesday: "Wed"
-        case .thursday: "Thu"
-        case .friday: "Fri"
-        case .saturday: "Sat"
-        case .sunday: "Sun"
+        case .monday: localized("scheduled.weekday.monday.short")
+        case .tuesday: localized("scheduled.weekday.tuesday.short")
+        case .wednesday: localized("scheduled.weekday.wednesday.short")
+        case .thursday: localized("scheduled.weekday.thursday.short")
+        case .friday: localized("scheduled.weekday.friday.short")
+        case .saturday: localized("scheduled.weekday.saturday.short")
+        case .sunday: localized("scheduled.weekday.sunday.short")
         }
     }
 
     static func fullWeekday(_ weekday: ScheduledWeekday) -> String {
         switch weekday {
-        case .monday: "Monday"
-        case .tuesday: "Tuesday"
-        case .wednesday: "Wednesday"
-        case .thursday: "Thursday"
-        case .friday: "Friday"
-        case .saturday: "Saturday"
-        case .sunday: "Sunday"
+        case .monday: localized("scheduled.weekday.monday.full")
+        case .tuesday: localized("scheduled.weekday.tuesday.full")
+        case .wednesday: localized("scheduled.weekday.wednesday.full")
+        case .thursday: localized("scheduled.weekday.thursday.full")
+        case .friday: localized("scheduled.weekday.friday.full")
+        case .saturday: localized("scheduled.weekday.saturday.full")
+        case .sunday: localized("scheduled.weekday.sunday.full")
         }
     }
 
     static func failureLabel(_ kind: ScheduledJobFailureKind) -> String {
         switch kind {
-        case .providerUnavailable: "Provider unavailable"
-        case .libraryChannelUnavailable: "Library tools unavailable"
-        case .permissionDenied: "Permission required"
-        case .interruptedBeforeStart, .interrupted: "Interrupted"
-        case .launchFailed: "Couldn’t start"
-        case .providerFailed: "Provider failed"
+        case .providerUnavailable: localized("scheduled.failure.providerUnavailable")
+        case .libraryChannelUnavailable: localized("scheduled.failure.libraryChannelUnavailable")
+        case .permissionDenied: localized("scheduled.failure.permissionDenied")
+        case .interruptedBeforeStart, .interrupted: localized("scheduled.failure.interrupted")
+        case .launchFailed: localized("scheduled.failure.launchFailed")
+        case .providerFailed: localized("scheduled.failure.providerFailed")
         case .unknown(let value): value
         }
+    }
+
+    static func runDetail(
+        _ run: ScheduledJobRun,
+        resultUnavailable: Bool = false
+    ) -> String {
+        let time = run.activityAt.formatted(date: .abbreviated, time: .shortened)
+        let status: String
+        switch run.status {
+        case .pending:
+            status = localized("scheduled.status.waiting")
+        case .running:
+            status = localized("scheduled.status.running")
+        case .succeeded:
+            status = run.providerSessionId == nil || resultUnavailable
+                ? localized("scheduled.status.finishedResultUnavailable")
+                : localized("scheduled.status.finished")
+        case .failed:
+            status = run.failureKind.map(failureLabel)
+                ?? localized("scheduled.status.failed")
+        case .cancelled:
+            status = localized("scheduled.status.cancelled")
+        case .unknown(let value):
+            status = value
+        }
+        return String(
+            format: localized("scheduled.status.atTime"),
+            locale: .current,
+            status,
+            time
+        )
+    }
+
+    static func nextRunLabel(_ job: ScheduledJob) -> String {
+        guard let next = job.nextRunAt else {
+            return localized("scheduled.status.paused")
+        }
+        return String(
+            format: localized("scheduled.status.nextRun"),
+            locale: .current,
+            next.formatted(date: .abbreviated, time: .shortened)
+        )
+    }
+
+    static func runAccessibilityLabel(
+        _ run: ScheduledJobRun,
+        jobName: String?,
+        resultUnavailable: Bool = false
+    ) -> String {
+        var parts = [
+            jobName ?? localized("scheduled.job.fallbackName"),
+            runDetail(run, resultUnavailable: resultUnavailable),
+        ]
+        if run.isUnread {
+            parts.append(localized("scheduled.status.unread"))
+        }
+        return parts.joined(separator: ", ")
+    }
+
+    static func jobAccessibilityLabel(_ job: ScheduledJob, isActive: Bool) -> String {
+        var parts = [
+            job.name,
+            job.isEnabled
+                ? localized("scheduled.status.enabled")
+                : localized("scheduled.status.disabled"),
+            scheduleLabel(job),
+            job.provider.displayName,
+            nextRunLabel(job),
+        ]
+        if isActive {
+            parts.append(localized("scheduled.status.running"))
+        }
+        return parts.joined(separator: ", ")
     }
 }
 #endif

@@ -1799,7 +1799,7 @@ private func scheduledWeekdayName(_ weekday: ScheduledWeekday) -> String {
     }
 }
 
-private func parseScheduledWeekdayMask(_ raw: String) throws -> Int {
+func parseScheduledWeekdayMask(_ raw: String) throws -> Int {
     let normalized = raw.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
     switch normalized {
     case "daily": return 127
@@ -1829,7 +1829,7 @@ private func parseScheduledWeekdayMask(_ raw: String) throws -> Int {
     return tokens.reduce(0) { $0 | mapping[$1]!.mask }
 }
 
-private func parseScheduledLocalTime(_ raw: String) throws -> Int {
+func parseScheduledLocalTime(_ raw: String) throws -> Int {
     let parts = raw.split(separator: ":", omittingEmptySubsequences: false)
     guard parts.count == 2,
           parts[0].count == 2,
@@ -1844,7 +1844,7 @@ private func parseScheduledLocalTime(_ raw: String) throws -> Int {
     return hour * 60 + minute
 }
 
-private func parseScheduledProvider(_ raw: String) throws -> ScheduledJobProvider {
+func parseScheduledProvider(_ raw: String) throws -> ScheduledJobProvider {
     let provider = ScheduledJobProvider(rawValue: raw.lowercased())
     guard provider.isSupported else {
         throw ValidationError("Invalid provider '\(raw)'. Use claude or codex.")
@@ -1852,7 +1852,7 @@ private func parseScheduledProvider(_ raw: String) throws -> ScheduledJobProvide
     return provider
 }
 
-private func scheduledJobCLIErrorMessage(_ error: Error) -> String {
+func scheduledJobCLIErrorMessage(_ error: Error) -> String {
     if let validationError = error as? ValidationError {
         return validationError.message
     }

@@ -44,6 +44,11 @@ struct MCPCommand: ParsableCommand {
         if ProcessInfo.processInfo.environment["RUBIEN_APP_PRESENTATION"] == "1" {
             tools += MCPAppPresentationToolCatalog.tools
         }
+        if !readOnly,
+           ProcessInfo.processInfo.environment[RubienAppSchedulingContract.environmentKey]
+            == RubienAppSchedulingContract.environmentValue {
+            tools += MCPAppSchedulingToolCatalog.tools
+        }
         let server = MCPServer(tools: tools)
         server.serve()
     }

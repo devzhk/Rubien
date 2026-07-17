@@ -63,6 +63,7 @@ struct ChatSurfaceConfiguration {
     var onImportPDFs: (() -> Void)?
     var scheduledJobs: ScheduledJobCoordinator?
     var onOpenScheduledRun: ((ScheduledJobRun) -> Void)?
+    var scheduledJobsPresentation: Binding<ScheduledJobsPresentation?>?
 
     static func reader(onClose: (() -> Void)?) -> Self {
         Self(
@@ -75,7 +76,8 @@ struct ChatSurfaceConfiguration {
             onAddPapers: nil,
             onImportPDFs: nil,
             scheduledJobs: nil,
-            onOpenScheduledRun: nil)
+            onOpenScheduledRun: nil,
+            scheduledJobsPresentation: nil)
     }
 
     static func home(
@@ -86,7 +88,8 @@ struct ChatSurfaceConfiguration {
         onAddPapers: @escaping () -> Void,
         onImportPDFs: @escaping () -> Void,
         scheduledJobs: ScheduledJobCoordinator,
-        onOpenScheduledRun: @escaping (ScheduledJobRun) -> Void
+        onOpenScheduledRun: @escaping (ScheduledJobRun) -> Void,
+        scheduledJobsPresentation: Binding<ScheduledJobsPresentation?>
     ) -> Self {
         Self(
             placement: .home,
@@ -98,7 +101,8 @@ struct ChatSurfaceConfiguration {
             onAddPapers: onAddPapers,
             onImportPDFs: onImportPDFs,
             scheduledJobs: scheduledJobs,
-            onOpenScheduledRun: onOpenScheduledRun)
+            onOpenScheduledRun: onOpenScheduledRun,
+            scheduledJobsPresentation: scheduledJobsPresentation)
     }
 
     var isHome: Bool { placement == .home }
@@ -117,6 +121,7 @@ struct ChatSurfaceView: View {
     @State private var showingHistory = false
     @State private var showingScheduledJobs = false
     @State private var scheduledJobToEdit: ScheduledJob?
+    @State private var scheduledJobsInitialErrorMessage: String?
     @State private var modelMenuHovered = false
     @State private var providerMenuHovered = false
     @State private var plusMenuHovered = false
@@ -172,6 +177,12 @@ struct ChatSurfaceView: View {
             // Opened via Selection→Ask (a selection was staged before the pane
             // mounted): drop the caret into the composer so the user can type.
             if session.stagedSelection != nil { focusComposerSoon() }
+            presentRequestedScheduledJobs(
+                configuration.scheduledJobsPresentation?.wrappedValue
+            )
+        }
+        .onChange(of: configuration.scheduledJobsPresentation?.wrappedValue) { _, request in
+            presentRequestedScheduledJobs(request)
         }
         .onChange(of: colorScheme) { _, new in renderer.setTheme(new == .dark ? .dark : .light) }
         .onChange(of: session.hasMessages) { _, hasMessages in
@@ -285,6 +296,7 @@ struct ChatSurfaceView: View {
                         help: "Scheduled jobs and recent runs"
                     ) {
                         scheduledJobToEdit = nil
+                        scheduledJobsInitialErrorMessage = nil
                         showingScheduledJobs = true
                     }
                     .overlay(alignment: .topTrailing) {
@@ -308,7 +320,8 @@ struct ChatSurfaceView: View {
                                 homeResumeRequested = true
                                 configuration.onOpenScheduledRun?(run)
                             },
-                            initialEditorJob: scheduledJobToEdit
+                            initialEditorJob: scheduledJobToEdit,
+                            initialErrorMessage: scheduledJobsInitialErrorMessage
                         )
                     }
                 }
@@ -492,6 +505,7 @@ struct ChatSurfaceView: View {
                        !scheduledJobs.upcomingJobs.isEmpty {
                         Button {
                             scheduledJobToEdit = nil
+                            scheduledJobsInitialErrorMessage = nil
                             showingScheduledJobs = true
                         } label: {
                             HStack(spacing: 4) {
@@ -506,6 +520,7 @@ struct ChatSurfaceView: View {
                             ForEach(scheduledJobs.upcomingJobs) { job in
                                 Button {
                                     scheduledJobToEdit = job
+                                    scheduledJobsInitialErrorMessage = nil
                                     showingScheduledJobs = true
                                 } label: {
                                     HStack(spacing: 8) {
@@ -567,6 +582,15 @@ struct ChatSurfaceView: View {
             }
             .scrollIndicators(.automatic)
         }
+    }
+
+    private func presentRequestedScheduledJobs(_ request: ScheduledJobsPresentation?) {
+        guard let request else { return }
+        homeResumeRequested = false
+        scheduledJobToEdit = nil
+        scheduledJobsInitialErrorMessage = request.message
+        showingScheduledJobs = true
+        configuration.scheduledJobsPresentation?.wrappedValue = nil
     }
 
     /// The starts occupy roughly 14% of an ordinary canvas, so placing the cluster

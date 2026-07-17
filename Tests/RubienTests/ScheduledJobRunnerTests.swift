@@ -43,7 +43,7 @@ final class ScheduledJobRunnerTests: XCTestCase {
     }
 
     @MainActor
-    func testApprovalRequestIsDeniedAndFailsRun() async throws {
+    func testDeniedOptionalApprovalCanRecoverAndSucceed() async throws {
         let database = try AppDatabase(DatabaseQueue())
         let claim = try makeClaim(database: database)
         let provider = ScheduledProviderStub(events: [
@@ -61,9 +61,77 @@ final class ScheduledJobRunnerTests: XCTestCase {
         let possibleResult = await runner.execute(claim)
         let result = try XCTUnwrap(possibleResult)
 
+        XCTAssertEqual(result.status, .succeeded)
+        XCTAssertNil(result.failureKind)
+        XCTAssertEqual(provider.decisions, ["approval-1": .deny])
+    }
+
+    @MainActor
+    func testDeniedRequiredApprovalUsesPermissionFailureWhenProviderFails() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let claim = try makeClaim(database: database)
+        let provider = ScheduledProviderStub(events: [
+            .sessionStarted(sessionID: "scheduled-session"),
+            .approvalRequested(id: "approval-1", toolName: "Bash", summary: "write"),
+            .turnCompleted(outcome: .failed, usage: nil),
+        ])
+        let runner = ScheduledJobRunner(
+            database: database,
+            providerFactory: { _ in provider },
+            workspaceProvider: { FileManager.default.temporaryDirectory },
+            attributionStore: nil
+        )
+
+        let possibleResult = await runner.execute(claim)
+        let result = try XCTUnwrap(possibleResult)
+
         XCTAssertEqual(result.status, .failed)
         XCTAssertEqual(result.failureKind, .permissionDenied)
         XCTAssertEqual(provider.decisions, ["approval-1": .deny])
+    }
+
+    @MainActor
+    func testProviderTerminalFailureCannotBeRecordedAsSuccess() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let claim = try makeClaim(database: database)
+        let provider = ScheduledProviderStub(events: [
+            .sessionStarted(sessionID: "scheduled-session"),
+            .turnCompleted(outcome: .failed, usage: nil),
+        ])
+        let runner = ScheduledJobRunner(
+            database: database,
+            providerFactory: { _ in provider },
+            workspaceProvider: { FileManager.default.temporaryDirectory },
+            attributionStore: nil
+        )
+
+        let possibleResult = await runner.execute(claim)
+        let result = try XCTUnwrap(possibleResult)
+
+        XCTAssertEqual(result.status, .failed)
+        XCTAssertEqual(result.failureKind, .providerFailed)
+    }
+
+    @MainActor
+    func testProviderTerminalInterruptionPersistsInterruptedFailure() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let claim = try makeClaim(database: database)
+        let provider = ScheduledProviderStub(events: [
+            .sessionStarted(sessionID: "scheduled-session"),
+            .turnCompleted(outcome: .interrupted, usage: nil),
+        ])
+        let runner = ScheduledJobRunner(
+            database: database,
+            providerFactory: { _ in provider },
+            workspaceProvider: { FileManager.default.temporaryDirectory },
+            attributionStore: nil
+        )
+
+        let possibleResult = await runner.execute(claim)
+        let result = try XCTUnwrap(possibleResult)
+
+        XCTAssertEqual(result.status, .failed)
+        XCTAssertEqual(result.failureKind, .interrupted)
     }
 
     @MainActor
@@ -126,12 +194,42 @@ final class ScheduledJobRunnerTests: XCTestCase {
 
         let execution = Task { await runner.execute(claim) }
         try await Task.sleep(for: .milliseconds(10))
-        runner.cancel()
+        runner.cancel(runID: claim.run.id)
         let possibleResult = await execution.value
         let result = try XCTUnwrap(possibleResult)
 
         XCTAssertEqual(result.status, .cancelled)
         XCTAssertNil(result.failureKind)
+    }
+
+    @MainActor
+    func testCancellationBeforeExecutionIsScopedToClaimedRun() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let firstClaim = try makeClaim(database: database)
+        let provider = ScheduledProviderStub(events: [
+            .sessionStarted(sessionID: "scheduled-session"),
+            .turnCompleted(usage: nil),
+        ])
+        let runner = ScheduledJobRunner(
+            database: database,
+            providerFactory: { _ in provider },
+            workspaceProvider: { FileManager.default.temporaryDirectory },
+            attributionStore: nil
+        )
+
+        runner.cancel(runID: firstClaim.run.id)
+        let possibleFirstResult = await runner.execute(firstClaim)
+        let firstResult = try XCTUnwrap(possibleFirstResult)
+
+        XCTAssertEqual(firstResult.status, .cancelled)
+        XCTAssertNil(provider.lastRequest)
+
+        let secondClaim = try database.claimManualScheduledJob(id: firstClaim.job.id)
+        let possibleSecondResult = await runner.execute(secondClaim)
+        let secondResult = try XCTUnwrap(possibleSecondResult)
+
+        XCTAssertEqual(secondResult.status, .succeeded)
+        XCTAssertNotNil(provider.lastRequest)
     }
 
     private func makeClaim(database: AppDatabase) throws -> ScheduledJobExecutionClaim {

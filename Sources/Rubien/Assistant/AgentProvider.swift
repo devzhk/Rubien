@@ -130,6 +130,22 @@ struct AgentUsage: Sendable, Equatable {
     }
 }
 
+/// The provider's authoritative terminal disposition for a turn. This is kept
+/// separate from process/stream termination: both runtimes can end their event
+/// stream normally after reporting a failed or interrupted turn.
+enum AgentTurnOutcome: Sendable, Equatable {
+    case succeeded
+    case failed
+    case interrupted
+}
+
+/// Terminal turn metadata carried as one associated value so existing consumers
+/// that only need to recognize `.turnCompleted` remain source-compatible.
+struct AgentTurnCompletion: Sendable, Equatable {
+    let outcome: AgentTurnOutcome
+    let usage: AgentUsage?
+}
+
 /// A single event streamed out of a running turn. The mapping from the runtime's
 /// stream-json lines is in `ClaudeStreamParser` (§4.2).
 enum AgentEvent: Sendable, Equatable {
@@ -158,11 +174,22 @@ enum AgentEvent: Sendable, Equatable {
     /// A tool was denied — a `result` `permission_denials[]` entry (Claude) or a
     /// Codex sandbox block (Phase 3).
     case toolDenied(name: String, reason: String)
-    /// The turn finished (`result`). Composer re-enables.
-    case turnCompleted(usage: AgentUsage?)
+    /// The turn finished (`result` / `turn/completed`). Composer re-enables.
+    case turnCompleted(AgentTurnCompletion)
     /// An out-of-band notice surfaced as chat content: a rate-limit warning, a
     /// non-zero exit, an auth problem, etc.
     case providerNotice(String)
+
+    /// Compatibility constructor for callers and test doubles whose completed
+    /// turn is successful by definition.
+    static func turnCompleted(usage: AgentUsage?) -> AgentEvent {
+        .turnCompleted(AgentTurnCompletion(outcome: .succeeded, usage: usage))
+    }
+
+    /// Constructor used by provider parsers, where terminal status is explicit.
+    static func turnCompleted(outcome: AgentTurnOutcome, usage: AgentUsage?) -> AgentEvent {
+        .turnCompleted(AgentTurnCompletion(outcome: outcome, usage: usage))
+    }
 }
 
 /// The user's answer to a Claude `approvalRequested`.

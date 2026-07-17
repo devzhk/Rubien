@@ -18,6 +18,26 @@ final class MigrationV8Tests: XCTestCase {
                 )
                 XCTAssertEqual(triggerCount, 0, "local-only \(table) must not sync")
             }
+            let indexNames = try String.fetchAll(
+                db,
+                sql: "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='scheduledJobRun'"
+            )
+            XCTAssertTrue(indexNames.contains("scheduledJobRun_status_scheduledFor"))
+            XCTAssertTrue(indexNames.contains("scheduledJobRun_active_jobId"))
+            XCTAssertTrue(indexNames.contains("scheduledJobRun_activityAt"))
+            XCTAssertTrue(indexNames.contains("scheduledJobRun_jobId_activityAt"))
+            let activeIndexSQL = try String.fetchOne(
+                db,
+                sql: "SELECT sql FROM sqlite_master WHERE type='index' AND name='scheduledJobRun_active_jobId'"
+            )
+            XCTAssertTrue(activeIndexSQL?.contains(
+                "status NOT IN ('succeeded', 'failed', 'cancelled')"
+            ) == true)
+            let activityIndexSQL = try String.fetchOne(
+                db,
+                sql: "SELECT sql FROM sqlite_master WHERE type='index' AND name='scheduledJobRun_activityAt'"
+            )
+            XCTAssertTrue(activityIndexSQL?.contains("COALESCE(finishedAt, startedAt, scheduledFor)") == true)
         }
     }
 
@@ -52,11 +72,23 @@ final class MigrationV8Tests: XCTestCase {
             now: now,
             calendar: calendar
         )
-        _ = try database.claimManualScheduledJob(id: job.id, now: now)
+        let claim = try database.claimManualScheduledJob(id: job.id, now: now)
+        XCTAssertTrue(try database.finishScheduledJobRun(id: claim.run.id, status: .succeeded))
 
-        try database.dbWriter.write { db in
-            try db.execute(sql: "UPDATE scheduledJobRun SET status='succeeded' WHERE jobId=?", arguments: [job.id])
+        XCTAssertThrowsError(try database.dbWriter.write { db in
+            var duplicate = claim.run
+            duplicate.id = UUID().uuidString.lowercased()
+            duplicate.status = .succeeded
+            duplicate.finishedAt = now
+            try duplicate.insert(db)
+        }) { error in
+            XCTAssertTrue(error is DatabaseError)
         }
+        let deduplicatedCount = try database.dbWriter.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM scheduledJobRun")
+        }
+        XCTAssertEqual(deduplicatedCount, 1)
+
         try database.deleteScheduledJob(id: job.id)
 
         let runCount = try database.dbWriter.read { db in

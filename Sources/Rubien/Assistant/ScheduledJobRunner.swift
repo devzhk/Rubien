@@ -19,8 +19,9 @@ final class ScheduledJobRunner {
         category: "ScheduledJobRunner"
     )
 
+    private var currentRunID: String?
     private var currentProvider: (any AgentProvider)?
-    private var cancellationRequested = false
+    private var cancelledRunIDs: Set<String> = []
 
     init(
         database: AppDatabase,
@@ -40,50 +41,59 @@ final class ScheduledJobRunner {
         _ claim: ScheduledJobExecutionClaim,
         onStarted: (() -> Void)? = nil
     ) async -> ScheduledJobRun? {
-        cancellationRequested = false
+        let runID = claim.run.id
+        defer { cancelledRunIDs.remove(runID) }
+        guard !isCancellationRequested(for: runID) else {
+            _ = try? database.finishScheduledJobRun(id: runID, status: .cancelled)
+            return try? database.fetchScheduledJobRun(id: runID)
+        }
         guard contentChannelAvailable else {
             _ = try? database.finishScheduledJobRun(
-                id: claim.run.id,
+                id: runID,
                 status: .failed,
                 failureKind: .libraryChannelUnavailable
             )
-            return try? database.fetchScheduledJobRun(id: claim.run.id)
+            return try? database.fetchScheduledJobRun(id: runID)
         }
         guard let kind = claim.job.provider.agentProviderKind,
               let provider = providerFactory(kind)
         else {
             _ = try? database.finishScheduledJobRun(
-                id: claim.run.id,
+                id: runID,
                 status: .failed,
                 failureKind: .providerUnavailable
             )
-            return try? database.fetchScheduledJobRun(id: claim.run.id)
+            return try? database.fetchScheduledJobRun(id: runID)
         }
 
+        currentRunID = runID
         currentProvider = provider
         defer {
             provider.shutdown()
-            currentProvider = nil
+            if currentRunID == runID {
+                currentRunID = nil
+                currentProvider = nil
+            }
         }
 
         let availability = await provider.isAvailable()
-        guard !cancellationRequested else {
-            _ = try? database.finishScheduledJobRun(id: claim.run.id, status: .cancelled)
-            return try? database.fetchScheduledJobRun(id: claim.run.id)
+        guard !isCancellationRequested(for: runID) else {
+            _ = try? database.finishScheduledJobRun(id: runID, status: .cancelled)
+            return try? database.fetchScheduledJobRun(id: runID)
         }
         guard availability.isReady else {
             _ = try? database.finishScheduledJobRun(
-                id: claim.run.id,
+                id: runID,
                 status: .failed,
                 failureKind: .providerUnavailable
             )
-            return try? database.fetchScheduledJobRun(id: claim.run.id)
+            return try? database.fetchScheduledJobRun(id: runID)
         }
         guard (try? database.markScheduledJobRunStarted(
-            id: claim.run.id,
+            id: runID,
             at: Date()
         )) == true else {
-            return try? database.fetchScheduledJobRun(id: claim.run.id)
+            return try? database.fetchScheduledJobRun(id: runID)
         }
         onStarted?()
 
@@ -102,18 +112,18 @@ final class ScheduledJobRunner {
         )
 
         var receivedSession = false
-        var completed = false
+        var completion: AgentTurnCompletion?
         var permissionDenied = false
         do {
             for try await event in provider.send(turn: request) {
-                if cancellationRequested {
+                if isCancellationRequested(for: runID) {
                     provider.cancel()
                 }
                 switch event {
                 case .sessionStarted(let sessionID):
                     receivedSession = true
                     _ = try? database.setScheduledJobRunProviderSessionID(
-                        id: claim.run.id,
+                        id: runID,
                         sessionID: sessionID
                     )
                     if let attributionStore {
@@ -127,14 +137,14 @@ final class ScheduledJobRunner {
                     }
                 case .approvalRequested(let id, _, _):
                     // Scheduled runs never wait for a person and never bypass the
-                    // provider boundary. Any approval request is denied and makes
-                    // the run visibly fail, even if the provider later emits result.
+                    // provider boundary. The provider's terminal outcome decides
+                    // whether this denied tool was required or merely optional.
                     permissionDenied = true
                     provider.respondToApproval(id: id, .deny)
                 case .toolDenied:
                     permissionDenied = true
-                case .turnCompleted:
-                    completed = true
+                case .turnCompleted(let terminal):
+                    completion = terminal
                 case .modelResolved, .assistantDelta, .assistantMessageCompleted,
                      .toolUseStarted, .toolUseCompleted, .paperPresentation,
                      .providerNotice:
@@ -142,35 +152,50 @@ final class ScheduledJobRunner {
                 }
             }
         } catch {
-            logger.error("scheduled run \(claim.run.id) failed: \(error.localizedDescription)")
+            logger.error("scheduled run \(runID) failed: \(error.localizedDescription)")
         }
 
         let status: ScheduledJobRunStatus
         let failure: ScheduledJobFailureKind?
-        if cancellationRequested {
+        if isCancellationRequested(for: runID) {
             status = .cancelled
             failure = nil
-        } else if permissionDenied {
-            status = .failed
-            failure = .permissionDenied
-        } else if completed {
-            status = .succeeded
-            failure = nil
         } else {
-            status = .failed
-            failure = receivedSession ? .providerFailed : .launchFailed
+            switch completion?.outcome {
+            case .succeeded:
+                status = .succeeded
+                failure = nil
+            case .interrupted:
+                status = .failed
+                failure = .interrupted
+            case .failed:
+                status = .failed
+                failure = permissionDenied ? .permissionDenied : .providerFailed
+            case nil:
+                status = .failed
+                if permissionDenied {
+                    failure = .permissionDenied
+                } else {
+                    failure = receivedSession ? .providerFailed : .launchFailed
+                }
+            }
         }
         _ = try? database.finishScheduledJobRun(
-            id: claim.run.id,
+            id: runID,
             status: status,
             failureKind: failure
         )
-        return try? database.fetchScheduledJobRun(id: claim.run.id)
+        return try? database.fetchScheduledJobRun(id: runID)
     }
 
-    func cancel() {
-        cancellationRequested = true
+    func cancel(runID: String) {
+        cancelledRunIDs.insert(runID)
+        guard currentRunID == runID else { return }
         currentProvider?.cancel()
+    }
+
+    private func isCancellationRequested(for runID: String) -> Bool {
+        cancelledRunIDs.contains(runID)
     }
 
     private static func scheduledSeed(jobName: String) -> String {

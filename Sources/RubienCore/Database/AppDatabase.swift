@@ -655,20 +655,30 @@ public final class AppDatabase: Sendable {
             )
             """)
         try db.create(
-            index: "scheduledJobRun_status",
+            index: "scheduledJobRun_status_scheduledFor",
             on: "scheduledJobRun",
-            columns: ["status"]
+            columns: ["status", "scheduledFor"]
         )
-        try db.create(
-            index: "scheduledJobRun_scheduledFor",
-            on: "scheduledJobRun",
-            columns: ["scheduledFor"]
-        )
-        try db.create(
-            index: "scheduledJobRun_jobId_scheduledFor",
-            on: "scheduledJobRun",
-            columns: ["jobId", "scheduledFor"]
-        )
+        try db.execute(sql: """
+            CREATE INDEX scheduledJobRun_active_jobId
+            ON scheduledJobRun(jobId)
+            WHERE status NOT IN ('succeeded', 'failed', 'cancelled')
+            """)
+        try db.execute(sql: """
+            CREATE INDEX scheduledJobRun_activityAt
+            ON scheduledJobRun(
+                COALESCE(finishedAt, startedAt, scheduledFor) DESC,
+                id DESC
+            )
+            """)
+        try db.execute(sql: """
+            CREATE INDEX scheduledJobRun_jobId_activityAt
+            ON scheduledJobRun(
+                jobId,
+                COALESCE(finishedAt, startedAt, scheduledFor) DESC,
+                id DESC
+            )
+            """)
         try db.execute(sql: """
             CREATE INDEX scheduledJobRun_unread
             ON scheduledJobRun(isUnread)

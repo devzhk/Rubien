@@ -192,6 +192,79 @@ final class ScheduledJobTests: XCTestCase {
         XCTAssertEqual(claim.job.nextRunAt, date("2026-07-20T08:00:00Z"))
     }
 
+    func testOccurrenceIdentityIsGregorianInTheSourceTimeZone() throws {
+        let database = try AppDatabase(DatabaseQueue())
+        var buddhist = Calendar(identifier: .buddhist)
+        buddhist.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+        let job = try database.createScheduledJob(
+            .init(
+                name: "Late scan",
+                prompt: "Find papers",
+                recurrence: .init(weekdayMask: 127, localMinuteOfDay: 23 * 60 + 30),
+                provider: .claude
+            ),
+            now: date("2026-07-14T05:00:00Z"), // July 13 at 22:00 in Los Angeles
+            calendar: buddhist
+        )
+
+        let first = try XCTUnwrap(database.claimNextDueScheduledJob(
+            now: date("2026-07-14T06:31:00Z"),
+            calendar: buddhist
+        ))
+        XCTAssertEqual(first.run.scheduledFor, date("2026-07-14T06:30:00Z"))
+        XCTAssertEqual(first.run.occurrenceKey, "2026-07-13")
+        XCTAssertTrue(try database.finishScheduledJobRun(id: first.run.id, status: .succeeded))
+
+        // Re-present the same occurrence through a different system calendar.
+        // The Gregorian local-day identity must still deduplicate it.
+        try database.dbWriter.write { db in
+            try db.execute(
+                sql: "UPDATE scheduledJob SET nextRunAt = ? WHERE id = ?",
+                arguments: [first.run.scheduledFor, job.id]
+            )
+        }
+        var japanese = Calendar(identifier: .japanese)
+        japanese.timeZone = buddhist.timeZone
+        XCTAssertNil(try database.claimNextDueScheduledJob(
+            now: date("2026-07-14T06:32:00Z"),
+            calendar: japanese
+        ))
+        XCTAssertEqual(try database.fetchScheduledJobRuns(jobId: job.id).count, 1)
+    }
+
+    func testEditingAfterTodaysRunSkipsTheConsumedLocalDay() throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let calendar = utcCalendar()
+        let job = try database.createScheduledJob(
+            definition(name: "Morning scan"),
+            now: date("2026-07-13T07:00:00Z"),
+            calendar: calendar
+        )
+        let run = try XCTUnwrap(database.claimNextDueScheduledJob(
+            now: date("2026-07-13T08:01:00Z"),
+            calendar: calendar
+        ))
+        XCTAssertTrue(try database.finishScheduledJobRun(id: run.run.id, status: .succeeded))
+
+        let edited = try database.updateScheduledJob(
+            id: job.id,
+            definition: .init(
+                name: "Later scan",
+                prompt: "Find papers",
+                recurrence: .init(weekdayMask: 127, localMinuteOfDay: 9 * 60),
+                provider: .claude
+            ),
+            now: date("2026-07-13T08:30:00Z"),
+            calendar: calendar
+        )
+
+        XCTAssertEqual(edited.nextRunAt, date("2026-07-14T09:00:00Z"))
+        XCTAssertNil(try database.claimNextDueScheduledJob(
+            now: date("2026-07-13T09:01:00Z"),
+            calendar: calendar
+        ))
+    }
+
     func testClockRecalculationPreservesOverdueDeadlineForCatchUpClassification() throws {
         let database = try AppDatabase(DatabaseQueue())
         let calendar = utcCalendar()
@@ -295,6 +368,53 @@ final class ScheduledJobTests: XCTestCase {
         XCTAssertEqual(recoveredRunning.failureKind, .interrupted)
     }
 
+    func testRecentRunsOrderByExecutionActivityInsteadOfNominalOccurrence() throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let job = try database.createScheduledJob(
+            definition(name: "History"),
+            now: date("2026-07-13T07:00:00Z"),
+            calendar: utcCalendar()
+        )
+        let earlier = try database.claimManualScheduledJob(
+            id: job.id,
+            now: date("2026-07-19T10:00:00Z")
+        )
+        XCTAssertTrue(try database.finishScheduledJobRun(
+            id: earlier.run.id,
+            status: .succeeded,
+            at: date("2026-07-19T10:05:00Z")
+        ))
+
+        let catchUp = try database.claimManualScheduledJob(
+            id: job.id,
+            now: date("2026-07-20T10:00:00Z")
+        )
+        try database.dbWriter.write { db in
+            try db.execute(
+                sql: "UPDATE scheduledJobRun SET trigger = 'catchUp', scheduledFor = ? WHERE id = ?",
+                arguments: [date("2026-07-01T08:00:00Z"), catchUp.run.id]
+            )
+        }
+        XCTAssertTrue(try database.markScheduledJobRunStarted(
+            id: catchUp.run.id,
+            at: date("2026-07-20T10:00:00Z")
+        ))
+        XCTAssertTrue(try database.finishScheduledJobRun(
+            id: catchUp.run.id,
+            status: .succeeded,
+            at: date("2026-07-20T10:05:00Z")
+        ))
+
+        XCTAssertEqual(
+            try database.fetchRecentScheduledJobRuns(limit: 1).first?.id,
+            catchUp.run.id
+        )
+        XCTAssertEqual(
+            try database.fetchScheduledJobRuns(jobId: job.id, limit: 1).first?.id,
+            catchUp.run.id
+        )
+    }
+
     func testUnknownPersistedEnumsDecodeWithoutFailure() throws {
         let database = try AppDatabase(DatabaseQueue())
         let calendar = utcCalendar()
@@ -314,6 +434,59 @@ final class ScheduledJobTests: XCTestCase {
         let run = try XCTUnwrap(database.fetchScheduledJobRun(id: claim.run.id))
         XCTAssertEqual(run.trigger, .unknown("futureTrigger"))
         XCTAssertEqual(run.status, .unknown("futureStatus"))
+        XCTAssertTrue(run.status.isActive)
+        XCTAssertFalse(run.status.isTerminal)
+        XCTAssertNil(try database.claimNextDueScheduledJob(
+            now: date("2026-07-13T08:01:00Z"),
+            calendar: calendar
+        ))
+        XCTAssertThrowsError(try database.claimManualScheduledJob(id: job.id)) { error in
+            XCTAssertEqual(error as? ScheduledJobError, .runnerBusy)
+        }
+        XCTAssertThrowsError(try database.deleteScheduledJob(id: job.id)) { error in
+            XCTAssertEqual(error as? ScheduledJobError, .activeRunPreventsDeletion)
+        }
+    }
+
+    func testIndependentWritersSerializeConcurrentClaims() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rubien-scheduled-claim-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        var configuration = Configuration()
+        configuration.busyMode = .timeout(5)
+        let path = directory.appendingPathComponent("library.sqlite").path
+        let firstDatabase = try AppDatabase(DatabasePool(path: path, configuration: configuration))
+        let secondDatabase = try AppDatabase(DatabasePool(path: path, configuration: configuration))
+        _ = try firstDatabase.createScheduledJob(
+            definition(name: "Concurrent"),
+            now: date("2026-07-13T07:00:00Z"),
+            calendar: utcCalendar()
+        )
+        let due = date("2026-07-13T08:01:00Z")
+        let calendar = utcCalendar()
+
+        let claims = try await withThrowingTaskGroup(
+            of: ScheduledJobExecutionClaim?.self,
+            returning: [ScheduledJobExecutionClaim?].self
+        ) { group in
+            group.addTask {
+                try firstDatabase.claimNextDueScheduledJob(now: due, calendar: calendar)
+            }
+            group.addTask {
+                try secondDatabase.claimNextDueScheduledJob(now: due, calendar: calendar)
+            }
+            var results: [ScheduledJobExecutionClaim?] = []
+            for try await result in group { results.append(result) }
+            return results
+        }
+
+        XCTAssertEqual(claims.compactMap { $0 }.count, 1)
+        let persistedCount = try await firstDatabase.dbWriter.read { db in
+            try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM scheduledJobRun") ?? 0
+        }
+        XCTAssertEqual(persistedCount, 1)
     }
 
     private func definition(name: String) -> ScheduledJobDefinition {

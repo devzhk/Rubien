@@ -170,7 +170,10 @@ struct ClaudeStreamParser {
                 events.append(.toolDenied(name: name, reason: "Permission denied"))
             }
         }
-        events.append(.turnCompleted(usage: Self.parseUsage(object)))
+        events.append(.turnCompleted(
+            outcome: Self.parseOutcome(object),
+            usage: Self.parseUsage(object)
+        ))
         toolNamesByUseID.removeAll(keepingCapacity: true)
         presentationOrdinalsByUseID.removeAll(keepingCapacity: true)
         nextPresentationOrdinal = 0
@@ -204,6 +207,20 @@ struct ClaudeStreamParser {
     }
 
     // MARK: - Helpers
+
+    /// Claude reports terminal disposition across both `subtype` and `is_error`.
+    /// Treat contradictory or future error subtypes as failures rather than
+    /// accidentally upgrading them to success.
+    static func parseOutcome(_ result: [String: Any]) -> AgentTurnOutcome {
+        let subtype = (result["subtype"] as? String)?.lowercased()
+        if subtype == "interrupted" || subtype == "cancelled" || subtype == "canceled" {
+            return .interrupted
+        }
+        if result["is_error"] as? Bool == true { return .failed }
+        if subtype == "success" { return .succeeded }
+        if subtype?.hasPrefix("error") == true { return .failed }
+        return result["is_error"] as? Bool == false ? .succeeded : .failed
+    }
 
     /// Parse `result.usage` + top-level `total_cost_usd` into `AgentUsage`, or `nil`
     /// when nothing usable is present.

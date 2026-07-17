@@ -866,6 +866,7 @@ struct ContentView: View {
     @State private var homeActivityWidth: CGFloat = 380
     @State private var homeUsesCompactLayout = false
     @State private var homeUnreadOutcome: AssistantTurnOutcome.Phase?
+    @State private var scheduledJobsPresentation: ScheduledJobsPresentation?
     @State private var hostingWindowBox = HostingWindowBox()
     @State private var selectedId: Int64?
     @State private var tableScrollRequest = 0
@@ -1155,6 +1156,7 @@ struct ContentView: View {
                     activityRailVisible: $homeActivityRailVisible,
                     activityOverlayPresented: $homeActivityOverlayPresented,
                     activityWidth: $homeActivityWidth,
+                    scheduledJobsPresentation: $scheduledJobsPresentation,
                     onOpenReference: openReader,
                     onOpenPaperSource: { ChatExternalLinkOpener.open($0) },
                     onAddPaperSource: beginSuggestedWebImport,
@@ -1587,21 +1589,59 @@ struct ContentView: View {
     }
 
     private func openScheduledRun(_ run: ScheduledJobRun) {
-        guard let sessionID = run.providerSessionId else { return }
-        guard let kind = run.provider.agentProviderKind else { return }
-        if homeSession.providerKind != kind {
-            homeSession.switchProvider(to: kind, persistAsDefault: false)
+        mainDestination = .home
+        guard run.status == .succeeded else {
+            presentRecentScheduledRuns(message: ScheduledJobFormatting.localized(
+                run.status == .cancelled
+                    ? "scheduled.result.cancelledMessage"
+                    : "scheduled.result.failedMessage"
+            ))
+            return
         }
-        let jobName = scheduledJobCoordinator.job(id: run.jobId)?.name ?? "Scheduled job"
-        homeSession.resume(AgentSessionSummary(
+        guard let sessionID = run.providerSessionId else {
+            scheduledJobCoordinator.markResultUnavailable(id: run.id)
+            presentRecentScheduledRuns(message: ScheduledJobFormatting.localized(
+                "scheduled.result.noSessionMessage"
+            ))
+            return
+        }
+        guard let kind = run.provider.agentProviderKind else {
+            scheduledJobCoordinator.markResultUnavailable(id: run.id)
+            presentRecentScheduledRuns(message: ScheduledJobFormatting.localized(
+                "scheduled.result.providerUnavailableMessage"
+            ))
+            return
+        }
+        let jobName = scheduledJobCoordinator.job(id: run.jobId)?.name
+            ?? ScheduledJobFormatting.localized("scheduled.job.fallbackName")
+        let summary = AgentSessionSummary(
             id: sessionID,
             preview: jobName,
-            date: run.finishedAt ?? run.startedAt ?? run.scheduledFor
-        ))
-        scheduledJobCoordinator.markRunRead(id: run.id)
-        homeDraft = ""
-        homeSelectedMentions = []
+            date: run.activityAt
+        )
+        Task { @MainActor in
+            switch await homeSession.resumeScheduledResult(
+                summary,
+                providerKind: kind
+            ) {
+            case .opened:
+                scheduledJobCoordinator.markRunRead(id: run.id)
+                homeDraft = ""
+                homeSelectedMentions = []
+            case .unavailable:
+                scheduledJobCoordinator.markResultUnavailable(id: run.id)
+                presentRecentScheduledRuns(message: ScheduledJobFormatting.localized(
+                    "scheduled.result.transcriptUnavailableMessage"
+                ))
+            case .superseded:
+                break
+            }
+        }
+    }
+
+    private func presentRecentScheduledRuns(message: String) {
         mainDestination = .home
+        scheduledJobsPresentation = ScheduledJobsPresentation(message: message)
     }
 
     private func importBibTeX() {

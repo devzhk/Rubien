@@ -183,6 +183,12 @@ enum CodexInvocation {
                 "-c",
                 #"\#(server).env.\#(MCPContentChannel.appPresentationEnvironmentKey)="\#(MCPContentChannel.appPresentationEnvironmentValue)""#,
             ]
+            if !readOnlyLibrary {
+                args += [
+                    "-c",
+                    #"\#(server).env.\#(RubienAppSchedulingContract.environmentKey)="\#(RubienAppSchedulingContract.environmentValue)""#,
+                ]
+            }
             if let root = libraryRoot, !root.isEmpty {
                 args += ["-c", "\(server).env.RUBIEN_LIBRARY_ROOT=\(root)"]
             }

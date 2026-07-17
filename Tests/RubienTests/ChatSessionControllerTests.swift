@@ -144,6 +144,32 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertEqual(controller.turnOutcome.phase, .cancelled)
     }
 
+    func testTurnOutcomeFailsClosedForProviderFailureInterruptionAndMissingCompletion() async {
+        let provider = MockAgentProvider()
+        let controller = makeController(provider: provider, sink: SpyTranscriptSink())
+
+        await runTurn(
+            controller,
+            provider: provider,
+            send: "provider failure",
+            events: [.turnCompleted(outcome: .failed, usage: nil)])
+        XCTAssertEqual(controller.turnOutcome.phase, .failed)
+
+        await runTurn(
+            controller,
+            provider: provider,
+            send: "provider interruption",
+            events: [.turnCompleted(outcome: .interrupted, usage: nil)])
+        XCTAssertEqual(controller.turnOutcome.phase, .failed)
+
+        await runTurn(
+            controller,
+            provider: provider,
+            send: "missing terminal event",
+            events: [.assistantMessageCompleted(text: "partial result")])
+        XCTAssertEqual(controller.turnOutcome.phase, .failed)
+    }
+
     func testAttributionLookupBlocksSendUntilHistoryResumeIsAdopted() async {
         let provider = MockAgentProvider()
         let store = AssistantSessionAttributionStore(
@@ -1008,6 +1034,147 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertEqual(replayed.map(\.body), history.map(\.body))
     }
 
+    func testScheduledResultRequiresTranscriptBeforeReplacingConversation() async {
+        let provider = MockAgentProvider()
+        let sink = SpyTranscriptSink()
+        let controller = makeController(provider: provider, sink: sink)
+        await runTurn(
+            controller,
+            provider: provider,
+            send: "current conversation",
+            events: [.sessionStarted(sessionID: "current-session"), .turnCompleted(usage: nil)]
+        )
+        let callsBeforePreflight = sink.calls
+
+        let opened = await controller.resumeScheduledResult(
+            AgentSessionSummary(
+                id: "pruned-session",
+                preview: "Scheduled result",
+                date: Date(timeIntervalSince1970: 0)
+            ),
+            providerKind: .claude
+        )
+
+        XCTAssertEqual(opened, .unavailable)
+        XCTAssertFalse(controller.isResuming)
+        XCTAssertEqual(controller.liveSessionID, "current-session")
+        XCTAssertTrue(controller.hasMessages)
+        XCTAssertEqual(
+            sink.calls,
+            callsBeforePreflight,
+            "a missing scheduled transcript must not reset or replace the visible conversation"
+        )
+    }
+
+    func testScheduledResultWithTranscriptOpensAndRestoresContent() async {
+        let provider = MockAgentProvider()
+        let sink = SpyTranscriptSink()
+        let controller = makeController(provider: provider, sink: sink)
+        let history = [
+            ChatRenderMessage(role: .user, body: "Scheduled question", seq: 0),
+            ChatRenderMessage(role: .assistant, body: "Scheduled answer", seq: 1),
+        ]
+        provider.setTranscript(history, for: "scheduled-session")
+
+        let opened = await controller.resumeScheduledResult(
+            AgentSessionSummary(
+                id: "scheduled-session",
+                preview: "Scheduled question",
+                date: Date(timeIntervalSince1970: 0)
+            ),
+            providerKind: .claude
+        )
+
+        XCTAssertEqual(opened, .opened)
+        XCTAssertFalse(controller.isResuming)
+        XCTAssertEqual(controller.liveSessionID, "scheduled-session")
+        guard case .loadTranscript(let messages)? = sink.calls.last else {
+            return XCTFail("expected the scheduled transcript to load: \(sink.calls)")
+        }
+        XCTAssertEqual(messages.map(\.body), history.map(\.body))
+        XCTAssertFalse(sink.calls.contains { if case .addNotice = $0 { return true }; return false })
+    }
+
+    func testOverlappingScheduledResultPreflightsReportTheOlderRequestAsSuperseded() async {
+        let provider = MockAgentProvider()
+        let sink = SpyTranscriptSink()
+        let controller = makeController(provider: provider, sink: sink)
+        provider.setTranscript(
+            [ChatRenderMessage(role: .assistant, body: "Older result", seq: 0)],
+            for: "older-session")
+        provider.setTranscript(
+            [ChatRenderMessage(role: .assistant, body: "Newer result", seq: 0)],
+            for: "newer-session")
+        provider.holdTranscripts()
+
+        let older = Task { @MainActor in
+            await controller.resumeScheduledResult(
+                AgentSessionSummary(
+                    id: "older-session",
+                    preview: "Older scheduled run",
+                    date: Date(timeIntervalSince1970: 0)),
+                providerKind: .claude)
+        }
+        await waitUntil { provider.pendingTranscriptReadCount == 1 }
+
+        let newer = Task { @MainActor in
+            await controller.resumeScheduledResult(
+                AgentSessionSummary(
+                    id: "newer-session",
+                    preview: "Newer scheduled run",
+                    date: Date(timeIntervalSince1970: 1)),
+                providerKind: .claude)
+        }
+        await waitUntil { provider.pendingTranscriptReadCount == 2 }
+
+        provider.releaseTranscripts()
+        let olderResult = await older.value
+        let newerResult = await newer.value
+
+        XCTAssertEqual(olderResult, .superseded)
+        XCTAssertEqual(newerResult, .opened)
+        XCTAssertEqual(controller.liveSessionID, "newer-session")
+        XCTAssertFalse(controller.isResuming)
+        guard case .loadTranscript(let messages)? = sink.calls.last else {
+            return XCTFail("expected the newer scheduled transcript to load: \(sink.calls)")
+        }
+        XCTAssertEqual(messages.map(\.body), ["Newer result"])
+    }
+
+    func testMissingCrossProviderFactoryClearsAnOlderScheduledPreflight() async {
+        let provider = MockAgentProvider()
+        let controller = makeController(provider: provider, sink: SpyTranscriptSink())
+        provider.setTranscript(
+            [ChatRenderMessage(role: .assistant, body: "Older result", seq: 0)],
+            for: "older-session")
+        provider.holdTranscripts()
+
+        let older = Task { @MainActor in
+            await controller.resumeScheduledResult(
+                AgentSessionSummary(
+                    id: "older-session",
+                    preview: "Older scheduled run",
+                    date: Date(timeIntervalSince1970: 0)),
+                providerKind: .claude)
+        }
+        await waitUntil { provider.pendingTranscriptReadCount == 1 }
+        XCTAssertTrue(controller.isResuming)
+
+        let unavailable = await controller.resumeScheduledResult(
+            AgentSessionSummary(
+                id: "codex-session",
+                preview: "Codex scheduled run",
+                date: Date(timeIntervalSince1970: 1)),
+            providerKind: .codex)
+
+        XCTAssertEqual(unavailable, .unavailable)
+        XCTAssertFalse(controller.isResuming)
+        provider.releaseTranscripts()
+        let olderResult = await older.value
+        XCTAssertEqual(olderResult, .superseded)
+        XCTAssertFalse(controller.isResuming)
+    }
+
     func testSearchSessionsForwardsToTheProviderWithTheWorkspace() async {
         let provider = MockAgentProvider()
         let controller = makeController(provider: provider, sink: SpyTranscriptSink())
@@ -1103,9 +1270,11 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertTrue(ChatSessionController.isSilentReadTool("mcp__rubien__rubien_get_reference"))
         XCTAssertTrue(ChatSessionController.isSilentReadTool("rubien/rubien_get_pdf_info"))
         XCTAssertFalse(ChatSessionController.isSilentReadTool("mcp__rubien__rubien_update_reference"))
+        XCTAssertFalse(ChatSessionController.isSilentReadTool("mcp__rubien__rubien_create_scheduled_job"))
         XCTAssertFalse(ChatSessionController.isSilentReadTool("mcp__rubien__rubien_future_write"))
         XCTAssertTrue(ChatSessionController.isUnknownRubienTool("mcp__rubien__rubien_future_write"))
         XCTAssertFalse(ChatSessionController.isUnknownRubienTool("mcp__rubien__rubien_update_reference"))
+        XCTAssertFalse(ChatSessionController.isUnknownRubienTool("mcp__rubien__rubien_create_scheduled_job"))
         XCTAssertTrue(ChatSessionController.isSilentReadTool("ToolSearch"))
         XCTAssertTrue(ChatSessionController.isSilentReadTool("Read"))
         XCTAssertFalse(ChatSessionController.isSilentReadTool("Write"))
@@ -1171,6 +1340,39 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertNil(controller.pendingApproval)
         XCTAssertEqual(provider.approvals.map(\.0), ["write-1"])
         XCTAssertEqual(provider.approvals.first?.1, .allowForConversation)
+    }
+
+    func testAppPrivateSchedulingWriteUsesNormalApprovalModes() {
+        let askProvider = MockAgentProvider()
+        let askController = makeController(provider: askProvider, sink: SpyTranscriptSink())
+
+        askController.handle(
+            .approvalRequested(
+                id: "schedule-ask",
+                toolName: "mcp__rubien__rubien_create_scheduled_job",
+                summary: "Create Morning papers at 08:00"
+            ),
+            gen: askController.generation
+        )
+
+        XCTAssertEqual(askController.pendingApproval?.id, "schedule-ask")
+        XCTAssertTrue(askProvider.approvals.isEmpty)
+
+        let autoProvider = MockAgentProvider()
+        let autoController = makeController(provider: autoProvider, sink: SpyTranscriptSink())
+        autoController.autoApprove = true
+        autoController.handle(
+            .approvalRequested(
+                id: "schedule-auto",
+                toolName: "rubien/rubien_create_scheduled_job",
+                summary: "Create Morning papers at 08:00"
+            ),
+            gen: autoController.generation
+        )
+
+        XCTAssertNil(autoController.pendingApproval)
+        XCTAssertEqual(autoProvider.approvals.map(\.0), ["schedule-auto"])
+        XCTAssertEqual(autoProvider.approvals.first?.1, .allowForConversation)
     }
 
     func testStagedSelectionIsQuotedIntoTheMessageThenCleared() async {
@@ -2842,6 +3044,10 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
         _transcriptWaiters = []
         lock.unlock()
         for waiter in waiters { waiter.resume() }
+    }
+
+    var pendingTranscriptReadCount: Int {
+        lock.lock(); defer { lock.unlock() }; return _transcriptWaiters.count
     }
 
     func sessionTranscript(sessionID: String, workspaceURL: URL) async -> [ChatRenderMessage] {
