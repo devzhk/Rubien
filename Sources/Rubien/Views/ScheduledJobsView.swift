@@ -375,6 +375,7 @@ private struct ScheduledJobEditor: View {
     @State private var name: String
     @State private var prompt: String
     @State private var weekdayMask: Int
+    @State private var hoveredWeekday: ScheduledWeekday?
     @State private var time: Date
     @State private var isEnabled: Bool
     @State private var provider: ScheduledJobProvider
@@ -587,6 +588,7 @@ private struct ScheduledJobEditor: View {
 
     private func weekdayButton(_ weekday: ScheduledWeekday) -> some View {
         let selected = weekdayMask & weekday.mask != 0
+        let isHovered = hoveredWeekday == weekday
         return Button {
             if selected {
                 weekdayMask &= ~weekday.mask
@@ -598,12 +600,24 @@ private struct ScheduledJobEditor: View {
                 .font(.caption2.weight(.semibold))
                 .frame(width: 38, height: 38)
                 .background(
-                    selected ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.045),
+                    selected
+                        ? Color.accentColor.opacity(isHovered ? 0.20 : 0.14)
+                        : Color.primary.opacity(isHovered ? 0.08 : 0.045),
                     in: RoundedRectangle(cornerRadius: 5, style: .continuous)
                 )
-                .foregroundStyle(selected ? Color.accentColor : Color.primary.opacity(0.76))
+                .foregroundStyle(
+                    selected ? Color.accentColor : Color.primary.opacity(isHovered ? 0.92 : 0.76)
+                )
         }
         .buttonStyle(.plain)
+        .onHover { hovering in
+            if hovering {
+                hoveredWeekday = weekday
+            } else if hoveredWeekday == weekday {
+                hoveredWeekday = nil
+            }
+        }
+        .animation(.easeOut(duration: 0.12), value: isHovered)
         .accessibilityLabel(ScheduledJobFormatting.fullWeekday(weekday))
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
