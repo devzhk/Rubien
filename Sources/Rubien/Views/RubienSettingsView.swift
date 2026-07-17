@@ -52,6 +52,8 @@ struct RubienSettingsView: View {
     @State private var defaultLoadUserTools = false
     @State private var libraryPrompt = AssistantContext.defaultPrompt(for: .library)
     @State private var readerPrompt = AssistantContext.defaultPrompt(for: .reader)
+    @State private var isEditingLibraryPrompt = false
+    @State private var isEditingReaderPrompt = false
     @State private var promptSaveTask: Task<Void, Never>?
     @State private var recordReadingActivity = true
     @State private var recordAssistantActivity = true
@@ -641,16 +643,18 @@ struct RubienSettingsView: View {
             assistantPromptEditor(
                 title: String(localized: "Home conversations", bundle: .module),
                 text: $libraryPrompt,
+                isEditing: $isEditingLibraryPrompt,
                 defaultPrompt: AssistantContext.defaultPrompt(for: .library))
             assistantPromptEditor(
                 title: String(localized: "Reader conversations", bundle: .module),
                 text: $readerPrompt,
+                isEditing: $isEditingReaderPrompt,
                 defaultPrompt: AssistantContext.defaultPrompt(for: .reader))
         } header: {
             Text(String(localized: "Seed prompts", bundle: .module))
         } footer: {
             Text(String(
-                localized: "These complete prompts are used for new conversations, up to 8,000 characters each. In the Reader prompt, {{reference}} is replaced with the current paper; if removed, Rubien appends that context. Changes do not alter live or resumed conversations.",
+                localized: "Each prompt starts from Rubien’s built-in text. Choose Edit to customize it or Reset to Default to restore it. Prompts apply to new conversations and support up to 8,000 characters each. In the Reader prompt, {{reference}} is replaced with the current paper; if removed, Rubien appends that context.",
                 bundle: .module
             ))
         }
@@ -660,6 +664,7 @@ struct RubienSettingsView: View {
     private func assistantPromptEditor(
         title: String,
         text: Binding<String>,
+        isEditing: Binding<Bool>,
         defaultPrompt: String
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -681,17 +686,43 @@ struct RubienSettingsView: View {
                 .buttonStyle(SettingsActionButtonStyle())
                 .disabled(text.wrappedValue == defaultPrompt)
                 .accessibilityLabel("Reset \(title) prompt to default")
-            }
-            TextEditor(text: Binding(
-                get: { text.wrappedValue },
-                set: {
-                    let limited = AssistantContext.limitedPrompt($0)
-                    text.wrappedValue = limited
+                Button(String(
+                    localized: isEditing.wrappedValue ? "Done" : "Edit",
+                    bundle: .module
+                )) {
+                    if isEditing.wrappedValue {
+                        promptSaveTask?.cancel()
+                        persistPromptOverrides()
+                    }
+                    isEditing.wrappedValue.toggle()
                 }
-            ))
+                .buttonStyle(SettingsActionButtonStyle())
+                .accessibilityLabel(
+                    isEditing.wrappedValue
+                        ? "Finish editing \(title) prompt"
+                        : "Edit \(title) prompt"
+                )
+            }
+            Group {
+                if isEditing.wrappedValue {
+                    TextEditor(text: Binding(
+                        get: { text.wrappedValue },
+                        set: {
+                            let limited = AssistantContext.limitedPrompt($0)
+                            text.wrappedValue = limited
+                        }
+                    ))
+                    .scrollContentBackground(.hidden)
+                } else {
+                    ScrollView {
+                        Text(text.wrappedValue)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
+                    }
+                }
+            }
                 .font(.body)
                 .frame(minHeight: 96, maxHeight: 120)
-                .scrollContentBackground(.hidden)
                 .padding(4)
                 .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 6))
                 .accessibilityLabel(title)
