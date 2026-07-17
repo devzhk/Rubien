@@ -35,7 +35,7 @@ These URLs are supported without adding their hosts to the publisher allowlist.
 | Source | Host | Supported URL patterns | How Rubien handles it |
 |---|---|---|---|
 | DOI | `doi.org` | `/10.<registrant>/<suffix>` | Extracts the DOI and resolves metadata through CrossRef. |
-| arXiv abstract | `arxiv.org` | `/abs/<yymm.number>[vN]` or `/abs/<archive>/<7-digit-id>[vN]` | Resolves through the arXiv API; an optional version suffix is ignored. |
+| arXiv abstract | `arxiv.org` | `/abs/<yymm.number>[vN]` or `/abs/<archive>/<7-digit-id>[vN]` | Races the arXiv API and OpenAlex; if a miss or failure leaves no primary result after a short grace period, Rubien reads the abstract page's citation metadata. An optional version suffix is ignored. |
 | arXiv DataCite DOI | `doi.org` | `/10.48550/arXiv.<id>[vN]` | Routes to the arXiv resolver instead of CrossRef. |
 | arXiv PDF | `arxiv.org` | `/pdf/<id>.pdf` | Downloads and imports the PDF directly. Use the abstract URL when metadata-only import is preferred. |
 | PubMed Central | `pmc.ncbi.nlm.nih.gov` or legacy `www.ncbi.nlm.nih.gov` | `/articles/PMC<digits>/` or `/pmc/articles/PMC<digits>/` | Extracts the PMCID, converts it through NCBI, then resolves through PubMed/CrossRef. Query strings and fragments are accepted. |

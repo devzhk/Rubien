@@ -977,8 +977,9 @@ internal struct PaperURLHTTPResponse: Sendable {
 
 internal extension PaperURLResolver {
     /// Performs an HTTP GET with retry, content-type filtering, and a redirect-host
-    /// check against the KnownPaperHost allowlist. Used by CitationMetaScraper
-    /// for every allowlisted host (CVF included).
+    /// check against the KnownPaperHost allowlist. Callers for a fixed internal
+    /// endpoint outside that registry may instead supply `permittedFinalHosts`.
+    /// Used by CitationMetaScraper for every allowlisted host (CVF included).
     ///
     /// Retry contract (matches CitationMetaScraper §2.1):
     /// - URLError.timedOut: retry, 1s base, exponential
@@ -990,7 +991,8 @@ internal extension PaperURLResolver {
         url: URL,
         session: URLSession = .shared,
         timeout: TimeInterval = 15,
-        maxAttempts: Int = 3
+        maxAttempts: Int = 3,
+        permittedFinalHosts: Set<String>? = nil
     ) async throws -> PaperURLHTTPResponse {
         try await withRetry(maxAttempts: maxAttempts) {
             var request = URLRequest(url: url)
@@ -1011,8 +1013,10 @@ internal extension PaperURLResolver {
 
             // Redirect-host check: response.url is the final URL after redirects.
             let finalURL = httpResponse.url ?? url
-            if let finalHost = finalURL.host?.lowercased(),
-               KnownPaperHost.classify(finalURL) == nil {
+            let finalHost = finalURL.host?.lowercased() ?? ""
+            let finalHostIsPermitted = permittedFinalHosts?.contains(finalHost)
+                ?? (KnownPaperHost.classify(finalURL) != nil)
+            if !finalHostIsPermitted {
                 throw ResolveError.redirectedAwayFromAllowlist(finalHost: finalHost)
             }
 

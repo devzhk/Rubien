@@ -19,6 +19,7 @@ public struct CitationMetaResult: Sendable, Equatable {
     public var abstract: String?
     public var pdfURL: String?
     public var publisher: String?
+    public var arxivID: String?
 
     public init() {
         self.authors = []
@@ -39,6 +40,9 @@ public enum CitationMetaScraper {
     public static func parse(html: String, baseURL: URL) -> CitationMetaResult {
         var result = CitationMetaResult()
         let tags = extractMetaTags(from: html)
+        var explicitYear: Int?
+        var publicationDateYear: Int?
+        var genericDateYear: Int?
 
         // Multi-value tags
         let authorValues = tags.filter { $0.name == "citation_author" }.map(\.content)
@@ -61,10 +65,13 @@ public enum CitationMetaScraper {
             case "citation_issn":              result.issn = content
             case "citation_publisher":         result.publisher = content
             case "citation_abstract":          result.abstract = content
+            case "citation_arxiv_id":          result.arxivID = content
             case "citation_publication_date":
-                if result.year == nil { result.year = MetadataResolution.extractYear(fromMetadataText: content) }
+                publicationDateYear = MetadataResolution.extractYear(fromMetadataText: content) ?? publicationDateYear
+            case "citation_date":
+                genericDateYear = MetadataResolution.extractYear(fromMetadataText: content) ?? genericDateYear
             case "citation_year":
-                result.year = MetadataResolution.extractYear(fromMetadataText: content) ?? result.year
+                explicitYear = MetadataResolution.extractYear(fromMetadataText: content) ?? explicitYear
             case "citation_pdf_url":
                 result.pdfURL = resolveAbsolute(content, baseURL: baseURL)
             case "og:description":
@@ -73,6 +80,7 @@ public enum CitationMetaScraper {
                 break
             }
         }
+        result.year = explicitYear ?? publicationDateYear ?? genericDateYear
 
         return result
     }

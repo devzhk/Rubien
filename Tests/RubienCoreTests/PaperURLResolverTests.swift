@@ -84,6 +84,20 @@ final class PaperURLResolverTests: XCTestCase {
         return try! String(contentsOf: url, encoding: .utf8)
     }
 
+    func testFetchHTMLAcceptsExplicitHostOutsidePaperRegistry() async throws {
+        let url = "https://arxiv.org/abs/2607.14935"
+        StubURLProtocol.stub(url, body: "<html><head></head></html>")
+
+        let response = try await PaperURLResolver.fetchHTML(
+            url: URL(string: url)!,
+            session: StubURLProtocol.makeSession(),
+            maxAttempts: 1,
+            permittedFinalHosts: ["arxiv.org"]
+        )
+
+        XCTAssertEqual(response.finalURL.absoluteString, url)
+    }
+
     // MARK: - OpenReview success path (no DOI)
 
     func testOpenReviewLandingProducesConferencePaper() async throws {

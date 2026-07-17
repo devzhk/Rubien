@@ -723,69 +723,118 @@ public enum MetadataFetcher {
     // MARK: - arXiv ID → arXiv API
 
     /// Fetch metadata for an arXiv ID by racing the arXiv Atom API against an
-    /// OpenAlex DataCite-DOI lookup. First success wins; the loser is cancelled.
+    /// OpenAlex DataCite-DOI lookup. If either primary source fails or has not
+    /// indexed the paper, the canonical arXiv abstract page joins the race as a
+    /// fallback. First success wins; the other requests are cancelled.
     /// arXiv's `export.arxiv.org` is fronted by Fastly and has occasional POP
-    /// stalls where TCP connects but no HTTP response arrives — sequential
-    /// fallback would force the full URLSession timeout before recovering. The
-    /// race bounds user-visible latency at `min(arXiv, OpenAlex)`.
+    /// stalls where TCP connects but no HTTP response arrives. Very recent papers
+    /// can also appear on the abstract page before the unversioned Atom query and
+    /// DataCite/OpenAlex indexes converge. Failure-gating the page fetch avoids an
+    /// extra HTML request—and timing-dependent source changes—on the normal path.
     public static func fetchFromArXiv(_ arxivId: String) async throws -> Reference {
         let cacheKey = "arxiv:\(arxivId)"
         if let cached = cachedReference(for: cacheKey) { return cached }
 
-        let winner = try await raceArxivAndOpenAlex(
+        let winner = try await raceArxivSources(
             arxivId: arxivId,
             arxivFetch: { id in try await Self.fetchFromArXivAPI(id) },
+            abstractFetch: { id in try await Self.fetchFromArXivAbstractPage(id) },
             openAlexFetch: { doi in try await Self.fetchFromOpenAlexByDOI(doi) }
         )
         cacheReference(winner, for: cacheKey)
         return winner
     }
 
-    /// Race arXiv and OpenAlex for the same arXiv ID. Internal so tests can
-    /// drive it deterministically with closures rather than URLSession stubs.
-    /// On dual failure, throws the arXiv error to preserve prior semantics.
-    internal static func raceArxivAndOpenAlex(
+    /// Race the Atom API and OpenAlex for the same ID. A primary failure starts
+    /// a 300 ms grace period; if the surviving primary has not succeeded by then,
+    /// the canonical abstract page joins the race. If both primaries fail, the
+    /// fallback starts immediately. Internal so tests can control each transition
+    /// without live networking. On total failure, the Atom error wins to preserve
+    /// the resolver's existing user-facing error semantics.
+    internal static func raceArxivSources(
         arxivId: String,
+        waitBeforeStartingAbstractFallback: @Sendable @escaping () async throws -> Void = {
+            try await Task.sleep(nanoseconds: 300_000_000)
+        },
         arxivFetch: @Sendable @escaping (String) async throws -> Reference,
+        abstractFetch: @Sendable @escaping (String) async throws -> Reference,
         openAlexFetch: @Sendable @escaping (String) async throws -> Reference?
     ) async throws -> Reference {
+        enum PrimarySource {
+            case arxiv, openAlex
+        }
+
         enum Outcome {
-            case arxiv(Result<Reference, Error>)
-            case openAlex(Result<Reference, Error>)
+            case primary(PrimarySource, Result<Reference, Error>)
+            case abstractPage(Result<Reference, Error>)
+            case abstractFallbackDelayExpired
+        }
+
+        let abstractOperation: @Sendable () async -> Outcome = {
+            do { return .abstractPage(.success(try await abstractFetch(arxivId))) }
+            catch { return .abstractPage(.failure(error)) }
         }
 
         return try await withThrowingTaskGroup(of: Outcome.self) { group in
             group.addTask {
-                do { return .arxiv(.success(try await arxivFetch(arxivId))) }
-                catch { return .arxiv(.failure(error)) }
+                do { return .primary(.arxiv, .success(try await arxivFetch(arxivId))) }
+                catch { return .primary(.arxiv, .failure(error)) }
             }
             group.addTask {
                 do {
                     guard let ref = try await openAlexFetch("10.48550/arXiv.\(arxivId)") else {
-                        return .openAlex(.failure(FetchError.parseError))
+                        return .primary(.openAlex, .failure(FetchError.parseError))
                     }
                     var stamped = ref
                     stamped.url = "https://arxiv.org/abs/\(arxivId)"
-                    return .openAlex(.success(stamped))
+                    return .primary(.openAlex, .success(stamped))
                 } catch {
-                    return .openAlex(.failure(error))
+                    return .primary(.openAlex, .failure(error))
                 }
             }
 
             var arxivError: Error?
+            var abstractPageError: Error?
             var openAlexError: Error?
+            var fallbackDelayStarted = false
+            var abstractFallbackStarted = false
+            var primaryRequestsRemaining = 2
             for try await outcome in group {
+                try Task.checkCancellation()
                 switch outcome {
-                case .arxiv(.success(let ref)), .openAlex(.success(let ref)):
+                case .primary(_, .success(let ref)):
                     group.cancelAll()
                     return ref
-                case .arxiv(.failure(let err)):
-                    arxivError = err
-                case .openAlex(.failure(let err)):
-                    openAlexError = err
+                case .primary(let source, .failure(let err)):
+                    primaryRequestsRemaining -= 1
+                    switch source {
+                    case .arxiv: arxivError = err
+                    case .openAlex: openAlexError = err
+                    }
+
+                    if primaryRequestsRemaining == 0, !abstractFallbackStarted {
+                        abstractFallbackStarted = true
+                        group.addTask(operation: abstractOperation)
+                    } else if !fallbackDelayStarted {
+                        fallbackDelayStarted = true
+                        group.addTask {
+                            try await waitBeforeStartingAbstractFallback()
+                            return .abstractFallbackDelayExpired
+                        }
+                    }
+                case .abstractPage(.success(let ref)):
+                    group.cancelAll()
+                    return ref
+                case .abstractPage(.failure(let err)):
+                    abstractPageError = err
+                case .abstractFallbackDelayExpired:
+                    if !abstractFallbackStarted {
+                        abstractFallbackStarted = true
+                        group.addTask(operation: abstractOperation)
+                    }
                 }
             }
-            throw arxivError ?? openAlexError ?? FetchError.parseError
+            throw arxivError ?? abstractPageError ?? openAlexError ?? FetchError.parseError
         }
     }
 
@@ -812,6 +861,25 @@ public enum MetadataFetcher {
         return try parseArXivResponse(data, arxivId: arxivId)
     }
 
+    /// Fetch citation metadata from arXiv's canonical abstract page. This page
+    /// is published as part of the submission itself and is therefore available
+    /// before downstream API and DOI indexes necessarily converge.
+    private static func fetchFromArXivAbstractPage(_ arxivId: String) async throws -> Reference {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "arxiv.org"
+        components.path = "/abs/\(arxivId)"
+        guard let url = components.url else { throw FetchError.invalidURL }
+
+        let response = try await PaperURLResolver.fetchHTML(
+            url: url,
+            timeout: 8,
+            maxAttempts: 1,
+            permittedFinalHosts: ["arxiv.org", "www.arxiv.org"]
+        )
+        return try parseArXivAbstractPage(response.data, arxivId: arxivId)
+    }
+
     static func parseArXivResponse(_ data: Data, arxivId: String) throws -> Reference {
         let parser = ArXivXMLParser(data: data)
         guard var entry = parser.parse() else {
@@ -819,6 +887,32 @@ public enum MetadataFetcher {
         }
         entry.url = "https://arxiv.org/abs/\(arxivId)"
         return entry
+    }
+
+    static func parseArXivAbstractPage(_ data: Data, arxivId: String) throws -> Reference {
+        guard let html = String(data: data, encoding: .utf8),
+              let baseURL = URL(string: "https://arxiv.org/abs/\(arxivId)") else {
+            throw FetchError.parseError
+        }
+
+        let meta = CitationMetaScraper.parse(html: html, baseURL: baseURL)
+        guard let pageID = meta.arxivID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              pageID.caseInsensitiveCompare(arxivId) == .orderedSame,
+              let title = meta.title?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !title.isEmpty,
+              !meta.authors.isEmpty else {
+            throw FetchError.parseError
+        }
+
+        return Reference(
+            title: title,
+            authors: meta.authors,
+            year: meta.year,
+            doi: meta.doi,
+            url: baseURL.absoluteString,
+            abstract: meta.abstract,
+            referenceType: .journalArticle
+        )
     }
 
     // MARK: - OpenAlex Full Metadata (title search + DOI lookup)

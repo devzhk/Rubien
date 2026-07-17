@@ -157,6 +157,34 @@ final class CitationMetaScraperParseTests: XCTestCase {
         XCTAssertEqual(result.year, 2024)
     }
 
+    func testArXivDateAndIdentifierAliases() {
+        let html = """
+        <html><head>
+        <meta name="citation_title" content="A Fresh arXiv Paper">
+        <meta name="citation_date" content="2026/07/16">
+        <meta name="citation_arxiv_id" content="2607.14935">
+        </head></html>
+        """
+        let result = CitationMetaScraper.parse(
+            html: html,
+            baseURL: baseURL("https://arxiv.org/abs/2607.14935")
+        )
+        XCTAssertEqual(result.year, 2026)
+        XCTAssertEqual(result.arxivID, "2607.14935")
+    }
+
+    func testYearFieldPrecedenceDoesNotDependOnTagOrder() {
+        let html = """
+        <html><head>
+        <meta name="citation_year" content="2024">
+        <meta name="citation_publication_date" content="2025/06/12">
+        <meta name="citation_date" content="2026/07/16">
+        </head></html>
+        """
+        let result = CitationMetaScraper.parse(html: html, baseURL: baseURL("https://example.com"))
+        XCTAssertEqual(result.year, 2024)
+    }
+
     // MARK: - Multiple citation_author tags collected in order
 
     func testMultipleAuthorsInOrder() {

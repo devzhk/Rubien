@@ -1,6 +1,34 @@
 import XCTest
 @testable import RubienCore
 
+private actor InvocationCounter {
+    private(set) var count = 0
+
+    func increment() {
+        count += 1
+    }
+}
+
+private actor AsyncGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func open() {
+        guard !isOpen else { return }
+        isOpen = true
+        let pending = waiters
+        waiters.removeAll()
+        pending.forEach { $0.resume() }
+    }
+}
+
 final class MetadataFetcherTests: XCTestCase {
     func testParsePubMedResponseSetsPMIDAndPMCID() throws {
         let json = """
@@ -210,14 +238,18 @@ final class MetadataFetcherTests: XCTestCase {
         XCTAssertFalse(error.isRetryable, "404 not-found errors should not be retryable")
     }
 
-    // MARK: - arXiv ↔ OpenAlex race
+    // MARK: - arXiv source race
 
     func testRaceArxivWinsWhenOpenAlexSlow() async throws {
-        let result = try await MetadataFetcher.raceArxivAndOpenAlex(
+        let result = try await MetadataFetcher.raceArxivSources(
             arxivId: "2410.08260",
             arxivFetch: { id in
                 try await Task.sleep(nanoseconds: 20_000_000)
                 return Reference(title: "From arXiv", url: "https://arxiv.org/abs/\(id)")
+            },
+            abstractFetch: { _ in
+                try await Task.sleep(nanoseconds: 300_000_000)
+                return Reference(title: "From abstract page")
             },
             openAlexFetch: { _ in
                 try await Task.sleep(nanoseconds: 200_000_000)
@@ -229,9 +261,13 @@ final class MetadataFetcherTests: XCTestCase {
     }
 
     func testRaceOpenAlexWinsWhenArxivStalls() async throws {
-        let result = try await MetadataFetcher.raceArxivAndOpenAlex(
+        let result = try await MetadataFetcher.raceArxivSources(
             arxivId: "2410.08260",
             arxivFetch: { _ in
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+                return Reference(title: "Should not win")
+            },
+            abstractFetch: { _ in
                 try await Task.sleep(nanoseconds: 1_000_000_000)
                 return Reference(title: "Should not win")
             },
@@ -244,43 +280,153 @@ final class MetadataFetcherTests: XCTestCase {
         XCTAssertEqual(result.url, "https://arxiv.org/abs/2410.08260")
     }
 
-    func testRaceBothFailRethrowsArxivError() async {
+    func testRaceAllFailRethrowsArxivError() async {
         struct ArxivErr: Error {}
+        struct AbstractErr: Error {}
         struct OAErr: Error {}
         do {
-            _ = try await MetadataFetcher.raceArxivAndOpenAlex(
+            _ = try await MetadataFetcher.raceArxivSources(
                 arxivId: "2410.08260",
+                waitBeforeStartingAbstractFallback: {},
                 arxivFetch: { _ in throw ArxivErr() },
+                abstractFetch: { _ in throw AbstractErr() },
                 openAlexFetch: { _ in throw OAErr() }
             )
             XCTFail("expected throw")
         } catch is ArxivErr {
-            // expected — arXiv error preserved on dual failure
+            // expected — arXiv error preserved when all sources fail
         } catch {
             XCTFail("expected ArxivErr, got \(error)")
         }
     }
 
     func testRaceOpenAlexNilDoesNotMaskArxivSuccess() async throws {
-        let result = try await MetadataFetcher.raceArxivAndOpenAlex(
+        let result = try await MetadataFetcher.raceArxivSources(
             arxivId: "2410.08260",
             arxivFetch: { id in
                 try await Task.sleep(nanoseconds: 20_000_000)
                 return Reference(title: "From arXiv", url: "https://arxiv.org/abs/\(id)")
             },
+            abstractFetch: { _ in throw URLError(.cannotParseResponse) },
             openAlexFetch: { _ in nil /* OpenAlex 404 / not yet indexed */ }
         )
         XCTAssertEqual(result.title, "From arXiv")
     }
 
+    func testRaceAbstractPageWinsForFreshPaper() async throws {
+        let result = try await MetadataFetcher.raceArxivSources(
+            arxivId: "2607.14935",
+            waitBeforeStartingAbstractFallback: {},
+            arxivFetch: { _ in
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+                return Reference(title: "Stalled Atom API")
+            },
+            abstractFetch: { id in
+                Reference(title: "Fresh abstract page", url: "https://arxiv.org/abs/\(id)")
+            },
+            openAlexFetch: { _ in nil /* DOI not indexed yet */ }
+        )
+        XCTAssertEqual(result.title, "Fresh abstract page")
+        XCTAssertEqual(result.url, "https://arxiv.org/abs/2607.14935")
+    }
+
+    func testPendingPrimaryWinsBeforeAbstractFallbackStarts() async throws {
+        let primaryMayFinish = AsyncGate()
+        let fallbackDelayStarted = AsyncGate()
+        let abstractRequests = InvocationCounter()
+        let resolution = Task {
+            try await MetadataFetcher.raceArxivSources(
+                arxivId: "2607.14935",
+                waitBeforeStartingAbstractFallback: {
+                    await fallbackDelayStarted.open()
+                    try await Task.sleep(nanoseconds: 10_000_000_000)
+                },
+                arxivFetch: { id in
+                    await primaryMayFinish.wait()
+                    return Reference(title: "Preferred Atom result", url: "https://arxiv.org/abs/\(id)")
+                },
+                abstractFetch: { _ in
+                    await abstractRequests.increment()
+                    return Reference(title: "Unexpected fallback")
+                },
+                openAlexFetch: { _ in nil /* starts the fallback */ }
+            )
+        }
+
+        await fallbackDelayStarted.wait()
+        await primaryMayFinish.open()
+        let result = try await resolution.value
+        XCTAssertEqual(result.title, "Preferred Atom result")
+        let requestCount = await abstractRequests.count
+        XCTAssertEqual(requestCount, 0)
+    }
+
+    func testCallerCancellationWhileFallbackDelayIsPendingPropagates() async {
+        let fallbackDelayStarted = AsyncGate()
+        let resolution = Task {
+            try await MetadataFetcher.raceArxivSources(
+                arxivId: "2607.14935",
+                waitBeforeStartingAbstractFallback: {
+                    await fallbackDelayStarted.open()
+                    try await Task.sleep(nanoseconds: 10_000_000_000)
+                },
+                arxivFetch: { _ in
+                    try await Task.sleep(nanoseconds: 10_000_000_000)
+                    return Reference(title: "Stalled Atom")
+                },
+                abstractFetch: { id in
+                    Reference(title: "Fallback abstract page", url: "https://arxiv.org/abs/\(id)")
+                },
+                openAlexFetch: { _ in nil /* starts the fallback */ }
+            )
+        }
+
+        await fallbackDelayStarted.wait()
+        resolution.cancel()
+        do {
+            _ = try await resolution.value
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            XCTFail("Expected CancellationError, got \(error)")
+        }
+    }
+
+    func testFastPrimarySourceDoesNotStartAbstractPageFallback() async throws {
+        let abstractRequests = InvocationCounter()
+        let result = try await MetadataFetcher.raceArxivSources(
+            arxivId: "2410.08260",
+            arxivFetch: { id in
+                Reference(title: "From arXiv", url: "https://arxiv.org/abs/\(id)")
+            },
+            abstractFetch: { _ in
+                await abstractRequests.increment()
+                return Reference(title: "Unexpected abstract request")
+            },
+            openAlexFetch: { _ in
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+                return Reference(title: "Slow OpenAlex")
+            }
+        )
+
+        XCTAssertEqual(result.title, "From arXiv")
+        let requestCount = await abstractRequests.count
+        XCTAssertEqual(requestCount, 0)
+    }
+
     func testRaceSimultaneousSuccessReturnsOneWithoutDeadlock() async throws {
-        // Both children resolve on the same scheduling tick — exercises the
-        // for-await loop when outcomes pile up. Either may win.
-        let result = try await MetadataFetcher.raceArxivAndOpenAlex(
+        // Atom and OpenAlex resolve on the same scheduling tick — exercises
+        // the for-await loop when outcomes pile up. Either may win.
+        let result = try await MetadataFetcher.raceArxivSources(
             arxivId: "2410.08260",
             arxivFetch: { id in
                 try await Task.sleep(nanoseconds: 10_000_000)
                 return Reference(title: "From arXiv", url: "https://arxiv.org/abs/\(id)")
+            },
+            abstractFetch: { _ in
+                try await Task.sleep(nanoseconds: 200_000_000)
+                return Reference(title: "From abstract page")
             },
             openAlexFetch: { _ in
                 try await Task.sleep(nanoseconds: 10_000_000)
@@ -288,5 +434,43 @@ final class MetadataFetcherTests: XCTestCase {
             }
         )
         XCTAssertTrue(["From arXiv", "From OpenAlex"].contains(result.title))
+    }
+
+    func testParseArXivAbstractPageUsesCitationMetadata() throws {
+        let html = """
+        <html><head>
+        <meta name="citation_title" content="VideoChat3: Fully Open Video MLLM">
+        <meta name="citation_author" content="Li, Xinhao">
+        <meta name="citation_author" content="Zhu, Yuhan">
+        <meta name="citation_date" content="2026/07/16">
+        <meta name="citation_doi" content="10.1234/published-version">
+        <meta name="citation_pdf_url" content="https://arxiv.org/pdf/2607.14935">
+        <meta name="citation_arxiv_id" content="2607.14935">
+        <meta name="citation_abstract" content="A fresh paper available before API propagation.">
+        </head></html>
+        """.data(using: .utf8)!
+
+        let reference = try MetadataFetcher.parseArXivAbstractPage(html, arxivId: "2607.14935")
+
+        XCTAssertEqual(reference.title, "VideoChat3: Fully Open Video MLLM")
+        XCTAssertEqual(reference.authors.map(\.family), ["Li", "Zhu"])
+        XCTAssertEqual(reference.year, 2026)
+        XCTAssertEqual(reference.doi, "10.1234/published-version")
+        XCTAssertEqual(reference.url, "https://arxiv.org/abs/2607.14935")
+        XCTAssertEqual(reference.abstract, "A fresh paper available before API propagation.")
+    }
+
+    func testParseArXivAbstractPageRejectsMismatchedIdentifier() {
+        let html = """
+        <html><head>
+        <meta name="citation_title" content="Wrong Paper">
+        <meta name="citation_author" content="Author, Example">
+        <meta name="citation_arxiv_id" content="9999.99999">
+        </head></html>
+        """.data(using: .utf8)!
+
+        XCTAssertThrowsError(
+            try MetadataFetcher.parseArXivAbstractPage(html, arxivId: "2607.14935")
+        )
     }
 }
