@@ -683,7 +683,7 @@ struct RubienSettingsView: View {
                     promptSaveTask?.cancel()
                     persistPromptOverrides()
                 }
-                .buttonStyle(SettingsActionButtonStyle(foregroundOpacity: 0.65))
+                .buttonStyle(SettingsActionButtonStyle())
                 .accessibilityLabel("Reset \(title) prompt to default")
                 Button(String(
                     localized: isEditing.wrappedValue ? "Done" : "Edit",
@@ -721,6 +721,7 @@ struct RubienSettingsView: View {
                 }
             }
                 .font(.body)
+                .foregroundStyle(Color.primary.opacity(0.72))
                 .frame(minHeight: 96, maxHeight: 120)
                 .padding(4)
                 .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 6))
@@ -990,13 +991,12 @@ struct RubienSettingsView: View {
 /// The stock `.bordered` / `.automatic` button gave no visible hover feedback on
 /// macOS, and a persistent border read as heavier than a form action needs.
 private struct SettingsActionButtonStyle: ButtonStyle {
-    var foregroundOpacity = 0.85
     @State private var hovered = false
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(Color.primary.opacity(foregroundOpacity))
+            .foregroundStyle(Color.primary.opacity(0.85))
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
             .background(

@@ -44,14 +44,16 @@ final class AssistantContextTests: XCTestCase {
     }
 
     func testDefaultPromptsAreVisibleForBothSettingsSurfaces() {
-        XCTAssertTrue(AssistantContext.defaultPrompt(for: .library).contains("library assistant"))
-        XCTAssertTrue(AssistantContext.defaultPrompt(for: .reader).contains("reading assistant"))
+        let library = AssistantContext.defaultPrompt(for: .library)
+        let reader = AssistantContext.defaultPrompt(for: .reader)
+        XCTAssertTrue(library.contains("library assistant"))
+        XCTAssertTrue(reader.contains("reading assistant"))
+        XCTAssertTrue(library.contains("Use LaTeX for mathematical notation"))
+        XCTAssertTrue(reader.contains("Use LaTeX for mathematical notation"))
         XCTAssertTrue(
-            AssistantContext.defaultPrompt(for: .reader)
-                .contains("rubien_present_document_cards"))
+            reader.contains("rubien_present_document_cards"))
         XCTAssertTrue(
-            AssistantContext.defaultPrompt(for: .reader)
-                .contains(AssistantContext.readerReferencePlaceholder))
+            reader.contains(AssistantContext.readerReferencePlaceholder))
     }
 
     func testLibraryPromptOverrideReplacesVisibleDefault() {
