@@ -540,7 +540,7 @@ private struct ScheduledJobEditor: View {
             }
             .formStyle(.grouped)
         }
-        .frame(width: 440, height: 650)
+        .frame(width: 380, height: 650)
         .onChange(of: provider) { _, newProvider in
             model = Self.defaultModel(for: newProvider, codexModels: codexModels)
             effort = Self.defaultEffort(for: newProvider)
