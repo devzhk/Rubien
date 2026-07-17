@@ -56,6 +56,7 @@ enum ActivityHeatmapCalendar {
 
 struct AgentHomeView: View {
     @ObservedObject var session: ChatSessionController
+    @EnvironmentObject private var scheduledJobs: ScheduledJobCoordinator
     let renderer: ChatTranscriptController
     let database: AppDatabase
     @Binding var draft: String
@@ -70,6 +71,7 @@ struct AgentHomeView: View {
     let onAddPapers: () -> Void
     let onImportPDFs: () -> Void
     let onCompactLayoutChange: (Bool) -> Void
+    let onOpenScheduledRun: (ScheduledJobRun) -> Void
 
     var body: some View {
         GeometryReader { geometry in
@@ -122,7 +124,9 @@ struct AgentHomeView: View {
                 onAddPaperSource: onAddPaperSource,
                 libraryIsEmpty: libraryIsEmpty,
                 onAddPapers: onAddPapers,
-                onImportPDFs: onImportPDFs))
+                onImportPDFs: onImportPDFs,
+                scheduledJobs: scheduledJobs,
+                onOpenScheduledRun: onOpenScheduledRun))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.chatSurface)
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))

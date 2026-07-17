@@ -155,6 +155,35 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertFalse(argv.contains("-c tools.web_search=false"), "web on by default")
     }
 
+    func testScheduledInvocationUsesReadOnlyRubienCatalog() {
+        let argv = CodexInvocation.arguments(
+            rubienCLIPath: "/Applications/Rubien.app/Contents/Helpers/rubien-cli",
+            libraryRoot: "/tmp/lib",
+            webAccess: true,
+            readOnlyLibrary: true,
+            disabledMCPServerNames: ["github", "rubien", "sites-design-picker"]
+        )
+        XCTAssertTrue(argv.containsPair("--disable", "apps"))
+        XCTAssertTrue(argv.containsPair("--disable", "plugins"))
+        XCTAssertTrue(argv.containsPair("-c", "mcp_servers.github.enabled=false"))
+        XCTAssertTrue(argv.containsPair("-c", "mcp_servers.sites-design-picker.enabled=false"))
+        XCTAssertTrue(argv.containsPair("-c", "mcp_servers.rubien.enabled=true"))
+        XCTAssertTrue(argv.containsPair("-c", #"mcp_servers.rubien.args=["mcp","--read-only"]"#))
+        XCTAssertFalse(argv.contains("mcp_servers.rubien.default_tools_approval_mode=writes"))
+    }
+
+    func testConfiguredMCPServerNameParserRejectsUnsafeNames() {
+        XCTAssertEqual(
+            CodexInvocation.configuredMCPServerNames(
+                from: #"[{"name":"github"},{"name":"sites-design-picker"}]"#
+            ),
+            ["github", "sites-design-picker"]
+        )
+        XCTAssertNil(CodexInvocation.configuredMCPServerNames(
+            from: #"[{"name":"unsafe.name"}]"#
+        ))
+    }
+
     func testUserToolsOptInEnablesCodexAppsAndKeepsRubienInjection() async throws {
         let workspace = try makeWorkspace()
         try writeConfig(["assistantText": "ok"], into: workspace)

@@ -830,6 +830,7 @@ struct ContentView: View {
     @StateObject private var homeRenderer: ChatTranscriptController
     @StateObject private var homeSession: ChatSessionController
     @EnvironmentObject private var pdfDownloadCoordinator: PDFDownloadCoordinator
+    @EnvironmentObject private var scheduledJobCoordinator: ScheduledJobCoordinator
     @Environment(\.syncCoordinator) private var syncCoordinator: SyncCoordinator?
     #if canImport(Sparkle)
     @Environment(UpdateController.self) private var updateController
@@ -865,6 +866,7 @@ struct ContentView: View {
     @State private var homeActivityWidth: CGFloat = 380
     @State private var homeUsesCompactLayout = false
     @State private var homeUnreadOutcome: AssistantTurnOutcome.Phase?
+    @State private var hostingWindowBox = HostingWindowBox()
     @State private var selectedId: Int64?
     @State private var tableScrollRequest = 0
     @State private var columnConfigs: [ColumnConfig] = {
@@ -1159,7 +1161,8 @@ struct ContentView: View {
                     libraryIsEmpty: viewModel.references.isEmpty,
                     onAddPapers: { showAddReferenceFlow = true },
                     onImportPDFs: { showAddReferenceFlow = true },
-                    onCompactLayoutChange: { homeUsesCompactLayout = $0 })
+                    onCompactLayoutChange: { homeUsesCompactLayout = $0 },
+                    onOpenScheduledRun: openScheduledRun)
             } else {
                 ReferenceTableView(
                 references: viewModel.filteredReferences,
@@ -1524,6 +1527,16 @@ struct ContentView: View {
             selectedId = id
             columnVisibility = .all
         }
+        .onReceive(NotificationCenter.default.publisher(for: .rubienOpenScheduledJobRun)) { note in
+            if let target = note.object as? NSWindow,
+               hostingWindowBox.window !== target {
+                return
+            }
+            guard let runID = note.userInfo?[ScheduledJobNotifications.runIDKey] as? String,
+                  let run = try? viewModel.db.fetchScheduledJobRun(id: runID)
+            else { return }
+            openScheduledRun(run)
+        }
         .alert(String(localized: "Operation failed", bundle: .module), isPresented: Binding(
             get: { viewModel.errorMessage != nil },
             set: { if !$0 { viewModel.errorMessage = nil } }
@@ -1533,6 +1546,7 @@ struct ContentView: View {
             Text(viewModel.errorMessage ?? "")
         }
         .frame(minWidth: 900, minHeight: 600)
+        .background(HostingWindowCapture(box: hostingWindowBox).frame(width: 0, height: 0))
         .onChange(of: columnConfigs) { _, newValue in
             if let data = try? JSONEncoder().encode(newValue) {
                 UserDefaults.standard.set(data, forKey: RubienPreferences.columnConfigsKey)
@@ -1570,6 +1584,24 @@ struct ContentView: View {
         .onDisappear {
             homeSession.teardown()
         }
+    }
+
+    private func openScheduledRun(_ run: ScheduledJobRun) {
+        guard let sessionID = run.providerSessionId else { return }
+        guard let kind = run.provider.agentProviderKind else { return }
+        if homeSession.providerKind != kind {
+            homeSession.switchProvider(to: kind, persistAsDefault: false)
+        }
+        let jobName = scheduledJobCoordinator.job(id: run.jobId)?.name ?? "Scheduled job"
+        homeSession.resume(AgentSessionSummary(
+            id: sessionID,
+            preview: jobName,
+            date: run.finishedAt ?? run.startedAt ?? run.scheduledFor
+        ))
+        scheduledJobCoordinator.markRunRead(id: run.id)
+        homeDraft = ""
+        homeSelectedMentions = []
+        mainDestination = .home
     }
 
     private func importBibTeX() {
@@ -2240,6 +2272,45 @@ struct ContentView: View {
         var saved = reference
         let result = viewModel.saveManualReference(&saved, reviewedBy: "web-import")
         confirmAndReveal(saved, result: result)
+    }
+}
+
+private final class HostingWindowBox {
+    weak var window: NSWindow?
+}
+
+private struct HostingWindowCapture: NSViewRepresentable {
+    let box: HostingWindowBox
+
+    func makeNSView(context: Context) -> NSView {
+        WindowCaptureView(box: box)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        box.window = nsView.window
+        if let window = nsView.window {
+            ScheduledJobNotificationRouter.shared.windowAvailable(window)
+        }
+    }
+
+    private final class WindowCaptureView: NSView {
+        weak var box: HostingWindowBox?
+
+        init(box: HostingWindowBox) {
+            self.box = box
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            box?.window = window
+            if let window {
+                ScheduledJobNotificationRouter.shared.windowAvailable(window)
+            }
+        }
     }
 }
 

@@ -51,7 +51,9 @@ final class ClaudeCodeProvider: AgentProvider {
         let token = UUID()
         let engine = self.engine
         let override = executableOverride
-        let mcpConfig = contentChannel?.configArgument()
+        let mcpConfig = contentChannel?.configArgument(
+            readOnly: turn.executionMode == .scheduled
+        )
         return AsyncThrowingStream { continuation in
             // Breaking/cancelling the consumed stream (e.g. window closed mid-turn)
             // kills this turn's process group — turn-scoped so it can't clobber a
@@ -509,6 +511,11 @@ enum ClaudeCLIInvocation {
             "--include-partial-messages",
             "--permission-prompt-tool", "stdio",
         ]
+        if request.executionMode == .scheduled {
+            // No approval bypass: scheduled runs keep Claude's normal permission
+            // boundary and the runner deterministically denies any prompt.
+            args += ["--permission-mode", "default"]
+        }
         if !request.loadUserTools {
             // Default isolation (D6): drops ambient settings/MCP/plugins while
             // subscription auth survives. Opted-in conversations omit this flag so

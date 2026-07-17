@@ -349,14 +349,16 @@ enum AgentBinaryProbe {
     /// the child.
     static func run(
         executablePath: String, arguments: [String],
-        environment: [String: String], timeout: TimeInterval
+        environment: [String: String], timeout: TimeInterval,
+        workingDirectory: String? = nil
     ) -> String? {
         guard let result = runCommand(
             executablePath: executablePath,
             arguments: arguments,
             environment: environment,
             timeout: timeout,
-            captureStderr: false),
+            captureStderr: false,
+            workingDirectory: workingDirectory),
               result.exitCode == 0,
               !result.timedOut
         else { return nil }
@@ -369,12 +371,16 @@ enum AgentBinaryProbe {
     static func runCommand(
         executablePath: String, arguments: [String],
         environment: [String: String], timeout: TimeInterval,
-        captureStderr: Bool = true
+        captureStderr: Bool = true,
+        workingDirectory: String? = nil
     ) -> CommandResult? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = arguments
         process.environment = environment
+        if let workingDirectory {
+            process.currentDirectoryURL = URL(fileURLWithPath: workingDirectory, isDirectory: true)
+        }
         let outPipe = Pipe()
         process.standardOutput = outPipe
         // Only pipe stderr when the caller needs it (auth probes read it). Otherwise send

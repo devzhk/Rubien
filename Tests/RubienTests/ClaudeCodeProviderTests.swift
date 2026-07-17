@@ -548,6 +548,17 @@ final class ClaudeCodeProviderTests: XCTestCase {
         XCTAssertFalse(args.contains("--disallowedTools"))  // web access on
     }
 
+    func testScheduledArgumentsPinDefaultPermissionMode() {
+        let request = AgentTurnRequest(
+            workspaceURL: URL(fileURLWithPath: "/ws"),
+            prompt: "scheduled",
+            executionMode: .scheduled
+        )
+        let args = ClaudeCLIInvocation.arguments(for: request)
+        XCTAssertTrue(args.containsPair("--permission-mode", "default"))
+        XCTAssertFalse(args.contains("--dangerously-skip-permissions"))
+    }
+
     func testMinimalEnvironmentIsAllowlistedAndNeverLeaksAppEnv() {
         let env = ClaudeCLIInvocation.environment(binaryDirectory: "/opt/homebrew/bin")
         XCTAssertEqual(env["TERM"], "dumb")

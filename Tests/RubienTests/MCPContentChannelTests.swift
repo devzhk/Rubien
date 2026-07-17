@@ -39,6 +39,14 @@ final class MCPContentChannelTests: XCTestCase {
         XCTAssertEqual(rubien?["args"] as? [String], ["mcp"])
     }
 
+    func testScheduledConfigUsesReadOnlyCatalog() throws {
+        let channel = makeChannel()
+        let arg = try XCTUnwrap(channel.configArgument(readOnly: true))
+        let parsed = try JSONSerialization.jsonObject(with: Data(arg.utf8)) as? [String: Any]
+        let rubien = (parsed?["mcpServers"] as? [String: Any])?["rubien"] as? [String: Any]
+        XCTAssertEqual(rubien?["args"] as? [String], ["mcp", "--read-only"])
+    }
+
     // MARK: argv injection
 
     func testArgumentsInjectMCPFlagsWhenConfigPresent() {

@@ -52,7 +52,7 @@ public struct ReferenceMentionCandidate: Sendable, Equatable {
 public final class AppDatabase: Sendable {
     /// Bumped whenever a new migration is registered. Surfaced in
     /// `rubien-cli sync status` JSON for diagnostics.
-    public static let currentSchemaVersion = "v7"
+    public static let currentSchemaVersion = "v8"
 
     public let dbWriter: any DatabaseWriter
 
@@ -595,7 +595,85 @@ public final class AppDatabase: Sendable {
             try Self.applyV7Body(db)
         }
 
+        // v8 (2026-07): local-only scheduled Assistant definitions and run
+        // history. These tables deliberately do not appear in `syncedTables`:
+        // schedules run on one Mac only in the first release, avoiding duplicate
+        // executions across devices and keeping provider session IDs local.
+        migrator.registerMigration("v8") { db in
+            try Self.applyV8Body(db)
+        }
+
         return migrator
+    }
+
+    fileprivate static func applyV8Body(_ db: Database) throws {
+        try db.execute(sql: """
+            CREATE TABLE scheduledJob (
+                id TEXT NOT NULL PRIMARY KEY,
+                name TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                weekdayMask INTEGER NOT NULL CHECK (weekdayMask BETWEEN 1 AND 127),
+                localMinuteOfDay INTEGER NOT NULL CHECK (localMinuteOfDay BETWEEN 0 AND 1439),
+                isEnabled BOOLEAN NOT NULL CHECK (isEnabled IN (0, 1)),
+                provider TEXT NOT NULL,
+                model TEXT,
+                effort TEXT,
+                webAccess BOOLEAN NOT NULL CHECK (webAccess IN (0, 1)),
+                notifyOnCompletion BOOLEAN NOT NULL CHECK (notifyOnCompletion IN (0, 1)),
+                nextRunAt DATETIME,
+                createdAt DATETIME NOT NULL,
+                dateModified DATETIME NOT NULL,
+                CHECK (length(trim(name)) BETWEEN 1 AND 200),
+                CHECK (length(trim(prompt)) BETWEEN 1 AND 20000),
+                CHECK (length(trim(provider)) > 0)
+            )
+            """)
+        try db.create(
+            index: "scheduledJob_enabled_nextRunAt",
+            on: "scheduledJob",
+            columns: ["isEnabled", "nextRunAt"]
+        )
+
+        try db.execute(sql: """
+            CREATE TABLE scheduledJobRun (
+                id TEXT NOT NULL PRIMARY KEY,
+                jobId TEXT NOT NULL REFERENCES scheduledJob(id) ON DELETE CASCADE,
+                trigger TEXT NOT NULL,
+                occurrenceKey TEXT NOT NULL,
+                scheduledFor DATETIME NOT NULL,
+                startedAt DATETIME,
+                finishedAt DATETIME,
+                status TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                providerSessionId TEXT,
+                failureKind TEXT,
+                isUnread BOOLEAN NOT NULL CHECK (isUnread IN (0, 1)),
+                UNIQUE (jobId, occurrenceKey),
+                CHECK (length(trim(trigger)) > 0),
+                CHECK (length(trim(status)) > 0),
+                CHECK (length(trim(provider)) > 0)
+            )
+            """)
+        try db.create(
+            index: "scheduledJobRun_status",
+            on: "scheduledJobRun",
+            columns: ["status"]
+        )
+        try db.create(
+            index: "scheduledJobRun_scheduledFor",
+            on: "scheduledJobRun",
+            columns: ["scheduledFor"]
+        )
+        try db.create(
+            index: "scheduledJobRun_jobId_scheduledFor",
+            on: "scheduledJobRun",
+            columns: ["jobId", "scheduledFor"]
+        )
+        try db.execute(sql: """
+            CREATE INDEX scheduledJobRun_unread
+            ON scheduledJobRun(isUnread)
+            WHERE isUnread = 1
+            """)
     }
 
     fileprivate static func applyV7Body(_ db: Database) throws {
@@ -943,6 +1021,14 @@ public final class AppDatabase: Sendable {
     public static func runV7MigrationForTesting(on queue: DatabaseQueue) throws {
         try queue.write { db in
             try Self.applyV7Body(db)
+        }
+    }
+
+    /// Test-only: applies the immutable v8 local scheduled-jobs schema body to
+    /// a v7-shaped queue. Used by `MigrationV8Tests` for the upgrade path.
+    public static func runV8MigrationForTesting(on queue: DatabaseQueue) throws {
+        try queue.write { db in
+            try Self.applyV8Body(db)
         }
     }
 

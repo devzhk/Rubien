@@ -30,6 +30,13 @@ enum CodexSandbox: String, Codable, Sendable, Equatable {
     case workspaceWrite
 }
 
+/// Scheduled turns have no person present to approve tools. Providers use this
+/// mode to pin their approval posture and expose Rubien's read-only MCP catalog.
+enum AgentExecutionMode: String, Codable, Sendable, Equatable {
+    case interactive
+    case scheduled
+}
+
 /// One user turn to run. Prompt + approval responses ride the process **stdin**;
 /// continuity is the runtime's `--resume`.
 struct AgentTurnRequest: Sendable, Equatable {
@@ -62,6 +69,8 @@ struct AgentTurnRequest: Sendable, Equatable {
     /// `--effort <low|medium|high|xhigh|max>` (verified 2.1.201). Codex (Phase 3):
     /// maps to `model_reasoning_effort`.
     let effortOverride: String?
+    /// Interactive chat or unattended scheduled execution.
+    let executionMode: AgentExecutionMode
 
     init(
         workspaceURL: URL,
@@ -73,7 +82,8 @@ struct AgentTurnRequest: Sendable, Equatable {
         loadUserTools: Bool = false,
         codexSandbox: CodexSandbox = .readOnly,
         modelOverride: String? = nil,
-        effortOverride: String? = nil
+        effortOverride: String? = nil,
+        executionMode: AgentExecutionMode = .interactive
     ) {
         self.workspaceURL = workspaceURL
         self.resumeSessionID = resumeSessionID
@@ -85,6 +95,7 @@ struct AgentTurnRequest: Sendable, Equatable {
         self.codexSandbox = codexSandbox
         self.modelOverride = modelOverride
         self.effortOverride = effortOverride
+        self.executionMode = executionMode
     }
 }
 
@@ -412,6 +423,8 @@ enum AgentProviderError: LocalizedError, Equatable, Sendable {
     /// A staged attachment vanished, became unreadable, or no longer has a
     /// provider-supported representation before the turn could start.
     case attachmentUnreadable(String)
+    /// Scheduled Codex could not enumerate and disable ambient MCP servers.
+    case isolationUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -421,6 +434,8 @@ enum AgentProviderError: LocalizedError, Equatable, Sendable {
             return "The assistant process could not be started (error \(code))."
         case .attachmentUnreadable(let name):
             return "The attachment \(name) could not be read before sending."
+        case .isolationUnavailable:
+            return "Codex's configured tools could not be isolated for this scheduled run."
         }
     }
 }

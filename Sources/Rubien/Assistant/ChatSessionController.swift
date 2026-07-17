@@ -1092,7 +1092,7 @@ final class ChatSessionController: ObservableObject {
     /// factory is absent (tests / DEBUG harness). The prior transcript is dropped
     /// (nothing persisted — D5); History can resume a Codex thread later. A real
     /// switch also becomes the default backend for future conversations.
-    func switchProvider(to kind: AgentProviderKind) {
+    func switchProvider(to kind: AgentProviderKind, persistAsDefault: Bool = true) {
         guard !isStagingAttachments,
               !hasAttachmentRehomeFailure,
               let providerFactory,
@@ -1111,7 +1111,9 @@ final class ChatSessionController: ObservableObject {
         // stale result landing in the gap before the recheck below runs must not write
         // the wrong backend's availability. The scheduled recheck bumps this again.
         availabilityProbeToken += 1
-        RubienPreferences.assistantProvider = kind
+        if persistAsDefault {
+            RubienPreferences.assistantProvider = kind
+        }
         resetConversationState(attachments: .preserveAndRehome)
         liveSessionID = nil
         seedSent = false

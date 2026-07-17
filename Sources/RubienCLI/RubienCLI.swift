@@ -38,6 +38,7 @@ struct RubienCLI: AsyncParsableCommand {
             Pdf.self,
             Stats.self,
             StatsClear.self,
+            Jobs.self,
             MCPCommand.self,
         ]
 #if os(macOS)
@@ -1535,6 +1536,331 @@ struct StatsClear: ParsableCommand {
         notifyLibraryChanged()
         printJSON(["cleared": activityKind.rawValue])
     }
+}
+
+// MARK: - Scheduled Jobs
+
+struct ScheduledJobDTO: Encodable {
+    let id: String
+    let name: String
+    let prompt: String
+    let weekdayMask: Int
+    let weekdays: [String]
+    let localTime: String
+    let enabled: Bool
+    let provider: String
+    let model: String?
+    let effort: String?
+    let webAccess: Bool
+    let notifyOnCompletion: Bool
+    let nextRunAt: Date?
+    let createdAt: Date
+    let dateModified: Date
+
+    init(_ job: ScheduledJob) {
+        id = job.id
+        name = job.name
+        prompt = job.prompt
+        weekdayMask = job.weekdayMask
+        weekdays = ScheduledWeekday.allCases
+            .filter { job.recurrence.contains($0) }
+            .map(scheduledWeekdayName)
+        localTime = String(format: "%02d:%02d", job.localMinuteOfDay / 60, job.localMinuteOfDay % 60)
+        enabled = job.isEnabled
+        provider = job.provider.rawValue
+        model = job.model
+        effort = job.effort
+        webAccess = job.webAccess
+        notifyOnCompletion = job.notifyOnCompletion
+        nextRunAt = job.nextRunAt
+        createdAt = job.createdAt
+        dateModified = job.dateModified
+    }
+}
+
+struct ScheduledJobRunDTO: Encodable {
+    let id: String
+    let jobId: String
+    let trigger: String
+    let occurrenceKey: String
+    let scheduledFor: Date
+    let startedAt: Date?
+    let finishedAt: Date?
+    let status: String
+    let provider: String
+    let providerSessionId: String?
+    let failureKind: String?
+    let unread: Bool
+
+    init(_ run: ScheduledJobRun) {
+        id = run.id
+        jobId = run.jobId
+        trigger = run.trigger.rawValue
+        occurrenceKey = run.occurrenceKey
+        scheduledFor = run.scheduledFor
+        startedAt = run.startedAt
+        finishedAt = run.finishedAt
+        status = run.status.rawValue
+        provider = run.provider.rawValue
+        providerSessionId = run.providerSessionId
+        failureKind = run.failureKind?.rawValue
+        unread = run.isUnread
+    }
+}
+
+struct Jobs: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "jobs",
+        abstract: "Manage local scheduled Rubien Assistant jobs",
+        subcommands: [
+            JobsList.self,
+            JobsGet.self,
+            JobsCreate.self,
+            JobsUpdate.self,
+            JobsDelete.self,
+            JobsEnable.self,
+            JobsRuns.self,
+        ],
+        defaultSubcommand: JobsList.self
+    )
+}
+
+struct JobsList: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "list", abstract: "List scheduled jobs")
+
+    func run() throws {
+        printJSON(try AppDatabase.shared.fetchScheduledJobs().map(ScheduledJobDTO.init))
+    }
+}
+
+struct JobsGet: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "get", abstract: "Get one scheduled job")
+
+    @Argument(help: "Scheduled job ID") var id: String
+
+    func run() throws {
+        guard let job = try AppDatabase.shared.fetchScheduledJob(id: id) else {
+            printJSONError("Scheduled job \(id) not found")
+            throw ExitCode.failure
+        }
+        printJSON(ScheduledJobDTO(job))
+    }
+}
+
+struct JobsCreate: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "create", abstract: "Create a scheduled job")
+
+    @Option(help: "Display name") var name: String
+    @Option(help: "Assistant prompt") var prompt: String
+    @Option(help: "Comma-separated weekdays (mon..sun), daily, weekdays, or weekends") var weekdays: String
+    @Option(help: "Local wall-clock time in HH:mm") var time: String
+    @Option(help: "Provider: claude or codex") var provider: String = "claude"
+    @Option(help: "Provider model override") var model: String?
+    @Option(help: "Provider effort override") var effort: String?
+    @Flag(name: .customLong("paused"), help: "Create the job paused") var paused = false
+    @Flag(name: .customLong("no-web-access"), help: "Disable provider web access") var noWebAccess = false
+    @Flag(name: .customLong("no-notify"), help: "Disable completion notifications") var noNotify = false
+
+    func run() throws {
+        do {
+            let job = try AppDatabase.shared.createScheduledJob(
+                .init(
+                    name: name,
+                    prompt: prompt,
+                    recurrence: .init(
+                        weekdayMask: try parseScheduledWeekdayMask(weekdays),
+                        localMinuteOfDay: try parseScheduledLocalTime(time)
+                    ),
+                    isEnabled: !paused,
+                    provider: try parseScheduledProvider(provider),
+                    model: model,
+                    effort: effort,
+                    webAccess: !noWebAccess,
+                    notifyOnCompletion: !noNotify
+                )
+            )
+            notifyLibraryChanged()
+            printJSON(ScheduledJobDTO(job))
+        } catch {
+            printJSONError(scheduledJobCLIErrorMessage(error))
+            throw ExitCode.failure
+        }
+    }
+}
+
+struct JobsUpdate: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "update", abstract: "Update a scheduled job")
+
+    @Argument(help: "Scheduled job ID") var id: String
+    @Option(help: "Display name") var name: String?
+    @Option(help: "Assistant prompt") var prompt: String?
+    @Option(help: "Comma-separated weekdays (mon..sun), daily, weekdays, or weekends") var weekdays: String?
+    @Option(help: "Local wall-clock time in HH:mm") var time: String?
+    @Option(help: "Provider: claude or codex") var provider: String?
+    @Option(help: "Provider model override; pass an empty string to clear") var model: String?
+    @Option(help: "Provider effort override; pass an empty string to clear") var effort: String?
+    @Option(help: "Whether the job is enabled: true or false") var enabled: Bool?
+    @Option(name: .customLong("web-access"), help: "Whether provider web access is enabled: true or false") var webAccess: Bool?
+    @Option(name: .customLong("notify-on-completion"), help: "Whether completion notifications are enabled: true or false") var notifyOnCompletion: Bool?
+
+    func run() throws {
+        do {
+            guard let existing = try AppDatabase.shared.fetchScheduledJob(id: id) else {
+                throw ScheduledJobError.notFound
+            }
+            let recurrence = ScheduledRecurrence(
+                weekdayMask: try weekdays.map(parseScheduledWeekdayMask) ?? existing.weekdayMask,
+                localMinuteOfDay: try time.map(parseScheduledLocalTime) ?? existing.localMinuteOfDay
+            )
+            let job = try AppDatabase.shared.updateScheduledJob(
+                id: id,
+                definition: .init(
+                    name: name ?? existing.name,
+                    prompt: prompt ?? existing.prompt,
+                    recurrence: recurrence,
+                    isEnabled: enabled ?? existing.isEnabled,
+                    provider: try provider.map(parseScheduledProvider) ?? existing.provider,
+                    model: model ?? existing.model,
+                    effort: effort ?? existing.effort,
+                    webAccess: webAccess ?? existing.webAccess,
+                    notifyOnCompletion: notifyOnCompletion ?? existing.notifyOnCompletion
+                )
+            )
+            notifyLibraryChanged()
+            printJSON(ScheduledJobDTO(job))
+        } catch {
+            printJSONError(scheduledJobCLIErrorMessage(error))
+            throw ExitCode.failure
+        }
+    }
+}
+
+struct JobsDelete: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "delete", abstract: "Delete a scheduled job and its run history")
+
+    @Argument(help: "Scheduled job ID") var id: String
+
+    func run() throws {
+        do {
+            try AppDatabase.shared.deleteScheduledJob(id: id)
+            notifyLibraryChanged()
+            printJSON(["deleted": id])
+        } catch {
+            printJSONError(scheduledJobCLIErrorMessage(error))
+            throw ExitCode.failure
+        }
+    }
+}
+
+struct JobsEnable: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "enable", abstract: "Enable or pause a scheduled job")
+
+    @Argument(help: "Scheduled job ID") var id: String
+    @Option(help: "true to enable, false to pause") var enabled: Bool
+
+    func run() throws {
+        do {
+            let job = try AppDatabase.shared.setScheduledJobEnabled(id: id, isEnabled: enabled)
+            notifyLibraryChanged()
+            printJSON(ScheduledJobDTO(job))
+        } catch {
+            printJSONError(scheduledJobCLIErrorMessage(error))
+            throw ExitCode.failure
+        }
+    }
+}
+
+struct JobsRuns: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "runs", abstract: "List scheduled job run history")
+
+    @Option(name: .customLong("job-id"), help: "Limit history to one scheduled job") var jobId: String?
+    @Option(help: "Maximum rows") var limit = 50
+
+    func run() throws {
+        guard limit > 0 else {
+            printJSONError("--limit must be greater than zero")
+            throw ExitCode.failure
+        }
+        let runs = try jobId.map { try AppDatabase.shared.fetchScheduledJobRuns(jobId: $0, limit: limit) }
+            ?? AppDatabase.shared.fetchRecentScheduledJobRuns(limit: limit)
+        printJSON(runs.map(ScheduledJobRunDTO.init))
+    }
+}
+
+private func scheduledWeekdayName(_ weekday: ScheduledWeekday) -> String {
+    switch weekday {
+    case .monday: "mon"
+    case .tuesday: "tue"
+    case .wednesday: "wed"
+    case .thursday: "thu"
+    case .friday: "fri"
+    case .saturday: "sat"
+    case .sunday: "sun"
+    }
+}
+
+private func parseScheduledWeekdayMask(_ raw: String) throws -> Int {
+    let normalized = raw.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+    switch normalized {
+    case "daily": return 127
+    case "weekdays":
+        return ScheduledWeekday.monday.mask | ScheduledWeekday.tuesday.mask
+            | ScheduledWeekday.wednesday.mask | ScheduledWeekday.thursday.mask
+            | ScheduledWeekday.friday.mask
+    case "weekends": return ScheduledWeekday.saturday.mask | ScheduledWeekday.sunday.mask
+    default: break
+    }
+
+    let mapping: [String: ScheduledWeekday] = [
+        "mon": .monday, "monday": .monday,
+        "tue": .tuesday, "tues": .tuesday, "tuesday": .tuesday,
+        "wed": .wednesday, "wednesday": .wednesday,
+        "thu": .thursday, "thur": .thursday, "thurs": .thursday, "thursday": .thursday,
+        "fri": .friday, "friday": .friday,
+        "sat": .saturday, "saturday": .saturday,
+        "sun": .sunday, "sunday": .sunday,
+    ]
+    let tokens = normalized.split(separator: ",").map {
+        String($0).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    guard !tokens.isEmpty, tokens.allSatisfy({ mapping[$0] != nil }) else {
+        throw ValidationError("Invalid --weekdays value. Use mon..sun, daily, weekdays, or weekends.")
+    }
+    return tokens.reduce(0) { $0 | mapping[$1]!.mask }
+}
+
+private func parseScheduledLocalTime(_ raw: String) throws -> Int {
+    let parts = raw.split(separator: ":", omittingEmptySubsequences: false)
+    guard parts.count == 2,
+          parts[0].count == 2,
+          parts[1].count == 2,
+          let hour = Int(parts[0]),
+          let minute = Int(parts[1]),
+          (0 ... 23).contains(hour),
+          (0 ... 59).contains(minute)
+    else {
+        throw ValidationError("Invalid --time value. Use 24-hour HH:mm format.")
+    }
+    return hour * 60 + minute
+}
+
+private func parseScheduledProvider(_ raw: String) throws -> ScheduledJobProvider {
+    let provider = ScheduledJobProvider(rawValue: raw.lowercased())
+    guard provider.isSupported else {
+        throw ValidationError("Invalid provider '\(raw)'. Use claude or codex.")
+    }
+    return provider
+}
+
+private func scheduledJobCLIErrorMessage(_ error: Error) -> String {
+    if let validationError = error as? ValidationError {
+        return validationError.message
+    }
+    if let localizedError = error as? LocalizedError,
+       let description = localizedError.errorDescription {
+        return description
+    }
+    return error.localizedDescription
 }
 
 struct Version: ParsableCommand {

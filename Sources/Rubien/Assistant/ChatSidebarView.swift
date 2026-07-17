@@ -1,6 +1,7 @@
 #if os(macOS)
 import SwiftUI
 import UniformTypeIdentifiers
+import RubienCore
 
 private enum ChatSurfaceTypography {
     /// Secondary interface text stays one step below 14-point conversation text.
@@ -60,6 +61,8 @@ struct ChatSurfaceConfiguration {
     var libraryIsEmpty: Bool
     var onAddPapers: (() -> Void)?
     var onImportPDFs: (() -> Void)?
+    var scheduledJobs: ScheduledJobCoordinator?
+    var onOpenScheduledRun: ((ScheduledJobRun) -> Void)?
 
     static func reader(onClose: (() -> Void)?) -> Self {
         Self(
@@ -70,7 +73,9 @@ struct ChatSurfaceConfiguration {
             onAddPaperSource: nil,
             libraryIsEmpty: false,
             onAddPapers: nil,
-            onImportPDFs: nil)
+            onImportPDFs: nil,
+            scheduledJobs: nil,
+            onOpenScheduledRun: nil)
     }
 
     static func home(
@@ -79,7 +84,9 @@ struct ChatSurfaceConfiguration {
         onAddPaperSource: @escaping (String) -> Void,
         libraryIsEmpty: Bool,
         onAddPapers: @escaping () -> Void,
-        onImportPDFs: @escaping () -> Void
+        onImportPDFs: @escaping () -> Void,
+        scheduledJobs: ScheduledJobCoordinator,
+        onOpenScheduledRun: @escaping (ScheduledJobRun) -> Void
     ) -> Self {
         Self(
             placement: .home,
@@ -89,7 +96,9 @@ struct ChatSurfaceConfiguration {
             onAddPaperSource: onAddPaperSource,
             libraryIsEmpty: libraryIsEmpty,
             onAddPapers: onAddPapers,
-            onImportPDFs: onImportPDFs)
+            onImportPDFs: onImportPDFs,
+            scheduledJobs: scheduledJobs,
+            onOpenScheduledRun: onOpenScheduledRun)
     }
 
     var isHome: Bool { placement == .home }
@@ -106,6 +115,8 @@ struct ChatSurfaceView: View {
     let configuration: ChatSurfaceConfiguration
 
     @State private var showingHistory = false
+    @State private var showingScheduledJobs = false
+    @State private var scheduledJobToEdit: ScheduledJob?
     @State private var modelMenuHovered = false
     @State private var providerMenuHovered = false
     @State private var plusMenuHovered = false
@@ -265,6 +276,40 @@ struct ChatSurfaceView: View {
                         resetDraft()
                         pendingFreshHomeDraft = nil
                         homeResumeRequested = true
+                    }
+                }
+                if let scheduledJobs = configuration.scheduledJobs {
+                    labeledHeaderButton(
+                        "alarm",
+                        title: "Scheduled",
+                        help: "Scheduled jobs and recent runs"
+                    ) {
+                        scheduledJobToEdit = nil
+                        showingScheduledJobs = true
+                    }
+                    .overlay(alignment: .topTrailing) {
+                        if scheduledJobs.unreadRunCount > 0 {
+                            Text(scheduledJobs.unreadRunCount > 9 ? "9+" : "\(scheduledJobs.unreadRunCount)")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 3)
+                                .frame(minWidth: 13, minHeight: 13)
+                                .background(Color.accentColor, in: Capsule())
+                                .offset(x: 3, y: -2)
+                        }
+                    }
+                    .popover(isPresented: $showingScheduledJobs, arrowEdge: .bottom) {
+                        ScheduledJobsPopover(
+                            coordinator: scheduledJobs,
+                            onOpenRun: { run in
+                                showingScheduledJobs = false
+                                resetDraft()
+                                pendingFreshHomeDraft = nil
+                                homeResumeRequested = true
+                                configuration.onOpenScheduledRun?(run)
+                            },
+                            initialEditorJob: scheduledJobToEdit
+                        )
                     }
                 }
             } else {
@@ -443,10 +488,58 @@ struct ChatSurfaceView: View {
         GeometryReader { geometry in
             ScrollView(.vertical) {
                 VStack(spacing: 8) {
+                    if let scheduledJobs = configuration.scheduledJobs,
+                       !scheduledJobs.upcomingJobs.isEmpty {
+                        Button {
+                            scheduledJobToEdit = nil
+                            showingScheduledJobs = true
+                        } label: {
+                            HStack(spacing: 4) {
+                                homeSectionTitle("Upcoming jobs")
+                                Image(systemName: "chevron.right")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        VStack(spacing: 2) {
+                            ForEach(scheduledJobs.upcomingJobs) { job in
+                                Button {
+                                    scheduledJobToEdit = job
+                                    showingScheduledJobs = true
+                                } label: {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "alarm")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                        Text(job.name)
+                                            .lineLimit(1)
+                                        Spacer()
+                                        if let next = job.nextRunAt {
+                                            Text(next.formatted(date: .abbreviated, time: .shortened))
+                                                .font(.caption)
+                                                .foregroundStyle(.tertiary)
+                                        }
+                                    }
+                                    .font(.system(size: ChatSurfaceTypography.controlFontSize))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .frame(maxWidth: Self.homeContentMaxWidth)
+                        .padding(.bottom, 5)
+                    }
                     if let setup = assistantSetupCopy {
                         assistantSetupBlock(setup)
                             .frame(maxWidth: 680)
                     } else {
+                        if configuration.scheduledJobs?.upcomingJobs.isEmpty == false {
+                            homeSectionTitle("Suggestions")
+                        }
                         VStack(spacing: 7) {
                             if configuration.libraryIsEmpty {
                                 homeNativeAction(
@@ -487,6 +580,16 @@ struct ChatSurfaceView: View {
 
     private func homeSuggestion(_ prompt: String) -> some View {
         PlainQuickStartText(text: prompt) { session.send(prompt) }
+    }
+
+    private func homeSectionTitle(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.tertiary)
+            .textCase(.uppercase)
+            .tracking(0.5)
+            .frame(maxWidth: Self.homeContentMaxWidth, alignment: .leading)
+            .padding(.horizontal, 10)
     }
 
     private func homeNativeAction(

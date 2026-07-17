@@ -4,12 +4,14 @@ import Combine
 import SwiftUI
 import RubienCore
 import RubienSync
+@preconcurrency import UserNotifications
 
 @main
 struct RubienApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var syncCoordinator = SyncCoordinator(appDatabase: AppDatabase.shared)
     @StateObject private var pdfDownloadCoordinator = PDFDownloadCoordinator()
+    @StateObject private var scheduledJobCoordinator = ScheduledJobCoordinator()
     #if canImport(Sparkle)
     @State private var updateController = UpdateController()
     #endif
@@ -25,6 +27,7 @@ struct RubienApp: App {
             // found" during state restoration.
             ContentView()
                 .environmentObject(pdfDownloadCoordinator)
+                .environmentObject(scheduledJobCoordinator)
                 .environment(\.syncCoordinator, syncCoordinator)
                 #if canImport(Sparkle)
                 .environment(updateController)
@@ -40,6 +43,9 @@ struct RubienApp: App {
                 .syncStatusBannerFromCoordinator()
                 .task {
                     await syncCoordinator.startIfEnabled()
+                }
+                .task {
+                    scheduledJobCoordinator.start()
                 }
                 #if canImport(Sparkle)
                 .task {
@@ -114,7 +120,7 @@ struct RubienApp: App {
 
 // MARK: - App Delegate
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     private var activationCancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -133,6 +139,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Configure API contact email for CrossRef/OpenAlex polite pool
         MetadataFetcher.contactEmail = RubienPreferences.apiContactEmail
 
+        if ScheduledJobNotifications.isAvailable {
+            UNUserNotificationCenter.current().delegate = self
+        }
+
         // Belt-and-suspenders for the cross-process observation bridge: if a
         // CLI write happened while the app was in the background and the
         // Darwin notification didn't reach us (e.g. the broadcaster wasn't
@@ -145,6 +155,68 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         ReaderWindowManager.shared.closeAll()
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        let runID = response.notification.request.content.userInfo[
+            ScheduledJobNotifications.runIDKey
+        ] as? String
+        DispatchQueue.main.async {
+            guard let runID else { return }
+            ScheduledJobNotificationRouter.shared.open(runID: runID)
+        }
+        completionHandler()
+    }
+}
+
+@MainActor
+final class ScheduledJobNotificationRouter {
+    static let shared = ScheduledJobNotificationRouter()
+    private var pendingRunID: String?
+    private let contentWindows = NSHashTable<NSWindow>.weakObjects()
+
+    private init() {}
+
+    func open(runID: String) {
+        pendingRunID = runID
+        NSApp.activate(ignoringOtherApps: true)
+        let candidates = contentWindows.allObjects.filter { $0.isVisible && $0.canBecomeKey }
+        if let target = candidates.first(where: { $0 === NSApp.keyWindow })
+            ?? candidates.first {
+            deliver(to: target)
+        } else {
+            NSApp.sendAction(Selector(("newWindow:")), to: nil, from: nil)
+        }
+    }
+
+    func windowAvailable(_ window: NSWindow) {
+        contentWindows.add(window)
+        guard pendingRunID != nil else { return }
+        window.makeKeyAndOrderFront(nil)
+        deliver(to: window)
+    }
+
+    private func deliver(to window: NSWindow) {
+        guard let runID = pendingRunID else { return }
+        pendingRunID = nil
+        window.makeKeyAndOrderFront(nil)
+        NotificationCenter.default.post(
+            name: .rubienOpenScheduledJobRun,
+            object: window,
+            userInfo: [ScheduledJobNotifications.runIDKey: runID]
+        )
     }
 }
 
