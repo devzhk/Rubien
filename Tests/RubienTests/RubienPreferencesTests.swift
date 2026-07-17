@@ -25,6 +25,8 @@ final class RubienPreferencesTests: XCTestCase {
             RubienPreferences.assistantAutoApproveKey,
             RubienPreferences.assistantLoadUserToolsKey,
             RubienPreferences.assistantWorkspacePathKey,
+            RubienPreferences.assistantLibraryInstructionsKey,
+            RubienPreferences.assistantReaderInstructionsKey,
             RubienPreferences.assistantBinaryPathKey,
             RubienPreferences.assistantProviderKey,
             RubienPreferences.assistantCodexModelKey,
@@ -150,6 +152,8 @@ final class RubienPreferencesTests: XCTestCase {
         XCTAssertTrue(RubienPreferences.assistantWebAccess)
         XCTAssertFalse(RubienPreferences.assistantAutoApprove)
         XCTAssertNil(RubienPreferences.assistantWorkspacePath)
+        XCTAssertNil(RubienPreferences.assistantLibraryInstructions)
+        XCTAssertNil(RubienPreferences.assistantReaderInstructions)
         XCTAssertNil(RubienPreferences.assistantBinaryPath)
     }
 
@@ -164,6 +168,20 @@ final class RubienPreferencesTests: XCTestCase {
         XCTAssertTrue(RubienPreferences.assistantAutoApprove)
         RubienPreferences.assistantWorkspacePath = "/tmp/ws"
         XCTAssertEqual(RubienPreferences.assistantWorkspacePath, "/tmp/ws")
+        RubienPreferences.assistantLibraryInstructions = "Prefer concise comparisons."
+        XCTAssertEqual(
+            RubienPreferences.assistantLibraryInstructions,
+            "Prefer concise comparisons.")
+        RubienPreferences.assistantReaderInstructions = "Challenge unsupported claims."
+        XCTAssertEqual(
+            RubienPreferences.assistantReaderInstructions,
+            "Challenge unsupported claims.")
+        RubienPreferences.assistantLibraryInstructions = String(
+            repeating: "z",
+            count: AssistantContext.customInstructionsCharacterLimit + 1)
+        XCTAssertEqual(
+            RubienPreferences.assistantLibraryInstructions?.count,
+            AssistantContext.customInstructionsCharacterLimit)
         RubienPreferences.assistantBinaryPath = "/usr/local/bin/claude"
         XCTAssertEqual(RubienPreferences.assistantBinaryPath, "/usr/local/bin/claude")
     }
@@ -172,6 +190,18 @@ final class RubienPreferencesTests: XCTestCase {
         RubienPreferences.assistantWorkspacePath = "/tmp/ws"
         RubienPreferences.assistantWorkspacePath = ""
         XCTAssertNil(RubienPreferences.assistantWorkspacePath, "empty override clears to nil (use default)")
+
+        RubienPreferences.assistantLibraryInstructions = "Home preference"
+        RubienPreferences.assistantLibraryInstructions = " \n\t "
+        XCTAssertNil(
+            RubienPreferences.assistantLibraryInstructions,
+            "whitespace-only Home instructions clear to the built-in prompt")
+
+        RubienPreferences.assistantReaderInstructions = "Reader preference"
+        RubienPreferences.assistantReaderInstructions = nil
+        XCTAssertNil(
+            RubienPreferences.assistantReaderInstructions,
+            "nil reader instructions clear to the built-in prompt")
 
         RubienPreferences.assistantBinaryPath = "/bin/claude"
         RubienPreferences.assistantBinaryPath = ""

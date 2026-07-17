@@ -846,6 +846,35 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertTrue(controller.loadUserTools)
     }
 
+    func testNewConversationAdoptsLatestSurfaceCustomInstructions() async throws {
+        var current = AssistantConversationDefaults(
+            model: "opus", effort: "high", webAccess: true, autoApprove: false,
+            customInstructions: "Use the original reading preference.")
+        let provider = MockAgentProvider()
+        let controller = ChatSessionController(
+            provider: provider,
+            transcript: SpyTranscriptSink(),
+            reference: ChatReference(id: 1, title: "T", authors: ""),
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"),
+            gate: AssistantTurnGate(),
+            customInstructions: current.customInstructions,
+            defaultsProvider: { _ in current },
+            initialAvailability: .installed(version: "test", path: "/fake/claude"))
+
+        current.customInstructions = "Use the updated reading preference."
+        controller.newConversation()
+        await runTurn(
+            controller,
+            provider: provider,
+            send: "hello",
+            events: [.turnCompleted(usage: nil)])
+
+        let seed = try XCTUnwrap(provider.lastRequest?.seed)
+        XCTAssertTrue(seed.contains("Use the updated reading preference."))
+        XCTAssertFalse(seed.contains("Use the original reading preference."))
+        XCTAssertTrue(seed.contains("reference ID 1"), "the fixed reader context remains intact")
+    }
+
     // MARK: Provider switch (Phase 3b-3)
 
     /// Switching the backend is a hard cut: it shuts down the outgoing runtime,
@@ -872,7 +901,8 @@ final class ChatSessionControllerTests: XCTestCase {
             case .codex:
                 return AssistantConversationDefaults(model: "gpt-5.5", effort: "medium", webAccess: false,
                                                      autoApprove: true, loadUserTools: true,
-                                                     codexSandbox: .workspaceWrite)
+                                                     codexSandbox: .workspaceWrite,
+                                                     customInstructions: "Use the switched-provider preference.")
             }
         }
         let controller = ChatSessionController(
@@ -905,6 +935,8 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertEqual(codex.requests.count, 1)
         XCTAssertEqual(codex.lastRequest?.loadUserTools, true)
         XCTAssertEqual(codex.lastRequest?.codexSandbox, .workspaceWrite)
+        XCTAssertTrue(
+            codex.lastRequest?.seed?.contains("Use the switched-provider preference.") == true)
         XCTAssertTrue(claude.requests.isEmpty, "the old provider gets no turns")
         codex.finishStream()
         await controller.turnTask?.value

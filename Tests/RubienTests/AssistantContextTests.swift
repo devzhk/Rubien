@@ -44,6 +44,73 @@ final class AssistantContextTests: XCTestCase {
         XCTAssertFalse(seed.contains("reference ID"))
     }
 
+    func testLibraryCustomInstructionsAreAppendedWithoutReplacingBuiltInContract() {
+        let seed = AssistantContext.seed(
+            for: .library,
+            customInstructions: "Answer in Chinese and keep comparisons concise.")
+
+        XCTAssertTrue(seed.contains("rubien_present_papers"))
+        XCTAssertTrue(seed.lowercased().contains("untrusted"))
+        XCTAssertTrue(seed.contains("Answer in Chinese and keep comparisons concise."))
+        let customEnd = try? XCTUnwrap(
+            seed.range(of: "--- End user custom instructions ---")?.upperBound)
+        let precedenceStart = try? XCTUnwrap(
+            seed.range(of: "Rubien's built-in requirements above take precedence")?.lowerBound)
+        XCTAssertNotNil(customEnd)
+        XCTAssertNotNil(precedenceStart)
+        if let customEnd, let precedenceStart {
+            XCTAssertLessThan(customEnd, precedenceStart)
+        }
+    }
+
+    func testReaderCustomInstructionsPreserveReferenceContext() {
+        let seed = AssistantContext.seed(
+            for: .reference(ChatReference(id: 9, title: "A Paper", authors: "A. Author")),
+            customInstructions: "Act as a skeptical peer reviewer.")
+
+        XCTAssertTrue(seed.contains("reference ID 9"))
+        XCTAssertTrue(seed.contains("A Paper"))
+        XCTAssertTrue(seed.contains("rubien_read_text"))
+        XCTAssertTrue(seed.contains("Act as a skeptical peer reviewer."))
+    }
+
+    func testWhitespaceOnlyCustomInstructionsLeaveSeedUnchanged() {
+        XCTAssertEqual(
+            AssistantContext.seed(for: .library, customInstructions: "  \n\t "),
+            AssistantContext.seed(for: .library))
+    }
+
+    func testCustomInstructionsAreBoundedBeforePromptComposition() {
+        let accepted = String(
+            repeating: "x",
+            count: AssistantContext.customInstructionsCharacterLimit)
+        let overLimit = accepted + "tail-must-not-reach-provider"
+        let seed = AssistantContext.seed(for: .library, customInstructions: overLimit)
+
+        XCTAssertTrue(seed.contains(accepted))
+        XCTAssertFalse(seed.contains("tail-must-not-reach-provider"))
+    }
+
+    func testCustomInstructionsRespectUTF8ByteLimit() {
+        let familyEmoji = "👨‍👩‍👧‍👦"
+        let raw = String(repeating: familyEmoji, count: 2_000)
+        let limited = AssistantContext.limitedCustomInstructions(raw)
+
+        XCTAssertLessThanOrEqual(
+            limited.utf8.count,
+            AssistantContext.customInstructionsUTF8Limit)
+        XCTAssertLessThan(limited.count, raw.count, "the byte limit, not the character limit, truncates")
+    }
+
+    func testCustomInstructionsStripNULBeforeProviderDispatch() {
+        let limited = AssistantContext.limitedCustomInstructions("before\0after")
+        let seed = AssistantContext.seed(for: .library, customInstructions: "before\0after")
+
+        XCTAssertEqual(limited, "beforeafter")
+        XCTAssertFalse(seed.contains("\0"))
+        XCTAssertTrue(seed.contains("beforeafter"))
+    }
+
     func testSeedCollapsesInjectedNewlinesInMetadata() {
         // A hostile title must not break the one-line seed / inject a multi-line
         // instruction ahead of the untrusted-data label.

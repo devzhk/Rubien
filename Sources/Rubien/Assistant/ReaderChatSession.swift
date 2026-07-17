@@ -72,11 +72,19 @@ enum ReaderChatSession {
         // The live pref snapshot for a backend, re-read on every fresh conversation so
         // a changed default is adopted on "New conversation"/provider switch without
         // reopening the window. Model/effort/sandbox are backend-specific; web,
-        // approvals, and the user-tool posture are shared across backends.
+        // approvals, the user-tool posture, and surface-specific custom instructions
+        // are shared across backends.
         let defaultsProvider: (AgentProviderKind) -> AssistantConversationDefaults = { kind in
             let webAccess = RubienPreferences.assistantWebAccess
             let autoApprove = RubienPreferences.assistantAutoApprove
             let loadUserTools = RubienPreferences.assistantLoadUserTools
+            let customInstructions: String?
+            switch context {
+            case .library, .unclassifiedResume:
+                customInstructions = RubienPreferences.assistantLibraryInstructions
+            case .reference:
+                customInstructions = RubienPreferences.assistantReaderInstructions
+            }
             switch kind {
             case .claude:
                 return AssistantConversationDefaults(
@@ -84,7 +92,8 @@ enum ReaderChatSession {
                     effort: RubienPreferences.assistantEffort,
                     webAccess: webAccess,
                     autoApprove: autoApprove,
-                    loadUserTools: loadUserTools)
+                    loadUserTools: loadUserTools,
+                    customInstructions: customInstructions)
             case .codex:
                 return AssistantConversationDefaults(
                     model: RubienPreferences.assistantCodexModel,
@@ -92,7 +101,8 @@ enum ReaderChatSession {
                     webAccess: webAccess,
                     autoApprove: autoApprove,
                     loadUserTools: loadUserTools,
-                    codexSandbox: RubienPreferences.assistantCodexSandbox)
+                    codexSandbox: RubienPreferences.assistantCodexSandbox,
+                    customInstructions: customInstructions)
             }
         }
 
@@ -105,6 +115,7 @@ enum ReaderChatSession {
             workspaceURL: AssistantContext.ensureWorkspace(RubienPreferences.assistantWorkspaceURL),
             webAccess: initial.webAccess,
             loadUserTools: initial.loadUserTools,
+            customInstructions: initial.customInstructions,
             modelOverride: initial.model,
             effortOverride: initial.effort,
             autoApprove: initial.autoApprove,

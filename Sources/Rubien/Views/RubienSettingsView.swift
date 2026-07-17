@@ -50,6 +50,11 @@ struct RubienSettingsView: View {
     @State private var defaultWebAccess = true
     @State private var defaultAutoApprove = false
     @State private var defaultLoadUserTools = false
+    @State private var libraryCustomInstructions = ""
+    @State private var readerCustomInstructions = ""
+    @State private var libraryCustomInstructionsCount = 0
+    @State private var readerCustomInstructionsCount = 0
+    @State private var customInstructionsSaveTask: Task<Void, Never>?
     @State private var recordReadingActivity = true
     @State private var recordAssistantActivity = true
     @State private var showClearReadingConfirmation = false
@@ -372,6 +377,7 @@ struct RubienSettingsView: View {
         Form {
             assistantWorkspaceSection
             assistantDefaultsSection
+            assistantInstructionsSection
             assistantClaudeCLISection
             assistantCodexCLISection
         }
@@ -385,6 +391,10 @@ struct RubienSettingsView: View {
             defaultWebAccess = RubienPreferences.assistantWebAccess
             defaultAutoApprove = RubienPreferences.assistantAutoApprove
             defaultLoadUserTools = RubienPreferences.assistantLoadUserTools
+            libraryCustomInstructions = RubienPreferences.assistantLibraryInstructions ?? ""
+            readerCustomInstructions = RubienPreferences.assistantReaderInstructions ?? ""
+            libraryCustomInstructionsCount = libraryCustomInstructions.count
+            readerCustomInstructionsCount = readerCustomInstructions.count
             seedModelEffortMirrors(for: defaultProvider)
             if claudeAvailability == nil { recheckClaude() }
             if codexAvailability == nil { recheckCodex() }
@@ -419,6 +429,16 @@ struct RubienSettingsView: View {
         .onChange(of: defaultAutoApprove) { _, value in RubienPreferences.assistantAutoApprove = value }
         .onChange(of: defaultLoadUserTools) { _, value in
             RubienPreferences.assistantLoadUserTools = value
+        }
+        .onChange(of: libraryCustomInstructions) { _, _ in
+            scheduleCustomInstructionsSave()
+        }
+        .onChange(of: readerCustomInstructions) { _, _ in
+            scheduleCustomInstructionsSave()
+        }
+        .onDisappear {
+            customInstructionsSaveTask?.cancel()
+            persistCustomInstructions()
         }
     }
 
@@ -616,6 +636,85 @@ struct RubienSettingsView: View {
                 Text(String(localized: "Permissions: your agent rules apply, so Rubien may not ask first.", bundle: .module))
             }
         }
+    }
+
+    private var assistantInstructionsSection: some View {
+        Section {
+            assistantInstructionsEditor(
+                title: String(localized: "Home conversations", bundle: .module),
+                text: $libraryCustomInstructions,
+                characterCount: $libraryCustomInstructionsCount)
+            assistantInstructionsEditor(
+                title: String(localized: "Reader conversations", bundle: .module),
+                text: $readerCustomInstructions,
+                characterCount: $readerCustomInstructionsCount)
+        } header: {
+            Text(String(localized: "Custom instructions", bundle: .module))
+        } footer: {
+            Text(String(
+                localized: "Added to Rubien’s built-in instructions for new conversations, up to 8,000 characters per field. Rubien keeps its library tools, paper cards, document context, and untrusted-content handling. Changes do not alter live or resumed conversations.",
+                bundle: .module
+            ))
+        }
+    }
+
+    @ViewBuilder
+    private func assistantInstructionsEditor(
+        title: String,
+        text: Binding<String>,
+        characterCount: Binding<Int>
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(title)
+                    .font(.subheadline.weight(.medium))
+                Spacer()
+                Text("\(characterCount.wrappedValue)/\(AssistantContext.customInstructionsCharacterLimit)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel(
+                        "\(characterCount.wrappedValue) of \(AssistantContext.customInstructionsCharacterLimit) characters"
+                    )
+                if !text.wrappedValue.isEmpty {
+                    Button(String(localized: "Reset", bundle: .module)) {
+                        text.wrappedValue = ""
+                        characterCount.wrappedValue = 0
+                        customInstructionsSaveTask?.cancel()
+                        persistCustomInstructions()
+                    }
+                    .buttonStyle(SettingsActionButtonStyle())
+                    .accessibilityLabel("Reset \(title) custom instructions")
+                }
+            }
+            TextEditor(text: Binding(
+                get: { text.wrappedValue },
+                set: {
+                    let limited = AssistantContext.limitedCustomInstructions($0)
+                    text.wrappedValue = limited
+                    characterCount.wrappedValue = limited.count
+                }
+            ))
+                .font(.body)
+                .frame(minHeight: 72, maxHeight: 96)
+                .scrollContentBackground(.hidden)
+                .padding(4)
+                .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 6))
+                .accessibilityLabel(title)
+        }
+    }
+
+    private func scheduleCustomInstructionsSave() {
+        customInstructionsSaveTask?.cancel()
+        customInstructionsSaveTask = Task {
+            try? await Task.sleep(for: .milliseconds(350))
+            guard !Task.isCancelled else { return }
+            persistCustomInstructions()
+        }
+    }
+
+    private func persistCustomInstructions() {
+        RubienPreferences.assistantLibraryInstructions = libraryCustomInstructions
+        RubienPreferences.assistantReaderInstructions = readerCustomInstructions
     }
 
     private var assistantClaudeCLISection: some View {

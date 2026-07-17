@@ -136,6 +136,43 @@ enum RubienPreferences {
         AssistantContext.workspaceURL(override: assistantWorkspacePath)
     }
 
+    /// Optional additive instructions for new Home/library conversations. The
+    /// built-in Rubien seed remains fixed; this text is appended as user preferences.
+    static let assistantLibraryInstructionsKey = "Rubien.assistant.instructions.library"
+
+    static var assistantLibraryInstructions: String? {
+        get { assistantInstructions(forKey: assistantLibraryInstructionsKey) }
+        set { setAssistantInstructions(newValue, forKey: assistantLibraryInstructionsKey) }
+    }
+
+    /// Optional additive instructions for new PDF/web reader conversations.
+    static let assistantReaderInstructionsKey = "Rubien.assistant.instructions.reader"
+
+    static var assistantReaderInstructions: String? {
+        get { assistantInstructions(forKey: assistantReaderInstructionsKey) }
+        set { setAssistantInstructions(newValue, forKey: assistantReaderInstructionsKey) }
+    }
+
+    private static func assistantInstructions(forKey key: String) -> String? {
+        guard let stored = UserDefaults.standard.string(forKey: key) else { return nil }
+        let value = AssistantContext.limitedCustomInstructions(stored)
+        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return value
+    }
+
+    private static func setAssistantInstructions(_ value: String?, forKey key: String) {
+        if let value {
+            let limited = AssistantContext.limitedCustomInstructions(value)
+            guard !limited.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                UserDefaults.standard.removeObject(forKey: key)
+                return
+            }
+            UserDefaults.standard.set(limited, forKey: key)
+        } else {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
+
     /// Default model alias for new Claude conversations. Normalized against Claude's
     /// current list, so an empty/unset or stale slug resolves to Claude's default.
     static let assistantModelKey = "Rubien.assistant.model"
