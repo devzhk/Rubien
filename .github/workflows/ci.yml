@@ -26,18 +26,23 @@ jobs:
     # by Nov 2, 2025. macos-latest is avoided so version skew is
     # explicit, not silent.
     runs-on: macos-26
-    # Cap runaway hangs. `swift test` here intermittently deadlocks (a flaky
-    # WKWebView/CLI-test race); healthy runs finish in ~4 min, but an unbounded
-    # hang burns GitHub's 6h default on a 10x-billed macOS runner — two of those
-    # is what tripped the Actions spending limit. 10 min passes every healthy run
-    # while capping a hang at 10 min instead of 360.
+    # Keep a backstop for genuine runaways. A single `swift test` process spanning
+    # the framework-heavy app tests and subprocess-heavy CLI tests intermittently
+    # deadlocks on the macOS runner. The isolated test steps below avoid that
+    # cross-suite lifetime race while retaining the 10-minute cost guard.
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Build
         run: swift build
-      - name: Test
-        run: swift test
+      - name: Test (non-app and non-CLI)
+        # This first invocation builds the shared test bundle. Excluding the two
+        # isolated targets also keeps future Core-style test targets covered.
+        run: swift test --skip 'RubienTests|RubienCLITests'
+      - name: Test (app)
+        run: swift test --skip-build --filter RubienTests
+      - name: Test (CLI)
+        run: swift test --skip-build --filter RubienCLITests
 
   linux:
     name: Linux (x86_64)
