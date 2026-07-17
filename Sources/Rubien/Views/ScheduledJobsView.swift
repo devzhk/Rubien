@@ -593,14 +593,20 @@ private struct ScheduledJobEditor: View {
             }
         } label: {
             Text(ScheduledJobFormatting.shortWeekday(weekday))
-                .font(.caption.weight(.medium))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 5)
+                .font(.caption2.weight(.semibold))
+                .frame(width: 38, height: 38)
                 .background(
-                    selected ? Color.accentColor : Color.primary.opacity(0.06),
-                    in: RoundedRectangle(cornerRadius: 6)
+                    selected ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.045),
+                    in: RoundedRectangle(cornerRadius: 5, style: .continuous)
                 )
-                .foregroundStyle(selected ? Color.white : Color.primary)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .stroke(
+                            selected ? Color.accentColor.opacity(0.38) : Color.primary.opacity(0.08),
+                            lineWidth: 1
+                        )
+                }
+                .foregroundStyle(selected ? Color.accentColor : Color.primary.opacity(0.76))
         }
         .buttonStyle(.plain)
         .accessibilityLabel(ScheduledJobFormatting.fullWeekday(weekday))
@@ -815,13 +821,13 @@ enum ScheduledJobFormatting {
 
     static func shortWeekday(_ weekday: ScheduledWeekday) -> String {
         switch weekday {
-        case .monday: "M"
-        case .tuesday: "T"
-        case .wednesday: "W"
-        case .thursday: "T"
-        case .friday: "F"
-        case .saturday: "S"
-        case .sunday: "S"
+        case .monday: "Mon"
+        case .tuesday: "Tue"
+        case .wednesday: "Wed"
+        case .thursday: "Thu"
+        case .friday: "Fri"
+        case .saturday: "Sat"
+        case .sunday: "Sun"
         }
     }
 
