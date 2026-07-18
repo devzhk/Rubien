@@ -24,9 +24,12 @@ enum CreateReferenceSource {
     ) async throws {
         // Normalize the locator once (trim surrounding whitespace + expand a
         // leading `~`), matching `ImportSourceMaterializer` — an MCP source has
-        // no shell to do it. The router, the executors, and the `input`
-        // provenance then all see the same resolved path.
-        let source = (rawSource.trimmingCharacters(in: .whitespacesAndNewlines) as NSString).expandingTildeInPath
+        // no shell to do it. Guard the NSString path operation: applying it to
+        // an HTTP(S) locator collapses `://` to `:/` before routing.
+        let trimmedSource = rawSource.trimmingCharacters(in: .whitespacesAndNewlines)
+        let source = trimmedSource.hasPrefix("~")
+            ? (trimmedSource as NSString).expandingTildeInPath
+            : trimmedSource
         let route = ImportRouter.classify(source: source, explicitDownloadPdf: downloadPdf)
 
         // An unroutable locator is a source problem, not a usage error — emit one

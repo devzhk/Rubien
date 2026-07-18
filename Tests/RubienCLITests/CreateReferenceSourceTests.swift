@@ -236,6 +236,22 @@ final class CreateReferenceSourceTests: XCTestCase {
         XCTAssertEqual(items[0]["status"] as? String, "failed")
     }
 
+    /// Source normalization may trim surrounding whitespace and expand a
+    /// leading tilde for local paths, but it must not run URL locators through
+    /// NSString path normalization (which collapses `://` to `:/`). This URL is
+    /// deliberately unroutable so the black-box test stays offline while still
+    /// asserting the exact locator that reached routing and diagnostics.
+    func testSourceURLPreservesSchemeSeparatorBeforeRouting() throws {
+        try skipIfBinaryMissing()
+        let source = "https://example.com/not-an-importable-document"
+        let result = try runCLI(["add", "--source", source])
+        XCTAssertNotEqual(result.exitCode, 0)
+
+        let obj = try json(result.stderr)
+        let items = try XCTUnwrap(obj["items"] as? [[String: Any]])
+        XCTAssertEqual(items.first?["input"] as? String, source)
+    }
+
     /// Exactly one input among `--source` / `--bibtex` / `--title` (spec §5.1,
     /// CLI half) — any pair is rejected.
     func testSourceCannotCombineWithLegacyInput() throws {
