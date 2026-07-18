@@ -54,7 +54,7 @@ struct ScheduledJobsPopover: View {
                     Label("New Job", systemImage: "plus")
                         .font(.system(size: 11, weight: .medium))
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(SLSecondaryButtonStyle())
                 .controlSize(.small)
             }
             .padding(.horizontal, 12)
@@ -86,7 +86,8 @@ struct ScheduledJobsPopover: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .frame(width: 440, height: 430)
+        .frame(width: 350, height: 430)
+        .activatePopoverHover()
         .onAppear {
             coordinator.refresh()
             errorMessage = initialErrorMessage

@@ -525,7 +525,7 @@ struct ChatSurfaceView: View {
                             }
                         }
                         .buttonStyle(.plain)
-                        .padding(.leading, 10)
+                        .padding(.leading, 25)
                         .frame(maxWidth: Self.homeContentMaxWidth, alignment: .leading)
                         VStack(spacing: 2) {
                             ForEach(scheduledJobs.upcomingJobs) { job in
@@ -549,7 +549,8 @@ struct ChatSurfaceView: View {
                                     }
                                     .font(.system(size: ChatSurfaceTypography.controlFontSize))
                                     .foregroundStyle(.secondary)
-                                    .padding(.horizontal, 10)
+                                    .padding(.leading, 25)
+                                    .padding(.trailing, 10)
                                     .padding(.vertical, 5)
                                     .contentShape(Rectangle())
                                 }
@@ -557,7 +558,7 @@ struct ChatSurfaceView: View {
                             }
                         }
                         .frame(maxWidth: Self.homeContentMaxWidth)
-                        .padding(.bottom, 5)
+                        .padding(.bottom, 21)
                     }
                     if let setup = assistantSetupCopy {
                         assistantSetupBlock(setup)
@@ -565,10 +566,10 @@ struct ChatSurfaceView: View {
                     } else {
                         if configuration.scheduledJobs?.upcomingJobs.isEmpty == false {
                             homeSectionTitle("Suggestions")
-                                .padding(.leading, 10)
+                                .padding(.leading, 25)
                                 .frame(maxWidth: Self.homeContentMaxWidth, alignment: .leading)
                         }
-                        VStack(spacing: 7) {
+                        VStack(spacing: 4) {
                             if configuration.libraryIsEmpty {
                                 homeNativeAction(
                                     "Add papers", action: configuration.onAddPapers)
@@ -581,10 +582,11 @@ struct ChatSurfaceView: View {
                                 homeSuggestion("Summarize what we’ve been reading this week")
                             }
                         }
-                        // Match the composer width. PlainQuickStartText's 25-point
-                        // leading inset then lands on the editor caret origin:
-                        // composer padding 10 + box padding 10 + text inset 5.
+                        // Match the composer width. Section headings land on the
+                        // editor caret; quick starts keep a 15-point subordinate
+                        // indent beneath them.
                         .frame(maxWidth: Self.homeContentMaxWidth)
+                        .padding(.bottom, 16)
                     }
                     homeComposer
                 }
@@ -621,7 +623,7 @@ struct ChatSurfaceView: View {
 
     private func homeSectionTitle(_ title: String) -> some View {
         Text(title)
-            .font(.system(size: 11, weight: .semibold))
+            .font(.system(size: 13, weight: .semibold))
             .foregroundStyle(.tertiary)
             .textCase(.uppercase)
             .tracking(0.5)
@@ -2288,7 +2290,7 @@ private struct PlainQuickStartText: View {
                 .font(.system(size: ChatSurfaceTypography.controlFontSize))
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.leading, 25)
+                .padding(.leading, 40)
                 .padding(.trailing, 10)
                 .padding(.vertical, 6)
                 .background(
