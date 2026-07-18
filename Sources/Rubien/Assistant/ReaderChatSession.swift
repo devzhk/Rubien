@@ -85,12 +85,12 @@ enum ReaderChatSession {
         // reopening the window. Model/effort/sandbox are backend-specific; web,
         // approvals, the user-tool posture, and surface-specific prompt overrides
         // are shared across backends.
-        let defaultsProvider: (AgentProviderKind) -> AssistantConversationDefaults = { kind in
+        let defaultsProvider: (AgentProviderKind, AssistantConversationContext) -> AssistantConversationDefaults = { kind, promptContext in
             let webAccess = RubienPreferences.assistantWebAccess
             let autoApprove = RubienPreferences.assistantAutoApprove
             let loadUserTools = RubienPreferences.assistantLoadUserTools
             let promptOverride: String?
-            switch context {
+            switch promptContext {
             case .library, .unclassifiedResume:
                 promptOverride = RubienPreferences.assistantLibraryPromptOverride
             case .reference:
@@ -118,7 +118,7 @@ enum ReaderChatSession {
         }
 
         let initialKind = RubienPreferences.assistantProvider
-        let initial = defaultsProvider(initialKind)
+        let initial = defaultsProvider(initialKind, context)
         return ChatSessionController(
             provider: providerFactory(initialKind),
             transcript: transcript,

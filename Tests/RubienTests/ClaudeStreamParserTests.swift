@@ -194,6 +194,15 @@ final class ClaudeStreamParserTests: XCTestCase {
         XCTAssertEqual(content.first?["text"] as? String, "quotes \" and \n newline")
     }
 
+    func testInterruptRequestMatchesClaudeSDKControlEnvelope() throws {
+        let json = try decode(ClaudeControlProtocol.interruptRequest(requestID: "interrupt-7"))
+        XCTAssertEqual(json["type"] as? String, "control_request")
+        XCTAssertEqual(json["request_id"] as? String, "interrupt-7")
+        XCTAssertEqual(
+            (json["request"] as? [String: Any])?["subtype"] as? String,
+            "interrupt")
+    }
+
     func testUserMessagePlacesImagesBeforeText() throws {
         let line = ClaudeControlProtocol.userMessage(
             prompt: "What is shown?",

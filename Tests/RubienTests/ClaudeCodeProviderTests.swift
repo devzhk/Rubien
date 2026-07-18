@@ -231,6 +231,16 @@ final class ClaudeCodeProviderTests: XCTestCase {
         return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String])
     }
 
+    private func readSpawnRecords(in workspace: URL) throws -> [[String: Any]] {
+        let text = try String(
+            contentsOf: workspace.appendingPathComponent("fake-claude-spawns.jsonl"),
+            encoding: .utf8)
+        return text.split(separator: "\n").compactMap { line in
+            guard let data = String(line).data(using: .utf8) else { return nil }
+            return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        }
+    }
+
     func testSessionIDRecapturedFromResult() async throws {
         let workspace = try makeWorkspace()
         try writeConfig(["sessionInit": "sess-init-xyz", "sessionResult": "sess-rotated-xyz"],
@@ -354,8 +364,421 @@ final class ClaudeCodeProviderTests: XCTestCase {
 
         // The stream must finish promptly once the group is signalled.
         try await withTimeout(12) { _ = try? await consumer.value }
+        let interrupt = try await waitForFile(
+            named: "fake-claude-interrupt.json", in: workspace, timeout: 3)
+        let interruptObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: interrupt) as? [String: Any])
+        XCTAssertEqual(
+            (interruptObject["request"] as? [String: Any])?["subtype"] as? String,
+            "interrupt",
+            "native interruption must precede the signal fallback")
         // …and the grandchild must be gone — killpg reached the whole tree.
         try await assertEventuallyDead(grandchildPID, timeout: 10)
+    }
+
+    func testNativeInterruptHandsRotatedSessionToSameConversationSuccessor() async throws {
+        let workspace = try makeWorkspace()
+        let conversationID = UUID()
+        try writeConfig([
+            "hang": true,
+            "emitResult": false,
+            "cooperativeInterrupt": true,
+            "sessionInit": "session-before-interrupt",
+            "sessionResult": "session-after-interrupt",
+            "delayInterruptResultMs": 150,
+        ], into: workspace)
+        let provider = ClaudeCodeProvider(
+            executableOverride: fakeCLIPath,
+            leaseCoordinator: ClaudeSessionLeaseCoordinator())
+        let first = provider.send(turn: turn(
+            workspace: workspace, conversationID: conversationID))
+        let firstConsumer = Task { () -> Void in for try await _ in first {} }
+        _ = try await waitForFile(
+            named: "fake-claude-user.json", in: workspace, timeout: 12)
+
+        // Match controller Steer: cancel the consumed stream, then immediately
+        // submit a successor carrying the same stable Rubien conversation UUID.
+        firstConsumer.cancel()
+        try writeConfig([
+            "deltas": ["continued"],
+            "assistantText": "continued after interrupt",
+            "sessionResult": "session-successor-result",
+        ], into: workspace)
+        let successor = provider.send(turn: turn(
+            workspace: workspace,
+            prompt: "steered prompt",
+            conversationID: conversationID,
+            resumeSessionID: "session-before-interrupt"))
+
+        let events = try await collectAllEvents(successor, timeout: 12)
+        XCTAssertTrue(events.contains(
+            .assistantMessageCompleted(text: "continued after interrupt")))
+        let interruptData = try Data(contentsOf: workspace.appendingPathComponent(
+            "fake-claude-interrupt.json"))
+        let interrupt = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: interruptData) as? [String: Any])
+        XCTAssertEqual(interrupt["type"] as? String, "control_request")
+        XCTAssertEqual(
+            (interrupt["request"] as? [String: Any])?["subtype"] as? String,
+            "interrupt")
+
+        let argv = try readSpawnedArgv(in: workspace)
+        let resumeIndex = try XCTUnwrap(argv.firstIndex(of: "--resume"))
+        XCTAssertEqual(argv[resumeIndex + 1], "session-after-interrupt")
+        _ = try? await firstConsumer.value
+    }
+
+    func testExplicitCancelSnapshotsOldTokenBeforeImmediateSend() async throws {
+        let workspace = try makeWorkspace()
+        let conversationID = UUID()
+        try writeConfig([
+            "hang": true,
+            "emitResult": false,
+            "cooperativeInterrupt": true,
+            "sessionResult": "explicit-cancel-rotated",
+        ], into: workspace)
+        let provider = ClaudeCodeProvider(
+            executableOverride: fakeCLIPath,
+            leaseCoordinator: ClaudeSessionLeaseCoordinator())
+        let first = provider.send(turn: turn(
+            workspace: workspace, conversationID: conversationID))
+        let firstConsumer = Task { () -> Void in for try await _ in first {} }
+        _ = try await waitForFile(
+            named: "fake-claude-user.json", in: workspace, timeout: 12)
+
+        // `cancel()` is synchronous at the API boundary: it captures the old
+        // token before this immediately following send publishes its token.
+        provider.cancel()
+        try writeConfig(["assistantText": "survived scoped cancel"], into: workspace)
+        let successor = provider.send(turn: turn(
+            workspace: workspace,
+            prompt: "next",
+            conversationID: conversationID,
+            resumeSessionID: "fake-session-init"))
+        let events = try await collectAllEvents(successor, timeout: 12)
+
+        XCTAssertTrue(events.contains(
+            .assistantMessageCompleted(text: "survived scoped cancel")))
+        let argv = try readSpawnedArgv(in: workspace)
+        let resumeIndex = try XCTUnwrap(argv.firstIndex(of: "--resume"))
+        XCTAssertEqual(argv[resumeIndex + 1], "explicit-cancel-rotated")
+        _ = try? await firstConsumer.value
+    }
+
+    func testRepeatedSteerWhileRetiringSpawnsOnlyLatestPendingTurn() async throws {
+        let workspace = try makeWorkspace()
+        let conversationID = UUID()
+        try writeConfig([
+            "hang": true,
+            "emitResult": false,
+            "cooperativeInterrupt": true,
+            "delayInterruptResultMs": 200,
+            "sessionResult": "rapid-steer-rotated",
+        ], into: workspace)
+        let provider = ClaudeCodeProvider(
+            executableOverride: fakeCLIPath,
+            leaseCoordinator: ClaudeSessionLeaseCoordinator())
+        let first = provider.send(turn: turn(
+            workspace: workspace, conversationID: conversationID))
+        let firstConsumer = Task { () -> Void in for try await _ in first {} }
+        _ = try await waitForFile(
+            named: "fake-claude-user.json", in: workspace, timeout: 12)
+
+        firstConsumer.cancel()
+        try writeConfig(["assistantText": "superseded pending"], into: workspace)
+        let second = provider.send(turn: turn(
+            workspace: workspace,
+            prompt: "second",
+            conversationID: conversationID,
+            resumeSessionID: "fake-session-init"))
+        let secondTask = Task { try await self.collectAllEvents(second, timeout: 12) }
+
+        try writeConfig(["assistantText": "latest pending"], into: workspace)
+        let third = provider.send(turn: turn(
+            workspace: workspace,
+            prompt: "third",
+            conversationID: conversationID,
+            resumeSessionID: "fake-session-init"))
+        let thirdEvents = try await collectAllEvents(third, timeout: 12)
+
+        let secondEvents = try await secondTask.value
+        XCTAssertTrue(secondEvents.isEmpty)
+        XCTAssertTrue(thirdEvents.contains(
+            .assistantMessageCompleted(text: "latest pending")))
+        XCTAssertEqual(try readSpawnRecords(in: workspace).count, 2)
+        let argv = try readSpawnedArgv(in: workspace)
+        let resumeIndex = try XCTUnwrap(argv.firstIndex(of: "--resume"))
+        XCTAssertEqual(argv[resumeIndex + 1], "rapid-steer-rotated")
+        _ = try? await firstConsumer.value
+    }
+
+    func testCancellationCannotWedgeBehindFullStdinPipe() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "stdinBackpressure": true,
+            "emitResult": false,
+        ], into: workspace)
+        let provider = ClaudeCodeProvider(
+            executableOverride: fakeCLIPath,
+            leaseCoordinator: ClaudeSessionLeaseCoordinator())
+        let stream = provider.send(turn: turn(
+            workspace: workspace,
+            prompt: String(repeating: "large-prompt-", count: 200_000),
+            conversationID: UUID()))
+        let consumer = Task { () -> Void in for try await _ in stream {} }
+        let leaderPID = try await waitForPID(
+            named: "stdin-backpressure.pid", in: workspace, timeout: 12)
+
+        provider.cancel()
+
+        try await withTimeout(5) { _ = try? await consumer.value }
+        try await assertEventuallyDead(leaderPID, timeout: 8)
+    }
+
+    func testNewConversationDoesNotInheritInterruptedRotatedSession() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "hang": true,
+            "emitResult": false,
+            "cooperativeInterrupt": true,
+            "sessionResult": "must-not-leak",
+        ], into: workspace)
+        let provider = ClaudeCodeProvider(
+            executableOverride: fakeCLIPath,
+            leaseCoordinator: ClaudeSessionLeaseCoordinator())
+        let first = provider.send(turn: turn(
+            workspace: workspace, conversationID: UUID()))
+        let firstConsumer = Task { () -> Void in for try await _ in first {} }
+        _ = try await waitForFile(
+            named: "fake-claude-user.json", in: workspace, timeout: 12)
+
+        firstConsumer.cancel()
+        try writeConfig(["assistantText": "fresh"], into: workspace)
+        let fresh = provider.send(turn: turn(
+            workspace: workspace, prompt: "new conversation", conversationID: UUID()))
+        let events = try await collectAllEvents(fresh, timeout: 12)
+
+        XCTAssertTrue(events.contains(.assistantMessageCompleted(text: "fresh")))
+        XCTAssertFalse(try readSpawnedArgv(in: workspace).contains("--resume"))
+        _ = try? await firstConsumer.value
+    }
+
+    func testProcessWideLeaseBlocksSecondProviderUntilInterruptedLeaderIsReaped() async throws {
+        let workspace = try makeWorkspace()
+        let conversationID = UUID()
+        let coordinator = ClaudeSessionLeaseCoordinator()
+        try writeConfig([
+            "hang": true,
+            "emitResult": false,
+            "cooperativeInterrupt": true,
+            "sessionInit": "shared-before",
+            "sessionResult": "shared-after",
+            "delayInterruptResultMs": 350,
+        ], into: workspace)
+        let firstProvider = ClaudeCodeProvider(
+            executableOverride: fakeCLIPath, leaseCoordinator: coordinator)
+        let secondProvider = ClaudeCodeProvider(
+            executableOverride: fakeCLIPath, leaseCoordinator: coordinator)
+        let first = firstProvider.send(turn: turn(
+            workspace: workspace,
+            conversationID: conversationID,
+            resumeSessionID: "shared-before"))
+        let firstConsumer = Task { () -> Void in for try await _ in first {} }
+        _ = try await waitForFile(
+            named: "fake-claude-user.json", in: workspace, timeout: 12)
+
+        firstConsumer.cancel()
+        try writeConfig(["assistantText": "second window"], into: workspace)
+        let secondTask = Task { try await self.collectAllEvents(
+            secondProvider.send(turn: self.turn(
+                workspace: workspace,
+                conversationID: conversationID,
+                resumeSessionID: "shared-before")),
+            timeout: 12)
+        }
+
+        try await Task.sleep(nanoseconds: 120_000_000)
+        XCTAssertEqual(
+            try readSpawnRecords(in: workspace).count, 1,
+            "the second provider must wait while the old session process owns its lease")
+
+        let events = try await secondTask.value
+        XCTAssertTrue(events.contains(.assistantMessageCompleted(text: "second window")))
+        XCTAssertEqual(try readSpawnRecords(in: workspace).count, 2)
+        let argv = try readSpawnedArgv(in: workspace)
+        let resumeIndex = try XCTUnwrap(argv.firstIndex(of: "--resume"))
+        XCTAssertEqual(argv[resumeIndex + 1], "shared-after")
+        _ = try? await firstConsumer.value
+    }
+
+    func testFreshInitAliasJoinsLiveProcessWideLeaseBeforeUIExposesIt() async throws {
+        let workspace = try makeWorkspace()
+        let coordinator = ClaudeSessionLeaseCoordinator()
+        try writeConfig([
+            "hang": true,
+            "emitResult": false,
+            "cooperativeInterrupt": true,
+            "sessionInit": "fresh-live-alias",
+            "sessionResult": "fresh-rotated-alias",
+        ], into: workspace)
+        let firstProvider = ClaudeCodeProvider(
+            executableOverride: fakeCLIPath, leaseCoordinator: coordinator)
+        let secondProvider = ClaudeCodeProvider(
+            executableOverride: fakeCLIPath, leaseCoordinator: coordinator)
+        let initSeen = expectation(description: "fresh init alias exposed")
+        let first = firstProvider.send(turn: turn(
+            workspace: workspace, conversationID: UUID()))
+        let firstConsumer = Task { () -> Void in
+            for try await event in first {
+                if event == .sessionStarted(sessionID: "fresh-live-alias") {
+                    initSeen.fulfill()
+                }
+            }
+        }
+        await fulfillment(of: [initSeen], timeout: 12)
+
+        // A second window can act on the visible init id immediately, but alias
+        // publication must already point it at the first process's held lease.
+        let secondTask = Task { try await self.collectAllEvents(
+            secondProvider.send(turn: self.turn(
+                workspace: workspace,
+                conversationID: UUID(),
+                resumeSessionID: "fresh-live-alias")),
+            timeout: 12)
+        }
+        try await Task.sleep(nanoseconds: 120_000_000)
+        XCTAssertEqual(try readSpawnRecords(in: workspace).count, 1)
+
+        try writeConfig(["assistantText": "after fresh alias wait"], into: workspace)
+        firstConsumer.cancel()
+        let events = try await secondTask.value
+        XCTAssertTrue(events.contains(
+            .assistantMessageCompleted(text: "after fresh alias wait")))
+        let argv = try readSpawnedArgv(in: workspace)
+        let resumeIndex = try XCTUnwrap(argv.firstIndex(of: "--resume"))
+        XCTAssertEqual(argv[resumeIndex + 1], "fresh-rotated-alias")
+        _ = try? await firstConsumer.value
+    }
+
+    func testShutdownIsTerminalKillsAndReapsLeaderAndRejectsLaterSend() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "hang": true,
+            "emitResult": false,
+        ], into: workspace)
+        let provider = ClaudeCodeProvider(
+            executableOverride: fakeCLIPath,
+            leaseCoordinator: ClaudeSessionLeaseCoordinator())
+        let stream = provider.send(turn: turn(
+            workspace: workspace, conversationID: UUID()))
+        let consumer = Task { () -> Void in for try await _ in stream {} }
+        _ = try await waitForFile(
+            named: "fake-claude-user.json", in: workspace, timeout: 12)
+        let record = try XCTUnwrap(readSpawnRecords(in: workspace).first)
+        let leaderPID = try XCTUnwrap((record["pid"] as? NSNumber)?.int32Value)
+
+        provider.shutdown()
+        try await withTimeout(8) { _ = try? await consumer.value }
+        try await assertEventuallyDead(leaderPID, timeout: 8)
+
+        let afterShutdown = provider.send(turn: turn(
+            workspace: workspace, prompt: "must not spawn", conversationID: UUID()))
+        let afterShutdownEvents = try await collectAllEvents(afterShutdown, timeout: 2)
+        XCTAssertTrue(afterShutdownEvents.isEmpty)
+        XCTAssertEqual(try readSpawnRecords(in: workspace).count, 1)
+    }
+
+    func testConsumerCancellationFinishesStreamAndAllowsImmediateSuccessorWhenDetachedHelperKeepsOutputPipeOpen() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "escapedOutputHolder": true,
+            "hang": true,
+            "emitResult": false,
+        ], into: workspace)
+        let provider = ClaudeCodeProvider(executableOverride: fakeCLIPath)
+        let stream = provider.send(turn: turn(workspace: workspace))
+        let streamFinished = expectation(description: "cancelled stream finished")
+        let consumer = Task { () -> Void in
+            for try await _ in stream {}
+            streamFinished.fulfill()
+        }
+
+        let holderPID = try await waitForPID(
+            named: "escaped-output-holder.pid", in: workspace, timeout: 12)
+        defer {
+            consumer.cancel()
+            _ = kill(holderPID, SIGKILL)
+        }
+        XCTAssertTrue(isAlive(holderPID))
+
+        // Match the UI's interrupt-and-steer path: cancelling the consumer triggers
+        // token-scoped termination, then the queued prompt starts immediately. The
+        // late cancellation callback for the retired token must not touch its successor.
+        try writeConfig([
+            "deltas": ["successor"],
+            "assistantText": "successor",
+        ], into: workspace)
+        consumer.cancel()
+        let successor = provider.send(turn: turn(workspace: workspace, prompt: "steered prompt"))
+
+        await fulfillment(of: [streamFinished], timeout: 8)
+        let successorEvents = try await collectAllEvents(successor, timeout: 12)
+        XCTAssertTrue(successorEvents.contains(.assistantMessageCompleted(text: "successor")))
+        XCTAssertTrue(successorEvents.containsTurnCompleted)
+        let pipeState = try await probeEscapedOutputHandles(in: workspace, timeout: 3)
+        XCTAssertEqual(pipeState, "closed,closed")
+        XCTAssertTrue(
+            isAlive(holderPID),
+            "the detached helper proves EOF did not finish the stream; the cancel watchdog did")
+    }
+
+    func testResultFinishesStreamWhenDetachedHelperKeepsOutputPipeOpen() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["escapedOutputHolder": true], into: workspace)
+        let provider = ClaudeCodeProvider(executableOverride: fakeCLIPath)
+        let stream = provider.send(turn: turn(workspace: workspace))
+        let streamFinished = expectation(description: "completed stream finished")
+        let consumer = Task { () -> Void in
+            for try await _ in stream {}
+            streamFinished.fulfill()
+        }
+
+        let holderPID = try await waitForPID(
+            named: "escaped-output-holder.pid", in: workspace, timeout: 12)
+        defer {
+            consumer.cancel()
+            _ = kill(holderPID, SIGKILL)
+        }
+
+        await fulfillment(of: [streamFinished], timeout: 12)
+        let pipeState = try await probeEscapedOutputHandles(in: workspace, timeout: 3)
+        XCTAssertEqual(pipeState, "closed,closed")
+        XCTAssertTrue(isAlive(holderPID))
+    }
+
+    func testTerminalResultAfterLeaderExitStillRotatesAndCompletes() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "emitResult": false,
+            "detachedResultDelayMs": 1_100,
+            "sessionResult": "rotated-after-leader-exit",
+            "assistantText": "late terminal result",
+        ], into: workspace)
+        let provider = ClaudeCodeProvider(
+            executableOverride: fakeCLIPath,
+            leaseCoordinator: ClaudeSessionLeaseCoordinator())
+
+        let events = try await collectAllEvents(
+            provider.send(turn: turn(workspace: workspace, conversationID: UUID())),
+            timeout: 8)
+
+        XCTAssertTrue(events.contains(.sessionStarted(
+            sessionID: "rotated-after-leader-exit")))
+        XCTAssertTrue(events.containsTurnCompleted)
+        XCTAssertFalse(events.contains { event in
+            if case .providerNotice = event { return true }
+            return false
+        })
     }
 
     func testBreakingStreamTerminatesProcess() async throws {
@@ -406,6 +829,36 @@ final class ClaudeCodeProviderTests: XCTestCase {
         }
         XCTAssertTrue(livingGrandchildren().isEmpty,
                       "cancel-before-register leaked live processes: \(livingGrandchildren())")
+    }
+
+    func testNewerPreStartCancellationMakesOlderDelayedStartStale() async throws {
+        let engine = ClaudeTurnEngine(
+            leaseCoordinator: ClaudeSessionLeaseCoordinator())
+        let olderToken = UUID()
+        let newerToken = UUID()
+        let (olderStream, olderContinuation) = makeEventStream()
+        let (newerStream, newerContinuation) = makeEventStream()
+        let request = turn(workspace: try makeWorkspace(), conversationID: UUID())
+
+        // Deterministic actor order: cancellation #2 arrives before delayed starts
+        // #1 and #2. Neither request may reach lease acquisition or spawn.
+        await engine.cancelIfCurrent(token: newerToken, sequence: 2)
+        await engine.startTurn(
+            token: olderToken, sequence: 1, request: request,
+            executableOverride: fakeCLIPath, mcpConfig: nil,
+            continuation: olderContinuation)
+        await engine.startTurn(
+            token: newerToken, sequence: 2, request: request,
+            executableOverride: fakeCLIPath, mcpConfig: nil,
+            continuation: newerContinuation)
+
+        let olderEvents = try await collectAllEvents(olderStream, timeout: 2)
+        let newerEvents = try await collectAllEvents(newerStream, timeout: 2)
+        XCTAssertTrue(olderEvents.isEmpty)
+        XCTAssertTrue(newerEvents.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: request.workspaceURL.appendingPathComponent(
+                "fake-claude-spawns.jsonl").path))
     }
 
     func testSecondTurnFinalizesAnUnfinishedFirstTurn() async throws {
@@ -656,9 +1109,39 @@ final class ClaudeCodeProviderTests: XCTestCase {
     }
 
     private func turn(
-        workspace: URL, prompt: String = "hello", attachments: [ChatAttachment] = []
+        workspace: URL,
+        prompt: String = "hello",
+        conversationID: UUID? = nil,
+        resumeSessionID: String? = nil,
+        attachments: [ChatAttachment] = []
     ) -> AgentTurnRequest {
-        AgentTurnRequest(workspaceURL: workspace, prompt: prompt, attachments: attachments)
+        AgentTurnRequest(
+            workspaceURL: workspace,
+            conversationID: conversationID,
+            resumeSessionID: resumeSessionID,
+            prompt: prompt,
+            attachments: attachments)
+    }
+
+    private func waitForFile(
+        named filename: String, in workspace: URL, timeout: TimeInterval
+    ) async throws -> Data {
+        let url = workspace.appendingPathComponent(filename)
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let data = try? Data(contentsOf: url), !data.isEmpty { return data }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        throw TestTimeout()
+    }
+
+    private func makeEventStream() -> (
+        AsyncThrowingStream<AgentEvent, Error>,
+        AsyncThrowingStream<AgentEvent, Error>.Continuation
+    ) {
+        var captured: AsyncThrowingStream<AgentEvent, Error>.Continuation!
+        let stream = AsyncThrowingStream<AgentEvent, Error> { captured = $0 }
+        return (stream, captured)
     }
 
     private func readGrandchildPID(in workspace: URL) throws -> pid_t {
@@ -671,10 +1154,36 @@ final class ClaudeCodeProviderTests: XCTestCase {
     }
 
     private func waitForGrandchildPID(in workspace: URL, timeout: TimeInterval) async throws -> pid_t {
+        try await waitForPID(named: "grandchild.pid", in: workspace, timeout: timeout)
+    }
+
+    private func waitForPID(
+        named filename: String, in workspace: URL, timeout: TimeInterval
+    ) async throws -> pid_t {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if let pid = try? readGrandchildPID(in: workspace) { return pid }
+            if let text = try? String(
+                contentsOf: workspace.appendingPathComponent(filename), encoding: .utf8),
+               let pid = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                return pid
+            }
             try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        throw TestTimeout()
+    }
+
+    private func probeEscapedOutputHandles(
+        in workspace: URL, timeout: TimeInterval
+    ) async throws -> String {
+        try Data().write(to: workspace.appendingPathComponent("probe-output-pipes"))
+        let resultURL = workspace.appendingPathComponent("escaped-output-holder-result")
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let result = try? String(contentsOf: resultURL, encoding: .utf8),
+               !result.isEmpty {
+                return result
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
         }
         throw TestTimeout()
     }

@@ -56,6 +56,14 @@ final class AssistantContextTests: XCTestCase {
             reader.contains(AssistantContext.readerReferencePlaceholder))
     }
 
+    func testUnclassifiedResumeReassertsUniversalRenderingInstructions() {
+        let seed = AssistantContext.seed(for: .unclassifiedResume)
+
+        XCTAssertTrue(seed.contains("Use LaTeX for mathematical notation"))
+        XCTAssertTrue(seed.contains("rubien_present_document_cards"))
+        XCTAssertTrue(seed.lowercased().contains("untrusted"))
+    }
+
     func testLibraryPromptOverrideReplacesVisibleDefault() {
         let seed = AssistantContext.seed(
             for: .library,

@@ -33,9 +33,10 @@ extension ChatTranscriptController: ChatTranscriptSink {}
 
 /// A snapshot of the user's Assistant defaults (Settings ▸ Assistant) applied to a
 /// FRESH conversation: model / effort / web / approval / tool posture / prompt
-/// override. A new reader window reads these at construction;
-/// `newConversation()` re-reads them (via an injected provider) so a changed default
-/// is adopted in an open window without reopening it.
+/// override. A new reader window reads these at construction; `newConversation()`
+/// re-reads them so a changed default is adopted without reopening the window.
+/// History also re-resolves only the surface-specific prompt when it adopts a
+/// conversation from another surface.
 struct AssistantConversationDefaults: Equatable {
     var model: String?
     var effort: String?
@@ -128,8 +129,9 @@ final class ChatSessionController: ObservableObject {
     /// Tool-environment posture snapshotted for this conversation. Settings changes
     /// are adopted by `newConversation()` rather than mutating a live agent session.
     @Published private(set) var loadUserTools: Bool
-    /// Surface-specific Settings text snapshotted with the conversation. It is sent
-    /// only as part of the first-turn seed and never mutates a live provider session.
+    /// Surface-specific Settings text snapshotted with the conversation. Rubien
+    /// reuses it whenever the provider needs to establish that conversation's
+    /// instructions; Settings changes never mutate a live provider session.
     private var promptOverride: String?
     @Published private(set) var availability: AgentAvailability?
     @Published private(set) var statusText: String?
@@ -211,10 +213,11 @@ final class ChatSessionController: ObservableObject {
     private let mentionSearch: MentionSearch
     /// Re-reads the user's Assistant defaults (Settings) when a fresh conversation
     /// starts, so changing a default + hitting "New conversation" adopts it without
-    /// reopening the window. Takes the CURRENT backend kind so it returns that
-    /// backend's model/effort/sandbox defaults. nil (tests / DEBUG harness) ⇒
-    /// `newConversation` keeps the current live values.
-    private let defaultsProvider: ((AgentProviderKind) -> AssistantConversationDefaults)?
+    /// reopening the window. Takes the CURRENT backend kind and effective context
+    /// so model/effort/sandbox and surface-specific prompt defaults are resolved
+    /// independently. nil (tests / DEBUG harness) ⇒ `newConversation` keeps the
+    /// current live values.
+    private let defaultsProvider: ((AgentProviderKind, AssistantConversationContext) -> AssistantConversationDefaults)?
     /// Present only in production composition roots. Tests remain database-free.
     private let activityDatabase: AppDatabase?
     private let attributionStore: AssistantSessionAttributionStore?
@@ -223,10 +226,6 @@ final class ChatSessionController: ObservableObject {
     /// The live provider session id. Captured from EVERY `.sessionStarted` because it
     /// **rotates each resume turn** (D5 / Risk #5); always resume the latest.
     private(set) var liveSessionID: String?
-    /// The seed is applied on the first turn only. Set once a `.sessionStarted` proves
-    /// the seed-bearing process actually started (NOT at send time — else a first turn
-    /// that fails before spawning would drop the reference context on the retry).
-    private var seedSent = false
     /// The in-flight turn (exposed read-only so tests can await it).
     private(set) var turnTask: Task<Void, Never>?
     /// The in-flight resume transcript restore (exposed read-only so tests can
@@ -257,6 +256,10 @@ final class ChatSessionController: ObservableObject {
     /// restores the visible transcript from this log when the pane remounts.
     private var renderLog: [ChatRenderMessage] = []
     private var renderSeq = 0
+    /// Deltas for the currently open assistant bubble. Normal completion replaces
+    /// them with the provider's authoritative message; Stop commits this partial
+    /// text so the next turn cannot append into the interrupted bubble.
+    private var streamingAssistantText = ""
     /// Bumped by `send` / `newConversation` to invalidate a superseded turn's late
     /// events + finalization (the stale-turn guard, §4.1): a drained old stream must
     /// not corrupt a fresh conversation's state or clobber a newer turn.
@@ -367,7 +370,7 @@ final class ChatSessionController: ObservableObject {
         autoApprove: Bool = false,
         codexSandbox: CodexSandbox = .readOnly,
         providerFactory: ((AgentProviderKind) -> any AgentProvider)? = nil,
-        defaultsProvider: ((AgentProviderKind) -> AssistantConversationDefaults)? = nil,
+        defaultsProvider: ((AgentProviderKind, AssistantConversationContext) -> AssistantConversationDefaults)? = nil,
         initialAvailability: AgentAvailability? = nil,
         attachmentStore: AssistantAttachmentStore? = nil,
         mentionSearch: @escaping MentionSearch = { _, _ in [] },
@@ -654,6 +657,7 @@ final class ChatSessionController: ObservableObject {
         generation += 1
         let gen = generation
         cancelledTurnGeneration = nil
+        streamingAssistantText = ""
         isResponding = true
         isAwaitingTurnAdmission = true
         turnOutcome = AssistantTurnOutcome(generation: gen, phase: .responding)
@@ -670,10 +674,11 @@ final class ChatSessionController: ObservableObject {
             mentionedReferences: mentions)
         let request = AgentTurnRequest(
             workspaceURL: workspaceURL,
+            conversationID: rubienConversationID,
             resumeSessionID: resumeID,
             prompt: providerPrompt,
             attachments: attachments,
-            seed: seedSent ? nil : AssistantContext.seed(
+            seed: AssistantContext.seed(
                 for: activeConversationContext,
                 promptOverride: promptOverride),
             webAccess: webAccess,
@@ -916,8 +921,25 @@ final class ChatSessionController: ObservableObject {
     func stop() {
         guard isResponding else { return }
         cancelledTurnGeneration = generation
-        provider.cancel()
+        commitInterruptedAssistantIfNeeded()
+        // A completed presentation can be waiting for the normal turn boundary.
+        // Publish it before the interruption notice; finalize must not place old
+        // assistant output below that boundary and above a queued Steer message.
+        publishPendingPaperPresentationsIfNeeded()
+        // Do not make controller progress depend on provider EOF. Cancelling the
+        // consumer releases the gate and invokes the stream's token-scoped
+        // termination handler, so a queued steer can start without a late,
+        // unscoped `provider.cancel()` accidentally cancelling that new turn.
+        turnTask?.cancel()
         renderNotice("_Interrupted._")
+    }
+
+    private func commitInterruptedAssistantIfNeeded() {
+        guard !streamingAssistantText.isEmpty else { return }
+        let partial = streamingAssistantText
+        streamingAssistantText = ""
+        transcript.commitAssistantMessage(partial)
+        appendToLog(.assistant, partial)
     }
 
     /// Escape-key action for a live turn with queued input. The normal finalization
@@ -979,7 +1001,7 @@ final class ChatSessionController: ObservableObject {
     /// bump the stale-turn `generation` so the old turn's still-draining events +
     /// finalization can't corrupt the fresh state (its awaited gate release still runs
     /// — no slot leak), and clear all transcript + turn UI state. Callers then set the
-    /// session-identity fields (`liveSessionID` / `seedSent` / `hasMessages`) and their
+    /// session-identity fields (`liveSessionID` / `hasMessages`) and their
     /// own tail (adopt defaults, or render a notice).
     private enum PendingAttachmentReset {
         case discard
@@ -995,7 +1017,11 @@ final class ChatSessionController: ObservableObject {
         attachmentQueue.removeAll()
         attachmentGeneration += 1
         attachmentConversationID = UUID()
-        provider.cancel()
+        // Stream cancellation is token-scoped by each provider. An unscoped
+        // fire-and-forget provider.cancel() can arrive after a fast reset + Send
+        // and terminate the new turn instead of the superseded one.
+        turnTask?.cancel()
+        turnTask = nil
         generation += 1
         cancelledTurnGeneration = nil
         turnOutcome = AssistantTurnOutcome(
@@ -1007,6 +1033,7 @@ final class ChatSessionController: ObservableObject {
         toolDetails.removeAll()
         renderLog.removeAll()
         renderSeq = 0
+        streamingAssistantText = ""
         isResponding = false
         isResuming = false
         isAwaitingTurnAdmission = false
@@ -1104,10 +1131,9 @@ final class ChatSessionController: ObservableObject {
     func newConversation() {
         resetConversationState(attachments: .discard)
         liveSessionID = nil
-        seedSent = false
         hasMessages = false
         beginFreshRubienConversation()
-        if let defaults = defaultsProvider?(providerKind) {
+        if let defaults = defaultsProvider?(providerKind, activeConversationContext) {
             applyConversationDefaults(defaults)
         }
         // A never-picked Codex user (nil model default) would otherwise drop to a
@@ -1149,10 +1175,9 @@ final class ChatSessionController: ObservableObject {
         }
         resetConversationState(attachments: .preserveAndRehome)
         liveSessionID = nil
-        seedSent = false
         hasMessages = false
         beginFreshRubienConversation()
-        if let defaults = defaultsProvider?(providerKind) {
+        if let defaults = defaultsProvider?(providerKind, activeConversationContext) {
             applyConversationDefaults(defaults)
         }
         seedCodexModelIfUnset()
@@ -1176,7 +1201,8 @@ final class ChatSessionController: ObservableObject {
     /// the History picker (§5.3). A light read of the provider's store; Rubien keeps
     /// nothing. Off-main inside the provider. `scopedToReference` keeps only sessions
     /// attributed to THIS document (the popover's default scope) — attribution is the
-    /// rubien tool calls in the session, since neither runtime persists the seed.
+    /// rubien tool calls in the session, since neither provider history surface
+    /// exposes the instructions.
     func listRecentSessions(limit: Int = 25, scopedToReference: Bool = false) async -> [AgentSessionSummary] {
         guard surfaceDefaultContext == .library, let attributionStore else {
             return await provider.recentSessions(
@@ -1233,9 +1259,10 @@ final class ChatSessionController: ObservableObject {
     /// Resume a past conversation from History: point the next turn at its session id
     /// (`--resume`) and start with a clean pane (Rubien has no stored transcript — D5).
     /// The provider stores no Rubien conversation-default snapshot, so the pane's
-    /// current web/approval/tool posture intentionally carries into the resume. The
-    /// resumed session already carries its seed/context, so `seedSent` is set to avoid
-    /// re-seeding. A notice with the preview gives the user their bearings.
+    /// current web/approval/tool posture intentionally carries into the resume.
+    /// Rubien re-applies the reconstructed instructions on the next provider turn;
+    /// this is required for Claude and ignored by Codex when resuming a thread.
+    /// A notice with the preview gives the user their bearings.
     func resume(_ summary: AgentSessionSummary) {
         resumeRequestGeneration += 1
         let requestGeneration = resumeRequestGeneration
@@ -1356,8 +1383,13 @@ final class ChatSessionController: ObservableObject {
                 id: id, title: "Reference \(id)", authors: ""))
         case nil: activeConversationContext = .unclassifiedResume
         }
+        // History can cross surfaces (Home may open a reader conversation and vice
+        // versa). Re-resolve only the prompt for the adopted context; the pane's
+        // current web/model/approval posture intentionally remains unchanged.
+        if let defaults = defaultsProvider?(providerKind, activeConversationContext) {
+            promptOverride = defaults.promptOverride
+        }
         liveSessionID = summary.id
-        seedSent = true
         hasMessages = true
         if let restoredHistory {
             restoreResumeHistory(restoredHistory)
@@ -1482,7 +1514,6 @@ final class ChatSessionController: ObservableObject {
             RubienPreferences.assistantCodexModel = id  // remember the pick as the default
             resetConversationState(attachments: .preserveAndRehome)
             liveSessionID = nil
-            seedSent = false
             modelOverride = id
             snapEffortToModelDefault(id)
             beginFreshRubienConversation()
@@ -1598,11 +1629,18 @@ final class ChatSessionController: ObservableObject {
     // MARK: Event mapping (internal for testing)
 
     func handle(_ event: AgentEvent, gen: Int) {
-        guard gen == generation else { return }  // drop a superseded turn's late events
+        // Cancellation can race a final buffered provider event. Once Stop has
+        // marked this generation, no more assistant output belongs below the
+        // interruption boundary; the queued Steer turn owns everything after it.
+        // Still capture a late session id: a very early Stop must not lose the
+        // runtime identity that the queued successor needs to continue safely.
+        guard gen == generation else { return }
+        if cancelledTurnGeneration == gen {
+            guard case .sessionStarted = event else { return }
+        }
         switch event {
         case .sessionStarted(let id):
             liveSessionID = id
-            seedSent = true  // the seed-bearing process started → the seed was delivered
             if let attributionStore {
                 let providerKind = providerKind
                 let workspaceURL = workspaceURL
@@ -1622,8 +1660,10 @@ final class ChatSessionController: ObservableObject {
             resolvedModel = model
             ensureEffortSupported()  // the governing model is now known — snap a stale effort
         case .assistantDelta(let text):
+            streamingAssistantText += text
             transcript.appendDelta(text)  // streaming-only; the commit is what's logged
         case .assistantMessageCompleted(let text):
+            streamingAssistantText = ""
             transcript.commitAssistantMessage(text)
             appendToLog(.assistant, text)
         case .toolUseStarted(let name, let detail):

@@ -187,6 +187,35 @@ final class ClaudeSessionStoreTests: XCTestCase {
         XCTAssertEqual(chip.status, .completed, "historical tool calls restore as completed chips")
     }
 
+    func testFullTranscriptHidesNativeInterruptBridgeBeforeSteeredMessage() throws {
+        let (store, _, workspace, dir) = try makeStore()
+        let cwd = workspace.path
+        try writeSession("interrupted", lines: [
+            userLine(cwd: cwd, content: "Explain PPO"),
+            #"{"type":"assistant","cwd":"\#(cwd)","isAbortedMidStream":true,"message":{"content":[{"type":"text","text":"The clipped objective limits…"}]}}"#,
+            #"{"type":"user","cwd":"\#(cwd)","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#,
+            #"{"type":"assistant","cwd":"\#(cwd)","message":{"model":"<synthetic>","content":[{"type":"text","text":"No response requested."}]}}"#,
+            userLine(cwd: cwd, content: "Also explain Figure 1"),
+            assistantLine(cwd: cwd, text: "Figure 1 shows the clipped ratio."),
+        ], mtime: Date(timeIntervalSince1970: 1_000), in: dir)
+
+        let rows = store.fullTranscript(sessionID: "interrupted", workspaceURL: workspace)
+        XCTAssertEqual(
+            rows.map(\.body),
+            [
+                "Explain PPO",
+                "The clipped objective limits…",
+                "Also explain Figure 1",
+                "Figure 1 shows the clipped ratio.",
+            ])
+        XCTAssertEqual(rows.map(\.role), [.user, .assistant, .user, .assistant])
+        XCTAssertTrue(store.searchSessions(
+            query: "No response requested",
+            workspaceURL: workspace,
+            limit: 25
+        ).isEmpty)
+    }
+
     func testFullTranscriptIsEmptyForAMissingSession() throws {
         let (store, _, workspace, _) = try makeStore()
         XCTAssertTrue(store.fullTranscript(sessionID: "nope", workspaceURL: workspace).isEmpty)

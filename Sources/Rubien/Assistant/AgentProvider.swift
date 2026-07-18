@@ -43,6 +43,11 @@ struct AgentTurnRequest: Sendable, Equatable {
     /// The agent's working directory (cwd). One shared, user-configurable folder
     /// (D4) — not per-reference.
     let workspaceURL: URL
+    /// Rubien's stable identity for the surrounding conversation. Unlike the
+    /// provider session id, this exists before Claude emits `system/init` and is
+    /// replaced immediately by New Conversation/History resume. Providers use it
+    /// to distinguish an early same-conversation steer from unrelated nil-id work.
+    let conversationID: UUID?
     /// The provider session id to `--resume`, or `nil` to start a new conversation.
     let resumeSessionID: String?
     /// The user's message text. Delivered as a stream-json `user` message on stdin
@@ -51,9 +56,10 @@ struct AgentTurnRequest: Sendable, Equatable {
     /// Local, staged attachments for this turn. Providers translate these into their
     /// native image/file inputs; the default keeps every text-only call site stable.
     let attachments: [ChatAttachment]
-    /// The one-line reference seed naming the reference id (D4). First turn only
-    /// (`nil` on resume — `--resume` carries it forward). Applied as Claude's
-    /// `--append-system-prompt`.
+    /// Rubien's trusted instructions for the surrounding conversation (D4).
+    /// Claude applies them as `--append-system-prompt` on every per-turn CLI
+    /// process because `--resume` does not persist that flag. Codex supplies them
+    /// as thread-level developer instructions when starting a new thread.
     let seed: String?
     /// Web toggle. When `false`, Claude gets `--disallowedTools "WebFetch WebSearch"`.
     let webAccess: Bool
@@ -74,6 +80,7 @@ struct AgentTurnRequest: Sendable, Equatable {
 
     init(
         workspaceURL: URL,
+        conversationID: UUID? = nil,
         resumeSessionID: String? = nil,
         prompt: String,
         attachments: [ChatAttachment] = [],
@@ -86,6 +93,7 @@ struct AgentTurnRequest: Sendable, Equatable {
         executionMode: AgentExecutionMode = .interactive
     ) {
         self.workspaceURL = workspaceURL
+        self.conversationID = conversationID
         self.resumeSessionID = resumeSessionID
         self.prompt = prompt
         self.attachments = attachments
@@ -270,13 +278,13 @@ struct AgentSessionSummary: Identifiable, Sendable, Equatable {
 }
 
 /// How a stored conversation is attributed to a reference — the History popover's
-/// "This document" scope. Neither runtime persists the seed (claude drops
-/// `--append-system-prompt` from its JSONL; codex never returns
-/// `developerInstructions`), so the recoverable signal is the rubien MCP TOOL
-/// CALLS a conversation contains: the seeded agent reads the document through
-/// them, and their arguments carry the reference id. ONE shared policy — which
-/// tools, which argument keys, how values coerce — so the Claude (JSONL
-/// `tool_use`) and Codex (`thread/read` `mcpToolCall`) scanners cannot drift.
+/// "This document" scope. Neither provider's history surface exposes Rubien's
+/// instructions (Claude omits `--append-system-prompt` from JSONL; Codex omits
+/// `developerInstructions` from `thread/read`), so the recoverable signal is the
+/// rubien MCP TOOL CALLS a conversation contains: the seeded agent reads the
+/// document through them, and their arguments carry the reference id. ONE shared
+/// policy — which tools, which argument keys, how values coerce — so the Claude
+/// (JSONL `tool_use`) and Codex (`thread/read` `mcpToolCall`) scanners cannot drift.
 enum ReferenceAttribution {
     /// Our server's registration key, as codex reports it in `mcpToolCall.server`.
     static var serverName: String { MCPContentChannel.serverName }
@@ -387,23 +395,25 @@ protocol AgentProvider: Sendable {
     /// approval request (Phase 3b).
     func respondToApproval(id: String, _ decision: ApprovalDecision)
 
-    /// Stop the CURRENT TURN. Claude: kills the turn's process group (SIGTERM →
-    /// grace → SIGKILL). Codex: `turn/interrupt` — the server lives on so the
-    /// conversation can continue.
+    /// Stop the CURRENT TURN. Claude: native stream-json `interrupt`, then bounded
+    /// SIGTERM/SIGKILL fallback. Codex: `turn/interrupt` — the server lives on so
+    /// the conversation can continue.
     func cancel()
 
     /// End the provider entirely (window close): terminate any live process tree.
     /// Distinct from `cancel()` for providers whose process outlives a turn —
     /// Codex's app-server dies here, not on every stop. Default: `cancel()`
-    /// (exactly right for Claude's per-turn process).
+    /// Claude overrides this too: teardown is terminal and rejects delayed sends,
+    /// while graceful Stop may hand the rotated session to a queued successor.
     func shutdown()
 
     /// The runtime's own recent sessions for `workspaceURL`, newest first, for the
     /// History picker (§5.3). A light read of the runtime's session store — Rubien
     /// stores nothing. A non-nil `referenceID` keeps only sessions attributed to
-    /// that reference (the popover's "This document" scope): neither runtime
-    /// persists the seed, so attribution is the rubien MCP tool calls whose
-    /// arguments carry the reference id. Default `[]` (no readable store).
+    /// that reference (the popover's "This document" scope): neither provider's
+    /// history surface exposes the instructions, so attribution is the rubien MCP
+    /// tool calls whose arguments carry the reference id. Default `[]` (no readable
+    /// store).
     func recentSessions(workspaceURL: URL, limit: Int, referenceID: Int64?) async -> [AgentSessionSummary]
 
     /// A picked session's full renderable transcript, so a resume restores the

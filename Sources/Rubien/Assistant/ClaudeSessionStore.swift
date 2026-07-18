@@ -94,9 +94,8 @@ struct ClaudeSessionStore {
             guard let obj = Self.parseLine(line) else { continue }
             if (obj["cwd"] as? String) == expectedCWD { cwdMatches = true }
             if preview == nil,
-               obj["type"] as? String == "user",
-               obj["isMeta"] as? Bool != true,  // skip Claude's internal/meta entries (command caveats etc.)
-               obj["isSidechain"] as? Bool != true,  // and subagent-internal rows
+               let entry = Self.conversationEntry(obj),
+               entry.type == "user",
                let text = Self.firstUserText(
                    obj, managedRoot: managedRoot, fileManager: fileManager
                ) {
@@ -230,9 +229,29 @@ struct ClaudeSessionStore {
         guard obj["isMeta"] as? Bool != true,
               obj["isSidechain"] as? Bool != true,
               let type = obj["type"] as? String, type == "user" || type == "assistant",
-              let message = obj["message"] as? [String: Any]
+              let message = obj["message"] as? [String: Any],
+              !isNativeInterruptArtifact(obj, type: type, message: message)
         else { return nil }
         return (type, message)
+    }
+
+    /// Claude's native stream-json interrupt is persisted as two protocol bridge
+    /// rows before the next real prompt. They are runtime bookkeeping, not authored
+    /// conversation content, and exposing them makes a steered message appear to
+    /// follow a bogus assistant reply in History.
+    private static func isNativeInterruptArtifact(
+        _ obj: [String: Any], type: String, message: [String: Any]
+    ) -> Bool {
+        let text = messageText(message)
+        if type == "user" {
+            // Real SDK prompts carry promptSource:"sdk". The native interrupt
+            // bridge does not, which keeps an intentionally literal user prompt
+            // with the same text visible.
+            return obj["promptSource"] == nil
+                && text == "[Request interrupted by user]"
+        }
+        return message["model"] as? String == "<synthetic>"
+            && text == "No response requested."
     }
 
     /// Content search over the folder's sessions: matches the VISIBLE conversation

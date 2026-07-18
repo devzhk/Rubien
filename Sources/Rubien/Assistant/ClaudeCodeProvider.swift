@@ -15,10 +15,9 @@ import RubienCore
 // internal `actor` (`ClaudeTurnEngine`) so the synchronous protocol methods
 // (`send`/`respondToApproval`/`cancel`) can forward without data races.
 //
-// **One conversation per instance:** a `ClaudeCodeProvider` runs a single turn at a
-// time; cross-window serialization is the process-wide `AssistantTurnGate`'s job. If
-// a second turn is ever started while one is still live, the engine cancels and
-// finalizes the prior one rather than silently orphaning its process (A2).
+// **One conversation per instance:** a `ClaudeCodeProvider` runs one live process at
+// a time. A process-wide Claude session lease outlives the UI gate and prevents a
+// second window from resuming an old/rotated alias until the former leader is reaped.
 //
 // The full native MCP library channel is wired per turn through
 // `--mcp-config`/`--strict-mcp-config`; availability still probes only the
@@ -36,11 +35,18 @@ final class ClaudeCodeProvider: AgentProvider {
     /// at the app's library, attached via `--mcp-config`. nil ⇒ the
     /// turn runs without document tools (the channel couldn't be resolved).
     private let contentChannel: MCPContentChannel?
+    /// `send`, `cancel`, and `shutdown` are synchronous protocol requirements. This
+    /// tiny locked box establishes their ordering before any actor hop.
+    private let controlState = ClaudeProviderControlState()
 
-    init(executableOverride: String? = nil, contentChannel: MCPContentChannel? = nil) {
+    init(
+        executableOverride: String? = nil,
+        contentChannel: MCPContentChannel? = nil,
+        leaseCoordinator: ClaudeSessionLeaseCoordinator = .shared
+    ) {
         self.executableOverride = executableOverride
         self.contentChannel = contentChannel
-        self.engine = ClaudeTurnEngine()
+        self.engine = ClaudeTurnEngine(leaseCoordinator: leaseCoordinator)
     }
 
     func isAvailable() async -> AgentAvailability {
@@ -48,7 +54,10 @@ final class ClaudeCodeProvider: AgentProvider {
     }
 
     func send(turn: AgentTurnRequest) -> AsyncThrowingStream<AgentEvent, Error> {
-        let token = UUID()
+        guard let ticket = controlState.beginSend() else {
+            return AsyncThrowingStream { $0.finish() }
+        }
+        let token = ticket.token
         let engine = self.engine
         let override = executableOverride
         let mcpConfig = contentChannel?.configArgument(
@@ -58,12 +67,14 @@ final class ClaudeCodeProvider: AgentProvider {
             // Breaking/cancelling the consumed stream (e.g. window closed mid-turn)
             // kills this turn's process group — turn-scoped so it can't clobber a
             // later turn.
-            continuation.onTermination = { _ in
-                Task { await engine.cancelIfCurrent(token: token) }
+            continuation.onTermination = { termination in
+                guard case .cancelled = termination else { return }
+                Task { await engine.cancelIfCurrent(
+                    token: token, sequence: ticket.sequence) }
             }
             Task {
                 await engine.startTurn(
-                    token: token, request: turn,
+                    token: token, sequence: ticket.sequence, request: turn,
                     executableOverride: override, mcpConfig: mcpConfig,
                     continuation: continuation)
             }
@@ -76,8 +87,16 @@ final class ClaudeCodeProvider: AgentProvider {
     }
 
     func cancel() {
+        guard let ticket = controlState.currentTicket() else { return }
         let engine = self.engine
-        Task { await engine.cancelCurrent() }
+        Task { await engine.cancelIfCurrent(
+            token: ticket.token, sequence: ticket.sequence) }
+    }
+
+    func shutdown() {
+        controlState.close()
+        let engine = self.engine
+        Task { await engine.shutdown() }
     }
 
     /// Light read of Claude's own session store for the History picker (§5.3).
@@ -121,57 +140,117 @@ final class ClaudeCodeProvider: AgentProvider {
     }
 }
 
+private final class ClaudeProviderControlState: @unchecked Sendable {
+    struct Ticket {
+        let token: UUID
+        let sequence: UInt64
+    }
+
+    private let lock = NSLock()
+    private var latestTicket: Ticket?
+    private var sequence: UInt64 = 0
+    private var isClosed = false
+
+    func beginSend() -> Ticket? {
+        lock.lock(); defer { lock.unlock() }
+        guard !isClosed else { return nil }
+        sequence &+= 1
+        let token = UUID()
+        let ticket = Ticket(token: token, sequence: sequence)
+        latestTicket = ticket
+        return ticket
+    }
+
+    func currentTicket() -> Ticket? {
+        lock.lock(); defer { lock.unlock() }
+        return latestTicket
+    }
+
+    func close() {
+        lock.lock()
+        isClosed = true
+        lock.unlock()
+    }
+}
+
 // MARK: - Turn engine (all mutable state is actor-isolated)
 
-private actor ClaudeTurnEngine {
-    /// The single in-flight turn (the `AssistantTurnGate` guarantees one at a time
-    /// per session; this is the low-level current-process guard).
+/// Internal for deterministic actor-order regression tests; production access is
+/// still exclusively through `ClaudeCodeProvider`.
+actor ClaudeTurnEngine {
     private var current: Turn?
-    /// Tokens cancelled BEFORE their `startTurn` ran (the consumer dropped the stream
-    /// in the window between `send()` arming `onTermination` and the `startTurn` task
-    /// executing). `startTurn` checks this and bails without spawning (A1).
+    private var pending: PendingStart?
     private var cancelledTokens: Set<UUID> = []
-    /// Only the binary path + --version is cached (expensive to resolve). Auth is NOT
-    /// cached — it's re-probed on every isAvailable() so a mid-session sign-out / token
-    /// expiry is reflected instead of Recheck being a no-op (#11); a not-found stays
-    /// uncached so installing / logging in later still lights up (B6).
+    private var isShuttingDown = false
+    private var latestStartSequence: UInt64 = 0
     private var cachedResolution: (path: String, version: String)?
+    private let leaseCoordinator: ClaudeSessionLeaseCoordinator
     private let logger = RubienLogger(subsystem: "com.rubien.assistant", category: "ClaudeProvider")
 
-    // Escalation timers (seconds). Named for single-point tuning (B5).
-    /// After a `result`, close stdin and, if the child lingers on stdout, SIGTERM…
     private static let settleSoftKillDelay: Double = 3.0
-    /// …then SIGKILL.
     private static let settleHardKillDelay: Double = 5.0
-    /// After an explicit cancel (SIGTERM already sent), SIGKILL if not yet dead.
-    private static let cancelHardKillDelay: Double = 2.0
-    // The crash-notice drain grace + tail size are shared (`AgentProcessExit`).
+    private static let interruptSoftKillDelay: Double = 0.5
+    private static let interruptHardKillDelay: Double = 2.0
+    private static let noResultExitGrace: Double = 2.0
 
-    /// One running turn's mutable state. Reference type, only ever touched inside
-    /// this actor's isolation, so it needs no synchronization of its own (the one
-    /// exception, `stderr`, is its own locked box read from the drain thread).
+    init(leaseCoordinator: ClaudeSessionLeaseCoordinator) {
+        self.leaseCoordinator = leaseCoordinator
+    }
+
+    private final class PendingStart {
+        let token: UUID
+        let request: AgentTurnRequest
+        let executableOverride: String?
+        let mcpConfig: String?
+        let continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation
+        var acquisitionTask: Task<Void, Never>?
+
+        init(
+            token: UUID,
+            request: AgentTurnRequest,
+            executableOverride: String?,
+            mcpConfig: String?,
+            continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation
+        ) {
+            self.token = token
+            self.request = request
+            self.executableOverride = executableOverride
+            self.mcpConfig = mcpConfig
+            self.continuation = continuation
+        }
+    }
+
     private final class Turn {
         let token: UUID
         let process: SpawnedAgentProcess
         let continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation
+        let conversationID: UUID?
+        let lease: ClaudeSessionLeaseCoordinator.Grant
         var parser = ClaudeStreamParser()
-        /// requestID → the bookkeeping needed to answer a `can_use_tool`.
         var pendingApprovals: [String: ClaudeControlProtocol.PendingApproval] = [:]
         let stderr = StderrRingBuffer()
+        var latestSessionID: String?
         var sawResult = false
         var cancelled = false
         var finished = false
-        /// The scheduled soft/hard-kill escalation, cancelled on finalize so no late
-        /// signal fires after normal completion (A3).
+        var leaderExited = false
+        var forceFinalize = false
+        var finalizing = false
         var terminationTask: Task<Void, Never>?
 
         init(
             token: UUID, process: SpawnedAgentProcess,
-            continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation
+            continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation,
+            conversationID: UUID?,
+            lease: ClaudeSessionLeaseCoordinator.Grant,
+            latestSessionID: String?
         ) {
             self.token = token
             self.process = process
             self.continuation = continuation
+            self.conversationID = conversationID
+            self.lease = lease
+            self.latestSessionID = latestSessionID
         }
     }
 
@@ -179,44 +258,107 @@ private actor ClaudeTurnEngine {
 
     func startTurn(
         token: UUID,
+        sequence: UInt64,
         request: AgentTurnRequest,
         executableOverride: String?,
         mcpConfig: String?,
         continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation
     ) {
-        // A1: the consumer may have cancelled the stream in the window before this
-        // task ran. `cancelIfCurrent` recorded the token; honor it and never spawn.
-        if cancelledTokens.remove(token) != nil {
+        guard !isShuttingDown else {
+            continuation.finish()
+            return
+        }
+        let wasCancelledBeforeStart = cancelledTokens.remove(token) != nil
+        guard sequence >= latestStartSequence else {
+            continuation.finish()
+            return
+        }
+        latestStartSequence = sequence
+        if wasCancelledBeforeStart {
             continuation.finish()
             return
         }
 
-        // A2: one conversation per instance. A still-live prior turn means a
-        // serialization violation upstream — cancel + finalize it (kill its group,
-        // finish its stream) rather than silently orphaning its process.
-        if let existing = current, !existing.finished {
-            logger.error("startTurn entered with an unfinished turn active — finalizing the prior turn")
-            abandon(existing)
-        }
+        let start = PendingStart(
+            token: token, request: request, executableOverride: executableOverride,
+            mcpConfig: mcpConfig, continuation: continuation)
+        if let replaced = pending { cancelPending(replaced) }
+        pending = start
 
+        if let turn = current {
+            beginRetirement(turn)
+        } else {
+            acquireLease(for: start)
+        }
+    }
+
+    private func acquireLease(for start: PendingStart) {
+        guard pending?.token == start.token, start.acquisitionTask == nil else { return }
+        let waiterID = UUID()
+        let coordinator = leaseCoordinator
+        start.acquisitionTask = Task { [self] in
+            let grant = await coordinator.acquire(
+                waiterID: waiterID,
+                conversationID: start.request.conversationID,
+                resumeSessionID: start.request.resumeSessionID)
+            if Task.isCancelled {
+                if let grant {
+                    await coordinator.release(grant, latestSessionID: grant.latestSessionID)
+                }
+                await leaseAcquired(nil, token: start.token)
+                return
+            }
+            await leaseAcquired(grant, token: start.token)
+        }
+    }
+
+    private func leaseAcquired(
+        _ grant: ClaudeSessionLeaseCoordinator.Grant?, token: UUID
+    ) async {
+        guard let start = pending, start.token == token,
+              !isShuttingDown, current == nil
+        else {
+            if let grant {
+                await leaseCoordinator.release(grant, latestSessionID: grant.latestSessionID)
+            }
+            return
+        }
+        start.acquisitionTask = nil
+        guard let grant else {
+            cancelPending(start)
+            return
+        }
+        await spawn(start, lease: grant, resumeSessionID: grant.latestSessionID)
+    }
+
+    private func spawn(
+        _ start: PendingStart,
+        lease: ClaudeSessionLeaseCoordinator.Grant,
+        resumeSessionID: String?
+    ) async {
         let images: [ClaudeImageInput]
-        switch Self.imageInputs(from: request.attachments) {
+        switch Self.imageInputs(from: start.request.attachments) {
         case .success(let inputs):
             images = inputs
         case .failure(let error):
-            continuation.finish(throwing: error)
+            await fail(start, lease: lease, resumeSessionID: resumeSessionID, error: error)
             return
         }
         let userMessage = ClaudeControlProtocol.userMessage(
-            prompt: request.prompt, images: images)
+            prompt: start.request.prompt, images: images)
 
-        guard let executable = Self.resolveExecutable(override: executableOverride) else {
-            continuation.finish(throwing: AgentProviderError.executableNotFound(
-                executableOverride ?? "claude"))
+        guard let executable = Self.resolveExecutable(override: start.executableOverride) else {
+            await fail(
+                start, lease: lease, resumeSessionID: resumeSessionID,
+                error: AgentProviderError.executableNotFound(
+                    start.executableOverride ?? "claude"))
             return
         }
 
-        let arguments = ClaudeCLIInvocation.arguments(for: request, mcpConfig: mcpConfig)
+        let arguments = ClaudeCLIInvocation.arguments(
+            for: start.request,
+            mcpConfig: start.mcpConfig,
+            resumeSessionID: resumeSessionID)
         let environment = ClaudeCLIInvocation.environment(
             binaryDirectory: (executable as NSString).deletingLastPathComponent)
 
@@ -226,18 +368,36 @@ private actor ClaudeTurnEngine {
                 executablePath: executable,
                 arguments: arguments,
                 environment: environment,
-                workingDirectory: request.workspaceURL.path)
+                workingDirectory: start.request.workspaceURL.path)
         } catch let error as AgentProviderError {
-            continuation.finish(throwing: error)
+            await fail(start, lease: lease, resumeSessionID: resumeSessionID, error: error)
             return
         } catch {
-            continuation.finish(throwing: AgentProviderError.spawnFailed(code: -1))
+            await fail(
+                start, lease: lease, resumeSessionID: resumeSessionID,
+                error: AgentProviderError.spawnFailed(code: -1))
             return
         }
 
-        logger.info("claude turn spawned pid=\(process.pid) resume=\(request.resumeSessionID != nil)")
+        guard !isShuttingDown, pending?.token == start.token else {
+            process.signalGroup(SIGKILL)
+            process.closeOutputHandles()
+            Task { [coordinator = leaseCoordinator] in
+                guard await process.observeExit() else { return }
+                process.signalGroup(SIGKILL)
+                guard await process.reap() != nil else { return }
+                await coordinator.release(lease, latestSessionID: resumeSessionID)
+            }
+            start.continuation.finish()
+            return
+        }
 
-        let turn = Turn(token: token, process: process, continuation: continuation)
+        logger.info("claude turn spawned pid=\(process.pid) resume=\(resumeSessionID != nil)")
+        let turn = Turn(
+            token: start.token, process: process, continuation: start.continuation,
+            conversationID: start.request.conversationID, lease: lease,
+            latestSessionID: resumeSessionID)
+        pending = nil
         current = turn
         startReaders(turn: turn)
 
@@ -245,6 +405,17 @@ private actor ClaudeTurnEngine {
         // stays open (it is also the approval bus) until the result / cancel.
         process.writeLine(ClaudeControlProtocol.initializeRequest(requestID: UUID().uuidString))
         process.writeLine(userMessage)
+    }
+
+    private func fail(
+        _ start: PendingStart,
+        lease: ClaudeSessionLeaseCoordinator.Grant,
+        resumeSessionID: String?,
+        error: Error
+    ) async {
+        if pending?.token == start.token { pending = nil }
+        start.continuation.finish(throwing: error)
+        await leaseCoordinator.release(lease, latestSessionID: resumeSessionID)
     }
 
     /// Materialize all native image blocks before any process is spawned or stdin
@@ -268,7 +439,7 @@ private actor ClaudeTurnEngine {
 
     /// Feed one stdout line into the turn. Stale lines (from a superseded/killed
     /// process) are dropped — the stale-process guard (§4.1).
-    func ingest(token: UUID, line: String) {
+    func ingest(token: UUID, line: String) async {
         guard let turn = current, turn.token == token, !turn.finished else { return }
 
         // Record approval bookkeeping BEFORE emitting the event, so a caller that
@@ -282,105 +453,158 @@ private actor ClaudeTurnEngine {
         }
 
         for event in turn.parser.parse(line: line) {
-            turn.continuation.yield(event)
+            if case .sessionStarted(let sessionID) = event {
+                turn.latestSessionID = sessionID
+                // Publish a fresh/rotated alias before exposing it to the UI. A
+                // different provider can immediately attempt History resume from
+                // that visible id; it must join this already-held lease rather
+                // than creating a second live owner.
+                await leaseCoordinator.update(turn.lease, latestSessionID: sessionID)
+            }
+            if !turn.cancelled { turn.continuation.yield(event) }
             if case .turnCompleted = event { onResult(turn) }
         }
     }
 
-    /// stdout reached EOF: reap the process group leader and finalize.
-    func stdoutClosed(token: UUID) async {
-        guard let turn = current, turn.token == token else { return }
-        // Lazy reap (no separate reaper thread): the child closed stdout so it is
-        // exiting; `wait()` returns promptly. A child that lingers on the pipe is
-        // force-killed by the settle/cancel watchdog, which unblocks this. `wait()`
-        // flags `hasExited` under the lock BEFORE reaping, so a late watchdog
-        // `killpg` can never signal a recycled pid (A3).
-        let status = await turn.process.wait()
-        guard let cur = current, cur.token == token else { return }
-        await finalize(cur, status: status)
+    private func leaderExited(token: UUID) {
+        guard let turn = current, turn.token == token, !turn.finished else { return }
+        turn.leaderExited = true
+        if turn.sawResult || turn.forceFinalize {
+            beginFinalize(turn)
+        } else if !turn.cancelled {
+            scheduleNoResultFallback(turn)
+        }
     }
 
     // MARK: External controls
 
     func respond(id: String, decision: ApprovalDecision) {
-        guard let turn = current, !turn.finished,
+        guard let turn = current, !turn.finished, !turn.cancelled,
               let pending = turn.pendingApprovals[id]
         else { return }
         turn.pendingApprovals[id] = nil
         turn.process.writeLine(ClaudeControlProtocol.controlResponse(for: pending, decision: decision))
     }
 
-    func cancelCurrent() {
-        guard let turn = current else { return }
-        cancel(turn)
-    }
-
-    func cancelIfCurrent(token: UUID) {
+    func cancelIfCurrent(token: UUID, sequence: UInt64) {
         if let turn = current, turn.token == token {
-            cancel(turn)
-        } else {
-            // A1: the turn hasn't registered yet (cancel raced ahead of `startTurn`).
-            // Record it so `startTurn` bails without spawning.
+            beginRetirement(turn)
+        } else if let start = pending, start.token == token {
+            cancelPending(start)
+        } else if sequence > latestStartSequence {
+            // A newer send can be cancelled before either its own start task or an
+            // older delayed start reaches the actor. Advancing the watermark makes
+            // that older start stale; discard an already-registered older pending
+            // acquisition as well. A live older turn is left alone because the
+            // cancelled successor never became an interruption request.
+            latestStartSequence = sequence
+            if let olderPending = pending { cancelPending(olderPending) }
             cancelledTokens.insert(token)
         }
+    }
+
+    func shutdown() {
+        guard !isShuttingDown else { return }
+        isShuttingDown = true
+        if let start = pending { cancelPending(start) }
+        guard let turn = current, !turn.finished else { return }
+        turn.cancelled = true
+        turn.forceFinalize = true
+        turn.pendingApprovals.removeAll()
+        turn.terminationTask?.cancel()
+        turn.continuation.finish()
+        turn.process.closeStdin()
+        turn.process.closeOutputHandles()
+        turn.stderr.finish()
+        turn.process.signalGroup(SIGKILL)
+        if turn.leaderExited { beginFinalize(turn) }
     }
 
     // MARK: Internals
 
     private func onResult(_ turn: Turn) {
+        guard !turn.sawResult else { return }
         turn.sawResult = true
-        // End the stream-json session so claude exits, then insure against a helper
-        // that lingers on stdout by escalating a kill if EOF doesn't arrive.
-        turn.process.closeStdin()
-        scheduleTermination(
-            turn, softAfter: Self.settleSoftKillDelay, hardAfter: Self.settleHardKillDelay)
+        if turn.cancelled {
+            turn.process.signalGroup(SIGTERM)
+        } else {
+            turn.process.closeStdin()
+            scheduleTermination(
+                turn,
+                softAfter: Self.settleSoftKillDelay,
+                hardAfter: Self.settleHardKillDelay)
+        }
+        if turn.leaderExited { beginFinalize(turn) }
     }
 
-    private func cancel(_ turn: Turn) {
-        guard !turn.finished else { return }
+    private func beginRetirement(_ turn: Turn) {
+        guard !turn.finished, !turn.cancelled else { return }
         turn.cancelled = true
-        turn.process.closeStdin()
-        turn.process.signalGroup(SIGTERM)      // whole tree (claude spawns children)
-        scheduleTermination(turn, softAfter: nil, hardAfter: Self.cancelHardKillDelay)
-        // stdout will EOF once the group dies → stdoutClosed → finalize.
+        turn.pendingApprovals.removeAll()
+        turn.continuation.finish()
+        turn.process.writeFinalLine(
+            ClaudeControlProtocol.interruptRequest(requestID: UUID().uuidString))
+        scheduleTermination(
+            turn,
+            softAfter: Self.interruptSoftKillDelay,
+            hardAfter: Self.interruptHardKillDelay)
+        if turn.leaderExited, turn.sawResult { beginFinalize(turn) }
     }
 
-    /// A2 helper: force a still-live turn to end synchronously (used when a new turn
-    /// starts while this one is unfinished). Kills the group, reaps in the background,
-    /// finishes the stream.
-    private func abandon(_ turn: Turn) {
-        guard !turn.finished else { return }
-        turn.finished = true
+    private func cancelPending(_ start: PendingStart) {
+        guard pending?.token == start.token else { return }
+        pending = nil
+        start.acquisitionTask?.cancel()
+        start.continuation.finish()
+        cancelledTokens.remove(start.token)
+    }
+
+    private func beginFinalize(_ turn: Turn) {
+        guard !turn.finished, !turn.finalizing, turn.leaderExited else { return }
+        turn.finalizing = true
         turn.terminationTask?.cancel()
         turn.process.signalGroup(SIGKILL)
-        turn.continuation.finish()
-        cancelledTokens.remove(turn.token)
-        if current?.token == turn.token { current = nil }
-        // Reap so the killed leader doesn't linger as a zombie (its own reader's
-        // `stdoutClosed` will early-return now that it is no longer `current`).
+        turn.process.closeOutputHandles()
+        turn.stderr.finish()
+        let token = turn.token
         let process = turn.process
-        Task { _ = await process.wait() }
+        Task { [self] in
+            guard let status = await process.reap() else {
+                reapFailed(token: token)
+                return
+            }
+            await cleanupCompleted(token: token, status: status)
+        }
     }
 
-    private func finalize(_ turn: Turn, status: Int32) async {
-        guard !turn.finished else { return }
-        turn.finished = true
-        turn.terminationTask?.cancel()   // A3: no late kill after normal completion
-        turn.process.closeStdin()
+    private func reapFailed(token: UUID) {
+        guard let turn = current, turn.token == token, turn.finalizing else { return }
+        logger.error("waitpid failed for claude pid=\(turn.process.pid); retaining session lease")
+        turn.finalizing = false
+    }
 
-        // A process that ended WITHOUT a result and WITHOUT being cancelled failed
-        // (crash / non-zero exit / auth error) → surface a clean notice (§4.5), not
-        // a thrown error, so it renders as chat content.
+    private func cleanupCompleted(token: UUID, status: Int32) async {
+        guard let turn = current, turn.token == token, !turn.finished else { return }
+        turn.finished = true
         if !turn.cancelled && !turn.sawResult {
-            // A5: the shared crash notice waits briefly for stderr's final (error)
-            // bytes so the message carries the real error, then composes it.
             turn.continuation.yield(.providerNotice(
                 await AgentProcessExit.crashNotice(waitStatus: status, stderr: turn.stderr)))
         }
+        if !turn.cancelled { turn.continuation.finish() }
+        cancelledTokens.remove(turn.token)
+        current = nil
 
-        turn.continuation.finish()
-        cancelledTokens.remove(turn.token)   // A1: prune so the set can't grow unbounded
-        if current?.token == turn.token { current = nil }
+        await leaseCoordinator.update(turn.lease, latestSessionID: turn.latestSessionID)
+        if !isShuttingDown,
+           let start = pending,
+           let conversationID = turn.conversationID,
+           start.request.conversationID == conversationID {
+            await spawn(start, lease: turn.lease, resumeSessionID: turn.latestSessionID)
+            return
+        }
+
+        await leaseCoordinator.release(turn.lease, latestSessionID: turn.latestSessionID)
+        if !isShuttingDown, let start = pending { acquireLease(for: start) }
     }
 
     /// Independent stdout (line → event) and stderr (bounded ring buffer) drains, so
@@ -397,7 +621,14 @@ private actor ClaudeTurnEngine {
             } catch {
                 // A read error is just an early EOF for our purposes.
             }
-            await self?.stdoutClosed(token: token)
+        }
+
+        Task { [self] in
+            guard await process.observeExit() else {
+                observationFailed(token: token)
+                return
+            }
+            leaderExited(token: token)
         }
 
         // stderr on a background thread doing bounded blocking reads (NOT per-byte
@@ -414,18 +645,29 @@ private actor ClaudeTurnEngine {
         }
     }
 
-    private func scheduleTermination(_ turn: Turn, softAfter: Double?, hardAfter: Double) {
+    private func scheduleTermination(
+        _ turn: Turn, softAfter: Double, hardAfter: Double
+    ) {
         let token = turn.token
         turn.terminationTask?.cancel()
         turn.terminationTask = Task { [weak self] in
-            if let softAfter {
-                try? await Task.sleep(nanoseconds: UInt64(softAfter * 1_000_000_000))
-                if Task.isCancelled { return }
-                await self?.softKill(token: token)
-            }
-            try? await Task.sleep(nanoseconds: UInt64(hardAfter * 1_000_000_000))
+            try? await Task.sleep(nanoseconds: UInt64(softAfter * 1_000_000_000))
             if Task.isCancelled { return }
-            await self?.hardKill(token: token)
+            await self?.softKill(token: token)
+            let remaining = hardAfter - softAfter
+            try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+            if Task.isCancelled { return }
+            await self?.forceKill(token: token)
+        }
+    }
+
+    private func scheduleNoResultFallback(_ turn: Turn) {
+        let token = turn.token
+        turn.terminationTask?.cancel()
+        turn.terminationTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.noResultExitGrace * 1_000_000_000))
+            if Task.isCancelled { return }
+            await self?.forceKill(token: token)
         }
     }
 
@@ -434,9 +676,20 @@ private actor ClaudeTurnEngine {
         turn.process.signalGroup(SIGTERM)
     }
 
-    private func hardKill(token: UUID) {
+    private func forceKill(token: UUID) {
         guard let turn = current, turn.token == token, !turn.finished else { return }
+        turn.forceFinalize = true
+        if turn.cancelled, !turn.sawResult {
+            logger.error(
+                "claude interrupt fallback lost cooperative result pid=\(turn.process.pid) session=\(turn.latestSessionID ?? "none")")
+        }
         turn.process.signalGroup(SIGKILL)
+        if turn.leaderExited { beginFinalize(turn) }
+    }
+
+    private func observationFailed(token: UUID) {
+        guard let turn = current, turn.token == token, !turn.finished else { return }
+        logger.error("waitid failed for claude pid=\(turn.process.pid); retaining session lease")
     }
 
     // MARK: Availability
@@ -502,7 +755,11 @@ enum ClaudeCLIInvocation {
 
     /// The per-turn argv (D3/§4.2). `mcpConfig`, when present, is the inline
     /// `--mcp-config` JSON for the native Rubien library channel.
-    static func arguments(for request: AgentTurnRequest, mcpConfig: String? = nil) -> [String] {
+    static func arguments(
+        for request: AgentTurnRequest,
+        mcpConfig: String? = nil,
+        resumeSessionID: String? = nil
+    ) -> [String] {
         var args = [
             "--print",
             "--input-format", "stream-json",
@@ -522,9 +779,12 @@ enum ClaudeCLIInvocation {
             // Claude loads its normal user/project/local configuration.
             args += ["--setting-sources", ""]
         }
-        if let resume = request.resumeSessionID, !resume.isEmpty {
+        if let resume = resumeSessionID ?? request.resumeSessionID, !resume.isEmpty {
             args += ["--resume", resume]
         }
+        // `--append-system-prompt` is invocation-scoped: `--resume` restores the
+        // transcript, but not this flag. The controller therefore carries the same
+        // trusted instructions into every Claude turn.
         if let seed = request.seed, !seed.isEmpty {
             args += ["--append-system-prompt", seed]
         }

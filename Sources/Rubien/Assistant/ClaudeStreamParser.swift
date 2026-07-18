@@ -285,6 +285,17 @@ enum ClaudeControlProtocol {
         ])
     }
 
+    /// Claude Agent SDK-compatible cooperative interruption request. This is the
+    /// graceful first step; the provider retains a bounded signal fallback for
+    /// older or wedged runtimes that never acknowledge it.
+    static func interruptRequest(requestID: String) -> String {
+        encode([
+            "type": "control_request",
+            "request_id": requestID,
+            "request": ["subtype": "interrupt"],
+        ])
+    }
+
     /// A stream-json `user` message carrying the prompt (delivered on stdin, §4.2).
     static func userMessage(prompt: String, images: [ClaudeImageInput] = []) -> String {
         let imageBlocks: [[String: Any]] = images.map { image in

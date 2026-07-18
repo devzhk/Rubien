@@ -750,7 +750,7 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertLessThan(chipIndex, deltaIndex, "the chip precedes the answer that used it")
     }
 
-    func testSeedIsFirstTurnOnlyAndSessionIDIsRecapturedForResume() async {
+    func testInstructionsAreIncludedOnEveryTurnAndSessionIDIsRecapturedForResume() async {
         let provider = MockAgentProvider()
         let controller = makeController(provider: provider, sink: SpyTranscriptSink())
 
@@ -760,7 +760,10 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertEqual(provider.requests.count, 2)
         XCTAssertNotNil(provider.requests[0].seed)
         XCTAssertNil(provider.requests[0].resumeSessionID)
-        XCTAssertNil(provider.requests[1].seed, "seed is applied on the first turn only")
+        XCTAssertEqual(
+            provider.requests[1].seed,
+            provider.requests[0].seed,
+            "Claude starts a fresh CLI process for each resumed turn, so Rubien instructions must be re-applied")
         XCTAssertEqual(provider.requests[1].resumeSessionID, "s1", "resume targets the id captured last turn")
     }
 
@@ -858,7 +861,7 @@ final class ChatSessionControllerTests: XCTestCase {
             gate: AssistantTurnGate(),
             webAccess: current.webAccess, modelOverride: current.model,
             effortOverride: current.effort, autoApprove: current.autoApprove,
-            defaultsProvider: { _ in current })
+            defaultsProvider: { _, _ in current })
 
         current = AssistantConversationDefaults(
             model: "sonnet", effort: "medium", webAccess: false, autoApprove: true,
@@ -884,7 +887,7 @@ final class ChatSessionControllerTests: XCTestCase {
             workspaceURL: URL(fileURLWithPath: "/tmp/ws"),
             gate: AssistantTurnGate(),
             promptOverride: current.promptOverride,
-            defaultsProvider: { _ in current },
+            defaultsProvider: { _, _ in current },
             initialAvailability: .installed(version: "test", path: "/fake/claude"))
 
         current.promptOverride = "Use the updated reading prompt for {{reference}}."
@@ -920,7 +923,7 @@ final class ChatSessionControllerTests: XCTestCase {
         let claude = MockAgentProvider(kind: .claude)
         let codex = MockAgentProvider(kind: .codex)
         let factory: (AgentProviderKind) -> any AgentProvider = { $0 == .claude ? claude : codex }
-        let defaults: (AgentProviderKind) -> AssistantConversationDefaults = { kind in
+        let defaults: (AgentProviderKind, AssistantConversationContext) -> AssistantConversationDefaults = { kind, _ in
             switch kind {
             case .claude:
                 return AssistantConversationDefaults(model: "opus", effort: "high", webAccess: true, autoApprove: false)
@@ -1008,7 +1011,7 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertEqual(claude.cancelCount, 0)
     }
 
-    func testResumePointsNextTurnAtSessionWithoutReseeding() async {
+    func testResumePointsNextTurnAtSessionAndReappliesInstructions() async {
         let provider = MockAgentProvider()
         let sink = SpyTranscriptSink()
         let controller = makeController(
@@ -1025,13 +1028,65 @@ final class ChatSessionControllerTests: XCTestCase {
             sink.calls.contains { if case .addNotice(let md) = $0 { return md.contains("Prior chat") } else { return false } },
             "a notice with the preview orients the user when the store is unreadable")
 
-        // The resumed session already carries its seed → the next turn resumes that id
-        // and does NOT re-send a seed.
+        // Claude does not persist --append-system-prompt in its session, so the next
+        // turn resumes the id and re-applies Rubien's instructions to the new process.
         await runTurn(controller, provider: provider, send: "continue", events: [.turnCompleted(usage: nil)])
         XCTAssertEqual(provider.lastRequest?.resumeSessionID, "sess-123")
-        XCTAssertNil(provider.lastRequest?.seed, "a resumed conversation must not re-seed")
+        XCTAssertTrue(provider.lastRequest?.seed?.contains("Use LaTeX for mathematical notation") == true)
+        XCTAssertTrue(provider.lastRequest?.seed?.contains("rubien_present_document_cards") == true)
         XCTAssertEqual(provider.lastRequest?.loadUserTools, true,
                        "History uses the pane's current tool posture; providers do not store this Rubien setting")
+    }
+
+    func testHistoryResumeUsesPromptOverrideForTheAdoptedSurface() async throws {
+        let workspace = URL(fileURLWithPath: "/tmp/ws")
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Rubien-attribution-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+        let store = AssistantSessionAttributionStore(fileURL: storeURL)
+        await store.record(
+            sessionID: "reader-history",
+            provider: .claude,
+            workspaceURL: workspace,
+            conversationId: UUID(),
+            context: .reference(ChatReference(id: 9, title: "Paper", authors: "Author")))
+
+        let provider = MockAgentProvider()
+        let defaults: (AgentProviderKind, AssistantConversationContext) -> AssistantConversationDefaults = { _, context in
+            let prompt: String
+            switch context {
+            case .library, .unclassifiedResume:
+                prompt = "LIBRARY PROMPT"
+            case .reference:
+                prompt = "READER PROMPT for {{reference}}"
+            }
+            return AssistantConversationDefaults(
+                model: "opus", effort: "high", webAccess: true,
+                autoApprove: false, promptOverride: prompt)
+        }
+        let controller = ChatSessionController(
+            provider: provider,
+            transcript: SpyTranscriptSink(),
+            conversationContext: .library,
+            workspaceURL: workspace,
+            gate: AssistantTurnGate(),
+            promptOverride: "LIBRARY PROMPT",
+            defaultsProvider: defaults,
+            initialAvailability: .installed(version: "test", path: "/fake/claude"),
+            attributionStore: store)
+
+        controller.resume(AgentSessionSummary(
+            id: "reader-history", preview: "Reader conversation", date: Date()))
+        await waitUntil { controller.liveSessionID == "reader-history" }
+        await runTurn(
+            controller,
+            provider: provider,
+            send: "continue",
+            events: [.turnCompleted(usage: nil)])
+
+        let seed = try XCTUnwrap(provider.lastRequest?.seed)
+        XCTAssertTrue(seed.contains("READER PROMPT for reference ID 9"))
+        XCTAssertFalse(seed.contains("LIBRARY PROMPT"))
     }
 
     func testResumeRestoresTheConversationTranscript() async {
@@ -1489,7 +1544,7 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertEqual(commits, 1)
     }
 
-    func testSeedIsResentWhenTheFirstTurnFailsBeforeASession() async {
+    func testRetryAfterPreSessionFailureStartsFreshTurn() async {
         let provider = MockAgentProvider()
         let controller = makeController(provider: provider, sink: SpyTranscriptSink())
 
@@ -1502,10 +1557,11 @@ final class ChatSessionControllerTests: XCTestCase {
         await task1?.value
         XCTAssertNil(controller.liveSessionID)
 
-        // The retry must re-send the seed (context was never established).
+        // Without a runtime session id, the retry must remain a fresh turn rather
+        // than attempting to resume a session that never existed.
         await runTurn(controller, provider: provider, send: "q1-retry", events: [.sessionStarted(sessionID: "s1"), .turnCompleted(usage: nil)])
-        XCTAssertNotNil(provider.requests[0].seed)
-        XCTAssertNotNil(provider.requests[1].seed, "the seed is re-sent because the first turn never started a session")
+        XCTAssertEqual(provider.requests.map(\.prompt), ["q1", "q1-retry"])
+        XCTAssertNil(provider.requests[1].resumeSessionID)
     }
 
     func testNewConversationDropsLateEventsFromTheDrainingTurn() async {
@@ -1551,10 +1607,11 @@ final class ChatSessionControllerTests: XCTestCase {
         provider.emit(.sessionStarted(sessionID: "s1"))
         XCTAssertTrue(controller.isResponding)
 
-        controller.stop()  // process-group kill; the mock ends the stream on cancel
+        controller.stop()  // consumer cancellation drives token-scoped provider teardown
         await task?.value
 
-        XCTAssertEqual(provider.cancelCount, 1)
+        XCTAssertEqual(provider.streamCancellationCount, 1)
+        XCTAssertEqual(provider.cancelCount, 0)
         XCTAssertTrue(sink.notices.contains { $0.contains("Interrupted") })
         XCTAssertFalse(controller.isResponding)
     }
@@ -1811,15 +1868,116 @@ final class ChatSessionControllerTests: XCTestCase {
         await firstTask?.value
         await provider.waitUntilStreaming()
 
-        XCTAssertEqual(provider.cancelCount, 1)
+        XCTAssertEqual(provider.streamCancellationCount, 1)
+        XCTAssertEqual(provider.cancelCount, 0)
         XCTAssertTrue(sink.notices.contains { $0.contains("Interrupted") })
         XCTAssertEqual(provider.requests.count, 2)
         XCTAssertEqual(provider.lastRequest?.prompt, "please focus on the result")
+        XCTAssertEqual(
+            provider.requests[1].seed,
+            provider.requests[0].seed,
+            "a steered Claude turn must receive the same Rubien instructions after interruption")
         XCTAssertTrue(controller.isResponding)
 
         let followUpTask = controller.turnTask
         provider.finishStream()
         await followUpTask?.value
+    }
+
+    func testInterruptAndSendQueuedDoesNotWaitForProviderEOF() async {
+        let provider = MockAgentProvider()
+        let controller = makeController(provider: provider, sink: SpyTranscriptSink())
+
+        controller.send("initial question")
+        let firstTask = controller.turnTask
+        await provider.waitUntilStreaming()
+        provider.emit(.sessionStarted(sessionID: "s1"))
+        await waitUntil { controller.liveSessionID == "s1" }
+        controller.send("steered follow-up")
+
+        XCTAssertTrue(controller.interruptAndSendQueued())
+        let firstTurnFinished = expectation(description: "cancelled first turn finished")
+        Task {
+            await firstTask?.value
+            firstTurnFinished.fulfill()
+        }
+        await fulfillment(of: [firstTurnFinished], timeout: 2)
+        await provider.waitUntilStreaming()
+
+        XCTAssertEqual(provider.streamCancellationCount, 1)
+        XCTAssertEqual(provider.cancelCount, 0)
+        XCTAssertEqual(provider.requests.count, 2)
+        XCTAssertEqual(provider.lastRequest?.prompt, "steered follow-up")
+
+        provider.finishStream()
+        await controller.turnTask?.value
+    }
+
+    func testInterruptedTurnDropsBufferedAssistantEventBeforeSteeredUserRow() async {
+        let provider = MockAgentProvider()
+        let sink = SpyTranscriptSink()
+        let controller = makeController(provider: provider, sink: sink)
+
+        controller.send("initial question")
+        let firstTask = controller.turnTask
+        await provider.waitUntilStreaming()
+        provider.emit(.sessionStarted(sessionID: "s1"))
+        await waitUntil { controller.liveSessionID == "s1" }
+        controller.send("steered follow-up")
+
+        let interruptedGeneration = controller.turnOutcome.generation
+        controller.handle(
+            .assistantDelta(text: "partial interrupted response"),
+            gen: interruptedGeneration)
+        let paper = ChatPaper(
+            kind: .library,
+            referenceId: 7,
+            url: nil,
+            title: "Completed before interruption",
+            year: nil,
+            badge: "Library")
+        controller.handle(
+            .paperPresentation(
+                callID: "before-stop",
+                ordinal: 0,
+                group: ChatPaperGroup(items: [paper])),
+            gen: interruptedGeneration)
+        XCTAssertTrue(controller.interruptAndSendQueued())
+        // Model the final event already buffered when cancellation won. It must
+        // not cross the interruption notice into the steered turn's chronology.
+        controller.handle(
+            .assistantMessageCompleted(text: "late interrupted response"),
+            gen: interruptedGeneration)
+
+        await firstTask?.value
+        await provider.waitUntilStreaming()
+
+        XCTAssertFalse(sink.calls.contains(.commitAssistantMessage("late interrupted response")))
+        let partialIndex = sink.calls.firstIndex(
+            of: .commitAssistantMessage("partial interrupted response"))
+        let interruptionIndex = try? XCTUnwrap(sink.calls.firstIndex {
+            if case .addNotice(let text) = $0 { return text.contains("Interrupted") }
+            return false
+        })
+        let steerIndex = sink.calls.firstIndex(of: .addUserMessage("steered follow-up"))
+        let paperIndex = sink.calls.firstIndex {
+            if case .addPaperGroup(let group) = $0 {
+                return group.items.map(\.title) == ["Completed before interruption"]
+            }
+            return false
+        }
+        XCTAssertNotNil(partialIndex)
+        XCTAssertNotNil(paperIndex)
+        XCTAssertNotNil(interruptionIndex)
+        XCTAssertNotNil(steerIndex)
+        if let partialIndex, let paperIndex, let interruptionIndex, let steerIndex {
+            XCTAssertLessThan(partialIndex, paperIndex)
+            XCTAssertLessThan(paperIndex, interruptionIndex)
+            XCTAssertLessThan(interruptionIndex, steerIndex)
+        }
+
+        provider.finishStream()
+        await controller.turnTask?.value
     }
 
     func testNewConversationDiscardsQueuedMessagesFromCancelledTurn() async {
@@ -1837,6 +1995,8 @@ final class ChatSessionControllerTests: XCTestCase {
 
         XCTAssertEqual(controller.queuedMessageCount, 0)
         XCTAssertFalse(controller.hasQueuedMessages)
+        XCTAssertEqual(provider.streamCancellationCount, 1)
+        XCTAssertEqual(provider.cancelCount, 0)
         XCTAssertEqual(provider.requests.count, 1, "reset must not auto-dispatch the discarded queue")
     }
 
@@ -2121,7 +2281,7 @@ final class ChatSessionControllerTests: XCTestCase {
 
     private func makeCodexController(
         catalog: CodexCatalog?,
-        defaults: ((AgentProviderKind) -> AssistantConversationDefaults)? = nil
+        defaults: ((AgentProviderKind, AssistantConversationContext) -> AssistantConversationDefaults)? = nil
     ) -> (ChatSessionController, MockAgentProvider) {
         let codex = MockAgentProvider(
             kind: .codex, availability: .installed(version: "t", path: "/fake/codex"))
@@ -2230,7 +2390,7 @@ final class ChatSessionControllerTests: XCTestCase {
             id: "gpt-5.6-sol", displayName: "Sol", description: nil,
             efforts: [], defaultEffort: "low", isDefault: true, hidden: false)
         // A never-picked user: Settings hands back a nil model (no remembered pick).
-        let nilModelDefaults: (AgentProviderKind) -> AssistantConversationDefaults = { _ in
+        let nilModelDefaults: (AgentProviderKind, AssistantConversationContext) -> AssistantConversationDefaults = { _, _ in
             AssistantConversationDefaults(model: nil, effort: nil, webAccess: true, autoApprove: false)
         }
         let (controller, _) = makeCodexController(
@@ -2390,7 +2550,7 @@ final class ChatSessionControllerTests: XCTestCase {
     func testCodexModelChangeMidConversationStartsNewConversationPreservingSettings() async {
         let restore = restoreCodexPrefsAfter()
         defer { restore() }
-        let conflictingDefaults: (AgentProviderKind) -> AssistantConversationDefaults = { _ in
+        let conflictingDefaults: (AgentProviderKind, AssistantConversationContext) -> AssistantConversationDefaults = { _, _ in
             AssistantConversationDefaults(model: nil, effort: "medium",
                                           webAccess: true, autoApprove: false)
         }
@@ -2943,6 +3103,7 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
     private let lock = NSLock()
     private var _requests: [AgentTurnRequest] = []
     private var _cancelCount = 0
+    private var _streamCancellationCount = 0
     private var _approvals: [(String, ApprovalDecision)] = []
     private var _availability: AgentAvailability
     private var _availabilityHold = false
@@ -3122,6 +3283,10 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
 
     func send(turn: AgentTurnRequest) -> AsyncThrowingStream<AgentEvent, Error> {
         AsyncThrowingStream { continuation in
+            continuation.onTermination = { [weak self] termination in
+                guard case .cancelled = termination else { return }
+                self?.recordStreamCancellation()
+            }
             lock.lock()
             _requests.append(turn)
             _continuation = continuation
@@ -3143,6 +3308,13 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
         _continuation = nil
         lock.unlock()
         continuation?.finish()
+    }
+
+    private func recordStreamCancellation() {
+        lock.lock()
+        _streamCancellationCount += 1
+        _continuation = nil
+        lock.unlock()
     }
 
     // Test controls
@@ -3167,6 +3339,9 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
     var requests: [AgentTurnRequest] { lock.lock(); defer { lock.unlock() }; return _requests }
     var lastRequest: AgentTurnRequest? { requests.last }
     var cancelCount: Int { lock.lock(); defer { lock.unlock() }; return _cancelCount }
+    var streamCancellationCount: Int {
+        lock.lock(); defer { lock.unlock() }; return _streamCancellationCount
+    }
     var approvals: [(String, ApprovalDecision)] { lock.lock(); defer { lock.unlock() }; return _approvals }
 }
 

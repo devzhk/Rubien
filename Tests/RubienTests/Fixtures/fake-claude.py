@@ -17,8 +17,10 @@ provider sets cwd = the turn's workspace, so the test writes the config there). 
 
 Config keys (all optional): sessionInit, sessionResult, deltas[], assistantText,
 approval{requestId,toolName,input,toolUseId,description,mutation}, afterApprovalText,
-floodStderr(int bytes), partialLine(bool), grandchild(bool), hang(bool),
-exitCode(int), emitResult(bool), delayExitMs(int).
+floodStderr(int bytes), partialLine(bool), grandchild(bool),
+escapedOutputHolder(bool), hang(bool), exitCode(int), emitResult(bool),
+delayExitMs(int), cooperativeInterrupt(bool), delayInterruptResultMs(int).
+stdinBackpressure(bool), detachedResultDelayMs(int).
 """
 import sys
 import os
@@ -27,10 +29,12 @@ import time
 import threading
 import subprocess
 
+emit_lock = threading.Lock()
 
 def emit(obj):
-    sys.stdout.write(json.dumps(obj) + "\n")
-    sys.stdout.flush()
+    with emit_lock:
+        sys.stdout.write(json.dumps(obj) + "\n")
+        sys.stdout.flush()
 
 
 def main():
@@ -49,6 +53,15 @@ def main():
     try:
         with open("fake-claude-argv.json", "w") as argv_handle:
             json.dump(sys.argv, argv_handle)
+        spawn_record = json.dumps({
+            "pid": os.getpid(), "argv": sys.argv, "started": time.time(),
+        }) + "\n"
+        descriptor = os.open(
+            "fake-claude-spawns.jsonl", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        try:
+            os.write(descriptor, spawn_record.encode("utf-8"))
+        finally:
+            os.close(descriptor)
     except OSError:
         pass
 
@@ -68,14 +81,20 @@ def main():
     flood = int(cfg.get("floodStderr", 0))
     partial_line = cfg.get("partialLine", True)
     grandchild = cfg.get("grandchild", False)
+    escaped_output_holder = cfg.get("escapedOutputHolder", False)
     hang = cfg.get("hang", False)
     exit_code = int(cfg.get("exitCode", 0))
     emit_result = cfg.get("emitResult", True)
     delay_exit_ms = int(cfg.get("delayExitMs", 0))
+    cooperative_interrupt = cfg.get("cooperativeInterrupt", False)
+    delay_interrupt_result_ms = int(cfg.get("delayInterruptResultMs", 0))
+    stdin_backpressure = cfg.get("stdinBackpressure", False)
+    detached_result_delay_ms = int(cfg.get("detachedResultDelayMs", 0))
     stderr_message = cfg.get("stderrMessage")
 
     user_received = threading.Event()
     approval_resolved = threading.Event()
+    interrupt_received = threading.Event()
     approval_behavior = {"value": None}
 
     def read_stdin():
@@ -102,6 +121,29 @@ def main():
                 inner = (obj.get("response") or {}).get("response") or {}
                 approval_behavior["value"] = inner.get("behavior")
                 approval_resolved.set()
+            elif kind == "control_request" and (obj.get("request") or {}).get("subtype") == "interrupt":
+                try:
+                    with open("fake-claude-interrupt.json", "w") as interrupt_handle:
+                        json.dump(obj, interrupt_handle)
+                except OSError:
+                    pass
+                emit({
+                    "type": "control_response",
+                    "response": {
+                        "subtype": "success",
+                        "request_id": obj.get("request_id"),
+                        "response": {"interrupted": True},
+                    },
+                })
+                interrupt_received.set()
+
+    if stdin_backpressure:
+        # Never read stdin: a large prompt fills the pipe and exercises the
+        # provider's nonblocking writer/cancellation preemption.
+        with open("stdin-backpressure.pid", "w") as pid_handle:
+            pid_handle.write(str(os.getpid()))
+        while True:
+            time.sleep(1)
 
     threading.Thread(target=read_stdin, daemon=True).start()
 
@@ -148,6 +190,29 @@ def main():
         subprocess.Popen([sys.executable, "-c", code],
                          stdout=devnull, stderr=devnull, stdin=subprocess.DEVNULL)
 
+    if escaped_output_holder:
+        # Model a helper that starts its own process group but inherits Claude's
+        # output descriptors. Killing Claude's original group removes the leader,
+        # yet stdout/stderr cannot reach EOF until this detached helper exits.
+        code = ("import os, time\n"
+                "open('escaped-output-holder.pid', 'w').write(str(os.getpid()))\n"
+                "deadline = time.time() + 300\n"
+                "while not os.path.exists('probe-output-pipes') and time.time() < deadline:\n"
+                "    time.sleep(0.05)\n"
+                "states = []\n"
+                "for fd in (1, 2):\n"
+                "    try:\n"
+                "        os.write(fd, b'pipe-probe\\n')\n"
+                "        states.append('open')\n"
+                "    except BrokenPipeError:\n"
+                "        states.append('closed')\n"
+                "open('escaped-output-holder-result', 'w').write(','.join(states))\n"
+                "time.sleep(300)\n")
+        subprocess.Popen(
+            [sys.executable, "-c", code],
+            stdin=subprocess.DEVNULL,
+            start_new_session=True)
+
     if approval:
         emit({
             "type": "control_request",
@@ -189,7 +254,43 @@ def main():
             written += len(blob)
         sys.stderr.flush()
 
+    if detached_result_delay_ms > 0:
+        # The leader exits first while an escaped helper retains stdout and emits
+        # the terminal result later. This deterministically reverses the provider's
+        # leader-exit/result callback order without relying on scheduler luck.
+        result = {
+            "type": "result", "subtype": "success", "is_error": False,
+            "session_id": session_result, "result": assistant_text,
+            "permission_denials": [],
+        }
+        code = (
+            "import json, sys, time\n"
+            f"time.sleep({detached_result_delay_ms / 1000.0!r})\n"
+            f"sys.stdout.write(json.dumps({result!r}) + '\\n')\n"
+            "sys.stdout.flush()\n"
+        )
+        subprocess.Popen(
+            [sys.executable, "-c", code],
+            stdin=subprocess.DEVNULL,
+            stdout=sys.stdout,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True)
+        return exit_code
+
     if hang:
+        if cooperative_interrupt:
+            interrupt_received.wait(timeout=10)
+            if interrupt_received.is_set():
+                if delay_interrupt_result_ms > 0:
+                    time.sleep(delay_interrupt_result_ms / 1000.0)
+                emit({
+                    "type": "result", "subtype": "error_during_execution",
+                    "is_error": True, "session_id": session_result,
+                    "result": "Interrupted by client", "permission_denials": [],
+                })
+                if delay_exit_ms > 0:
+                    time.sleep(delay_exit_ms / 1000.0)
+                return exit_code
         # Wait to be killed (cancel test). The whole process group dies on killpg.
         while True:
             time.sleep(1)

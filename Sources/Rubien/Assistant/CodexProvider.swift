@@ -46,7 +46,8 @@ final class CodexProvider: AgentProvider {
         return AsyncThrowingStream { continuation in
             // Dropping the consumed stream ends THE TURN (turn/interrupt), never the
             // long-lived server — the semantic divergence from Claude (review #5).
-            continuation.onTermination = { _ in
+            continuation.onTermination = { termination in
+                guard case .cancelled = termination else { return }
                 Task { await connection.interruptIfCurrent(token: token) }
             }
             Task {
@@ -351,6 +352,9 @@ private actor CodexAppServerConnection {
     /// Tokens interrupted BEFORE their `startTurn` ran (A1 — the consumer dropped the
     /// stream in the window between `send()` arming `onTermination` and the task).
     private var cancelledTokens: Set<UUID> = []
+    private var retiredTokens: Set<UUID> = []
+    private var retiredTokenOrder: [UUID] = []
+    private static let retiredTokenLimit = 64
     /// Only the binary path + --version is cached (expensive to resolve). Auth is NOT
     /// cached — re-probed on every isAvailable() so a mid-session sign-out is reflected
     /// instead of Recheck being a no-op (#11); a not-found stays uncached (B6).
@@ -364,6 +368,7 @@ private actor CodexAppServerConnection {
         continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation
     ) async {
         if cancelledTokens.remove(token) != nil {
+            retire(token)
             continuation.finish()
             return
         }
@@ -509,6 +514,7 @@ private actor CodexAppServerConnection {
         active.finished = true
         active.continuation.finish()
         cancelledTokens.remove(active.token)
+        retire(active.token)
         if turn === active { turn = nil }
         // A straggler notification for this now-finished turn can't reach a LATER turn:
         // the positive turn-id filter in `route` accepts only the current turn's id
@@ -539,7 +545,7 @@ private actor CodexAppServerConnection {
         if let active = turn, active.token == token {
             guard !active.finished else { return }
             requestInterrupt(active)
-        } else {
+        } else if !retiredTokens.contains(token) {
             // A1: the turn hasn't registered yet (drop raced ahead of startTurn).
             cancelledTokens.insert(token)
         }
@@ -576,6 +582,14 @@ private actor CodexAppServerConnection {
         guard let active = turn, active.token == token, !active.finished else { return }
         logger.error("turn/interrupt was not acknowledged — force-finishing the turn stream")
         finishTurn(active)
+    }
+
+    private func retire(_ token: UUID) {
+        guard retiredTokens.insert(token).inserted else { return }
+        retiredTokenOrder.append(token)
+        if retiredTokenOrder.count > Self.retiredTokenLimit {
+            retiredTokens.remove(retiredTokenOrder.removeFirst())
+        }
     }
 
     /// Window close: kill the server's whole tree. The turn stream (if any) is

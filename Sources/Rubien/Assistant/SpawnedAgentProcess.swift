@@ -17,16 +17,20 @@ import Foundation
 // leader — §4.1 process mechanics).
 
 /// A child spawned via `posix_spawn` in its OWN process group. FileHandles are each
-/// accessed from a single domain (stdin: the owning actor, stdout: the reader task,
-/// stderr: the drain thread), so `@unchecked Sendable` is sound.
+/// accessed from a single domain (stdin: its serial writer queue, stdout: the reader
+/// task, stderr: the drain thread); lifecycle flags are lock-guarded, so
+/// `@unchecked Sendable` is sound.
 final class SpawnedAgentProcess: @unchecked Sendable {
     let pid: pid_t
     let stdinHandle: FileHandle
     let stdoutHandle: FileHandle
     let stderrHandle: FileHandle
     private var stdinClosed = false
+    private var normalWriteAbortedPartially = false
+    private let stdinQueue = DispatchQueue(label: "com.rubien.agent-process.stdin")
     private let stateLock = NSLock()
-    private var hasExited = false
+    private var hasReaped = false
+    private var reapedStatus: Int32?
 
     private init(pid: pid_t, stdin: FileHandle, stdout: FileHandle, stderr: FileHandle) {
         self.pid = pid
@@ -66,37 +70,204 @@ final class SpawnedAgentProcess: @unchecked Sendable {
     /// messages). No-op after `closeStdin`; `SIGPIPE` is globally ignored so a dead
     /// child can't crash the app on write.
     func writeLine(_ string: String) {
-        guard !stdinClosed else { return }
         _ = SpawnedAgentProcess.sigpipeIgnored
-        try? stdinHandle.write(contentsOf: Data((string + "\n").utf8))
+        let payload = Data((string + "\n").utf8)
+        stateLock.lock()
+        guard !stdinClosed else {
+            stateLock.unlock()
+            return
+        }
+        let descriptor = stdinHandle.fileDescriptor
+        stdinQueue.async { [self] in
+            writeNormal(payload, to: descriptor)
+        }
+        stateLock.unlock()
     }
 
     /// Close stdin → the child sees EOF on its input stream.
     func closeStdin() {
+        stateLock.lock(); defer { stateLock.unlock() }
         guard !stdinClosed else { return }
         stdinClosed = true
         try? stdinHandle.close()
     }
 
-    /// Reap the process-group leader. A3: wait for exit WITHOUT reaping first
-    /// (`waitid` + `WNOWAIT`), then — inside the lock — flag `hasExited` and only
-    /// THEN reap (`waitpid`). Because `signalGroup` checks-and-signals inside the
-    /// same lock, no `killpg` can ever fire after the pid is reaped (and thus
-    /// possibly recycled).
-    func wait() async -> Int32 {
+    /// Atomically take a close-on-exec duplicate of stdin for one final bounded
+    /// control write, then close the ordinary writer. `F_DUPFD_CLOEXEC` is
+    /// load-bearing: a plain `dup()` can leak this old turn's pipe into another
+    /// provider's concurrent `posix_spawn` before a separate CLOEXEC update.
+    func writeFinalLine(_ string: String, timeout: TimeInterval = 0.25) {
+        stateLock.lock()
+        guard !stdinClosed else {
+            stateLock.unlock()
+            return
+        }
+        let duplicate = Self.duplicateCloseOnExec(stdinHandle.fileDescriptor)
+        stdinClosed = true
+        try? stdinHandle.close()
+        stateLock.unlock()
+        guard duplicate >= 0 else { return }
+
+        guard Self.setNonblocking(duplicate) else {
+            _ = Darwin.close(duplicate)
+            return
+        }
+        let payload = Data((string + "\n").utf8)
+        stdinQueue.async { [self] in
+            defer { _ = Darwin.close(duplicate) }
+            stateLock.lock()
+            let canWrite = !normalWriteAbortedPartially
+            stateLock.unlock()
+            guard canWrite else { return }
+            let timeoutNanoseconds = UInt64(max(0, timeout) * 1_000_000_000)
+            let started = DispatchTime.now().uptimeNanoseconds
+            let deadline = started.addingReportingOverflow(timeoutNanoseconds)
+            let deadlineNanoseconds = deadline.overflow ? UInt64.max : deadline.partialValue
+            payload.withUnsafeBytes { rawBuffer in
+                guard let base = rawBuffer.baseAddress else { return }
+                var offset = 0
+                while offset < rawBuffer.count,
+                      DispatchTime.now().uptimeNanoseconds < deadlineNanoseconds {
+                    let count = Darwin.write(
+                        duplicate, base.advanced(by: offset), rawBuffer.count - offset)
+                    if count > 0 {
+                        offset += count
+                        continue
+                    }
+                    if count < 0, errno == EINTR { continue }
+                    guard count < 0, errno == EAGAIN || errno == EWOULDBLOCK else { return }
+                    var writable = pollfd(fd: duplicate, events: Int16(POLLOUT), revents: 0)
+                    let now = DispatchTime.now().uptimeNanoseconds
+                    let remainingMilliseconds = now < deadlineNanoseconds
+                        ? (deadlineNanoseconds - now) / 1_000_000 : 0
+                    var pollResult: Int32
+                    repeat {
+                        pollResult = Darwin.poll(
+                            &writable, 1, Int32(min(remainingMilliseconds, 50)))
+                    } while pollResult < 0 && errno == EINTR
+                }
+            }
+        }
+    }
+
+    /// Drain an ordinary queued message without ever blocking the provider actor.
+    /// A final close makes the nonblocking write/poll loop notice `stdinClosed` and
+    /// yield the serial queue to the final interrupt. If cancellation caught a
+    /// partially written NDJSON line, the final writer deliberately sends nothing
+    /// (appending JSON would only corrupt the stream); signal fallback still runs.
+    private func writeNormal(_ payload: Data, to descriptor: Int32) {
+        payload.withUnsafeBytes { rawBuffer in
+            guard let base = rawBuffer.baseAddress else { return }
+            var offset = 0
+            while offset < rawBuffer.count {
+                stateLock.lock()
+                if stdinClosed {
+                    if offset > 0 { normalWriteAbortedPartially = true }
+                    stateLock.unlock()
+                    return
+                }
+                let count = Darwin.write(
+                    descriptor, base.advanced(by: offset), rawBuffer.count - offset)
+                stateLock.unlock()
+                if count > 0 {
+                    offset += count
+                    continue
+                }
+                if count < 0, errno == EINTR { continue }
+                if count < 0, errno == EAGAIN || errno == EWOULDBLOCK {
+                    var writable = pollfd(fd: descriptor, events: Int16(POLLOUT), revents: 0)
+                    _ = Darwin.poll(&writable, 1, 50)
+                    continue
+                }
+                stateLock.lock()
+                if offset > 0 { normalWriteAbortedPartially = true }
+                stateLock.unlock()
+                return
+            }
+        }
+    }
+
+    private static func duplicateCloseOnExec(_ descriptor: Int32) -> Int32 {
+        var duplicate: Int32
+        repeat {
+            duplicate = fcntl(descriptor, F_DUPFD_CLOEXEC, 0)
+        } while duplicate < 0 && errno == EINTR
+        return duplicate
+    }
+
+    private static func setNonblocking(_ descriptor: Int32) -> Bool {
+        var flags: Int32
+        repeat {
+            flags = fcntl(descriptor, F_GETFL)
+        } while flags < 0 && errno == EINTR
+        guard flags >= 0 else { return false }
+
+        var result: Int32
+        repeat {
+            result = fcntl(descriptor, F_SETFL, flags | O_NONBLOCK)
+        } while result < 0 && errno == EINTR
+        return result == 0
+    }
+
+    /// Close the parent-side output readers when a provider must finish without
+    /// waiting for EOF (for example, a detached helper inherited the write ends).
+    /// Active readers then terminate with EOF or a caught read error instead of
+    /// retaining tasks, threads, and descriptors for the helper's lifetime.
+    func closeOutputHandles() {
+        try? stdoutHandle.close()
+        try? stderrHandle.close()
+    }
+
+    /// Observe leader exit without reaping it. Keeping the exited leader reserved
+    /// prevents PID reuse while the provider classifies normal vs retiring cleanup
+    /// and signals any residual children in the still-stable process group.
+    func observeExit() async -> Bool {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
-                // Block until the child has exited, but leave it reapable.
                 var info = siginfo_t()
-                _ = waitid(P_PID, id_t(self.pid), &info, WEXITED | WNOWAIT)
+                var result: Int32
+                repeat {
+                    result = waitid(P_PID, id_t(self.pid), &info, WEXITED | WNOWAIT)
+                } while result != 0 && errno == EINTR
+                continuation.resume(returning: result == 0)
+            }
+        }
+    }
+
+    /// Reap exactly once. Call after `observeExit()` when residual group signalling
+    /// is complete. The reaped flag is published under the same lock used by
+    /// `signalGroup`, before `waitpid`, so no signal can target a recycled pid.
+    func reap() async -> Int32? {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
                 self.stateLock.lock()
-                self.hasExited = true          // set BEFORE reaping → no signal past here
+                if let status = self.reapedStatus {
+                    self.stateLock.unlock()
+                    continuation.resume(returning: status)
+                    return
+                }
                 var status: Int32 = 0
-                _ = waitpid(self.pid, &status, 0)  // immediate; the child already exited
+                var result: pid_t
+                repeat {
+                    result = waitpid(self.pid, &status, 0)
+                } while result < 0 && errno == EINTR
+                guard result == self.pid else {
+                    self.stateLock.unlock()
+                    continuation.resume(returning: nil)
+                    return
+                }
+                self.hasReaped = true
+                self.reapedStatus = status
                 self.stateLock.unlock()
                 continuation.resume(returning: status)
             }
         }
+    }
+
+    /// Compatibility helper for the Codex app-server path.
+    func wait() async -> Int32 {
+        guard await observeExit() else { return -1 }
+        return await reap() ?? -1
     }
 
     /// Signal the whole process group (leader pgid == pid, since we set pgroup 0).
@@ -104,7 +275,7 @@ final class SpawnedAgentProcess: @unchecked Sendable {
     /// reap in `wait()`, so a signal can never target a reaped/recycled pid (A3).
     func signalGroup(_ signal: Int32) {
         stateLock.lock(); defer { stateLock.unlock() }
-        guard pid > 0, !hasExited else { return }
+        guard pid > 0, !hasReaped else { return }
         _ = killpg(pid, signal)
     }
 
@@ -138,6 +309,10 @@ final class SpawnedAgentProcess: @unchecked Sendable {
         let parentStdoutRead = stdoutPipe.fileHandleForReading.fileDescriptor
         let childStderr = stderrPipe.fileHandleForWriting.fileDescriptor
         let parentStderrRead = stderrPipe.fileHandleForReading.fileDescriptor
+
+        guard setNonblocking(parentStdinWrite) else {
+            throw AgentProviderError.spawnFailed(code: errno)
+        }
 
         posix_spawn_file_actions_adddup2(&fileActions, childStdin, 0)
         posix_spawn_file_actions_adddup2(&fileActions, childStdout, 1)

@@ -101,6 +101,7 @@ final class ScheduledJobRunner {
         let conversationID = UUID()
         let request = AgentTurnRequest(
             workspaceURL: workspaceURL,
+            conversationID: conversationID,
             prompt: claim.job.prompt,
             seed: Self.scheduledSeed(jobName: claim.job.name),
             webAccess: claim.job.webAccess,
