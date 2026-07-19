@@ -1,10 +1,16 @@
 <p align="center">
-  <img src="icon.png" alt="Rubien" width="160" height="160">
+  <img src="icon-transparent.png" alt="Rubien" width="160" height="160">
 </p>
 
 # Rubien
 
-Rubien is a native macOS reference manager built on one principle: **one library, two front doors.** A single local SQLite database holds every reference, tag, annotation, custom property, and view — and you reach it through either a Notion-style SwiftUI app for humans, or a scriptable `rubien-cli` for agents and automation. Both speak to the same store; neither is a second-class citizen. The icon — a cube whose faces are a Notion-style UI on one side and a terminal on the other — is the architecture in one image.
+**Your agentic research library.**
+
+*Discover, read, and connect ideas in one library—with the AI models you already use.*
+
+Rubien organizes papers, books, and web sources in one local library. Its native readers and in-library Assistant help you discover new work, understand what you read, connect ideas across sources, and act through the tools available to Claude Code or Codex.
+
+Underneath, Rubien is built on one principle: **one library, two front doors.** A single local SQLite database holds every reference, tag, annotation, custom property, and view — and you reach it through either a Notion-style SwiftUI app for humans or a scriptable `rubien-cli` for agents and automation. Both speak to the same store; neither is a second-class citizen. The icon — a cube whose faces are a Notion-style UI on one side and a terminal on the other — is the architecture in one image.
 
 The SwiftUI app is Mac-only. `rubien-cli` also runs on Linux — see [Linux CLI](#linux-cli).
 
@@ -12,6 +18,8 @@ The name means *the keeper of borrowed knowledge.*
 
 ## Features
 
+- **Research Assistant** — work with Claude Code or Codex from Home or alongside the document you're reading. Discover sources, ask for explanations, connect ideas across your library, and use your existing connected tools.
+- **Web reader + annotations** — save and read clean versions of web articles while retaining access to the original page. Highlight, underline, and attach anchored notes.
 - **PDF reader + annotations** — native rendering with highlight / underline / anchored notes. Thumbnails, outline, full-text search. The Mac app reader uses PDFKit; CLI PDF tooling works on Mac (PDFKit) and Linux (poppler-glib).
 - **Metadata fetching** — paste a DOI, arXiv ID, PMID, PMCID, ISBN, URL, or paper title. See [Supported sources](#supported-sources). No API keys.
 - **FTS5 search** — SQLite full-text search across title, authors, journal, abstract, notes, DOI.

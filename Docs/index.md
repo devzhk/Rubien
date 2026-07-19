@@ -1,6 +1,12 @@
+<p align="center">
+  <img src="/Rubien/icon-transparent.png" alt="Rubien" width="160" height="160">
+</p>
+
 # Rubien
 
-A native macOS reference manager.
+**Your agentic research library.**
+
+*Discover, read, and connect ideas in one library—with the AI models you already use.*
 
 **Latest release:** see the [Releases page](https://github.com/devzhk/Rubien/releases/latest).
 

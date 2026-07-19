@@ -4,7 +4,7 @@ This file is the single source of guidance for coding agents (Claude Code, Codex
 
 ## Overview
 
-Rubien is a native macOS reference manager (SwiftUI, macOS 14+) plus a companion `rubien-cli` that also runs on Linux. Two front doors over one SQLite library.
+Rubien is a native macOS agentic research library and reference manager (SwiftUI, macOS 14+) for papers, books, and web sources. Its in-library Assistant works through Claude Code or Codex. A companion `rubien-cli` also runs on Linux: two front doors over one SQLite library.
 
 ## Pinned versions
 

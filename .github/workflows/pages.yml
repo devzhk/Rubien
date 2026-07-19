@@ -5,7 +5,7 @@ name: Deploy Pages
 # design notes) are deliberately NOT uploaded — they stay browsable in the
 # GitHub repo but are not part of the public Pages surface.
 #
-# Triggers only when the three published files (or this workflow) change,
+# Triggers only when the published files (or this workflow) change,
 # so Linux-port commits, code refactors, and other Docs/* edits don't
 # rebuild the site unnecessarily.
 
@@ -16,6 +16,7 @@ on:
       - 'Docs/appcast.xml'
       - 'Docs/staging-appcast.xml'
       - 'Docs/index.md'
+      - 'icon-transparent.png'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -43,6 +44,7 @@ jobs:
           cp Docs/appcast.xml          _site/appcast.xml
           cp Docs/staging-appcast.xml  _site/staging-appcast.xml
           cp Docs/index.md             _site/index.md
+          cp icon-transparent.png      _site/icon-transparent.png
           ls -la _site/
 
       - uses: actions/configure-pages@v5
