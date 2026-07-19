@@ -217,6 +217,42 @@ final class KnownPaperHostClassifyTests: XCTestCase {
         XCTAssertEqual(classify("https://www.sciencedirect.com/science/article/pii/S0123456789012345/pdfft"), .scienceDirect)
     }
 
+    // Cell Press
+    func testCellPressFullTextWithReturnURL() {
+        XCTAssertEqual(
+            classify("https://www.cell.com/neuron/fulltext/S0896-6273(26)00414-9?_returnURL=https%3A%2F%2Flinkinghub.elsevier.com%2Fretrieve%2Fpii%2FS0896627326004149"),
+            .cellPress
+        )
+    }
+    func testCellPressAbstract() {
+        XCTAssertEqual(
+            classify("https://www.cell.com/neuron/abstract/S0896-6273(26)00414-9"),
+            .cellPress
+        )
+    }
+    func testCellPressPDF() {
+        XCTAssertEqual(
+            classify("https://www.cell.com/neuron/pdf/S0896-6273(26)00414-9.pdf"),
+            .cellPress
+        )
+    }
+    func testCellPressJoulePIIWithXCheckDigit() {
+        XCTAssertEqual(
+            classify("https://www.cell.com/joule/fulltext/S2542-4351(26)00214-X"),
+            .cellPress
+        )
+    }
+    func testCellPressNestedTrendsPathAndISSNWithXCheckDigit() {
+        XCTAssertEqual(
+            classify("https://www.cell.com/trends/microbiology/fulltext/S0966-842X(26)00180-0"),
+            .cellPress
+        )
+    }
+    func testCellPressRejectsMalformedPIIAndJournalPage() {
+        XCTAssertNil(classify("https://www.cell.com/neuron/fulltext/not-a-pii"))
+        XCTAssertNil(classify("https://www.cell.com/neuron/home"))
+    }
+
     // Science / AAAS
     func testScienceFullArticle() {
         XCTAssertEqual(

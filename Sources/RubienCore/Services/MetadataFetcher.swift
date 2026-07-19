@@ -529,6 +529,13 @@ public enum MetadataFetcher {
 
     /// Fetch metadata from PMID via NCBI efetch API
     public static func fetchFromPMID(_ pmid: String) async throws -> Reference {
+        try await fetchFromPMID(pmid, session: .shared)
+    }
+
+    internal static func fetchFromPMID(
+        _ pmid: String,
+        session: URLSession
+    ) async throws -> Reference {
         let cacheKey = "pmid:\(pmid)"
         if let cached = cachedReference(for: cacheKey) { return cached }
 
@@ -541,7 +548,7 @@ public enum MetadataFetcher {
             var request = URLRequest(url: url)
             request.timeoutInterval = 15
 
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await session.data(for: request)
             guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
                 throw FetchError.httpError((response as? HTTPURLResponse)?.statusCode ?? 0)
             }
@@ -551,6 +558,78 @@ public enum MetadataFetcher {
 
         cacheReference(ref, for: cacheKey)
         return ref
+    }
+
+    // MARK: - Publisher PII → PubMed API
+
+    /// Resolve an Elsevier Publisher Item Identifier through PubMed's exact
+    /// `[pii]` field, then fetch the matching record through the PMID path.
+    internal static func fetchFromPII(
+        _ pii: String,
+        session: URLSession
+    ) async throws -> Reference {
+        let cacheKey = "pii:\(pii.uppercased())"
+        if let cached = cachedReference(for: cacheKey) { return cached }
+
+        guard let searchURL = pubMedSearchURL(forPII: pii) else {
+            throw FetchError.invalidURL
+        }
+        let pmid = try await withRetry {
+            var request = URLRequest(url: searchURL)
+            request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+            request.timeoutInterval = 15
+
+            let (data, response) = try await session.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse,
+                  httpResponse.statusCode == 200 else {
+                throw FetchError.httpError((response as? HTTPURLResponse)?.statusCode ?? 0)
+            }
+            return try parsePubMedPIISearchResponse(data)
+        }
+
+        let ref = try await fetchFromPMID(pmid, session: session)
+        cacheReference(ref, for: cacheKey)
+        return ref
+    }
+
+    internal static func pubMedSearchURL(forPII pii: String) -> URL? {
+        var components = URLComponents(
+            string: "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+        )
+        components?.queryItems = ncbiQueryItems([
+            URLQueryItem(name: "db", value: "pubmed"),
+            URLQueryItem(name: "term", value: "\(pii)[pii]"),
+            URLQueryItem(name: "retmode", value: "json"),
+            URLQueryItem(name: "retmax", value: "2"),
+        ])
+        return components?.url
+    }
+
+    private static func ncbiQueryItems(_ baseItems: [URLQueryItem]) -> [URLQueryItem] {
+        var queryItems = baseItems
+        queryItems.append(URLQueryItem(name: "tool", value: "Rubien"))
+        let email = contactEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !email.isEmpty, email.contains("@") {
+            queryItems.append(URLQueryItem(name: "email", value: email))
+        }
+        return queryItems
+    }
+
+    internal static func parsePubMedPIISearchResponse(_ data: Data) throws -> String {
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let result = json["esearchresult"] as? [String: Any],
+              let rawIDs = result["idlist"] as? [Any] else {
+            throw FetchError.parseError
+        }
+        let ids = rawIDs.compactMap(stringOrInt).filter { !$0.isEmpty }
+        guard ids.count == 1 else {
+            throw FetchError.unsupported(
+                ids.isEmpty
+                    ? "No PubMed record matched this publisher PII."
+                    : "Multiple PubMed records matched this publisher PII."
+            )
+        }
+        return ids[0]
     }
 
     static func parsePubMedResponse(_ data: Data, pmid: String) throws -> Reference {
@@ -648,16 +727,10 @@ public enum MetadataFetcher {
         _ normalized: String
     ) async throws -> (pmid: String?, doi: String?, warning: String?) {
         var components = URLComponents(string: "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/")
-        var items: [URLQueryItem] = [
+        components?.queryItems = ncbiQueryItems([
             URLQueryItem(name: "ids", value: normalized),
             URLQueryItem(name: "format", value: "json"),
-            URLQueryItem(name: "tool", value: "Rubien"),
-        ]
-        let email = contactEmail.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !email.isEmpty, email.contains("@") {
-            items.append(URLQueryItem(name: "email", value: email))
-        }
-        components?.queryItems = items
+        ])
         guard let url = components?.url else { throw FetchError.invalidURL }
 
         var request = URLRequest(url: url)
@@ -919,21 +992,107 @@ public enum MetadataFetcher {
 
     /// Search OpenAlex by title and return a full Reference (for articles without identifiers)
     public static func fetchFromOpenAlexByTitle(_ title: String) async throws -> Reference? {
-        let encoded = title.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? title
-        let urlString = "https://api.openalex.org/works?search=\(encoded)&select=\(openAlexWorkSelect)&per-page=1"
-        guard let url = URL(string: urlString) else { return nil }
+        guard let url = openAlexTitleSearchURL(title, perPage: 1),
+              let result = try await fetchOpenAlexWorks(url: url, session: .shared) else { return nil }
+        return result.works.compactMap(parseOpenAlexWork).first
+    }
+
+    /// Cell Press fallback for a title supplied by Elsevier Linking Hub. The
+    /// PII carries the journal ISSN and two-digit assignment year; require both,
+    /// an Elsevier DOI, and one unique DOI so generic titles cannot bind the
+    /// pasted URL to an unrelated OpenAlex work.
+    internal static func fetchFromOpenAlexByExactTitle(
+        _ title: String,
+        expectedISSN: String,
+        assignmentYearSuffix: Int,
+        session: URLSession
+    ) async throws -> Reference? {
+        guard let url = openAlexCellPressTitleSearchURL(
+            title,
+            expectedISSN: expectedISSN,
+            assignmentYearSuffix: assignmentYearSuffix
+        ),
+              let result = try await fetchOpenAlexWorks(url: url, session: session),
+              let totalCount = result.totalCount,
+              totalCount <= result.works.count else { return nil }
+
+        let normalizedExpectedISSN = normalizedISSN(expectedISSN)
+        var matchesByDOI: [String: Reference] = [:]
+        for work in result.works {
+            guard let reference = parseOpenAlexWork(work),
+                  MetadataResolution.titleSimilarity(title, reference.title) >= 0.95,
+                  let doi = reference.doi?.lowercased(),
+                  doi.hasPrefix("10.1016/"),
+                  matchesCellPressPIIYear(
+                      doi: doi,
+                      publicationYear: reference.year,
+                      assignmentYearSuffix: assignmentYearSuffix
+                  ),
+                  openAlexSourceISSNs(work).contains(where: {
+                      normalizedISSN($0) == normalizedExpectedISSN
+                  }) else { continue }
+            matchesByDOI[doi] = reference
+        }
+
+        guard matchesByDOI.count == 1 else { return nil }
+        return matchesByDOI.values.first
+    }
+
+    internal static func openAlexTitleSearchURL(
+        _ title: String,
+        perPage: Int
+    ) -> URL? {
+        var components = URLComponents(string: "https://api.openalex.org/works")
+        components?.queryItems = [
+            URLQueryItem(name: "search", value: title),
+            URLQueryItem(name: "select", value: openAlexWorkSelect),
+            URLQueryItem(name: "per-page", value: String(perPage)),
+        ]
+        return components?.url
+    }
+
+    internal static func openAlexCellPressTitleSearchURL(
+        _ title: String,
+        expectedISSN: String,
+        assignmentYearSuffix: Int
+    ) -> URL? {
+        let candidateYears = [
+            1900 + assignmentYearSuffix,
+            1901 + assignmentYearSuffix,
+            2000 + assignmentYearSuffix,
+            2001 + assignmentYearSuffix,
+        ].map(String.init).joined(separator: "|")
+        var components = URLComponents(string: "https://api.openalex.org/works")
+        components?.queryItems = [
+            URLQueryItem(name: "search", value: title),
+            URLQueryItem(
+                name: "filter",
+                value: "primary_location.source.issn:\(expectedISSN),publication_year:\(candidateYears)"
+            ),
+            URLQueryItem(name: "select", value: openAlexWorkSelect),
+            URLQueryItem(name: "per-page", value: "100"),
+        ]
+        return components?.url
+    }
+
+    private static func fetchOpenAlexWorks(
+        url: URL,
+        session: URLSession
+    ) async throws -> (works: [[String: Any]], totalCount: Int?)? {
 
         var request = URLRequest(url: url)
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 10
 
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse,
+              httpResponse.statusCode == 200 else { return nil }
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let results = json["results"] as? [[String: Any]],
-              let work = results.first else {
+              let results = json["results"] as? [[String: Any]] else {
             return nil
         }
-        return parseOpenAlexWork(work)
+        let totalCount = (json["meta"] as? [String: Any])?["count"] as? Int
+        return (results, totalCount)
     }
 
     /// Fallback for arXiv API outages via the DataCite DOI form `10.48550/arXiv.<id>`.
@@ -955,6 +1114,42 @@ public enum MetadataFetcher {
     }
 
     private static let openAlexWorkSelect = "id,doi,title,authorships,publication_year,primary_location,biblio,abstract_inverted_index,type"
+
+    private static func openAlexSourceISSNs(_ work: [String: Any]) -> [String] {
+        guard let location = work["primary_location"] as? [String: Any],
+              let source = location["source"] as? [String: Any] else { return [] }
+        var issns = source["issn"] as? [String] ?? []
+        if let linkingISSN = source["issn_l"] as? String {
+            issns.append(linkingISSN)
+        }
+        return issns
+    }
+
+    private static func normalizedISSN(_ issn: String) -> String {
+        issn.filter { $0.isLetter || $0.isNumber }.uppercased()
+    }
+
+    private static func matchesCellPressPIIYear(
+        doi: String,
+        publicationYear: Int?,
+        assignmentYearSuffix: Int
+    ) -> Bool {
+        let doiYear = doi.split(separator: ".").compactMap { token -> Int? in
+            guard token.count == 4, let year = Int(token), (1900...2099).contains(year) else {
+                return nil
+            }
+            return year
+        }.first
+        if let doiYear {
+            return doiYear % 100 == assignmentYearSuffix
+        }
+
+        // The PII records identifier assignment, so print publication can land
+        // in the following calendar year when the DOI does not encode a year.
+        guard let publicationYear else { return false }
+        let suffixDelta = (publicationYear % 100 - assignmentYearSuffix + 100) % 100
+        return suffixDelta == 0 || suffixDelta == 1
+    }
 
     private static func parseOpenAlexWork(_ work: [String: Any]) -> Reference? {
         let fetchedTitle = work["title"] as? String ?? "Untitled"

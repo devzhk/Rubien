@@ -331,6 +331,246 @@ final class PaperURLResolverTests: XCTestCase {
         )
     }
 
+    // MARK: - Cell Press PII path
+
+    func testCellPressArticleResolvesThroughPubMedWithoutScrapingPublisherHTML() async throws {
+        let input = "https://www.cell.com/neuron/fulltext/S0896-6273(26)00414-9?_returnURL=https%3A%2F%2Flinkinghub.elsevier.com%2Fretrieve%2Fpii%2FS0896627326004149%3Fshowall%3Dtrue"
+        let pii = "S0896-6273(26)00414-9"
+        let searchURL = try XCTUnwrap(MetadataFetcher.pubMedSearchURL(forPII: pii))
+        StubURLProtocol.stub(
+            searchURL.absoluteString,
+            contentType: "application/json",
+            body: """
+            {
+              "esearchresult": {
+                "count": "1",
+                "idlist": ["42392073"]
+              }
+            }
+            """
+        )
+        let summaryURL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id=42392073&retmode=json"
+        StubURLProtocol.stub(
+            summaryURL,
+            contentType: "application/json",
+            body: """
+            {
+              "result": {
+                "uids": ["42392073"],
+                "42392073": {
+                  "title": "Sparse component analysis: A method that uncovers separable computations within neural population activity.",
+                  "pubdate": "2026 Jul 2",
+                  "source": "Neuron",
+                  "authors": [
+                    {"name": "Zimnik AJ"},
+                    {"name": "Glaser JI"}
+                  ],
+                  "articleids": [
+                    {"idtype": "doi", "value": "10.1016/j.neuron.2026.05.022"}
+                  ]
+                }
+              }
+            }
+            """
+        )
+        let recorder = CrossrefDOIRecorder()
+
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: input)!,
+            session: StubURLProtocol.makeSession(),
+            crossrefFetcher: { doi in
+                await recorder.record(doi)
+                throw URLError(.notConnectedToInternet)
+            }
+        )
+
+        XCTAssertEqual(StubURLProtocol.requests.map(\.url), [searchURL, URL(string: summaryURL)!])
+        let resolvedDOIs = await recorder.values
+        XCTAssertEqual(resolvedDOIs, ["10.1016/j.neuron.2026.05.022"])
+        XCTAssertEqual(outcome.reference.title, "Sparse component analysis: A method that uncovers separable computations within neural population activity")
+        XCTAssertEqual(outcome.reference.authors.count, 2)
+        XCTAssertEqual(outcome.reference.year, 2026)
+        XCTAssertEqual(outcome.reference.journal, "Neuron")
+        XCTAssertEqual(outcome.reference.pmid, "42392073")
+        XCTAssertEqual(outcome.reference.doi, "10.1016/j.neuron.2026.05.022")
+        XCTAssertEqual(
+            outcome.reference.url,
+            "https://www.cell.com/neuron/fulltext/S0896-6273(26)00414-9"
+        )
+        XCTAssertEqual(
+            outcome.scrapedPDFURL,
+            "https://www.cell.com/neuron/pdf/S0896-6273(26)00414-9.pdf"
+        )
+    }
+
+    func testCellPressFallsBackToLinkingHubAndExactOpenAlexMatch() async throws {
+        let input = "https://www.cell.com/joule/fulltext/S2542-4351(26)00214-X"
+        let pii = "S2542-4351(26)00214-X"
+        let searchURL = try XCTUnwrap(MetadataFetcher.pubMedSearchURL(forPII: pii))
+        StubURLProtocol.stub(
+            searchURL.absoluteString,
+            contentType: "application/json",
+            body: #"{"esearchresult":{"count":"0","idlist":[]}}"#
+        )
+        let linkingHubURL = try XCTUnwrap(PaperURLResolver.cellPressLinkingHubURL(forPII: pii))
+        let title = "Prospects for mining critical materials from nontraditional water sources to meet decarbonized energy needs"
+        StubURLProtocol.stub(
+            linkingHubURL.absoluteString,
+            body: "<script>articleName : '\(title)', identifierValue : 'S254243512600214X'</script>"
+        )
+        let openAlexURL = try XCTUnwrap(MetadataFetcher.openAlexCellPressTitleSearchURL(
+            title,
+            expectedISSN: "2542-4351",
+            assignmentYearSuffix: 26
+        ))
+        StubURLProtocol.stub(
+            openAlexURL.absoluteString,
+            contentType: "application/json",
+            body: """
+            {
+              "meta": {"count": 2},
+              "results": [
+                {
+                  "title": "\(title)",
+                  "doi": "https://doi.org/10.1016/j.energy.2026.999999",
+                  "publication_year": 2026,
+                  "authorships": [{"author":{"display_name":"Wrong Author"}}],
+                  "primary_location": {"source":{"display_name":"Energy", "issn":["0360-5442"]}},
+                  "biblio": {},
+                  "type": "article"
+                },
+                {
+                  "title": "\(title)",
+                  "doi": "https://doi.org/10.1016/j.joule.2026.102530",
+                  "publication_year": 2026,
+                  "authorships": [{"author":{"display_name":"Lauren E. McMahon"}}],
+                  "primary_location": {"source":{"display_name":"Joule", "issn":["2542-4351"]}},
+                  "biblio": {},
+                  "type": "article"
+                }
+              ]
+            }
+            """
+        )
+        let recorder = CrossrefDOIRecorder()
+
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: input)!,
+            session: StubURLProtocol.makeSession(),
+            crossrefFetcher: { doi in
+                await recorder.record(doi)
+                throw URLError(.notConnectedToInternet)
+            }
+        )
+
+        XCTAssertEqual(
+            StubURLProtocol.requests.map(\.url),
+            [searchURL, linkingHubURL, openAlexURL]
+        )
+        let resolvedDOIs = await recorder.values
+        XCTAssertEqual(resolvedDOIs, ["10.1016/j.joule.2026.102530"])
+        XCTAssertEqual(outcome.reference.title, title)
+        XCTAssertEqual(outcome.reference.journal, "Joule")
+        XCTAssertEqual(outcome.reference.year, 2026)
+        XCTAssertEqual(outcome.reference.doi, "10.1016/j.joule.2026.102530")
+        XCTAssertEqual(outcome.reference.url, input)
+        XCTAssertEqual(
+            outcome.scrapedPDFURL,
+            "https://www.cell.com/joule/pdf/S2542-4351(26)00214-X.pdf"
+        )
+    }
+
+    func testCellPressOpenAlexFallbackRejectsAmbiguousPIIIdentityMatches() async throws {
+        let title = "Editorial"
+        let openAlexURL = try XCTUnwrap(MetadataFetcher.openAlexCellPressTitleSearchURL(
+            title,
+            expectedISSN: "2542-4351",
+            assignmentYearSuffix: 26
+        ))
+        StubURLProtocol.stub(
+            openAlexURL.absoluteString,
+            contentType: "application/json",
+            body: """
+            {
+              "meta": {"count": 2},
+              "results": [
+                {
+                  "title": "Editorial",
+                  "doi": "https://doi.org/10.1016/j.joule.2026.100001",
+                  "publication_year": 2026,
+                  "primary_location": {"source":{"display_name":"Joule", "issn":["2542-4351"]}}
+                },
+                {
+                  "title": "Editorial",
+                  "doi": "https://doi.org/10.1016/j.joule.2026.100002",
+                  "publication_year": 2026,
+                  "primary_location": {"source":{"display_name":"Joule", "issn_l":"2542-4351"}}
+                }
+              ]
+            }
+            """
+        )
+
+        let result = try await MetadataFetcher.fetchFromOpenAlexByExactTitle(
+            title,
+            expectedISSN: "2542-4351",
+            assignmentYearSuffix: 26,
+            session: StubURLProtocol.makeSession()
+        )
+
+        XCTAssertNil(result)
+    }
+
+    func testCellPressOpenAlexFallbackUsesDOIAssignmentYearAcrossPublicationBoundary() async throws {
+        let title = "Year-boundary Cell article"
+        let openAlexURL = try XCTUnwrap(MetadataFetcher.openAlexCellPressTitleSearchURL(
+            title,
+            expectedISSN: "2542-4351",
+            assignmentYearSuffix: 25
+        ))
+        StubURLProtocol.stub(
+            openAlexURL.absoluteString,
+            contentType: "application/json",
+            body: """
+            {
+              "meta": {"count": 2},
+              "results": [
+                {
+                  "title": "Year-boundary Cell article",
+                  "doi": "https://doi.org/10.1016/j.joule.2024.999999",
+                  "publication_year": 2026,
+                  "primary_location": {"source":{"display_name":"Joule", "issn":["2542-4351"]}}
+                },
+                {
+                  "title": "Year-boundary Cell article",
+                  "doi": "https://doi.org/10.1016/j.joule.2025.102310",
+                  "publication_year": 2026,
+                  "primary_location": {"source":{"display_name":"Joule", "issn":["2542-4351"]}}
+                }
+              ]
+            }
+            """
+        )
+
+        let result = try await MetadataFetcher.fetchFromOpenAlexByExactTitle(
+            title,
+            expectedISSN: "2542-4351",
+            assignmentYearSuffix: 25,
+            session: StubURLProtocol.makeSession()
+        )
+
+        XCTAssertEqual(result?.doi, "10.1016/j.joule.2025.102310")
+        XCTAssertEqual(result?.year, 2026)
+    }
+
+    func testCellPressLinkingHubTitleDecodesEscapedApostropheAndEntities() throws {
+        let html = #"<script>articleName : 'Earth\'s &amp; future'</script>"#
+        XCTAssertEqual(
+            PaperURLResolver.parseCellPressLinkingHubTitle(Data(html.utf8)),
+            "Earth's & future"
+        )
+    }
+
     // MARK: - Content-Type rejection
 
     func testNonHTMLContentTypeRejected() async {

@@ -58,51 +58,57 @@ public enum PaperURLResolver {
         // without fetching publisher pages that commonly reject automated
         // clients. eLife exposes a stable, keyless JSON API; the remaining
         // hosts use the generic citation_* scraper.
-        let (scrapedReference, scrapedPDFURL): (Reference, String?)
+        let (sourceReference, publisherPDFURL): (Reference, String?)
         if host == .aps {
-            (scrapedReference, scrapedPDFURL) = try await resolveAPS(
+            (sourceReference, publisherPDFURL) = try await resolveAPS(
                 landingURL: landingURL,
                 crossrefFetcher: crossrefFetcher
             )
         } else if host == .science || host == .acs {
-            (scrapedReference, scrapedPDFURL) = try await resolveDOIPublisher(
+            (sourceReference, publisherPDFURL) = try await resolveDOIPublisher(
                 landingURL: landingURL,
                 host: host,
                 crossrefFetcher: crossrefFetcher
             )
         } else if host == .eLife {
-            (scrapedReference, scrapedPDFURL) = try await resolveELife(
+            (sourceReference, publisherPDFURL) = try await resolveELife(
+                landingURL: landingURL,
+                session: session
+            )
+        } else if host == .cellPress {
+            (sourceReference, publisherPDFURL) = try await resolveCellPress(
                 landingURL: landingURL,
                 session: session
             )
         } else {
-            (scrapedReference, scrapedPDFURL) = try await resolveCitationMeta(
+            (sourceReference, publisherPDFURL) = try await resolveCitationMeta(
                 landingURL: landingURL,
                 host: host,
                 session: session
             )
         }
 
-        // 5. Normalize scraper metadata through CrossRef when it carries a DOI.
+        // 5. Normalize source metadata through CrossRef when it carries a DOI.
         // DOI-bearing publisher paths already resolved directly in step 4.
-        var finalReference = scrapedReference
+        var finalReference = sourceReference
         if host != .aps, host != .science, host != .acs,
-           let doi = scrapedReference.doi?.trimmingCharacters(in: .whitespacesAndNewlines),
+           let doi = sourceReference.doi?.trimmingCharacters(in: .whitespacesAndNewlines),
            !doi.isEmpty {
             do {
                 let crossref = try await crossrefFetcher(doi)
-                let scraperTitle = scrapedReference.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                let sourceTitle = sourceReference.title.trimmingCharacters(in: .whitespacesAndNewlines)
                 let crossrefTitle = crossref.title.trimmingCharacters(in: .whitespacesAndNewlines)
-                let score = MetadataResolution.titleSimilarity(scraperTitle, crossrefTitle)
+                let score = MetadataResolution.titleSimilarity(sourceTitle, crossrefTitle)
                 if score >= 0.80 {
-                    finalReference = MetadataResolution.mergeReference(primary: crossref, fallback: scrapedReference)
+                    finalReference = MetadataResolution.mergeReference(primary: crossref, fallback: sourceReference)
                     // Force canonical landing URL — CrossRef may have populated url with doi.org redirect.
                     finalReference.url = landingURL.absoluteString
-                    // Preserve the per-host metadataSource the scraper assigned
-                    // (.cvfOpenAccess for CVF, .publisherCitationMeta otherwise):
+                    // Preserve the per-host metadataSource assigned by the
+                    // source path (.cvfOpenAccess for CVF,
+                    // .publisherCitationMeta for citation-meta pages):
                     // the user pasted a publisher URL, so provenance reflects
                     // that path rather than CrossRef.
-                    finalReference.metadataSource = scrapedReference.metadataSource
+                    finalReference.metadataSource = sourceReference.metadataSource
                 } else {
                     // Title mismatch (chapter-vs-book scenario) — keep scraper-only.
                     // Log via existing logger if available; spec uses resolverTrace which lives in
@@ -119,11 +125,11 @@ public enum PaperURLResolver {
         if finalReference.authors.isEmpty {
             throw ResolveError.noAuthorsAvailable(
                 reference: finalReference,
-                scrapedPDFURL: scrapedPDFURL
+                scrapedPDFURL: publisherPDFURL
             )
         }
 
-        return Outcome(reference: finalReference, scrapedPDFURL: scrapedPDFURL)
+        return Outcome(reference: finalReference, scrapedPDFURL: publisherPDFURL)
     }
 
     // MARK: - APS DOI path
@@ -169,6 +175,82 @@ public enum PaperURLResolver {
         return (reference, pdfURL.absoluteString)
     }
 
+    // MARK: - Cell Press PII path
+
+    private static func resolveCellPress(
+        landingURL: URL,
+        session: URLSession
+    ) async throws -> (Reference, String?) {
+        guard let article = cellPressArticle(from: landingURL),
+              let piiIdentity = cellPressPIIIdentity(article.pii),
+              let pdfURL = cellPressURL(for: article, pageKind: .pdf) else {
+            throw ResolveError.insufficientMetadata
+        }
+
+        // Cell Press article pages are protected by a browser challenge, so a
+        // headless citation-meta scrape is not reliable. Prefer the formatted
+        // PII's exact PubMed Publisher-ID match. Physical-science Cell Press
+        // journals may not be indexed there, so fall back to the title exposed
+        // by Elsevier Linking Hub and require a PII-constrained OpenAlex match.
+        let resolvedReference: Reference
+        do {
+            resolvedReference = try await MetadataFetcher.fetchFromPII(
+                article.pii,
+                session: session
+            )
+        } catch {
+            let pubMedError = error
+            if let fetchError = error as? MetadataFetcher.FetchError,
+               case .unsupported(let message) = fetchError,
+               message.hasPrefix("Multiple PubMed records") {
+                throw error
+            }
+            guard let linkingHubTitle = try? await fetchCellPressLinkingHubTitle(
+                pii: article.pii,
+                session: session
+            ) else {
+                throw pubMedError
+            }
+            do {
+                guard let fallback = try await MetadataFetcher.fetchFromOpenAlexByExactTitle(
+                    linkingHubTitle,
+                    expectedISSN: piiIdentity.issn,
+                    assignmentYearSuffix: piiIdentity.assignmentYearSuffix,
+                    session: session
+                ) else {
+                    throw pubMedError
+                }
+                resolvedReference = fallback
+            } catch {
+                throw pubMedError
+            }
+        }
+
+        // The normal resolver flow will use the DOI, when present, for the same
+        // Crossref normalization applied to other publisher sources.
+        var reference = resolvedReference
+        reference.url = landingURL.absoluteString
+        return (reference, pdfURL.absoluteString)
+    }
+
+    private static func fetchCellPressLinkingHubTitle(
+        pii: String,
+        session: URLSession
+    ) async throws -> String {
+        guard let url = cellPressLinkingHubURL(forPII: pii) else {
+            throw ResolveError.insufficientMetadata
+        }
+        let response = try await fetchHTML(
+            url: url,
+            session: session,
+            permittedFinalHosts: ["linkinghub.elsevier.com"]
+        )
+        guard let title = parseCellPressLinkingHubTitle(response.data) else {
+            throw ResolveError.insufficientMetadata
+        }
+        return title
+    }
+
     // MARK: - Citation-meta dispatch
 
     private static func resolveCitationMeta(
@@ -200,7 +282,7 @@ public enum PaperURLResolver {
                 return .conferencePaper
             case .aclAnthology:
                 return meta.conferenceTitle != nil ? .conferencePaper : .journalArticle
-            case .ieeeXplore, .acmDL, .nature, .springer, .scienceDirect,
+            case .ieeeXplore, .acmDL, .nature, .springer, .scienceDirect, .cellPress,
                  .science, .acs, .aanda, .eLife, .eNeuro, .aps:
                 if meta.journal != nil { return .journalArticle }
                 if meta.conferenceTitle != nil { return .conferencePaper }
@@ -414,7 +496,7 @@ public enum PaperURLResolver {
 internal enum KnownPaperHost: CaseIterable {
     case openReview, aclAnthology, cvfOpenAccess
     case neurIPS, neurIPSProceedings
-    case pmlr, ieeeXplore, acmDL, nature, springer, scienceDirect
+    case pmlr, ieeeXplore, acmDL, nature, springer, scienceDirect, cellPress
     case science, acs, aanda, eLife, eNeuro, aps
 
     /// Returns the host bucket if the URL matches both a known host and a
@@ -475,6 +557,8 @@ internal enum KnownPaperHost: CaseIterable {
             if matches(path, pattern: #"^/science/article/.+/pdfft$"#) { return .scienceDirect }
             if matches(path, pattern: #"^/science/article/(pii|abs/pii)/.+$"#) { return .scienceDirect }
             return nil
+        case "cell.com":
+            return PaperURLResolver.cellPressArticle(from: canonical) == nil ? nil : .cellPress
         case "science.org":
             return PaperURLResolver.doiPublisherArticle(from: canonical, host: .science) == nil
                 ? nil
@@ -559,6 +643,15 @@ internal extension PaperURLResolver {
         let journalSlug: String
         let pageKind: APSPageKind
         let doi: String
+    }
+
+    enum CellPressPageKind: String, Sendable {
+        case fulltext, abstract, pdf
+    }
+
+    struct CellPressArticle: Sendable {
+        let journalPath: String
+        let pii: String
     }
 
     static func canonicalize(_ url: URL) -> URL? {
@@ -800,6 +893,95 @@ internal extension PaperURLResolver {
         guard !articleID.isEmpty, articleID.allSatisfy(\.isNumber) else { return nil }
         return articleID
     }
+
+    /// Parse Cell Press article URLs such as
+    /// `/neuron/fulltext/S0896-6273(26)00414-9` and their abstract/PDF forms.
+    static func cellPressArticle(from url: URL) -> CellPressArticle? {
+        guard let canonical = canonicalize(url),
+              canonical.host == "cell.com" else { return nil }
+        var path = canonical.path(percentEncoded: false)
+        guard path.hasPrefix("/") else { return nil }
+        if path.hasSuffix("/") { path.removeLast() }
+        let segments = path.split(separator: "/", omittingEmptySubsequences: false)
+            .dropFirst()
+            .map(String.init)
+        guard segments.count >= 3 else { return nil }
+        let pageKindIndex = segments.index(segments.endIndex, offsetBy: -2)
+        let journalSegments = segments[..<pageKindIndex]
+        guard !journalSegments.isEmpty,
+              journalSegments.allSatisfy({ segment in
+                  !segment.isEmpty && segment.allSatisfy({
+                      $0.isASCII && ($0.isLowercase || $0.isNumber || $0 == "-")
+                  })
+              }),
+              let pageKind = CellPressPageKind(rawValue: segments[pageKindIndex]) else { return nil }
+
+        var pii = segments[segments.index(after: pageKindIndex)]
+        if pageKind == .pdf {
+            guard pii.lowercased().hasSuffix(".pdf") else { return nil }
+            pii.removeLast(4)
+        }
+        guard pii.range(
+            of: #"^S[0-9]{4}-[0-9]{3}[0-9X]\([0-9]{2}\)[0-9]{5}-[0-9X]$"#,
+            options: .regularExpression
+        ) != nil else { return nil }
+        return CellPressArticle(journalPath: journalSegments.joined(separator: "/"), pii: pii)
+    }
+
+    private static func cellPressPIIIdentity(
+        _ pii: String
+    ) -> (issn: String, assignmentYearSuffix: Int)? {
+        guard pii.count >= 13 else { return nil }
+        let issnStart = pii.index(after: pii.startIndex)
+        let issnEnd = pii.index(issnStart, offsetBy: 9)
+        let issn = String(pii[issnStart..<issnEnd])
+        guard let openingParen = pii.firstIndex(of: "("),
+              let closingParen = pii[openingParen...].firstIndex(of: ")"),
+              let suffix = Int(pii[pii.index(after: openingParen)..<closingParen]) else {
+            return nil
+        }
+        return (issn, suffix)
+    }
+
+    static func cellPressURL(
+        for article: CellPressArticle,
+        pageKind: CellPressPageKind
+    ) -> URL? {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "www.cell.com"
+        let suffix = pageKind == .pdf ? "\(article.pii).pdf" : article.pii
+        components.path = "/\(article.journalPath)/\(pageKind.rawValue)/\(suffix)"
+        return components.url
+    }
+
+    static func cellPressLinkingHubURL(forPII pii: String) -> URL? {
+        let compactPII = pii.filter { character in
+            character.isASCII && (character.isLetter || character.isNumber)
+        }
+        guard !compactPII.isEmpty else { return nil }
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "linkinghub.elsevier.com"
+        components.path = "/retrieve/pii/\(compactPII)"
+        return components.url
+    }
+
+    static func parseCellPressLinkingHubTitle(_ data: Data) -> String? {
+        guard let html = String(data: data, encoding: .utf8),
+              let regex = try? NSRegularExpression(
+                pattern: #"articleName\s*:\s*'((?:\\.|[^'\\])*)'"#
+              ) else { return nil }
+        let range = NSRange(html.startIndex..., in: html)
+        guard let match = regex.firstMatch(in: html, options: [], range: range),
+              let titleRange = Range(match.range(at: 1), in: html) else { return nil }
+        let unescaped = String(html[titleRange])
+            .replacingOccurrences(of: #"\'"#, with: "'")
+            .replacingOccurrences(of: #"\\"#, with: #"\"#)
+        let title = CitationMetaScraper.decodeHTMLEntities(unescaped)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return title.isEmpty ? nil : title
+    }
 }
 
 // MARK: - PDF → landing rewrite
@@ -913,6 +1095,15 @@ internal extension PaperURLResolver {
             // /science/article/pii/SXXXX/pdfft → /science/article/pii/SXXXX
             if path.hasSuffix("/pdfft") {
                 components.path = String(path.dropLast("/pdfft".count))
+            }
+
+        case .cellPress:
+            // Normalize fulltext/abstract/PDF variants to the clean fulltext
+            // landing page and discard tracking/Linking Hub return parameters.
+            if let article = cellPressArticle(from: canonical),
+               let landing = cellPressURL(for: article, pageKind: .fulltext),
+               let landingComponents = URLComponents(url: landing, resolvingAgainstBaseURL: false) {
+                components = landingComponents
             }
 
         case .science, .acs:

@@ -78,6 +78,25 @@ final class ImportRouterTests: XCTestCase {
         XCTAssertEqual(route, .resolver(impliedDownloadPdf: true))
     }
 
+    func testCellPressLandingAndPDFRouteToResolver() {
+        let landing = ImportRouter.classify(
+            source: "https://www.cell.com/neuron/fulltext/S0896-6273(26)00414-9",
+            probe: noPaths
+        )
+        let pdf = ImportRouter.classify(
+            source: "https://www.cell.com/neuron/pdf/S0896-6273(26)00414-9.pdf",
+            probe: noPaths
+        )
+        XCTAssertEqual(landing, .resolver(impliedDownloadPdf: false))
+        XCTAssertEqual(pdf, .resolver(impliedDownloadPdf: true))
+
+        let trends = ImportRouter.classify(
+            source: "https://www.cell.com/trends/microbiology/fulltext/S0966-842X(26)00180-0",
+            probe: noPaths
+        )
+        XCTAssertEqual(trends, .resolver(impliedDownloadPdf: false))
+    }
+
     func testAPSPDFURLWithoutExtensionImpliesDownload() {
         let route = ImportRouter.classify(
             source: "https://journals.aps.org/prl/pdf/10.1103/3v91-5pzf",

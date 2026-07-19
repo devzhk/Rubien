@@ -64,6 +64,27 @@ final class PaperURLRewriteTests: XCTestCase {
                        "https://sciencedirect.com/science/article/pii/SXXXX")
     }
 
+    func testCellPressPDFRewrite() {
+        XCTAssertEqual(
+            rewrite("https://www.cell.com/neuron/pdf/S0896-6273(26)00414-9.pdf"),
+            "https://www.cell.com/neuron/fulltext/S0896-6273(26)00414-9"
+        )
+    }
+
+    func testCellPressNestedTrendsPDFRewrite() {
+        XCTAssertEqual(
+            rewrite("https://www.cell.com/trends/microbiology/pdf/S0966-842X(26)00180-0.pdf"),
+            "https://www.cell.com/trends/microbiology/fulltext/S0966-842X(26)00180-0"
+        )
+    }
+
+    func testCellPressFullTextDropsReturnURL() {
+        XCTAssertEqual(
+            rewrite("https://www.cell.com/neuron/fulltext/S0896-6273(26)00414-9?_returnURL=https%3A%2F%2Flinkinghub.elsevier.com%2Fretrieve%2Fpii%2FS0896627326004149"),
+            "https://www.cell.com/neuron/fulltext/S0896-6273(26)00414-9"
+        )
+    }
+
     func testSciencePDFVariantsRewriteToCanonicalLanding() {
         XCTAssertEqual(
             rewrite("https://www.science.org/doi/pdf/10.1126/sciadv.abn9545"),

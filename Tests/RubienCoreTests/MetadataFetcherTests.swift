@@ -64,6 +64,43 @@ final class MetadataFetcherTests: XCTestCase {
         XCTAssertEqual(reference.year, 2024)
     }
 
+    func testParsePubMedPIISearchResponseRequiresSingleExactMatch() throws {
+        let match = """
+        {
+          "esearchresult": {
+            "count": "1",
+            "idlist": ["42392073"]
+          }
+        }
+        """.data(using: .utf8)!
+        XCTAssertEqual(
+            try MetadataFetcher.parsePubMedPIISearchResponse(match),
+            "42392073"
+        )
+
+        let noMatch = """
+        {"esearchresult":{"count":"0","idlist":[]}}
+        """.data(using: .utf8)!
+        XCTAssertThrowsError(try MetadataFetcher.parsePubMedPIISearchResponse(noMatch)) { error in
+            guard case MetadataFetcher.FetchError.unsupported(let message) = error else {
+                return XCTFail("Expected unsupported error, got \(error)")
+            }
+            XCTAssertTrue(message.contains("No PubMed record"))
+        }
+
+        let multipleMatches = """
+        {"esearchresult":{"count":"2","idlist":["42392073","42392074"]}}
+        """.data(using: .utf8)!
+        XCTAssertThrowsError(
+            try MetadataFetcher.parsePubMedPIISearchResponse(multipleMatches)
+        ) { error in
+            guard case MetadataFetcher.FetchError.unsupported(let message) = error else {
+                return XCTFail("Expected unsupported error, got \(error)")
+            }
+            XCTAssertTrue(message.contains("Multiple PubMed records"))
+        }
+    }
+
     func testParseArXivResponseUsesIdentifierForCanonicalURL() throws {
         let xml = """
         <?xml version="1.0" encoding="UTF-8"?>

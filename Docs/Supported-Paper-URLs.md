@@ -19,6 +19,7 @@ These hosts have explicit article-path support. Rubien preserves the publisher l
 | Nature | `nature.com` | `/articles/<article-id>` | `/articles/<article-id>.pdf` |
 | Springer Link | `link.springer.com` | `/article/<id>`, `/chapter/<id>`, `/book/<id>`, or `/referenceworkentry/<id>` | None |
 | ScienceDirect | `sciencedirect.com` | `/science/article/pii/<pii>` or `/science/article/abs/pii/<pii>` | `/science/article/pii/<pii>/pdfft` |
+| Cell Press | `cell.com` | `/<journal-path>/fulltext/<formatted-pii>` or `/<journal-path>/abstract/<formatted-pii>` (including nested Trends paths such as `/trends/microbiology/...`) | `/<journal-path>/pdf/<formatted-pii>.pdf` |
 | Science / AAAS | `www.science.org` | `/doi/10.1126/<suffix>`, `/doi/full/10.1126/<suffix>`, or `/doi/abs/10.1126/<suffix>` | `/doi/pdf/10.1126/<suffix>` or `/doi/epdf/10.1126/<suffix>` |
 | American Chemical Society | `pubs.acs.org` | `/doi/10.1021/<suffix>`, `/doi/full/10.1021/<suffix>`, or `/doi/abs/10.1021/<suffix>` | `/doi/pdf/10.1021/<suffix>` or `/doi/epdf/10.1021/<suffix>` |
 | Astronomy & Astrophysics | `www.aanda.org` | `/articles/aa/full_html/<yyyy>/<issue>/<id>/<id>.html` or `/articles/aa/abs/<yyyy>/<issue>/<id>/<id>.html` | `/articles/aa/pdf/<yyyy>/<issue>/<id>.pdf` |
@@ -26,7 +27,7 @@ These hosts have explicit article-path support. Rubien preserves the publisher l
 | eNeuro | `www.eneuro.org` | `/content/<volume>/<issue>/ENEURO.<id>` or `/content/early/<yyyy>/<mm>/<dd>/ENEURO.<id>`; `.abstract`, `.full`, and `.long` variants are accepted | `/content/eneuro/<volume>/<issue>/ENEURO.<id>.full.pdf` or `/content/eneuro/early/<yyyy>/<mm>/<dd>/ENEURO.<id>.full.pdf` |
 | APS Physical Review journals | `journals.aps.org` | `/<journal>/abstract/10.1103/<suffix>` or `/<journal>/accepted/10.1103/<suffix>` | `/<journal>/pdf/10.1103/<suffix>` → abstract URL |
 
-Rubien reads most pages from `citation_*` HTML metadata, then uses CrossRef to normalize records with a DOI. eLife uses its official API. APS, Science, and ACS URLs resolve directly through their embedded DOI so publisher HTML is not required. PDF access depends on the publisher.
+Rubien reads most pages from `citation_*` HTML metadata, then uses CrossRef to normalize records with a DOI. eLife uses its official API. APS, Science, and ACS URLs resolve directly through their embedded DOI so publisher HTML is not required. Cell Press URLs first resolve their formatted PII through PubMed; for journals not indexed there, Rubien reads the canonical title from Elsevier Linking Hub and requires a unique OpenAlex match constrained by the PII's ISSN and assignment year. This avoids relying on Cell's browser-protected article HTML. PDF access depends on the publisher.
 
 ## Identifier, preprint, and direct-file URLs
 
