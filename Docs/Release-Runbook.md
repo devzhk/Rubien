@@ -48,7 +48,7 @@ The source repo `devzhk/Rubien` is **private**, but Sparkle downloads update DMG
 
 Host prerequisites: `gh` authenticated, the Developer ID identity available, the EdDSA private key in Keychain, and the `RubienNotary` notarytool profile in the login Keychain (from One-time setup §4 — it persists across releases; you do **not** re-run `store-credentials` each time). Steps 1–3 establish the repository prerequisites: release-preparation changes committed and pushed to `origin/main`, the CI gate satisfied, and a clean synchronized `main`.
 
-The order is strict: **prepare and commit → push and satisfy the CI gate → obtain explicit approval and sign/publish with host access → verify Mac and Linux artifacts → publish any coupled npm package**. Normally the green run must match `HEAD` exactly. The only exception is a descendant containing Markdown-only documentation changes after an already-green release-preparation SHA; the commands below prove that no release input changed. Do not start signing while release-preparation commits exist only locally.
+The order is strict: **prepare and commit → push and satisfy the CI gate → smoke-test release-candidate browser assets → obtain explicit approval and sign/publish with host access → verify published Mac and Linux artifacts → publish any coupled npm package**. Normally the green run must match `HEAD` exactly. The only exception is a descendant containing Markdown-only documentation changes after an already-green release-preparation SHA; the commands below prove that no release input changed. Do not start signing while release-preparation commits exist only locally.
 
 > **An agent may run the signed release pipeline only after the user explicitly approves the release command.** Before requesting approval, show the exact version/build and release notes and confirm the release-preparation SHA passed the CI gate. The approval authorizes the consequential effects of `release.sh`: signed build and notarization, an appcast commit and push, a source tag, a public GitHub release, and Linux-release workflow dispatch. Run it with elevated/unsandboxed host access so it can read the Developer ID and Sparkle EdDSA keys, use the `RubienNotary` login-Keychain profile, write `build/`, access the network, and update Git/GitHub. A failed credential check inside the ordinary sandbox does **not** prove a credential is missing; repeat the read-only preflight with approved host access. Once explicit approval is recorded, no separate interactive-host handoff is required.
 
@@ -62,6 +62,8 @@ git pull --ff-only
 $EDITOR VERSION       # e.g. 0.1.0 → 0.1.1
 $EDITOR BUILD.txt     # increment by 1
 ./scripts/generate-cli-version.sh   # regenerate checked-in GeneratedVersion.swift — CI fails if it drifts
+# The extension packager stamps manifest.json from VERSION; there is no
+# separate browser-extension version to bump for a release.
 # If mcp-server changed, complete its npm version check below before committing.
 # Also stage any coupled package-version files changed for this release.
 git add VERSION BUILD.txt Sources/RubienCLI/GeneratedVersion.swift
@@ -89,30 +91,35 @@ test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
 test -z "$(git status --porcelain)"
 git status --short --branch
 
-# 4. Set the Developer ID identity in your shell
+# 4. Build an unsigned release candidate and complete the browser-extension
+# pre-publication smoke gate below. This has no signing or publication effects.
+CODESIGN_ENABLED=0 ./scripts/build-app.sh release dmg
+
+# 5. Set the Developer ID identity in your shell
 # If an agent is driving the release, show the exact version/build, notes, and
 # external effects above and obtain explicit user approval before continuing.
 export CODESIGN_IDENTITY="Developer ID Application: <Your Name> (9TXK4V3SS8)"
 
-# 5. Pass this release's notes inline and run release.sh
+# 6. Pass this release's notes inline and run release.sh
 # Replace the example bullets; do not reuse an exported value from an older release.
 RELEASE_NOTES_TEXT=$'• This release change\n• Another release change' ./scripts/release.sh
 
-# 6. Wait for notarization (5-15 minutes). The script blocks.
+# 7. Wait for notarization (5-15 minutes). The script blocks.
 
-# 7. Confirm the Mac publication
-# - https://github.com/devzhk/Rubien-releases/releases/latest shows the new DMG (public host)
+# 8. Confirm the Mac + browser-extension publication
+# - https://github.com/devzhk/Rubien-releases/releases/latest shows both the
+#   new DMG and Rubien-Browser-Extension-X.Y.Z.zip (public host)
 # - https://devzhk.github.io/Rubien/appcast.xml has the new <item>
 # - The private source repo has the matching vX.Y.Z tag
 # - Within ~24 hours, existing installs see the "Update ready" indicator
 
-# 8. Watch the Linux CLI run printed by release.sh, then inspect all assets
+# 9. Watch the Linux CLI run printed by release.sh, then inspect all assets
 LINUX_RUN_ID="paste the run ID printed by release.sh here"
 gh run watch "$LINUX_RUN_ID" --exit-status
 gh release view "v$(tr -d '[:space:]' < VERSION)" \
     --repo devzhk/Rubien-releases --json assets --jq '.assets[].name'
-# Expect the versioned DMG, browser-extension ZIP, Linux .tar.gz, and Linux
-# .tar.gz.sig.
+# Expect Rubien-X.Y.Z.dmg, Rubien-Browser-Extension-X.Y.Z.zip, the Linux
+# .tar.gz, and its .tar.gz.sig.
 # Copy the dSYM zip path printed by build-app.sh to durable private storage.
 ```
 
@@ -120,9 +127,60 @@ gh release view "v$(tr -d '[:space:]' < VERSION)" \
 
 Only after that gate is green is `release.sh` the single entry point: it calls `scripts/build-app.sh` (which assembles + signs + embeds Sparkle, then builds the DMG and browser-extension ZIP), notarizes, signs the appcast item with `sign_update`, prepends the item to `Docs/appcast.xml`, commits + pushes the appcast change, tags the source commit on the private repo, and creates the GitHub release with the DMG and browser-extension ZIP on the public `devzhk/Rubien-releases` repo via `gh release create --repo`. Its later appcast push is part of publication; it is not a substitute for pushing and validating the release-preparation commit before signing starts.
 
+### Browser-extension release contract
+
+The Rubien app, native messaging host, and Chrome extension share a versioned
+wire protocol, so they are one release unit even though Chrome requires the
+extension to be installed manually. Every production release must publish both
+of these assets under the same public GitHub Release tag:
+
+- `Rubien-X.Y.Z.dmg`
+- `Rubien-Browser-Extension-X.Y.Z.zip`
+
+`scripts/package-browser-extension.sh` stamps the staged extension manifest
+from the root `VERSION`, validates Chrome's numeric version format, verifies the
+ZIP, and fails if the packaged manifest version differs. Do not publish a new
+extension or native-host behavior against an old Rubien release: bump Rubien's
+`VERSION`/`BUILD.txt`, pass the normal exact-SHA CI gate, and release the DMG and
+ZIP together. App-only releases still include the matching extension ZIP so a
+user never has to guess which pair is compatible.
+
+Before requesting approval to run the signed release, use the release-candidate
+DMG and ZIP produced by step 4, not a development build or files loaded directly
+from the source tree. Install `build/Rubien-Release.dmg`, then:
+
+1. Launch the candidate Rubien app once so it registers its bundled
+   Chrome native-messaging host.
+2. Unzip `build/Rubien-Browser-Extension-X.Y.Z.zip`. Open
+   `chrome://extensions`, enable Developer mode, choose **Load unpacked**, and
+   select the unzipped `Rubien-Browser-Extension` directory.
+3. Confirm the extension version shown by Chrome is `X.Y.Z` and its Rubien icon
+   renders correctly.
+4. Import an ordinary article and verify the confirmation step appears before
+   the reference is saved.
+5. Import an authenticated publisher paper with **Download PDF** enabled, then
+   import a different authenticated paper with it disabled. Verify the first
+   reference has a readable PDF and the second imports metadata without
+   downloading one. Using the same paper twice is not a valid test because
+   Rubien can deduplicate the second import against the first.
+6. Import a direct PDF URL and verify Rubien attaches a readable PDF rather than
+   clipping the browser viewer as Markdown or HTML.
+
+If the candidate fails, stop before signing or publication, fix the issue, and
+repeat the normal commit, exact-SHA CI, and candidate-smoke gates. This unsigned
+candidate gate validates the app/host/extension integration but does not replace
+the signed/notarized checks in `release.sh`.
+
+After publication, download the DMG and ZIP from the public GitHub Release and
+repeat steps 1–4 plus the direct-PDF check. This confirms the downloadable assets
+match and that the final signed app registers its host correctly. If that check
+fails, do not leave a mismatched ZIP attached to the release; pull the release
+and appcast as appropriate and ship a version/build bump through the normal
+fix-forward procedure.
+
 ## Environment and signing invariants
 
-- **Pass `RELEASE_NOTES_TEXT` fresh on every invocation.** `release.sh` reads it from the environment and uses it for both the GitHub release and appcast description. A value left exported from an earlier release silently republishes the old notes. Prefer the inline assignment in step 5; otherwise `unset RELEASE_NOTES_TEXT` before composing the new value.
+- **Pass `RELEASE_NOTES_TEXT` fresh on every invocation.** `release.sh` reads it from the environment and uses it for both the GitHub release and appcast description. A value left exported from an earlier release silently republishes the old notes. Prefer the inline assignment in step 6; otherwise `unset RELEASE_NOTES_TEXT` before composing the new value.
 - **Use ANSI-C syntax for multi-line notes, not a pasted heredoc.** Pass `RELEASE_NOTES_TEXT=$'• line one\n• line two' ./scripts/release.sh`. A pasted `RELEASE_NOTES_TEXT="$(cat <<'NOTES' … NOTES)"` can hang at `dquote cmdsubst heredoc>` when terminal indentation prevents the terminator from landing at column zero.
 - **Export the exact Developer ID identity before running.** Missing or incorrect `CODESIGN_IDENTITY` (`Developer ID Application: … (9TXK4V3SS8)`) can ad-hoc-sign the payload (`Signature=adhoc`) and make notarization fail only after the expensive build.
 - **Sparkle is controlled by the default-enabled `Sparkle` package trait.** DMG builds include it; a future Mac App Store flavor opts out with `swift build --disable-default-traits`. Keep every `import Sparkle` inside `#if canImport(Sparkle)` so both the trait-disabled flavor and Linux compile without the product.
@@ -316,5 +374,5 @@ Avoid losing both anchors simultaneously by storing them in independent failure 
 - `scripts/build-app.sh` — assembles + signs the `.app` bundle and the DMG, then packages a ready-to-unzip Chrome extension ZIP. Also usable standalone for dev builds.
   - The `embed_sparkle_framework` step inside this script manually copies `Sparkle.framework` into the bundle's `Contents/Frameworks/`. SwiftPM-via-`xcodebuild` does not auto-embed framework dependencies into the assembled bundle, so the script handles it explicitly before code-signing runs.
 - `scripts/lib/codesign.sh` — ordered Sparkle component signing. The order matters: `Installer.xpc → Downloader.xpc → Autoupdate → Updater.app → Sparkle.framework`. Never use `--deep`. `Downloader.xpc` needs `--preserve-metadata=entitlements`.
-- `scripts/package-browser-extension.sh` — creates `build/Rubien-Browser-Extension-<version>.zip` from the extension sources and checked-in Defuddle bundle; `release.sh` uploads it beside the DMG.
+- `scripts/package-browser-extension.sh` — creates `build/Rubien-Browser-Extension-<version>.zip` from the extension sources and checked-in Defuddle bundle, stamps and validates its manifest version from `VERSION`, and verifies the archive; `release.sh` uploads it beside the DMG.
 - `scripts/lib/appcast.sh` — renders + prepends an `<item>` block to the chosen appcast.
