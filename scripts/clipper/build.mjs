@@ -9,11 +9,13 @@
 //      Sources/Rubien/Resources/ClipperDefuddle.js together.
 
 import { build } from 'esbuild';
+import { copyFile, mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const outfile = resolve(here, '../../Sources/Rubien/Resources/ClipperDefuddle.js');
+const browserOutfile = resolve(here, '../../BrowserExtension/dist/ClipperDefuddle.js');
 
 await build({
   entryPoints: [resolve(here, 'src/clipper-defuddle.js')],
@@ -34,4 +36,8 @@ await build({
   logLevel: 'info',
 });
 
+await mkdir(dirname(browserOutfile), { recursive: true });
+await copyFile(outfile, browserOutfile);
+
 console.log(`Wrote ${outfile}`);
+console.log(`Wrote ${browserOutfile}`);

@@ -10,7 +10,7 @@ The source repo `devzhk/Rubien` is **private**, but Sparkle downloads update DMG
 |---|---|---|
 | Source, `Docs/appcast.xml`, Pages workflow | private `devzhk/Rubien` | code stays private; Pages is public even for a private repo |
 | Sparkle appcast (served) | private `devzhk/Rubien` Pages → `https://devzhk.github.io/Rubien/appcast.xml` | one stable feed URL; never changes |
-| DMG assets (`<enclosure url>`) | **public `devzhk/Rubien-releases`** | Sparkle can download anonymously |
+| DMG and browser-extension assets | **public `devzhk/Rubien-releases`** | Sparkle and Chrome users can download anonymously |
 
 **The appcast URL and the app's `SUFeedURL` never change** — only the `<enclosure>` URLs point at the public repo. That is what lets already-installed clients self-heal: repointing the enclosures in `Docs/appcast.xml` fixes every shipped install on its next check, with no new build. `release.sh` targets `$RELEASES_REPO` (default `devzhk/Rubien-releases`) for the DMG and separately runs `git tag` on the private repo for source traceability. Override `RELEASES_REPO` to host under a different account/repo.
 
@@ -111,13 +111,14 @@ LINUX_RUN_ID="paste the run ID printed by release.sh here"
 gh run watch "$LINUX_RUN_ID" --exit-status
 gh release view "v$(tr -d '[:space:]' < VERSION)" \
     --repo devzhk/Rubien-releases --json assets --jq '.assets[].name'
-# Expect the versioned DMG, Linux .tar.gz, and Linux .tar.gz.sig.
+# Expect the versioned DMG, browser-extension ZIP, Linux .tar.gz, and Linux
+# .tar.gz.sig.
 # Copy the dSYM zip path printed by build-app.sh to durable private storage.
 ```
 
 **You must bump `VERSION` (if the marketing version is changing) and `BUILD.txt` (every release) before running — `release.sh` does not bump them for you. Then run `./scripts/generate-cli-version.sh` and commit the regenerated `Sources/RubienCLI/GeneratedVersion.swift` alongside the bump; the file is checked in and CI's "Verify generated CLI version is in sync" step fails the build if it drifts from `VERSION` + `BUILD.txt`. Push that commit and watch the CI run for its exact SHA to a successful conclusion. If CI fails, stop: fix the issue in a new commit, push, and watch again. A green run for an older commit and local test results are not substitutes unless `HEAD` is a Markdown-only descendant and the explicit diff check above passes.**
 
-Only after that gate is green is `release.sh` the single entry point: it calls `scripts/build-app.sh` (which assembles + signs + embeds Sparkle, then builds the DMG), notarizes, signs the appcast item with `sign_update`, prepends the item to `Docs/appcast.xml`, commits + pushes the appcast change, tags the source commit on the private repo, and creates the GitHub release with the DMG on the public `devzhk/Rubien-releases` repo via `gh release create --repo`. Its later appcast push is part of publication; it is not a substitute for pushing and validating the release-preparation commit before signing starts.
+Only after that gate is green is `release.sh` the single entry point: it calls `scripts/build-app.sh` (which assembles + signs + embeds Sparkle, then builds the DMG and browser-extension ZIP), notarizes, signs the appcast item with `sign_update`, prepends the item to `Docs/appcast.xml`, commits + pushes the appcast change, tags the source commit on the private repo, and creates the GitHub release with the DMG and browser-extension ZIP on the public `devzhk/Rubien-releases` repo via `gh release create --repo`. Its later appcast push is part of publication; it is not a substitute for pushing and validating the release-preparation commit before signing starts.
 
 ## Environment and signing invariants
 
@@ -132,12 +133,13 @@ Only after that gate is green is `release.sh` the single entry point: it calls `
 `scripts/build-app.sh release` makes release size deterministic rather than
 inheriting user-specific Xcode scheme state:
 
-- Both first-party Mac executables are pinned to exactly `arm64`, matching
+- All three first-party Mac executables are pinned to exactly `arm64`, matching
   Rubien's Apple Silicon-only release policy, and code coverage is explicitly
   disabled. The copied Sparkle binary framework is thinned to arm64 too, and
   the build rejects any non-arm64 Mach-O anywhere in the assembled app.
-- The assembled app and CLI binaries are checked for LLVM coverage sections,
-  then stripped with `strip -S -x` before codesigning. Before stripping, their
+- The assembled app, CLI, and Chrome native-messaging host binaries are checked
+  for LLVM coverage sections, then stripped with `strip -S -x` before
+  codesigning. Before stripping, their
   UUID-matched dSYMs are preserved in a compressed, UUID-keyed archive under
   `build/dSYMs/Rubien-<version>-<build>-<uuid-hash>.dSYMs.zip`.
   The build fails if the architecture is not exactly `arm64`, a matching dSYM
@@ -156,19 +158,23 @@ After a release build, these checks should succeed before notarization:
 APP=build/Rubien.app
 DSYM_ZIP=$(cat "build/dSYMs/Rubien-$(tr -d '[:space:]' < VERSION)-$(tr -d '[:space:]' < BUILD.txt).latest.txt")
 
-# Expected: every line begins with exactly "arm64" (currently seven Mach-Os:
-# the app, CLI, Sparkle framework, Autoupdate, Updater, and two XPC services).
+# Expected: every line begins with exactly "arm64" (currently eight Mach-Os:
+# the app, CLI, browser host, Sparkle framework, Autoupdate, Updater, and two
+# XPC services).
 find "$APP/Contents" -type f -print0 | while IFS= read -r -d '' binary; do
   archs=$(lipo -archs "$binary" 2>/dev/null) || continue
   printf '%s\t%s\n' "$archs" "${binary#$APP/Contents/}"
 done
 
-# Expected: both negated checks exit zero with no output.
+# Expected: all three negated checks exit zero with no output.
 ! otool -l "$APP/Contents/MacOS/Rubien" | grep -E '(__LLVM_COV|__llvm_prf_)'
 ! otool -l "$APP/Contents/Helpers/rubien-cli" | grep -E '(__LLVM_COV|__llvm_prf_)'
+! otool -l "$APP/Contents/Helpers/rubien-browser-host" | grep -E '(__LLVM_COV|__llvm_prf_)'
 
-# Expected: the manifest lists the same UUIDs as the two binaries above.
-dwarfdump --uuid "$APP/Contents/MacOS/Rubien" "$APP/Contents/Helpers/rubien-cli"
+# Expected: the manifest lists the same UUIDs as the three binaries above.
+dwarfdump --uuid "$APP/Contents/MacOS/Rubien" \
+  "$APP/Contents/Helpers/rubien-cli" \
+  "$APP/Contents/Helpers/rubien-browser-host"
 unzip -p "$DSYM_ZIP" '*/UUIDs.txt'
 
 # This is the downloadable byte count used by Sparkle/GitHub. Do not use du.
@@ -306,8 +312,9 @@ Avoid losing both anchors simultaneously by storing them in independent failure 
 - `Docs/appcast.xml` — production Sparkle feed (served by GitHub Pages from the private repo; its `<enclosure>` DMG URLs point at the public `devzhk/Rubien-releases` repo).
 - `Docs/staging-appcast.xml` — staging feed for end-to-end tests.
 - `Docs/index.md` — GitHub Pages landing page.
-- `scripts/release.sh` — orchestrator. Reads (does not bump) `VERSION` + `BUILD.txt`, calls `build-app.sh`, notarizes, signs the appcast item, commits + pushes the appcast, tags the source on the private repo, and calls `gh release create --repo "$RELEASES_REPO"` to upload the DMG to the public releases repo.
-- `scripts/build-app.sh` — assembles + signs the `.app` bundle and the DMG. Also usable standalone for dev builds.
+- `scripts/release.sh` — orchestrator. Reads (does not bump) `VERSION` + `BUILD.txt`, calls `build-app.sh`, notarizes, signs the appcast item, commits + pushes the appcast, tags the source on the private repo, and calls `gh release create --repo "$RELEASES_REPO"` to upload the DMG and browser-extension ZIP to the public releases repo.
+- `scripts/build-app.sh` — assembles + signs the `.app` bundle and the DMG, then packages a ready-to-unzip Chrome extension ZIP. Also usable standalone for dev builds.
   - The `embed_sparkle_framework` step inside this script manually copies `Sparkle.framework` into the bundle's `Contents/Frameworks/`. SwiftPM-via-`xcodebuild` does not auto-embed framework dependencies into the assembled bundle, so the script handles it explicitly before code-signing runs.
 - `scripts/lib/codesign.sh` — ordered Sparkle component signing. The order matters: `Installer.xpc → Downloader.xpc → Autoupdate → Updater.app → Sparkle.framework`. Never use `--deep`. `Downloader.xpc` needs `--preserve-metadata=entitlements`.
+- `scripts/package-browser-extension.sh` — creates `build/Rubien-Browser-Extension-<version>.zip` from the extension sources and checked-in Defuddle bundle; `release.sh` uploads it beside the DMG.
 - `scripts/lib/appcast.sh` — renders + prepends an `<item>` block to the chosen appcast.

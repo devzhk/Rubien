@@ -79,7 +79,7 @@ final class ImportRouterTests: XCTestCase {
             "https://aclanthology.org/2024.acl-long.123.pdf",
             "https://www.cell.com/neuron/pdf/S0896-6273(26)00414-9.pdf",
             "https://journals.aps.org/prl/pdf/10.1103/3v91-5pzf",
-            "https://www.science.org/doi/pdf/10.1126/sciadv.abn9545",
+            "https://www.science.org/doi/pdf/10.1126/scirobotics.adz7397?download=true",
             "https://pubs.acs.org/doi/epdf/10.1021/acscentsci.3c01275",
         ]
 

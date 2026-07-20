@@ -96,8 +96,13 @@ echo "▸ Releasing Rubien $VERSION (build $BUILD_NUMBER) → $APPCAST_TARGET ap
 
 DMG_NAME="Rubien-Release.dmg"
 DMG_PATH="$PROJECT_DIR/build/$DMG_NAME"
+BROWSER_EXTENSION_PATH="$PROJECT_DIR/build/Rubien-Browser-Extension-${VERSION}.zip"
 if [ ! -f "$DMG_PATH" ]; then
     echo "✗ Expected DMG not produced at $DMG_PATH" >&2
+    exit 1
+fi
+if [ ! -f "$BROWSER_EXTENSION_PATH" ]; then
+    echo "✗ Expected browser extension not produced at $BROWSER_EXTENSION_PATH" >&2
     exit 1
 fi
 check_dmg_size_growth "$DMG_PATH" "Pre-notarization"
@@ -252,11 +257,11 @@ if [ "$APPCAST_TARGET" = "production" ]; then
     git push origin "v${VERSION}"
 fi
 
-# 16. Create the GitHub release with the DMG on the PUBLIC releases repo so
-#     Sparkle (anonymous) can download it. The appcast itself stays on the
+# 16. Create the GitHub release with the DMG and ready-to-unzip Chrome
+#     extension on the PUBLIC releases repo. The appcast itself stays on the
 #     private repo's Pages (Docs/appcast.xml -> devzhk.github.io/Rubien/appcast.xml).
 if [ "$APPCAST_TARGET" = "production" ]; then
-    gh release create "v${VERSION}" "$DMG_PATH" \
+    gh release create "v${VERSION}" "$DMG_PATH" "$BROWSER_EXTENSION_PATH" \
         --repo "$RELEASES_REPO" \
         --title "Rubien ${VERSION} — Beta" \
         --notes "$RELEASE_NOTES_TEXT" \
@@ -280,4 +285,5 @@ fi
 
 echo "✓ Release $VERSION complete."
 echo "   DMG: $DMG_PATH"
+echo "   Browser extension: $BROWSER_EXTENSION_PATH"
 echo "   Appcast: $APPCAST_PATH"

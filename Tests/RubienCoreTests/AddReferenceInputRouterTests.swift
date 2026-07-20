@@ -45,6 +45,11 @@ final class AddReferenceInputRouterTests: XCTestCase {
         XCTAssertEqual(AddReferenceInputRouter.classify(input, probe: noPaths), .website(input))
     }
 
+    func testXArticleWithSnowflakeIDRoutesToWebsite() {
+        let input = "https://x.com/Majumdar_Ani/article/2078508177620926531"
+        XCTAssertEqual(AddReferenceInputRouter.classify(input, probe: noPaths), .website(input))
+    }
+
     func testDirectPDFAndMarkdownURLsRouteToFileImport() {
         let pdf = "https://example.com/paper.pdf"
         let markdown = "https://example.com/note.markdown"

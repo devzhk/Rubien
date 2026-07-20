@@ -333,68 +333,12 @@ final class MetadataResolver {
         seed: MetadataResolutionSeed?,
         fallback: Reference?
     ) async -> (MetadataResolutionResult, scrapedPDFURL: String?) {
-        do {
-            // All non-paperURL identifiers fetch a Reference with no scrapedPDFURL;
-            // only .paperURL ever yields a non-nil URL via PaperURLResolver.
-            let (reference, scrapedPDFURL): (Reference, String?)
-            switch identifier {
-            case .doi(let value):    (reference, scrapedPDFURL) = (try await MetadataFetcher.fetchFromDOI(value), nil)
-            case .pmid(let value):   (reference, scrapedPDFURL) = (try await MetadataFetcher.fetchFromPMID(value), nil)
-            case .arxiv(let value):  (reference, scrapedPDFURL) = (try await MetadataFetcher.fetchFromArXiv(value), nil)
-            case .isbn(let value):   (reference, scrapedPDFURL) = (try await MetadataFetcher.fetchFromISBN(value), nil)
-            case .pmcid(let value):  (reference, scrapedPDFURL) = (try await MetadataFetcher.fetchFromPMCID(value), nil)
-            case .paperURL(let url):
-                let outcome = try await PaperURLResolver.resolve(url)
-                (reference, scrapedPDFURL) = (outcome.reference, outcome.scrapedPDFURL)
-            }
-
-            let evidence = buildGenericEvidence(
-                for: reference,
-                fetchMode: .identifier,
-                origin: .identifierAPI,
-                recordKey: normalizedIdentifier(reference.doi)
-                    ?? normalizedIdentifier(reference.pmid)
-                    ?? normalizedIdentifier(reference.isbn),
-                exactIdentifierMatch: true
-            )
-            let result = verifyFetchedRecord(
-                AuthoritativeMetadataRecord(reference: reference, evidence: evidence),
-                seed: seed,
-                fallback: fallback,
-                defaultRejectMessage: "Identifier matched, but auto-verification rules were not met."
-            )
-
-            // Force scrapedPDFURL to nil on any non-verified outcome — preferredPDFURL
-            // is defined as "populated only on .verified". See ManualEntryOutcome.
-            let effectiveScrapedPDFURL: String? = {
-                if case .verified = result { return scrapedPDFURL }
-                return nil
-            }()
-            return (result, effectiveScrapedPDFURL)
-        } catch PaperURLResolver.ResolveError.noAuthorsAvailable(let partialRef, _) {
-            // Spec §4: empty Reference.authors produces .candidate (NOT .rejected),
-            // so the user reviews the partial metadata before importing.
-            // scrapedPDFURL is intentionally discarded — preferredPDFURL is
-            // .verified-only.
-            resolverTrace("resolveIdentifierLocally noAuthorsAvailable: title=\(partialRef.title)")
-            let envelope = MetadataResolver.candidateEnvelopeForNoAuthors(
-                partialRef: partialRef,
-                seed: seed,
-                fallback: fallback
-            )
-            return (.candidate(envelope), nil)
-        } catch {
-            resolverTrace("resolveIdentifierLocally failed error=\"\(error.localizedDescription)\"")
-            return (.rejected(
-                RejectedEnvelope(
-                    seed: seed,
-                    fallbackReference: fallback,
-                    currentReference: fallback,
-                    reason: .insufficientEvidence,
-                    message: error.localizedDescription
-                )
-            ), nil)
-        }
+        let outcome = await MetadataResolutionPipeline.resolveIdentifier(
+            identifier,
+            seed: seed,
+            fallback: fallback
+        )
+        return (outcome.result, outcome.preferredPDFURL)
     }
 
     // MARK: - Verification glue
@@ -660,33 +604,10 @@ extension MetadataResolver {
         seed: MetadataResolutionSeed?,
         fallback: Reference?
     ) -> CandidateEnvelope {
-        let candidate = MetadataCandidate(
-            source: partialRef.metadataSource ?? .publisherCitationMeta,
-            title: partialRef.title,
-            authors: partialRef.authors,
-            journal: partialRef.journal,
-            publisher: partialRef.publisher,
-            year: partialRef.year,
-            detailURL: partialRef.url ?? "",
-            // Score 1.0 — direct-source URL, no competing candidates, single
-            // entry list. The user is reviewing because authors are missing,
-            // not because of low confidence in the match. < candidateThreshold
-            // (0.52) would render as a misleading "50% match" in the UI.
-            score: 1.0,
-            snippet: partialRef.abstract,
-            workKind: .unknown,
-            referenceType: partialRef.referenceType,
-            isbn: partialRef.isbn,
-            issn: partialRef.issn,
-            sourceRecordID: partialRef.doi
-        )
-        return CandidateEnvelope(
+        MetadataResolutionPipeline.candidateEnvelopeForNoAuthors(
+            partialReference: partialRef,
             seed: seed,
-            fallbackReference: fallback,
-            currentReference: partialRef,
-            candidates: [candidate],
-            message: "Found a paper, but no authors are listed on the page or in CrossRef. Review before importing.",
-            evidence: nil
+            fallback: fallback
         )
     }
 }

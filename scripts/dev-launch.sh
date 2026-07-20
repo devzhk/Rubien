@@ -43,6 +43,7 @@ CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-Apple Development}"
 PROVISION_PROFILE="${PROVISION_PROFILE:-$HOME/Downloads/Rubien_Mac_Dev.provisionprofile}"
 ENTITLEMENTS="${ENTITLEMENTS:-$PROJECT_DIR/Sources/Rubien/Rubien.entitlements}"
 RUBIEN_CLI_ENTITLEMENTS="${RUBIEN_CLI_ENTITLEMENTS:-$PROJECT_DIR/Sources/RubienCLI/RubienCLI.entitlements}"
+RUBIEN_BROWSER_HOST_ENTITLEMENTS="${RUBIEN_BROWSER_HOST_ENTITLEMENTS:-$RUBIEN_CLI_ENTITLEMENTS}"
 
 APP_BUNDLE="$PROJECT_DIR/build/Rubien.app"
 
@@ -88,6 +89,11 @@ if [ -f "$STAGE/Rubien.app/Contents/Helpers/rubien-cli" ]; then
         "$STAGE/Rubien.app/Contents/Helpers/rubien-cli" \
         "$RUBIEN_CLI_ENTITLEMENTS"
 fi
+if [ -f "$STAGE/Rubien.app/Contents/Helpers/rubien-browser-host" ]; then
+    rubien_codesign_binary \
+        "$STAGE/Rubien.app/Contents/Helpers/rubien-browser-host" \
+        "$RUBIEN_BROWSER_HOST_ENTITLEMENTS"
+fi
 xattr -cr "$STAGE/Rubien.app"
 codesign --force --sign "$CODESIGN_IDENTITY" \
     --entitlements "$ENTITLEMENTS" \
@@ -113,6 +119,12 @@ if [ -f "$APP_BUNDLE/Contents/Helpers/rubien-cli" ]; then
         "$RUBIEN_APP_GROUP_ID" \
         "App Group" \
         "rubien-cli will hit unsandboxed DB, not the shared one"
+fi
+if [ -f "$APP_BUNDLE/Contents/Helpers/rubien-browser-host" ]; then
+    rubien_require_entitlement "$APP_BUNDLE/Contents/Helpers/rubien-browser-host" \
+        "$RUBIEN_APP_GROUP_ID" \
+        "App Group" \
+        "rubien-browser-host will hit unsandboxed DB, not the shared one"
 fi
 
 echo "▸ Launching..."

@@ -46,6 +46,8 @@ To update Defuddle:
   npm run build
   # commit scripts/clipper/package.json, package-lock.json,
   # and the regenerated Sources/Rubien/Resources/ClipperDefuddle.js together.
+  # The same build also copies the bundle to the ignored
+  # BrowserExtension/dist/ClipperDefuddle.js for local extension development.
 
 To update the reader stylesheets (separate concern — still upstream obsidian-clipper):
   Copy obsidian-clipper/dist/reader.css → ClipperReader.css

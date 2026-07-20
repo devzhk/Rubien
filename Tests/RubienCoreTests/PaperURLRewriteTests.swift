@@ -87,8 +87,8 @@ final class PaperURLRewriteTests: XCTestCase {
 
     func testSciencePDFVariantsRewriteToCanonicalLanding() {
         XCTAssertEqual(
-            rewrite("https://www.science.org/doi/pdf/10.1126/sciadv.abn9545"),
-            "https://www.science.org/doi/10.1126/sciadv.abn9545"
+            rewrite("https://www.science.org/doi/pdf/10.1126/scirobotics.adz7397?download=true"),
+            "https://www.science.org/doi/10.1126/scirobotics.adz7397"
         )
         XCTAssertEqual(
             rewrite("https://www.science.org/doi/epdf/10.1126/sciadv.abn9545"),

@@ -55,6 +55,14 @@ final class PaperURLExtractionTests: XCTestCase {
         }
     }
 
+    func testScienceAuthenticatedPDFExtractsAsPaperURL() {
+        let input = "https://www.science.org/doi/pdf/10.1126/scirobotics.adz7397?download=true"
+        guard case .paperURL(let url) = extract(input) else {
+            return XCTFail("Expected .paperURL")
+        }
+        XCTAssertEqual(url.absoluteString, input)
+    }
+
     func testACSArticleExtractsAsPaperURL() {
         guard case .paperURL = extract(
             "https://pubs.acs.org/doi/full/10.1021/acscentsci.3c01275"
@@ -136,6 +144,20 @@ final class PaperURLExtractionTests: XCTestCase {
 
     func testRandomBlogFallsThrough() {
         XCTAssertNil(extract("https://example-blog.com/post/hello"))
+    }
+
+    func testXArticleDoesNotMatchOldStyleArxivPattern() {
+        XCTAssertNil(extract(
+            "https://x.com/Majumdar_Ani/article/2078508177620926531"
+        ))
+    }
+
+    func testOldStyleArxivIdentifierStillWorksForBareInputAndArxivURL() {
+        XCTAssertEqual(extract("hep-th/9901001"), .arxiv("hep-th/9901001"))
+        XCTAssertEqual(
+            extract("https://arxiv.org/abs/hep-th/9901001"),
+            .arxiv("hep-th/9901001")
+        )
     }
 
     func testBareDOIStillWorks() {

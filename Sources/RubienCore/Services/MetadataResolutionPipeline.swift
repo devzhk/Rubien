@@ -2,25 +2,38 @@ import Foundation
 
 private let metadataResolutionPipelineLog = RubienLogger(
     subsystem: "com.rubien.metadata",
-    category: "resolution.imported-pdf"
+    category: "resolution.pipeline"
 )
 
-/// Resolution pipeline used when a PDF import supplies only extracted file
-/// metadata. Keeping this flow in RubienCore gives every front door the same
-/// verification and pending-intake behavior without introducing a Core →
-/// PDFKit dependency.
+/// Shared identifier and seed-resolution pipeline. Keeping this flow in
+/// RubienCore gives the app, browser helper, and PDF importer the same
+/// verification/pending-intake behavior without introducing a Core → PDFKit
+/// dependency.
 public enum MetadataResolutionPipeline {
+    /// Identifier/paper-URL resolution plus the trusted PDF URL selected by a
+    /// known-host resolver. The PDF URL is surfaced only for verified results,
+    /// matching the Add Reference UI contract.
+    public struct IdentifierResolutionOutcome: Sendable {
+        public let result: MetadataResolutionResult
+        public let preferredPDFURL: String?
+
+        public init(result: MetadataResolutionResult, preferredPDFURL: String? = nil) {
+            self.result = result
+            self.preferredPDFURL = preferredPDFURL
+        }
+    }
+
     public static func resolve(
         seed: MetadataResolutionSeed,
         fallback: Reference?
     ) async -> MetadataResolutionResult {
         if let doi = seed.doi?.rubien_nilIfBlank {
-            let result = await resolveIdentifier(.doi(doi), seed: seed, fallback: fallback)
+            let result = await resolveIdentifier(.doi(doi), seed: seed, fallback: fallback).result
             if shouldReturnImmediately(result) { return result }
         }
 
         if let isbn = seed.isbn?.rubien_nilIfBlank {
-            let result = await resolveIdentifier(.isbn(isbn), seed: seed, fallback: fallback)
+            let result = await resolveIdentifier(.isbn(isbn), seed: seed, fallback: fallback).result
             if shouldReturnImmediately(result) { return result }
         }
 
@@ -58,11 +71,6 @@ public enum MetadataResolutionPipeline {
         )
     }
 
-    private enum Identifier {
-        case doi(String)
-        case isbn(String)
-    }
-
     private static func shouldReturnImmediately(_ result: MetadataResolutionResult) -> Bool {
         switch result {
         case .verified, .candidate, .blocked:
@@ -72,18 +80,37 @@ public enum MetadataResolutionPipeline {
         }
     }
 
-    private static func resolveIdentifier(
-        _ identifier: Identifier,
-        seed: MetadataResolutionSeed,
+    /// Resolve the identifier forms accepted by the app's Add Reference flow.
+    /// This is shared by the app and headless browser front door so incomplete
+    /// records produce the same pending-intake outcome everywhere.
+    public static func resolveIdentifier(
+        _ identifier: MetadataFetcher.Identifier,
+        seed: MetadataResolutionSeed?,
         fallback: Reference?
-    ) async -> MetadataResolutionResult {
+    ) async -> IdentifierResolutionOutcome {
         do {
             let reference: Reference
+            let scrapedPDFURL: String?
             switch identifier {
             case .doi(let value):
                 reference = try await MetadataFetcher.fetchFromDOI(value)
+                scrapedPDFURL = nil
+            case .pmid(let value):
+                reference = try await MetadataFetcher.fetchFromPMID(value)
+                scrapedPDFURL = nil
+            case .arxiv(let value):
+                reference = try await MetadataFetcher.fetchFromArXiv(value)
+                scrapedPDFURL = nil
             case .isbn(let value):
                 reference = try await MetadataFetcher.fetchFromISBN(value)
+                scrapedPDFURL = nil
+            case .pmcid(let value):
+                reference = try await MetadataFetcher.fetchFromPMCID(value)
+                scrapedPDFURL = nil
+            case .paperURL(let url):
+                let outcome = try await PaperURLResolver.resolve(url)
+                reference = outcome.reference
+                scrapedPDFURL = outcome.scrapedPDFURL
             }
 
             let evidence = buildGenericEvidence(
@@ -95,26 +122,61 @@ public enum MetadataResolutionPipeline {
                     ?? normalizedIdentifier(reference.isbn),
                 exactIdentifierMatch: true
             )
-            return verifyFetchedRecord(
+            let result = verifyFetchedRecord(
                 AuthoritativeMetadataRecord(reference: reference, evidence: evidence),
                 seed: seed,
                 fallback: fallback,
                 defaultRejectMessage: "Identifier matched, but auto-verification rules were not met."
             )
+            let preferredPDFURL: String?
+            if case .verified = result {
+                preferredPDFURL = scrapedPDFURL
+            } else {
+                preferredPDFURL = nil
+            }
+            return IdentifierResolutionOutcome(
+                result: result,
+                preferredPDFURL: preferredPDFURL
+            )
+        } catch PaperURLResolver.ResolveError.noAuthorsAvailable(let partialReference, _) {
+            return IdentifierResolutionOutcome(
+                result: .candidate(candidateEnvelopeForNoAuthors(
+                    partialReference: partialReference,
+                    seed: seed,
+                    fallback: fallback
+                ))
+            )
         } catch {
             metadataResolutionPipelineLog.error(
-                "Imported PDF identifier resolution failed: \(error.localizedDescription)"
+                "Identifier resolution failed: \(error.localizedDescription)"
             )
-            return .rejected(
-                RejectedEnvelope(
+            return IdentifierResolutionOutcome(
+                result: .rejected(RejectedEnvelope(
                     seed: seed,
                     fallbackReference: fallback,
                     currentReference: fallback,
                     reason: .insufficientEvidence,
                     message: error.localizedDescription
-                )
+                ))
             )
         }
+    }
+
+    public static func resolveIdentifierInput(
+        _ input: String,
+        seed: MetadataResolutionSeed? = nil,
+        fallback: Reference? = nil
+    ) async -> IdentifierResolutionOutcome {
+        guard let identifier = MetadataFetcher.extractIdentifier(from: input) else {
+            return IdentifierResolutionOutcome(result: .rejected(RejectedEnvelope(
+                seed: seed,
+                fallbackReference: fallback,
+                currentReference: fallback,
+                reason: .unsupportedRoute,
+                message: "Enter a DOI, arXiv ID, PMID, PMCID, ISBN, or supported paper URL."
+            )))
+        }
+        return await resolveIdentifier(identifier, seed: seed, fallback: fallback)
     }
 
     private static func resolveByTitle(
@@ -153,7 +215,7 @@ public enum MetadataResolutionPipeline {
 
     private static func verifyFetchedRecord(
         _ record: AuthoritativeMetadataRecord,
-        seed: MetadataResolutionSeed,
+        seed: MetadataResolutionSeed?,
         fallback: Reference?,
         defaultRejectMessage: String
     ) -> MetadataResolutionResult {
@@ -171,7 +233,7 @@ public enum MetadataResolutionPipeline {
             } ?? envelope.currentReference ?? record.reference
             return .candidate(
                 CandidateEnvelope(
-                    seed: envelope.seed,
+                    seed: seed ?? envelope.seed,
                     fallbackReference: fallback ?? envelope.fallbackReference,
                     currentReference: current,
                     candidates: envelope.candidates,
@@ -183,7 +245,7 @@ public enum MetadataResolutionPipeline {
         case .blocked(let envelope):
             return .blocked(
                 BlockedEnvelope(
-                    seed: envelope.seed,
+                    seed: seed ?? envelope.seed,
                     fallbackReference: fallback ?? envelope.fallbackReference,
                     currentReference: envelope.currentReference ?? record.reference,
                     candidates: envelope.candidates,
@@ -199,7 +261,7 @@ public enum MetadataResolutionPipeline {
             } ?? envelope.currentReference ?? record.reference
             return .rejected(
                 RejectedEnvelope(
-                    seed: envelope.seed,
+                    seed: seed ?? envelope.seed,
                     fallbackReference: fallback ?? envelope.fallbackReference,
                     currentReference: mergedCurrent,
                     reason: envelope.reason,
@@ -267,5 +329,39 @@ public enum MetadataResolutionPipeline {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Direct publisher resolution can establish the record identity while
+    /// still finding no authors. Keep that partial record reviewable rather
+    /// than promoting it to the library or discarding it.
+    public static func candidateEnvelopeForNoAuthors(
+        partialReference: Reference,
+        seed: MetadataResolutionSeed?,
+        fallback: Reference?
+    ) -> CandidateEnvelope {
+        let candidate = MetadataCandidate(
+            source: partialReference.metadataSource ?? .publisherCitationMeta,
+            title: partialReference.title,
+            authors: partialReference.authors,
+            journal: partialReference.journal,
+            publisher: partialReference.publisher,
+            year: partialReference.year,
+            detailURL: partialReference.url ?? "",
+            score: 1.0,
+            snippet: partialReference.abstract,
+            workKind: .unknown,
+            referenceType: partialReference.referenceType,
+            isbn: partialReference.isbn,
+            issn: partialReference.issn,
+            sourceRecordID: partialReference.doi
+        )
+        return CandidateEnvelope(
+            seed: seed,
+            fallbackReference: fallback,
+            currentReference: partialReference,
+            candidates: [candidate],
+            message: "Found a paper, but no authors are listed on the page or in CrossRef. Review before importing.",
+            evidence: nil
+        )
     }
 }

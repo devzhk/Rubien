@@ -313,6 +313,27 @@ final class ImportSourceMaterializerTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: sourceURL.path))
     }
 
+    func testTemporaryLocalCopySurvivesSourceRemovalAndOwnsCleanup() throws {
+        let sourceURL = temporaryRoot.appendingPathComponent("browser-download.pdf")
+        let contents = Data("%PDF-1.7\n".utf8)
+        try contents.write(to: sourceURL)
+
+        let materialized = try ImportSourceMaterializer.materializeTemporaryCopy(
+            localFileURL: sourceURL,
+            originalInput: "https://example.test/browser-download.pdf"
+        )
+        try FileManager.default.removeItem(at: sourceURL)
+
+        XCTAssertEqual(materialized.input, "https://example.test/browser-download.pdf")
+        XCTAssertEqual(materialized.kind, .pdf)
+        XCTAssertEqual(try Data(contentsOf: materialized.fileURL), contents)
+        XCTAssertNotNil(materialized.temporaryDirectoryURL)
+
+        let temporaryDirectoryURL = try XCTUnwrap(materialized.temporaryDirectoryURL)
+        materialized.cleanup()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: temporaryDirectoryURL.path))
+    }
+
     // The remote-import tests below drive ImportSourceURLProtocol; its normal
     // client callbacks (urlProtocolDidFinishLoading) crash swift-corelibs
     // FoundationNetworking on Linux (TaskRegistry "task not in registry"), a

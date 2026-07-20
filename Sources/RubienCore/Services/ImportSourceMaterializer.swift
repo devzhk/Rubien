@@ -170,14 +170,54 @@ public enum ImportSourceMaterializer {
     /// Validates a local file URL while retaining the exact URL supplied by the
     /// caller. AppKit open panels can return a security-scoped URL whose access
     /// capability is not recoverable by rebuilding one from `url.path`.
-    public static func materialize(localFileURL: URL) throws -> MaterializedImportSource {
+    public static func materialize(
+        localFileURL: URL,
+        originalInput: String? = nil
+    ) throws -> MaterializedImportSource {
         guard localFileURL.isFileURL else {
             throw MaterializationError.notRegularFile(localFileURL.path)
         }
         return try materializeValidatedLocal(
-            input: localFileURL.path,
+            input: originalInput ?? localFileURL.path,
             fileURL: localFileURL
         )
+    }
+
+    /// Validates a caller-owned local file, then copies it into a temporary
+    /// directory owned by the returned value. Use this when the source may be
+    /// removed independently while a preview or deferred import still needs
+    /// stable access to its contents.
+    public static func materializeTemporaryCopy(
+        localFileURL: URL,
+        originalInput: String? = nil
+    ) throws -> MaterializedImportSource {
+        let validated = try materialize(
+            localFileURL: localFileURL,
+            originalInput: originalInput
+        )
+        let temporaryDirectoryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("RubienImport-\(UUID().uuidString)", isDirectory: true)
+        let copiedURL = temporaryDirectoryURL.appendingPathComponent(
+            localFileURL.lastPathComponent,
+            isDirectory: false
+        )
+
+        do {
+            try FileManager.default.createDirectory(
+                at: temporaryDirectoryURL,
+                withIntermediateDirectories: true
+            )
+            try FileManager.default.copyItem(at: localFileURL, to: copiedURL)
+            return MaterializedImportSource(
+                input: validated.input,
+                fileURL: copiedURL,
+                kind: validated.kind,
+                temporaryDirectoryURL: temporaryDirectoryURL
+            )
+        } catch {
+            try? FileManager.default.removeItem(at: temporaryDirectoryURL)
+            throw MaterializationError.temporaryWriteFailed(error)
+        }
     }
 
     private static func materializeLocal(

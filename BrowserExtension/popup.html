@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Import into Rubien</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <img class="app-mark" src="icons/icon-128.png" alt="" aria-hidden="true">
+    <div>
+      <h1>Import into Rubien</h1>
+      <p>Review before anything is saved</p>
+    </div>
+  </header>
+
+  <main>
+    <section id="loading-view" class="state-view" aria-live="polite">
+      <div class="spinner" aria-hidden="true"></div>
+      <strong id="loading-title">Reading the current tab…</strong>
+      <span id="loading-detail">Rubien is preparing an import preview.</span>
+    </section>
+
+    <section id="preview-view" class="state-view hidden">
+      <div class="preview-heading">
+        <span id="kind-badge" class="kind-badge">Reference</span>
+        <span id="capture-badge" class="capture-badge hidden">Page content captured</span>
+      </div>
+      <h2 id="preview-title"></h2>
+      <dl id="metadata-list">
+        <div id="authors-row" class="metadata-row hidden">
+          <dt>Authors</dt><dd id="preview-authors"></dd>
+        </div>
+        <div id="year-row" class="metadata-row hidden">
+          <dt>Year</dt><dd id="preview-year"></dd>
+        </div>
+        <div id="container-row" class="metadata-row hidden">
+          <dt>Published in</dt><dd id="preview-container"></dd>
+        </div>
+        <div id="source-row" class="metadata-row hidden">
+          <dt>Source</dt><dd id="preview-source"></dd>
+        </div>
+      </dl>
+      <label id="pdf-option" class="pdf-option hidden">
+        <input id="download-pdf-checkbox" type="checkbox" checked>
+        <span class="pdf-option-copy">
+          <strong>Download PDF</strong>
+          <small>Uses your signed-in Chrome session when needed.</small>
+        </span>
+      </label>
+      <p id="preview-message" class="preview-message"></p>
+      <div id="review-notice" class="notice hidden">
+        <strong>Metadata review needed</strong>
+        <span>Confirming will place this reference in Rubien’s pending review queue.</span>
+      </div>
+    </section>
+
+    <section id="result-view" class="state-view hidden" aria-live="polite">
+      <div id="result-mark" class="result-mark">✓</div>
+      <strong id="result-title">Imported</strong>
+      <span id="result-detail"></span>
+    </section>
+
+    <section id="error-view" class="state-view hidden" role="alert">
+      <div class="result-mark error-mark">!</div>
+      <strong>Rubien couldn’t prepare this import</strong>
+      <span id="error-detail"></span>
+    </section>
+  </main>
+
+  <footer id="preview-actions" class="hidden">
+    <button id="cancel-button" class="secondary">Cancel</button>
+    <button id="confirm-button" class="primary">Confirm import</button>
+  </footer>
+  <footer id="result-actions" class="hidden">
+    <button id="done-button" class="primary full">Done</button>
+  </footer>
+  <footer id="error-actions" class="hidden">
+    <button id="close-button" class="secondary">Close</button>
+    <button id="retry-button" class="primary">Try again</button>
+  </footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>

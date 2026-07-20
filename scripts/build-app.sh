@@ -39,6 +39,7 @@ STAGING_DIR="$OUTPUT_DIR/dmg-staging"
 
 APP_NAME="Rubien"
 CLI_NAME="rubien-cli"
+BROWSER_HOST_NAME="rubien-browser-host"
 BUNDLE_ID="${BUNDLE_ID:-com.rubien.app}"
 APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
 DMG_NAME="$APP_NAME-${CONFIGURATION}.dmg"
@@ -63,6 +64,9 @@ DSYM_ARCHIVE_PATH=""
 # so shipped binaries are coverage-free and keep the intentional Apple
 # Silicon-only contract regardless of a developer machine's scheme.
 XCODEBUILD_SETTINGS=()
+# macOS still ships Bash 3.2, where `set -u` treats an empty array expansion as
+# unset. The guarded `${array[@]+...}` form at each xcodebuild call keeps debug
+# builds argument-free while preserving all release settings as separate args.
 if [ "$MODE" = "release" ]; then
     XCODEBUILD_SETTINGS=(
         ARCHS=arm64
@@ -89,6 +93,9 @@ CODESIGN_ENTITLEMENTS="${CODESIGN_ENTITLEMENTS:-$PROJECT_DIR/Sources/Rubien/Rubi
 # App Group and read the same library.sqlite the app uses. Default points at
 # the in-repo plist; override via env var for custom builds.
 CLI_ENTITLEMENTS="${CLI_ENTITLEMENTS:-$PROJECT_DIR/Sources/RubienCLI/RubienCLI.entitlements}"
+# The browser host has the same storage needs as the CLI: App Group access,
+# no App Sandbox, and no restricted app-identifier claims.
+BROWSER_HOST_ENTITLEMENTS="${BROWSER_HOST_ENTITLEMENTS:-$CLI_ENTITLEMENTS}"
 # Developer ID Distribution provisioning profile required for the dmg flavor
 # when CODESIGN_ENABLED=1. AMFI rejects launch with error -413
 # "No matching profile found" otherwise. Generate at developer.apple.com
@@ -102,7 +109,7 @@ build_app() {
         -configuration "$CONFIGURATION" \
         -destination 'platform=macOS' \
         -derivedDataPath "$DERIVED_DATA" \
-        "${XCODEBUILD_SETTINGS[@]}" \
+        ${XCODEBUILD_SETTINGS[@]+"${XCODEBUILD_SETTINGS[@]}"} \
         -quiet
 }
 
@@ -113,7 +120,18 @@ build_cli() {
         -configuration "$CONFIGURATION" \
         -destination 'platform=macOS' \
         -derivedDataPath "$DERIVED_DATA" \
-        "${XCODEBUILD_SETTINGS[@]}" \
+        ${XCODEBUILD_SETTINGS[@]+"${XCODEBUILD_SETTINGS[@]}"} \
+        -quiet
+}
+
+build_browser_host() {
+    echo "▸ Building $BROWSER_HOST_NAME ($CONFIGURATION)..."
+    xcodebuild build \
+        -scheme "$BROWSER_HOST_NAME" \
+        -configuration "$CONFIGURATION" \
+        -destination 'platform=macOS' \
+        -derivedDataPath "$DERIVED_DATA" \
+        ${XCODEBUILD_SETTINGS[@]+"${XCODEBUILD_SETTINGS[@]}"} \
         -quiet
 }
 
@@ -232,10 +250,12 @@ stamp_sparkle_info_plist() {
 }
 
 embed_helpers() {
-    echo "▸ Embedding CLI..."
+    echo "▸ Embedding CLI and browser helper..."
     mkdir -p "$HELPERS_DIR"
     cp "$PRODUCTS_DIR/$CLI_NAME" "$HELPERS_DIR/$CLI_NAME"
     chmod 755 "$HELPERS_DIR/$CLI_NAME"
+    cp "$PRODUCTS_DIR/$BROWSER_HOST_NAME" "$HELPERS_DIR/$BROWSER_HOST_NAME"
+    chmod 755 "$HELPERS_DIR/$BROWSER_HOST_NAME"
 }
 
 embed_sparkle_framework() {
@@ -352,14 +372,16 @@ prepare_release_artifacts() {
     mkdir -p "$DSYM_ARCHIVE_DIR"
 
     local all_uuids=""
-    local names=("$APP_NAME" "$CLI_NAME")
+    local names=("$APP_NAME" "$CLI_NAME" "$BROWSER_HOST_NAME")
     local binaries=(
         "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
         "$HELPERS_DIR/$CLI_NAME"
+        "$HELPERS_DIR/$BROWSER_HOST_NAME"
     )
     local dsyms=(
         "$PRODUCTS_DIR/$APP_NAME.dSYM"
         "$PRODUCTS_DIR/$CLI_NAME.dSYM"
+        "$PRODUCTS_DIR/$BROWSER_HOST_NAME.dSYM"
     )
     if [ "${#names[@]}" -ne "${#binaries[@]}" ] \
         || [ "${#names[@]}" -ne "${#dsyms[@]}" ]; then
@@ -492,6 +514,7 @@ sign_bundle() {
     dot_clean -m "$APP_BUNDLE" 2>/dev/null || true
     xattr -cr "$APP_BUNDLE" 2>/dev/null || true
     rubien_codesign_binary "$HELPERS_DIR/$CLI_NAME" "$CLI_ENTITLEMENTS"
+    rubien_codesign_binary "$HELPERS_DIR/$BROWSER_HOST_NAME" "$BROWSER_HOST_ENTITLEMENTS"
 
     # Sign Sparkle.framework components in the order Sparkle's sandboxing
     # docs require, BEFORE the outer app-bundle sign below. Order matters —
@@ -633,6 +656,7 @@ create_dmg() {
 
 build_app
 build_cli
+build_browser_host
 assemble_app_bundle
 embed_app_icon
 embed_helpers
@@ -642,6 +666,7 @@ thin_sparkle_for_release
 prepare_release_artifacts
 sign_bundle
 create_dmg
+"$SCRIPT_DIR/package-browser-extension.sh" "$VERSION" "$OUTPUT_DIR"
 
 APP_SIZE=$(du -sh "$APP_BUNDLE" | cut -f1 | xargs)
 DMG_SIZE_BYTES=$(stat -f '%z' "$DMG_PATH")
@@ -652,6 +677,7 @@ echo "✅ Done!  App=${APP_SIZE}  DMG=${DMG_SIZE}"
 echo "   DMG data fork: ${DMG_SIZE_BYTES} bytes"
 echo "   App: $APP_BUNDLE"
 echo "   DMG: $DMG_PATH"
+echo "   Browser extension: $OUTPUT_DIR/Rubien-Browser-Extension-$VERSION.zip"
 if [ "$MODE" = "release" ]; then
     echo "   dSYMs: $DSYM_ARCHIVE_PATH"
 fi

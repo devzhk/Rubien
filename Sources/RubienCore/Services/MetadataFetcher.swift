@@ -108,20 +108,40 @@ public enum MetadataFetcher {
             return .pmcid(pmcid)
         }
 
-        // arXiv: YYMM.NNNNN or category/NNNNNNN. Must precede the ISBN digit-count
-        // heuristic — a URL like "https://arxiv.org/abs/2501.07888v3" reduces to
-        // exactly 10 digits ("2501078883") after stripping non-[0-9X] chars and
-        // would otherwise be misclassified as ISBN.
-        let arxivPatterns = [
-            #"(\d{4}\.\d{4,5})(v\d+)?"#,
-            #"([a-z\-]+/\d{7})"#,
-            #"arXiv:(.+)"#
-        ]
-        for pattern in arxivPatterns {
-            if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
-               let match = regex.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed)),
-               let range = Range(match.range(at: 1), in: trimmed) {
-                return .arxiv(String(trimmed[range]))
+        // arXiv: YYMM.NNNNN or category/NNNNNNN. On HTTP(S) input, search
+        // these deliberately broad patterns only on arxiv.org itself. Without
+        // that host gate, ordinary paths such as X's `/article/2078508…`
+        // match the legacy `category/NNNNNNN` shape and become fake papers.
+        // Bare identifiers remain accepted. This must still precede the ISBN
+        // digit-count heuristic: `https://arxiv.org/abs/2501.07888v3` reduces
+        // to exactly 10 digits after stripping non-[0-9X] characters.
+        let arxivSearchText: String? = {
+            guard let url = URL(string: trimmed),
+                  let scheme = url.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https" else {
+                return trimmed
+            }
+            guard let host = url.host?.lowercased(),
+                  host == "arxiv.org" || host.hasSuffix(".arxiv.org") else {
+                return nil
+            }
+            return trimmed
+        }()
+        if let arxivSearchText {
+            let arxivPatterns = [
+                #"(\d{4}\.\d{4,5})(v\d+)?"#,
+                #"([a-z\-]+/\d{7})"#,
+                #"arXiv:(.+)"#
+            ]
+            for pattern in arxivPatterns {
+                if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
+                   let match = regex.firstMatch(
+                    in: arxivSearchText,
+                    range: NSRange(arxivSearchText.startIndex..., in: arxivSearchText)
+                   ),
+                   let range = Range(match.range(at: 1), in: arxivSearchText) {
+                    return .arxiv(String(arxivSearchText[range]))
+                }
             }
         }
 

@@ -502,6 +502,16 @@ window.RubienDefuddleExtract = function RubienDefuddleExtract() {
     if (resCh) {
       try { resCh.postMessage(payload); } catch (_) {}
     }
+    // Chrome's isolated extension world has no `window.webkit` channel. The
+    // browser clipper installs this callback immediately before invoking the
+    // extractor and awaits the same payload the WKWebView path posts above.
+    // Page JavaScript cannot see this callback because isolated worlds have
+    // separate JS globals while sharing the rendered DOM.
+    const browserCallback =
+      typeof window !== 'undefined' && window.RubienDefuddleResultCallback;
+    if (typeof browserCallback === 'function') {
+      try { browserCallback(payload); } catch (_) {}
+    }
     return JSON.stringify(payload);
   }
 

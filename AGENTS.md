@@ -55,13 +55,14 @@ It's an SPM bug around stale state, not something you broke.
 
 ## Architecture
 
-Five Swift targets in `Package.swift`:
+Six main Swift targets in `Package.swift`:
 
 - **`RubienPDFKit`** (library) — cross-platform PDF facade with Darwin (PDFKit) and Linux (poppler-glib) backends. Hosts `PDFExtractor`, `PDFService`, `ZoteroFolderImporter`. Depends on `RubienCore`. The Mac app's reader still uses PDFKit directly; the facade is for the headless extract/render path. Read `Docs/Linux-PDF-Backend.md` before touching `Sources/RubienPDFKit/Linux/`.
 - **`RubienCore`** (library) — everything usable without AppKit: GRDB models, migrations, metadata resolvers, BibTeX/RIS importers, citation engines. Depends on no other Rubien target (it is the root library; `RubienPDFKit` depends on *it*, not vice versa).
 - **`RubienSync`** (library, Mac-only) — CloudKit mapping + `CKSyncEngine`. CLI does not link it.
 - **`Rubien`** (app executable, Mac-only) — SwiftUI views, readers.
 - **`RubienCLI`** (executable, `rubien-cli`) — 18 subcommands on Mac, 17 on Linux (no `sync`).
+- **`RubienBrowserHost`** (executable, `rubien-browser-host`) — Chrome native-messaging bridge that validates and imports signed-in page captures through `RubienCore`.
 
 ### Data layer
 
@@ -126,12 +127,13 @@ PDF binaries sync as a sibling `CDReferencePDF` record carrying a `CKAsset`; per
 
 ## Tests
 
-Five test targets:
+Six test targets:
 
 - `RubienCoreTests` — bulk of business-logic coverage. Fastest loop; prefer adding coverage here.
 - `RubienSyncTests` — CKRecord ↔ model round-trip per entity. Pure in-memory.
 - `RubienTests` — app-level tests that import SwiftUI. **Every file in this target must be wrapped in `#if os(macOS)` … `#endif`** — SwiftPM compiles all test targets on Linux CI even for a filtered run, and the Mac-only `Rubien` module doesn't exist there ("no such module 'Rubien'"). A macOS build won't catch a missing guard; only Linux CI does.
 - `RubienCLITests` — exercises `.build/debug/rubien-cli` via Process. Keep JSON contracts stable.
+- `RubienBrowserHostTests` — native-message framing, caller-origin validation, import mapping, and deduplication coverage.
 - `RubienPDFKitTests` — cross-backend parity tests. **Mac-only** by `Package.swift` conditional dep; linking poppler into the Linux test bundle triggers a swift-corelibs-xctest+libdispatch hang. Linux contributors who want to run them locally: see `scripts/run-linux-parity-tests.sh`.
 
 `swift test` needs the full Xcode toolchain (not just CommandLineTools). Verify with `xcode-select -p` and switch with `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer` if needed.

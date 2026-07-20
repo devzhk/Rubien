@@ -766,6 +766,9 @@ internal extension PaperURLResolver {
         components.scheme = "https"
         components.host = article.host == .science ? "www.science.org" : "pubs.acs.org"
         components.path = doiPublisherPath(for: article, pageKind: pageKind)
+        if article.host == .science, case .pdf = pageKind {
+            components.queryItems = [URLQueryItem(name: "download", value: "true")]
+        }
         return components.url
     }
 
@@ -1095,6 +1098,9 @@ internal extension PaperURLResolver {
                 components.host = article.host == .science ? "www.science.org" : "pubs.acs.org"
                 if article.pageKind == .pdf || article.pageKind == .epdf {
                     components.path = doiPublisherPath(for: article, pageKind: .canonical)
+                    if article.host == .science {
+                        components.queryItems = nil
+                    }
                 }
             }
 

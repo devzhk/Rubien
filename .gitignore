@@ -18,6 +18,7 @@ Package.resolved
 
 # === Build outputs ===
 build/
+BrowserExtension/dist/
 
 # === Node.js ===
 node_modules/

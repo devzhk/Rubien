@@ -1234,7 +1234,10 @@ extension AppDatabase {
             #if DEBUG
             if RubienCoreDebugLogging.sqlTrace {
                 config.prepareDatabase { db in
-                    db.trace { print("SQL: \($0)") }
+                    // Native Messaging reserves stdout for framed protocol
+                    // responses. Unified logging also keeps CLI diagnostics
+                    // from corrupting machine-readable output.
+                    db.trace { appDatabaseLog.debug("SQL: \($0)") }
                 }
             }
             #endif

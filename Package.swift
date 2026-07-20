@@ -10,6 +10,7 @@ let package = Package(
         .library(name: "RubienSync", targets: ["RubienSync"]),
         .executable(name: "Rubien", targets: ["Rubien"]),
         .executable(name: "rubien-cli", targets: ["RubienCLI"]),
+        .executable(name: "rubien-browser-host", targets: ["RubienBrowserHost"]),
     ],
     traits: [
         .default(enabledTraits: ["Sparkle"]),
@@ -105,6 +106,16 @@ let package = Package(
                 "RubienCLI.entitlements"
             ]
         ),
+        .executableTarget(
+            name: "RubienBrowserHost",
+            dependencies: [
+                "RubienCore",
+                // Native messaging is currently a macOS Chrome integration.
+                // Keep PDFKit off Linux's umbrella test link graph, matching
+                // the existing RubienCoreTests/RubienTests constraint below.
+                .target(name: "RubienPDFKit", condition: .when(platforms: [.macOS])),
+            ]
+        ),
         .testTarget(
             name: "RubienCoreTests",
             dependencies: [
@@ -166,6 +177,16 @@ let package = Package(
                 .product(name: "GRDB", package: "GRDB.swift"),
             ],
             path: "Tests/RubienCLITests"
+        ),
+        .testTarget(
+            name: "RubienBrowserHostTests",
+            dependencies: [
+                "RubienBrowserHost",
+                "RubienCore",
+                .target(name: "RubienPDFKit", condition: .when(platforms: [.macOS])),
+                .product(name: "GRDB", package: "GRDB.swift"),
+            ],
+            path: "Tests/RubienBrowserHostTests"
         ),
     ],
     // Tools-version 6.1 unlocks package traits (used below for Sparkle),

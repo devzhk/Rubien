@@ -232,7 +232,7 @@ final class PaperURLResolverTests: XCTestCase {
         XCTAssertEqual(outcome.reference.doi, "10.1126/sciadv.abn9545")
         XCTAssertEqual(
             outcome.scrapedPDFURL,
-            "https://www.science.org/doi/pdf/10.1126/sciadv.abn9545"
+            "https://www.science.org/doi/pdf/10.1126/sciadv.abn9545?download=true"
         )
     }
 
@@ -283,7 +283,10 @@ final class PaperURLResolverTests: XCTestCase {
             outcome.reference.url,
             "https://www.science.org/doi/10.1126/sciadv.abn9545"
         )
-        XCTAssertEqual(outcome.scrapedPDFURL, "https://www.science.org/doi/pdf/10.1126/sciadv.abn9545")
+        XCTAssertEqual(
+            outcome.scrapedPDFURL,
+            "https://www.science.org/doi/pdf/10.1126/sciadv.abn9545?download=true"
+        )
     }
 
     // MARK: - Astronomy & Astrophysics citation metadata

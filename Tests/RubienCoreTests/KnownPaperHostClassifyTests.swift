@@ -272,7 +272,7 @@ final class KnownPaperHostClassifyTests: XCTestCase {
     }
     func testSciencePDFVariants() {
         XCTAssertEqual(
-            classify("https://www.science.org/doi/pdf/10.1126/sciadv.abn9545"),
+            classify("https://www.science.org/doi/pdf/10.1126/scirobotics.adz7397?download=true"),
             .science
         )
         XCTAssertEqual(

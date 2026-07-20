@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "Rubien Importer",
+  "description": "Preview and import the current paper, article, or webpage into your local Rubien library.",
+  "version": "0.3.3",
+  "minimum_chrome_version": "110",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtoY1Vd4NHyLDjGmp3RUzqy0AAVtGCozdkeiGyJyQ/fNEvG4zH3PPGT/PjtzizE1Eplrt+9QmlYQnnXPZee5AEZsql2iaN/ZDrVMPh0wr3yS/BukG4M9ET8u0/8fUSq5F/CrhQUYIWcoUUDqTn22/R4aeZe5v3hVwbaFtiLDWX5EqBjik2MAxt45Q0oVToEI2AJHFfnwZDLkYC/CQmodaI/Z1uHxQSB97Z4zI/D8Ekfe6k95YLRkXi9TZMF0MWsovmlkuJen7KjPj7ICfwG8SjQ0xTa2EKZ3DmRiAGo+3kTEZc4l7wa6whrz2RcJunvyunaohv2G/6/3IeWaCMzreRwIDAQAB",
+  "permissions": [
+    "activeTab",
+    "downloads",
+    "nativeMessaging",
+    "scripting"
+  ],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "Import into Rubien",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Alt+Shift+R",
+        "mac": "Command+Shift+R"
+      },
+      "description": "Import the current tab into Rubien"
+    }
+  }
+}

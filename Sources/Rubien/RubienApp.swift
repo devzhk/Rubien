@@ -138,6 +138,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // Configure API contact email for CrossRef/OpenAlex polite pool
         MetadataFetcher.contactEmail = RubienPreferences.apiContactEmail
 
+        // Chrome Native Messaging requires an absolute helper path plus an
+        // exact extension origin. Re-register on every packaged-app launch so
+        // moving or updating Rubien repairs the per-user manifest naturally.
+        BrowserExtensionHostInstaller.registerBundledHostIfAvailable()
+
         if ScheduledJobNotifications.isAvailable {
             UNUserNotificationCenter.current().delegate = self
         }
