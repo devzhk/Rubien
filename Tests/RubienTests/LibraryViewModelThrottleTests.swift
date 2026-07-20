@@ -17,6 +17,138 @@ import GRDB
 @MainActor
 final class LibraryViewModelThrottleTests: XCTestCase {
 
+    func testReselectingCurrentSidebarDoesNotRebuildReferenceObserver() async throws {
+        let db = try AppDatabase(DatabaseQueue())
+        try await db.dbWriter.write { db in
+            try db.execute(
+                sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(?, ?, ?, ?)",
+                arguments: [1, "seed", Date(), Date()]
+            )
+        }
+
+        let vm = LibraryViewModel(db: db)
+        var cancellables = Set<AnyCancellable>()
+        let primed = expectation(description: "view-model primed")
+        vm.$references
+            .filter { $0.count == 1 }
+            .prefix(1)
+            .sink { _ in primed.fulfill() }
+            .store(in: &cancellables)
+        await fulfillment(of: [primed], timeout: 2.0)
+
+        // Let the initial throttle window close before observing navigation work.
+        try await Task.sleep(for: .milliseconds(250))
+        var subsequentEmissions = 0
+        vm.$references
+            .dropFirst()
+            .sink { _ in subsequentEmissions += 1 }
+            .store(in: &cancellables)
+        var sidebarEmissions = 0
+        vm.$selectedSidebar
+            .dropFirst()
+            .sink { _ in sidebarEmissions += 1 }
+            .store(in: &cancellables)
+
+        vm.selectSidebar(vm.selectedSidebar, stashCurrentDraft: false)
+        try await Task.sleep(for: .milliseconds(250))
+
+        XCTAssertEqual(
+            subsequentEmissions,
+            0,
+            "reselecting the active library row must not cancel and recreate its database observation"
+        )
+        XCTAssertEqual(
+            sidebarEmissions,
+            0,
+            "reselecting the active library row must not invalidate the entire view hierarchy"
+        )
+    }
+
+    func testReselectingSavedViewRebuildsObserverWhenSyncedScopeChanged() async throws {
+        let db = try AppDatabase(DatabaseQueue())
+        try await db.dbWriter.write { db in
+            try db.execute(
+                sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(?, ?, ?, ?)",
+                arguments: [1, "seed", Date(), Date()]
+            )
+        }
+
+        let vm = LibraryViewModel(db: db)
+        vm.databaseViews = [DatabaseView(id: 42, name: "Synced view", scope: .all)]
+        vm.selectSidebar(.view(42), stashCurrentDraft: false)
+
+        let primed = expectation(description: "all-scope observer primed")
+        var cancellables = Set<AnyCancellable>()
+        vm.$references
+            .filter { $0.count == 1 }
+            .prefix(1)
+            .sink { _ in primed.fulfill() }
+            .store(in: &cancellables)
+        await fulfillment(of: [primed], timeout: 2.0)
+
+        vm.databaseViews = [DatabaseView(id: 42, name: "Synced view", scope: .tag(99))]
+        let narrowed = expectation(description: "tag-scope observer rebuilt")
+        vm.$references
+            .dropFirst()
+            .filter(\.isEmpty)
+            .prefix(1)
+            .sink { _ in narrowed.fulfill() }
+            .store(in: &cancellables)
+
+        vm.selectSidebar(vm.selectedSidebar, stashCurrentDraft: false)
+        await fulfillment(of: [narrowed], timeout: 2.0)
+    }
+
+    func testReturningFromHomeAdoptsRemoteSavedViewConfigurationWithoutLocalDraft() throws {
+        let vm = LibraryViewModel(db: try AppDatabase(DatabaseQueue()))
+        vm.databaseViews = [DatabaseView(id: 42, name: "Synced view")]
+        vm.selectSidebar(.view(42), stashCurrentDraft: false)
+        vm.stashCurrentViewDraft()
+
+        let remoteFilter = ViewFilter(
+            target: .builtin(.title),
+            op: .contains,
+            value: .text("remote")
+        )
+        vm.databaseViews = [DatabaseView(
+            id: 42,
+            name: "Synced view",
+            filters: [remoteFilter]
+        )]
+
+        vm.selectSidebar(.view(42), stashCurrentDraft: false)
+
+        XCTAssertEqual(vm.viewFilters, [remoteFilter])
+    }
+
+    func testReturningFromHomePreservesGenuineLocalSavedViewDraft() throws {
+        let vm = LibraryViewModel(db: try AppDatabase(DatabaseQueue()))
+        vm.databaseViews = [DatabaseView(id: 42, name: "Synced view")]
+        vm.selectSidebar(.view(42), stashCurrentDraft: false)
+        let localFilter = ViewFilter(
+            target: .builtin(.title),
+            op: .contains,
+            value: .text("local")
+        )
+        vm.viewFilters = [localFilter]
+        vm.stashCurrentViewDraft()
+
+        let remoteFilter = ViewFilter(
+            target: .builtin(.title),
+            op: .contains,
+            value: .text("remote")
+        )
+        vm.databaseViews = [DatabaseView(
+            id: 42,
+            name: "Synced view",
+            filters: [remoteFilter]
+        )]
+
+        vm.selectSidebar(.view(42), stashCurrentDraft: false)
+
+        XCTAssertEqual(vm.viewFilters, [localFilter])
+    }
+
     func testReferenceObserverCoalescesBurstyCommits() async throws {
         let db = try AppDatabase(DatabaseQueue())
         var cancellables = Set<AnyCancellable>()

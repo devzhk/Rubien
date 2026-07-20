@@ -59,6 +59,7 @@ struct AgentHomeView: View {
     @EnvironmentObject private var scheduledJobs: ScheduledJobCoordinator
     let renderer: ChatTranscriptController
     let database: AppDatabase
+    let isActive: Bool
     @Binding var draft: String
     @Binding var selectedMentions: [PaperMentionSelection]
     @Binding var activityRailVisible: Bool
@@ -119,6 +120,7 @@ struct AgentHomeView: View {
             renderer: renderer,
             draft: $draft,
             selectedMentions: $selectedMentions,
+            isActive: isActive,
             configuration: .home(
                 onOpenReference: onOpenReference,
                 onOpenPaperSource: onOpenPaperSource,
@@ -143,6 +145,7 @@ struct AgentHomeView: View {
     private func activityPanel(maximumHeight: CGFloat) -> some View {
         ReadingActivityPanel(
             database: database,
+            isActive: isActive,
             maximumHeight: maximumHeight,
             onOpenReference: onOpenReference)
     }
@@ -155,7 +158,19 @@ struct AgentHomeView: View {
 }
 
 private struct ReadingActivityPanel: View {
+    private struct LoadResult: Sendable {
+        let snapshot: ReadingActivitySnapshot
+        let paperCards: [Int64: ChatPaper]
+    }
+
+    private struct InFlightLoad {
+        let id: UUID
+        let reloadID: String
+        let task: Task<LoadResult, Error>
+    }
+
     let database: AppDatabase
+    let isActive: Bool
     let maximumHeight: CGFloat
     let onOpenReference: (Int64) -> Void
 
@@ -166,9 +181,12 @@ private struct ReadingActivityPanel: View {
     @State private var anchor = Date()
     @State private var showingInfo = false
     @State private var refreshTrigger = 0
+    @State private var needsReload = true
     @State private var reloadGeneration = 0
     @State private var notificationReloadTask: Task<Void, Never>?
     @State private var recentPaperCards: [Int64: ChatPaper] = [:]
+    @State private var inFlightLoad: InFlightLoad?
+    @State private var loadedReloadID: String?
 
     private var calendar: Calendar { AppDatabase.activityCalendar() }
     private var interval: DateInterval {
@@ -185,8 +203,12 @@ private struct ReadingActivityPanel: View {
             .frame(maxHeight: maximumHeight)
         }
         .neutralGlassCard(cornerRadius: 14)
-        .task(id: reloadID) { await reload() }
-        .task {
+        .task(id: activeReloadID) {
+            guard isActive, needsReload || loadedReloadID != reloadID else { return }
+            await reload()
+        }
+        .task(id: isActive) {
+            guard isActive else { return }
             while !Task.isCancelled {
                 do {
                     try await Task.sleep(for: .seconds(30))
@@ -194,7 +216,7 @@ private struct ReadingActivityPanel: View {
                     return
                 }
                 guard !Task.isCancelled else { return }
-                refreshTrigger &+= 1
+                requestReload()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .rubienActivityDidChange)) { _ in
@@ -208,6 +230,9 @@ private struct ReadingActivityPanel: View {
         }
         .onDisappear {
             notificationReloadTask?.cancel()
+        }
+        .onChange(of: isActive) { _, active in
+            if !active { notificationReloadTask?.cancel() }
         }
     }
 
@@ -248,7 +273,7 @@ private struct ReadingActivityPanel: View {
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                         Spacer()
-                        Button("Retry") { refreshTrigger &+= 1 }
+                        Button("Retry") { requestReload() }
                             .font(.caption2)
                             .buttonStyle(AgentHomeHoverButtonStyle())
                     }
@@ -260,7 +285,7 @@ private struct ReadingActivityPanel: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Activity unavailable").font(.headline)
                     Text(errorMessage).font(.caption).foregroundStyle(.secondary)
-                    Button("Retry") { refreshTrigger &+= 1 }
+                    Button("Retry") { requestReload() }
                         .buttonStyle(AgentHomeHoverButtonStyle())
                 }
             } else {
@@ -329,6 +354,7 @@ private struct ReadingActivityPanel: View {
                 })
             .accessibilityLabel("Reading activity range")
             .onChange(of: range) { _, value in
+                needsReload = true
                 RubienPreferences.activityHeatmapRange = value.rawValue
             }
 
@@ -397,6 +423,10 @@ private struct ReadingActivityPanel: View {
         "\(range.rawValue)-\(interval.start.timeIntervalSinceReferenceDate)-\(interval.end.timeIntervalSinceReferenceDate)-\(refreshTrigger)"
     }
 
+    private var activeReloadID: String {
+        "\(isActive)-\(reloadID)"
+    }
+
     @MainActor
     private func reload() async {
         reloadGeneration &+= 1
@@ -404,24 +434,47 @@ private struct ReadingActivityPanel: View {
         let start = LocalDay(date: interval.start, calendar: calendar)
         let endDate = calendar.date(byAdding: .day, value: -1, to: interval.end) ?? interval.end
         let end = LocalDay(date: endDate, calendar: calendar)
-        do {
-            let loaded = try await Task.detached(priority: .utility) {
+        let load: InFlightLoad
+        if let existing = inFlightLoad, existing.reloadID == reloadID {
+            load = existing
+        } else {
+            let id = UUID()
+            let task = Task.detached(priority: .utility) {
                 let snapshot = try database.fetchReadingActivitySnapshot(
                     dailyActivityStartDay: start,
                     dailyActivityEndDay: end)
-                return (snapshot, Self.paperCards(for: snapshot, database: database))
-            }.value
+                return LoadResult(
+                    snapshot: snapshot,
+                    paperCards: Self.paperCards(for: snapshot, database: database)
+                )
+            }
+            load = InFlightLoad(id: id, reloadID: reloadID, task: task)
+            inFlightLoad = load
+        }
+        do {
+            let loaded = try await load.task.value
+            if inFlightLoad?.id == load.id { inFlightLoad = nil }
             guard !Task.isCancelled, generation == reloadGeneration else { return }
-            snapshot = loaded.0
-            recentPaperCards = loaded.1
+            snapshot = loaded.snapshot
+            recentPaperCards = loaded.paperCards
             errorMessage = nil
+            needsReload = false
+            loadedReloadID = load.reloadID
         } catch {
+            if inFlightLoad?.id == load.id { inFlightLoad = nil }
             guard !Task.isCancelled, generation == reloadGeneration else { return }
             errorMessage = error.localizedDescription
         }
     }
 
     private func scheduleNotificationReload() {
+        guard isActive else {
+            // One dirty bit is enough while Home is retained but hidden. Do
+            // not advance the task id for every sync/activity notification;
+            // activation will consume the flag with a single reload.
+            needsReload = true
+            return
+        }
         notificationReloadTask?.cancel()
         notificationReloadTask = Task { @MainActor in
             do {
@@ -430,8 +483,13 @@ private struct ReadingActivityPanel: View {
                 return
             }
             guard !Task.isCancelled else { return }
-            refreshTrigger &+= 1
+            requestReload()
         }
+    }
+
+    private func requestReload() {
+        needsReload = true
+        refreshTrigger &+= 1
     }
 
     private func moveAnchor(_ direction: Int) {
@@ -441,6 +499,7 @@ private struct ReadingActivityPanel: View {
             direction: direction,
             calendar: calendar
         ) {
+            needsReload = true
             anchor = min(moved, Date())
         }
     }

@@ -6,14 +6,70 @@ import RubienCore
 
 private let tableLog = Logger(subsystem: "Rubien", category: "reference-table")
 
+struct ReferenceTableWrappableColumn: Identifiable {
+    let id: String
+    let label: String
+}
+
+private let hardcodedReferenceTableDefaultFieldKeys: Set<String> = [
+    "tags", "readingStatus", "lastReadAt", "readCount",
+]
+
+func referenceTableCustomProperties(_ definitions: [PropertyDefinition]) -> [PropertyDefinition] {
+    definitions.filter { property in
+        guard property.isVisible else { return false }
+        if !property.isDefault { return true }
+        guard let key = property.defaultFieldKey else { return false }
+        return !hardcodedReferenceTableDefaultFieldKeys.contains(key)
+    }
+}
+
+func visibleReferenceTableWrappableColumns(
+    propertyDefs: [PropertyDefinition],
+    isColumnVisible: (String) -> Bool
+) -> [ReferenceTableWrappableColumn] {
+    var result: [ReferenceTableWrappableColumn] = []
+
+    for builtin in [ColumnIdentifier.title, .authors] where isColumnVisible(builtin.rawValue) {
+        result.append(ReferenceTableWrappableColumn(id: builtin.rawValue, label: builtin.header))
+    }
+
+    for property in referenceTableCustomProperties(propertyDefs)
+        .sorted(by: { $0.sortOrder < $1.sortOrder }) {
+        guard isColumnVisible(property.customizationID) else { continue }
+        guard property.type == .string || property.type == .url || property.type == .number else {
+            continue
+        }
+        result.append(ReferenceTableWrappableColumn(id: property.customizationID, label: property.name))
+    }
+    return result
+}
+
 struct ReferenceTableView: View {
-    /// `defaultFieldKey` values for properties that already have their own
-    /// hardcoded `TableColumn` in `ReferenceTableContent.body`. The
-    /// `customProperties` filter excludes these so they don't render twice
-    /// when the user toggles them visible in the Property Manager.
-    private static let hardcodedDefaultFieldKeys: Set<String> = [
-        "tags", "readingStatus", "lastReadAt", "readCount",
-    ]
+    private struct PipelineInput: Equatable {
+        let references: [Reference]
+        let tagMap: [Int64: [Tag]]
+        let propertyDefs: [PropertyDefinition]
+        let customPropertyValueMap: [Int64: [Int64: String]]
+        let filters: [ViewFilter]
+        let sorts: [ViewSort]
+        let groupBy: GroupConfig?
+        let pdfAttachmentRevision: Int
+        let calendarDay: Date
+    }
+
+    private struct PipelineSnapshot {
+        let input: PipelineInput
+        let sourceIsEmpty: Bool
+        let processed: [Reference]
+        let buckets: [GroupBucket]?
+    }
+
+    /// Reference cache rather than observable state: updating it during a
+    /// visible render must not schedule a second pipeline render.
+    private final class PipelineSnapshotCache {
+        var snapshot: PipelineSnapshot?
+    }
 
     let references: [Reference]
     let tagMap: [Int64: [Tag]]
@@ -46,6 +102,8 @@ struct ReferenceTableView: View {
     var onSaveView: () -> Void = {}
     var onDiscardView: () -> Void = {}
     var scrollRequest: Int = 0
+    var isActive = true
+    var pdfAttachmentRevision = 0
 
     @State private var selection = Set<Reference.ID>()
     @State private var showDeleteConfirm = false
@@ -54,16 +112,21 @@ struct ReferenceTableView: View {
     // read would be stale right after the user hides a column.
     @State private var columnCustomization: TableColumnCustomization<Reference> =
         RubienPreferences.loadTableColumnCustomization()
+    @State private var pipelineSnapshotCache = PipelineSnapshotCache()
 
     var body: some View {
-        // Hoist pipeline computations once per body render. `processedReferences`
-        // and `groupedBuckets` are computed vars, so reading them multiple times
-        // re-runs FilterEngine/SortEngine/GroupEngine across the whole set.
-        let processed = processedReferences
-        let buckets: [GroupBucket]? = {
-            guard let config = groupBy else { return nil }
-            return GroupEngine.apply(processed, config: config, context: pipelineContext)
-        }()
+        // While Home covers the retained table, reuse its last visible pipeline
+        // snapshot. This keeps navigation warm without repeatedly filtering,
+        // sorting, grouping, or querying PDF attachment ids for an invisible UI.
+        let input = pipelineInput
+        let snapshot: PipelineSnapshot
+        if let retained = pipelineSnapshotCache.snapshot,
+           !isActive || retained.input == input {
+            snapshot = retained
+        } else {
+            snapshot = makePipelineSnapshot(input: input)
+            pipelineSnapshotCache.snapshot = snapshot
+        }
         return VStack(spacing: 0) {
             ViewChromeBar(
                 viewName: viewName,
@@ -74,24 +137,25 @@ struct ReferenceTableView: View {
                 isColumnVisible: { id in columnCustomization[visibility: id] != .hidden },
                 tags: allTags,
                 propertyDefs: propertyDefs,
-                currentBuckets: buckets ?? [],
+                currentBuckets: snapshot.buckets ?? [],
                 isDirty: isDirty,
                 onSave: onSaveView,
                 onDiscard: onDiscardView
             )
             subtitleRow
-            if references.isEmpty {
+            if snapshot.sourceIsEmpty {
                 emptyState
-            } else if processed.isEmpty {
+            } else if snapshot.processed.isEmpty {
                 filteredEmptyState
             } else {
-                tableContentView(processed: processed, buckets: buckets)
+                tableContentView(processed: snapshot.processed, buckets: snapshot.buckets)
                 if !selection.isEmpty {
                     batchToolbar
                 }
             }
         }
         .onKeyPress(.init("a"), phases: .down) { event in
+            guard isActive else { return .ignored }
             if event.modifiers.contains(.command) {
                 selection = Set(references.map(\.id))
                 return .handled
@@ -99,6 +163,7 @@ struct ReferenceTableView: View {
             return .ignored
         }
         .onKeyPress(.escape) {
+            guard isActive else { return .ignored }
             if !selection.isEmpty {
                 selection.removeAll()
                 return .handled
@@ -134,6 +199,14 @@ struct ReferenceTableView: View {
             .sorted { $0.displayOrder < $1.displayOrder }
     }
 
+    private var hasVisibleWrappedColumn: Bool {
+        visibleReferenceTableWrappableColumns(
+            propertyDefs: propertyDefs,
+            isColumnVisible: { columnCustomization[visibility: $0] != .hidden }
+        )
+        .contains { viewColumnWraps.contains($0.id) }
+    }
+
     private func tableContentView(processed: [Reference], buckets: [GroupBucket]?) -> some View {
         ReferenceTableContent(
             references: processed,
@@ -154,13 +227,7 @@ struct ReferenceTableView: View {
             onCreateOption: onCreateOption,
             onDeleteOption: onDeleteOption,
             deleteUnlessInUse: deleteUnlessInUse,
-            customProperties: propertyDefs.filter { prop in
-                guard prop.isVisible else { return false }
-                if !prop.isDefault { return true }
-                // Skip defaults that have a dedicated TableColumn below.
-                guard let key = prop.defaultFieldKey else { return false }
-                return !Self.hardcodedDefaultFieldKeys.contains(key)
-            },
+            customProperties: referenceTableCustomProperties(propertyDefs),
             statusDef: propertyDefs.first(forFieldKey: PropertyDefinition.readingStatusFieldKey),
             customPropertyValueMap: customPropertyValueMap,
             db: db,
@@ -171,7 +238,8 @@ struct ReferenceTableView: View {
             ReferenceTableSelectionScroller(
                 selectedId: selectedId,
                 scrollRequest: scrollRequest,
-                rowIDs: visibleTableRowIDs(processed: processed, buckets: buckets)
+                rowIDs: visibleTableRowIDs(processed: processed, buckets: buckets),
+                usesAutomaticRowHeights: hasVisibleWrappedColumn
             )
         )
         .background(ReferenceTableRowHover())
@@ -274,6 +342,35 @@ struct ReferenceTableView: View {
     ]
 
     // MARK: - Pipeline
+
+    private var pipelineInput: PipelineInput {
+        PipelineInput(
+            references: references,
+            tagMap: tagMap,
+            propertyDefs: propertyDefs,
+            customPropertyValueMap: customPropertyValueMap,
+            filters: filters,
+            sorts: sorts,
+            groupBy: groupBy,
+            pdfAttachmentRevision: pdfAttachmentRevision,
+            calendarDay: Calendar.current.startOfDay(for: Date())
+        )
+    }
+
+    private func makePipelineSnapshot(input: PipelineInput) -> PipelineSnapshot {
+        let context = pipelineContext
+        let filtered = FilterEngine.apply(references, filters: filters, context: context)
+        let processed = SortEngine.apply(filtered, sorts: sorts, context: context)
+        let buckets = groupBy.map {
+            GroupEngine.apply(processed, config: $0, context: context)
+        }
+        return PipelineSnapshot(
+            input: input,
+            sourceIsEmpty: references.isEmpty,
+            processed: processed,
+            buckets: buckets
+        )
+    }
 
     private var pipelineContext: PipelineContext {
         let pdfAttachedIds = (try? db.pdfAttachedReferenceIDs()) ?? []
@@ -828,6 +925,7 @@ private struct ReferenceTableSelectionScroller: NSViewRepresentable {
     let selectedId: Int64?
     let scrollRequest: Int
     let rowIDs: [Int64?]
+    let usesAutomaticRowHeights: Bool
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -841,6 +939,8 @@ private struct ReferenceTableSelectionScroller: NSViewRepresentable {
         context.coordinator.selectedId = selectedId
         context.coordinator.scrollRequest = scrollRequest
         context.coordinator.rowIDs = rowIDs
+        context.coordinator.usesAutomaticRowHeights = usesAutomaticRowHeights
+        context.coordinator.scheduleTableConfiguration(from: nsView)
         context.coordinator.scheduleScroll(from: nsView)
     }
 
@@ -854,10 +954,72 @@ private struct ReferenceTableSelectionScroller: NSViewRepresentable {
         var selectedId: Int64?
         var scrollRequest = 0
         var rowIDs: [Int64?] = []
+        var usesAutomaticRowHeights = false
         private var lastScrollKey: ScrollKey?
+        private var scrollGeneration = 0
+        private weak var configuredTableView: NSTableView?
+        private var configuredAutomaticRowHeights: Bool?
+        private var configurationGeneration = 0
+
+        func scheduleTableConfiguration(from view: NSView) {
+            if let configuredTableView,
+               configuredTableView.window != nil,
+               configuredAutomaticRowHeights == usesAutomaticRowHeights {
+                return
+            }
+
+            configurationGeneration &+= 1
+            let generation = configurationGeneration
+            let desiredValue = usesAutomaticRowHeights
+            DispatchQueue.main.async { [weak view, weak self] in
+                guard let view else { return }
+                self?.configureTable(
+                    from: view,
+                    usesAutomaticRowHeights: desiredValue,
+                    generation: generation
+                )
+            }
+        }
+
+        private func configureTable(
+            from view: NSView,
+            usesAutomaticRowHeights desiredValue: Bool,
+            generation: Int,
+            attempt: Int = 0
+        ) {
+            guard generation == configurationGeneration,
+                  desiredValue == usesAutomaticRowHeights
+            else { return }
+            guard let tableView = view.nearestTableView() else {
+                guard attempt < 6 else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak view, weak self] in
+                    guard let view else { return }
+                    self?.configureTable(
+                        from: view,
+                        usesAutomaticRowHeights: desiredValue,
+                        generation: generation,
+                        attempt: attempt + 1
+                    )
+                }
+                return
+            }
+
+            // SwiftUI enables automatic heights for Table even when every cell
+            // is single-line. AppKit 26 can recursively re-enter its row-height
+            // delegate while applying a rapid row diff, producing an uneven
+            // frame and a future-assert warning. Fixed native heights avoid that
+            // path; explicit per-view Wrap Text still opts back into automatic
+            // height calculation.
+            if tableView.usesAutomaticRowHeights != desiredValue {
+                tableView.usesAutomaticRowHeights = desiredValue
+            }
+            configuredTableView = tableView
+            configuredAutomaticRowHeights = desiredValue
+        }
 
         func scheduleScroll(from view: NSView) {
             guard let selectedId else {
+                scrollGeneration &+= 1
                 lastScrollKey = nil
                 return
             }
@@ -865,44 +1027,54 @@ private struct ReferenceTableSelectionScroller: NSViewRepresentable {
             let key = ScrollKey(selectedId: selectedId, scrollRequest: scrollRequest, rowIDs: rowIDs)
             guard key != lastScrollKey else { return }
 
+            // A saved-view switch can update the rows several times in quick
+            // succession. Invalidate callbacks for older snapshots so their
+            // AppKit scroll corrections cannot land during a newer Table diff.
+            scrollGeneration &+= 1
+            let generation = scrollGeneration
             DispatchQueue.main.async { [weak view, weak self] in
                 guard let view else { return }
-                self?.scrollIfNeeded(from: view)
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak view, weak self] in
-                guard let view else { return }
-                self?.scrollIfNeeded(from: view, force: true)
+                self?.scrollIfNeeded(from: view, key: key, generation: generation)
             }
         }
 
-        private func scrollIfNeeded(from view: NSView, attempt: Int = 0, force: Bool = false) {
-            guard let selectedId else {
-                lastScrollKey = nil
+        private func scrollIfNeeded(
+            from view: NSView,
+            key: ScrollKey,
+            generation: Int,
+            attempt: Int = 0
+        ) {
+            guard generation == scrollGeneration,
+                  key != lastScrollKey,
+                  selectedId == key.selectedId,
+                  scrollRequest == key.scrollRequest,
+                  rowIDs == key.rowIDs
+            else { return }
+            guard let selectedRow = key.rowIDs.firstIndex(of: key.selectedId) else {
+                // Filtering can legitimately remove the selected reference.
+                // That is a settled state, not an AppKit row-diff delay.
+                lastScrollKey = key
                 return
             }
-
-            let key = ScrollKey(selectedId: selectedId, scrollRequest: scrollRequest, rowIDs: rowIDs)
-            guard force || key != lastScrollKey else { return }
             guard let tableView = view.nearestTableView() else {
-                retry(from: view, attempt: attempt, force: force)
+                retry(from: view, key: key, generation: generation, attempt: attempt)
+                return
+            }
+            guard selectedRow < tableView.numberOfRows,
+                  tableView.selectedRowIndexes.contains(selectedRow) else {
+                retry(from: view, key: key, generation: generation, attempt: attempt)
                 return
             }
 
-            guard let selectedRow = rowIDs.firstIndex(of: selectedId),
-                  selectedRow < tableView.numberOfRows else {
-                retry(from: view, attempt: attempt, force: force)
-                return
-            }
-
-            if !tableView.selectedRowIndexes.contains(selectedRow) {
-                tableView.selectRowIndexes(IndexSet(integer: selectedRow), byExtendingSelection: false)
-            }
             reveal(row: selectedRow, in: tableView)
             lastScrollKey = key
         }
 
         private func reveal(row: Int, in tableView: NSTableView) {
-            tableView.layoutSubtreeIfNeeded()
+            // SwiftUI owns Table selection through its Binding. Calling
+            // `selectRowIndexes` (and forcing layout) here re-entered the
+            // backing NSTableView delegate during rapid row diffs. This bridge
+            // only needs to reveal and center the already-bound selection.
             tableView.scrollRowToVisible(row)
 
             guard let scrollView = tableView.enclosingScrollView else { return }
@@ -918,11 +1090,21 @@ private struct ReferenceTableSelectionScroller: NSViewRepresentable {
             scrollView.reflectScrolledClipView(clipView)
         }
 
-        private func retry(from view: NSView, attempt: Int, force: Bool) {
+        private func retry(
+            from view: NSView,
+            key: ScrollKey,
+            generation: Int,
+            attempt: Int
+        ) {
             guard attempt < 6 else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak view, weak self] in
                 guard let view else { return }
-                self?.scrollIfNeeded(from: view, attempt: attempt + 1, force: force)
+                self?.scrollIfNeeded(
+                    from: view,
+                    key: key,
+                    generation: generation,
+                    attempt: attempt + 1
+                )
             }
         }
 

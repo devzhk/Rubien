@@ -280,6 +280,9 @@ private struct SidebarRow<Trailing: View>: View {
     let action: () -> Void
 
     @State private var isHovered = false
+    @State private var isPointerPressActive = false
+    @State private var suppressReleaseAction = false
+    @State private var pointerPressGeneration = 0
 
     init(
         icon: String,
@@ -312,7 +315,15 @@ private struct SidebarRow<Trailing: View>: View {
     }
 
     var body: some View {
-        Button(action: action) {
+        Button {
+            // Pointer activation already ran on mouse-down. Keep the Button's
+            // release action for keyboard and accessibility activation only.
+            if suppressReleaseAction {
+                suppressReleaseAction = false
+            } else {
+                action()
+            }
+        } label: {
             HStack(spacing: 7) {
                 if let iconView {
                     iconView
@@ -344,6 +355,47 @@ private struct SidebarRow<Trailing: View>: View {
             .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         }
         .buttonStyle(.plain)
+        // Native macOS sidebar selections respond on mouse-down. SwiftUI
+        // Buttons normally wait for mouse-up, which made a deliberate click
+        // add the full press duration to Home/library navigation latency.
+        // Keep the Button itself so keyboard and accessibility actions retain
+        // their standard behavior.
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    guard !isPointerPressActive else { return }
+                    isPointerPressActive = true
+                    suppressReleaseAction = true
+                    pointerPressGeneration &+= 1
+                    // Leave the current AppKit mouse-tracking callback before
+                    // changing a retained SwiftUI Table's rows/visibility.
+                    // Updating it reentrantly from the pointer event makes
+                    // NSTableView warn today and becomes an assertion in a
+                    // future macOS release. This still activates before the
+                    // user's mouse-up, one main-loop turn after mouse-down.
+                    DispatchQueue.main.async {
+                        action()
+                    }
+                }
+                .onEnded { _ in
+                    isPointerPressActive = false
+                }
+        )
+        // `.onDrag` can take over a row's zero-distance gesture and omit its
+        // `onEnded`. Watch the physical button so a cancelled/outside drag
+        // cannot leave future keyboard or accessibility actions suppressed.
+        .task(id: pointerPressGeneration) {
+            guard pointerPressGeneration > 0 else { return }
+            let generation = pointerPressGeneration
+            while !Task.isCancelled, NSEvent.pressedMouseButtons != 0 {
+                try? await Task.sleep(for: .milliseconds(25))
+            }
+            // Let normal Button release delivery consume the suppression first.
+            try? await Task.sleep(for: .milliseconds(50))
+            guard !Task.isCancelled, pointerPressGeneration == generation else { return }
+            isPointerPressActive = false
+            suppressReleaseAction = false
+        }
         .onHover { isHovered = $0 }
         .animation(.easeInOut(duration: 0.12), value: isHovered)
         .animation(.easeInOut(duration: 0.12), value: isSelected)

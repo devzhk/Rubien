@@ -159,28 +159,11 @@ private struct DisplayMenuPopover: View {
     let isColumnVisible: (String) -> Bool
     let propertyDefs: [PropertyDefinition]
 
-    private struct Entry: Identifiable {
-        let id: String  // customizationID
-        let label: String
-    }
-
-    private var entries: [Entry] {
-        var result: [Entry] = []
-
-        for builtin in [ColumnIdentifier.title, .authors] where isColumnVisible(builtin.rawValue) {
-            result.append(Entry(id: builtin.rawValue, label: builtin.header))
-        }
-
-        for prop in propertyDefs.sorted(by: { $0.sortOrder < $1.sortOrder }) {
-            guard prop.isVisible, isColumnVisible(prop.customizationID) else { continue }
-            // Pill/date/checkbox cells ignore the `wrap` flag — skip them so
-            // the menu doesn't offer no-op toggles. Built-in "tags" and
-            // "readingStatus" are `.multiSelect`/`.singleSelect`, already
-            // excluded by this guard.
-            guard prop.type == .string || prop.type == .url || prop.type == .number else { continue }
-            result.append(Entry(id: prop.customizationID, label: prop.name))
-        }
-        return result
+    private var entries: [ReferenceTableWrappableColumn] {
+        visibleReferenceTableWrappableColumns(
+            propertyDefs: propertyDefs,
+            isColumnVisible: isColumnVisible
+        )
     }
 
     var body: some View {

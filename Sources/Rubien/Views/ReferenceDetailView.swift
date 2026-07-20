@@ -173,6 +173,7 @@ struct ReferenceDetailPDFOperationRegistry {
     }
 
     private var operations: [Int64: Operation] = [:]
+    private(set) var revision = 0
 
     func operation(for referenceId: Int64?) -> Operation? {
         guard let referenceId else { return nil }
@@ -182,12 +183,14 @@ struct ReferenceDetailPDFOperationRegistry {
     mutating func begin(_ operation: Operation, for referenceId: Int64) -> Bool {
         guard operations[referenceId] == nil else { return false }
         operations[referenceId] = operation
+        revision &+= 1
         return true
     }
 
     mutating func finish(_ operation: Operation, for referenceId: Int64) {
         guard operations[referenceId] == operation else { return }
         operations.removeValue(forKey: referenceId)
+        revision &+= 1
     }
 }
 
@@ -195,6 +198,7 @@ struct ReferenceDetailView: View {
     let reference: Reference
     let allTags: [Tag]
     let db: AppDatabase
+    let isActive: Bool
     let onSave: (Reference) -> Void
     let onDelete: () -> Void
     var onOpenPDFReader: ((Reference) -> Void)?
@@ -212,6 +216,7 @@ struct ReferenceDetailView: View {
     @State private var pdfAnnotationCount: Int = 0
     @State private var webAnnotationCount: Int = 0
     @State private var hasStoredWebContent = false
+    @State private var cachedHasPDFInCache = false
     @State private var pdfDownloadState: PDFDownloadState = .idle
     @State private var pdfAttachmentState: PDFAttachmentState = .idle
     @Binding private var pdfOperations: ReferenceDetailPDFOperationRegistry
@@ -236,10 +241,14 @@ struct ReferenceDetailView: View {
 
     private var isPDFDownloadActive: Bool { activePDFOperation == .download }
     private var isPDFAttachmentActive: Bool { activePDFOperation == .attachment }
+    private var pdfCacheRefreshID: String {
+        "\(reference.id ?? -1)-\(reference.dateModified.timeIntervalSinceReferenceDate)-\(isActive)-\(pdfOperations.revision)"
+    }
 
     let liveTags: [Tag]
 
     init(reference: Reference, allTags: [Tag], liveTags: [Tag] = [], db: AppDatabase,
+         isActive: Bool = true,
          onSave: @escaping (Reference) -> Void, onDelete: @escaping () -> Void,
          onOpenPDFReader: ((Reference) -> Void)? = nil, onOpenWebReader: ((Reference) -> Void)? = nil,
          onUpdateTags: ((Int64, [Int64]) -> Void)? = nil,
@@ -252,6 +261,7 @@ struct ReferenceDetailView: View {
         self.allTags = allTags
         self.liveTags = liveTags
         self.db = db
+        self.isActive = isActive
         self.onSave = onSave
         self.onDelete = onDelete
         self.onOpenPDFReader = onOpenPDFReader
@@ -266,16 +276,12 @@ struct ReferenceDetailView: View {
     }
 
     var body: some View {
-        // Resolve PDF-cache state once per render (a synchronous SQLite lookup);
-        // it's read in two places below and the detail re-renders on every
-        // resize-drag frame, so don't query it twice.
-        let hasPDFInCache = reference.hasPDFInCache(in: db)
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 headerSection
                 propertiesCard
                 if canOpenWebReader { webReaderCard }
-                if hasPDFInCache { pdfCard }
+                if cachedHasPDFInCache { pdfCard }
                 abstractSection
                 notesSection
                 footerSection
@@ -284,7 +290,7 @@ struct ReferenceDetailView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background {
-            if editingField == nil, hasPDFInCache {
+            if editingField == nil, cachedHasPDFInCache {
                 quickPreviewShortcut
             }
         }
@@ -295,6 +301,7 @@ struct ReferenceDetailView: View {
             editingField = nil
             guard oldRef.id != newRef.id else { return }
             pdfAttachmentState = .idle
+            cachedHasPDFInCache = false
             pdfDownloadState = .idle
             referenceTags = []
             pdfAnnotationCount = 0
@@ -306,8 +313,15 @@ struct ReferenceDetailView: View {
             await loadSupplementaryData(for: reference.id)
             await loadCustomPropertyValues(for: reference.id)
         }
+        .task(id: pdfCacheRefreshID) {
+            guard isActive else { return }
+            cachedHasPDFInCache = reference.hasPDFInCache(in: db)
+        }
         .onChange(of: liveTags) { _, newTags in
             referenceTags = newTags
+        }
+        .onChange(of: isActive) { _, active in
+            if !active { closeQuickPreviewWindow() }
         }
         .onDisappear { closeQuickPreviewWindow() }
     }
@@ -415,7 +429,7 @@ struct ReferenceDetailView: View {
             // PDF attach/remove actions
             Divider().padding(.leading, 100)
             PropertyRowLayout(label: "PDF") {
-                if editedRef.hasPDFInCache(in: db) {
+                if cachedHasPDFInCache {
                     HStack(spacing: 8) {
                         Label("Attached", systemImage: "doc.fill")
                             .font(.system(size: 12))
@@ -1466,6 +1480,7 @@ struct ReferenceDetailView: View {
             try? FileManager.default.removeItem(at: url)
         }
         try? db.detachReferencePDF(id: id)
+        cachedHasPDFInCache = false
         var updated = editedRef
         updated.dateModified = Date()
         onSave(updated)
@@ -1506,6 +1521,7 @@ struct ReferenceDetailView: View {
             EmptyView()
         }
         .keyboardShortcut(.space, modifiers: [])
+        .disabled(!isActive)
         .frame(width: 0, height: 0)
         .opacity(0)
         .allowsHitTesting(false)
@@ -1653,8 +1669,8 @@ struct ReferenceDetailView: View {
 /// current hover flag into its content (used to reveal an `editPencil`). Keeping
 /// the flag in this small subview — rather than a shared `@State` on
 /// `ReferenceDetailView` — means a mouse enter/leave only re-evaluates this
-/// region, not the whole detail panel (whose `body` re-runs `hasPDFInCache` DB
-/// lookups). Mirrors the local-`Bool` `.onHover` pattern used across the app.
+/// region, not the whole detail panel. Mirrors the local-`Bool` `.onHover`
+/// pattern used across the app.
 ///
 /// `.contentShape(Rectangle())` makes the *entire* frame hoverable, including the
 /// empty gap between a leading, full-width `Text` and a trailing pencil. Without

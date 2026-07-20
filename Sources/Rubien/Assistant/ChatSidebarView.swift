@@ -125,6 +125,7 @@ struct ChatSurfaceView: View {
     let renderer: ChatTranscriptController
     @Binding var draft: String
     @Binding var selectedMentions: [PaperMentionSelection]
+    var isActive = true
     let configuration: ChatSurfaceConfiguration
 
     @State private var showingHistory = false
@@ -785,6 +786,7 @@ struct ChatSurfaceView: View {
                     Button("Allow") { session.respond(to: approval, .allowOnce) }
                         .buttonStyle(ApprovalChoiceButtonStyle())
                         .keyboardShortcut(.defaultAction)
+                        .disabled(!isActive)
                     Button("Deny") { session.respond(to: approval, .deny) }
                         .buttonStyle(ApprovalChoiceButtonStyle())
                 }

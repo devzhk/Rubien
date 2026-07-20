@@ -2,6 +2,7 @@
 import SwiftUI
 import Combine
 import AppKit
+import WebKit
 import RubienCore
 import RubienPDFKit
 
@@ -234,13 +235,32 @@ final class LibraryViewModel: ObservableObject {
     @Published var pendingMetadataIntakes: [MetadataIntake] = []
     @Published var tags: [Tag] = []
     @Published var selectedSidebar: SidebarItem = .allReferences {
-        willSet {
-            stashDraftIfDirty(for: selectedSidebar)
-        }
         didSet {
-            rebuildReferenceObserver()
+            if oldValue != selectedSidebar || !isObservingCurrentReferenceScope {
+                rebuildReferenceObserver()
+            }
             syncColumnConfigFromView()
         }
+    }
+
+    func selectSidebar(_ item: SidebarItem, stashCurrentDraft: Bool = true) {
+        if stashCurrentDraft { stashDraftIfDirty(for: selectedSidebar) }
+
+        // Home is a separate destination, so returning to the already-selected
+        // library row is the common path. Do not reassign the @Published value:
+        // even an equal assignment emits objectWillChange and invalidates the
+        // whole ContentView hierarchy. Still reconcile the observer/config in
+        // case a synced saved view changed while Home was visible.
+        if selectedSidebar == item {
+            if !isObservingCurrentReferenceScope { rebuildReferenceObserver() }
+            syncColumnConfigFromView()
+            return
+        }
+        selectedSidebar = item
+    }
+
+    func stashCurrentViewDraft() {
+        stashDraftIfDirty(for: selectedSidebar)
     }
     /// Raw search text typed by the user; debounced before hitting the DB.
     @Published var searchText = "" {
@@ -282,6 +302,8 @@ final class LibraryViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     /// Cancellable for the active reference ValueObservation subscription.
     private var referenceObserverCancellable: AnyCancellable?
+    /// Scope captured when the active reference observation was created.
+    private var observedReferenceScope: ReferenceScope?
     /// Timer-based debounce task for search input.
     private var searchDebounceTask: Task<Void, Never>?
     /// The filter currently applied to the database query.
@@ -393,6 +415,7 @@ final class LibraryViewModel: ObservableObject {
         referenceObserverCancellable?.cancel()
 
         let scope = currentReferenceScope
+        observedReferenceScope = scope
         var filter = activeFilter
 
         if case .titleKeyword(let word) = selectedSidebar {
@@ -439,6 +462,18 @@ final class LibraryViewModel: ObservableObject {
             }
         }
         return scope
+    }
+
+    private var isObservingCurrentReferenceScope: Bool {
+        guard let observedReferenceScope else { return false }
+        switch (observedReferenceScope, currentReferenceScope) {
+        case (.all, .all):
+            return true
+        case let (.tag(observed), .tag(current)):
+            return observed == current
+        default:
+            return false
+        }
     }
 
 
@@ -670,7 +705,7 @@ final class LibraryViewModel: ObservableObject {
         do {
             try db.deleteDatabaseView(id: id)
             if case .view(let selectedId) = selectedSidebar, selectedId == id {
-                selectedSidebar = .allReferences
+                selectSidebar(.allReferences, stashCurrentDraft: false)
             }
         } catch {
             errorMessage = "Delete view failed: \(error.localizedDescription)"
@@ -685,7 +720,12 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
-    func createDatabaseView(name: String, icon: String = ViewIconCatalog.defaultIcon, scope: ViewScope = .all) {
+    func createDatabaseView(
+        name: String,
+        icon: String = ViewIconCatalog.defaultIcon,
+        scope: ViewScope = .all,
+        stashCurrentDraft: Bool = true
+    ) {
         let maxOrder = databaseViews.map(\.displayOrder).max() ?? 0
         var view = DatabaseView(
             name: name,
@@ -696,7 +736,7 @@ final class LibraryViewModel: ObservableObject {
         )
         saveDatabaseView(&view)
         if let id = view.id {
-            selectedSidebar = .view(id)
+            selectSidebar(.view(id), stashCurrentDraft: stashCurrentDraft)
         }
     }
 
@@ -724,24 +764,35 @@ final class LibraryViewModel: ObservableObject {
     }
 
     private func syncColumnConfigFromView() {
+        let config: ViewDraft
+
         guard let dbView = currentDBView, let id = dbView.id else {
-            tableSorts = [.defaultSort]
-            viewFilters = []
-            viewGroupBy = nil
-            viewColumnWraps = []
+            applyColumnConfig(ViewDraft(
+                filters: [],
+                sorts: [.defaultSort],
+                groupBy: nil,
+                columnWraps: []
+            ))
             return
         }
         if let draft = viewDrafts[id] {
-            tableSorts = draft.sorts
-            viewFilters = draft.filters
-            viewGroupBy = draft.groupBy
-            viewColumnWraps = draft.columnWraps
+            config = draft
         } else {
-            tableSorts = dbView.parsedSorts
-            viewFilters = dbView.parsedFilters
-            viewGroupBy = dbView.parsedGroupBy
-            viewColumnWraps = dbView.parsedColumnWraps
+            config = ViewDraft(
+                filters: dbView.parsedFilters,
+                sorts: dbView.parsedSorts,
+                groupBy: dbView.parsedGroupBy,
+                columnWraps: dbView.parsedColumnWraps
+            )
         }
+        applyColumnConfig(config)
+    }
+
+    private func applyColumnConfig(_ config: ViewDraft) {
+        if tableSorts != config.sorts { tableSorts = config.sorts }
+        if viewFilters != config.filters { viewFilters = config.filters }
+        if viewGroupBy != config.groupBy { viewGroupBy = config.groupBy }
+        if viewColumnWraps != config.columnWraps { viewColumnWraps = config.columnWraps }
     }
 
     private func stashDraftIfDirty(for item: SidebarItem) {
@@ -795,10 +846,12 @@ final class LibraryViewModel: ObservableObject {
 
     func discardDraftForCurrentView() {
         guard let dbView = currentDBView, let id = dbView.id else { return }
-        viewFilters = dbView.parsedFilters
-        tableSorts = dbView.parsedSorts
-        viewGroupBy = dbView.parsedGroupBy
-        viewColumnWraps = dbView.parsedColumnWraps
+        applyColumnConfig(ViewDraft(
+            filters: dbView.parsedFilters,
+            sorts: dbView.parsedSorts,
+            groupBy: dbView.parsedGroupBy,
+            columnWraps: dbView.parsedColumnWraps
+        ))
         viewDrafts.removeValue(forKey: id)
     }
 
@@ -813,7 +866,7 @@ final class LibraryViewModel: ObservableObject {
            let defaultView = databaseViews.first(where: \.isDefault),
            let id = defaultView.id {
             hasAppliedDefaultView = true
-            selectedSidebar = .view(id)
+            selectSidebar(.view(id), stashCurrentDraft: false)
         }
     }
 
@@ -859,6 +912,10 @@ struct ContentView: View {
     @State private var pendingQueueNotice: PendingQueueNotice?
     @State private var columnVisibility = NavigationSplitViewVisibility.all
     @State private var mainDestination: MainDestination = .home
+    /// Once the library has been mounted, keep its table hierarchy alive while
+    /// Home is visible. Rebuilding SwiftUI's macOS Table on every navigation is
+    /// noticeably slower than toggling the retained surface's visibility.
+    @State private var hasPresentedLibrary = false
     @State private var homeDraft = ""
     @State private var homeSelectedMentions: [PaperMentionSelection] = []
     @State private var homeActivityRailVisible = true
@@ -1075,6 +1132,7 @@ struct ContentView: View {
                     allTags: viewModel.tags,
                     liveTags: viewModel.referenceTagMap[ref.id ?? -1] ?? [],
                     db: viewModel.db,
+                    isActive: mainDestination == .library,
                     onSave: { updated in
                         var r = updated
                         viewModel.saveReference(&r)
@@ -1129,28 +1187,32 @@ struct ContentView: View {
                 titleKeywords: viewModel.titleKeywords,
                 selection: Binding(
                     get: { viewModel.selectedSidebar },
-                    set: {
-                        viewModel.selectedSidebar = $0
-                        mainDestination = .library
-                    }),
+                    set: { showLibrary(selecting: $0) }),
                 isHomeSelected: mainDestination == .home,
                 homeIsResponding: homeSession.isResponding,
                 homeNeedsApproval: homeSession.pendingApproval != nil,
                 homeUnreadOutcome: homeUnreadOutcome,
-                onSelectHome: { mainDestination = .home },
+                onSelectHome: showHome,
                 referenceCount: viewModel.references.count,
-                onCreateView: { name, icon in viewModel.createDatabaseView(name: name, icon: icon) },
+                onCreateView: { name, icon in
+                    viewModel.createDatabaseView(
+                        name: name,
+                        icon: icon,
+                        stashCurrentDraft: mainDestination == .library
+                    )
+                },
                 onDeleteView: { viewModel.deleteDatabaseView(id: $0) },
                 onUpdateView: { id, name, icon in viewModel.updateDatabaseView(id: id, name: name, icon: icon) },
                 onReorderViews: { viewModel.reorderDatabaseViews($0) }
             )
             .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 300)
         } detail: {
-            if mainDestination == .home {
+            ZStack {
                 AgentHomeView(
                     session: homeSession,
                     renderer: homeRenderer,
                     database: viewModel.db,
+                    isActive: mainDestination == .home,
                     draft: $homeDraft,
                     selectedMentions: $homeSelectedMentions,
                     activityRailVisible: $homeActivityRailVisible,
@@ -1165,8 +1227,10 @@ struct ContentView: View {
                     onImportPDFs: { showAddReferenceFlow = true },
                     onCompactLayoutChange: { homeUsesCompactLayout = $0 },
                     onOpenScheduledRun: openScheduledRun)
-            } else {
-                ReferenceTableView(
+                .retainedDetailSurface(isActive: mainDestination == .home)
+
+                if hasPresentedLibrary || mainDestination == .library {
+                    ReferenceTableView(
                 references: viewModel.filteredReferences,
                 tagMap: viewModel.referenceTagMap,
                 allTags: viewModel.tags,
@@ -1222,7 +1286,9 @@ struct ContentView: View {
                 isDirty: viewModel.isCurrentViewDirty,
                 onSaveView: { viewModel.saveDraftForCurrentView() },
                 onDiscardView: { viewModel.discardDraftForCurrentView() },
-                scrollRequest: tableScrollRequest
+                scrollRequest: tableScrollRequest,
+                isActive: mainDestination == .library,
+                pdfAttachmentRevision: pdfDownloadCoordinator.operations.revision
             )
             // The detail floats over the table (table stays full-width and shows
             // through the translucent glass), below the toolbar, shown only while
@@ -1238,6 +1304,8 @@ struct ContentView: View {
                 }
             }
             .animation(.easeInOut(duration: 0.22), value: showInspector)
+            .retainedDetailSurface(isActive: mainDestination == .library)
+                }
             }
         }
         .toolbar(content: {
@@ -1283,18 +1351,16 @@ struct ContentView: View {
             #endif
             // Trailing toggle for the details panel, pushed to the far-right edge
             // by the clear principal item at the top of this toolbar.
-            if mainDestination == .library {
-                ToolbarItemGroup(placement: .primaryAction) {
+            ToolbarItemGroup(placement: .primaryAction) {
+                if mainDestination == .library {
                     if columnVisibility == .detailOnly, homeHasAttention {
-                        Button { mainDestination = .home } label: { homeAttentionIcon }
+                        Button(action: showHome) { homeAttentionIcon }
                             .help(homeSession.pendingApproval != nil
                                 ? "Assistant approval needed"
                                 : "Open Home Assistant")
                     }
                     detailsToggleButton
-                }
-            } else {
-                ToolbarItem(placement: .primaryAction) {
+                } else {
                     Button {
                         if homeUsesCompactLayout {
                             homeActivityOverlayPresented.toggle()
@@ -1492,7 +1558,7 @@ struct ContentView: View {
 
         .onReceive(NotificationCenter.default.publisher(for: .rubienClipImported)) { note in
             guard let id = note.userInfo?[RubienClipImportedKeys.id] as? Int64 else { return }
-            mainDestination = .library
+            showLibrary()
             selectedId = id
             columnVisibility = .all
         }
@@ -1539,9 +1605,11 @@ struct ContentView: View {
             }
         }
         .onChange(of: mainDestination) { _, destination in
+            resignRetainedDetailEditorIfNeeded()
             if destination == .library {
                 homeActivityOverlayPresented = false
             } else {
+                viewModel.stashCurrentViewDraft()
                 homeUnreadOutcome = nil
             }
         }
@@ -1573,7 +1641,7 @@ struct ContentView: View {
     }
 
     private func openScheduledRun(_ run: ScheduledJobRun) {
-        mainDestination = .home
+        showHome()
         guard run.status == .succeeded else {
             presentRecentScheduledRuns(message: ScheduledJobFormatting.localized(
                 run.status == .cancelled
@@ -1624,7 +1692,7 @@ struct ContentView: View {
     }
 
     private func presentRecentScheduledRuns(message: String) {
-        mainDestination = .home
+        showHome()
         scheduledJobsPresentation = ScheduledJobsPresentation(message: message)
     }
 
@@ -1638,12 +1706,9 @@ struct ContentView: View {
 
     private func revealReference(_ reference: Reference) {
         guard let id = reference.id else { return }
-        mainDestination = .library
-        // Land on the unfiltered .allReferences scope (which always renders the row) unless we're
-        // already there. Never the default database view — its saved filters could hide the row.
-        if case .allReferences = viewModel.selectedSidebar {} else {
-            viewModel.selectedSidebar = .allReferences
-        }
+        // Land on the unfiltered .allReferences scope, which always renders the
+        // row. Never the default saved view — its filters could hide the row.
+        showLibrary(selecting: .allReferences)
         selectedId = id
         tableScrollRequest += 1
         columnVisibility = .all
@@ -2339,6 +2404,67 @@ struct ContentView: View {
         var saved = reference
         let result = viewModel.saveManualReference(&saved, reviewedBy: "web-import")
         confirmAndReveal(saved, result: result)
+    }
+
+    private func showLibrary(selecting item: SidebarItem? = nil) {
+        let returningFromHome = mainDestination != .library
+        if let item {
+            viewModel.selectSidebar(item, stashCurrentDraft: !returningFromHome)
+        } else if returningFromHome {
+            // Programmatic returns (for example, a clip import) do not flow
+            // through the sidebar Binding. Reconcile a saved view whose scope
+            // or configuration may have changed through sync while Home was up.
+            viewModel.selectSidebar(viewModel.selectedSidebar, stashCurrentDraft: false)
+        }
+        setMainDestination(.library, mountingLibrary: true)
+    }
+
+    private func showHome() {
+        setMainDestination(.home)
+    }
+
+    /// Destination changes should feel like switching an already-open native
+    /// tab. Explicitly suppress transition and NSToolbar diff animations while
+    /// batching the retained-surface visibility change with the first mount.
+    private func setMainDestination(
+        _ destination: MainDestination,
+        mountingLibrary: Bool = false
+    ) {
+        guard mainDestination != destination || (mountingLibrary && !hasPresentedLibrary) else { return }
+        var transaction = Transaction(animation: nil)
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            if mountingLibrary { hasPresentedLibrary = true }
+            mainDestination = destination
+        }
+    }
+
+    /// Retained surfaces keep their AppKit controls alive. If navigation was
+    /// programmatic, a text editor inside the surface being hidden can still be
+    /// the window's first responder; resign only editor responders so a sidebar
+    /// click keeps its normal keyboard focus.
+    private func resignRetainedDetailEditorIfNeeded() {
+        guard let window = hostingWindowBox.window else { return }
+        var responder = window.firstResponder
+        while let current = responder {
+            if current is NSTextView || current is WKWebView {
+                window.makeFirstResponder(nil)
+                return
+            }
+            responder = current.nextResponder
+        }
+    }
+}
+
+private extension View {
+    /// Keeps an expensive detail surface mounted while making the inactive
+    /// destination inert and invisible. This preserves AppKit-backed controls
+    /// such as Table and WKWebView across Home/library navigation.
+    func retainedDetailSurface(isActive: Bool) -> some View {
+        opacity(isActive ? 1 : 0)
+            .allowsHitTesting(isActive)
+            .accessibilityHidden(!isActive)
+            .zIndex(isActive ? 1 : 0)
     }
 }
 
