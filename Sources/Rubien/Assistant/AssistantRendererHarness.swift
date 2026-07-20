@@ -211,8 +211,8 @@ struct AssistantRendererHarnessView: View {
 
 // MARK: - Debug menu command + window
 
-/// Adds **Debug ▸ Assistant Renderer Harness** to the menu bar. Wired into
-/// `RubienApp` behind `#if DEBUG`.
+/// Adds both assistant harnesses to the Debug menu. Wired into `RubienApp` behind
+/// `#if DEBUG`.
 struct AssistantHarnessMenuCommands: Commands {
     var body: some Commands {
         CommandMenu("Debug") {

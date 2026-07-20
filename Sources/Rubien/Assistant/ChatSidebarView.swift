@@ -119,6 +119,7 @@ struct ChatSurfaceConfiguration {
 
 struct ChatSurfaceView: View {
     private static let homeContentMaxWidth: CGFloat = 700
+    private static let homeApprovalMaxWidth: CGFloat = 520
     private static let queuedMessageRowHeight: CGFloat = 54
 
     @ObservedObject var session: ChatSessionController
@@ -779,10 +780,11 @@ struct ChatSurfaceView: View {
                     .textSelection(.enabled)
                     .lineLimit(4)
             }
-            VStack(spacing: 6) {
-                // Two equal-width, neutral primary actions — the normal highlight is
-                // enough; no accent/red tint. Enter still triggers Allow.
+            VStack(alignment: .trailing, spacing: 4) {
+                // Compact, neutral primary actions — the normal highlight is enough;
+                // no accent/red tint. Enter still triggers Allow.
                 HStack(spacing: 8) {
+                    Spacer(minLength: 0)
                     Button("Allow") { session.respond(to: approval, .allowOnce) }
                         .buttonStyle(ApprovalChoiceButtonStyle())
                         .keyboardShortcut(.defaultAction)
@@ -799,7 +801,6 @@ struct ChatSurfaceView: View {
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
-                        .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(HeaderControlButtonStyle())
             }
@@ -807,15 +808,15 @@ struct ChatSurfaceView: View {
         .padding(10)
         .background(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .fill(Color(nsColor: .textBackgroundColor))
+                .fill(Color.primary.opacity(0.035))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .stroke(Color.accentColor.opacity(0.35), lineWidth: 1)
+                .stroke(Color.primary.opacity(0.10), lineWidth: 1)
         )
         .padding(.horizontal, 10)
         .padding(.top, 8)
-        .frame(maxWidth: configuration.isHome ? Self.homeContentMaxWidth : .infinity)
+        .frame(maxWidth: configuration.isHome ? Self.homeApprovalMaxWidth : .infinity)
         .frame(maxWidth: .infinity, alignment: .center)
         .padding(.horizontal, configuration.isHome ? 24 : 0)
     }
@@ -2368,8 +2369,8 @@ private struct HeaderControlButtonStyle: ButtonStyle {
     }
 }
 
-/// An equal-width, neutral approval action (Allow / Deny). A soft filled + hairline
-/// pill that deepens on hover/press — the normal highlight, no accent or red tint.
+/// A compact, neutral approval action (Allow / Deny). A soft filled + hairline pill
+/// that deepens on hover/press — the normal highlight, no accent or red tint.
 private struct ApprovalChoiceButtonStyle: ButtonStyle {
     @State private var isHovered = false
 
@@ -2377,7 +2378,8 @@ private struct ApprovalChoiceButtonStyle: ButtonStyle {
         configuration.label
             .font(.system(size: 11.5, weight: .medium))
             .foregroundStyle(Color.primary.opacity(0.85))
-            .frame(maxWidth: .infinity)   // equal width across the row
+            .frame(minWidth: 58)
+            .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .background(
                 RoundedRectangle(cornerRadius: 7, style: .continuous)

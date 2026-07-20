@@ -2,10 +2,11 @@
 import AppKit
 import SwiftUI
 
-/// Debug-only harness for the full chat sidebar — composer → streamed answer with a
-/// tool chip + LaTeX — driven by a scripted fake provider (no real agent). Open from
-/// **Debug ▸ Assistant Sidebar Harness** (`swift run Rubien`). Also exercises the exact
-/// `@StateObject` init-wiring the web reader uses (renderer shared as the session's sink).
+/// Debug-only harness for the full chat sidebar — approval card, composer, streamed
+/// answer with a tool chip + LaTeX — driven by a scripted fake provider (no real
+/// agent). Open from **Debug ▸ Assistant Sidebar Harness** (`swift run Rubien`). Also
+/// exercises the exact `@StateObject` init-wiring the web reader uses (renderer shared
+/// as the session's sink).
 struct ChatSidebarHarnessView: View {
     @StateObject private var renderer: ChatTranscriptController
     @StateObject private var session: ChatSessionController
@@ -53,13 +54,23 @@ struct ChatSidebarHarnessView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("Appearance", selection: $appearance) {
-                ForEach(ColorSchemePreference.allCases, id: \.self) { appearance in
-                    Text(appearance.localizedTitle).tag(appearance)
+            HStack(spacing: 8) {
+                Picker("Appearance", selection: $appearance) {
+                    ForEach(ColorSchemePreference.allCases, id: \.self) { appearance in
+                        Text(appearance.localizedTitle).tag(appearance)
+                    }
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                Spacer(minLength: 0)
+
+                Button("Show approval", systemImage: "hand.raised") {
+                    showApprovalPreview()
+                }
+                .disabled(session.pendingApproval != nil)
+                .help("Inject a fake approval request without starting an agent")
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
             .padding(8)
             Divider()
             ChatSidebarView(session: session, renderer: renderer, onClose: {
@@ -74,6 +85,21 @@ struct ChatSidebarHarnessView: View {
             didStageAttachmentPreviews = true
             stageAttachmentPreviews()
         }
+    }
+
+    /// Route a representative request through the same event mapper used by live
+    /// providers. This intentionally bypasses `send`, so it adds no user message and
+    /// never starts the scripted provider (or a real Claude/Codex process).
+    private func showApprovalPreview() {
+        session.autoApprove = false
+        session.handle(
+            .approvalRequested(
+                id: "sidebar-harness-approval",
+                toolName: "shell",
+                summary: "Run `swift test --filter ChatSessionControllerTests`"
+            ),
+            gen: session.generation
+        )
     }
 
     /// Stage after SwiftUI installs the StateObject. Starting the controller worker
@@ -113,8 +139,8 @@ private struct HarnessWindowAppearance: NSViewRepresentable {
 }
 
 /// Streams a canned answer (session id → tool chip → deltas → commit) so the sidebar's
-/// live path can be eyeballed. Approval + empty-state are exercised against real Claude
-/// in the reader.
+/// live path can be eyeballed. The harness injects approval events directly; this fake
+/// remains responsible only for turns submitted through the composer.
 private final class ScriptedAgentProvider: AgentProvider, @unchecked Sendable {
     let kind: AgentProviderKind = .claude
 

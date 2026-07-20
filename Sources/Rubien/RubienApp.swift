@@ -77,9 +77,8 @@ struct RubienApp: App {
         }
         #endif
         #if DEBUG
-        // Debug ▸ Assistant Renderer Harness — eyeball the chat transcript
-        // renderer (markdown/LaTeX/streaming/tool chips/hostile input/theme)
-        // without spawning an agent. Debug builds only.
+        // Debug-only renderer + full-sidebar harnesses for exercising the transcript,
+        // composer, and approval card without spawning an agent.
         .commands {
             AssistantHarnessMenuCommands()
         }
