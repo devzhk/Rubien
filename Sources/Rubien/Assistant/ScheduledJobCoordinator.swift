@@ -419,7 +419,11 @@ final class ScheduledJobCoordinator: ObservableObject {
                 object: nil,
                 queue: .main
             ) { [weak self] notification in
-                MainActor.assumeIsolated {
+                // NotificationCenter's `.main` queue guarantees the main
+                // thread, but it does not establish Swift's MainActor
+                // executor. Hop explicitly instead of trapping in
+                // `MainActor.assumeIsolated` during app activation.
+                Task { @MainActor [weak self] in
                     if notification.name == .NSSystemTimeZoneDidChange
                         || notification.name == .NSSystemClockDidChange {
                         self?.reconcileClockAndScan()
@@ -435,12 +439,12 @@ final class ScheduledJobCoordinator: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.reconcileClockAndScan() }
+            Task { @MainActor [weak self] in self?.reconcileClockAndScan() }
         })
         libraryChangeCancellable = LibraryChangeBroadcaster.shared.events
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
-                MainActor.assumeIsolated {
+                Task { @MainActor [weak self] in
                     // The broadcaster covers every CLI/MCP library mutation, not
                     // only schedules, so preserve a genuine claim-failure backoff.
                     self?.didMutate(resetDueRetry: false)

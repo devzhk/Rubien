@@ -329,7 +329,7 @@ final class ReadingActivityWindowMonitor {
         ]
         for name in lifecycleNames {
             observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.refresh() }
+                Task { @MainActor [weak self] in self?.refresh() }
             })
         }
 
@@ -338,7 +338,7 @@ final class ReadingActivityWindowMonitor {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated {
+            Task { @MainActor [weak self] in
                 self?.isSystemAwake = false
                 self?.refresh()
             }
@@ -348,7 +348,7 @@ final class ReadingActivityWindowMonitor {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated {
+            Task { @MainActor [weak self] in
                 self?.isSystemAwake = true
                 self?.refresh()
             }
@@ -358,13 +358,13 @@ final class ReadingActivityWindowMonitor {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.forceBoundary() }
+            Task { @MainActor [weak self] in self?.forceBoundary() }
         })
 
         libraryChangeCancellable = LibraryChangeBroadcaster.shared.events
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
-                MainActor.assumeIsolated { self?.refresh() }
+                Task { @MainActor [weak self] in self?.refresh() }
             }
     }
 
