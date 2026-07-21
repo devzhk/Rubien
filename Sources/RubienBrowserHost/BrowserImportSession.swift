@@ -1,3 +1,4 @@
+import Foundation
 import RubienCore
 #if os(macOS)
 import AppKit
