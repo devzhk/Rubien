@@ -146,8 +146,9 @@ ZIP together. App-only releases still include the matching extension ZIP so a
 user never has to guess which pair is compatible.
 
 Before requesting approval to run the signed release, use the release-candidate
-DMG and ZIP produced by step 4, not a development build or files loaded directly
-from the source tree. Install `build/Rubien-Release.dmg`, then:
+app and ZIP produced by step 4, not a development build or files loaded directly
+from the source tree. Use `build/Rubien.app` in place; do not replace the
+currently installed app solely for this gate. Then:
 
 1. Launch the candidate Rubien app once so it registers its bundled
    Chrome native-messaging host.
