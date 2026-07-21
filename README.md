@@ -14,8 +14,6 @@ Underneath, Rubien is built on one principle: **one library, two front doors.** 
 
 The SwiftUI app is Mac-only. `rubien-cli` also runs on Linux — see [Linux CLI](#linux-cli).
 
-The name means *the keeper of borrowed knowledge.*
-
 ## Features
 
 - **Research Assistant** — work with Claude Code or Codex from Home or alongside the document you're reading. Discover sources, ask for explanations, connect ideas across your library, and use your existing connected tools.
@@ -220,7 +218,6 @@ scripts/
 | [GRDB.swift](https://github.com/groue/GRDB.swift) | MIT | SQLite ORM and reactive queries |
 | [Readability.js](https://github.com/mozilla/readability) | Apache-2.0 | Web article extraction |
 | [Defuddle](https://github.com/kepano/defuddle) | MIT | Web content cleaning |
-| [citeproc-js](https://github.com/Juris-M/citeproc-js) | AGPL-3.0 | CSL renderer — bundled but currently unused |
 
 **Linked dynamically against system packages on Linux** (not bundled, not redistributed):
 
@@ -230,8 +227,6 @@ scripts/
 | [cairo](https://www.cairographics.org) | LGPL-2.1 / MPL-1.1 | Image surface for `poppler_page_render` |
 | [gdk-pixbuf](https://gitlab.gnome.org/GNOME/gdk-pixbuf) | LGPL-2.1+ | JPEG/PNG encoding of rendered page images |
 
-citeproc-js (AGPL-3.0) ships in the resources tree but isn't called by any live code path; pure-Swift `CitationFormatter` and `CSLEngine` handle every citation today. AGPL would still apply to the bundled file on redistribution — revisit if you re-activate it.
-
 Linux system libraries are linked dynamically against the user's distro packages — Rubien doesn't vendor or redistribute them.
 
-Upstream: the original SwiftLib by [NickHood](https://github.com/NickHood1984/SwiftLib) included additional AGPL components (Zotero translation-server, translators_CN) which are not part of Rubien.
+Rubien began from [SwiftLib by NickHood](https://github.com/NickHood1984/SwiftLib) and adapted portions of its SwiftUI interface, PDF and web readers, and metadata importers.

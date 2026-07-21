@@ -135,7 +135,7 @@ describe("rubien_create_reference argv routing", () => {
     );
   });
 
-  it("omits both flags when downloadPdf is absent (router decides)", async () => {
+  it("omits both flags when downloadPdf is absent (CLI applies default-on)", async () => {
     const client = await connectedClient();
     await client.callTool({
       name: "rubien_create_reference",

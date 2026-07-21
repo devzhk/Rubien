@@ -128,7 +128,7 @@ export function registerReferenceTools(server: McpServer): void {
     {
       title: "Create reference (one door: locator, BibTeX, or title)",
       description:
-        "Create reference(s) — one door for every input. Pass exactly one of: `source` (ANY locator — DOI / arXiv / PMID / PMCID / ISBN, paper URL, PDF/Markdown file URL, local file path, or folder path; the CLI routes it), `bibtex` (inline BibTeX, can hold multiple entries), or `title` (minimal manual row). May return MULTIPLE items (multi-entry BibTeX, folders) and may return `status: 'existing'` instead of creating — the input matched an existing row (deduped by normalized DOI / PMID / PMCID / ISBN / URL / ISSN+title+year) and non-empty incoming fields were folded into it. Output envelope: `{ items: [{ reference?, status: 'created'|'existing'|'queued'|'failed', intakeId?, input, pdfDownload?, error? }], summary: {created, existing, queued, failed}, diagnostics? }`. Routing notes: an existing local path wins over an identifier-shaped string (escape a DOI as https://doi.org/…); a registered-host .pdf URL resolves metadata AND attaches the PDF (implied downloadPdf); an unregistered .pdf/.md URL is downloaded and imported directly. To fetch a PDF for a reference that already exists, use rubien_download_pdf instead.",
+        "Create reference(s) — one door for every input. Pass exactly one of: `source` (ANY locator — DOI / arXiv / PMID / PMCID / ISBN, paper URL, PDF/Markdown file URL, local file path, or folder path; the CLI routes it), `bibtex` (inline BibTeX, can hold multiple entries), or `title` (minimal manual row). Resolver sources attempt an open-access PDF fetch by default; pass `downloadPdf: false` to opt out. The reference remains saved if the fetch is unavailable or fails. May return MULTIPLE items (multi-entry BibTeX, folders) and may return `status: 'existing'` instead of creating — the input matched an existing row (deduped by normalized DOI / PMID / PMCID / ISBN / URL / ISSN+title+year) and non-empty incoming fields were folded into it. Output envelope: `{ items: [{ reference?, status: 'created'|'existing'|'queued'|'failed', intakeId?, input, pdfDownload?, error? }], summary: {created, existing, queued, failed}, diagnostics? }`. Routing notes: an existing local path wins over an identifier-shaped string (escape a DOI as https://doi.org/…); registered-host PDF URLs resolve metadata and attempt to attach the PDF; unregistered .pdf/.md URLs are downloaded and imported directly. To fetch a PDF for a reference that already exists, use rubien_download_pdf instead.",
       inputSchema: {
         source: z
           .string()
@@ -145,7 +145,7 @@ export function registerReferenceTools(server: McpServer): void {
           .boolean()
           .optional()
           .describe(
-            "Resolver routes only (identifier / paper-URL source). true = fetch the open-access PDF after resolution; false = explicitly skip (overrides the implied fetch on registered .pdf URLs); absent = the router decides. The reference is saved even if the fetch fails. Adds up to ~3min.",
+            "Resolver routes only (identifier / paper-URL source). true or absent = fetch the open-access PDF after resolution (default); false = explicitly skip. The reference is saved even if the fetch fails. Adds up to ~3min.",
           ),
         format: z
           .enum(["bib", "ris", "md"])
@@ -200,8 +200,8 @@ export function registerReferenceTools(server: McpServer): void {
       if (source !== undefined) args.push("--source", source);
       if (bibtex !== undefined) args.push("--bibtex", bibtex);
       if (title !== undefined) args.push("--title", title);
-      // Tri-state: absent = router decides; the inversion pair makes
-      // "explicitly false" representable (overrides implied fetch).
+      // Tri-state: absent = the CLI's default-on policy; the inversion pair
+      // makes an explicit opt-out representable.
       if (downloadPdf === true) args.push("--download-pdf");
       else if (downloadPdf === false) args.push("--no-download-pdf");
       args.push(

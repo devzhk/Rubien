@@ -145,10 +145,11 @@ Add a reference from any locator (identifier, URL, file, folder), an inline BibT
 ```bash
 # One door: --source routes any locator automatically (spec §5)
 rubien-cli add --source "10.1038/s41586-021-03819-2"
-rubien-cli add --source "2106.04561" --download-pdf
+rubien-cli add --source "2106.04561"
 rubien-cli add --source "PMC4587766"
-rubien-cli add --source "https://openreview.net/forum?id=YicbFdNTTy" --download-pdf
-rubien-cli add --source "https://aclanthology.org/2025.acl-long.1141.pdf"   # implies --download-pdf
+rubien-cli add --source "https://openreview.net/forum?id=YicbFdNTTy"
+rubien-cli add --source "https://aclanthology.org/2025.acl-long.1141.pdf"
+rubien-cli add --source "10.1038/s41586-021-03819-2" --no-download-pdf  # opt out
 rubien-cli add --source ./references.bib
 rubien-cli add --source ./zotero-export                 # folder → Zotero / Markdown
 rubien-cli add --source - --format ris < refs.ris       # stdin (CLI only)
@@ -165,7 +166,7 @@ rubien-cli add --title "My Paper"
 | `--format` | String | With `--source`: format hint (`bib`, `ris`, `md`) for a file or stdin source; disambiguates a folder holding both `.bib` and `.md`. |
 | `--property` | String | With `--source` folder: property to stamp on every imported reference (default: `Tags`). |
 | `--value` | String | With `--source` folder: value to stamp on `--property` (default: folder basename). |
-| `--download-pdf` / `--no-download-pdf` | Flag (tri-state) | Fetch (or explicitly skip) the open-access PDF after resolving an identifier / paper URL. A registered `.pdf` URL **implies** `--download-pdf` unless `--no-download-pdf` is given. Absent = the router decides. Only valid with `--source` on a resolver route (identifier / paper-URL); rejected on file/folder/download-import routes and on `--bibtex`/`--title`. arXiv inputs use the preprint PDF; DOI/PMID/PMCID use OpenAlex's best open-access location; paper URLs use `citation_pdf_url` (eLife uses its API). The reference is saved even if the download fails. |
+| `--download-pdf` / `--no-download-pdf` | Flag (tri-state) | Fetch (or explicitly skip) the open-access PDF after resolving an identifier / paper URL. Resolver routes download by default when neither flag is given; use `--no-download-pdf` to opt out. Only valid with `--source` on a resolver route (identifier / paper-URL); rejected on file/folder/download-import routes and on `--bibtex`/`--title`. arXiv inputs use the preprint PDF; DOI/PMID/PMCID use OpenAlex's best open-access location; paper URLs use `citation_pdf_url` (eLife uses its API). The reference is saved even if the download fails. |
 
 Exactly one of `--source`, `--bibtex`, or `--title` is required.
 
@@ -203,7 +204,7 @@ One shape for every route — `--source`, `--bibtex`, and `--title`:
 - `diagnostics` is present only when the route produces it (`file` for single-file/URL routes; `property`/`value` for folder stamping; `attached`/`duplicatesSkipped`/`missingPDFs` for Zotero). Inline routes never carry it.
 - `pdfDownload` is present only when a PDF fetch was attempted: `{ "ok": Bool, "action": String?, "filename": String?, "error": String? }`. `action` values: `"downloaded"`, `"replaced"`, `"already-attached"`, `"already-pending"` (cache row exists but the file hasn't been materialized yet — sync will deliver it), `"skipped"` (no DOI/arXiv identifier AND no scraped `citation_pdf_url`). The item's `status` and the exit code are unaffected by `pdfDownload.ok` — the reference is saved either way.
 - Exit code is nonzero **iff zero items succeeded** (succeeded = created/existing/queued). A partial failure exits 0 with the failures visible in `items`. On the all-failed path the full envelope is written to **stderr**; partial/full success goes to stdout.
-- Routing highlights: an existing local **path wins** over an identifier-shaped string (escape a DOI with `https://doi.org/…`, a filename with `./name`); a registered-host `.pdf` URL takes the resolver route and still attaches the PDF (implied download); an unregistered `.pdf`/`.md` URL (e.g. `arxiv.org/pdf/…`) is downloaded and imported directly; remote `.bib`/`.ris` URLs are not supported (download first).
+- Routing highlights: an existing local **path wins** over an identifier-shaped string (escape a DOI with `https://doi.org/…`, a filename with `./name`); every resolver route attempts an open-access PDF download by default; registered-host PDF URLs resolve metadata before attachment, while unregistered `.pdf`/`.md` URLs (e.g. `arxiv.org/pdf/…`) are downloaded and imported directly; remote `.bib`/`.ris` URLs are not supported (download first).
 
 ---
 

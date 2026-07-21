@@ -127,12 +127,12 @@ enum MCPAdditionalToolCatalog {
 
     private static let createReferenceTool = MCPTool(
         name: "rubien_create_reference",
-        description: "Create reference(s) from exactly one of `source`, inline `bibtex`, or `title`. `source` accepts identifiers, paper URLs, files, or folders. Stdin is unavailable over MCP.",
+        description: "Create reference(s) from exactly one of `source`, inline `bibtex`, or `title`. `source` accepts identifiers, paper URLs, files, or folders. Resolver sources attempt an open-access PDF fetch by default; pass `downloadPdf: false` to opt out. The reference remains saved if the fetch is unavailable or fails. Stdin is unavailable over MCP.",
         inputSchema: objectSchema(properties: [
             "source": ["type": "string", "description": "Identifier, paper URL, file URL, absolute path, or folder path"],
             "bibtex": ["type": "string", "description": "Inline BibTeX, possibly containing multiple entries"],
             "title": ["type": "string", "description": "Title for a minimal manual entry"],
-            "downloadPdf": ["type": "boolean", "description": "Tri-state PDF fetch override; absent lets the router decide"],
+            "downloadPdf": ["type": "boolean", "description": "Resolver routes only; true or absent attempts an open-access PDF fetch by default, false opts out. Best-effort: the reference remains saved on failure. May add up to ~3 minutes"],
             "format": ["type": "string", "enum": ["bib", "ris", "md"]],
             "property": ["type": "string", "description": "Folder route property"],
             "value": ["type": "string", "description": "Folder route property value"],

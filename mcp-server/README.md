@@ -150,7 +150,7 @@ claude mcp add rubien -- node $(pwd)/dist/index.js        # Claude Code
 | Saved views | `rubien_list_views`, `rubien_create_view`, `rubien_update_view`, `rubien_delete_view` |
 | Sync | `rubien_get_sync_status` (Mac-only — errors on Linux) |
 
-`rubien_create_reference` is the **one door in**: pass exactly one of `source` (any locator — DOI / arXiv / PMID / PMCID / ISBN, paper URL, PDF/Markdown file URL, absolute file path, or folder path; the CLI routes it), `bibtex`, or `title`. It may return multiple items (multi-entry BibTeX, folders) and `status: "existing"` when dedup matched, in the unified `{items, summary, diagnostics}` envelope. Stdin (`"-"`) is intentionally unavailable through MCP.
+`rubien_create_reference` is the **one door in**: pass exactly one of `source` (any locator — DOI / arXiv / PMID / PMCID / ISBN, paper URL, PDF/Markdown file URL, absolute file path, or folder path; the CLI routes it), `bibtex`, or `title`. Resolver sources attempt an open-access PDF fetch by default; pass `downloadPdf: false` to opt out. The reference remains saved if the fetch is unavailable or fails. It may return multiple items (multi-entry BibTeX, folders) and `status: "existing"` when dedup matched, in the unified `{items, summary, diagnostics}` envelope. Stdin (`"-"`) is intentionally unavailable through MCP.
 
 Per-reference property values (cells) are edited through `rubien_update_reference`'s `properties` payload — `{"Status": "Reading", "Tags": {"add": ["12"]}, "7": ["ml", "nlp"], "Themes": null}` — atomically alongside metadata fields. The option tools (`create_option` / `update_option` / `delete_option`) manage the *choices themselves* (including Tag rows for the built-in Tags property).
 

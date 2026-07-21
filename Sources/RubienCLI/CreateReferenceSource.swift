@@ -48,8 +48,8 @@ enum CreateReferenceSource {
             try runStdin(source: source, format: format)
         case .existingPath(let isDirectory):
             try await runExistingPath(source: source, isDirectory: isDirectory, format: format, property: property, value: value)
-        case .resolver(let impliedDownloadPdf):
-            try await runResolver(source: source, downloadPdf: downloadPdf, impliedDownloadPdf: impliedDownloadPdf)
+        case .resolver(let downloadPdf):
+            try await runResolver(source: source, downloadPdf: downloadPdf)
         case .downloadImport:
             try await runDownloadImport(source: source)
         case .unroutable:
@@ -151,15 +151,14 @@ enum CreateReferenceSource {
 
     // MARK: - Resolver route (identifier / paper URL)
 
-    private static func runResolver(source: String, downloadPdf: Bool?, impliedDownloadPdf: Bool) async throws {
-        // Fetch → verify → save → optionally attach the OA PDF. `impliedDownloadPdf`
-        // already respects an explicit `--no-download-pdf` (the router cleared it).
-        let wantPDF = (downloadPdf == true) || impliedDownloadPdf
+    private static func runResolver(source: String, downloadPdf: Bool) async throws {
+        // Fetch → verify → save → optionally attach the OA PDF. The router has
+        // already applied the default-on policy and any explicit opt-out.
         do {
             let (fetched, scrapedPDFURL) = try await MetadataFetcher.fetchWithScrapedPDFURL(from: source)
             var ref = MetadataVerifier.manuallyVerified(fetched, reviewedBy: "cli-source")
             let saveResult = try AppDatabase.shared.saveReference(&ref)
-            let pdf = wantPDF ? await attemptPDFDownload(for: ref, pdfURLOverride: scrapedPDFURL) : nil
+            let pdf = downloadPdf ? await attemptPDFDownload(for: ref, pdfURLOverride: scrapedPDFURL) : nil
             let outcome = ItemOutcome(
                 reference: ref,
                 disposition: saveResult == .existing ? .existing : .created,

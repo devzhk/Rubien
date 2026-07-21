@@ -50,7 +50,7 @@ final class ImportRouterTests: XCTestCase {
     /// disk falls through to the identifier route.
     func testMissingIdentifierShapedPathRoutesAsResolver() {
         let route = ImportRouter.classify(source: "2501.07888", probe: noPaths)
-        XCTAssertEqual(route, .resolver(impliedDownloadPdf: false))
+        XCTAssertEqual(route, .resolver(impliedDownloadPdf: true))
     }
 
     /// A `doi.org` URL is never probed as a local path (it has a scheme), so it
@@ -61,67 +61,50 @@ final class ImportRouterTests: XCTestCase {
         let route = ImportRouter.classify(source: "https://doi.org/10.1234/foo", probe: { _ in
             ImportRouter.PathProbe(exists: true, isDirectory: false)
         })
-        XCTAssertEqual(route, .resolver(impliedDownloadPdf: false))
+        XCTAssertEqual(route, .resolver(impliedDownloadPdf: true))
     }
 
     // MARK: - Step 2: URLs
 
     func testKnownHostLandingURLRoutesToResolver() {
         let route = ImportRouter.classify(source: "https://aclanthology.org/2024.acl-long.123", probe: noPaths)
+        XCTAssertEqual(route, .resolver(impliedDownloadPdf: true))
+    }
+
+    /// Registered PDF forms all take the resolver route and inherit its
+    /// default-on policy; host-specific PDF-shape parsing is no longer needed
+    /// to decide whether a download should be attempted.
+    func testRegisteredHostPDFFormsRouteToResolverWithDefaultDownload() {
+        let sources = [
+            "https://aclanthology.org/2024.acl-long.123.pdf",
+            "https://www.cell.com/neuron/pdf/S0896-6273(26)00414-9.pdf",
+            "https://journals.aps.org/prl/pdf/10.1103/3v91-5pzf",
+            "https://www.science.org/doi/pdf/10.1126/sciadv.abn9545",
+            "https://pubs.acs.org/doi/epdf/10.1021/acscentsci.3c01275",
+        ]
+
+        for source in sources {
+            XCTAssertEqual(
+                ImportRouter.classify(source: source, probe: noPaths),
+                .resolver(impliedDownloadPdf: true),
+                source
+            )
+        }
+    }
+
+    /// An explicit `--no-download-pdf` suppresses the default download.
+    func testExplicitFalseSuppressesDefaultDownloadForPDFURL() {
+        let route = ImportRouter.classify(
+            source: "https://aclanthology.org/2024.acl-long.123.pdf",
+            explicitDownloadPdf: false,
+            probe: noPaths
+        )
         XCTAssertEqual(route, .resolver(impliedDownloadPdf: false))
     }
 
-    /// A registered-host `.pdf` URL routes to the resolver AND implies a PDF
-    /// download (the caller pointed at a PDF).
-    func testKnownHostPDFURLImpliesDownload() {
-        let route = ImportRouter.classify(source: "https://aclanthology.org/2024.acl-long.123.pdf", probe: noPaths)
-        XCTAssertEqual(route, .resolver(impliedDownloadPdf: true))
-    }
-
-    func testCellPressLandingAndPDFRouteToResolver() {
-        let landing = ImportRouter.classify(
-            source: "https://www.cell.com/neuron/fulltext/S0896-6273(26)00414-9",
-            probe: noPaths
-        )
-        let pdf = ImportRouter.classify(
-            source: "https://www.cell.com/neuron/pdf/S0896-6273(26)00414-9.pdf",
-            probe: noPaths
-        )
-        XCTAssertEqual(landing, .resolver(impliedDownloadPdf: false))
-        XCTAssertEqual(pdf, .resolver(impliedDownloadPdf: true))
-
-        let trends = ImportRouter.classify(
-            source: "https://www.cell.com/trends/microbiology/fulltext/S0966-842X(26)00180-0",
-            probe: noPaths
-        )
-        XCTAssertEqual(trends, .resolver(impliedDownloadPdf: false))
-    }
-
-    func testAPSPDFURLWithoutExtensionImpliesDownload() {
+    func testExplicitFalseSuppressesDefaultDownloadForLandingURL() {
         let route = ImportRouter.classify(
-            source: "https://journals.aps.org/prl/pdf/10.1103/3v91-5pzf",
-            probe: noPaths
-        )
-        XCTAssertEqual(route, .resolver(impliedDownloadPdf: true))
-    }
-
-    func testScienceAndACSPDFURLsWithoutExtensionsImplyDownload() {
-        let science = ImportRouter.classify(
-            source: "https://www.science.org/doi/pdf/10.1126/sciadv.abn9545",
-            probe: noPaths
-        )
-        let acs = ImportRouter.classify(
-            source: "https://pubs.acs.org/doi/epdf/10.1021/acscentsci.3c01275",
-            probe: noPaths
-        )
-        XCTAssertEqual(science, .resolver(impliedDownloadPdf: true))
-        XCTAssertEqual(acs, .resolver(impliedDownloadPdf: true))
-    }
-
-    /// An explicit `--no-download-pdf` suppresses the implied download.
-    func testExplicitFalseSuppressesImpliedDownload() {
-        let route = ImportRouter.classify(
-            source: "https://aclanthology.org/2024.acl-long.123.pdf",
+            source: "https://aclanthology.org/2024.acl-long.123",
             explicitDownloadPdf: false,
             probe: noPaths
         )
@@ -162,11 +145,20 @@ final class ImportRouterTests: XCTestCase {
 
     func testBareDOIRoutesToResolver() {
         let route = ImportRouter.classify(source: "10.1038/s41586-021-03819-2", probe: noPaths)
-        XCTAssertEqual(route, .resolver(impliedDownloadPdf: false))
+        XCTAssertEqual(route, .resolver(impliedDownloadPdf: true))
     }
 
     func testBarePMCIDRoutesToResolver() {
         let route = ImportRouter.classify(source: "PMC4587766", probe: noPaths)
+        XCTAssertEqual(route, .resolver(impliedDownloadPdf: true))
+    }
+
+    func testExplicitFalseSuppressesDefaultDownloadForBareIdentifier() {
+        let route = ImportRouter.classify(
+            source: "PMC4587766",
+            explicitDownloadPdf: false,
+            probe: noPaths
+        )
         XCTAssertEqual(route, .resolver(impliedDownloadPdf: false))
     }
 

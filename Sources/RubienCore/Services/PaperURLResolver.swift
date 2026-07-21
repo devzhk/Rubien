@@ -987,22 +987,6 @@ internal extension PaperURLResolver {
 // MARK: - PDF → landing rewrite
 
 internal extension PaperURLResolver {
-    /// True when `url` is `host`'s PDF form of an article link. The default
-    /// is a `.pdf` path extension; hosts whose PDF URLs lack one override.
-    static func isPublisherPDFURL(_ url: URL, host: KnownPaperHost) -> Bool {
-        switch host {
-        case .aps:
-            return apsArticle(from: url)?.pageKind == .pdf
-        case .science, .acs:
-            guard let article = doiPublisherArticle(from: url, host: host) else { return false }
-            return article.pageKind == .pdf || article.pageKind == .epdf
-        case .aanda:
-            return aandaArticle(from: url)?.pageKind == .pdf
-        default:
-            return url.pathExtension.lowercased() == "pdf"
-        }
-    }
-
     static let neurIPSRewriteRegex = try! NSRegularExpression(
         pattern: #"(/paper_files/paper/\d+/)file/(.+)-Paper(.*)\.pdf$"#
     )

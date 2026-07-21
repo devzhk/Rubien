@@ -18,12 +18,11 @@ public enum ImportRouter {
         /// DOI-shaped filename that exists on disk routes here.
         case existingPath(isDirectory: Bool)
         /// A resolver route: a bare identifier (DOI / arXiv / PMID / PMCID /
-        /// ISBN) or a known paper-host URL. `impliedDownloadPdf` is true only
-        /// for a registered-host PDF URL (`PaperURLResolver.isPublisherPDFURL`:
-        /// a `.pdf` path extension, or a host-specific PDF path shape) where
-        /// the caller did not explicitly pass `downloadPdf: false` — the caller
-        /// handed us a PDF link, so resolving to metadata-only would silently
-        /// drop it (§5.2 step 2).
+        /// ISBN) or a known paper-host URL. The associated value is the
+        /// effective choice after applying the tri-state override: resolver
+        /// routes fetch an open-access PDF by default, and an explicit `false`
+        /// opts out. The original `impliedDownloadPdf` label is retained for
+        /// source compatibility with existing RubienCore clients.
         case resolver(impliedDownloadPdf: Bool)
         /// A URL with a `.pdf` / `.md` / `.markdown` path extension on an
         /// *unregistered* host → download-then-import (materializer) route.
@@ -44,10 +43,10 @@ public enum ImportRouter {
     }
 
     /// Classify `source`. `explicitDownloadPdf` is the caller's tri-state
-    /// `downloadPdf` flag (nil = unset); it only affects the implied-`true`
-    /// rule on a registered-host PDF URL. `probe` checks whether a bare (non-URL)
-    /// string names an existing local path — defaults to `FileManager`, and is
-    /// injectable so the routing matrix runs without touching disk.
+    /// `downloadPdf` flag (nil = unset); resolver routes default to downloading,
+    /// while an explicit `false` opts out. `probe` checks whether a bare
+    /// (non-URL) string names an existing local path — defaults to `FileManager`,
+    /// and is injectable so the routing matrix runs without touching disk.
     public static func classify(
         source rawSource: String,
         explicitDownloadPdf: Bool? = nil,
@@ -58,6 +57,7 @@ public enum ImportRouter {
         // so an MCP source — no shell to strip it — classifies the same as the
         // materializer would import it.
         let source = rawSource.trimmingCharacters(in: .whitespacesAndNewlines)
+        let downloadPdf = explicitDownloadPdf != false
 
         // Step 0: stdin (CLI-only).
         if source == "-" { return .stdin }
@@ -80,13 +80,11 @@ public enum ImportRouter {
         if let url = URL(string: source),
            let scheme = url.scheme?.lowercased(),
            scheme == "http" || scheme == "https" {
-            if let host = KnownPaperHost.classify(url) {
+            if KnownPaperHost.classify(url) != nil {
                 // Registered paper host → resolver route (incl. the resolver's
-                // own PDF-URL → landing rewrite). A PDF link implies
-                // downloadPdf: true unless the caller explicitly said false.
-                let isPDFLink = PaperURLResolver.isPublisherPDFURL(url, host: host)
-                let implied = isPDFLink && (explicitDownloadPdf != false)
-                return .resolver(impliedDownloadPdf: implied)
+                // own PDF-URL → landing rewrite). All resolver routes download
+                // by default unless the caller explicitly opts out.
+                return .resolver(impliedDownloadPdf: downloadPdf)
             }
             if ImportSourceKind(pathExtension: pathExtension(of: url)) != nil {
                 // Unregistered host with a file extension → download-import
@@ -96,14 +94,14 @@ public enum ImportRouter {
             // Unregistered host, no file extension → last-chance identifier
             // extraction (a `doi.org/…` or `arxiv.org/abs/…` URL).
             if MetadataFetcher.extractIdentifier(from: source) != nil {
-                return .resolver(impliedDownloadPdf: false)
+                return .resolver(impliedDownloadPdf: downloadPdf)
             }
             return .unroutable(reason: Self.unroutableURLMessage)
         }
 
         // Step 3: a bare string — identifier patterns only.
         if MetadataFetcher.extractIdentifier(from: source) != nil {
-            return .resolver(impliedDownloadPdf: false)
+            return .resolver(impliedDownloadPdf: downloadPdf)
         }
         return .unroutable(reason: Self.unroutableBareMessage)
     }

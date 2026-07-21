@@ -390,7 +390,7 @@ struct CitationTextOutput: Encodable {
 
 /// Stable JSON string for the `action` field across both PDF-download
 /// outputs. Used by `pdf download <id>` and the resolver route's PDF fetch
-/// (`add --source <identifier|paper URL> --download-pdf`).
+/// (`add --source <identifier|paper URL>`, unless explicitly opted out).
 enum PDFDownloadAction: String, Encodable {
     case downloaded
     case replaced
@@ -427,8 +427,8 @@ private func downloadAndAttachPDF(
     return filename
 }
 
-/// Best-effort PDF download for the resolver route's `--download-pdf`. The
-/// reference is already saved by the caller, so all error paths must
+/// Best-effort PDF download for the resolver route. The reference is already
+/// saved by the caller, so all error paths must
 /// soft-fail into the DTO so the command still exits 0. When
 /// `pdfURLOverride` is provided (e.g. from `citation_pdf_url` on a
 /// paper-landing-page scrape), the download path uses it directly —
@@ -786,12 +786,11 @@ struct Add: AsyncParsableCommand {
     @Option(name: .long, help: "Folder source: value to stamp on the property (default: folder basename)")
     var value: String?
 
-    // Tri-state (`--download-pdf` / `--no-download-pdf` / absent, spec §5.1): the
-    // implied-download rule for a registered `.pdf` URL needs "explicitly false"
-    // to be representable. Bare `--download-pdf` stays valid (the npm server
-    // emits exactly that spelling).
+    // Tri-state (`--download-pdf` / `--no-download-pdf` / absent, spec §5.1):
+    // resolver routes default to downloading, so "explicitly false" must remain
+    // representable. Bare `--download-pdf` stays valid.
     @Flag(inversion: .prefixedNo,
-          help: "Fetch the open-access PDF after resolving an identifier / paper URL. A registered `.pdf` URL implies --download-pdf unless --no-download-pdf is given.")
+          help: "Fetch the open-access PDF after resolving an identifier / paper URL (default). Use --no-download-pdf to opt out.")
     var downloadPdf: Bool?
 
     func run() async throws {
@@ -816,7 +815,7 @@ struct Add: AsyncParsableCommand {
         // The route-scoped flags apply only to `--source` routes (§5.1:
         // inapplicable options are rejected, not silently ignored).
         if downloadPdf != nil || format != nil || property != nil || value != nil {
-            printJSONError("--download-pdf / --format / --property / --value require --source")
+            printJSONError("--download-pdf / --no-download-pdf / --format / --property / --value require --source")
             throw ExitCode.failure
         }
         if let bib = bibtex {
