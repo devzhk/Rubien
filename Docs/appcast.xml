@@ -511,5 +511,23 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.6.0</title>
+            <description sparkle:format="plain-text"><![CDATA[• Import papers and articles from Chrome, including authenticated pages and direct PDFs, with confirmation and one-click opening in Rubien.
+• Recognize Cell Press and Hugging Face Papers URLs, preserve URL sources through CLI routing, and download available PDFs by default.
+• Improve Assistant interruption, prompt continuity, approval cards, and scheduled-job progress, history, and search.
+• Reduce library navigation latency and fix lifecycle concurrency issues.
+• Refresh Rubien’s public icon and product positioning.]]></description>
+            <pubDate>Tue, 21 Jul 2026 05:25:24 +0000</pubDate>
+            <sparkle:version>34</sparkle:version>
+            <sparkle:shortVersionString>0.6.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.6.0/Rubien-0.6.0.dmg"
+                sparkle:edSignature="GJ2OBJ+yyTG0wW5loOTxsxlYnIcsef5wGXPnsqp90Z0TK4qWdumVTJ+AbLMF8KXBKbOLT9ZcNNwpdNTRo2BoAg=="
+                length="16682930"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
