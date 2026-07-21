@@ -240,3 +240,7 @@ scripts/
 Linux system libraries are linked dynamically against the user's distro packages — Rubien doesn't vendor or redistribute them.
 
 Rubien began from [SwiftLib by NickHood](https://github.com/NickHood1984/SwiftLib) and adapted portions of its SwiftUI interface, PDF and web readers, and metadata importers.
+
+## License
+
+Rubien's first-party source code is available under the [Apache License 2.0](LICENSE), including the separately packaged [`mcp-server/`](mcp-server). Third-party components retain their original licenses; see [third-party notices](THIRD_PARTY_NOTICES) and the attributions above. Portions adapted from SwiftLib are copyright NickHood and used under its MIT License.

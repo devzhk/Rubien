@@ -53,6 +53,8 @@ cp "$PROJECT_DIR/BrowserExtension/popup.html" "$EXTENSION_DIR/popup.html"
 cp "$PROJECT_DIR/BrowserExtension/popup.css" "$EXTENSION_DIR/popup.css"
 cp "$PROJECT_DIR/BrowserExtension/popup.js" "$EXTENSION_DIR/popup.js"
 cp "$PROJECT_DIR/BrowserExtension/README.md" "$EXTENSION_DIR/README.md"
+cp "$PROJECT_DIR/LICENSE" "$EXTENSION_DIR/LICENSE"
+cp "$PROJECT_DIR/THIRD_PARTY_NOTICES" "$EXTENSION_DIR/THIRD_PARTY_NOTICES"
 cp "$PROJECT_DIR/BrowserExtension/icons/icon-16.png" "$EXTENSION_DIR/icons/icon-16.png"
 cp "$PROJECT_DIR/BrowserExtension/icons/icon-32.png" "$EXTENSION_DIR/icons/icon-32.png"
 cp "$PROJECT_DIR/BrowserExtension/icons/icon-48.png" "$EXTENSION_DIR/icons/icon-48.png"
@@ -78,5 +80,13 @@ if [ "$PACKAGED_VERSION" != "$VERSION" ]; then
     echo "✗ Packaged extension version mismatch: expected $VERSION, found $PACKAGED_VERSION" >&2
     exit 1
 fi
+
+for legal_file in LICENSE THIRD_PARTY_NOTICES; do
+    if ! /usr/bin/unzip -p "$OUTPUT_DIR/$ARTIFACT_NAME" \
+        "Rubien-Browser-Extension/$legal_file" | grep -q '[^[:space:]]'; then
+        echo "✗ Packaged extension is missing $legal_file" >&2
+        exit 1
+    fi
+done
 
 echo "   Browser extension: $OUTPUT_DIR/$ARTIFACT_NAME (manifest $PACKAGED_VERSION)"

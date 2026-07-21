@@ -158,6 +158,20 @@ assemble_app_bundle() {
     stamp_info_plist_version
     stamp_deep_link_info_plist
     stamp_sparkle_info_plist
+    embed_legal_files
+}
+
+embed_legal_files() {
+    local legal_file
+    mkdir -p "$APP_BUNDLE/Contents/Resources"
+    for legal_file in LICENSE THIRD_PARTY_NOTICES; do
+        if [ ! -s "$PROJECT_DIR/$legal_file" ]; then
+            echo "✗ Missing required legal file: $legal_file" >&2
+            exit 1
+        fi
+        cp "$PROJECT_DIR/$legal_file" "$APP_BUNDLE/Contents/Resources/$legal_file"
+    done
+    echo "   ✓ Embedded license and third-party notices"
 }
 
 write_info_plist() {

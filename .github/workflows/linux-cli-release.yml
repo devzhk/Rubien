@@ -36,6 +36,7 @@ jobs:
           # INSTALL.txt / tarring. (Docker Desktop masks this locally by mapping
           # bind-mount ownership to the host user; a real Linux runner does not.)
           sudo chown -R "$(id -u):$(id -g)" stage
+          cp LICENSE THIRD_PARTY_NOTICES stage/
           cat > stage/INSTALL.txt <<'EOF'
           rubien-cli (Linux x86_64). Requires Ubuntu 22.04+ (glibc >= 2.35).
           Runtime deps: sudo apt install libsqlite3-0 libcurl4 libxml2 libpoppler-glib8 libcairo2 libgdk-pixbuf-2.0-0 libglib2.0-0 ca-certificates
@@ -59,6 +60,8 @@ jobs:
             apt-get install -y --no-install-recommends libsqlite3-0 libcurl4 libxml2 libpoppler-glib8 libcairo2 libgdk-pixbuf-2.0-0 libglib2.0-0 ca-certificates
             mkdir -p /opt/r && tar -C /opt/r -xzf /t.tgz
             ls -d /opt/r/*.resources >/dev/null
+            test -s /opt/r/LICENSE
+            test -s /opt/r/THIRD_PARTY_NOTICES
             export RUBIEN_LIBRARY_ROOT=/tmp/lib
             /opt/r/rubien-cli version
             /opt/r/rubien-cli list
