@@ -327,6 +327,16 @@ class Server:
                 cfg = load_config()
                 if cfg.get("grandchild"):
                     spawn_grandchild()
+                if cfg.get("initDelayOnceMs"):
+                    try:
+                        descriptor = os.open(
+                            ".fake-codex-init-delayed",
+                            os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                        )
+                        os.close(descriptor)
+                        time.sleep(int(cfg["initDelayOnceMs"]) / 1000.0)
+                    except FileExistsError:
+                        pass
                 if cfg.get("initDelayMs"):
                     time.sleep(int(cfg["initDelayMs"]) / 1000.0)
                 respond(req_id, {"userAgent": "fake-codex/0.142.5", "codexHome": os.path.expanduser("~/.codex"),

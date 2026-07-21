@@ -626,6 +626,32 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertEqual(observed["initialized"] as? Bool, true)
     }
 
+    func testInitializeTimeoutRetriesOnceOnFreshServer() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "initDelayOnceMs": 3_000,
+            "assistantText": "recovered",
+        ], into: workspace)
+        let provider = CodexProvider(
+            executableOverride: fakeServerPath,
+            requestTimeout: 1)
+        defer { provider.shutdown() }
+
+        let events = try await collectAllEvents(
+            provider.send(turn: turn(workspace: workspace)),
+            timeout: 5)
+
+        XCTAssertTrue(
+            events.contains(.assistantMessageCompleted(text: "recovered")),
+            "expected the retried server to complete the turn; got \(events)")
+        XCTAssertFalse(events.contains { event in
+            if case .providerNotice(let text) = event {
+                return text.contains("initialize timed out")
+            }
+            return false
+        })
+    }
+
     /// Review #2: a straggler `turn/completed` for a DIFFERENT (old/abandoned) turn id
     /// must be dropped by the positive turn-id filter, not finish the current stream
     /// early — the current turn still streams its real content to completion.

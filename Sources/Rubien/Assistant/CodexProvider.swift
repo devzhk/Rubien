@@ -30,10 +30,16 @@ final class CodexProvider: AgentProvider {
     private let connection: CodexAppServerConnection
     private let executableOverride: String?
 
-    init(executableOverride: String? = nil, contentChannel: MCPContentChannel? = nil) {
+    init(
+        executableOverride: String? = nil,
+        contentChannel: MCPContentChannel? = nil,
+        requestTimeout: Double = 30
+    ) {
         self.executableOverride = executableOverride
         self.connection = CodexAppServerConnection(
-            executableOverride: executableOverride, contentChannel: contentChannel)
+            executableOverride: executableOverride,
+            contentChannel: contentChannel,
+            requestTimeout: requestTimeout)
     }
 
     func isAvailable() async -> AgentAvailability {
@@ -254,14 +260,19 @@ private actor CodexAppServerConnection {
     private let contentChannel: MCPContentChannel?
     private let logger = RubienLogger(subsystem: "com.rubien.assistant", category: "CodexProvider")
 
-    init(executableOverride: String?, contentChannel: MCPContentChannel?) {
+    init(
+        executableOverride: String?,
+        contentChannel: MCPContentChannel?,
+        requestTimeout: Double
+    ) {
         self.executableOverride = executableOverride
         self.contentChannel = contentChannel
+        self.requestTimeout = requestTimeout
     }
 
     // Tunables (single point — mirrors ClaudeTurnEngine's named timers).
     /// Bound on any single JSON-RPC request (initialize / thread ops / turn/start).
-    private static let requestTimeout: Double = 30
+    private let requestTimeout: Double
     /// After `turn/interrupt`, force-finish the turn stream if the server never
     /// delivers the interrupted `turn/completed` (the server itself stays alive).
     private static let interruptGrace: Double = 5
@@ -284,6 +295,11 @@ private actor CodexAppServerConnection {
             case .serverExited:
                 return "The assistant ended unexpectedly."
             }
+        }
+
+        var isInitializeTimeout: Bool {
+            if case .timeout(method: "initialize") = self { return true }
+            return false
         }
     }
 
@@ -639,12 +655,29 @@ private actor CodexAppServerConnection {
     private func ensureServer(
         configuration: SpawnConfiguration,
         workspaceURL: URL,
-        reuseAnySpawnConfiguration: Bool = false
+        reuseAnySpawnConfiguration: Bool = false,
+        allowInitializeRetry: Bool = true
     ) async throws -> Server {
         if let srv = server {
             if reuseAnySpawnConfiguration || srv.spawnConfiguration == configuration {
-                try await joinHandshake(srv)   // fast path still waits for initialize
-                return srv
+                do {
+                    try await joinHandshake(srv)   // fast path still waits for initialize
+                    return srv
+                } catch let failure as RequestFailure {
+                    // A failed handshake can never become usable. In particular, keeping
+                    // an initialize timeout cached on a still-live process made every
+                    // later send in this window fail immediately with the same notice.
+                    if server === srv { killServer(srv) }
+                    guard failure.isInitializeTimeout, allowInitializeRetry else {
+                        throw failure
+                    }
+                    logger.info("codex initialize timed out — retrying once on a fresh app-server")
+                    return try await ensureServer(
+                        configuration: configuration,
+                        workspaceURL: workspaceURL,
+                        reuseAnySpawnConfiguration: reuseAnySpawnConfiguration,
+                        allowInitializeRetry: false)
+                }
             }
             logger.info("spawn configuration changed — respawning codex app-server")
             killServer(srv)
@@ -705,9 +738,19 @@ private actor CodexAppServerConnection {
             return srv
         } catch let failure as RequestFailure {
             completeHandshake(srv, .failure(failure))
+            if server === srv { killServer(srv) }
+            if failure.isInitializeTimeout, allowInitializeRetry {
+                logger.info("codex initialize timed out — retrying once on a fresh app-server")
+                return try await ensureServer(
+                    configuration: configuration,
+                    workspaceURL: workspaceURL,
+                    reuseAnySpawnConfiguration: reuseAnySpawnConfiguration,
+                    allowInitializeRetry: false)
+            }
             throw failure
         } catch {
             completeHandshake(srv, .failure(.serverExited))
+            if server === srv { killServer(srv) }
             throw RequestFailure.serverExited
         }
     }
@@ -905,12 +948,13 @@ private actor CodexAppServerConnection {
         srv.nextRequestID += 1
         let line = build(requestID)
         let generation = srv.generation
+        let timeout = requestTimeout
 
         let outcome: Result<[String: Any], RequestFailure> = await withCheckedContinuation { continuation in
             srv.pending[requestID] = continuation
             srv.process.writeLine(line)
             Task { [weak self] in
-                try? await Task.sleep(for: .seconds(Self.requestTimeout))
+                try? await Task.sleep(for: .seconds(timeout))
                 await self?.timeoutRequest(generation: generation, requestID: requestID, method: method)
             }
         }
@@ -921,7 +965,7 @@ private actor CodexAppServerConnection {
         guard let srv = server, srv.generation == generation,
               let waiter = srv.pending.removeValue(forKey: requestID)
         else { return }
-        logger.error("codex request \(method) timed out after \(Self.requestTimeout)s")
+        logger.error("codex request \(method) timed out after \(self.requestTimeout)s")
         waiter.resume(returning: .failure(.timeout(method: method)))
     }
 
