@@ -178,16 +178,33 @@ final class CodexProviderTests: XCTestCase {
         })
     }
 
-    func testConfiguredMCPServerNameParserRejectsUnsafeNames() {
+    func testConfiguredMCPServerNameParserKeepsOnlyEnabledServers() {
         XCTAssertEqual(
-            CodexInvocation.configuredMCPServerNames(
-                from: #"[{"name":"github"},{"name":"sites-design-picker"}]"#
+            CodexInvocation.configuredEnabledMCPServerNames(
+                from: #"[{"name":"github","enabled":true},{"name":"computer-use","enabled":false},{"name":"sites-design-picker"}]"#
             ),
             ["github", "sites-design-picker"]
         )
-        XCTAssertNil(CodexInvocation.configuredMCPServerNames(
-            from: #"[{"name":"unsafe.name"}]"#
+    }
+
+    func testScheduledMCPProbeAppliesFeatureIsolationBeforeListingServers() {
+        XCTAssertEqual(CodexInvocation.scheduledMCPListArguments, [
+            "--disable", "apps",
+            "--disable", "plugins",
+            "mcp", "list", "--json",
+        ])
+    }
+
+    func testConfiguredMCPServerNameParserRejectsUnsafeEnabledNames() {
+        XCTAssertNil(CodexInvocation.configuredEnabledMCPServerNames(
+            from: #"[{"name":"unsafe.name","enabled":true}]"#
         ))
+        XCTAssertEqual(
+            CodexInvocation.configuredEnabledMCPServerNames(
+                from: #"[{"name":"unsafe.name","enabled":false},{"name":"github","enabled":true}]"#
+            ),
+            ["github"]
+        )
     }
 
     func testUserToolsOptInEnablesCodexAppsAndKeepsRubienInjection() async throws {

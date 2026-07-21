@@ -121,13 +121,23 @@ final class CodexProvider: AgentProvider {
 /// (mirrors `ClaudeCLIInvocation`).
 enum CodexInvocation {
 
+    /// Query the effective ambient MCP catalog after applying the same feature
+    /// isolation as a scheduled app-server. Plugin-provided servers disappear at
+    /// the source instead of being rediscovered and then recreated as invalid,
+    /// transport-less `enabled=false` overrides.
+    static let scheduledMCPListArguments = [
+        "--disable", "apps",
+        "--disable", "plugins",
+        "mcp", "list", "--json",
+    ]
+
     /// Arguments for the long-lived `codex app-server` process.
     ///
     /// - `loadUserTools` (the "use my other MCP servers" opt-in lever, default OFF):
     ///   when off, `--disable apps` drops codex's BUILT-IN app connectors (the one
-    ///   net-new silent-read surface vs Claude — §4). The user's own configured
-    ///   `~/.codex` servers still load either way (codex has no `--strict-mcp-config`
-    ///   analogue — accepted posture).
+    ///   net-new silent-read surface vs Claude — §4). In interactive runs, the
+    ///   user's configured `~/.codex` servers still load either way; scheduled
+    ///   runs separately disable them because codex has no `--strict-mcp-config`.
     /// - `webAccess=false` disables codex's built-in web search for this server.
     /// - The rubien `-c` KEY overrides replace any user-configured `rubien` entry
     ///   field-by-field (command/args/env all set), so exactly one rubien loads.
@@ -197,13 +207,19 @@ enum CodexInvocation {
         return args
     }
 
-    static func configuredMCPServerNames(from json: String) -> [String]? {
+    static func configuredEnabledMCPServerNames(from json: String) -> [String]? {
         guard let data = json.data(using: .utf8),
               let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
         else { return nil }
         let validName = try? NSRegularExpression(pattern: "^[A-Za-z0-9_-]+$")
         var names = Set<String>()
         for row in rows {
+            // `codex mcp list --json` includes disabled entries. Do not add a
+            // redundant override for them: touching an already-disabled legacy
+            // entry can make newer Codex versions validate its stale transport
+            // and reject the whole app-server configuration. A missing/non-Boolean
+            // status remains conservative and is treated as enabled.
+            if let enabled = row["enabled"] as? Bool, !enabled { continue }
             guard let name = row["name"] as? String,
                   !name.isEmpty,
                   validName?.firstMatch(
@@ -643,11 +659,11 @@ private actor CodexAppServerConnection {
         if configuration.readOnlyLibrary {
             guard let catalog = AgentBinaryProbe.run(
                 executablePath: executable,
-                arguments: ["mcp", "list", "--json"],
+                arguments: CodexInvocation.scheduledMCPListArguments,
                 environment: environment,
                 timeout: 5,
                 workingDirectory: workspaceURL.path
-            ), let names = CodexInvocation.configuredMCPServerNames(from: catalog) else {
+            ), let names = CodexInvocation.configuredEnabledMCPServerNames(from: catalog) else {
                 throw AgentProviderError.isolationUnavailable
             }
             disabledMCPServerNames = names
