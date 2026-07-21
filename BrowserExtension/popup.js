@@ -8,6 +8,8 @@ let previewOffersPDF = false;
 let pendingDownloadID = null;
 let confirmationAwaitingHost = false;
 let finished = false;
+let openingRubien = false;
+let resultDestination = null;
 
 const views = ['loading-view', 'preview-view', 'result-view', 'error-view'];
 const actionBars = ['preview-actions', 'result-actions', 'error-actions'];
@@ -15,7 +17,7 @@ const actionBars = ['preview-actions', 'result-actions', 'error-actions'];
 document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('cancel-button').addEventListener('click', closePopup);
   document.getElementById('confirm-button').addEventListener('click', confirmImport);
-  document.getElementById('done-button').addEventListener('click', closePopup);
+  document.getElementById('open-button').addEventListener('click', openInRubien);
   document.getElementById('close-button').addEventListener('click', closePopup);
   document.getElementById('retry-button').addEventListener('click', () => location.reload());
   void prepareImport();
@@ -54,16 +56,7 @@ async function prepareImport() {
     }
 
     setLoading('Resolving with Rubien…', 'Nothing has been saved yet.');
-    nativePort = chrome.runtime.connectNative(NATIVE_HOST_NAME);
-    nativePort.onMessage.addListener(handleNativeResponse);
-    nativePort.onDisconnect.addListener(() => {
-      const message = chrome.runtime.lastError?.message;
-      nativePort = null;
-      if (!finished && message) {
-        confirmationAwaitingHost = false;
-        showError(message);
-      }
-    });
+    nativePort = connectNativeHost();
     nativePort.postMessage({
       version: PROTOCOL_VERSION,
       command: 'preview',
@@ -77,12 +70,22 @@ async function prepareImport() {
 function handleNativeResponse(response) {
   confirmationAwaitingHost = false;
   if (!response?.ok) {
-    showError(response?.error?.message || 'Rubien could not prepare this import.');
+    const message = response?.error?.message || 'Rubien could not prepare this import.';
+    if (openingRubien) {
+      showOpenError(message);
+    } else {
+      showError(message);
+    }
     return;
   }
   if (response.preview) {
     confirmationID = response.preview.confirmationID;
     renderPreview(response.preview);
+    return;
+  }
+  if (response.opened) {
+    openingRubien = false;
+    closePopup();
     return;
   }
   if (response.result) {
@@ -171,11 +174,85 @@ function renderResult(response) {
   setText('result-title', queued ? 'Queued for review' : (existing ? 'Already in Rubien' : 'Imported'));
   const title = response.title || 'The reference is now available in Rubien.';
   setText('result-detail', response.message ? `${title} — ${response.message}` : title);
+  const referenceID = Number.isSafeInteger(response.referenceID) && response.referenceID > 0
+    ? response.referenceID
+    : null;
+  const intakeID = Number.isSafeInteger(response.intakeID) && response.intakeID > 0
+    ? response.intakeID
+    : null;
+  resultDestination = referenceID !== null
+    ? { referenceID }
+    : (intakeID !== null ? { intakeID } : null);
+  const openButton = document.getElementById('open-button');
+  openButton.disabled = false;
+  openButton.textContent = resultDestination
+    ? (queued ? 'Review in Rubien' : 'Open in Rubien')
+    : 'Done';
+  toggleHidden('result-open-error', true);
+  showOnly('result-view', 'result-actions');
+}
+
+function connectNativeHost() {
+  const port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
+  port.onMessage.addListener(handleNativeResponse);
+  port.onDisconnect.addListener(() => {
+    const message = chrome.runtime.lastError?.message;
+    if (nativePort === port) nativePort = null;
+    if (openingRubien) {
+      openingRubien = false;
+      confirmationAwaitingHost = false;
+      showOpenError(message || 'Rubien closed the connection before opening this item.');
+    } else if (!finished && message) {
+      confirmationAwaitingHost = false;
+      showError(message);
+    }
+  });
+  return port;
+}
+
+function openInRubien() {
+  if (!resultDestination) {
+    closePopup();
+    return;
+  }
+
+  const openButton = document.getElementById('open-button');
+  openButton.disabled = true;
+  openButton.textContent = 'Opening Rubien…';
+  openingRubien = true;
+
+  try {
+    if (!nativePort) nativePort = connectNativeHost();
+    nativePort.postMessage({
+      version: PROTOCOL_VERSION,
+      command: 'open',
+      ...resultDestination,
+    });
+  } catch (error) {
+    openingRubien = false;
+    showOpenError(error instanceof Error ? error.message : String(error));
+  }
+}
+
+function showOpenError(message) {
+  openingRubien = false;
+  finished = true;
+  const port = nativePort;
+  nativePort = null;
+  if (port) port.disconnect();
+  setText('result-open-error', message);
+  toggleHidden('result-open-error', false);
+  const openButton = document.getElementById('open-button');
+  openButton.disabled = false;
+  openButton.textContent = resultDestination?.intakeID
+    ? 'Review in Rubien'
+    : 'Open in Rubien';
   showOnly('result-view', 'result-actions');
 }
 
 function showError(message) {
   finished = true;
+  openingRubien = false;
   const port = nativePort;
   nativePort = null;
   if (port) port.disconnect();
@@ -209,6 +286,7 @@ function showOnly(viewID, actionsID = null) {
 
 function closePopup() {
   finished = true;
+  openingRubien = false;
   if (nativePort) nativePort.disconnect();
   nativePort = null;
   void cleanupPDFDownload();

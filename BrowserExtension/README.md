@@ -63,7 +63,9 @@ preview; clear it to import bibliographic metadata without downloading a PDF.
 
 After confirmation, the popup reports whether the reference was created,
 matched an existing item, or entered the pending-review queue, plus whether a
-paper PDF was attached.
+paper PDF was attached. Choose **Open in Rubien** to reveal a created or matched
+reference in the library; queued imports open directly in the pending-review
+sheet.
 
 ## Security and packaging
 

@@ -239,6 +239,11 @@ final class AppDatabaseTests: XCTestCase {
         XCTAssertEqual(intake.verificationStatus, .candidate)
         XCTAssertEqual(intake.decodedCandidates.count, 1)
         XCTAssertEqual(try db.fetchPendingMetadataIntakes().count, 1)
+        XCTAssertEqual(
+            try db.fetchPendingMetadataIntake(id: try XCTUnwrap(intake.id))?.id,
+            intake.id
+        )
+        XCTAssertNil(try db.fetchPendingMetadataIntake(id: Int64.max))
     }
 
     func testPersistVerifiedResolutionWritesReference() throws {
@@ -431,6 +436,7 @@ final class AppDatabaseTests: XCTestCase {
         XCTAssertEqual(try db.pdfFilename(for: try XCTUnwrap(reference.id)), "PDFs/staged.pdf")
 
         let intakeID = try XCTUnwrap(intake.id)
+        XCTAssertNil(try db.fetchPendingMetadataIntake(id: intakeID))
         let stored = try XCTUnwrap(try db.dbWriter.read { database in
             try MetadataIntake.fetchOne(database, id: intakeID)
         })

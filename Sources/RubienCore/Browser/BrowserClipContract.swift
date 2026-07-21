@@ -25,6 +25,8 @@ public struct BrowserClipRequest: Codable, Sendable, Equatable {
     public var confirmationID: String?
     public var downloadedPDFPath: String?
     public var downloadPDF: Bool?
+    public var referenceID: Int64?
+    public var intakeID: Int64?
 
     public init(
         version: Int,
@@ -32,7 +34,9 @@ public struct BrowserClipRequest: Codable, Sendable, Equatable {
         page: BrowserClipPage? = nil,
         confirmationID: String? = nil,
         downloadedPDFPath: String? = nil,
-        downloadPDF: Bool? = nil
+        downloadPDF: Bool? = nil,
+        referenceID: Int64? = nil,
+        intakeID: Int64? = nil
     ) {
         self.version = version
         self.command = command
@@ -40,6 +44,75 @@ public struct BrowserClipRequest: Codable, Sendable, Equatable {
         self.confirmationID = confirmationID
         self.downloadedPDFPath = downloadedPDFPath
         self.downloadPDF = downloadPDF
+        self.referenceID = referenceID
+        self.intakeID = intakeID
+    }
+}
+
+public enum BrowserClipDeepLinkDestination: Sendable, Equatable {
+    case reference(Int64)
+    case pendingIntake(Int64)
+}
+
+/// App deep links used by the browser helper after an import is committed.
+/// Keeping construction and parsing in the shared wire-contract target avoids
+/// letting the extension or helper invent arbitrary URLs for Rubien to open.
+public enum BrowserClipDeepLink {
+    public static let scheme = "rubien"
+
+    public static func destination(
+        referenceID: Int64?,
+        intakeID: Int64?
+    ) -> BrowserClipDeepLinkDestination? {
+        switch (referenceID, intakeID) {
+        case (.some(let id), nil) where id > 0:
+            return .reference(id)
+        case (nil, .some(let id)) where id > 0:
+            return .pendingIntake(id)
+        default:
+            return nil
+        }
+    }
+
+    public static func url(for destination: BrowserClipDeepLinkDestination) -> URL? {
+        let host: String
+        let id: Int64
+        switch destination {
+        case .reference(let value):
+            host = "reference"
+            id = value
+        case .pendingIntake(let value):
+            host = "pending-intake"
+            id = value
+        }
+        guard id > 0 else { return nil }
+        return URL(string: "\(scheme)://\(host)/\(id)")
+    }
+
+    public static func parse(_ url: URL) -> BrowserClipDeepLinkDestination? {
+        guard url.scheme?.lowercased() == scheme,
+              url.user == nil,
+              url.password == nil,
+              url.port == nil,
+              url.query == nil,
+              url.fragment == nil,
+              let host = url.host?.lowercased()
+        else { return nil }
+
+        let segments = url.path.split(separator: "/", omittingEmptySubsequences: true)
+        guard segments.count == 1,
+              let id = Int64(segments[0]),
+              id > 0
+        else { return nil }
+
+        switch host {
+        case "reference":
+            return .reference(id)
+        case "pending-intake":
+            return .pendingIntake(id)
+        default:
+            return nil
+        }
     }
 }
 
@@ -210,6 +283,7 @@ public struct BrowserClipFailure: Codable, Sendable, Equatable {
 
 public struct BrowserClipResponse: Codable, Sendable, Equatable {
     public var ok: Bool
+    public var opened: Bool?
     public var result: BrowserClipSaveResult?
     public var referenceID: Int64?
     public var intakeID: Int64?
@@ -222,6 +296,7 @@ public struct BrowserClipResponse: Codable, Sendable, Equatable {
 
     public init(
         ok: Bool,
+        opened: Bool? = nil,
         result: BrowserClipSaveResult? = nil,
         referenceID: Int64? = nil,
         intakeID: Int64? = nil,
@@ -233,6 +308,7 @@ public struct BrowserClipResponse: Codable, Sendable, Equatable {
         error: BrowserClipFailure? = nil
     ) {
         self.ok = ok
+        self.opened = opened
         self.result = result
         self.referenceID = referenceID
         self.intakeID = intakeID
@@ -276,5 +352,16 @@ public struct BrowserClipResponse: Codable, Sendable, Equatable {
         _ preview: BrowserClipConfirmationPreview
     ) -> BrowserClipResponse {
         BrowserClipResponse(ok: true, preview: preview)
+    }
+
+    public static func opened(
+        _ destination: BrowserClipDeepLinkDestination
+    ) -> BrowserClipResponse {
+        switch destination {
+        case .reference(let id):
+            return BrowserClipResponse(ok: true, opened: true, referenceID: id)
+        case .pendingIntake(let id):
+            return BrowserClipResponse(ok: true, opened: true, intakeID: id)
+        }
     }
 }

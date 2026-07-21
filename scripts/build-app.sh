@@ -156,6 +156,7 @@ assemble_app_bundle() {
     fi
 
     stamp_info_plist_version
+    stamp_deep_link_info_plist
     stamp_sparkle_info_plist
 }
 
@@ -209,6 +210,14 @@ stamp_info_plist_version() {
     /usr/bin/plutil -replace CFBundleShortVersionString -string "$VERSION" "$plist"
     /usr/bin/plutil -replace CFBundleVersion -string "$BUILD_NUMBER" "$plist"
     echo "   ✓ Stamped Info.plist: $VERSION ($BUILD_NUMBER)"
+}
+
+stamp_deep_link_info_plist() {
+    local plist="$APP_BUNDLE/Contents/Info.plist"
+    local url_types="[{\"CFBundleTypeRole\":\"Viewer\",\"CFBundleURLName\":\"$BUNDLE_ID\",\"CFBundleURLSchemes\":[\"rubien\"]}]"
+    /usr/bin/plutil -replace CFBundleURLTypes -json "$url_types" "$plist" 2>/dev/null \
+        || /usr/bin/plutil -insert CFBundleURLTypes -json "$url_types" "$plist"
+    echo "   ✓ Registered rubien:// app links"
 }
 
 stamp_sparkle_info_plist() {

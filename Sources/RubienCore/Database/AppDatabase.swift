@@ -2317,14 +2317,23 @@ extension AppDatabase {
         try dbWriter.read { db in
             try MetadataIntake
                 .filter(
-                    [VerificationStatus.seedOnly.rawValue,
-                     VerificationStatus.candidate.rawValue,
-                     VerificationStatus.blocked.rawValue,
-                     VerificationStatus.rejectedAmbiguous.rawValue]
+                    VerificationStatus.pendingQueueRawValues
                         .contains(MetadataIntake.Columns.verificationStatus)
                 )
                 .order(MetadataIntake.Columns.updatedAt.desc)
                 .fetchAll(db)
+        }
+    }
+
+    public func fetchPendingMetadataIntake(id: Int64) throws -> MetadataIntake? {
+        try dbWriter.read { db in
+            try MetadataIntake
+                .filter(MetadataIntake.Columns.id == id)
+                .filter(
+                    VerificationStatus.pendingQueueRawValues
+                        .contains(MetadataIntake.Columns.verificationStatus)
+                )
+                .fetchOne(db)
         }
     }
 
@@ -3674,10 +3683,7 @@ extension AppDatabase {
         observePublisher { db in
             try MetadataIntake
                 .filter(
-                    [VerificationStatus.seedOnly.rawValue,
-                     VerificationStatus.candidate.rawValue,
-                     VerificationStatus.blocked.rawValue,
-                     VerificationStatus.rejectedAmbiguous.rawValue]
+                    VerificationStatus.pendingQueueRawValues
                         .contains(MetadataIntake.Columns.verificationStatus)
                 )
                 .order(MetadataIntake.Columns.updatedAt.desc)

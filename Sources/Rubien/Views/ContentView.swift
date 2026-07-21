@@ -1562,6 +1562,27 @@ struct ContentView: View {
             selectedId = id
             columnVisibility = .all
         }
+        .onReceive(NotificationCenter.default.publisher(for: .rubienOpenBrowserImport)) { note in
+            guard let target = note.object as? NSWindow,
+                  hostingWindowBox.window === target
+            else { return }
+
+            if let id = note.userInfo?[RubienOpenBrowserImportKeys.referenceID] as? Int64,
+               let reference = try? viewModel.db.fetchReferences(ids: [id]).first {
+                revealReference(reference)
+                return
+            }
+
+            if let id = note.userInfo?[RubienOpenBrowserImportKeys.intakeID] as? Int64,
+               let intake = try? viewModel.db.fetchPendingMetadataIntake(id: id) {
+                showLibrary()
+                scopedPendingMetadataIntakes = PendingMetadataIntakePresentation.scopedIntakes(
+                    from: [intake]
+                )
+                pendingQueueNotice = nil
+                showPendingMetadataQueue = true
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .rubienOpenAssistantPaperReference)) { note in
             guard let target = note.object as? NSWindow,
                   hostingWindowBox.window === target

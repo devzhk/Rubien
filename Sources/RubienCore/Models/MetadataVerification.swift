@@ -15,6 +15,10 @@ public enum VerificationStatus: String, Codable, CaseIterable, DatabaseValueConv
     case verifiedAuto
     case verifiedManual
 
+    static let pendingQueueRawValues = allCases
+        .filter(\.isPendingQueueVisible)
+        .map(\.rawValue)
+
     public var isLibraryReady: Bool {
         switch self {
         case .verifiedAuto, .verifiedManual:

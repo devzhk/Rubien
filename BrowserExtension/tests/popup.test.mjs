@@ -9,14 +9,174 @@ const popupSource = await readFile(
 );
 
 function makeElement() {
+  const classes = new Set();
   return {
     checked: false,
     disabled: false,
     textContent: '',
-    classList: { toggle() {} },
+    classList: {
+      toggle(name, force) {
+        if (force === true) classes.add(name);
+        else if (force === false) classes.delete(name);
+        else if (classes.has(name)) classes.delete(name);
+        else classes.add(name);
+      },
+      contains(name) { return classes.has(name); },
+    },
     addEventListener() {},
   };
 }
+
+test('result action opens imported references and queued reviews in Rubien', () => {
+  const elements = new Map();
+  const messages = [];
+  const element = (id) => {
+    if (!elements.has(id)) elements.set(id, makeElement());
+    return elements.get(id);
+  };
+  const context = vm.createContext({
+    URL,
+    clearTimeout,
+    console,
+    setTimeout,
+    document: {
+      addEventListener() {},
+      getElementById: element,
+    },
+    window: { addEventListener() {}, close() {} },
+    chrome: {},
+  });
+  vm.runInContext(popupSource, context);
+  vm.runInContext(`
+    nativePort = {
+      postMessage(message) { globalThis.openMessage = message; },
+      disconnect() {},
+    };
+  `, context);
+
+  vm.runInContext(`renderResult({
+    result: 'created', referenceID: 42, title: 'A paper'
+  }); openInRubien();`, context);
+  messages.push(structuredClone(context.openMessage));
+  assert.equal(element('open-button').textContent, 'Opening Rubien…');
+
+  vm.runInContext(`renderResult({
+    result: 'queued', intakeID: 73, title: 'Needs review'
+  }); openInRubien();`, context);
+  messages.push(structuredClone(context.openMessage));
+
+  assert.deepEqual(messages, [
+    {
+      version: 4,
+      command: 'open',
+      referenceID: 42,
+    },
+    {
+      version: 4,
+      command: 'open',
+      intakeID: 73,
+    },
+  ]);
+  assert.equal(element('open-button').textContent, 'Opening Rubien…');
+});
+
+test('successful open acknowledgement closes the result popup', () => {
+  const elements = new Map();
+  let closed = false;
+  let disconnected = 0;
+  const context = vm.createContext({
+    URL,
+    clearTimeout,
+    console,
+    setTimeout,
+    document: {
+      addEventListener() {},
+      getElementById(id) {
+        if (!elements.has(id)) elements.set(id, makeElement());
+        return elements.get(id);
+      },
+    },
+    window: {
+      addEventListener() {},
+      close() { closed = true; },
+    },
+    disconnected() { disconnected += 1; },
+    chrome: {},
+  });
+  vm.runInContext(popupSource, context);
+  vm.runInContext(`
+    nativePort = {
+      postMessage() {},
+      disconnect() { globalThis.disconnected(); },
+    };
+    renderResult({ result: 'created', referenceID: 42, title: 'A paper' });
+    openInRubien();
+    handleNativeResponse({ ok: true, opened: true });
+  `, context);
+
+  assert.equal(closed, true);
+  assert.equal(disconnected, 1);
+});
+
+test('open failure preserves the import result and supports retry', () => {
+  const elements = new Map();
+  const retryMessages = [];
+  let disconnectListener;
+  const retryPort = {
+    onMessage: { addListener() {} },
+    onDisconnect: { addListener(listener) { disconnectListener = listener; } },
+    postMessage(message) { retryMessages.push(structuredClone(message)); },
+    disconnect() {},
+  };
+  const context = vm.createContext({
+    URL,
+    clearTimeout,
+    console,
+    setTimeout,
+    document: {
+      addEventListener() {},
+      getElementById(id) {
+        if (!elements.has(id)) elements.set(id, makeElement());
+        return elements.get(id);
+      },
+    },
+    window: { addEventListener() {}, close() {} },
+    chrome: {
+      runtime: {
+        connectNative() { return retryPort; },
+      },
+    },
+  });
+  vm.runInContext(popupSource, context);
+  vm.runInContext(`
+    nativePort = {
+      postMessage() {},
+      disconnect() {},
+    };
+    renderResult({ result: 'created', referenceID: 42, title: 'A paper' });
+    openInRubien();
+    handleNativeResponse({
+      ok: false,
+      error: { message: 'macOS could not open Rubien.' },
+    });
+  `, context);
+
+  assert.equal(elements.get('result-title').textContent, 'Imported');
+  assert.equal(elements.get('result-open-error').textContent, 'macOS could not open Rubien.');
+  assert.equal(elements.get('result-open-error').classList.contains('hidden'), false);
+  assert.equal(elements.get('open-button').disabled, false);
+  assert.equal(elements.get('open-button').textContent, 'Open in Rubien');
+
+  vm.runInContext('openInRubien()', context);
+  assert.deepEqual(retryMessages, [{ version: 4, command: 'open', referenceID: 42 }]);
+
+  disconnectListener();
+  assert.equal(
+    elements.get('result-open-error').textContent,
+    'Rubien closed the connection before opening this item.'
+  );
+  assert.equal(elements.get('open-button').disabled, false);
+});
 
 test('confirmation downloads a publisher PDF with Chrome before importing', async () => {
   const elements = new Map();

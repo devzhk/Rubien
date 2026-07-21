@@ -21,6 +21,8 @@ enum BrowserClipHostError: LocalizedError, Equatable {
     case messageTooLarge(Int)
     case incompleteMessage
     case invalidBrowserDownload
+    case invalidOpenDestination
+    case couldNotOpenRubien
 
     var code: String {
         switch self {
@@ -39,6 +41,8 @@ enum BrowserClipHostError: LocalizedError, Equatable {
         case .messageTooLarge: return "message-too-large"
         case .incompleteMessage: return "incomplete-message"
         case .invalidBrowserDownload: return "invalid-browser-download"
+        case .invalidOpenDestination: return "invalid-open-destination"
+        case .couldNotOpenRubien: return "could-not-open-rubien"
         }
     }
 
@@ -76,6 +80,10 @@ enum BrowserClipHostError: LocalizedError, Equatable {
             return "Chrome closed the native messaging pipe before sending a complete request."
         case .invalidBrowserDownload:
             return "Chrome provided a downloaded file that does not belong to this import preview."
+        case .invalidOpenDestination:
+            return "Chrome did not provide one valid imported item to open."
+        case .couldNotOpenRubien:
+            return "macOS could not open the imported item in Rubien."
         }
     }
 }

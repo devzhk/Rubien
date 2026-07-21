@@ -694,6 +694,79 @@ final class BrowserClipImportServiceTests: XCTestCase {
         XCTAssertEqual(try database.referenceCount(), 1)
     }
 
+    func testSessionOpensImportedReferenceAndPendingIntakeDeepLinks() async throws {
+        var openedURLs: [URL] = []
+        var session = BrowserImportSession(
+            service: BrowserClipImportService(database: try makeDatabase()),
+            openURL: { url in
+                openedURLs.append(url)
+                return true
+            }
+        )
+
+        let referenceResponse = try await session.handle(BrowserClipRequest(
+            version: BrowserClipContract.protocolVersion,
+            command: "open",
+            referenceID: 42
+        ))
+        let intakeResponse = try await session.handle(BrowserClipRequest(
+            version: BrowserClipContract.protocolVersion,
+            command: "open",
+            intakeID: 73
+        ))
+
+        XCTAssertEqual(
+            openedURLs.map(\.absoluteString),
+            ["rubien://reference/42", "rubien://pending-intake/73"]
+        )
+        XCTAssertEqual(referenceResponse.opened, true)
+        XCTAssertEqual(referenceResponse.referenceID, 42)
+        XCTAssertEqual(intakeResponse.opened, true)
+        XCTAssertEqual(intakeResponse.intakeID, 73)
+    }
+
+    func testSessionRejectsInvalidOrUnopenableImportDestination() async throws {
+        var session = BrowserImportSession(
+            service: BrowserClipImportService(database: try makeDatabase()),
+            openURL: { _ in false }
+        )
+
+        await assertSessionThrows(
+            .invalidOpenDestination,
+            session: &session,
+            request: BrowserClipRequest(
+                version: BrowserClipContract.protocolVersion,
+                command: "open",
+                referenceID: 42,
+                intakeID: 73
+            )
+        )
+        await assertSessionThrows(
+            .couldNotOpenRubien,
+            session: &session,
+            request: BrowserClipRequest(
+                version: BrowserClipContract.protocolVersion,
+                command: "open",
+                referenceID: 42
+            )
+        )
+    }
+
+    func testSessionResolvesOnlyItsEnclosingApplicationBundle() {
+        XCTAssertEqual(
+            BrowserImportSession.enclosingApplicationURL(for: URL(
+                fileURLWithPath: "/Applications/Rubien.app/Contents/Helpers/rubien-browser-host"
+            )),
+            URL(fileURLWithPath: "/Applications/Rubien.app")
+        )
+        XCTAssertNil(BrowserImportSession.enclosingApplicationURL(for: URL(
+            fileURLWithPath: "/usr/local/bin/rubien-browser-host"
+        )))
+        XCTAssertNil(BrowserImportSession.enclosingApplicationURL(for: URL(
+            fileURLWithPath: "/Applications/Rubien.app/Contents/MacOS/rubien-browser-host"
+        )))
+    }
+
     func testSecondConfirmedXArticleUsesWebsiteMergePath() async throws {
         let database = try makeDatabase()
         let service = BrowserClipImportService(database: database)
