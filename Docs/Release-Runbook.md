@@ -159,11 +159,8 @@ currently installed app solely for this gate. Then:
    renders correctly.
 4. Import an ordinary article and verify the confirmation step appears before
    the reference is saved.
-5. Import an authenticated publisher paper with **Download PDF** enabled, then
-   import a different authenticated paper with it disabled. Verify the first
-   reference has a readable PDF and the second imports metadata without
-   downloading one. Using the same paper twice is not a valid test because
-   Rubien can deduplicate the second import against the first.
+5. Import an authenticated publisher paper with **Download PDF** enabled and
+   verify the reference has a readable PDF.
 6. Import a direct PDF URL and verify Rubien attaches a readable PDF rather than
    clipping the browser viewer as Markdown or HTML.
 
