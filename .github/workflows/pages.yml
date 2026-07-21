@@ -16,7 +16,7 @@ on:
       - 'Docs/appcast.xml'
       - 'Docs/staging-appcast.xml'
       - 'Docs/index.md'
-      - 'icon-transparent.png'
+      - 'Assets/icon-transparent.png'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -40,11 +40,11 @@ jobs:
 
       - name: Assemble published payload
         run: |
-          mkdir _site
+          mkdir -p _site/Assets
           cp Docs/appcast.xml          _site/appcast.xml
           cp Docs/staging-appcast.xml  _site/staging-appcast.xml
           cp Docs/index.md             _site/index.md
-          cp icon-transparent.png      _site/icon-transparent.png
+          cp Assets/icon-transparent.png _site/Assets/icon-transparent.png
           ls -la _site/
 
       - uses: actions/configure-pages@v5
