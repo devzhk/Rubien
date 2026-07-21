@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="/Rubien/icon-transparent.png" alt="Rubien" width="160" height="160">
+  <img src="/Rubien/Assets/icon-transparent.png" alt="Rubien" width="160" height="160">
 </p>
 
 # Rubien

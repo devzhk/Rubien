@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="icon-transparent.png" alt="Rubien" width="160" height="160">
+  <img src="Assets/icon-transparent.png" alt="Rubien" width="160" height="160">
 </p>
 
 # Rubien
@@ -11,6 +11,8 @@ Rubien is a local research library with native readers for papers, books, and we
 - [Download Rubien](https://github.com/devzhk/Rubien-releases/releases/latest).
   - Requires macOS 14.4+ and Apple Silicon; macOS 26.0 or later is recommended.
   - Requires Codex CLI or Claude Code CLI to drive the in-library assistant.
+
+![Rubien showing the Home dashboard, reading activity, PDF reader, and in-document AI assistant](Assets/rubien-ui.jpg)
 
 ## Features
 
