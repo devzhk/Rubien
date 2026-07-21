@@ -529,5 +529,21 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.6.1</title>
+            <description sparkle:format="plain-text"><![CDATA[• Fixed overdue scheduled jobs leaving the library empty and Reading Activity loading indefinitely at startup.
+• Fixed Codex Assistant turns that could time out during initialization.
+• Rubien is now licensed under Apache 2.0, with refreshed third-party notices and developer documentation.]]></description>
+            <pubDate>Tue, 21 Jul 2026 17:56:37 +0000</pubDate>
+            <sparkle:version>35</sparkle:version>
+            <sparkle:shortVersionString>0.6.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.6.1/Rubien-0.6.1.dmg"
+                sparkle:edSignature="3qzVse2e92nCUD0ve4HL5anGf9Pz4f68DK5wic+wb9s7MRihT7A7riKEPO0JQiCLBM0PKXTVl5vbnDP+Jk4ACg=="
+                length="16679520"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
