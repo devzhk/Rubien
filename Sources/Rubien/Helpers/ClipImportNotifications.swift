@@ -3,7 +3,6 @@ import Foundation
 
 extension Notification.Name {
     static let rubienClipImported = Notification.Name("RubienClipImported")
-    static let rubienOpenBrowserImport = Notification.Name("RubienOpenBrowserImport")
 }
 
 enum RubienClipImportedKeys {
@@ -11,8 +10,4 @@ enum RubienClipImportedKeys {
     static let title = "title"
 }
 
-enum RubienOpenBrowserImportKeys {
-    static let referenceID = "referenceID"
-    static let intakeID = "intakeID"
-}
 #endif

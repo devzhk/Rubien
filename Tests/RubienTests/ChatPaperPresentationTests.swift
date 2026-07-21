@@ -65,34 +65,6 @@ final class ChatPaperPresentationTests: XCTestCase {
         XCTAssertEqual(openWindowRequests, 0)
     }
 
-    func testBrowserImportDeepLinkWaitsForAndTargetsOneContentWindow() {
-        var openWindowRequests = 0
-        let router = ContentWindowNotificationRouter(
-            activateApplication: {},
-            openContentWindow: { openWindowRequests += 1 },
-            activateWindow: { _ in })
-        let window = NSWindow()
-        let delivered = expectation(description: "browser import delivered")
-        let observer = NotificationCenter.default.addObserver(
-            forName: .rubienOpenBrowserImport,
-            object: nil,
-            queue: .main
-        ) { note in
-            XCTAssertEqual(
-                note.userInfo?[RubienOpenBrowserImportKeys.referenceID] as? Int64,
-                42)
-            XCTAssertTrue(note.object as? NSWindow === window)
-            delivered.fulfill()
-        }
-        defer { NotificationCenter.default.removeObserver(observer) }
-
-        router.openBrowserImport(.reference(42))
-        XCTAssertEqual(openWindowRequests, 1)
-
-        router.windowAvailable(window)
-        wait(for: [delivered], timeout: 1)
-    }
-
     func testClaudeSuccessfulPresentationDecodesTypedCards() {
         var parser = ClaudeStreamParser()
         _ = parser.parse(line: #"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"paper-call","name":"mcp__rubien__rubien_present_document_cards","input":{"items":[{"referenceId":7}]}}]}}"#)

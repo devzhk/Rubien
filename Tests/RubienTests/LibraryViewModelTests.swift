@@ -28,6 +28,21 @@ final class LibraryViewModelTests: XCTestCase {
         XCTAssertEqual(vm.selectedSidebar, .allReferences)
     }
 
+    func testExplicitRevealPreemptsDelayedDefaultViewSelection() throws {
+        let db = try makeTestDB()
+        let vm = LibraryViewModel(db: db)
+
+        vm.selectSidebar(
+            .allReferences,
+            stashCurrentDraft: false,
+            preemptsInitialDefaultView: true
+        )
+        vm.databaseViews = [try XCTUnwrap(db.fetchDefaultDatabaseView())]
+        vm.selectDefaultViewIfNeeded()
+
+        XCTAssertEqual(vm.selectedSidebar, .allReferences)
+    }
+
     // MARK: - Save Reference
 
     func testSaveReference() throws {

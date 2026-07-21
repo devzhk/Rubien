@@ -243,7 +243,12 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
-    func selectSidebar(_ item: SidebarItem, stashCurrentDraft: Bool = true) {
+    func selectSidebar(
+        _ item: SidebarItem,
+        stashCurrentDraft: Bool = true,
+        preemptsInitialDefaultView: Bool = false
+    ) {
+        if preemptsInitialDefaultView { hasAppliedDefaultView = true }
         if stashCurrentDraft { stashDraftIfDirty(for: selectedSidebar) }
 
         // Home is a separate destination, so returning to the already-selected
@@ -1562,26 +1567,13 @@ struct ContentView: View {
             selectedId = id
             columnVisibility = .all
         }
-        .onReceive(NotificationCenter.default.publisher(for: .rubienOpenBrowserImport)) { note in
-            guard let target = note.object as? NSWindow,
-                  hostingWindowBox.window === target
-            else { return }
-
-            if let id = note.userInfo?[RubienOpenBrowserImportKeys.referenceID] as? Int64,
-               let reference = try? viewModel.db.fetchReferences(ids: [id]).first {
-                revealReference(reference)
-                return
-            }
-
-            if let id = note.userInfo?[RubienOpenBrowserImportKeys.intakeID] as? Int64,
-               let intake = try? viewModel.db.fetchPendingMetadataIntake(id: id) {
-                showLibrary()
-                scopedPendingMetadataIntakes = PendingMetadataIntakePresentation.scopedIntakes(
-                    from: [intake]
-                )
-                pendingQueueNotice = nil
-                showPendingMetadataQueue = true
-            }
+        .handlesExternalEvents(
+            preferring: ["\(BrowserClipDeepLink.scheme):"],
+            allowing: []
+        )
+        .onOpenURL { url in
+            guard let destination = BrowserClipDeepLink.parse(url) else { return }
+            openBrowserImport(destination)
         }
         .onReceive(NotificationCenter.default.publisher(for: .rubienOpenAssistantPaperReference)) { note in
             guard let target = note.object as? NSWindow,
@@ -1731,10 +1723,26 @@ struct ContentView: View {
         guard let id = reference.id else { return }
         // Land on the unfiltered .allReferences scope, which always renders the
         // row. Never the default saved view — its filters could hide the row.
-        showLibrary(selecting: .allReferences)
+        showLibrary(selecting: .allReferences, preemptsInitialDefaultView: true)
         selectedId = id
         tableScrollRequest += 1
         columnVisibility = .all
+    }
+
+    private func openBrowserImport(_ destination: BrowserClipDeepLinkDestination) {
+        switch destination {
+        case .reference(let id):
+            guard let reference = try? viewModel.db.fetchReferences(ids: [id]).first else { return }
+            revealReference(reference)
+        case .pendingIntake(let id):
+            guard let intake = try? viewModel.db.fetchPendingMetadataIntake(id: id) else { return }
+            showLibrary()
+            scopedPendingMetadataIntakes = PendingMetadataIntakePresentation.scopedIntakes(
+                from: [intake]
+            )
+            pendingQueueNotice = nil
+            showPendingMetadataQueue = true
+        }
     }
 
     /// Single-add follow-through: confirmation toast (created vs duplicate) + reveal the row.
@@ -2429,10 +2437,17 @@ struct ContentView: View {
         confirmAndReveal(saved, result: result)
     }
 
-    private func showLibrary(selecting item: SidebarItem? = nil) {
+    private func showLibrary(
+        selecting item: SidebarItem? = nil,
+        preemptsInitialDefaultView: Bool = false
+    ) {
         let returningFromHome = mainDestination != .library
         if let item {
-            viewModel.selectSidebar(item, stashCurrentDraft: !returningFromHome)
+            viewModel.selectSidebar(
+                item,
+                stashCurrentDraft: !returningFromHome,
+                preemptsInitialDefaultView: preemptsInitialDefaultView
+            )
         } else if returningFromHome {
             // Programmatic returns (for example, a clip import) do not flow
             // through the sidebar Binding. Reconcile a saved view whose scope

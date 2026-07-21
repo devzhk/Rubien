@@ -71,6 +71,7 @@ struct RubienApp: App {
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified(showsTitle: false))
         .defaultSize(width: Self.defaultWindowSize.width, height: Self.defaultWindowSize.height)
+        .handlesExternalEvents(matching: ["*"])
         #if canImport(Sparkle)
         .commands {
             UpdateMenuCommands()
@@ -161,15 +162,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         ReaderWindowManager.shared.closeAll()
     }
 
-    func application(_ application: NSApplication, open urls: [URL]) {
-        for url in urls {
-            guard let destination = BrowserClipDeepLink.parse(url) else { continue }
-            Task { @MainActor in
-                ContentWindowNotificationRouter.shared.openBrowserImport(destination)
-            }
-        }
-    }
-
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification,
@@ -229,19 +221,6 @@ final class ContentWindowNotificationRouter {
         post(
             name: .rubienOpenScheduledJobRun,
             userInfo: [ScheduledJobNotifications.runIDKey: runID])
-    }
-
-    func openBrowserImport(_ destination: BrowserClipDeepLinkDestination) {
-        switch destination {
-        case .reference(let id):
-            post(
-                name: .rubienOpenBrowserImport,
-                userInfo: [RubienOpenBrowserImportKeys.referenceID: id])
-        case .pendingIntake(let id):
-            post(
-                name: .rubienOpenBrowserImport,
-                userInfo: [RubienOpenBrowserImportKeys.intakeID: id])
-        }
     }
 
     func post(name: Notification.Name, userInfo: [AnyHashable: Any]) {
