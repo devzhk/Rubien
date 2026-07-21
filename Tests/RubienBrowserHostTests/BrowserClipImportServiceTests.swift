@@ -756,8 +756,8 @@ final class BrowserClipImportServiceTests: XCTestCase {
         XCTAssertEqual(
             BrowserImportSession.enclosingApplicationURL(for: URL(
                 fileURLWithPath: "/Applications/Rubien.app/Contents/Helpers/rubien-browser-host"
-            )),
-            URL(fileURLWithPath: "/Applications/Rubien.app")
+            ))?.path,
+            "/Applications/Rubien.app"
         )
         XCTAssertNil(BrowserImportSession.enclosingApplicationURL(for: URL(
             fileURLWithPath: "/usr/local/bin/rubien-browser-host"
