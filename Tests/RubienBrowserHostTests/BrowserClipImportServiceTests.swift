@@ -232,7 +232,7 @@ final class BrowserClipImportServiceTests: XCTestCase {
             referenceId: referenceID,
             filename: storedFilename
         )
-        defer { PDFService.deletePDF(at: storedFilename) }
+        defer { deleteStoredPDF(at: storedFilename) }
 
         let service = BrowserClipImportService(
             database: database,
@@ -386,7 +386,7 @@ final class BrowserClipImportServiceTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: stagedSource.fileURL.path))
         if let referenceID = response.referenceID,
            let filename = try database.pdfFilename(for: referenceID) {
-            PDFService.deletePDF(at: filename)
+            deleteStoredPDF(at: filename)
         }
     }
 
@@ -430,7 +430,7 @@ final class BrowserClipImportServiceTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(
             atPath: AppDatabase.pdfStorageURL.appendingPathComponent(pdfPath).path
         ))
-        PDFService.deletePDF(at: pdfPath)
+        deleteStoredPDF(at: pdfPath)
     }
 
     func testDirectChromePDFRejectsHTMLBodyAndDeletesBrowserFile() async throws {
@@ -862,6 +862,12 @@ final class BrowserClipImportServiceTests: XCTestCase {
                 temporaryDirectoryURL: directory
             ),
             directory
+        )
+    }
+
+    private func deleteStoredPDF(at relativePath: String) {
+        try? FileManager.default.removeItem(
+            at: AppDatabase.pdfStorageURL.appendingPathComponent(relativePath)
         )
     }
 
