@@ -545,5 +545,21 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.6.2</title>
+            <description sparkle:format="plain-text"><![CDATA[• Fix intermittent Codex initialization and CLI checks that could make sidebar and scheduled runs time out.
+• Fix Claude read-only tool handling that could leave sidebar chats stuck on “Responding…”.
+• Add live scheduled-run transcripts and progress on Home, with clickable runs and scoped cancellation.]]></description>
+            <pubDate>Tue, 21 Jul 2026 20:39:05 +0000</pubDate>
+            <sparkle:version>36</sparkle:version>
+            <sparkle:shortVersionString>0.6.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien-releases/releases/download/v0.6.2/Rubien-0.6.2.dmg"
+                sparkle:edSignature="0zmjMb5HFudqLQDkqr5+cw3pOgc1e+q5WJVZ/mprWFtdmqQ68la/0ZUUafJdL/gWEUcv6dL9uw39D8ObTgCJBQ=="
+                length="16729771"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
