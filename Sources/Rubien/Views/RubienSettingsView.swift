@@ -42,9 +42,8 @@ struct RubienSettingsView: View {
     /// or when discovery failed — the pickers then degrade per spec §4.7.
     @State private var codexCatalogModels: [CodexModelInfo] = []
     /// Monotonic load token mirroring `codexProbeGeneration`: only the latest
-    /// `loadCodexCatalog` result is applied, so an overlapping load (the on-appear
-    /// fetch racing a Recheck, or a fast Reset→Choose) can't be overwritten by a
-    /// stale one landing late.
+    /// `loadCodexCatalog` result is applied, so a fast Reset→Choose can't be
+    /// overwritten by a stale load landing late.
     @State private var codexCatalogLoadGeneration = 0
     @State private var defaultCodexSandbox: CodexSandbox = .readOnly
     @State private var defaultWebAccess = true
@@ -397,8 +396,14 @@ struct RubienSettingsView: View {
                 ?? AssistantContext.defaultPrompt(for: .reader)
             seedModelEffortMirrors(for: defaultProvider)
             if claudeAvailability == nil { recheckClaude() }
-            if codexAvailability == nil { recheckCodex() }
-            loadCodexCatalog()
+            if codexAvailability == nil {
+                // `recheckCodex` deliberately performs availability THEN model
+                // discovery. Starting a second catalog load here made first-open
+                // launch up to three codex processes against the same cold runtime.
+                if !isProbingCodex { recheckCodex() }
+            } else if codexCatalogModels.isEmpty, !isProbingCodex {
+                loadCodexCatalog()
+            }
         }
         // Persist each mirror to the (non-observable) prefs when the user changes it.
         // Switching the default backend re-seeds the model/effort mirrors from that
@@ -762,7 +767,7 @@ struct RubienSettingsView: View {
                 RubienPreferences.assistantBinaryPath = nil
                 binaryPathOverride = ""
                 recheckClaude()
-            }, onChoose: pickBinary)
+            }, onChoose: pickBinary, disabled: isProbingClaude)
         } header: {
             Text(String(localized: "Claude Code CLI", bundle: .module))
         }
@@ -775,7 +780,7 @@ struct RubienSettingsView: View {
                 RubienPreferences.assistantCodexBinaryPath = nil
                 codexBinaryPathOverride = ""
                 recheckCodex()
-            }, onChoose: pickCodexBinary)
+            }, onChoose: pickCodexBinary, disabled: isProbingCodex)
         } header: {
             Text(String(localized: "Codex CLI", bundle: .module))
         } footer: {
@@ -853,7 +858,8 @@ struct RubienSettingsView: View {
     private func agentBinaryPathRow(
         override: String,
         onReset: @escaping () -> Void,
-        onChoose: @escaping () -> Void
+        onChoose: @escaping () -> Void,
+        disabled: Bool = false
     ) -> some View {
         HStack(spacing: 8) {
             Text(String(localized: "Binary path", bundle: .module))
@@ -867,9 +873,11 @@ struct RubienSettingsView: View {
             if !override.isEmpty {
                 Button(String(localized: "Reset", bundle: .module), action: onReset)
                     .buttonStyle(SettingsActionButtonStyle())
+                    .disabled(disabled)
             }
             Button(String(localized: "Choose…", bundle: .module), action: onChoose)
                 .buttonStyle(SettingsActionButtonStyle())
+                .disabled(disabled)
         }
     }
 
@@ -914,29 +922,58 @@ struct RubienSettingsView: View {
     }
 
     /// Codex's parallel probe (its own generation token + binary override).
+    ///
+    /// Keep the lightweight version/auth checks and the app-server model lookup in
+    /// ONE ordered task. On first Settings open these used to run concurrently (and
+    /// `.task` also launched a redundant catalog lookup), so a cold codex install
+    /// could spend the version probe's five-second budget contending with plugin and
+    /// model initialization, report "not found", then succeed immediately on Recheck.
     private func recheckCodex() {
-        loadCodexCatalog(forceReload: true)
         codexProbeGeneration += 1
-        let generation = codexProbeGeneration
+        codexCatalogLoadGeneration += 1
+        let probeGeneration = codexProbeGeneration
+        let catalogGeneration = codexCatalogLoadGeneration
         isProbingCodex = true
         let override = RubienPreferences.assistantCodexBinaryPath
-        Task {
+        Task { @MainActor in
             let availability = await CodexProvider(executableOverride: override).isAvailable()
-            guard generation == codexProbeGeneration else { return }  // superseded by a newer probe
+            guard probeGeneration == codexProbeGeneration else { return }
             codexAvailability = availability
+
+            guard availability.isInstalled else {
+                // Do not launch a heavier app-server after the binary itself failed
+                // its bounded probe. It cannot yield a usable catalog and would make
+                // an immediate Reset/Choose retry contend with the failed attempt.
+                codexCatalogModels = []
+                isProbingCodex = false
+                return
+            }
+
+            let models = await CodexModelCatalog.shared
+                .catalog(executableOverride: override, forceReload: true)
+                .visibleModels
+            guard probeGeneration == codexProbeGeneration else { return }
+            guard catalogGeneration == codexCatalogLoadGeneration else {
+                // A standalone catalog refresh superseded only this second phase;
+                // this probe still owns the availability spinner.
+                isProbingCodex = false
+                return
+            }
+            codexCatalogModels = models
             isProbingCodex = false
         }
     }
 
-    /// Fetch the codex model catalog for the Settings pickers. `forceReload`
-    /// (Recheck / binary-path change) drops the shared memo first.
-    private func loadCodexCatalog(forceReload: Bool = false) {
+    /// Fetch a memoized codex model catalog when the pane is revisited after an
+    /// earlier unavailable/empty lookup. Recheck performs its forced reload in the
+    /// ordered availability task above.
+    private func loadCodexCatalog() {
         codexCatalogLoadGeneration += 1
         let generation = codexCatalogLoadGeneration
         let override = RubienPreferences.assistantCodexBinaryPath
         Task { @MainActor in
             let models = await CodexModelCatalog.shared
-                .catalog(executableOverride: override, forceReload: forceReload)
+                .catalog(executableOverride: override)
                 .visibleModels
             guard generation == codexCatalogLoadGeneration else { return }  // superseded by a newer load
             codexCatalogModels = models

@@ -52,6 +52,53 @@ final class ScheduledJobCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.unreadRunCount, 1)
     }
 
+    @MainActor
+    func testSequentialDueRunsRetainTheirClaimedPromptsAndProgress() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let calendar = utcCalendar()
+        for (name, prompt) in [("First", "First claimed prompt"), ("Second", "Second claimed prompt")] {
+            _ = try database.createScheduledJob(
+                .init(
+                    name: name,
+                    prompt: prompt,
+                    recurrence: .init(weekdayMask: 127, localMinuteOfDay: 8 * 60),
+                    provider: .claude,
+                    notifyOnCompletion: false
+                ),
+                now: date("2026-07-13T07:00:00Z"),
+                calendar: calendar
+            )
+        }
+        let runner = ScheduledJobRunner(
+            database: database,
+            providerFactory: { _ in CoordinatorProviderStub() },
+            workspaceProvider: { FileManager.default.temporaryDirectory },
+            attributionStore: nil
+        )
+        let coordinator = ScheduledJobCoordinator(
+            database: database,
+            runner: runner,
+            now: { self.date("2026-07-13T08:01:00Z") },
+            calendar: { calendar },
+            usesBackgroundScheduler: false
+        )
+
+        coordinator.start()
+
+        try await waitUntil {
+            coordinator.recentRuns.filter { $0.status == .succeeded }.count == 2
+        }
+        let prompts = Set(coordinator.recentRuns.compactMap {
+            coordinator.progress(for: $0.id)?.prompt
+        })
+        XCTAssertEqual(prompts, ["First claimed prompt", "Second claimed prompt"])
+        for run in coordinator.recentRuns {
+            XCTAssertTrue(coordinator.progress(for: run.id)?.entries.contains(where: {
+                $0.detail == "Scanning the library…"
+            }) == true)
+        }
+    }
+
     func testBackgroundActivityTimingRejectsDueDeadlinesAndKeepsFutureValuesValid() throws {
         XCTAssertNil(ScheduledJobCoordinator.backgroundActivityTiming(for: -1))
         XCTAssertNil(ScheduledJobCoordinator.backgroundActivityTiming(for: 0))
@@ -110,6 +157,57 @@ final class ScheduledJobCoordinatorTests: XCTestCase {
         try coordinator.runNow(id: job.id)
         try await waitUntil { coordinator.recentRuns.first?.status == .succeeded }
         XCTAssertEqual(provider.availabilityCallCount, 1)
+    }
+
+    @MainActor
+    func testStaleRunCancellationCannotCancelQueuedSuccessor() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let calendar = utcCalendar()
+        for name in ["First", "Second"] {
+            _ = try database.createScheduledJob(
+                .init(
+                    name: name,
+                    prompt: "Find papers",
+                    recurrence: .init(weekdayMask: 127, localMinuteOfDay: 8 * 60),
+                    provider: .claude,
+                    notifyOnCompletion: false
+                ),
+                now: date("2026-07-13T07:00:00Z"),
+                calendar: calendar
+            )
+        }
+        let runner = ScheduledJobRunner(
+            database: database,
+            providerFactory: { _ in
+                CoordinatorProviderStub(completionDelay: .milliseconds(300))
+            },
+            workspaceProvider: { FileManager.default.temporaryDirectory },
+            attributionStore: nil
+        )
+        let coordinator = ScheduledJobCoordinator(
+            database: database,
+            runner: runner,
+            now: { self.date("2026-07-13T08:01:00Z") },
+            calendar: { calendar },
+            usesBackgroundScheduler: false
+        )
+
+        coordinator.start()
+        try await waitUntil { coordinator.activeRun?.status == .running }
+        let firstRunID = try XCTUnwrap(coordinator.activeRun?.id)
+        try await waitUntil {
+            coordinator.activeRun?.id != firstRunID
+                && coordinator.activeRun?.status == .running
+        }
+        let successorRunID = try XCTUnwrap(coordinator.activeRun?.id)
+
+        coordinator.cancelActiveRun(id: firstRunID)
+
+        XCTAssertEqual(coordinator.activeRun?.id, successorRunID)
+        try await waitUntil {
+            coordinator.recentRuns.first(where: { $0.id == successorRunID })?.status
+                == .succeeded
+        }
     }
 
     @MainActor
@@ -232,6 +330,11 @@ final class ScheduledJobCoordinatorTests: XCTestCase {
 private final class CoordinatorProviderStub: AgentProvider, @unchecked Sendable {
     let kind: AgentProviderKind = .claude
     private(set) var availabilityCallCount = 0
+    private let completionDelay: Duration
+
+    init(completionDelay: Duration = .milliseconds(100)) {
+        self.completionDelay = completionDelay
+    }
 
     func isAvailable() async -> AgentAvailability {
         availabilityCallCount += 1
@@ -239,11 +342,12 @@ private final class CoordinatorProviderStub: AgentProvider, @unchecked Sendable 
     }
 
     func send(turn: AgentTurnRequest) -> AsyncThrowingStream<AgentEvent, Error> {
-        AsyncThrowingStream { continuation in
+        let completionDelay = completionDelay
+        return AsyncThrowingStream<AgentEvent, Error> { continuation in
             continuation.yield(.sessionStarted(sessionID: "coordinator-session"))
             continuation.yield(.assistantDelta(text: "Scanning the library…"))
             Task {
-                try? await Task.sleep(for: .milliseconds(100))
+                try? await Task.sleep(for: completionDelay)
                 continuation.yield(.turnCompleted(usage: nil))
                 continuation.finish()
             }

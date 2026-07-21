@@ -186,7 +186,8 @@
 "scheduled.accessibility.notSelected" = "Not selected";
 "scheduled.accessibility.selected" = "Selected";
 "scheduled.action.openResult" = "Open Result";
-"scheduled.action.hideProgress" = "Hide Progress";
+"scheduled.action.backToAssistant" = "Back to Assistant";
+"scheduled.action.cancelRun" = "Cancel Run";
 "scheduled.action.deleteRun" = "Delete Run";
 "scheduled.action.viewDetails" = "View Details";
 "scheduled.action.viewProgress" = "View Progress";
@@ -211,6 +212,7 @@
 "scheduled.progress.preparing" = "Preparing provider…";
 "scheduled.progress.referencesFound" = "%d references found";
 "scheduled.progress.waitingForOutput" = "Waiting for provider output…";
+"scheduled.progress.completedWithoutOutput" = "Run completed without additional output.";
 "scheduled.recurrence.atTime" = "%1$@ at %2$@";
 "scheduled.recurrence.everyDay" = "Every day";
 "scheduled.recurrence.weekdays" = "Weekdays";

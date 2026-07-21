@@ -42,7 +42,6 @@ struct ScheduledJobsPopover: View {
     @State private var deleteTarget: ScheduledJob?
     @State private var deleteRunTarget: ScheduledJobRun?
     @State private var errorMessage: String?
-    @State private var expandedRunID: String?
     @State private var recentRunQuery = ""
     @FocusState private var recentRunSearchFocused: Bool
 
@@ -227,36 +226,15 @@ struct ScheduledJobsPopover: View {
                         run: run,
                         job: coordinator.job(id: run.jobId),
                         resultUnavailable: coordinator.unavailableResultRunIDs.contains(run.id),
-                        isExpanded: expandedRunID == run.id,
-                        onOpen: expandedRunID == run.id ? {
-                            withAnimation(.easeInOut(duration: 0.16)) {
-                                expandedRunID = nil
-                            }
-                        } : (isActive ? {
-                            withAnimation(.easeInOut(duration: 0.16)) {
-                                expandedRunID = run.id
-                            }
-                        } : (run.status.isTerminal ? {
-                            onOpenRun(run)
-                        } : nil)),
+                        onOpen: isActive || run.status.isTerminal
+                            ? { onOpenRun(run) }
+                            : nil,
                         onCancel: isActive && (run.status == .pending || run.status == .running)
-                            ? { coordinator.cancelActiveRun() }
+                            ? { coordinator.cancelActiveRun(id: run.id) }
                             : nil,
                         onRunNow: run.status == .failed ? { runNow(jobID: run.jobId) } : nil,
                         onDelete: run.status.isTerminal ? { deleteRunTarget = run } : nil
                     )
-                    if expandedRunID == run.id {
-                        ScheduledRunProgressView(
-                            run: coordinator.activeRun?.id == run.id
-                                ? coordinator.activeRun ?? run
-                                : run,
-                            progress: coordinator.activeRunProgress?.runID == run.id
-                                ? coordinator.activeRunProgress
-                                : nil,
-                            onCancel: isActive ? { coordinator.cancelActiveRun() } : nil
-                        )
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                    }
                     Divider().padding(.leading, 42)
                 }
             }
@@ -299,9 +277,7 @@ struct ScheduledJobsPopover: View {
                                 : nil,
                             onSetEnabled: { enabled in setEnabled(job, enabled) },
                             onRunNow: { runNow(job) },
-                            onCancel: coordinator.activeRun?.jobId == job.id
-                                ? { coordinator.cancelActiveRun() }
-                                : nil,
+                            onCancel: cancelAction(for: job.id),
                             onEdit: { editorTarget = .edit(job) },
                             onDelete: { deleteTarget = job }
                         )
@@ -321,6 +297,11 @@ struct ScheduledJobsPopover: View {
         }
     }
 
+    private func cancelAction(for jobID: String) -> (() -> Void)? {
+        guard let run = coordinator.activeRun, run.jobId == jobID else { return nil }
+        return { coordinator.cancelActiveRun(id: run.id) }
+    }
+
     private func runNow(_ job: ScheduledJob) {
         runNow(jobID: job.id)
     }
@@ -337,10 +318,8 @@ struct ScheduledJobsPopover: View {
     }
 
     private func showActiveRunProgress() {
-        guard let runID = coordinator.activeRun?.id else { return }
-        recentRunQuery = ""
-        expandedRunID = runID
-        tab = .recentRuns
+        guard let run = coordinator.activeRun else { return }
+        onOpenRun(run)
     }
 
     private func delete(_ job: ScheduledJob) {
@@ -356,7 +335,6 @@ struct ScheduledJobsPopover: View {
     private func deleteRun(_ run: ScheduledJobRun) {
         do {
             try coordinator.deleteRun(id: run.id)
-            if expandedRunID == run.id { expandedRunID = nil }
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
@@ -369,7 +347,6 @@ private struct ScheduledRunRow: View {
     let run: ScheduledJobRun
     let job: ScheduledJob?
     let resultUnavailable: Bool
-    let isExpanded: Bool
     let onOpen: (() -> Void)?
     let onCancel: (() -> Void)?
     let onRunNow: (() -> Void)?
@@ -430,9 +407,7 @@ private struct ScheduledRunRow: View {
             if onOpen != nil {
                 HStack(spacing: 3) {
                     Text(ScheduledJobFormatting.localized(actionLabelKey))
-                    Image(systemName: isExpanded
-                          ? "chevron.down"
-                          : "chevron.right")
+                    Image(systemName: "chevron.right")
                         .font(.system(size: 8, weight: .semibold))
                 }
                 .font(.caption)
@@ -447,7 +422,6 @@ private struct ScheduledRunRow: View {
     }
 
     private var actionLabelKey: String {
-        if isExpanded { return "scheduled.action.hideProgress" }
         if run.status.isActive { return "scheduled.action.viewProgress" }
         if run.status == .succeeded,
            run.providerSessionId != nil,
@@ -612,143 +586,6 @@ private struct ScheduledJobRow: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
-    }
-}
-
-private struct ScheduledRunProgressView: View {
-    let run: ScheduledJobRun
-    let progress: ScheduledJobProgress?
-    let onCancel: (() -> Void)?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 7) {
-                if run.status.isActive {
-                    ProgressView().controlSize(.mini)
-                }
-                Text(progressStatus)
-                    .font(.system(size: 11, weight: .semibold))
-                if let model = progress?.model {
-                    Text(model)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
-                }
-                Spacer()
-                if let onCancel {
-                    Button("Cancel", action: onCancel)
-                        .font(.caption)
-                        .buttonStyle(ToolbarHoverButtonStyle(
-                            hoverOpacity: 0.10,
-                            pressedOpacity: 0.16
-                        ))
-                }
-            }
-
-            if let entries = progress?.entries, !entries.isEmpty {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 8) {
-                            ForEach(entries) { entry in
-                                progressEntry(entry)
-                                    .id(entry.id)
-                            }
-                        }
-                        .padding(.vertical, 2)
-                    }
-                    .onChange(of: progress?.revision) { _, _ in
-                        guard let lastID = progress?.entries.last?.id else { return }
-                        withAnimation(.easeOut(duration: 0.12)) {
-                            proxy.scrollTo(lastID, anchor: .bottom)
-                        }
-                    }
-                }
-                .frame(maxHeight: 180)
-            } else {
-                Text(ScheduledJobFormatting.localized("scheduled.progress.waitingForOutput"))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, minHeight: 54, alignment: .center)
-            }
-        }
-        .padding(.leading, 42)
-        .padding(.trailing, 12)
-        .padding(.bottom, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.primary.opacity(0.025))
-    }
-
-    @ViewBuilder
-    private func progressEntry(_ entry: ScheduledJobProgress.Entry) -> some View {
-        HStack(alignment: .top, spacing: 7) {
-            switch entry.kind {
-            case .assistant(let isStreaming):
-                Image(systemName: isStreaming ? "ellipsis.bubble" : "sparkles")
-                    .foregroundStyle(Color.accentColor)
-                Text(verbatim: entry.detail)
-                    .textSelection(.enabled)
-            case .tool(let name, let status):
-                Image(systemName: toolIcon(status))
-                    .foregroundStyle(status == .denied ? .orange : .secondary)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(name)
-                        .fontWeight(.medium)
-                    if !entry.detail.isEmpty {
-                        Text(verbatim: entry.detail)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            case .notice:
-                Image(systemName: "exclamationmark.circle")
-                    .foregroundStyle(.orange)
-                Text(verbatim: entry.detail)
-                    .textSelection(.enabled)
-            case .papers(let count):
-                Image(systemName: "doc.text.magnifyingglass")
-                    .foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(String(
-                        format: ScheduledJobFormatting.localized("scheduled.progress.referencesFound"),
-                        locale: .current,
-                        count
-                    ))
-                    .fontWeight(.medium)
-                    if !entry.detail.isEmpty {
-                        Text(verbatim: entry.detail)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-        }
-        .font(.system(size: 10.5))
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var progressStatus: String {
-        guard let progress else {
-            return ScheduledJobFormatting.runDetail(run)
-        }
-        switch progress.phase {
-        case .preparing:
-            return ScheduledJobFormatting.localized("scheduled.progress.preparing")
-        case .running:
-            return ScheduledJobFormatting.localized("scheduled.status.running")
-        case .succeeded:
-            return ScheduledJobFormatting.localized("scheduled.status.finished")
-        case .failed:
-            return run.failureKind.map(ScheduledJobFormatting.failureLabel)
-                ?? ScheduledJobFormatting.localized("scheduled.status.failed")
-        case .cancelled:
-            return ScheduledJobFormatting.localized("scheduled.status.cancelled")
-        }
-    }
-
-    private func toolIcon(_ status: ToolChipStatus) -> String {
-        switch status {
-        case .started: "gearshape.2"
-        case .completed: "checkmark.circle"
-        case .denied: "xmark.circle"
-        }
     }
 }
 

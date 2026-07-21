@@ -270,6 +270,41 @@ final class SpawnedAgentProcess: @unchecked Sendable {
         return await reap() ?? -1
     }
 
+    /// Reap within a bounded interval, polling with `WNOHANG` so a child whose
+    /// process state is unexpectedly wedged cannot pin a provider actor forever.
+    /// A timed-out or cancelled wait leaves one background reaper responsible for
+    /// eventually collecting the child.
+    func wait(timeout: TimeInterval) async -> Int32? {
+        let deadline = ProcessInfo.processInfo.systemUptime + max(0, timeout)
+        repeat {
+            if let status = pollReapedStatus() { return status }
+            guard ProcessInfo.processInfo.systemUptime < deadline else { break }
+            do {
+                try await Task.sleep(for: .milliseconds(25))
+            } catch {
+                break
+            }
+        } while true
+
+        Task { _ = await self.wait() }
+        return nil
+    }
+
+    private func pollReapedStatus() -> Int32? {
+        stateLock.lock(); defer { stateLock.unlock() }
+        if let reapedStatus { return reapedStatus }
+
+        var status: Int32 = 0
+        var result: pid_t
+        repeat {
+            result = waitpid(pid, &status, WNOHANG)
+        } while result < 0 && errno == EINTR
+        guard result == pid else { return nil }
+        hasReaped = true
+        reapedStatus = status
+        return status
+    }
+
     /// Signal the whole process group (leader pgid == pid, since we set pgroup 0).
     /// The check + `killpg` are one critical section, mutually exclusive with the
     /// reap in `wait()`, so a signal can never target a reaped/recycled pid (A3).

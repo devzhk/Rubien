@@ -66,6 +66,7 @@ struct AgentHomeView: View {
     @Binding var activityOverlayPresented: Bool
     @Binding var activityWidth: CGFloat
     @Binding var scheduledJobsPresentation: ScheduledJobsPresentation?
+    @Binding var presentedScheduledRunID: String?
     let onOpenReference: (Int64) -> Void
     let onOpenPaperSource: (String) -> Void
     let onAddPaperSource: (String) -> Void
@@ -115,22 +116,44 @@ struct AgentHomeView: View {
     }
 
     private var chatSurface: some View {
-        ChatSurfaceView(
-            session: session,
-            renderer: renderer,
-            draft: $draft,
-            selectedMentions: $selectedMentions,
-            isActive: isActive,
-            configuration: .home(
-                onOpenReference: onOpenReference,
-                onOpenPaperSource: onOpenPaperSource,
-                onAddPaperSource: onAddPaperSource,
-                libraryIsEmpty: libraryIsEmpty,
-                onAddPapers: onAddPapers,
-                onImportPDFs: onImportPDFs,
-                scheduledJobs: scheduledJobs,
-                onOpenScheduledRun: onOpenScheduledRun,
-                scheduledJobsPresentation: $scheduledJobsPresentation))
+        Group {
+            if let run = presentedScheduledRun {
+                ScheduledRunTranscriptView(
+                    run: run,
+                    job: scheduledJobs.job(id: run.jobId),
+                    progress: scheduledJobs.progress(for: run.id),
+                    onBack: { presentedScheduledRunID = nil },
+                    onCancel: run.status.isActive && scheduledJobs.activeRun?.id == run.id
+                        ? { scheduledJobs.cancelActiveRun(id: run.id) }
+                        : nil,
+                    onOpenResultOrDetails: {
+                        presentedScheduledRunID = nil
+                        onOpenScheduledRun(run)
+                    },
+                    onOpenReference: onOpenReference,
+                    onOpenPaperSource: onOpenPaperSource,
+                    onAddPaperSource: onAddPaperSource
+                )
+                .id(run.id)
+            } else {
+                ChatSurfaceView(
+                    session: session,
+                    renderer: renderer,
+                    draft: $draft,
+                    selectedMentions: $selectedMentions,
+                    isActive: isActive,
+                    configuration: .home(
+                        onOpenReference: onOpenReference,
+                        onOpenPaperSource: onOpenPaperSource,
+                        onAddPaperSource: onAddPaperSource,
+                        libraryIsEmpty: libraryIsEmpty,
+                        onAddPapers: onAddPapers,
+                        onImportPDFs: onImportPDFs,
+                        scheduledJobs: scheduledJobs,
+                        onOpenScheduledRun: onOpenScheduledRun,
+                        scheduledJobsPresentation: $scheduledJobsPresentation))
+            }
+        }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.chatSurface)
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -140,6 +163,14 @@ struct AgentHomeView: View {
                         Color(nsColor: .separatorColor).opacity(0.35),
                         lineWidth: 0.5)
             }
+    }
+
+    private var presentedScheduledRun: ScheduledJobRun? {
+        guard let presentedScheduledRunID else { return nil }
+        if scheduledJobs.activeRun?.id == presentedScheduledRunID {
+            return scheduledJobs.activeRun
+        }
+        return scheduledJobs.recentRuns.first { $0.id == presentedScheduledRunID }
     }
 
     private func activityPanel(maximumHeight: CGFloat) -> some View {

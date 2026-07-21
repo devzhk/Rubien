@@ -452,6 +452,10 @@ def main():
         sys.stdout.write("Logged in using ChatGPT\n")
         sys.stdout.flush()
         return 0
+    if len(sys.argv) >= 4 and sys.argv[-3:] == ["mcp", "list", "--json"]:
+        sys.stdout.write(json.dumps(load_config().get("mcpServers", [])) + "\n")
+        sys.stdout.flush()
+        return 0
     try:
         _atomic_write_json("fake-codex-argv.json", sys.argv)
     except OSError:

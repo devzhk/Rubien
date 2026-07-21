@@ -1810,42 +1810,16 @@ final class ChatSessionController: ObservableObject {
         turnTask = nil
     }
 
-    /// Claude's read/search builtins that are safe to run without a prompt.
-    private static let silentReadBuiltins: Set<String> = [
-        "ToolSearch", "Read", "Glob", "Grep", "LS", "NotebookRead", "WebFetch", "WebSearch",
-    ]
-
     /// Whether a tool may run without an approval card even in "Ask" mode.
     static func isSilentReadTool(_ toolName: String) -> Bool {
-        if let rubienName = bareRubienToolName(toolName) {
-            return rubienName == ChatPaperPresentation.toolName
-                || RubienMCPToolPolicy.access(for: rubienName) == .read
-        }
-        return silentReadBuiltins.contains(toolName)
+        AssistantToolApprovalPolicy.isSilentReadTool(toolName)
     }
 
     /// A qualified Rubien tool that is absent from the canonical policy. This is
     /// deliberately separate from `isSilentReadTool`: Auto mode must deny it,
     /// not merely turn it into a card or auto-approve it.
     static func isUnknownRubienTool(_ toolName: String) -> Bool {
-        guard let bare = bareRubienToolName(toolName) else { return false }
-        return bare != ChatPaperPresentation.toolName
-            && RubienAppSchedulingContract.access(for: bare) == nil
-            && RubienMCPToolPolicy.access(for: bare) == nil
-    }
-
-    /// Normalize Claude (`mcp__rubien__tool`) and Codex (`rubien/tool`) display
-    /// names. Bare canonical names are accepted for protocol compatibility.
-    private static func bareRubienToolName(_ toolName: String) -> String? {
-        if toolName.hasPrefix(ReferenceAttribution.claudeToolPrefix) {
-            return String(toolName.dropFirst(ReferenceAttribution.claudeToolPrefix.count))
-        }
-        let codexPrefix = "\(ReferenceAttribution.serverName)/"
-        if toolName.hasPrefix(codexPrefix) {
-            return String(toolName.dropFirst(codexPrefix.count))
-        }
-        if toolName.hasPrefix("rubien_") { return toolName }
-        return nil
+        AssistantToolApprovalPolicy.isUnknownRubienTool(toolName)
     }
 
     /// Pop the oldest remembered detail for a tool name (FIFO — events carry no id).

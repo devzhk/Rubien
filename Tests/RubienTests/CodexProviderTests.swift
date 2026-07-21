@@ -634,7 +634,8 @@ final class CodexProviderTests: XCTestCase {
         ], into: workspace)
         let provider = CodexProvider(
             executableOverride: fakeServerPath,
-            requestTimeout: 1)
+            requestTimeout: 1,
+            initializeRetryDelay: .milliseconds(10))
         defer { provider.shutdown() }
 
         let events = try await collectAllEvents(
@@ -650,6 +651,70 @@ final class CodexProviderTests: XCTestCase {
             }
             return false
         })
+    }
+
+    func testConcurrentSendCannotBypassInitializeRecoveryBackoff() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "initDelayOnceMs": 3_000,
+            "assistantText": "recovered",
+        ], into: workspace)
+        let provider = CodexProvider(
+            executableOverride: fakeServerPath,
+            requestTimeout: 1,
+            initializeRetryDelay: .seconds(2))
+        defer { provider.shutdown() }
+
+        let first = Task {
+            try? await collectAllEvents(provider.send(turn: turn(workspace: workspace)), timeout: 10)
+        }
+        // The Python fixture itself can take a few seconds to cold-start on a busy
+        // macOS test host. Recovery timing begins only after its PID is observable.
+        try await waitForObserved(in: workspace, timeout: 5) { $0["pid"] is Int }
+        let failedPID = try XCTUnwrap(try readObserved(in: workspace)["pid"] as? Int)
+        try await Task.sleep(for: .milliseconds(1_250))
+
+        let second = Task {
+            try? await collectAllEvents(
+                provider.send(turn: turn(workspace: workspace, resume: "TH-1")),
+                timeout: 5)
+        }
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(try readObserved(in: workspace)["pid"] as? Int, failedPID,
+                       "a concurrent send spawned before the recovery backoff ended")
+
+        try await waitForObserved(in: workspace, timeout: 6) {
+            ($0["pid"] as? Int) != failedPID && ($0["initialized"] as? Bool) == true
+        }
+        _ = await first.value
+        _ = await second.value
+    }
+
+    func testShutdownDuringInitializeRecoveryDoesNotRespawn() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "initDelayOnceMs": 3_000,
+            "assistantText": "must not run",
+        ], into: workspace)
+        let provider = CodexProvider(
+            executableOverride: fakeServerPath,
+            requestTimeout: 1,
+            initializeRetryDelay: .seconds(2))
+
+        let consumer = Task {
+            try? await collectAllEvents(provider.send(turn: turn(workspace: workspace)), timeout: 8)
+        }
+        try await waitForObserved(in: workspace, timeout: 5) { $0["pid"] is Int }
+        let failedPID = try XCTUnwrap(try readObserved(in: workspace)["pid"] as? Int)
+        try await Task.sleep(for: .milliseconds(1_250))
+
+        provider.shutdown()
+        try await Task.sleep(for: .milliseconds(100))
+        try await Task.sleep(for: .seconds(2.2))
+
+        XCTAssertEqual(try readObserved(in: workspace)["pid"] as? Int, failedPID,
+                       "provider teardown must invalidate a sleeping initialize retry")
+        _ = await consumer.value
     }
 
     /// Review #2: a straggler `turn/completed` for a DIFFERENT (old/abandoned) turn id

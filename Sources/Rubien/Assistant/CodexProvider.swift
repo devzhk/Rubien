@@ -33,13 +33,15 @@ final class CodexProvider: AgentProvider {
     init(
         executableOverride: String? = nil,
         contentChannel: MCPContentChannel? = nil,
-        requestTimeout: Double = 30
+        requestTimeout: Double = 30,
+        initializeRetryDelay: Duration = .seconds(5)
     ) {
         self.executableOverride = executableOverride
         self.connection = CodexAppServerConnection(
             executableOverride: executableOverride,
             contentChannel: contentChannel,
-            requestTimeout: requestTimeout)
+            requestTimeout: requestTimeout,
+            initializeRetryDelay: initializeRetryDelay)
     }
 
     func isAvailable() async -> AgentAvailability {
@@ -97,8 +99,8 @@ final class CodexProvider: AgentProvider {
         await connection.readTranscript(threadID: sessionID, workspaceURL: workspaceURL)
     }
 
-    /// The installed codex's own model catalog (memoized per binary — one probe
-    /// spawn per launch; spec §4.1). Feeds pickers only.
+    /// The installed codex's own model catalog (memoized per binary — one isolated
+    /// discovery operation per launch; spec §4.1). Feeds pickers only.
     func availableModels() async -> CodexCatalog? {
         await CodexModelCatalog.shared.catalog(executableOverride: executableOverride)
     }
@@ -165,10 +167,11 @@ enum CodexInvocation {
         if readOnlyLibrary {
             // Unlike Claude, app-server has no strict MCP-config flag. Resolve
             // the effective catalog before launch, disable plugins/connectors,
-            // and pin every remaining ambient server off by name. The injected
-            // canonical Rubien server is re-enabled below.
+            // and pin every remaining ambient server off by name. When supplied,
+            // the injected canonical Rubien server is re-enabled below.
             args += ["--disable", "plugins"]
-            for name in disabledMCPServerNames where name != MCPContentChannel.serverName {
+            for name in disabledMCPServerNames
+            where name != MCPContentChannel.serverName || rubienCLIPath == nil {
                 args += ["-c", "mcp_servers.\(name).enabled=false"]
             }
         }
@@ -238,6 +241,24 @@ enum CodexInvocation {
         return names.sorted()
     }
 
+    /// Resolve the ambient MCP names under the same Apps/plugins isolation used
+    /// by unattended and metadata-only servers. Callers then pin those remaining
+    /// configured servers off with per-name overrides.
+    static func isolatedMCPServerNames(
+        executablePath: String,
+        environment: [String: String],
+        workingDirectory: String
+    ) -> [String]? {
+        guard let catalog = AgentBinaryProbe.run(
+            executablePath: executablePath,
+            arguments: scheduledMCPListArguments,
+            environment: environment,
+            timeout: 5,
+            workingDirectory: workingDirectory
+        ) else { return nil }
+        return configuredEnabledMCPServerNames(from: catalog)
+    }
+
     /// The shared minimal ALLOWLISTED environment. `HOME` (in the shared allowlist)
     /// is required so `~/.codex` auth/config resolve (§4 — no CODEX_HOME override).
     static func environment(binaryDirectory: String) -> [String: String] {
@@ -258,16 +279,19 @@ enum CodexInvocation {
 private actor CodexAppServerConnection {
     private let executableOverride: String?
     private let contentChannel: MCPContentChannel?
+    private let initializeRetryDelay: Duration
     private let logger = RubienLogger(subsystem: "com.rubien.assistant", category: "CodexProvider")
 
     init(
         executableOverride: String?,
         contentChannel: MCPContentChannel?,
-        requestTimeout: Double
+        requestTimeout: Double,
+        initializeRetryDelay: Duration
     ) {
         self.executableOverride = executableOverride
         self.contentChannel = contentChannel
         self.requestTimeout = requestTimeout
+        self.initializeRetryDelay = initializeRetryDelay
     }
 
     // Tunables (single point — mirrors ClaudeTurnEngine's named timers).
@@ -278,6 +302,9 @@ private actor CodexAppServerConnection {
     private static let interruptGrace: Double = 5
     /// After `shutdown`'s SIGTERM, escalate to SIGKILL.
     private static let shutdownHardKillDelay: Double = 2
+    /// A SIGKILLed initialize process should reap immediately; bound the wait so
+    /// recovery itself can never monopolize the connection actor.
+    private static let initializeCleanupWait: Double = 2
     // The crash-notice drain grace + tail size are shared (`AgentProcessExit`).
 
     /// A JSON-RPC request failure (soft — surfaced as a §4.5 notice, never thrown).
@@ -349,11 +376,27 @@ private actor CodexAppServerConnection {
         }
     }
 
+    /// One connection-wide initialize recovery gate. Actor methods are reentrant:
+    /// while the owner awaits process reaping/backoff, every new sender must join
+    /// this task instead of observing `server == nil` and spawning into the same
+    /// failing cold-start window.
+    private struct InitializeRecovery {
+        let token: UUID
+        let task: Task<Bool, Never>
+    }
+
     private var server: Server?
     private var serverGeneration = 0
+    private var initializeRecovery: InitializeRecovery?
+    /// A SIGKILLed leader that did not reap within the hard bound makes this
+    /// connection unsafe to reuse: spawning another server could overlap it.
+    private var initializeRecoveryBlocked = false
     /// Set during a deliberate `shutdown()` so the reader's EOF path doesn't compose
     /// a scary crash notice for an intentional kill.
     private var shuttingDown = false
+    /// Terminal provider teardown. Unlike `shuttingDown`, this also covers the
+    /// initialize-recovery interval where no `server` is currently installed.
+    private var shutdownRequested = false
 
     // MARK: Per-turn state
 
@@ -628,8 +671,10 @@ private actor CodexAppServerConnection {
     /// finished FIRST so the reader's EOF path sees a deliberate shutdown.
     func shutdown() {
         if let active = turn { finishTurn(active) }
-        guard let srv = server else { return }
+        shutdownRequested = true
+        initializeRecovery?.task.cancel()
         shuttingDown = true
+        guard let srv = server else { return }
         server = nil
         failAllPending(srv, with: .serverExited)
         srv.process.closeStdin()
@@ -658,6 +703,11 @@ private actor CodexAppServerConnection {
         reuseAnySpawnConfiguration: Bool = false,
         allowInitializeRetry: Bool = true
     ) async throws -> Server {
+        guard await joinInitializeRecoveryIfNeeded() else {
+            throw RequestFailure.serverExited
+        }
+        guard !shutdownRequested else { throw RequestFailure.serverExited }
+
         if let srv = server {
             if reuseAnySpawnConfiguration || srv.spawnConfiguration == configuration {
                 do {
@@ -667,11 +717,14 @@ private actor CodexAppServerConnection {
                     // A failed handshake can never become usable. In particular, keeping
                     // an initialize timeout cached on a still-live process made every
                     // later send in this window fail immediately with the same notice.
-                    if server === srv { killServer(srv) }
+                    let recovered = await recoverInitializeServer(
+                        srv,
+                        applyBackoff: failure.isInitializeTimeout && allowInitializeRetry)
                     guard failure.isInitializeTimeout, allowInitializeRetry else {
                         throw failure
                     }
-                    logger.info("codex initialize timed out — retrying once on a fresh app-server")
+                    guard recovered else { throw failure }
+                    logger.info("codex initialize timed out — retrying once after cleanup backoff")
                     return try await ensureServer(
                         configuration: configuration,
                         workspaceURL: workspaceURL,
@@ -690,13 +743,11 @@ private actor CodexAppServerConnection {
             binaryDirectory: (executable as NSString).deletingLastPathComponent)
         let disabledMCPServerNames: [String]
         if configuration.readOnlyLibrary {
-            guard let catalog = AgentBinaryProbe.run(
+            guard let names = CodexInvocation.isolatedMCPServerNames(
                 executablePath: executable,
-                arguments: CodexInvocation.scheduledMCPListArguments,
                 environment: environment,
-                timeout: 5,
                 workingDirectory: workspaceURL.path
-            ), let names = CodexInvocation.configuredEnabledMCPServerNames(from: catalog) else {
+            ) else {
                 throw AgentProviderError.isolationUnavailable
             }
             disabledMCPServerNames = names
@@ -738,9 +789,12 @@ private actor CodexAppServerConnection {
             return srv
         } catch let failure as RequestFailure {
             completeHandshake(srv, .failure(failure))
-            if server === srv { killServer(srv) }
+            let recovered = await recoverInitializeServer(
+                srv,
+                applyBackoff: failure.isInitializeTimeout && allowInitializeRetry)
             if failure.isInitializeTimeout, allowInitializeRetry {
-                logger.info("codex initialize timed out — retrying once on a fresh app-server")
+                guard recovered else { throw failure }
+                logger.info("codex initialize timed out — retrying once after cleanup backoff")
                 return try await ensureServer(
                     configuration: configuration,
                     workspaceURL: workspaceURL,
@@ -782,6 +836,59 @@ private actor CodexAppServerConnection {
         srv.process.signalGroup(SIGKILL)
         let process = srv.process
         Task { _ = await process.wait() }
+    }
+
+    /// Join the recovery owner across actor suspension points. The token prevents a
+    /// late waiter from clearing a newer recovery installed after its task completed.
+    private func joinInitializeRecoveryIfNeeded() async -> Bool {
+        while let recovery = initializeRecovery {
+            let recovered = await recovery.task.value
+            if !recovered { initializeRecoveryBlocked = true }
+            if initializeRecovery?.token == recovery.token {
+                initializeRecovery = nil
+            }
+        }
+        return !initializeRecoveryBlocked
+    }
+
+    /// Initialization can wedge while Codex is refreshing its runtime or shared
+    /// state. Kill/reap the failed process tree and, for the one allowed timeout
+    /// retry, hold a connection-wide backoff gate. A concurrent handshake waiter
+    /// joins the same recovery; it never starts another cleanup or an early server.
+    private func recoverInitializeServer(_ srv: Server, applyBackoff: Bool) async -> Bool {
+        if initializeRecovery != nil {
+            return await joinInitializeRecoveryIfNeeded()
+        }
+        guard !initializeRecoveryBlocked else { return false }
+        // Another waiter may reach this catch after the owner already recovered and
+        // installed a fresh server. The owner was responsible for the old process.
+        guard server === srv else { return true }
+
+        server = nil
+        failAllPending(srv, with: .serverExited)
+        srv.process.closeStdin()
+        srv.process.signalGroup(SIGKILL)
+        let process = srv.process
+        let cleanupWait = Self.initializeCleanupWait
+        let retryDelay = initializeRetryDelay
+        let task = Task { [logger] in
+            if await process.wait(timeout: cleanupWait) == nil {
+                logger.error("codex initialize cleanup did not reap within the bounded wait")
+                return false
+            }
+            if applyBackoff {
+                try? await Task.sleep(for: retryDelay)
+            }
+            return true
+        }
+        let recovery = InitializeRecovery(token: UUID(), task: task)
+        initializeRecovery = recovery
+        let recovered = await task.value
+        if !recovered { initializeRecoveryBlocked = true }
+        if initializeRecovery?.token == recovery.token {
+            initializeRecovery = nil
+        }
+        return recovered
     }
 
     /// Fail every awaiter of `srv` — pending JSON-RPC requests AND handshake joiners

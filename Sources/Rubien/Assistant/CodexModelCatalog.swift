@@ -18,29 +18,38 @@ import RubienCore
 
 actor CodexModelCatalog {
     /// Production singleton — Settings and every reader window share one result
-    /// (one probe spawn per launch per binary path).
+    /// (one isolated discovery operation per launch per binary path).
     static let shared = CodexModelCatalog()
 
     private let workingDirectory: URL
+    private let fetchTimeout: Double
     /// `static` (not an instance property) so the free-standing `fetch` probe —
     /// deliberately non-isolated from the actor so a slow probe never blocks other
     /// paths' lookups — can log without threading the logger through as a parameter.
     private static let logger = RubienLogger(subsystem: "com.rubien.assistant", category: "CodexModelCatalog")
 
     private var cache: [String: CodexCatalog] = [:]
-    private var inflight: [String: Task<CodexCatalog, Never>] = [:]
+    private struct InflightFetch {
+        let token: UUID
+        let generation: Int
+        let task: Task<CodexCatalog, Never>
+    }
+    private var inflight: [String: InflightFetch] = [:]
     /// Per-PATH invalidation tokens (spec §4.1): `forceReload` bumps a path's
     /// token so a fetch that started before the bump can't repopulate the entry
     /// it invalidated. Per-path, not global — reloading one binary must not
     /// invalidate another's in-flight fetch (plan-review #2).
     private var generation: [String: Int] = [:]
 
-    /// Bound on the whole probe (spawn → handshake → model/list). Local IPC answers
+    /// Bound on the app-server phase (spawn → handshake → model/list), after
+    /// the separately bounded five-second MCP-isolation preflight. Local IPC answers
     /// in well under a second; a wedged binary must not hold a picker open forever.
-    private static let fetchTimeout: Double = 10
-
-    init(workingDirectory: URL = FileManager.default.temporaryDirectory) {
+    init(
+        workingDirectory: URL = FileManager.default.temporaryDirectory,
+        fetchTimeout: Double = 10
+    ) {
         self.workingDirectory = workingDirectory
+        self.fetchTimeout = fetchTimeout
     }
 
     /// The catalog for the codex the override resolves to. Memoized; `forceReload`
@@ -54,36 +63,97 @@ actor CodexModelCatalog {
         }
         if forceReload {
             cache[path] = nil
-            inflight[path] = nil
             generation[path, default: 0] += 1
+            let previous = inflight[path]
+            previous?.task.cancel()
+
+            // Publish the replacement before awaiting the superseded probe. Existing
+            // callers that were awaiting `previous` can then follow this task instead
+            // of briefly receiving its cancellation result as "catalog unavailable".
+            // The replacement itself waits for the canceled process to finish its
+            // bounded kill/reap cleanup, so app-server probes still never overlap.
+            let gen = generation[path, default: 0]
+            let directory = workingDirectory
+            let timeout = fetchTimeout
+            let replacement = InflightFetch(
+                token: UUID(),
+                generation: gen,
+                task: Task {
+                    if let previous { _ = await previous.task.value }
+                    guard !Task.isCancelled else { return .unavailable }
+                    return await Self.fetch(
+                        executablePath: path,
+                        workingDirectory: directory,
+                        timeout: timeout)
+                })
+            inflight[path] = replacement
+            return await finish(replacement, for: path)
         }
         if let cached = cache[path] { return cached }
-        if let running = inflight[path] { return await running.value }
+        if let running = inflight[path] {
+            return await finish(running, for: path)
+        }
 
         let gen = generation[path, default: 0]
         let directory = workingDirectory
-        let task = Task { await Self.fetch(executablePath: path, workingDirectory: directory) }
-        inflight[path] = task
-        let result = await task.value
-        // A forceReload that raced this fetch bumped the path's generation: the
-        // stale completion must not repopulate the entry it invalidated. When the
-        // generation still matches, the inflight entry is necessarily THIS task
-        // (only forceReload replaces it, and that bumps the generation), so it is
-        // safe to clear without comparing Task identities (plan-review #1).
-        if generation[path, default: 0] == gen {
-            cache[path] = result
-            inflight[path] = nil
+        let timeout = fetchTimeout
+        let fetch = InflightFetch(
+            token: UUID(),
+            generation: gen,
+            task: Task {
+                await Self.fetch(
+                    executablePath: path,
+                    workingDirectory: directory,
+                    timeout: timeout)
+            })
+        inflight[path] = fetch
+        return await finish(fetch, for: path)
+    }
+
+    /// Complete one generation. If a force reload superseded it while the actor was
+    /// suspended, follow the replacement task already published in `inflight`.
+    private func finish(_ fetch: InflightFetch, for path: String) async -> CodexCatalog {
+        let result = await fetch.task.value
+        guard generation[path, default: 0] == fetch.generation,
+              inflight[path]?.token == fetch.token
+        else {
+            if let replacement = inflight[path] {
+                return await finish(replacement, for: path)
+            }
+            return cache[path] ?? .unavailable
         }
+        cache[path] = result
+        inflight[path] = nil
         return result
     }
 
-    /// One standalone probe: spawn, handshake, `model/list`, kill. Static + isolated
-    /// from the actor so a slow probe never blocks other paths' lookups.
-    private static func fetch(executablePath: String, workingDirectory: URL) async -> CodexCatalog {
-        let arguments = CodexInvocation.arguments(
-            rubienCLIPath: nil, libraryRoot: nil, webAccess: true)
+    /// One standalone discovery: isolate ambient MCP config, then spawn, handshake,
+    /// `model/list`, and kill. Static + isolated from the actor so a slow operation
+    /// never blocks other paths' lookups.
+    private static func fetch(
+        executablePath: String,
+        workingDirectory: URL,
+        timeout: Double
+    ) async -> CodexCatalog {
         let environment = CodexInvocation.environment(
             binaryDirectory: (executablePath as NSString).deletingLastPathComponent)
+        // Model discovery needs no apps, plugins, or MCP tools. Resolve the ambient
+        // names under feature isolation, then pin every configured server off before
+        // starting this metadata-only app-server.
+        guard let disabledMCPServerNames = CodexInvocation.isolatedMCPServerNames(
+            executablePath: executablePath,
+            environment: environment,
+            workingDirectory: workingDirectory.path
+        ) else {
+            logger.error("codex model/list probe failed: could not isolate ambient MCP servers")
+            return .unavailable
+        }
+        let arguments = CodexInvocation.arguments(
+            rubienCLIPath: nil,
+            libraryRoot: nil,
+            webAccess: true,
+            readOnlyLibrary: true,
+            disabledMCPServerNames: disabledMCPServerNames)
 
         let process: SpawnedAgentProcess
         do {
@@ -104,14 +174,32 @@ actor CodexModelCatalog {
         }
         // Watchdog: a wedged probe is killed, which EOFs the read loop below.
         let watchdog = Task {
-            try? await Task.sleep(for: .seconds(fetchTimeout))
+            try? await Task.sleep(for: .seconds(timeout))
             process.signalGroup(SIGKILL)
         }
 
-        var models: [CodexModelInfo]?
         process.writeLine(CodexAppServerProtocol.initialize(
             requestID: 1, clientName: "rubien-model-catalog",
             version: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"))
+        let models = await withTaskCancellationHandler {
+            await readModels(from: process)
+        } onCancel: {
+            process.closeStdin()
+            process.signalGroup(SIGKILL)
+        }
+        watchdog.cancel()
+        process.closeStdin()
+        process.signalGroup(SIGKILL)
+        _ = await process.wait(timeout: 2)
+
+        guard let models else {
+            logger.error("codex model/list probe failed: no model list received (EOF, timeout, or decode failure)")
+            return .unavailable
+        }
+        return CodexCatalog(models: models, fetchedOK: true)
+    }
+
+    private static func readModels(from process: SpawnedAgentProcess) async -> [CodexModelInfo]? {
         do {
             for try await line in process.stdoutHandle.bytes.lines {
                 guard case let .response(id, result, error)? =
@@ -119,32 +207,24 @@ actor CodexModelCatalog {
                 if id == .number(1) {
                     guard error == nil else {
                         logger.error("codex model/list probe failed: initialize returned an error: \(String(describing: error))")
-                        break
+                        return nil
                     }
                     process.writeLine(CodexAppServerProtocol.initialized())
                     process.writeLine(CodexAppServerProtocol.modelList(requestID: 2))
                 } else if id == .number(2) {
-                    if error == nil, let result {
-                        models = CodexAppServerProtocol.decodeModelList(result)
-                    } else if error != nil {
-                        logger.error("codex model/list probe failed: model/list returned an error: \(String(describing: error))")
+                    guard error == nil, let result else {
+                        if error != nil {
+                            logger.error("codex model/list probe failed: model/list returned an error: \(String(describing: error))")
+                        }
+                        return nil
                     }
-                    break
+                    return CodexAppServerProtocol.decodeModelList(result)
                 }
             }
         } catch {
             // Early EOF / read error → unavailable below.
         }
-        watchdog.cancel()
-        process.closeStdin()
-        process.signalGroup(SIGKILL)
-        Task { _ = await process.wait() }   // reap off-path
-
-        guard let models else {
-            logger.error("codex model/list probe failed: no model list received (EOF, timeout, or decode failure)")
-            return .unavailable
-        }
-        return CodexCatalog(models: models, fetchedOK: true)
+        return nil
     }
 }
 #endif

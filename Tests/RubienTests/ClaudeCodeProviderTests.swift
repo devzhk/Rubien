@@ -343,6 +343,32 @@ final class ClaudeCodeProviderTests: XCTestCase {
         XCTAssertEqual(try referenceTitles(libraryRoot: libraryRoot), [])
     }
 
+    func testReadOnlyApprovalIsAnsweredAtProviderBoundary() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "approval": [
+                "requestId": "req-read",
+                "toolName": "mcp__rubien__rubien_read_text",
+                "toolUseId": "toolu_read",
+                "input": ["id": 1690, "pages": "1-2"],
+                "description": "Read pages 1-2",
+            ],
+            "afterApprovalText": "Read completed",
+        ], into: workspace)
+        let provider = ClaudeCodeProvider(executableOverride: fakeCLIPath)
+
+        let events = try await withTimeout(25) {
+            try await self.collectAllEvents(provider.send(turn: self.turn(workspace: workspace)))
+        }
+
+        XCTAssertFalse(events.contains { event in
+            if case .approvalRequested = event { return true }
+            return false
+        })
+        XCTAssertTrue(events.contains(.assistantMessageCompleted(text: "Read completed")))
+        XCTAssertTrue(events.containsTurnCompleted)
+    }
+
     // MARK: Cancellation → process-group kill
 
     func testCancelKillsWholeProcessGroupWithNoOrphan() async throws {
@@ -635,7 +661,11 @@ final class ClaudeCodeProviderTests: XCTestCase {
                 }
             }
         }
-        await fulfillment(of: [initSeen], timeout: 12)
+        // This assertion starts only after the fake CLI publishes its init alias;
+        // process-heavy full-suite runs can delay the Python harness itself well
+        // beyond its normal subsecond startup. The behavior under test is lease
+        // publication ordering, not interpreter launch latency.
+        await fulfillment(of: [initSeen], timeout: 30)
 
         // A second window can act on the visible init id immediately, but alias
         // publication must already point it at the first process's held lease.
@@ -644,7 +674,7 @@ final class ClaudeCodeProviderTests: XCTestCase {
                 workspace: workspace,
                 conversationID: UUID(),
                 resumeSessionID: "fresh-live-alias")),
-            timeout: 12)
+            timeout: 30)
         }
         try await Task.sleep(nanoseconds: 120_000_000)
         XCTAssertEqual(try readSpawnRecords(in: workspace).count, 1)

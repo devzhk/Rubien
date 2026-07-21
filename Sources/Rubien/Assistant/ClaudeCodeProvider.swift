@@ -449,6 +449,13 @@ actor ClaudeTurnEngine {
         // second full JSON parse on every frequent `stream_event` delta.
         if line.contains("can_use_tool"),
            let pending = ClaudeControlProtocol.decodeCanUseTool(line: line) {
+            if AssistantToolApprovalPolicy.isSilentReadTool(pending.toolName) {
+                turn.process.writeLine(ClaudeControlProtocol.controlResponse(
+                    for: pending,
+                    decision: .allowForConversation
+                ))
+                return
+            }
             turn.pendingApprovals[pending.requestID] = pending
         }
 

@@ -29,6 +29,7 @@ struct ScheduledJobProgress: Equatable, Sendable {
     }
 
     let runID: String
+    let prompt: String?
     private(set) var phase: Phase
     private(set) var sessionID: String?
     private(set) var model: String?
@@ -36,11 +37,14 @@ struct ScheduledJobProgress: Equatable, Sendable {
     private(set) var revision = 0
 
     private var streamingAssistantEntryID: UUID?
+    private var totalEntryCharacters = 0
     private static let maximumEntries = 120
-    private static let maximumEntryCharacters = 64_000
+    private static let maximumEntryCharacters = 32_000
+    private static let maximumTotalCharacters = 128_000
 
-    init(run: ScheduledJobRun) {
+    init(run: ScheduledJobRun, prompt: String? = nil) {
         runID = run.id
+        self.prompt = prompt
         phase = switch run.status {
         case .pending, .unknown: .preparing
         case .running: .running
@@ -63,7 +67,7 @@ struct ScheduledJobProgress: Equatable, Sendable {
         case .modelResolved(let model):
             self.model = model
         case .assistantDelta(let text):
-            appendAssistantDelta(text)
+            guard appendAssistantDelta(text) else { return }
         case .assistantMessageCompleted(let text):
             commitAssistantMessage(text)
         case .toolUseStarted(let name, let detail):
@@ -112,15 +116,25 @@ struct ScheduledJobProgress: Equatable, Sendable {
         revision += 1
     }
 
-    private mutating func appendAssistantDelta(_ text: String) {
-        guard !text.isEmpty else { return }
+    @discardableResult
+    private mutating func appendAssistantDelta(_ text: String) -> Bool {
+        guard !text.isEmpty else { return false }
         if let id = streamingAssistantEntryID,
            let index = entries.firstIndex(where: { $0.id == id }) {
+            // Once the visible prefix is saturated, later provider tokens cannot
+            // change this bounded snapshot. Avoid repeatedly copying/counting the
+            // same 32K string or publishing no-op revisions.
+            if entries[index].detail.count > Self.maximumEntryCharacters {
+                return false
+            }
+            let oldCount = entries[index].detail.count
             entries[index].detail.append(contentsOf: text)
             if entries[index].detail.count > Self.maximumEntryCharacters {
                 entries[index].detail = bounded(entries[index].detail)
             }
-            return
+            totalEntryCharacters += entries[index].detail.count - oldCount
+            enforceBounds()
+            return true
         }
         let entry = Entry(
             id: UUID(),
@@ -129,13 +143,14 @@ struct ScheduledJobProgress: Equatable, Sendable {
         )
         streamingAssistantEntryID = entry.id
         append(entry)
+        return true
     }
 
     private mutating func commitAssistantMessage(_ text: String) {
         if let id = streamingAssistantEntryID,
            let index = entries.firstIndex(where: { $0.id == id }) {
             entries[index].kind = .assistant(isStreaming: false)
-            entries[index].detail = bounded(text)
+            replaceDetail(at: index, with: text)
         } else {
             append(Entry(
                 id: UUID(),
@@ -144,6 +159,7 @@ struct ScheduledJobProgress: Equatable, Sendable {
             ))
         }
         streamingAssistantEntryID = nil
+        enforceBounds()
     }
 
     private mutating func completeTool(
@@ -156,7 +172,8 @@ struct ScheduledJobProgress: Equatable, Sendable {
             return entryName == name
         }) {
             entries[index].kind = .tool(name: name, status: status)
-            if let detail { entries[index].detail = detail }
+            if let detail { replaceDetail(at: index, with: detail) }
+            enforceBounds()
         } else {
             append(Entry(
                 id: UUID(),
@@ -167,15 +184,38 @@ struct ScheduledJobProgress: Equatable, Sendable {
     }
 
     private mutating func append(_ entry: Entry) {
+        var entry = entry
+        entry.detail = bounded(entry.detail)
         entries.append(entry)
-        guard entries.count > Self.maximumEntries else { return }
-        let overflow = entries.count - Self.maximumEntries
-        let removed = entries.prefix(overflow)
-        if let streamingAssistantEntryID,
-           removed.contains(where: { $0.id == streamingAssistantEntryID }) {
-            self.streamingAssistantEntryID = nil
+        totalEntryCharacters += entry.detail.count
+        enforceBounds()
+    }
+
+    private mutating func replaceDetail(at index: Int, with detail: String) {
+        totalEntryCharacters -= entries[index].detail.count
+        entries[index].detail = bounded(detail)
+        totalEntryCharacters += entries[index].detail.count
+    }
+
+    /// Keep app-lifetime snapshots small regardless of event kind. Tool details,
+    /// notices, and paper titles are provider-controlled too, so limiting only
+    /// assistant text would not provide a real per-run memory bound.
+    private mutating func enforceBounds() {
+        while entries.count > Self.maximumEntries
+                || totalEntryCharacters > Self.maximumTotalCharacters {
+            guard entries.count > 1 else {
+                replaceDetail(
+                    at: 0,
+                    with: String(entries[0].detail.prefix(Self.maximumTotalCharacters))
+                )
+                return
+            }
+            let removed = entries.removeFirst()
+            totalEntryCharacters -= removed.detail.count
+            if removed.id == streamingAssistantEntryID {
+                streamingAssistantEntryID = nil
+            }
         }
-        entries.removeFirst(overflow)
     }
 
     private func bounded(_ text: String) -> String {

@@ -1,4 +1,5 @@
 #if os(macOS)
+import Darwin
 import XCTest
 @testable import Rubien
 
@@ -27,6 +28,19 @@ final class CodexModelCatalogTests: XCTestCase {
         XCTAssertEqual(catalog.models[0].defaultEffort, "medium")
         XCTAssertTrue(catalog.models[0].isDefault)
         XCTAssertEqual(catalog.models[1].efforts.map(\.value), ["low", "max", "ultra"])
+    }
+
+    func testProbeDisablesAppsPluginsAndAmbientMCPServers() async throws {
+        _ = await freshCatalog(config: ["mcpServers": [
+            ["name": "github", "enabled": true],
+            ["name": "rubien", "enabled": true],
+        ]]).catalog(executableOverride: fakeServerPath)
+
+        let arguments = try spawnedArguments()
+        XCTAssertTrue(arguments.containsPair("--disable", "apps"))
+        XCTAssertTrue(arguments.containsPair("--disable", "plugins"))
+        XCTAssertTrue(arguments.containsPair("-c", "mcp_servers.github.enabled=false"))
+        XCTAssertTrue(arguments.containsPair("-c", "mcp_servers.rubien.enabled=false"))
     }
 
     func testMemoizesPerBinaryPath() async throws {
@@ -80,10 +94,29 @@ final class CodexModelCatalogTests: XCTestCase {
         let reloaded = await store.catalog(executableOverride: fakeServerPath, forceReload: true)
         XCTAssertEqual(reloaded.models.map(\.id), ["fresh-model"])
 
-        _ = await slow.value   // the stale (gen-0) fetch completes AFTER the reload
+        let joined = await slow.value
+        XCTAssertEqual(joined.models.map(\.id), ["fresh-model"],
+                       "a superseded waiter must join the replacement fetch")
         let cached = await store.catalog(executableOverride: fakeServerPath)
         XCTAssertEqual(cached.models.map(\.id), ["fresh-model"],
                        "the stale in-flight fetch must not repopulate the cache (plan-review #2)")
+    }
+
+    func testForceReloadKillsSupersededProbeBeforeStartingFreshOne() async throws {
+        let store = freshCatalog(config: ["modelListDelayMs": 5_000])
+        let slow = Task { await store.catalog(executableOverride: fakeServerPath) }
+        let oldPID = try observedPID()
+        try writeConfig(["models": [["id": "fresh-model", "displayName": "Fresh"]]])
+
+        let reloaded = await store.catalog(executableOverride: fakeServerPath, forceReload: true)
+
+        XCTAssertEqual(reloaded.models.map(\.id), ["fresh-model"])
+        for _ in 0..<50 where kill(oldPID, 0) == 0 {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertNotEqual(kill(oldPID, 0), 0,
+                          "forceReload must not leave the superseded app-server running")
+        _ = await slow.value
     }
 
     // MARK: Helpers
@@ -100,7 +133,10 @@ final class CodexModelCatalogTests: XCTestCase {
             try? data?.write(to: dir.appendingPathComponent("fake-codex.json"))
         }
         currentWorkspace = dir
-        return CodexModelCatalog(workingDirectory: dir)
+        // The production picker keeps a ten-second bound. The Python fixture can
+        // cold-start much more slowly after the full process-heavy provider suite,
+        // so give the harness headroom without weakening the production timeout.
+        return CodexModelCatalog(workingDirectory: dir, fetchTimeout: 30)
     }
 
     private var currentWorkspace: URL?
@@ -126,11 +162,36 @@ final class CodexModelCatalogTests: XCTestCase {
         throw XCTSkip("observed file never appeared — fake server did not run")
     }
 
+    private func spawnedArguments() throws -> [String] {
+        let url = try XCTUnwrap(currentWorkspace).appendingPathComponent("fake-codex-argv.json")
+        let data = try Data(contentsOf: url)
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String])
+    }
+
+    private func observedPID() throws -> pid_t {
+        let url = try XCTUnwrap(currentWorkspace).appendingPathComponent("fake-codex-observed.json")
+        for _ in 0..<100 {
+            if let data = try? Data(contentsOf: url),
+               let observed = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let pid = observed["pid"] as? Int {
+                return pid_t(pid)
+            }
+            usleep(20_000)
+        }
+        throw XCTSkip("probe process never recorded its pid")
+    }
+
     private var fakeServerPath: String {
         URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
             .appendingPathComponent("Fixtures/fake-codex-app-server.py")
             .path
+    }
+}
+
+private extension Array where Element == String {
+    func containsPair(_ first: String, _ second: String) -> Bool {
+        zip(self, dropFirst()).contains { $0 == first && $1 == second }
     }
 }
 #endif

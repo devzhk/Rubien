@@ -929,6 +929,7 @@ struct ContentView: View {
     @State private var homeUsesCompactLayout = false
     @State private var homeUnreadOutcome: AssistantTurnOutcome.Phase?
     @State private var scheduledJobsPresentation: ScheduledJobsPresentation?
+    @State private var homePresentedScheduledRunID: String?
     @State private var hostingWindowBox = HostingWindowBox()
     @State private var selectedId: Int64?
     @State private var tableScrollRequest = 0
@@ -1224,6 +1225,7 @@ struct ContentView: View {
                     activityOverlayPresented: $homeActivityOverlayPresented,
                     activityWidth: $homeActivityWidth,
                     scheduledJobsPresentation: $scheduledJobsPresentation,
+                    presentedScheduledRunID: $homePresentedScheduledRunID,
                     onOpenReference: openReader,
                     onOpenPaperSource: { ChatExternalLinkOpener.open($0) },
                     onAddPaperSource: beginSuggestedReferenceImport,
@@ -1655,6 +1657,11 @@ struct ContentView: View {
 
     private func openScheduledRun(_ run: ScheduledJobRun) {
         showHome()
+        if run.status.isActive {
+            homePresentedScheduledRunID = run.id
+            return
+        }
+        homePresentedScheduledRunID = nil
         guard run.status == .succeeded else {
             scheduledJobCoordinator.markRunRead(id: run.id)
             presentRecentScheduledRuns(message: run.status == .cancelled
