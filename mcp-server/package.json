@@ -1,6 +1,6 @@
 {
   "name": "rubien-mcp-server",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "MCP server wrapping rubien-cli so Claude Code and claude.ai can manage the Rubien reference library.",
   "license": "Apache-2.0",
   "author": "devzhk",
