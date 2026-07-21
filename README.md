@@ -10,21 +10,31 @@
 
 Rubien organizes papers, books, and web sources in one local library. Its native readers and in-library Assistant help you discover new work, understand what you read, connect ideas across sources, and act through the tools available to Claude Code or Codex.
 
-Underneath, Rubien is built on one principle: **one library, two front doors.** A single local SQLite database holds every reference, tag, annotation, custom property, and view — and you reach it through either a Notion-style SwiftUI app for humans or a scriptable `rubien-cli` for agents and automation. Both speak to the same store; neither is a second-class citizen. The icon — a cube whose faces are a Notion-style UI on one side and a terminal on the other — is the architecture in one image.
-
-The SwiftUI app is Mac-only. `rubien-cli` also runs on Linux — see [Linux CLI](#linux-cli).
-
 ## Features
 
-- **Research Assistant** — work with Claude Code or Codex from Home or alongside the document you're reading. Discover sources, ask for explanations, connect ideas across your library, and use your existing connected tools.
-- **Web reader + annotations** — save and read clean versions of web articles while retaining access to the original page. Highlight, underline, and attach anchored notes.
-- **PDF reader + annotations** — native rendering with highlight / underline / anchored notes. Thumbnails, outline, full-text search. The Mac app reader uses PDFKit; CLI PDF tooling works on Mac (PDFKit) and Linux (poppler-glib).
-- **Metadata fetching** — paste a DOI, arXiv ID, PMID, PMCID, ISBN, URL, or paper title. See [Supported sources](#supported-sources). No API keys.
-- **FTS5 search** — SQLite full-text search across title, authors, journal, abstract, notes, DOI.
-- **BibTeX / RIS import & export** — standard parsers, round-trip friendly.
-- **Direct Zotero import** *(Mac only)* — detects Zotero on the same Mac, lets you expand collections to preview their papers, choose collections and subcollections, and transfer metadata, a local PDF, and supported highlights, underlines, and anchored notes.
-- **iCloud sync** *(Mac only)* — `CKSyncEngine`-backed two-way sync of references, tags, annotations, custom properties, and views across Macs signed into the same iCloud account. Toggle in Settings → iCloud Sync.
-- **CLI** — `rubien-cli` exposes everything as scriptable JSON. 18 subcommands on Mac, 17 on Linux (no `sync`). Tag operations live under `properties` against the built-in Tags property. Full reference in [`Docs/CLI-Reference.md`](Docs/CLI-Reference.md).
+### An assistant that lives in your library
+
+- **Just ask** — "find recent papers on this topic", "explain this section", "save our takeaways as a notion in my Notion". Claude Code or Codex does it from Home or right beside the document you're reading, and asks first before changing your library.
+- **Set it on a schedule** — a job like "every weekday morning, find new papers on my topic" runs whenever the app is open, with a history of what it did.
+
+### Build your library from anywhere
+
+- **Paste anything** — a DOI, arXiv ID, PMID, ISBN, paper URL, or bare title ([supported sources](#supported-sources)). Metadata resolves and open-access PDFs download automatically — no API keys, no account.
+- **One click from your browser** — the [Chrome extension](BrowserExtension/README.md) imports the paper, PDF, or article you're viewing.
+- **Ask the Assistant** — describe what you're after and it finds and files the references for you.
+- **Bring what you have** — import from Zotero (metadata, PDFs, and annotations), BibTeX, or RIS.
+
+### Read, organize, find
+
+- **Read and mark up in place** — native PDF reader and clean web reader, with highlights, underlines, and anchored notes; web clips keep a path back to the original page.
+- **Organize your way** — tags, reading status, and custom columns in a database-style table, plus saved views that each remember their own filters, sorts, and grouping.
+- **Find anything again** — search titles, authors, abstracts, and notes, plus the full text of your PDFs and saved pages.
+- **See your reading habits** — reading streaks, an activity heatmap, and recent reads on Home.
+
+### Everywhere you work
+
+- **Sync across your Macs** — references, tags, annotations, properties, and views stay current on every Mac signed into the same iCloud account.
+- **Agents and scripts can use it too** — [`rubien-cli`](Docs/CLI-Reference.md) (Mac and Linux) speaks JSON, and the [MCP server](#mcp-server) gives any MCP client the same library you use in the app.
 
 ## MCP server
 
@@ -94,7 +104,7 @@ This nukes the local package checkouts and SwiftPM state, then re-fetches cleanl
 
 ## Linux CLI
 
-`rubien-cli` builds and runs on Linux (x86_64 + arm64). The SwiftUI app and `RubienSync` (CloudKit) stay Mac-only — Linux gets 17 of the 18 CLI subcommands, everything except `sync`. PDF support (read text, render page images, extract metadata) comes via `RubienPDFKit`'s poppler-glib backend.
+`rubien-cli` builds and runs on Linux (x86_64 + arm64). The SwiftUI app and `RubienSync` (CloudKit) stay Mac-only — Linux gets 20 of the 21 CLI subcommands, everything except `sync`. PDF support (read text, render page images, extract metadata) comes via `RubienPDFKit`'s poppler-glib backend.
 
 ### Prebuilt binary
 
@@ -137,7 +147,7 @@ install -m 755 .build/release/rubien-cli ~/bin/rubien-cli
 cp -r .build/release/*.resources ~/bin/
 
 # Verify
-rubien-cli --help     # 17 subcommands; no `sync`
+rubien-cli --help     # 20 subcommands; no `sync`
 ```
 
 For local development iterate against the debug build at `.build/debug/rubien-cli` (rebuilt by `swift build --product rubien-cli` without `-c release`).

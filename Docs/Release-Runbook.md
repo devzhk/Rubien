@@ -16,7 +16,7 @@ The source repo `devzhk/Rubien` is **private**, but Sparkle downloads update DMG
 
 ## One-time setup
 
-1. **Apple Developer Program enrollment.** ($99/yr.)
+1. **Apple Developer Program enrollment.**
 2. **Developer ID Application certificate.** Xcode → Settings → Accounts → Manage Certificates → + → "Developer ID Application". Export as `.p12` to 1Password.
 3. **EdDSA keypair for Sparkle.** Run `<path-to>/.build/.../bin/generate_keys`. Private key auto-saves to the macOS Keychain. Export with `generate_keys -x rubien-sparkle-private.key`, copy to 1Password AND an offline encrypted USB drive, then `rm` the local file. Save the printed base64 public key to `.sparkle-public-key` (gitignored).
 4. **notarytool keychain profile.** Generate an app-specific password at appleid.apple.com, then:
