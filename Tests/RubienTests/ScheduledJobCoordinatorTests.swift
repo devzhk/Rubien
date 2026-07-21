@@ -32,7 +32,9 @@ final class ScheduledJobCoordinatorTests: XCTestCase {
             runner: runner,
             now: { self.date("2026-07-13T08:01:00Z") },
             calendar: { calendar },
-            usesBackgroundScheduler: false
+            // Keep the real background-scheduler path enabled: this overdue
+            // startup scenario previously raised NSInvalidArgumentException.
+            usesBackgroundScheduler: true
         )
 
         coordinator.start()
@@ -48,6 +50,22 @@ final class ScheduledJobCoordinatorTests: XCTestCase {
         XCTAssertNil(coordinator.activeRun)
         XCTAssertEqual(coordinator.activeRunProgress?.phase, .succeeded)
         XCTAssertEqual(coordinator.unreadRunCount, 1)
+    }
+
+    func testBackgroundActivityTimingRejectsDueDeadlinesAndKeepsFutureValuesValid() throws {
+        XCTAssertNil(ScheduledJobCoordinator.backgroundActivityTiming(for: -1))
+        XCTAssertNil(ScheduledJobCoordinator.backgroundActivityTiming(for: 0))
+        XCTAssertNil(ScheduledJobCoordinator.backgroundActivityTiming(for: .infinity))
+
+        for delay in [0.001, 0.5, 1, 1.01, 10, 600, 86_400] {
+            let timing = try XCTUnwrap(
+                ScheduledJobCoordinator.backgroundActivityTiming(for: delay)
+            )
+            XCTAssertGreaterThanOrEqual(timing.interval, 1)
+            XCTAssertGreaterThan(timing.tolerance, 0)
+            XCTAssertLessThan(timing.tolerance, timing.interval)
+            XCTAssertLessThanOrEqual(timing.tolerance, 60)
+        }
     }
 
     @MainActor

@@ -10,6 +10,11 @@ import UserNotifications
 /// timer coalescing cannot duplicate or permanently skip an occurrence.
 @MainActor
 final class ScheduledJobCoordinator: ObservableObject {
+    struct BackgroundActivityTiming: Equatable {
+        let interval: TimeInterval
+        let tolerance: TimeInterval
+    }
+
     @Published private(set) var jobs: [ScheduledJob] = []
     @Published private(set) var upcomingJobs: [ScheduledJob] = []
     @Published private(set) var recentRuns: [ScheduledJobRun] = []
@@ -373,7 +378,18 @@ final class ScheduledJobCoordinator: ObservableObject {
               let nextRunAt = upcomingJobs.compactMap(\.nextRunAt).min()
         else { return }
         let deadline = max(nextRunAt, dueRetryNotBefore ?? nextRunAt)
-        let interval = max(0.1, deadline.timeIntervalSince(now()))
+        let delay = deadline.timeIntervalSince(now())
+        guard let backgroundTiming = Self.backgroundActivityTiming(for: delay) else {
+            // An overdue occurrence is work to claim now, not a future deadline
+            // for NSBackgroundActivityScheduler. Defer one actor turn so callers
+            // can finish publishing their dashboard snapshot before the claim.
+            Task { @MainActor [weak self] in
+                await Task.yield()
+                self?.scanForDueJobs()
+            }
+            return
+        }
+        let interval = max(0.1, delay)
         let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
             Task { @MainActor in self?.scanForDueJobs() }
         }
@@ -385,8 +401,8 @@ final class ScheduledJobCoordinator: ObservableObject {
             identifier: "com.rubien.scheduled-jobs.next-run"
         )
         activity.repeats = false
-        activity.interval = max(1, interval)
-        activity.tolerance = min(60, max(1, interval * 0.1))
+        activity.interval = backgroundTiming.interval
+        activity.tolerance = backgroundTiming.tolerance
         activity.qualityOfService = .utility
         activity.schedule { [weak self] completion in
             Task { @MainActor in
@@ -395,6 +411,17 @@ final class ScheduledJobCoordinator: ObservableObject {
             }
         }
         backgroundActivity = activity
+    }
+
+    nonisolated static func backgroundActivityTiming(
+        for delay: TimeInterval
+    ) -> BackgroundActivityTiming? {
+        guard delay.isFinite, delay > 0 else { return nil }
+        let interval = max(1, delay)
+        return BackgroundActivityTiming(
+            interval: interval,
+            tolerance: min(60, interval / 2)
+        )
     }
 
     private func reconcileClockAndScan() {
