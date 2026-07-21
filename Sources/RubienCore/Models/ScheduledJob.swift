@@ -509,8 +509,10 @@ public enum ScheduledJobError: Error, Equatable, LocalizedError {
     case invalidRecurrence
     case unsupportedProvider(String)
     case notFound
+    case runNotFound
     case runnerBusy
     case activeRunPreventsDeletion
+    case activeRunPreventsRunDeletion
 
     public var errorDescription: String? {
         switch self {
@@ -519,8 +521,10 @@ public enum ScheduledJobError: Error, Equatable, LocalizedError {
         case .invalidRecurrence: "Choose at least one weekday and a valid local time."
         case let .unsupportedProvider(provider): "The provider ‘\(provider)’ is not supported."
         case .notFound: "The scheduled job could not be found."
+        case .runNotFound: "The scheduled job run could not be found."
         case .runnerBusy: "Another scheduled job is already running."
         case .activeRunPreventsDeletion: "A job with an active run cannot be deleted."
+        case .activeRunPreventsRunDeletion: "An active scheduled job run cannot be deleted. Cancel it first."
         }
     }
 }

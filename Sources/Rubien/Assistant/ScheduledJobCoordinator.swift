@@ -15,6 +15,10 @@ final class ScheduledJobCoordinator: ObservableObject {
     @Published private(set) var recentRuns: [ScheduledJobRun] = []
     @Published private(set) var unreadRunCount = 0
     @Published private(set) var activeRun: ScheduledJobRun?
+    /// Bounded live output for the active run. The terminal snapshot is retained
+    /// until the next run begins so an already-expanded progress view does not
+    /// disappear at the exact moment the job finishes.
+    @Published private(set) var activeRunProgress: ScheduledJobProgress?
     /// Result sessions proven missing from the provider during this app launch.
     /// Keeping the refusal in memory prevents Recent Runs from continuing to offer
     /// an Open Result action that has already failed its transcript preflight.
@@ -35,6 +39,9 @@ final class ScheduledJobCoordinator: ObservableObject {
     private var backgroundActivity: NSBackgroundActivityScheduler?
     private var dueRetryNotBefore: Date?
     private var executionTask: Task<Void, Never>?
+    private var progressAccumulator: ScheduledJobProgress?
+    private var pendingProgressAssistantDelta = ""
+    private var progressPublishTask: Task<Void, Never>?
     private var started = false
     private var didRequestNotificationAuthorization = false
     private var observers: [NSObjectProtocol] = []
@@ -175,6 +182,19 @@ final class ScheduledJobCoordinator: ObservableObject {
         refresh()
     }
 
+    func deleteRun(id: String) throws {
+        try database.deleteScheduledJobRun(id: id, at: now())
+        unavailableResultRunIDs.remove(id)
+        if activeRun == nil, activeRunProgress?.runID == id {
+            progressPublishTask?.cancel()
+            progressPublishTask = nil
+            pendingProgressAssistantDelta = ""
+            progressAccumulator = nil
+            activeRunProgress = nil
+        }
+        refresh()
+    }
+
     func markResultUnavailable(id: String) {
         unavailableResultRunIDs.insert(id)
     }
@@ -216,18 +236,32 @@ final class ScheduledJobCoordinator: ObservableObject {
         backgroundActivity?.invalidate()
         backgroundActivity = nil
         activeRun = initialClaim.run
+        resetProgress(for: initialClaim.run)
         executionTask = Task { [weak self] in
             guard let self else { return }
             var claim: ScheduledJobExecutionClaim? = initialClaim
             while let currentClaim = claim, !Task.isCancelled {
                 self.activeRun = currentClaim.run
+                if self.progressAccumulator?.runID != currentClaim.run.id {
+                    self.resetProgress(for: currentClaim.run)
+                }
                 self.refresh()
-                let finishedRun = await self.runner.execute(currentClaim) { [weak self] in
-                    guard let self else { return }
-                    self.activeRun = try? self.database.fetchScheduledJobRun(
-                        id: currentClaim.run.id
-                    )
-                    self.refresh()
+                let finishedRun = await self.runner.execute(
+                    currentClaim,
+                    onStarted: { [weak self] in
+                        guard let self else { return }
+                        self.activeRun = try? self.database.fetchScheduledJobRun(
+                            id: currentClaim.run.id
+                        )
+                        self.markProgressStarted(runID: currentClaim.run.id)
+                        self.refresh()
+                    },
+                    onEvent: { [weak self] event in
+                        self?.recordProgress(event, runID: currentClaim.run.id)
+                    }
+                )
+                if let finishedRun {
+                    self.finishProgress(with: finishedRun)
                 }
                 if let finishedRun, currentClaim.job.notifyOnCompletion {
                     self.completionNotifier(currentClaim.job, finishedRun)
@@ -248,6 +282,85 @@ final class ScheduledJobCoordinator: ObservableObject {
             self.activeRun = nil
             self.refresh()
         }
+    }
+
+    private func resetProgress(for run: ScheduledJobRun) {
+        progressPublishTask?.cancel()
+        progressPublishTask = nil
+        pendingProgressAssistantDelta = ""
+        let progress = ScheduledJobProgress(run: run)
+        progressAccumulator = progress
+        activeRunProgress = progress
+    }
+
+    private func markProgressStarted(runID: String) {
+        guard var progress = progressAccumulator, progress.runID == runID else { return }
+        progress.markStarted()
+        progressAccumulator = progress
+        publishProgressNow()
+    }
+
+    private func recordProgress(_ event: AgentEvent, runID: String) {
+        guard progressAccumulator?.runID == runID else { return }
+        if case .assistantDelta(let text) = event {
+            pendingProgressAssistantDelta.append(text)
+            scheduleProgressPublish()
+            return
+        }
+
+        flushPendingProgressDelta()
+        guard var progress = progressAccumulator else { return }
+        progress.record(event)
+        progressAccumulator = progress
+
+        if case .turnCompleted = event {
+            publishProgressNow()
+        } else {
+            scheduleProgressPublish()
+        }
+    }
+
+    private func finishProgress(with run: ScheduledJobRun) {
+        guard progressAccumulator?.runID == run.id else { return }
+        flushPendingProgressDelta()
+        guard var progress = progressAccumulator else { return }
+        progress.finish(with: run)
+        progressAccumulator = progress
+        publishProgressNow()
+    }
+
+    private func flushPendingProgressDelta() {
+        guard !pendingProgressAssistantDelta.isEmpty,
+              var progress = progressAccumulator
+        else { return }
+        let delta = pendingProgressAssistantDelta
+        pendingProgressAssistantDelta = ""
+        progress.record(.assistantDelta(text: delta))
+        progressAccumulator = progress
+    }
+
+    /// Provider deltas can arrive token-by-token. Coalescing them keeps SwiftUI
+    /// invalidation bounded and leaves the main actor responsive to Cancel.
+    private func scheduleProgressPublish() {
+        guard progressPublishTask == nil else { return }
+        progressPublishTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(50))
+            } catch {
+                return
+            }
+            guard let self else { return }
+            self.flushPendingProgressDelta()
+            self.activeRunProgress = self.progressAccumulator
+            self.progressPublishTask = nil
+        }
+    }
+
+    private func publishProgressNow() {
+        progressPublishTask?.cancel()
+        progressPublishTask = nil
+        flushPendingProgressDelta()
+        activeRunProgress = progressAccumulator
     }
 
     private func scheduleTimer() {

@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import XCTest
 
 final class JobsCommandTests: XCTestCase {
@@ -70,6 +71,59 @@ final class JobsCommandTests: XCTestCase {
         ])
         XCTAssertNotEqual(invalid.exitCode, 0)
         XCTAssertTrue(invalid.stderr.contains("HH:mm"), invalid.stderr)
+    }
+
+    func testDeleteRunHidesTerminalHistoryAndClearsProviderLink() throws {
+        try skipIfBinaryMissing()
+        let created = try runCLI([
+            "jobs", "create",
+            "--name", "History",
+            "--prompt", "Find papers",
+            "--weekdays", "daily",
+            "--time", "08:00",
+        ])
+        XCTAssertEqual(created.exitCode, 0, created.stderr)
+        let jobID = try XCTUnwrap(try object(created.stdout)["id"] as? String)
+        let runID = "run-to-delete"
+        let databaseURL = testLibraryRoot.appendingPathComponent("library.sqlite")
+        let queue = try DatabaseQueue(path: databaseURL.path)
+        try queue.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO scheduledJobRun (
+                        id, jobId, trigger, occurrenceKey, scheduledFor,
+                        startedAt, finishedAt, status, provider,
+                        providerSessionId, isUnread
+                    ) VALUES (?, ?, 'manual', 'manual/delete-test', ?, ?, ?,
+                              'succeeded', 'claude', 'provider-session', 1)
+                    """,
+                arguments: [runID, jobID, Date(), Date(), Date()]
+            )
+        }
+
+        let deleted = try runCLI(["jobs", "delete-run", runID])
+        XCTAssertEqual(deleted.exitCode, 0, deleted.stderr)
+        XCTAssertEqual(try object(deleted.stdout)["deletedRun"] as? String, runID)
+
+        let runs = try runCLI(["jobs", "runs"])
+        XCTAssertEqual(runs.exitCode, 0, runs.stderr)
+        XCTAssertTrue(try array(runs.stdout).isEmpty)
+        try queue.read { db in
+            let row = try XCTUnwrap(Row.fetchOne(
+                db,
+                sql: """
+                    SELECT hiddenAt, trigger, status, provider, providerSessionId, isUnread
+                    FROM scheduledJobRun WHERE id = ?
+                    """,
+                arguments: [runID]
+            ))
+            XCTAssertNotNil(row["hiddenAt"] as Date?)
+            XCTAssertEqual(row["trigger"] as String?, "deleted")
+            XCTAssertEqual(row["status"] as String?, "cancelled")
+            XCTAssertEqual(row["provider"] as String?, "deleted")
+            XCTAssertNil(row["providerSessionId"] as String?)
+            XCTAssertEqual(row["isUnread"] as Bool?, false)
+        }
     }
 
     private func skipIfBinaryMissing() throws {

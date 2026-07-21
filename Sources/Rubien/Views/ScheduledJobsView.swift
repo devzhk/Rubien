@@ -40,7 +40,11 @@ struct ScheduledJobsPopover: View {
     @State private var tab: Tab = .recentRuns
     @State private var editorTarget: EditorTarget?
     @State private var deleteTarget: ScheduledJob?
+    @State private var deleteRunTarget: ScheduledJobRun?
     @State private var errorMessage: String?
+    @State private var expandedRunID: String?
+    @State private var recentRunQuery = ""
+    @FocusState private var recentRunSearchFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -115,54 +119,163 @@ struct ScheduledJobsPopover: View {
         } message: { job in
             Text("“\(job.name)” and its run history will be deleted.")
         }
+        .alert(
+            "Delete run history?",
+            isPresented: Binding(
+                get: { deleteRunTarget != nil },
+                set: { if !$0 { deleteRunTarget = nil } }
+            ),
+            presenting: deleteRunTarget
+        ) { run in
+            Button("Delete Run", role: .destructive) { deleteRun(run) }
+            Button("Cancel", role: .cancel) { deleteRunTarget = nil }
+        } message: { run in
+            Text(String(
+                format: ScheduledJobFormatting.localized("scheduled.deleteRun.confirmation"),
+                locale: .current,
+                coordinator.job(id: run.jobId)?.name
+                    ?? ScheduledJobFormatting.localized("scheduled.job.fallbackName"),
+                ScheduledJobFormatting.runDetail(run)
+            ))
+        }
     }
 
     @ViewBuilder
     private var recentRuns: some View {
-        if coordinator.recentRuns.isEmpty {
+        if displayedRecentRuns.isEmpty {
             ContentUnavailableView(
                 "No recent runs",
                 systemImage: "clock.arrow.circlepath",
                 description: Text("Completed and failed scheduled jobs will appear here.")
             )
         } else {
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(coordinator.recentRuns) { run in
-                        ScheduledRunRow(
-                            run: run,
-                            job: coordinator.job(id: run.jobId),
-                            resultUnavailable: coordinator.unavailableResultRunIDs.contains(run.id),
-                            onOpen: run.status == .succeeded
-                                && run.providerSessionId != nil
-                                && !coordinator.unavailableResultRunIDs.contains(run.id) ? {
-                                onOpenRun(run)
-                            } : nil,
-                            onCancel: run.status == .pending || run.status == .running
-                                ? { coordinator.cancelActiveRun() }
-                                : nil,
-                            onRunNow: run.status == .failed ? { runNow(jobID: run.jobId) } : nil
+            VStack(spacing: 0) {
+                recentRunSearchField
+                Divider()
+                Group {
+                    if filteredRecentRuns.isEmpty {
+                        ContentUnavailableView(
+                            "No matching runs",
+                            systemImage: "magnifyingglass",
+                            description: Text("Try another job name, status, provider, or date.")
                         )
-                        Divider().padding(.leading, 42)
+                    } else {
+                        recentRunList
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .safeAreaInset(edge: .bottom) {
+                    if coordinator.unreadRunCount > 0 {
+                        HStack {
+                            Text("\(coordinator.unreadRunCount) unread")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Button("Mark All Read") { coordinator.markAllRunsRead() }
+                                .font(.caption)
+                                .buttonStyle(ToolbarHoverButtonStyle(
+                                    hoverOpacity: 0.10,
+                                    pressedOpacity: 0.16
+                                ))
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(.bar)
                     }
                 }
             }
-            .safeAreaInset(edge: .bottom) {
-                if coordinator.unreadRunCount > 0 {
-                    HStack {
-                        Text("\(coordinator.unreadRunCount) unread")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Button("Mark All Read") { coordinator.markAllRunsRead() }
-                            .font(.caption)
-                            .buttonStyle(.plain)
+        }
+    }
+
+    private var recentRunSearchField: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+            TextField("Search recent runs", text: $recentRunQuery)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .focused($recentRunSearchFocused)
+            if !recentRunQuery.isEmpty {
+                Button {
+                    recentRunQuery = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help(String(localized: "Clear search", bundle: .module))
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .onAppear {
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(50))
+                recentRunSearchFocused = true
+            }
+        }
+    }
+
+    private var recentRunList: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(filteredRecentRuns) { run in
+                    let isActive = coordinator.activeRun?.id == run.id
+                    ScheduledRunRow(
+                        run: run,
+                        job: coordinator.job(id: run.jobId),
+                        resultUnavailable: coordinator.unavailableResultRunIDs.contains(run.id),
+                        isExpanded: expandedRunID == run.id,
+                        onOpen: expandedRunID == run.id ? {
+                            withAnimation(.easeInOut(duration: 0.16)) {
+                                expandedRunID = nil
+                            }
+                        } : (isActive ? {
+                            withAnimation(.easeInOut(duration: 0.16)) {
+                                expandedRunID = run.id
+                            }
+                        } : (run.status.isTerminal ? {
+                            onOpenRun(run)
+                        } : nil)),
+                        onCancel: isActive && (run.status == .pending || run.status == .running)
+                            ? { coordinator.cancelActiveRun() }
+                            : nil,
+                        onRunNow: run.status == .failed ? { runNow(jobID: run.jobId) } : nil,
+                        onDelete: run.status.isTerminal ? { deleteRunTarget = run } : nil
+                    )
+                    if expandedRunID == run.id {
+                        ScheduledRunProgressView(
+                            run: coordinator.activeRun?.id == run.id
+                                ? coordinator.activeRun ?? run
+                                : run,
+                            progress: coordinator.activeRunProgress?.runID == run.id
+                                ? coordinator.activeRunProgress
+                                : nil,
+                            onCancel: isActive ? { coordinator.cancelActiveRun() } : nil
+                        )
+                        .transition(.opacity.combined(with: .move(edge: .top)))
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
-                    .background(.bar)
+                    Divider().padding(.leading, 42)
                 }
             }
+        }
+    }
+
+    private var displayedRecentRuns: [ScheduledJobRun] {
+        guard let activeRun = coordinator.activeRun else { return coordinator.recentRuns }
+        return [activeRun] + coordinator.recentRuns.filter { $0.id != activeRun.id }
+    }
+
+    private var filteredRecentRuns: [ScheduledJobRun] {
+        displayedRecentRuns.filter { run in
+            ScheduledJobFormatting.runMatchesSearch(
+                run,
+                job: coordinator.job(id: run.jobId),
+                resultUnavailable: coordinator.unavailableResultRunIDs.contains(run.id),
+                query: recentRunQuery
+            )
         }
     }
 
@@ -181,6 +294,9 @@ struct ScheduledJobsPopover: View {
                         ScheduledJobRow(
                             job: job,
                             isActive: coordinator.activeRun?.jobId == job.id,
+                            onOpenProgress: coordinator.activeRun?.jobId == job.id
+                                ? { showActiveRunProgress() }
+                                : nil,
                             onSetEnabled: { enabled in setEnabled(job, enabled) },
                             onRunNow: { runNow(job) },
                             onCancel: coordinator.activeRun?.jobId == job.id
@@ -213,10 +329,18 @@ struct ScheduledJobsPopover: View {
         do {
             try coordinator.runNow(id: jobID)
             errorMessage = nil
+            recentRunQuery = ""
             tab = .recentRuns
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func showActiveRunProgress() {
+        guard let runID = coordinator.activeRun?.id else { return }
+        recentRunQuery = ""
+        expandedRunID = runID
+        tab = .recentRuns
     }
 
     private func delete(_ job: ScheduledJob) {
@@ -228,42 +352,109 @@ struct ScheduledJobsPopover: View {
         }
         deleteTarget = nil
     }
+
+    private func deleteRun(_ run: ScheduledJobRun) {
+        do {
+            try coordinator.deleteRun(id: run.id)
+            if expandedRunID == run.id { expandedRunID = nil }
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        deleteRunTarget = nil
+    }
 }
 
 private struct ScheduledRunRow: View {
     let run: ScheduledJobRun
     let job: ScheduledJob?
     let resultUnavailable: Bool
+    let isExpanded: Bool
     let onOpen: (() -> Void)?
     let onCancel: (() -> Void)?
     let onRunNow: (() -> Void)?
+    let onDelete: (() -> Void)?
 
+    @ViewBuilder
     var body: some View {
+        HStack(alignment: .center, spacing: 0) {
+            if let onOpen {
+                Button(action: onOpen) {
+                    primaryContent
+                }
+                .buttonStyle(ScheduledRunRowButtonStyle())
+                .linkPointerStyle()
+            } else {
+                primaryContent
+            }
+
+            if let onCancel {
+                Button("Cancel", action: onCancel)
+                    .font(.caption)
+                    .buttonStyle(ToolbarHoverButtonStyle(
+                        hoverOpacity: 0.10,
+                        pressedOpacity: 0.16
+                    ))
+            } else if let onRunNow {
+                Button("Run Now", action: onRunNow)
+                    .font(.caption)
+                    .buttonStyle(ToolbarHoverButtonStyle(
+                        hoverOpacity: 0.10,
+                        pressedOpacity: 0.16
+                    ))
+            }
+            if let onDelete {
+                Button(action: onDelete) {
+                    Image(systemName: "trash")
+                        .foregroundStyle(.secondary)
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(ToolbarHoverButtonStyle(
+                    hoverOpacity: 0.10,
+                    pressedOpacity: 0.16
+                ))
+                .help(ScheduledJobFormatting.localized("scheduled.action.deleteRun"))
+                .accessibilityLabel(ScheduledJobFormatting.localized("scheduled.action.deleteRun"))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var primaryContent: some View {
         HStack(alignment: .top, spacing: 10) {
             statusIcon
                 .frame(width: 20, height: 20)
                 .accessibilityHidden(true)
             runSummary
             Spacer(minLength: 8)
-            if let onCancel {
-                Button("Cancel", action: onCancel)
-                    .font(.caption)
-                    .buttonStyle(.borderless)
-            } else if let onRunNow {
-                Button("Run Now", action: onRunNow)
-                    .font(.caption)
-                    .buttonStyle(.borderless)
-            } else if let onOpen {
-                Button(
-                    String(localized: "scheduled.action.openResult", bundle: .module),
-                    action: onOpen
-                )
+            if onOpen != nil {
+                HStack(spacing: 3) {
+                    Text(ScheduledJobFormatting.localized(actionLabelKey))
+                    Image(systemName: isExpanded
+                          ? "chevron.down"
+                          : "chevron.right")
+                        .font(.system(size: 8, weight: .semibold))
+                }
                 .font(.caption)
-                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
             }
         }
-        .padding(.horizontal, 12)
+        .padding(.leading, 12)
+        .padding(.trailing, onCancel == nil && onRunNow == nil && onDelete == nil ? 12 : 4)
         .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+    }
+
+    private var actionLabelKey: String {
+        if isExpanded { return "scheduled.action.hideProgress" }
+        if run.status.isActive { return "scheduled.action.viewProgress" }
+        if run.status == .succeeded,
+           run.providerSessionId != nil,
+           !resultUnavailable {
+            return "scheduled.action.openResult"
+        }
+        return "scheduled.action.viewDetails"
     }
 
     private var runSummary: some View {
@@ -308,9 +499,29 @@ private struct ScheduledRunRow: View {
 
 }
 
+/// Clickable run and active-job rows expose one large primary target. The
+/// highlight is clear at rest, then fills that target on hover/press.
+private struct ScheduledRunRowButtonStyle: ButtonStyle {
+    @State private var isHovered = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(configuration.isPressed
+                          ? Color.primary.opacity(0.10)
+                          : (isHovered ? Color.primary.opacity(0.06) : .clear))
+            )
+            .onHover { isHovered = $0 }
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .animation(.easeOut(duration: 0.12), value: isHovered)
+    }
+}
+
 private struct ScheduledJobRow: View {
     let job: ScheduledJob
     let isActive: Bool
+    let onOpenProgress: (() -> Void)?
     let onSetEnabled: (Bool) -> Void
     let onRunNow: () -> Void
     let onCancel: (() -> Void)?
@@ -333,15 +544,20 @@ private struct ScheduledJobRow: View {
             .controlSize(.mini)
             .padding(.top, 2)
 
-            Button(action: onEdit) {
+            Button(action: onOpenProgress ?? onEdit) {
                 jobSummary
             }
-            .buttonStyle(.plain)
+            .buttonStyle(ScheduledRunRowButtonStyle())
+            .linkPointerStyle()
             .accessibilityLabel(ScheduledJobFormatting.jobAccessibilityLabel(
                 job,
                 isActive: isActive
             ))
-            .accessibilityHint(ScheduledJobFormatting.localized("scheduled.accessibility.editHint"))
+            .accessibilityHint(ScheduledJobFormatting.localized(
+                isActive
+                    ? "scheduled.accessibility.viewProgressHint"
+                    : "scheduled.accessibility.editHint"
+            ))
             Spacer(minLength: 6)
             Menu {
                 if let onCancel {
@@ -385,9 +601,154 @@ private struct ScheduledJobRow: View {
             Text(ScheduledJobFormatting.nextRunLabel(job))
                 .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
+            if isActive {
+                Label(
+                    ScheduledJobFormatting.localized("scheduled.action.viewProgress"),
+                    systemImage: "chevron.right"
+                )
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
+    }
+}
+
+private struct ScheduledRunProgressView: View {
+    let run: ScheduledJobRun
+    let progress: ScheduledJobProgress?
+    let onCancel: (() -> Void)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 7) {
+                if run.status.isActive {
+                    ProgressView().controlSize(.mini)
+                }
+                Text(progressStatus)
+                    .font(.system(size: 11, weight: .semibold))
+                if let model = progress?.model {
+                    Text(model)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+                Spacer()
+                if let onCancel {
+                    Button("Cancel", action: onCancel)
+                        .font(.caption)
+                        .buttonStyle(ToolbarHoverButtonStyle(
+                            hoverOpacity: 0.10,
+                            pressedOpacity: 0.16
+                        ))
+                }
+            }
+
+            if let entries = progress?.entries, !entries.isEmpty {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 8) {
+                            ForEach(entries) { entry in
+                                progressEntry(entry)
+                                    .id(entry.id)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                    .onChange(of: progress?.revision) { _, _ in
+                        guard let lastID = progress?.entries.last?.id else { return }
+                        withAnimation(.easeOut(duration: 0.12)) {
+                            proxy.scrollTo(lastID, anchor: .bottom)
+                        }
+                    }
+                }
+                .frame(maxHeight: 180)
+            } else {
+                Text(ScheduledJobFormatting.localized("scheduled.progress.waitingForOutput"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 54, alignment: .center)
+            }
+        }
+        .padding(.leading, 42)
+        .padding(.trailing, 12)
+        .padding(.bottom, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.025))
+    }
+
+    @ViewBuilder
+    private func progressEntry(_ entry: ScheduledJobProgress.Entry) -> some View {
+        HStack(alignment: .top, spacing: 7) {
+            switch entry.kind {
+            case .assistant(let isStreaming):
+                Image(systemName: isStreaming ? "ellipsis.bubble" : "sparkles")
+                    .foregroundStyle(Color.accentColor)
+                Text(verbatim: entry.detail)
+                    .textSelection(.enabled)
+            case .tool(let name, let status):
+                Image(systemName: toolIcon(status))
+                    .foregroundStyle(status == .denied ? .orange : .secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(name)
+                        .fontWeight(.medium)
+                    if !entry.detail.isEmpty {
+                        Text(verbatim: entry.detail)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            case .notice:
+                Image(systemName: "exclamationmark.circle")
+                    .foregroundStyle(.orange)
+                Text(verbatim: entry.detail)
+                    .textSelection(.enabled)
+            case .papers(let count):
+                Image(systemName: "doc.text.magnifyingglass")
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(String(
+                        format: ScheduledJobFormatting.localized("scheduled.progress.referencesFound"),
+                        locale: .current,
+                        count
+                    ))
+                    .fontWeight(.medium)
+                    if !entry.detail.isEmpty {
+                        Text(verbatim: entry.detail)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        .font(.system(size: 10.5))
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var progressStatus: String {
+        guard let progress else {
+            return ScheduledJobFormatting.runDetail(run)
+        }
+        switch progress.phase {
+        case .preparing:
+            return ScheduledJobFormatting.localized("scheduled.progress.preparing")
+        case .running:
+            return ScheduledJobFormatting.localized("scheduled.status.running")
+        case .succeeded:
+            return ScheduledJobFormatting.localized("scheduled.status.finished")
+        case .failed:
+            return run.failureKind.map(ScheduledJobFormatting.failureLabel)
+                ?? ScheduledJobFormatting.localized("scheduled.status.failed")
+        case .cancelled:
+            return ScheduledJobFormatting.localized("scheduled.status.cancelled")
+        }
+    }
+
+    private func toolIcon(_ status: ToolChipStatus) -> String {
+        switch status {
+        case .started: "gearshape.2"
+        case .completed: "checkmark.circle"
+        case .denied: "xmark.circle"
+        }
     }
 }
 
@@ -898,6 +1259,74 @@ enum ScheduledJobFormatting {
         case .launchFailed: localized("scheduled.failure.launchFailed")
         case .providerFailed: localized("scheduled.failure.providerFailed")
         case .unknown(let value): value
+        }
+    }
+
+    static func failureDetail(_ kind: ScheduledJobFailureKind) -> String {
+        switch kind {
+        case .providerUnavailable:
+            localized("scheduled.failureDetail.providerUnavailable")
+        case .libraryChannelUnavailable:
+            localized("scheduled.failureDetail.libraryChannelUnavailable")
+        case .permissionDenied:
+            localized("scheduled.failureDetail.permissionDenied")
+        case .interruptedBeforeStart, .interrupted:
+            localized("scheduled.failureDetail.interrupted")
+        case .launchFailed:
+            localized("scheduled.failureDetail.launchFailed")
+        case .providerFailed:
+            localized("scheduled.failureDetail.providerFailed")
+        case .unknown(let value):
+            value
+        }
+    }
+
+    static func failedRunMessage(_ run: ScheduledJobRun) -> String {
+        let detail = run.failureKind.map(failureDetail)
+            ?? localized("scheduled.failureDetail.unknown")
+        return String(
+            format: localized("scheduled.result.failedReasonMessage"),
+            locale: .current,
+            detail
+        )
+    }
+
+    /// Recent Runs is a local history index rather than a transcript copy. Match
+    /// every whitespace-separated term across the fields the run row represents,
+    /// plus the job prompt/model so a remembered task description is searchable.
+    static func runMatchesSearch(
+        _ run: ScheduledJobRun,
+        job: ScheduledJob?,
+        resultUnavailable: Bool = false,
+        query: String
+    ) -> Bool {
+        let terms = query.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard !terms.isEmpty else { return true }
+
+        var fields = [
+            job?.name,
+            job?.prompt,
+            job?.model,
+            job?.effort,
+            run.provider.displayName,
+            run.provider.rawValue,
+            run.status.rawValue,
+            run.trigger.rawValue,
+            run.providerSessionId,
+            runDetail(run, resultUnavailable: resultUnavailable),
+        ].compactMap { $0 }
+        if let failure = run.failureKind {
+            fields.append(failure.rawValue)
+            fields.append(failureLabel(failure))
+            fields.append(failureDetail(failure))
+        }
+        let haystack = fields.joined(separator: "\n")
+        return terms.allSatisfy { term in
+            haystack.range(
+                of: term,
+                options: [.caseInsensitive, .diacriticInsensitive],
+                locale: .current
+            ) != nil
         }
     }
 

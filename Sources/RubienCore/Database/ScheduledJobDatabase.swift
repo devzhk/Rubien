@@ -137,7 +137,11 @@ extension AppDatabase {
 
     public func fetchScheduledJobRun(id: String) throws -> ScheduledJobRun? {
         try dbWriter.read { db in
-            try ScheduledJobRun.fetchOne(db, key: id)
+            try ScheduledJobRun.fetchOne(
+                db,
+                sql: "SELECT * FROM scheduledJobRun WHERE id = ? AND hiddenAt IS NULL",
+                arguments: [id]
+            )
         }
     }
 
@@ -155,7 +159,7 @@ extension AppDatabase {
                 db,
                 sql: """
                     SELECT * FROM scheduledJobRun
-                    WHERE jobId = ?
+                    WHERE jobId = ? AND hiddenAt IS NULL
                     ORDER BY COALESCE(finishedAt, startedAt, scheduledFor) DESC, id DESC
                     LIMIT ?
                     """,
@@ -193,7 +197,7 @@ extension AppDatabase {
     public func markScheduledJobRunRead(id: String) throws {
         try dbWriter.write { db in
             try db.execute(
-                sql: "UPDATE scheduledJobRun SET isUnread = 0 WHERE id = ?",
+                sql: "UPDATE scheduledJobRun SET isUnread = 0 WHERE id = ? AND hiddenAt IS NULL",
                 arguments: [id]
             )
         }
@@ -201,7 +205,40 @@ extension AppDatabase {
 
     public func markAllScheduledJobRunsRead() throws {
         try dbWriter.write { db in
-            try db.execute(sql: "UPDATE scheduledJobRun SET isUnread = 0 WHERE isUnread = 1")
+            try db.execute(
+                sql: "UPDATE scheduledJobRun SET isUnread = 0 WHERE isUnread = 1 AND hiddenAt IS NULL"
+            )
+        }
+    }
+
+    /// Removes a terminal run from visible history while retaining its unique
+    /// occurrence marker so schedule reconciliation cannot execute it again.
+    /// The provider owns its own transcript/history; this scrubs Rubien's local
+    /// execution metadata and provider-session link.
+    public func deleteScheduledJobRun(id: String, at date: Date = Date()) throws {
+        try dbWriter.write { db in
+            guard let row = try Row.fetchOne(
+                db,
+                sql: "SELECT status, hiddenAt FROM scheduledJobRun WHERE id = ?",
+                arguments: [id]
+            ), row["hiddenAt"] as Date? == nil else {
+                throw ScheduledJobError.runNotFound
+            }
+            let status = ScheduledJobRunStatus(rawValue: row["status"] as String)
+            guard status.isTerminal else {
+                throw ScheduledJobError.activeRunPreventsRunDeletion
+            }
+            try db.execute(
+                sql: """
+                    UPDATE scheduledJobRun
+                    SET hiddenAt = ?, trigger = 'deleted', scheduledFor = ?,
+                        startedAt = NULL, finishedAt = NULL, status = 'cancelled',
+                        provider = 'deleted', providerSessionId = NULL,
+                        failureKind = NULL, isUnread = 0
+                    WHERE id = ? AND hiddenAt IS NULL
+                    """,
+                arguments: [date, date, id]
+            )
         }
     }
 
@@ -480,6 +517,7 @@ extension AppDatabase {
             db,
             sql: """
                 SELECT * FROM scheduledJobRun
+                WHERE hiddenAt IS NULL
                 ORDER BY COALESCE(finishedAt, startedAt, scheduledFor) DESC, id DESC
                 LIMIT ?
                 """,
@@ -490,7 +528,7 @@ extension AppDatabase {
     private static func unreadScheduledJobRunCount(in db: Database) throws -> Int {
         try Int.fetchOne(
             db,
-            sql: "SELECT COUNT(*) FROM scheduledJobRun WHERE isUnread = 1"
+            sql: "SELECT COUNT(*) FROM scheduledJobRun WHERE isUnread = 1 AND hiddenAt IS NULL"
         ) ?? 0
     }
 

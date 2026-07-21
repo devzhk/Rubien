@@ -39,7 +39,8 @@ final class ScheduledJobRunner {
 
     func execute(
         _ claim: ScheduledJobExecutionClaim,
-        onStarted: (() -> Void)? = nil
+        onStarted: (() -> Void)? = nil,
+        onEvent: ((AgentEvent) -> Void)? = nil
     ) async -> ScheduledJobRun? {
         let runID = claim.run.id
         defer { cancelledRunIDs.remove(runID) }
@@ -120,6 +121,7 @@ final class ScheduledJobRunner {
                 if isCancellationRequested(for: runID) {
                     provider.cancel()
                 }
+                onEvent?(event)
                 switch event {
                 case .sessionStarted(let sessionID):
                     receivedSession = true

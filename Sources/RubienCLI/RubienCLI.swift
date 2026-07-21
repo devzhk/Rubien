@@ -1620,6 +1620,7 @@ struct Jobs: ParsableCommand {
             JobsDelete.self,
             JobsEnable.self,
             JobsRuns.self,
+            JobsDeleteRun.self,
         ],
         defaultSubcommand: JobsList.self
     )
@@ -1784,6 +1785,26 @@ struct JobsRuns: ParsableCommand {
         let runs = try jobId.map { try AppDatabase.shared.fetchScheduledJobRuns(jobId: $0, limit: limit) }
             ?? AppDatabase.shared.fetchRecentScheduledJobRuns(limit: limit)
         printJSON(runs.map(ScheduledJobRunDTO.init))
+    }
+}
+
+struct JobsDeleteRun: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "delete-run",
+        abstract: "Remove one terminal run from visible history"
+    )
+
+    @Argument(help: "Scheduled job run ID") var id: String
+
+    func run() throws {
+        do {
+            try AppDatabase.shared.deleteScheduledJobRun(id: id)
+            notifyLibraryChanged()
+            printJSON(["deletedRun": id])
+        } catch {
+            printJSONError(scheduledJobCLIErrorMessage(error))
+            throw ExitCode.failure
+        }
     }
 }
 

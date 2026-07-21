@@ -39,8 +39,14 @@ final class ScheduledJobCoordinatorTests: XCTestCase {
 
         try await waitUntil { coordinator.activeRun?.status == .running }
         XCTAssertEqual(coordinator.recentRuns.first?.status, .running)
+        try await waitUntil {
+            coordinator.activeRunProgress?.entries.contains(where: {
+                $0.detail == "Scanning the library…"
+            }) == true
+        }
         try await waitUntil { coordinator.recentRuns.first?.status == .succeeded }
         XCTAssertNil(coordinator.activeRun)
+        XCTAssertEqual(coordinator.activeRunProgress?.phase, .succeeded)
         XCTAssertEqual(coordinator.unreadRunCount, 1)
     }
 
@@ -86,6 +92,44 @@ final class ScheduledJobCoordinatorTests: XCTestCase {
         try coordinator.runNow(id: job.id)
         try await waitUntil { coordinator.recentRuns.first?.status == .succeeded }
         XCTAssertEqual(provider.availabilityCallCount, 1)
+    }
+
+    @MainActor
+    func testDeleteRunRefreshesHistoryAndUnavailableState() throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let job = try database.createScheduledJob(
+            .init(
+                name: "Finished scan",
+                prompt: "Find papers",
+                recurrence: .init(weekdayMask: 127, localMinuteOfDay: 8 * 60),
+                provider: .claude,
+                notifyOnCompletion: false
+            )
+        )
+        let claim = try database.claimManualScheduledJob(id: job.id)
+        XCTAssertTrue(try database.finishScheduledJobRun(
+            id: claim.run.id,
+            status: .succeeded
+        ))
+        let runner = ScheduledJobRunner(
+            database: database,
+            providerFactory: { _ in CoordinatorProviderStub() },
+            workspaceProvider: { FileManager.default.temporaryDirectory },
+            attributionStore: nil
+        )
+        let coordinator = ScheduledJobCoordinator(
+            database: database,
+            runner: runner,
+            usesBackgroundScheduler: false
+        )
+        coordinator.refresh()
+        coordinator.markResultUnavailable(id: claim.run.id)
+
+        try coordinator.deleteRun(id: claim.run.id)
+
+        XCTAssertTrue(coordinator.recentRuns.isEmpty)
+        XCTAssertEqual(coordinator.unreadRunCount, 0)
+        XCTAssertFalse(coordinator.unavailableResultRunIDs.contains(claim.run.id))
     }
 
     @MainActor
@@ -179,6 +223,7 @@ private final class CoordinatorProviderStub: AgentProvider, @unchecked Sendable 
     func send(turn: AgentTurnRequest) -> AsyncThrowingStream<AgentEvent, Error> {
         AsyncThrowingStream { continuation in
             continuation.yield(.sessionStarted(sessionID: "coordinator-session"))
+            continuation.yield(.assistantDelta(text: "Scanning the library…"))
             Task {
                 try? await Task.sleep(for: .milliseconds(100))
                 continuation.yield(.turnCompleted(usage: nil))

@@ -326,9 +326,11 @@ struct ChatSurfaceView: View {
                             coordinator: scheduledJobs,
                             onOpenRun: { run in
                                 showingScheduledJobs = false
-                                resetDraft()
-                                pendingFreshHomeDraft = nil
-                                homeResumeRequested = true
+                                if run.status == .succeeded {
+                                    resetDraft()
+                                    pendingFreshHomeDraft = nil
+                                    homeResumeRequested = true
+                                }
                                 configuration.onOpenScheduledRun?(run)
                             },
                             initialEditorJob: scheduledJobToEdit,
@@ -1960,11 +1962,20 @@ extension Color {
 /// Home history is deliberately narrower than the reader history browser: the
 /// controller's library-context listing filters provider sessions through Rubien's
 /// content-free attribution store, so unrelated CLI conversations never appear.
+/// Search still reads visible transcript content from the provider's own store;
+/// Rubien keeps only attribution metadata, never a second transcript copy.
 private struct HomeChatHistoryPopover: View {
     let session: ChatSessionController
     let onResumed: () -> Void
 
     @State private var sessions: [AgentSessionSummary]?
+    @State private var query = ""
+    @State private var searchResults: [AgentSessionSummary]?
+    @State private var searchTask: Task<Void, Never>?
+
+    private var trimmedQuery: String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1972,37 +1983,12 @@ private struct HomeChatHistoryPopover: View {
                 .font(.system(size: 12, weight: .semibold))
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
+            HistorySearchField(
+                placeholder: "Search Home conversations",
+                query: $query
+            )
             Divider()
-            Group {
-                if let sessions {
-                    if sessions.isEmpty {
-                        Text("No Rubien Home conversations yet.")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .padding(14)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    } else {
-                        ScrollView {
-                            VStack(spacing: 0) {
-                                ForEach(sessions) { summary in
-                                    HistoryRow(summary: summary) {
-                                        session.resume(summary)
-                                        onResumed()
-                                    }
-                                }
-                            }
-                        }
-                        .frame(height: min(CGFloat(sessions.count) * HistoryRow.height, 340))
-                    }
-                } else {
-                    HStack {
-                        Spacer()
-                        ProgressView().controlSize(.small)
-                        Spacer()
-                    }
-                    .padding(.vertical, 16)
-                }
-            }
+            content
             Divider()
             Text("Only conversations started from Rubien Home are shown.")
                 .font(.system(size: 10))
@@ -2012,6 +1998,60 @@ private struct HomeChatHistoryPopover: View {
         }
         .frame(width: 320)
         .task { sessions = await session.listRecentSessions(limit: 25) }
+        .onChange(of: query) { _, _ in scheduleSearch() }
+        .onDisappear { searchTask?.cancel() }
+    }
+
+    @ViewBuilder private var content: some View {
+        let highlight = trimmedQuery.isEmpty ? nil : trimmedQuery
+        let items = highlight == nil ? sessions : searchResults
+        if let items {
+            if items.isEmpty {
+                Text(highlight == nil
+                    ? "No Rubien Home conversations yet."
+                    : "No Home conversations match “\(trimmedQuery)”.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        ForEach(items) { summary in
+                            HistoryRow(summary: summary, highlightQuery: highlight) {
+                                session.resume(summary)
+                                onResumed()
+                            }
+                        }
+                    }
+                }
+                .frame(height: min(CGFloat(items.count) * HistoryRow.height, 340))
+            }
+        } else {
+            HStack {
+                Spacer()
+                ProgressView().controlSize(.small)
+                Spacer()
+            }
+            .padding(.vertical, 16)
+        }
+    }
+
+    private func scheduleSearch() {
+        searchTask?.cancel()
+        let trimmed = trimmedQuery
+        guard !trimmed.isEmpty else {
+            searchResults = nil
+            return
+        }
+        searchResults = nil
+        searchTask = Task {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled else { return }
+            let hits = await session.searchSessions(trimmed, limit: 25)
+            guard !Task.isCancelled else { return }
+            searchResults = hits
+        }
     }
 }
 
@@ -2039,7 +2079,6 @@ private struct ChatHistoryPopover: View {
     /// the query is empty (recents show).
     @State private var searchResults: [AgentSessionSummary]?
     @State private var searchTask: Task<Void, Never>?
-    @FocusState private var searchFocused: Bool
 
     private var trimmedQuery: String {
         query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2052,7 +2091,10 @@ private struct ChatHistoryPopover: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
             scopePicker
-            searchField
+            HistorySearchField(
+                placeholder: "Search past conversations",
+                query: $query
+            )
             Divider()
             content
             Divider()
@@ -2081,6 +2123,7 @@ private struct ChatHistoryPopover: View {
         // Re-run an active search under the new scope (the debounce task captures
         // the scope at schedule time). Empty-query handling is scheduleSearch's own.
         .onChange(of: scope) { _, _ in scheduleSearch() }
+        .onDisappear { searchTask?.cancel() }
     }
 
     /// The reader sidebars' own tab control (hover highlight + sliding indicator)
@@ -2092,32 +2135,6 @@ private struct ChatHistoryPopover: View {
         ])
         .padding(.horizontal, 12)
         .padding(.bottom, 8)
-    }
-
-    private var searchField: some View {
-        HStack(spacing: 5) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(.secondary)
-            TextField("Search past conversations", text: $query)
-                .textFieldStyle(.plain)
-                .font(.system(size: 12))
-                .focused($searchFocused)
-            if !query.isEmpty {
-                Button {
-                    query = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help(String(localized: "Clear search", bundle: .module))
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.bottom, 8)
-        .onAppear { focusSoon() }
     }
 
     /// Debounced content search: typing cancels the previous probe; the query
@@ -2138,15 +2155,6 @@ private struct ChatHistoryPopover: View {
             let hits = await session.searchSessions(trimmed, scopedToReference: scoped)
             guard !Task.isCancelled else { return }
             searchResults = hits
-        }
-    }
-
-    /// Focus at popover-mount doesn't take; hop the runloop first (the sidebar
-    /// composer's `focusComposerSoon` idiom).
-    private func focusSoon() {
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 50_000_000)
-            searchFocused = true
         }
     }
 
@@ -2216,6 +2224,45 @@ private struct ChatHistoryPopover: View {
             Spacer()
         }
         .padding(.vertical, 16)
+    }
+}
+
+/// Shared provider-history search field. Focus at popover mount does not take,
+/// so it hops the run loop before claiming focus.
+private struct HistorySearchField: View {
+    let placeholder: LocalizedStringKey
+    @Binding var query: String
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+            TextField(placeholder, text: $query)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .focused($focused)
+            if !query.isEmpty {
+                Button {
+                    query = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help(String(localized: "Clear search", bundle: .module))
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
+        .onAppear {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 50_000_000)
+                focused = true
+            }
+        }
     }
 }
 

@@ -415,6 +415,80 @@ final class ScheduledJobTests: XCTestCase {
         )
     }
 
+    func testDeletingTerminalRunHidesHistoryButRetainsOccurrenceIdentity() throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let job = try database.createScheduledJob(
+            definition(name: "History"),
+            now: date("2026-07-13T07:00:00Z"),
+            calendar: utcCalendar()
+        )
+        let claim = try database.claimManualScheduledJob(
+            id: job.id,
+            now: date("2026-07-13T07:10:00Z")
+        )
+        XCTAssertTrue(try database.finishScheduledJobRun(
+            id: claim.run.id,
+            status: .failed,
+            failureKind: .providerFailed
+        ))
+        XCTAssertEqual(try database.unreadScheduledJobRunCount(), 1)
+
+        try database.deleteScheduledJobRun(
+            id: claim.run.id,
+            at: date("2026-07-13T07:20:00Z")
+        )
+
+        XCTAssertNil(try database.fetchScheduledJobRun(id: claim.run.id))
+        XCTAssertTrue(try database.fetchRecentScheduledJobRuns().isEmpty)
+        XCTAssertTrue(try database.fetchScheduledJobRuns(jobId: job.id).isEmpty)
+        XCTAssertEqual(try database.unreadScheduledJobRunCount(), 0)
+
+        try database.dbWriter.read { db in
+            let row = try XCTUnwrap(Row.fetchOne(
+                db,
+                sql: """
+                    SELECT hiddenAt, trigger, scheduledFor, startedAt, finishedAt,
+                           status, provider, providerSessionId, failureKind
+                    FROM scheduledJobRun WHERE id = ?
+                    """,
+                arguments: [claim.run.id]
+            ))
+            XCTAssertNotNil(row["hiddenAt"] as Date?)
+            XCTAssertEqual(row["trigger"] as String?, "deleted")
+            XCTAssertEqual(
+                row["scheduledFor"] as Date?,
+                date("2026-07-13T07:20:00Z")
+            )
+            XCTAssertNil(row["startedAt"] as Date?)
+            XCTAssertNil(row["finishedAt"] as Date?)
+            XCTAssertEqual(row["status"] as String?, "cancelled")
+            XCTAssertEqual(row["provider"] as String?, "deleted")
+            XCTAssertNil(row["providerSessionId"] as String?)
+            XCTAssertNil(row["failureKind"] as String?)
+        }
+
+        XCTAssertThrowsError(try database.dbWriter.write { db in
+            var duplicate = claim.run
+            duplicate.id = UUID().uuidString.lowercased()
+            try duplicate.insert(db)
+        }) { error in
+            XCTAssertTrue(error is DatabaseError)
+        }
+    }
+
+    func testDeletingActiveOrMissingRunFailsClearly() throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let job = try database.createScheduledJob(definition(name: "Active"))
+        let claim = try database.claimManualScheduledJob(id: job.id)
+
+        XCTAssertThrowsError(try database.deleteScheduledJobRun(id: claim.run.id)) { error in
+            XCTAssertEqual(error as? ScheduledJobError, .activeRunPreventsRunDeletion)
+        }
+        XCTAssertThrowsError(try database.deleteScheduledJobRun(id: "missing")) { error in
+            XCTAssertEqual(error as? ScheduledJobError, .runNotFound)
+        }
+    }
+
     func testUnknownPersistedEnumsDecodeWithoutFailure() throws {
         let database = try AppDatabase(DatabaseQueue())
         let calendar = utcCalendar()

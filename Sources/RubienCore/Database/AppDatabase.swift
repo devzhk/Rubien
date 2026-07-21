@@ -52,7 +52,7 @@ public struct ReferenceMentionCandidate: Sendable, Equatable {
 public final class AppDatabase: Sendable {
     /// Bumped whenever a new migration is registered. Surfaced in
     /// `rubien-cli sync status` JSON for diagnostics.
-    public static let currentSchemaVersion = "v8"
+    public static let currentSchemaVersion = "v9"
 
     public let dbWriter: any DatabaseWriter
 
@@ -603,6 +603,14 @@ public final class AppDatabase: Sendable {
             try Self.applyV8Body(db)
         }
 
+        // v9 (2026-07): allow terminal scheduled runs to be removed from visible
+        // history without deleting their occurrence identity. Keeping the hidden
+        // row prevents a clock/time-zone reconciliation from executing the same
+        // scheduled occurrence a second time.
+        migrator.registerMigration("v9") { db in
+            try Self.applyV9Body(db)
+        }
+
         return migrator
     }
 
@@ -684,6 +692,12 @@ public final class AppDatabase: Sendable {
             ON scheduledJobRun(isUnread)
             WHERE isUnread = 1
             """)
+    }
+
+    fileprivate static func applyV9Body(_ db: Database) throws {
+        try db.alter(table: "scheduledJobRun") { table in
+            table.add(column: "hiddenAt", .datetime)
+        }
     }
 
     fileprivate static func applyV7Body(_ db: Database) throws {
@@ -1039,6 +1053,14 @@ public final class AppDatabase: Sendable {
     public static func runV8MigrationForTesting(on queue: DatabaseQueue) throws {
         try queue.write { db in
             try Self.applyV8Body(db)
+        }
+    }
+
+    /// Test-only: applies the v9 hidden-history marker to a v8-shaped queue.
+    /// Used by `MigrationV9Tests` for the upgrade path.
+    public static func runV9MigrationForTesting(on queue: DatabaseQueue) throws {
+        try queue.write { db in
+            try Self.applyV9Body(db)
         }
     }
 

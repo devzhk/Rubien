@@ -1053,6 +1053,7 @@ rubien-cli jobs create --name "Morning papers" \
 rubien-cli jobs update <job-id> --weekdays mon,wed,fri --time 07:30
 rubien-cli jobs enable <job-id> --enabled false
 rubien-cli jobs runs --job-id <job-id> --limit 20
+rubien-cli jobs delete-run <run-id>
 rubien-cli jobs delete <job-id>
 ```
 
@@ -1069,6 +1070,10 @@ The JSON job shape includes `id`, `name`, `prompt`, `weekdayMask`, `weekdays`,
 `localTime`, `enabled`, provider options, `nextRunAt`, `createdAt`, and
 `dateModified`. Run rows include their trigger, local occurrence key, lifecycle
 timestamps, status, provider session ID, failure kind, and unread state.
+`jobs delete-run` accepts only a terminal run. It removes the run from Rubien's
+visible history and clears Rubien's local provider-session link, but does not
+delete the provider-owned conversation. A minimal hidden occurrence marker is
+retained so a scheduled occurrence cannot execute a second time.
 
 > **Storage-root warning:** the signed app and bundled CLI helper share the App
 > Group library, but `swift run rubien-cli` normally uses

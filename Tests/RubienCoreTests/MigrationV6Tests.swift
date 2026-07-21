@@ -5,9 +5,9 @@ import GRDB
 final class MigrationV6Tests: XCTestCase {
 
     /// The `currentSchemaVersion` constant must track the latest registered
-    /// migration (v8). Its value surfaces in `rubien-cli sync status` JSON.
-    func testCurrentSchemaVersionIsV8() throws {
-        XCTAssertEqual(AppDatabase.currentSchemaVersion, "v8")
+    /// migration (v9). Its value surfaces in `rubien-cli sync status` JSON.
+    func testCurrentSchemaVersionIsV9() throws {
+        XCTAssertEqual(AppDatabase.currentSchemaVersion, "v9")
     }
 
     /// The realistic v5-era six-option state (v3 prune output), plus one

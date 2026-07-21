@@ -22,14 +22,20 @@ final class ScheduledJobRunnerTests: XCTestCase {
         )
 
         var statusAtStart: ScheduledJobRunStatus?
-        let possibleResult = await runner.execute(claim) {
-            statusAtStart = try? database.fetchScheduledJobRun(id: claim.run.id)?.status
-        }
+        var receivedEvents: [AgentEvent] = []
+        let possibleResult = await runner.execute(
+            claim,
+            onStarted: {
+                statusAtStart = try? database.fetchScheduledJobRun(id: claim.run.id)?.status
+            },
+            onEvent: { receivedEvents.append($0) }
+        )
         let result = try XCTUnwrap(possibleResult)
 
         XCTAssertEqual(statusAtStart, .running)
         XCTAssertEqual(result.status, .succeeded)
         XCTAssertEqual(result.providerSessionId, "scheduled-session")
+        XCTAssertEqual(receivedEvents, provider.events)
         XCTAssertTrue(result.isUnread)
         let request = try XCTUnwrap(provider.lastRequest)
         XCTAssertEqual(request.executionMode, .scheduled)

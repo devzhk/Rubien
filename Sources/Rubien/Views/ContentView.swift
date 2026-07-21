@@ -1643,15 +1643,15 @@ struct ContentView: View {
     private func openScheduledRun(_ run: ScheduledJobRun) {
         showHome()
         guard run.status == .succeeded else {
-            presentRecentScheduledRuns(message: ScheduledJobFormatting.localized(
-                run.status == .cancelled
-                    ? "scheduled.result.cancelledMessage"
-                    : "scheduled.result.failedMessage"
-            ))
+            scheduledJobCoordinator.markRunRead(id: run.id)
+            presentRecentScheduledRuns(message: run.status == .cancelled
+                ? ScheduledJobFormatting.localized("scheduled.result.cancelledMessage")
+                : ScheduledJobFormatting.failedRunMessage(run))
             return
         }
         guard let sessionID = run.providerSessionId else {
             scheduledJobCoordinator.markResultUnavailable(id: run.id)
+            scheduledJobCoordinator.markRunRead(id: run.id)
             presentRecentScheduledRuns(message: ScheduledJobFormatting.localized(
                 "scheduled.result.noSessionMessage"
             ))
@@ -1659,6 +1659,7 @@ struct ContentView: View {
         }
         guard let kind = run.provider.agentProviderKind else {
             scheduledJobCoordinator.markResultUnavailable(id: run.id)
+            scheduledJobCoordinator.markRunRead(id: run.id)
             presentRecentScheduledRuns(message: ScheduledJobFormatting.localized(
                 "scheduled.result.providerUnavailableMessage"
             ))
@@ -1682,6 +1683,7 @@ struct ContentView: View {
                 homeSelectedMentions = []
             case .unavailable:
                 scheduledJobCoordinator.markResultUnavailable(id: run.id)
+                scheduledJobCoordinator.markRunRead(id: run.id)
                 presentRecentScheduledRuns(message: ScheduledJobFormatting.localized(
                     "scheduled.result.transcriptUnavailableMessage"
                 ))
