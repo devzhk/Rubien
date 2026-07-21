@@ -136,6 +136,37 @@ final class BrowserClipImportServiceTests: XCTestCase {
         XCTAssertEqual(evidenceCount, 1)
     }
 
+    func testHuggingFacePaperURLPreviewsAsPaperInsteadOfWebpage() async throws {
+        let database = try makeDatabase()
+        let pageURL = "https://huggingface.co/papers/2607.09657"
+        let fetched = Reference(
+            title: "Scalable Visual Pretraining for Language Intelligence",
+            authors: [AuthorName(given: "Yiming", family: "Zhang")],
+            year: 2026,
+            url: "https://arxiv.org/abs/2607.09657",
+            referenceType: .journalArticle
+        )
+        let service = BrowserClipImportService(
+            database: database,
+            metadataResolver: { input, _ in
+                XCTAssertEqual(input, pageURL)
+                return self.verifiedOutcome(fetched)
+            }
+        )
+
+        let prepared = try await service.prepareClip(request(page: BrowserClipPage(
+            url: pageURL,
+            title: fetched.title,
+            siteName: "Hugging Face"
+        )))
+
+        XCTAssertEqual(prepared.preview.kind, .paper)
+        XCTAssertEqual(prepared.preview.title, fetched.title)
+        XCTAssertEqual(prepared.preview.sourceURL, "https://arxiv.org/abs/2607.09657")
+        XCTAssertTrue(prepared.preview.willDownloadPDF)
+        XCTAssertEqual(try database.referenceCount(), 0)
+    }
+
     func testSciencePaperConfirmationAttachesChromeDownloadedPDFInsteadOfCapturedPage() async throws {
         let database = try makeDatabase()
         let articleURL = "https://www.science.org/doi/10.1126/scirobotics.adz7397"

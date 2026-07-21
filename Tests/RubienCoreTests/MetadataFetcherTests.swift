@@ -30,6 +30,40 @@ private actor AsyncGate {
 }
 
 final class MetadataFetcherTests: XCTestCase {
+    func testHuggingFacePaperURLExtractsCanonicalArXivIdentifier() {
+        XCTAssertEqual(
+            MetadataFetcher.extractIdentifier(
+                from: "https://huggingface.co/papers/2607.09657"
+            ),
+            .arxiv("2607.09657")
+        )
+        XCTAssertEqual(
+            MetadataFetcher.extractIdentifier(
+                from: "https://www.huggingface.co/papers/2607.09657v2/?ref=daily"
+            ),
+            .arxiv("2607.09657")
+        )
+    }
+
+    func testOtherHuggingFaceURLsDoNotExtractArXivIdentifiers() {
+        XCTAssertNil(MetadataFetcher.extractIdentifier(from: "https://huggingface.co/papers"))
+        XCTAssertNil(
+            MetadataFetcher.extractIdentifier(
+                from: "https://huggingface.co/papers/2607.09657/discussion"
+            )
+        )
+        XCTAssertNil(
+            MetadataFetcher.extractIdentifier(
+                from: "https://huggingface.co/models/2607.09657"
+            )
+        )
+        XCTAssertNil(
+            MetadataFetcher.extractIdentifier(
+                from: "https://user:pass@huggingface.co/papers/2607.09657"
+            )
+        )
+    }
+
     func testParsePubMedResponseSetsPMIDAndPMCID() throws {
         let json = """
         {

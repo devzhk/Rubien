@@ -90,6 +90,13 @@ public enum MetadataFetcher {
             return .paperURL(url)
         }
 
+        // Hugging Face Daily Papers pages are mirrors keyed by an arXiv ID.
+        // Route only the exact /papers/<modern-arxiv-id> shape through the
+        // canonical arXiv resolver; other Hugging Face pages remain websites.
+        if let arxivID = arxivIDFromHuggingFacePaperURL(trimmed) {
+            return .arxiv(arxivID)
+        }
+
         // DOI: 10.XXXX/... (most specific)
         if let doi = cleanDOI(trimmed) {
             // arXiv DataCite DOIs (10.48550/arXiv.YYMM.NNNNN) aren't indexed by
@@ -178,6 +185,33 @@ public enum MetadataFetcher {
             options: .regularExpression
         )
         return stripped.isEmpty ? nil : stripped
+    }
+
+    private static func arxivIDFromHuggingFacePaperURL(_ text: String) -> String? {
+        guard let url = URL(string: text),
+              let canonical = PaperURLResolver.canonicalize(url),
+              canonical.host == "huggingface.co" else {
+            return nil
+        }
+
+        let components = canonical.path.split(separator: "/", omittingEmptySubsequences: true)
+        guard components.count == 2,
+              components[0] == "papers" else {
+            return nil
+        }
+
+        let identifier = String(components[1])
+        guard identifier.range(
+            of: #"^\d{4}\.\d{4,5}(?:v\d+)?$"#,
+            options: .regularExpression
+        ) != nil else {
+            return nil
+        }
+        return identifier.replacingOccurrences(
+            of: #"v\d+$"#,
+            with: "",
+            options: [.regularExpression, .caseInsensitive]
+        )
     }
 
     /// Extract canonical PMCID (e.g. `PMC1234567`) from a bare-string input.
