@@ -205,6 +205,13 @@ extension or native-host behavior against an old Rubien release: bump Rubien's
 ZIP together. App-only releases still include the matching extension ZIP so a
 user never has to guess which pair is compatible.
 
+**This is a human-run smoke gate.** When an agent is driving the release, it
+must ask the user to perform the app/extension checks below and wait for the
+user to explicitly confirm that they passed. The agent must not try to satisfy
+this gate through Browser/Chrome control or other UI automation. It may build
+and statically verify the candidate artifacts, then provide their exact paths
+and this checklist to the user.
+
 Before requesting approval to run the signed release, use the release-candidate
 app and ZIP produced by step 4, not a development build or files loaded directly
 from the source tree. Use `build/Rubien.app` in place; do not replace the
