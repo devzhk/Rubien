@@ -97,22 +97,49 @@ jobs:
             "rubien-cli-${{ inputs.tag }}-linux-x86_64.tar.gz.sig" \
             --repo "$CANONICAL_RELEASES_REPO" --clobber
 
-      - name: Upload the 0.6.3 compatibility bridge
+      - name: Download canonical 0.6.3 assets for the compatibility mirror
+        if: ${{ inputs.tag == 'v0.6.3' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/legacy-mirror"
+          gh release download "${{ inputs.tag }}" \
+            --repo "$CANONICAL_RELEASES_REPO" \
+            --pattern "Rubien-0.6.3.dmg" \
+            --pattern "Rubien-Browser-Extension-0.6.3.zip" \
+            --dir "$RUNNER_TEMP/legacy-mirror"
+          gh release view "${{ inputs.tag }}" \
+            --repo "$CANONICAL_RELEASES_REPO" \
+            --json name --jq .name > "$RUNNER_TEMP/legacy-release-title.txt"
+          gh release view "${{ inputs.tag }}" \
+            --repo "$CANONICAL_RELEASES_REPO" \
+            --json body --jq .body > "$RUNNER_TEMP/legacy-release-notes.md"
+          test -s "$RUNNER_TEMP/legacy-mirror/Rubien-0.6.3.dmg"
+          test -s "$RUNNER_TEMP/legacy-mirror/Rubien-Browser-Extension-0.6.3.zip"
+          test -s "$RUNNER_TEMP/legacy-release-title.txt"
+          test -s "$RUNNER_TEMP/legacy-release-notes.md"
+
+      - name: Publish the full 0.6.3 compatibility mirror
         if: ${{ inputs.tag == 'v0.6.3' }}
         env:
           GH_TOKEN: ${{ secrets.RELEASES_UPLOAD_TOKEN }}
         run: |
+          RELEASE_TITLE="$(cat "$RUNNER_TEMP/legacy-release-title.txt")"
           if ! gh release view "${{ inputs.tag }}" --repo "$LEGACY_RELEASES_REPO" >/dev/null 2>&1; then
             gh release create "${{ inputs.tag }}" \
               --repo "$LEGACY_RELEASES_REPO" \
-              --title "Rubien 0.6.3 — Compatibility bridge" \
-              --notes "Compatibility bridge for existing Linux CLI installations. Future releases are hosted at https://github.com/${CANONICAL_RELEASES_REPO}/releases." \
+              --title "$RELEASE_TITLE" \
+              --notes-file "$RUNNER_TEMP/legacy-release-notes.md" \
               --draft
           fi
           gh release upload "${{ inputs.tag }}" \
+            "$RUNNER_TEMP/legacy-mirror/Rubien-0.6.3.dmg" \
+            "$RUNNER_TEMP/legacy-mirror/Rubien-Browser-Extension-0.6.3.zip" \
             "rubien-cli-${{ inputs.tag }}-linux-x86_64.tar.gz" \
             "rubien-cli-${{ inputs.tag }}-linux-x86_64.tar.gz.sig" \
             --repo "$LEGACY_RELEASES_REPO" --clobber
           gh release edit "${{ inputs.tag }}" \
             --repo "$LEGACY_RELEASES_REPO" \
+            --title "$RELEASE_TITLE" \
+            --notes-file "$RUNNER_TEMP/legacy-release-notes.md" \
             --draft=false --prerelease=false --latest
