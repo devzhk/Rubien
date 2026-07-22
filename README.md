@@ -11,6 +11,13 @@ Rubien is a local research library with native readers for papers, books, and we
 - [Download Rubien](https://github.com/devzhk/Rubien-releases/releases/latest).
   - Requires macOS 14.4+ and Apple Silicon; macOS 26.0 or later is recommended.
   - Requires Codex CLI or Claude Code CLI to drive the in-library assistant.
+- [Demo video](https://youtu.be/XW-xJaE8-8M)
+- Quick start:
+  1. Install either Codex CLI or Claude Code and sign in.
+  2. Download the latest Rubien DMG and drag Rubien to Applications.
+  3. Open Rubien and confirm your CLI under Settings → Assistant.
+  4. Start a conversation from Home or beside an open document.
+  5. Optional: install the [Chrome extension](BrowserExtension/README.md) to import papers, PDFs, and web articles in one click.
 
 ![Rubien showing the Home dashboard, reading activity, PDF reader, and in-document AI assistant](Assets/rubien-ui.jpg)
 
@@ -37,7 +44,7 @@ Rubien supports various import options:
 - Ask the agent: describe what you're after and it finds and imports the references for you.
 - Other options: import from Zotero, PDF file, or BibTeX file.
 
-### Other
+### Other modern features
 
 - Native PDF/web readers with highlights, underlines, and anchored notes.
 - Track your reading activity and habits: reading streaks, an activity heatmap, and recent reads on Home.
