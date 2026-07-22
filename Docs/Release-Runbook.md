@@ -169,13 +169,6 @@ repeat the normal commit, exact-SHA CI, and candidate-smoke gates. This unsigned
 candidate gate validates the app/host/extension integration but does not replace
 the signed/notarized checks in `release.sh`.
 
-After publication, download the DMG and ZIP from the public GitHub Release and
-repeat steps 1–4 plus the direct-PDF check. This confirms the downloadable assets
-match and that the final signed app registers its host correctly. If that check
-fails, do not leave a mismatched ZIP attached to the release; pull the release
-and appcast as appropriate and ship a version/build bump through the normal
-fix-forward procedure.
-
 ## Environment and signing invariants
 
 - **Pass `RELEASE_NOTES_TEXT` fresh on every invocation.** `release.sh` reads it from the environment and uses it for both the GitHub release and appcast description. A value left exported from an earlier release silently republishes the old notes. Prefer the inline assignment in step 6; otherwise `unset RELEASE_NOTES_TEXT` before composing the new value.
