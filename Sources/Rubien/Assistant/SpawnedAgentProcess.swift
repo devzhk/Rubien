@@ -9,8 +9,8 @@ import Foundation
 // reuses the identical mechanics instead of copying them):
 //
 //   • Claude: one process PER TURN (spawn → stream → exit).
-//   • Codex:  one LONG-LIVED `codex app-server` per conversation (spawn once,
-//     `turn/start` many times, kill on teardown).
+//   • Codex: one LONG-LIVED `codex app-server` shared by Home, readers, History,
+//     and scheduled work.
 //
 // Either way the child runs in its OWN process group so the whole tree can be
 // signalled with `killpg` (Foundation `Process.terminate()` reaches only the
@@ -266,8 +266,16 @@ final class SpawnedAgentProcess: @unchecked Sendable {
 
     /// Compatibility helper for the Codex app-server path.
     func wait() async -> Int32 {
-        guard await observeExit() else { return -1 }
+        if let status = cachedReapedStatus() { return status }
+        guard await observeExit() else {
+            return cachedReapedStatus() ?? -1
+        }
         return await reap() ?? -1
+    }
+
+    private func cachedReapedStatus() -> Int32? {
+        stateLock.lock(); defer { stateLock.unlock() }
+        return reapedStatus
     }
 
     /// Reap within a bounded interval, polling with `WNOHANG` so a child whose
@@ -290,7 +298,10 @@ final class SpawnedAgentProcess: @unchecked Sendable {
         return nil
     }
 
-    private func pollReapedStatus() -> Int32? {
+    /// Nonblocking exit-status probe. Providers use this immediately after stdout
+    /// EOF to preserve a natural crash code before escalating a process that closed
+    /// its pipe without actually exiting.
+    func pollReapedStatus() -> Int32? {
         stateLock.lock(); defer { stateLock.unlock() }
         if let reapedStatus { return reapedStatus }
 
@@ -520,21 +531,74 @@ enum AgentBinaryProbe {
         return shellResolve(binaryName: binaryName)
     }
 
-    /// Probe `--version` off the main actor (bounded), mapped to MAJOR.MINOR.PATCH.
-    /// The provider supplies its own child `environment`.
-    static func probeVersion(executablePath: String, environment: [String: String]) async -> String? {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let result = runCommand(
-                    executablePath: executablePath, arguments: ["--version"],
-                    environment: environment, timeout: 5, captureStderr: false)
-                guard let result, result.exitCode == 0, !result.timedOut else {
-                    continuation.resume(returning: nil)
-                    return
-                }
-                continuation.resume(returning: parseVersionString(result.stdout))
+    /// Probe `--version` in its own process group, bounded and fully reaped before
+    /// returning. Codex opts into one retry because npm's wrapper can lose its first
+    /// cold start while another app-server is initializing; cleanup completes before
+    /// the retry, so the retry never overlaps the failed tree.
+    static func probeVersion(
+        executablePath: String,
+        environment: [String: String],
+        retryOnce: Bool = false
+    ) async -> String? {
+        let attempts = retryOnce ? 2 : 1
+        for attempt in 0..<attempts {
+            if let result = await runSpawnedCommand(
+                executablePath: executablePath,
+                arguments: ["--version"],
+                environment: environment,
+                timeout: 5),
+               result.exitCode == 0,
+               !result.timedOut,
+               let version = parseVersionString(result.stdout) {
+                return version
+            }
+            if attempt + 1 < attempts {
+                try? await Task.sleep(for: .milliseconds(150))
             }
         }
+        return nil
+    }
+
+    private static func runSpawnedCommand(
+        executablePath: String,
+        arguments: [String],
+        environment: [String: String],
+        timeout: TimeInterval
+    ) async -> CommandResult? {
+        let process: SpawnedAgentProcess
+        do {
+            process = try SpawnedAgentProcess.spawn(
+                executablePath: executablePath,
+                arguments: arguments,
+                environment: environment,
+                workingDirectory: FileManager.default.temporaryDirectory.path)
+        } catch {
+            return nil
+        }
+        process.closeStdin()
+        let stdoutTask = Task.detached(priority: .userInitiated) {
+            process.stdoutHandle.readDataToEndOfFile()
+        }
+        let stderrTask = Task.detached(priority: .utility) {
+            process.stderrHandle.readDataToEndOfFile()
+        }
+        let watchdog = Task<Bool, Never> {
+            do {
+                try await Task.sleep(for: .seconds(timeout))
+            } catch {
+                return false
+            }
+            process.signalGroup(SIGKILL)
+            return true
+        }
+        let waitStatus = await process.wait()
+        watchdog.cancel()
+        let timedOut = await watchdog.value
+        return CommandResult(
+            stdout: String(decoding: await stdoutTask.value, as: UTF8.self),
+            stderr: String(decoding: await stderrTask.value, as: UTF8.self),
+            exitCode: AgentProcessExit.code(fromWaitStatus: waitStatus),
+            timedOut: timedOut)
     }
 
     /// Last-resort discovery: ask the user's login shell where `binaryName` lives

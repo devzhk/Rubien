@@ -1968,9 +1968,15 @@ private struct HomeChatHistoryPopover: View {
     let session: ChatSessionController
     let onResumed: () -> Void
 
-    @State private var sessions: [AgentSessionSummary]?
+    private struct RecentLoadID: Hashable {
+        let generation: Int
+        let enabled: Bool
+    }
+
+    @State private var sessions: AgentSessionQueryResult?
+    @State private var reloadGeneration = 0
     @State private var query = ""
-    @State private var searchResults: [AgentSessionSummary]?
+    @State private var searchResults: AgentSessionQueryResult?
     @State private var searchTask: Task<Void, Never>?
 
     private var trimmedQuery: String {
@@ -1997,35 +2003,52 @@ private struct HomeChatHistoryPopover: View {
                 .padding(.vertical, 6)
         }
         .frame(width: 320)
-        .task { sessions = await session.listRecentSessions(limit: 25) }
+        .task(id: RecentLoadID(
+            generation: reloadGeneration,
+            enabled: trimmedQuery.isEmpty
+        )) {
+            guard trimmedQuery.isEmpty else { return }
+            sessions = nil
+            let loaded = await session.loadRecentSessions(limit: 25)
+            guard !Task.isCancelled else { return }
+            sessions = loaded
+        }
         .onChange(of: query) { _, _ in scheduleSearch() }
         .onDisappear { searchTask?.cancel() }
     }
 
     @ViewBuilder private var content: some View {
         let highlight = trimmedQuery.isEmpty ? nil : trimmedQuery
-        let items = highlight == nil ? sessions : searchResults
-        if let items {
-            if items.isEmpty {
-                Text(highlight == nil
-                    ? "No Rubien Home conversations yet."
-                    : "No Home conversations match “\(trimmedQuery)”.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .padding(14)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                ScrollView {
-                    VStack(spacing: 0) {
-                        ForEach(items) { summary in
-                            HistoryRow(summary: summary, highlightQuery: highlight) {
-                                session.resume(summary)
-                                onResumed()
+        let result = highlight == nil ? sessions : searchResults
+        if let result {
+            VStack(alignment: .leading, spacing: 0) {
+                if result.didTimeOut {
+                    HistoryTimeoutNotice(
+                        hasPartialResults: !result.sessions.isEmpty,
+                        retry: retryCurrentLoad)
+                }
+                if result.sessions.isEmpty, !result.didTimeOut {
+                    Text(highlight == nil
+                        ? "No Rubien Home conversations yet."
+                        : "No Home conversations match “\(trimmedQuery)”.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .padding(14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else if !result.sessions.isEmpty {
+                    ScrollView {
+                        VStack(spacing: 0) {
+                            ForEach(result.sessions) { summary in
+                                HistoryRow(summary: summary, highlightQuery: highlight) {
+                                    session.resume(summary)
+                                    onResumed()
+                                }
                             }
                         }
                     }
+                    .frame(height: min(
+                        CGFloat(result.sessions.count) * HistoryRow.height, 340))
                 }
-                .frame(height: min(CGFloat(items.count) * HistoryRow.height, 340))
             }
         } else {
             HStack {
@@ -2037,7 +2060,7 @@ private struct HomeChatHistoryPopover: View {
         }
     }
 
-    private func scheduleSearch() {
+    private func scheduleSearch(debounce: Bool = true) {
         searchTask?.cancel()
         let trimmed = trimmedQuery
         guard !trimmed.isEmpty else {
@@ -2046,11 +2069,21 @@ private struct HomeChatHistoryPopover: View {
         }
         searchResults = nil
         searchTask = Task {
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            if debounce {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
             guard !Task.isCancelled else { return }
-            let hits = await session.searchSessions(trimmed, limit: 25)
+            let hits = await session.loadSearchSessions(trimmed, limit: 25)
             guard !Task.isCancelled else { return }
             searchResults = hits
+        }
+    }
+
+    private func retryCurrentLoad() {
+        if trimmedQuery.isEmpty {
+            reloadGeneration += 1
+        } else {
+            scheduleSearch(debounce: false)
         }
     }
 }
@@ -2072,12 +2105,19 @@ private struct ChatHistoryPopover: View {
         case thisDocument, allDocuments
     }
 
+    private struct RecentLoadID: Hashable {
+        let scope: HistoryScope
+        let generation: Int
+        let enabled: Bool
+    }
+
     @State private var scope: HistoryScope = .thisDocument
-    @State private var sessions: [AgentSessionSummary]?
+    @State private var sessions: AgentSessionQueryResult?
+    @State private var reloadGeneration = 0
     @State private var query = ""
     /// nil while a search is in flight (spinner); results otherwise. Ignored when
     /// the query is empty (recents show).
-    @State private var searchResults: [AgentSessionSummary]?
+    @State private var searchResults: AgentSessionQueryResult?
     @State private var searchTask: Task<Void, Never>?
 
     private var trimmedQuery: String {
@@ -2109,9 +2149,14 @@ private struct ChatHistoryPopover: View {
         .frame(width: 320)
         // `task(id:)` (re)loads recents on open AND whenever the scope flips,
         // cancelling the superseded load (a scoped listing scans session bodies).
-        .task(id: scope) {
+        .task(id: RecentLoadID(
+            scope: scope,
+            generation: reloadGeneration,
+            enabled: trimmedQuery.isEmpty
+        )) {
+            guard trimmedQuery.isEmpty else { return }
             sessions = nil
-            let loaded = await session.listRecentSessions(
+            let loaded = await session.loadRecentSessions(
                 scopedToReference: scope == .thisDocument)
             // Cancellation is cooperative: a superseded (cancelled) load can still
             // return, and without this guard its stale scope's rows would overwrite
@@ -2140,7 +2185,7 @@ private struct ChatHistoryPopover: View {
     /// Debounced content search: typing cancels the previous probe; the query
     /// must be stable for a beat before files are scanned. An empty query just
     /// switches the list back to recents. Honors the scope toggle.
-    private func scheduleSearch() {
+    private func scheduleSearch(debounce: Bool = true) {
         searchTask?.cancel()
         let trimmed = trimmedQuery
         guard !trimmed.isEmpty else {
@@ -2150,9 +2195,12 @@ private struct ChatHistoryPopover: View {
         searchResults = nil  // spinner while (re)searching
         let scoped = scope == .thisDocument
         searchTask = Task {
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            if debounce {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
             guard !Task.isCancelled else { return }
-            let hits = await session.searchSessions(trimmed, scopedToReference: scoped)
+            let hits = await session.loadSearchSessions(
+                trimmed, scopedToReference: scoped)
             guard !Task.isCancelled else { return }
             searchResults = hits
         }
@@ -2162,12 +2210,19 @@ private struct ChatHistoryPopover: View {
     /// rows → list. Only the source array, empty-text, and highlight differ.
     @ViewBuilder private var content: some View {
         let highlight = trimmedQuery.isEmpty ? nil : trimmedQuery
-        let items = highlight == nil ? sessions : searchResults
-        if let items {
-            if items.isEmpty {
-                emptyLabel(emptyText(searching: highlight != nil))
-            } else {
-                rowList(items, highlight: highlight)
+        let result = highlight == nil ? sessions : searchResults
+        if let result {
+            VStack(alignment: .leading, spacing: 0) {
+                if result.didTimeOut {
+                    HistoryTimeoutNotice(
+                        hasPartialResults: !result.sessions.isEmpty,
+                        retry: retryCurrentLoad)
+                }
+                if result.sessions.isEmpty, !result.didTimeOut {
+                    emptyLabel(emptyText(searching: highlight != nil))
+                } else if !result.sessions.isEmpty {
+                    rowList(result.sessions, highlight: highlight)
+                }
             }
         } else {
             loadingSpinner
@@ -2224,6 +2279,37 @@ private struct ChatHistoryPopover: View {
             Spacer()
         }
         .padding(.vertical, 16)
+    }
+
+    private func retryCurrentLoad() {
+        if trimmedQuery.isEmpty {
+            reloadGeneration += 1
+        } else {
+            scheduleSearch(debounce: false)
+        }
+    }
+}
+
+/// A timeout is a retryable provider-contention state, not an empty History.
+/// Partial rows remain usable below this compact notice.
+private struct HistoryTimeoutNotice: View {
+    let hasPartialResults: Bool
+    let retry: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(hasPartialResults
+                ? "Some conversations couldn’t be loaded."
+                : "History is temporarily unavailable.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 4)
+            Button("Retry", action: retry)
+                .buttonStyle(.borderless)
+                .font(.system(size: 11, weight: .medium))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
     }
 }
 

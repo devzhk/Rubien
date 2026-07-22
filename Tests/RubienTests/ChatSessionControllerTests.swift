@@ -1290,6 +1290,68 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertEqual(provider.searches.map(\.referenceID), [1, nil])
     }
 
+    func testHomeHistoryTimeoutReturnsPartialRowsWithoutProgressiveRefetch() async throws {
+        let workspace = URL(fileURLWithPath: "/tmp/ws")
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Rubien-attribution-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+        let store = AssistantSessionAttributionStore(fileURL: storeURL)
+        let summary = AgentSessionSummary(
+            id: "partial-home", preview: "Partial result", date: Date())
+        await store.record(
+            sessionID: summary.id,
+            provider: .claude,
+            workspaceURL: workspace,
+            conversationId: UUID(),
+            context: .library)
+        let provider = MockAgentProvider()
+        provider.setRecentResult(AgentSessionQueryResult(
+            sessions: [summary], didTimeOut: true))
+        let controller = ChatSessionController(
+            provider: provider,
+            transcript: SpyTranscriptSink(),
+            conversationContext: .library,
+            workspaceURL: workspace,
+            gate: AssistantTurnGate(),
+            initialAvailability: .installed(version: "test", path: "/fake/claude"),
+            attributionStore: store)
+
+        let result = await controller.loadRecentSessions(limit: 25)
+
+        XCTAssertTrue(result.didTimeOut)
+        XCTAssertEqual(result.sessions, [summary])
+        XCTAssertEqual(provider.recentsCalls.map(\.limit), [50],
+            "a timeout must stop Home's 50→500 progressive widening")
+    }
+
+    func testHomeHistoryProgressiveFetchesShareOneDeadline() async throws {
+        let workspace = URL(fileURLWithPath: "/tmp/ws")
+        let storeURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Rubien-attribution-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: storeURL) }
+        let provider = MockAgentProvider()
+        provider.setRecentResult(.completed((0..<50).map {
+            AgentSessionSummary(
+                id: "foreign-\($0)", preview: "Foreign", date: Date())
+        }))
+        let controller = ChatSessionController(
+            provider: provider,
+            transcript: SpyTranscriptSink(),
+            conversationContext: .library,
+            workspaceURL: workspace,
+            gate: AssistantTurnGate(),
+            initialAvailability: .installed(version: "test", path: "/fake/claude"),
+            attributionStore: AssistantSessionAttributionStore(fileURL: storeURL))
+
+        _ = await controller.loadRecentSessions(limit: 25)
+
+        XCTAssertEqual(provider.recentsCalls.map(\.limit), [50, 100])
+        let deadlines = provider.recentsCalls.compactMap(\.deadline)
+        XCTAssertEqual(deadlines.count, 2)
+        XCTAssertEqual(deadlines[0], deadlines[1],
+            "widening rounds must consume one UI deadline, not restart it")
+    }
+
     func testQuickSendAfterResumeStillPrependsTheRestoredHistory() async {
         // The race codex flagged: a follow-up send bumps `generation` before the
         // restore lands — the history must still prepend (same conversation),
@@ -2952,6 +3014,22 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertFalse(fixture.controller.hasAttachmentRehomeFailure)
     }
 
+    func testTeardownBeforeTurnAdmissionNeverDispatchesThroughClosedProvider() async {
+        let provider = MockAgentProvider(kind: .codex)
+        let gate = AssistantTurnGate()
+        let controller = makeController(
+            provider: provider, sink: SpyTranscriptSink(), gate: gate)
+
+        controller.send("summarize")
+        let admissionTask = controller.turnTask
+        controller.teardown()
+        await admissionTask?.value
+
+        XCTAssertTrue(provider.requests.isEmpty)
+        let admitted = await gate.tryAcquire(provider: .codex, sessionID: nil)
+        XCTAssertTrue(admitted)
+    }
+
     func testDuplicateSourceIsRejectedAndBatchKeepsValidSiblings() async throws {
         let fixture = try makeAttachmentController()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -3116,7 +3194,8 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
     private var _transcriptWaiters: [CheckedContinuation<Void, Never>] = []
     private var _searches: [(query: String, limit: Int, referenceID: Int64?)] = []
     private var _searchResults: [AgentSessionSummary] = []
-    private var _recentsCalls: [(limit: Int, referenceID: Int64?)] = []
+    private var _recentsCalls: [(limit: Int, referenceID: Int64?, deadline: Date?)] = []
+    private var _recentResult: AgentSessionQueryResult?
     private var _catalog: CodexCatalog?
     private var _catalogHold = false
     private var _catalogReleaseWaiters: [CheckedContinuation<Void, Never>] = []
@@ -3261,23 +3340,32 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }; _searchResults = results
     }
 
-    func searchSessions(query: String, workspaceURL: URL, limit: Int, referenceID: Int64?) async -> [AgentSessionSummary] {
+    func searchSessionsResult(
+        query: String, workspaceURL: URL, limit: Int, referenceID: Int64?,
+        deadline: Date?
+    ) async -> AgentSessionQueryResult {
         lock.lock(); defer { lock.unlock() }
         _searches.append((query, limit, referenceID))
-        return _searchResults
+        return .completed(_searchResults)
     }
 
     var searches: [(query: String, limit: Int, referenceID: Int64?)] {
         lock.lock(); defer { lock.unlock() }; return _searches
     }
 
-    func recentSessions(workspaceURL: URL, limit: Int, referenceID: Int64?) async -> [AgentSessionSummary] {
-        lock.lock(); defer { lock.unlock() }
-        _recentsCalls.append((limit, referenceID))
-        return []
+    func setRecentResult(_ result: AgentSessionQueryResult) {
+        lock.lock(); defer { lock.unlock() }; _recentResult = result
     }
 
-    var recentsCalls: [(limit: Int, referenceID: Int64?)] {
+    func recentSessionsResult(
+        workspaceURL: URL, limit: Int, referenceID: Int64?, deadline: Date?
+    ) async -> AgentSessionQueryResult {
+        lock.lock(); defer { lock.unlock() }
+        _recentsCalls.append((limit, referenceID, deadline))
+        return _recentResult ?? .completed([])
+    }
+
+    var recentsCalls: [(limit: Int, referenceID: Int64?, deadline: Date?)] {
         lock.lock(); defer { lock.unlock() }; return _recentsCalls
     }
 

@@ -5,12 +5,11 @@ import RubienCore
 
 // MARK: - Codex model catalog (model/list auto-discovery)
 //
-// Fetches the installed codex's OWN model list via a short-lived `codex app-server`
-// (`initialize → initialized → model/list`; verified back to codex 0.142.5 — spec
-// §2.1) and memoizes it per resolved binary path. The catalog feeds PICKERS ONLY:
-// no turn ever waits on it (spec §4.1) — a transient unseeded turn omits the model
-// (codex then applies its own config-chain fallback) and a pinned/seeded slug is sent
-// verbatim, so a turn racing this fetch is already correct.
+// Fetches the installed codex's OWN model list (`model/list`, verified back to codex
+// 0.142.5 — spec §2.1) and memoizes it per resolved binary path. Production routes
+// through the same app-server connection as Home/readers/scheduled work; isolated
+// catalog instances retain the short-lived probe for deterministic tests. The catalog
+// feeds PICKERS ONLY: no turn ever waits on it (spec §4.1).
 //
 // Correctness internals (spec review finding #9): concurrent callers join one
 // in-flight Task per path; a generation token invalidates on forceReload / path
@@ -18,11 +17,12 @@ import RubienCore
 
 actor CodexModelCatalog {
     /// Production singleton — Settings and every reader window share one result
-    /// (one isolated discovery operation per launch per binary path).
-    static let shared = CodexModelCatalog()
+    /// and route discovery through the process-wide Rubien Codex connection.
+    static let shared = CodexModelCatalog(usesSharedRuntime: true)
 
     private let workingDirectory: URL
     private let fetchTimeout: Double
+    private let usesSharedRuntime: Bool
     /// `static` (not an instance property) so the free-standing `fetch` probe —
     /// deliberately non-isolated from the actor so a slow probe never blocks other
     /// paths' lookups — can log without threading the logger through as a parameter.
@@ -46,10 +46,12 @@ actor CodexModelCatalog {
     /// in well under a second; a wedged binary must not hold a picker open forever.
     init(
         workingDirectory: URL = FileManager.default.temporaryDirectory,
-        fetchTimeout: Double = 10
+        fetchTimeout: Double = 10,
+        usesSharedRuntime: Bool = false
     ) {
         self.workingDirectory = workingDirectory
         self.fetchTimeout = fetchTimeout
+        self.usesSharedRuntime = usesSharedRuntime
     }
 
     /// The catalog for the codex the override resolves to. Memoized; `forceReload`
@@ -75,6 +77,7 @@ actor CodexModelCatalog {
             let gen = generation[path, default: 0]
             let directory = workingDirectory
             let timeout = fetchTimeout
+            let usesSharedRuntime = usesSharedRuntime
             let replacement = InflightFetch(
                 token: UUID(),
                 generation: gen,
@@ -82,9 +85,8 @@ actor CodexModelCatalog {
                     if let previous { _ = await previous.task.value }
                     guard !Task.isCancelled else { return .unavailable }
                     return await Self.fetch(
-                        executablePath: path,
-                        workingDirectory: directory,
-                        timeout: timeout)
+                        executablePath: path, workingDirectory: directory,
+                        timeout: timeout, usesSharedRuntime: usesSharedRuntime)
                 })
             inflight[path] = replacement
             return await finish(replacement, for: path)
@@ -97,14 +99,14 @@ actor CodexModelCatalog {
         let gen = generation[path, default: 0]
         let directory = workingDirectory
         let timeout = fetchTimeout
+        let usesSharedRuntime = usesSharedRuntime
         let fetch = InflightFetch(
             token: UUID(),
             generation: gen,
             task: Task {
                 await Self.fetch(
-                    executablePath: path,
-                    workingDirectory: directory,
-                    timeout: timeout)
+                    executablePath: path, workingDirectory: directory,
+                    timeout: timeout, usesSharedRuntime: usesSharedRuntime)
             })
         inflight[path] = fetch
         return await finish(fetch, for: path)
@@ -133,8 +135,15 @@ actor CodexModelCatalog {
     private static func fetch(
         executablePath: String,
         workingDirectory: URL,
-        timeout: Double
+        timeout: Double,
+        usesSharedRuntime: Bool
     ) async -> CodexCatalog {
+        if usesSharedRuntime {
+            return await CodexProvider.sharedModelCatalog(
+                executablePath: executablePath,
+                workingDirectory: workingDirectory,
+                timeout: timeout)
+        }
         let environment = CodexInvocation.environment(
             binaryDirectory: (executablePath as NSString).deletingLastPathComponent)
         // Model discovery needs no apps, plugins, or MCP tools. Resolve the ambient

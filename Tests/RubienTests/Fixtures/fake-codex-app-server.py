@@ -23,7 +23,8 @@ usageLast{...}, approval{reason,command,availableDecisions[]},
 mcpApproval{server,tool,mutation}, unknownRequest(bool),
 hang(bool), exitAfterTurnStart(int), models[] / modelListError (model/list).
 History (3b-4): threads[] (thread/list data), searchHits[] (thread/search data,
-each {thread,snippet}), transcript{turns:[…]} (thread/read). All record params.
+each {thread,snippet}), transcript{turns:[…]} (thread/read), and
+threadReadDelayOnceMs (delay the first read across respawns). All record params.
 """
 import json
 import os
@@ -394,6 +395,15 @@ class Server:
                 params = msg.get("params", {})
                 record(threadReadParams=params,
                        threadReadIds=OBSERVED.get("threadReadIds", []) + [params.get("threadId")])
+                delay_once_ms = cfg.get("threadReadDelayOnceMs")
+                if delay_once_ms:
+                    sentinel = ".fake-codex-thread-read-delayed"
+                    try:
+                        fd = os.open(sentinel, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                        os.close(fd)
+                        time.sleep(int(delay_once_ms) / 1000.0)
+                    except FileExistsError:
+                        pass
                 # `is None`, not `or`: an explicitly configured EMPTY per-thread
                 # transcript ({}) must be served, not swallowed by falsiness.
                 thread = cfg.get("transcripts", {}).get(params.get("threadId"))

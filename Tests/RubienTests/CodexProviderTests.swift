@@ -42,6 +42,17 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertEqual(availability.resolvedPath, fakeServerPath)
     }
 
+    func testIsAvailableRetriesOneCleanedUpTransientVersionFailure() async throws {
+        let cli = try makeTransientVersionProbeCLI()
+        let provider = CodexProvider(executableOverride: cli.path)
+
+        let availability = await provider.isAvailable()
+
+        XCTAssertTrue(availability.isInstalled)
+        XCTAssertTrue(availability.isAuthenticated)
+        XCTAssertEqual(availability.version, "0.145.0")
+    }
+
     func testIsAvailableReportsUnauthenticatedWhenCodexLoginStatusIsSignedOut() async throws {
         let cli = try makeCodexAuthProbeCLI(
             authOutput: "Not logged in. Run codex login to authenticate.",
@@ -343,6 +354,242 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertEqual(observed["threadResumes"] as? Int, 0)
     }
 
+    func testInteractiveProvidersShareOneAppLifetimeServerAcrossWindowReopen() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["assistantText": "shared"], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let home = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+        let reader = CodexProvider(
+            executableOverride: fakeServerPath,
+            historyTimeout: 0.25,
+            sharedConnectionRegistry: registry)
+
+        _ = try await collectAllEvents(home.send(turn: turn(workspace: workspace)))
+        let firstPID = pid_t(try XCTUnwrap(
+            try readObserved(in: workspace)["pid"] as? Int))
+        _ = try await collectAllEvents(reader.send(turn: turn(workspace: workspace)))
+        let shared = try readObserved(in: workspace)
+
+        XCTAssertEqual(shared["pid"] as? Int, Int(firstPID))
+        XCTAssertEqual(shared["threadStarts"] as? Int, 2)
+
+        home.shutdown()
+        _ = try await collectAllEvents(reader.send(turn: turn(
+            workspace: workspace, resume: "TH-1")))
+        XCTAssertEqual(try readObserved(in: workspace)["pid"] as? Int, Int(firstPID),
+            "closing Home must not kill the reader's shared runtime")
+
+        reader.shutdown()
+        let reopened = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+        _ = try await collectAllEvents(reopened.send(turn: turn(workspace: workspace)))
+        XCTAssertEqual(try readObserved(in: workspace)["pid"] as? Int, Int(firstPID),
+            "the final window closing must not race a new server on immediate reopen")
+        reopened.shutdown()
+
+        await registry.shutdownAll()
+        try await assertEventuallyDead(firstPID, timeout: 8)
+    }
+
+    func testModelDiscoveryReusesTheSharedTurnServer() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["assistantText": "same runtime"], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let provider = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+
+        let catalog = await provider.modelCatalog(workspaceURL: workspace)
+        XCTAssertTrue(catalog.fetchedOK)
+        let catalogPID = try XCTUnwrap(
+            try readObserved(in: workspace)["pid"] as? Int)
+
+        let events = try await collectAllEvents(
+            provider.send(turn: turn(workspace: workspace)))
+        XCTAssertTrue(events.contains(.assistantMessageCompleted(text: "same runtime")))
+        XCTAssertEqual(try readObserved(in: workspace)["pid"] as? Int, catalogPID,
+            "model/list must not launch a competing app-server beside the turn runtime")
+
+        provider.shutdown()
+        await registry.shutdownAll()
+    }
+
+    func testInteractiveSharedProviderCannotDisplaceAnotherSurfaceTurn() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["hang": true], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let home = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+        let reader = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+
+        let homeEvents = Task {
+            try await collectAllEvents(
+                home.send(turn: turn(workspace: workspace)), timeout: 8)
+        }
+        try await waitForObserved(in: workspace, timeout: 5) {
+            ($0["turnStarts"] as? Int) == 1
+        }
+
+        let started = Date()
+        let readerEvents = try await collectAllEvents(
+            reader.send(turn: turn(workspace: workspace)), timeout: 2)
+
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1)
+        XCTAssertTrue(readerEvents.contains { event in
+            if case .providerNotice(let text) = event { return text.contains("busy") }
+            return false
+        })
+        XCTAssertEqual(readerEvents.turnCompletion?.outcome, .failed)
+        XCTAssertEqual(try readObserved(in: workspace)["turnStarts"] as? Int, 1,
+            "a reader must not replace Home's active Codex turn")
+
+        let historyStarted = Date()
+        let history = await reader.recentSessionsResult(
+            workspaceURL: workspace, limit: 5, referenceID: nil)
+        XCTAssertTrue(history.didTimeOut)
+        XCTAssertLessThan(Date().timeIntervalSince(historyStarted), 0.5,
+            "History must fail fast while another surface owns Codex")
+
+        home.cancel()
+        _ = try await homeEvents.value
+        home.shutdown()
+        reader.shutdown()
+        await registry.shutdownAll()
+    }
+
+    func testScheduledTurnQueuesBehindInteractiveSharedRuntime() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["hang": true], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let home = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+        let scheduler = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+
+        let homeEvents = Task {
+            try await collectAllEvents(
+                home.send(turn: turn(workspace: workspace)), timeout: 10)
+        }
+        try await waitForObserved(in: workspace, timeout: 5) {
+            ($0["turnStarts"] as? Int) == 1
+        }
+        let interactivePID = try XCTUnwrap(
+            try readObserved(in: workspace)["pid"] as? Int)
+
+        try writeConfig(["assistantText": "scheduled completed"], into: workspace)
+        let scheduledEvents = Task {
+            try await collectAllEvents(
+                scheduler.send(turn: turn(
+                    workspace: workspace,
+                    executionMode: .scheduled)),
+                timeout: 10)
+        }
+        try await Task.sleep(for: .milliseconds(250))
+        XCTAssertEqual(try readObserved(in: workspace)["pid"] as? Int, interactivePID)
+        XCTAssertEqual(try readObserved(in: workspace)["turnStarts"] as? Int, 1,
+            "scheduled work must wait rather than spawn beside an interactive server")
+
+        home.cancel()
+        _ = try await homeEvents.value
+        let events = try await scheduledEvents.value
+        XCTAssertTrue(events.contains(.assistantMessageCompleted(text: "scheduled completed")))
+        XCTAssertEqual(events.turnCompletion?.outcome, .succeeded)
+        XCTAssertNotEqual(try readObserved(in: workspace)["pid"] as? Int, interactivePID,
+            "the read-only scheduled posture should start only after the old server reaps")
+
+        home.shutdown()
+        scheduler.shutdown()
+        await registry.shutdownAll()
+    }
+
+    func testSharedProviderRejectsSendAfterShutdown() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["assistantText": "must not run"], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let provider = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+
+        provider.shutdown()
+        let events = try await collectAllEvents(
+            provider.send(turn: turn(workspace: workspace)))
+
+        XCTAssertTrue(events.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: workspace.appendingPathComponent("fake-codex-observed.json").path))
+        await registry.shutdownAll()
+    }
+
+    func testClosedSharedProviderCannotAnswerAnotherWrappersApproval() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "approval": ["reason": "First approval", "command": "touch first"],
+        ], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let first = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+        let second = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+
+        let firstApproval = LockedApprovalID()
+        let firstEvents = Task {
+            try await collectAllEvents(
+                first.send(turn: turn(workspace: workspace)), timeout: 8
+            ) { event in
+                if case .approvalRequested(let id, _, _) = event {
+                    firstApproval.store(id)
+                }
+            }
+        }
+        let staleID = try await waitForApprovalID(firstApproval)
+        first.shutdown()
+        _ = try await firstEvents.value
+
+        // Change a process-wide spawn flag so the replacement app-server resets its
+        // server-request sequence. Both approvals are id "0", reproducing the exact
+        // cross-wrapper collision a token-less response could authorize.
+        try writeConfig([
+            "approval": ["reason": "Second approval", "command": "touch second"],
+        ], into: workspace)
+        let secondApproval = LockedApprovalID()
+        let secondEvents = Task {
+            try await collectAllEvents(
+                second.send(turn: turn(workspace: workspace, webAccess: false)),
+                timeout: 8
+            ) { event in
+                if case .approvalRequested(let id, _, _) = event {
+                    secondApproval.store(id)
+                }
+            }
+        }
+        let liveID = try await waitForApprovalID(secondApproval)
+        XCTAssertEqual(staleID, liveID)
+
+        first.respondToApproval(id: staleID, .allowOnce)
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertNil(try readObserved(in: workspace)["approval"],
+            "a closed wrapper's delayed response must not authorize the live turn")
+
+        second.respondToApproval(id: liveID, .deny)
+        _ = try await secondEvents.value
+        XCTAssertEqual(
+            (try readObserved(in: workspace)["approval"] as? [String: Any])?["decision"] as? String,
+            "decline")
+
+        second.shutdown()
+        await registry.shutdownAll()
+    }
+
     // MARK: Approvals
 
     func testApprovalAcceptRoundTripEchoesNumericId() async throws {
@@ -626,6 +873,36 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertEqual(observed["initialized"] as? Bool, true)
     }
 
+    func testHistoryDeadlineBoundsJoiningAnInteractiveInitialize() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "initDelayMs": 1_000,
+            "assistantText": "interactive survived",
+        ], into: workspace)
+        let provider = CodexProvider(
+            executableOverride: fakeServerPath,
+            requestTimeout: 3,
+            historyTimeout: 0.2)
+        defer { provider.shutdown() }
+
+        let interactive = Task {
+            try await collectAllEvents(
+                provider.send(turn: turn(workspace: workspace)), timeout: 5)
+        }
+        try await waitForObserved(in: workspace, timeout: 3) { $0["pid"] is Int }
+
+        let started = Date()
+        let history = await provider.recentSessionsResult(
+            workspaceURL: workspace, limit: 5, referenceID: nil)
+
+        XCTAssertTrue(history.didTimeOut)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.8,
+            "History inherited the interactive initialize timeout")
+        let events = try await interactive.value
+        XCTAssertTrue(events.contains(.assistantMessageCompleted(text: "interactive survived")),
+            "the bounded History waiter must not kill the interactive server")
+    }
+
     func testInitializeTimeoutRetriesOnceOnFreshServer() async throws {
         let workspace = try makeWorkspace()
         try writeConfig([
@@ -634,13 +911,15 @@ final class CodexProviderTests: XCTestCase {
         ], into: workspace)
         let provider = CodexProvider(
             executableOverride: fakeServerPath,
-            requestTimeout: 1,
+            // Keep the retry comfortably above a busy full-suite host's Python
+            // startup jitter while the first 3-second initialize still times out.
+            requestTimeout: 1.5,
             initializeRetryDelay: .milliseconds(10))
         defer { provider.shutdown() }
 
         let events = try await collectAllEvents(
             provider.send(turn: turn(workspace: workspace)),
-            timeout: 5)
+            timeout: 7)
 
         XCTAssertTrue(
             events.contains(.assistantMessageCompleted(text: "recovered")),
@@ -783,6 +1062,144 @@ final class CodexProviderTests: XCTestCase {
     }
 
     // MARK: History over the wire (thread/list · thread/search · thread/read — 3b-4)
+
+    func testHistoryTimeoutResetsTheServerAndRetrySucceeds() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "threadReadDelayOnceMs": 3_000,
+            "threads": [[
+                "id": "TH-SLOW", "preview": "Slow first read",
+                "updatedAt": 1_700_000_200,
+            ]],
+            "transcripts": [
+                "TH-SLOW": ["turns": [["items": [[
+                    "type": "userMessage",
+                    "content": [["type": "text", "text": "Recovered conversation"]],
+                ]]]]],
+            ],
+        ], into: workspace)
+        let provider = CodexProvider(
+            executableOverride: fakeServerPath,
+            requestTimeout: 3,
+            historyTimeout: 1)
+        defer { provider.shutdown() }
+
+        let first = await provider.recentSessionsResult(
+            workspaceURL: workspace, limit: 5, referenceID: nil)
+        XCTAssertTrue(first.didTimeOut)
+        XCTAssertTrue(first.sessions.isEmpty)
+        let firstPID = pid_t(try XCTUnwrap(try readObserved(in: workspace)["pid"] as? Int))
+        try await assertEventuallyDead(firstPID, timeout: 3)
+
+        let retry = await provider.recentSessionsResult(
+            workspaceURL: workspace, limit: 5, referenceID: nil)
+        XCTAssertFalse(retry.didTimeOut)
+        XCTAssertEqual(retry.sessions.map(\.id), ["TH-SLOW"])
+        let retryPID = pid_t(try XCTUnwrap(try readObserved(in: workspace)["pid"] as? Int))
+        XCTAssertNotEqual(retryPID, firstPID, "Retry must use a clean app-server")
+    }
+
+    func testNewHistoryLookupSupersedesOlderPendingQuery() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "threadReadDelayOnceMs": 3_000,
+            "threads": [[
+                "id": "TH-SLOW", "preview": "Slow read",
+                "updatedAt": 1_700_000_200,
+            ]],
+        ], into: workspace)
+        let provider = CodexProvider(
+            executableOverride: fakeServerPath,
+            requestTimeout: 3,
+            historyTimeout: 1)
+        defer { provider.shutdown() }
+
+        async let first = provider.recentSessionsResult(
+            workspaceURL: workspace, limit: 5, referenceID: nil)
+        async let second = provider.recentSessionsResult(
+            workspaceURL: workspace, limit: 5, referenceID: nil)
+        let results = await [first, second]
+
+        XCTAssertEqual(results.filter(\.didTimeOut).count, 1,
+            "only the latest lookup should remain pending long enough to time out")
+    }
+
+    func testResumeTurnPreemptsPendingTranscriptRestore() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "threadReadDelayOnceMs": 5_000,
+            "threads": [[
+                "id": "TH-SLOW", "preview": "Slow read",
+                "updatedAt": 1_700_000_200,
+            ]],
+            "assistantText": "interactive turn won",
+        ], into: workspace)
+        let provider = CodexProvider(
+            executableOverride: fakeServerPath,
+            requestTimeout: 10,
+            historyTimeout: 10)
+        defer { provider.shutdown() }
+
+        let historyTask = Task {
+            await provider.sessionTranscript(
+                sessionID: "TH-SLOW", workspaceURL: workspace)
+        }
+        try await waitForObserved(in: workspace, timeout: 3) { observed in
+            (observed["threadReadIds"] as? [String]) == ["TH-SLOW"]
+        }
+        let historyPID = pid_t(try XCTUnwrap(
+            try readObserved(in: workspace)["pid"] as? Int))
+
+        let events = try await collectAllEvents(
+            provider.send(turn: turn(
+                workspace: workspace, resume: "TH-SLOW")), timeout: 3)
+        let history = await historyTask.value
+        let observed = try readObserved(in: workspace)
+        let turnPID = pid_t(try XCTUnwrap(observed["pid"] as? Int))
+
+        XCTAssertTrue(history.isEmpty,
+            "the superseded transcript restore must not mutate the resumed pane later")
+        XCTAssertTrue(events.contains(.assistantMessageCompleted(text: "interactive turn won")))
+        XCTAssertEqual(observed["threadResumes"] as? Int, 1)
+        XCTAssertNotEqual(turnPID, historyPID,
+            "an interactive turn must not queue behind the wedged History server")
+        try await assertEventuallyDead(historyPID, timeout: 3)
+    }
+
+    func testInteractiveTurnPreemptsHistoryOwnedColdInitialize() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "initDelayOnceMs": 5_000,
+            "assistantText": "cold initialize preempted",
+        ], into: workspace)
+        let provider = CodexProvider(
+            executableOverride: fakeServerPath,
+            requestTimeout: 10,
+            historyTimeout: 10)
+        defer { provider.shutdown() }
+
+        let historyTask = Task {
+            await provider.sessionTranscript(
+                sessionID: "TH-COLD", workspaceURL: workspace)
+        }
+        try await waitForObserved(in: workspace, timeout: 3) { observed in
+            observed["pid"] is Int && observed["initialized"] == nil
+        }
+        let historyPID = pid_t(try XCTUnwrap(
+            try readObserved(in: workspace)["pid"] as? Int))
+
+        let events = try await collectAllEvents(
+            provider.send(turn: turn(workspace: workspace)), timeout: 3)
+        let history = await historyTask.value
+        let turnPID = pid_t(try XCTUnwrap(
+            try readObserved(in: workspace)["pid"] as? Int))
+
+        XCTAssertTrue(history.isEmpty)
+        XCTAssertTrue(events.contains(
+            .assistantMessageCompleted(text: "cold initialize preempted")))
+        XCTAssertNotEqual(turnPID, historyPID)
+        try await assertEventuallyDead(historyPID, timeout: 3)
+    }
 
     func testRecentSessionsListsThreadsScopedToTheWorkspace() async throws {
         let workspace = try makeWorkspace()
@@ -1309,6 +1726,10 @@ final class CodexProviderTests: XCTestCase {
         let catalog = await provider.availableModels()
         XCTAssertEqual(catalog?.fetchedOK, true)
         XCTAssertEqual(catalog?.visibleModels.map(\.id), ["fake-default", "fake-frontier"])
+        // Production deliberately retains the shared runtime for the app lifetime;
+        // the XCTest host must close that singleton so its stdout reader cannot keep
+        // the suite alive after this delegation check.
+        await CodexSharedConnectionRegistry.shared.shutdownAll()
     }
 
     // MARK: Harness plumbing
@@ -1435,14 +1856,42 @@ final class CodexProviderTests: XCTestCase {
         return cli
     }
 
+    private func makeTransientVersionProbeCLI() throws -> URL {
+        let workspace = try makeWorkspace()
+        let cli = workspace.appendingPathComponent("fake-codex-transient-version")
+        let script = """
+        #!/bin/sh
+        state_file="${0%/*}/version-attempted"
+        if [ "$1" = "--version" ]; then
+          if [ ! -e "$state_file" ]; then
+            touch "$state_file"
+            exit 1
+          fi
+          printf '%s\\n' 'codex 0.145.0'
+          exit 0
+        fi
+        if [ "$1" = "login" ] && [ "$2" = "status" ]; then
+          printf '%s\\n' 'Logged in using ChatGPT'
+          exit 0
+        fi
+        exit 0
+        """
+        try script.write(to: cli, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: cli.path)
+        return cli
+    }
+
     private func turn(
         workspace: URL, prompt: String = "hello", resume: String? = nil,
         webAccess: Bool = true, attachments: [ChatAttachment] = [],
-        loadUserTools: Bool = false
+        loadUserTools: Bool = false,
+        executionMode: AgentExecutionMode = .interactive
     ) -> AgentTurnRequest {
         AgentTurnRequest(
             workspaceURL: workspace, resumeSessionID: resume, prompt: prompt,
-            attachments: attachments, webAccess: webAccess, loadUserTools: loadUserTools)
+            attachments: attachments, webAccess: webAccess,
+            loadUserTools: loadUserTools, executionMode: executionMode)
     }
 
     private func readSpawnedArgv(in workspace: URL) throws -> [String] {
@@ -1471,6 +1920,18 @@ final class CodexProviderTests: XCTestCase {
         XCTFail("fake-codex-observed.json never matched the expected state within \(timeout)s")
     }
 
+    private func waitForApprovalID(
+        _ box: LockedApprovalID,
+        timeout: TimeInterval = 5
+    ) async throws -> String {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let id = box.value { return id }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        throw TestTimeout()
+    }
+
     private func isAlive(_ pid: pid_t) -> Bool { kill(pid, 0) == 0 }
 
     private func assertEventuallyDead(_ pid: pid_t, timeout: TimeInterval) async throws {
@@ -1497,6 +1958,23 @@ final class CodexProviderTests: XCTestCase {
             }
             return events
         }
+    }
+}
+
+private final class LockedApprovalID: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: String?
+
+    var value: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+
+    func store(_ value: String) {
+        lock.lock()
+        stored = value
+        lock.unlock()
     }
 }
 

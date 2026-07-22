@@ -3,8 +3,8 @@ import XCTest
 
 @testable import Rubien
 
-/// Tests for `AssistantTurnGate` — the per-`(provider, sessionID)` serialization
-/// that prevents two windows from forking a resumed session (§4.1).
+/// Tests for `AssistantTurnGate` — per-session serialization for Claude and
+/// shared-interactive-runtime serialization for Codex (§4.1).
 final class AssistantTurnGateTests: XCTestCase {
 
     func testKeyedSessionIsExclusiveThenReusableAfterRelease() async {
@@ -23,7 +23,7 @@ final class AssistantTurnGateTests: XCTestCase {
         XCTAssertTrue(third)
     }
 
-    func testNewConversationsAreUnkeyedAndAlwaysAdmitted() async {
+    func testNewClaudeConversationsAreUnkeyedAndAlwaysAdmitted() async {
         let gate = AssistantTurnGate()
         // A brand-new conversation has no session id yet → never blocks another.
         let a = await gate.tryAcquire(provider: .claude, sessionID: nil)
@@ -34,18 +34,38 @@ final class AssistantTurnGateTests: XCTestCase {
         XCTAssertTrue(c)
     }
 
+    func testCodexClaimsOneSharedInteractiveRuntimeAcrossSessions() async {
+        let gate = AssistantTurnGate()
+        let fresh = await gate.tryAcquire(provider: .codex, sessionID: nil)
+        let otherFresh = await gate.tryAcquire(provider: .codex, sessionID: nil)
+        let resumed = await gate.tryAcquire(provider: .codex, sessionID: "thread-2")
+
+        XCTAssertTrue(fresh)
+        XCTAssertFalse(otherFresh)
+        XCTAssertFalse(resumed)
+        let busy = await gate.isBusy(provider: .codex, sessionID: "thread-2")
+        XCTAssertTrue(busy)
+
+        await gate.release(provider: .codex, sessionID: nil)
+        let reacquired = await gate.tryAcquire(provider: .codex, sessionID: "thread-2")
+        XCTAssertTrue(reacquired)
+    }
+
     func testDifferentProviderOrSessionAreIndependent() async {
         let gate = AssistantTurnGate()
         let claudeS = await gate.tryAcquire(provider: .claude, sessionID: "s")
         // Same session id, different provider → independent slot.
         let codexS = await gate.tryAcquire(provider: .codex, sessionID: "s")
-        // Same provider, different session id → independent slot.
+        // Claude keeps per-session slots.
         let claudeOther = await gate.tryAcquire(provider: .claude, sessionID: "other")
+        // Codex uses one provider-wide slot, regardless of thread id.
+        let codexOther = await gate.tryAcquire(provider: .codex, sessionID: "other")
         // But the original is still held.
         let claudeSAgain = await gate.tryAcquire(provider: .claude, sessionID: "s")
         XCTAssertTrue(claudeS)
         XCTAssertTrue(codexS)
         XCTAssertTrue(claudeOther)
+        XCTAssertFalse(codexOther)
         XCTAssertFalse(claudeSAgain)
     }
 

@@ -101,11 +101,13 @@ final class ClaudeCodeProvider: AgentProvider {
 
     /// Light read of Claude's own session store for the History picker (§5.3).
     /// A scoped listing (`referenceID` set) scans file bodies for attribution.
-    func recentSessions(workspaceURL: URL, limit: Int, referenceID: Int64?) async -> [AgentSessionSummary] {
-        await storeRead {
+    func recentSessionsResult(
+        workspaceURL: URL, limit: Int, referenceID: Int64?, deadline: Date?
+    ) async -> AgentSessionQueryResult {
+        .completed(await storeRead {
             ClaudeSessionStore().recentSessions(
                 workspaceURL: workspaceURL, limit: limit, referenceID: referenceID)
-        }
+        })
     }
 
     /// A picked session's full transcript (resume restores the conversation's
@@ -117,11 +119,14 @@ final class ClaudeCodeProvider: AgentProvider {
     }
 
     /// Content search over the store's sessions (History picker's search field).
-    func searchSessions(query: String, workspaceURL: URL, limit: Int, referenceID: Int64?) async -> [AgentSessionSummary] {
-        await storeRead {
+    func searchSessionsResult(
+        query: String, workspaceURL: URL, limit: Int, referenceID: Int64?,
+        deadline: Date?
+    ) async -> AgentSessionQueryResult {
+        .completed(await storeRead {
             ClaudeSessionStore().searchSessions(
                 query: query, workspaceURL: workspaceURL, limit: limit, referenceID: referenceID)
-        }
+        })
     }
 
     /// Run one blocking session-store read off the main actor. The closure's value

@@ -60,7 +60,13 @@ final class ScheduledJobCoordinator: ObservableObject {
         let runner = ScheduledJobRunner(
             database: database,
             providerFactory: { kind in
-                AssistantProviderFactory.make(kind, contentChannel: contentChannel)
+                AssistantProviderFactory.make(
+                    kind,
+                    contentChannel: contentChannel,
+                    // Scheduled Codex must use the same process-wide connection as
+                    // Home/readers. Its read-only spawn posture is applied only after
+                    // an active interactive turn has ended and reaped.
+                    shareCodexAppServer: true)
             },
             workspaceProvider: { RubienPreferences.assistantWorkspaceURL },
             contentChannelAvailable: contentChannel != nil

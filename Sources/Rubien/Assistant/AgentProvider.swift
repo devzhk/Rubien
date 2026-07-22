@@ -277,6 +277,22 @@ struct AgentSessionSummary: Identifiable, Sendable, Equatable {
     var matchSnippet: String? = nil
 }
 
+/// A bounded History lookup. Providers may return rows decoded before a timeout;
+/// callers should show those partial results together with a retry affordance.
+struct AgentSessionQueryResult: Sendable, Equatable {
+    let sessions: [AgentSessionSummary]
+    let didTimeOut: Bool
+
+    static func completed(_ sessions: [AgentSessionSummary]) -> Self {
+        Self(sessions: sessions, didTimeOut: false)
+    }
+}
+
+enum AgentHistoryPolicy {
+    /// One user-visible recents/search load, including Home attribution widening.
+    static let loadTimeout: TimeInterval = 8
+}
+
 /// How a stored conversation is attributed to a reference — the History popover's
 /// "This document" scope. Neither provider's history surface exposes Rubien's
 /// instructions (Claude omits `--append-system-prompt` from JSONL; Codex omits
@@ -400,9 +416,9 @@ protocol AgentProvider: Sendable {
     /// the conversation can continue.
     func cancel()
 
-    /// End the provider entirely (window close): terminate any live process tree.
-    /// Distinct from `cancel()` for providers whose process outlives a turn —
-    /// Codex's app-server dies here, not on every stop. Default: `cancel()`
+    /// End this provider wrapper (window close). A dedicated live process tree is
+    /// terminated; the shared Codex app-server remains available for the app lifetime.
+    /// Distinct from `cancel()` for providers whose process outlives a turn. Default: `cancel()`
     /// Claude overrides this too: teardown is terminal and rejects delayed sends,
     /// while graceful Stop may hand the rotated session to a queued successor.
     func shutdown()
@@ -412,9 +428,11 @@ protocol AgentProvider: Sendable {
     /// stores nothing. A non-nil `referenceID` keeps only sessions attributed to
     /// that reference (the popover's "This document" scope): neither provider's
     /// history surface exposes the instructions, so attribution is the rubien MCP
-    /// tool calls whose arguments carry the reference id. Default `[]` (no readable
-    /// store).
-    func recentSessions(workspaceURL: URL, limit: Int, referenceID: Int64?) async -> [AgentSessionSummary]
+    /// tool calls whose arguments carry the reference id. `deadline` lets a caller
+    /// keep progressive filtering inside one UI budget. Default: completed `[]`.
+    func recentSessionsResult(
+        workspaceURL: URL, limit: Int, referenceID: Int64?, deadline: Date?
+    ) async -> AgentSessionQueryResult
 
     /// A picked session's full renderable transcript, so a resume restores the
     /// conversation's content (still read from the runtime's own store — Rubien
@@ -424,8 +442,12 @@ protocol AgentProvider: Sendable {
     /// Content search over the runtime's sessions for `workspaceURL` (the visible
     /// user/assistant text, not tool payloads), newest first, each hit carrying a
     /// `matchSnippet`. `referenceID` scopes hits like `recentSessions`. Default
-    /// `[]` (a provider without a readable store).
-    func searchSessions(query: String, workspaceURL: URL, limit: Int, referenceID: Int64?) async -> [AgentSessionSummary]
+    /// `deadline` has the same progressive-load semantics as recents. Default:
+    /// completed `[]` (a provider without a readable store).
+    func searchSessionsResult(
+        query: String, workspaceURL: URL, limit: Int, referenceID: Int64?,
+        deadline: Date?
+    ) async -> AgentSessionQueryResult
 
     /// The models the installed runtime reports it supports, for the model picker.
     /// Three states (spec §4.3): `nil` — this backend has no discovery surface
@@ -436,12 +458,50 @@ protocol AgentProvider: Sendable {
 
 extension AgentProvider {
     func shutdown() { cancel() }
-    func recentSessions(workspaceURL: URL, limit: Int, referenceID: Int64?) async -> [AgentSessionSummary] { [] }
+    func recentSessionsResult(
+        workspaceURL: URL, limit: Int, referenceID: Int64?, deadline: Date?
+    ) async -> AgentSessionQueryResult {
+        .completed([])
+    }
     func sessionTranscript(sessionID: String, workspaceURL: URL) async -> [ChatRenderMessage] { [] }
-    func searchSessions(query: String, workspaceURL: URL, limit: Int, referenceID: Int64?) async -> [AgentSessionSummary] { [] }
+    func searchSessionsResult(
+        query: String, workspaceURL: URL, limit: Int, referenceID: Int64?,
+        deadline: Date?
+    ) async -> AgentSessionQueryResult {
+        .completed([])
+    }
     func availableModels() async -> CodexCatalog? { nil }
 
-    /// Unscoped conveniences (existing call sites/tests; forward `referenceID: nil`).
+    /// Array-only and no-deadline conveniences for existing callers/tests. The
+    /// status-preserving result methods above are the provider implementation seam.
+    func recentSessions(
+        workspaceURL: URL, limit: Int, referenceID: Int64?
+    ) async -> [AgentSessionSummary] {
+        await recentSessionsResult(
+            workspaceURL: workspaceURL, limit: limit,
+            referenceID: referenceID, deadline: nil).sessions
+    }
+    func recentSessionsResult(
+        workspaceURL: URL, limit: Int, referenceID: Int64?
+    ) async -> AgentSessionQueryResult {
+        await recentSessionsResult(
+            workspaceURL: workspaceURL, limit: limit,
+            referenceID: referenceID, deadline: nil)
+    }
+    func searchSessions(
+        query: String, workspaceURL: URL, limit: Int, referenceID: Int64?
+    ) async -> [AgentSessionSummary] {
+        await searchSessionsResult(
+            query: query, workspaceURL: workspaceURL, limit: limit,
+            referenceID: referenceID, deadline: nil).sessions
+    }
+    func searchSessionsResult(
+        query: String, workspaceURL: URL, limit: Int, referenceID: Int64?
+    ) async -> AgentSessionQueryResult {
+        await searchSessionsResult(
+            query: query, workspaceURL: workspaceURL, limit: limit,
+            referenceID: referenceID, deadline: nil)
+    }
     func recentSessions(workspaceURL: URL, limit: Int) async -> [AgentSessionSummary] {
         await recentSessions(workspaceURL: workspaceURL, limit: limit, referenceID: nil)
     }

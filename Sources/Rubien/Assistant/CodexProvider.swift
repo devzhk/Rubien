@@ -10,10 +10,10 @@ import RubienCore
 // sibling of `ClaudeCodeProvider`. The process model is the key difference:
 //
 //   • Claude: one process PER TURN; killing the turn's stream kills its process.
-//   • Codex:  one server PER CONVERSATION/WINDOW — spawned lazily on the first send,
-//     reused for every follow-up turn (`turn/start` on the live thread), and killed
-//     only on `shutdown()` (window close) or its own exit. Dropping a turn's stream
-//     or pressing stop sends `turn/interrupt`; the SERVER LIVES (design review #5).
+//   • Codex:  one server shared by every production Rubien surface — Home, readers,
+//     History, and scheduled jobs. It is spawned lazily and reused across threads.
+//     Dropping a turn's stream or pressing stop sends `turn/interrupt`; the SERVER
+//     LIVES (design review #5).
 //
 // Config posture (§4, user decision): NO managed CODEX_HOME — the user's real
 // `~/.codex` provides auth/config exactly as Claude keeps `~/.claude`. Ambient config
@@ -29,19 +29,43 @@ final class CodexProvider: AgentProvider {
 
     private let connection: CodexAppServerConnection
     private let executableOverride: String?
+    private let usesSharedConnection: Bool
+    private let turnTokens = CodexProviderTurnTokens()
+    private let ownerID = UUID()
 
     init(
         executableOverride: String? = nil,
         contentChannel: MCPContentChannel? = nil,
         requestTimeout: Double = 30,
-        initializeRetryDelay: Duration = .seconds(5)
+        historyTimeout: Double = AgentHistoryPolicy.loadTimeout,
+        initializeRetryDelay: Duration = .seconds(5),
+        shareAppServer: Bool = false,
+        sharedConnectionRegistry: CodexSharedConnectionRegistry? = nil
     ) {
         self.executableOverride = executableOverride
-        self.connection = CodexAppServerConnection(
-            executableOverride: executableOverride,
-            contentChannel: contentChannel,
-            requestTimeout: requestTimeout,
-            initializeRetryDelay: initializeRetryDelay)
+        let makeConnection = {
+            CodexAppServerConnection(
+                executableOverride: executableOverride,
+                contentChannel: contentChannel,
+                requestTimeout: requestTimeout,
+                historyTimeout: historyTimeout,
+                initializeRetryDelay: initializeRetryDelay)
+        }
+        if shareAppServer || sharedConnectionRegistry != nil {
+            let registry = sharedConnectionRegistry ?? .shared
+            self.connection = registry.acquire(
+                key: CodexSharedConnectionKey(
+                    executableOverride: executableOverride,
+                    contentChannel: contentChannel,
+                    requestTimeout: requestTimeout,
+                    historyTimeout: historyTimeout,
+                    initializeRetryDelay: initializeRetryDelay),
+                makeConnection: makeConnection)
+            self.usesSharedConnection = true
+        } else {
+            self.connection = makeConnection()
+            self.usesSharedConnection = false
+        }
     }
 
     func isAvailable() async -> AgentAvailability {
@@ -50,33 +74,50 @@ final class CodexProvider: AgentProvider {
 
     func send(turn: AgentTurnRequest) -> AsyncThrowingStream<AgentEvent, Error> {
         let token = UUID()
+        guard turnTokens.beginSend(token) else {
+            return AsyncThrowingStream { $0.finish() }
+        }
         let connection = self.connection
+        let turnTokens = self.turnTokens
         return AsyncThrowingStream { continuation in
             // Dropping the consumed stream ends THE TURN (turn/interrupt), never the
             // long-lived server — the semantic divergence from Claude (review #5).
             continuation.onTermination = { termination in
+                turnTokens.clear(ifCurrent: token)
                 guard case .cancelled = termination else { return }
                 Task { await connection.interruptIfCurrent(token: token) }
             }
             Task {
-                await connection.startTurn(token: token, request: turn, continuation: continuation)
+                await connection.startTurn(
+                    token: token, ownerID: ownerID,
+                    request: turn, continuation: continuation)
             }
         }
     }
 
     func respondToApproval(id: String, _ decision: ApprovalDecision) {
+        guard let token = turnTokens.current else { return }
         let connection = self.connection
-        Task { await connection.respond(id: id, decision: decision) }
+        Task { await connection.respond(id: id, decision: decision, token: token) }
     }
 
     /// Stop button / conversation reset: interrupt the live turn; the server stays.
     func cancel() {
+        guard let token = turnTokens.current else { return }
         let connection = self.connection
-        Task { await connection.interruptCurrent() }
+        Task { await connection.interruptIfCurrent(token: token) }
     }
 
-    /// Window close: kill the server's whole process tree.
+    /// Window close: stop this wrapper's turn. A shared interactive server is killed
+    /// only with the app; dedicated providers kill now. Keeping the interactive
+    /// connection alive avoids a close/reopen race where a replacement server starts
+    /// before the prior process has reaped and both contend in Codex's shared home.
     func shutdown() {
+        if let token = turnTokens.close() {
+            let connection = self.connection
+            Task { await connection.interruptIfCurrent(token: token) }
+        }
+        guard !usesSharedConnection else { return }
         let connection = self.connection
         Task { await connection.shutdown() }
     }
@@ -85,24 +126,56 @@ final class CodexProvider: AgentProvider {
     // Each delegates to the connection, which reads codex's OWN thread store via the
     // app-server (Rubien persists nothing — D5). All degrade to `[]` on failure.
 
-    func recentSessions(workspaceURL: URL, limit: Int, referenceID: Int64?) async -> [AgentSessionSummary] {
+    func recentSessionsResult(
+        workspaceURL: URL, limit: Int, referenceID: Int64?, deadline: Date?
+    ) async -> AgentSessionQueryResult {
         await connection.recentThreads(
-            workspaceURL: workspaceURL, limit: limit, referenceID: referenceID)
+            workspaceURL: workspaceURL, limit: limit, referenceID: referenceID,
+            deadline: deadline)
     }
 
-    func searchSessions(query: String, workspaceURL: URL, limit: Int, referenceID: Int64?) async -> [AgentSessionSummary] {
+    func searchSessionsResult(
+        query: String, workspaceURL: URL, limit: Int, referenceID: Int64?,
+        deadline: Date?
+    ) async -> AgentSessionQueryResult {
         await connection.searchThreads(
-            searchTerm: query, workspaceURL: workspaceURL, limit: limit, referenceID: referenceID)
+            searchTerm: query, workspaceURL: workspaceURL, limit: limit,
+            referenceID: referenceID, deadline: deadline)
     }
 
     func sessionTranscript(sessionID: String, workspaceURL: URL) async -> [ChatRenderMessage] {
         await connection.readTranscript(threadID: sessionID, workspaceURL: workspaceURL)
     }
 
-    /// The installed codex's own model catalog (memoized per binary — one isolated
-    /// discovery operation per launch; spec §4.1). Feeds pickers only.
+    /// The installed codex's own model catalog (memoized per binary and fetched over
+    /// the process-wide shared runtime; spec §4.1). Feeds pickers only.
     func availableModels() async -> CodexCatalog? {
         await CodexModelCatalog.shared.catalog(executableOverride: executableOverride)
+    }
+
+    /// Internal seam for the production catalog bridge and deterministic shared-
+    /// connection tests.
+    func modelCatalog(workspaceURL: URL, timeout: Double = 10) async -> CodexCatalog {
+        await connection.fetchModelCatalog(
+            workspaceURL: workspaceURL,
+            timeout: timeout)
+    }
+
+    /// Production model discovery must use the same process-wide connection as
+    /// Home/readers/scheduled work. A standalone metadata app-server racing the
+    /// first real turn reproduced the cold-start initialize failures.
+    static func sharedModelCatalog(
+        executablePath: String,
+        workingDirectory: URL,
+        timeout: Double
+    ) async -> CodexCatalog {
+        let provider = CodexProvider(
+            executableOverride: executablePath,
+            contentChannel: MCPContentChannel.resolveBundled(),
+            shareAppServer: true)
+        defer { provider.shutdown() }
+        return await provider.modelCatalog(
+            workspaceURL: workingDirectory, timeout: timeout)
     }
 
     /// Well-known codex install dirs — shared by the live connection AND
@@ -119,6 +192,119 @@ final class CodexProvider: AgentProvider {
                 "\(home)/.local/bin/codex",
             ],
             binaryName: "codex")
+    }
+}
+
+/// Token ownership stays on the provider wrapper even when several wrappers share
+/// one connection. Stop/teardown can therefore interrupt only the turn that wrapper
+/// started, never a newer turn from another window.
+private final class CodexProviderTurnTokens: @unchecked Sendable {
+    private let lock = NSLock()
+    private var token: UUID?
+    private var isClosed = false
+
+    var current: UUID? {
+        lock.lock()
+        defer { lock.unlock() }
+        return token
+    }
+
+    func beginSend(_ token: UUID) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !isClosed else { return false }
+        self.token = token
+        return true
+    }
+
+    func clear(ifCurrent candidate: UUID) {
+        lock.lock()
+        if token == candidate { token = nil }
+        lock.unlock()
+    }
+
+    func close() -> UUID? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !isClosed else { return nil }
+        isClosed = true
+        let current = token
+        token = nil
+        return current
+    }
+}
+
+/// All production providers share one app-lifetime app-server connection. Retaining
+/// an idle connection is intentional: final-window teardown followed by an immediate
+/// reopen must never overlap a new server with a still-reaping old one in Codex's
+/// shared home. A scheduled turn changes the connection's spawn posture only after
+/// any interactive turn has ended and the old process has reaped.
+private struct CodexSharedConnectionKey: Hashable {
+    let executableOverride: String?
+    let cliPath: String?
+    let libraryRootPath: String?
+    let requestTimeout: Double
+    let historyTimeout: Double
+    let retrySeconds: Int64
+    let retryAttoseconds: Int64
+
+    init(
+        executableOverride: String?,
+        contentChannel: MCPContentChannel?,
+        requestTimeout: Double,
+        historyTimeout: Double,
+        initializeRetryDelay: Duration
+    ) {
+        self.executableOverride = executableOverride
+        self.cliPath = contentChannel?.cliURL.standardizedFileURL.path
+        self.libraryRootPath = contentChannel?.libraryRoot.standardizedFileURL.path
+        self.requestTimeout = requestTimeout
+        self.historyTimeout = historyTimeout
+        let retry = initializeRetryDelay.components
+        self.retrySeconds = retry.seconds
+        self.retryAttoseconds = retry.attoseconds
+    }
+}
+
+final class CodexSharedConnectionRegistry: @unchecked Sendable {
+    static let shared = CodexSharedConnectionRegistry()
+
+    private let lock = NSLock()
+    private var entry: (key: CodexSharedConnectionKey, connection: CodexAppServerConnection)?
+
+    fileprivate func acquire(
+        key: CodexSharedConnectionKey,
+        makeConnection: () -> CodexAppServerConnection
+    ) -> CodexAppServerConnection {
+        lock.lock()
+        defer { lock.unlock() }
+        if let entry {
+            // Immutable launch inputs are pinned by the first production provider
+            // for this app launch. Most importantly, a settings-path change must not
+            // create a second live app-server beside the first one; the newly selected
+            // path is adopted on the next app launch.
+            return entry.connection
+        }
+        let connection = makeConnection()
+        entry = (key, connection)
+        return connection
+    }
+
+    /// Test/support cleanup. Production retains the registry for the app lifetime;
+    /// process termination closes its inherited stdin descriptors and Codex exits on
+    /// EOF without creating an in-app close/reopen race.
+    func shutdownAll() async {
+        let connections = removeAllConnections()
+        for connection in connections {
+            await connection.shutdown()
+        }
+    }
+
+    private func removeAllConnections() -> [CodexAppServerConnection] {
+        lock.lock()
+        defer { lock.unlock() }
+        defer { entry = nil }
+        return entry.map { [$0.connection] } ?? []
     }
 }
 
@@ -286,17 +472,21 @@ private actor CodexAppServerConnection {
         executableOverride: String?,
         contentChannel: MCPContentChannel?,
         requestTimeout: Double,
+        historyTimeout: Double,
         initializeRetryDelay: Duration
     ) {
         self.executableOverride = executableOverride
         self.contentChannel = contentChannel
         self.requestTimeout = requestTimeout
+        self.historyTimeout = historyTimeout
         self.initializeRetryDelay = initializeRetryDelay
     }
 
     // Tunables (single point — mirrors ClaudeTurnEngine's named timers).
     /// Bound on any single JSON-RPC request (initialize / thread ops / turn/start).
     private let requestTimeout: Double
+    /// One overall budget for a History list/search and all transcript projections.
+    private let historyTimeout: Double
     /// After `turn/interrupt`, force-finish the turn stream if the server never
     /// delivers the interrupted `turn/completed` (the server itself stays alive).
     private static let interruptGrace: Double = 5
@@ -310,6 +500,8 @@ private actor CodexAppServerConnection {
     /// A JSON-RPC request failure (soft — surfaced as a §4.5 notice, never thrown).
     private enum RequestFailure: Error {
         case timeout(method: String)
+        case handshakeWaitTimeout
+        case historySuperseded
         case serverError(message: String)
         case serverExited
 
@@ -317,6 +509,10 @@ private actor CodexAppServerConnection {
             switch self {
             case .timeout(let method):
                 return "The assistant did not respond (\(method) timed out)."
+            case .handshakeWaitTimeout:
+                return "The assistant did not respond (initialize timed out)."
+            case .historySuperseded:
+                return "The History request was superseded."
             case .serverError(let message):
                 return message
             case .serverExited:
@@ -327,6 +523,15 @@ private actor CodexAppServerConnection {
         var isInitializeTimeout: Bool {
             if case .timeout(method: "initialize") = self { return true }
             return false
+        }
+
+        /// A concurrent History request can be swept as `serverExited` when the
+        /// request that actually timed out resets their shared idle server.
+        var makesHistoryIncomplete: Bool {
+            switch self {
+            case .timeout, .handshakeWaitTimeout, .serverExited: return true
+            case .historySuperseded, .serverError: return false
+            }
         }
     }
 
@@ -345,6 +550,15 @@ private actor CodexAppServerConnection {
             webAccess: true, loadUserTools: false, readOnlyLibrary: false)
     }
 
+    private struct PendingRequest {
+        let continuation: CheckedContinuation<
+            Result<[String: Any], RequestFailure>, Never
+        >
+        let timeoutTask: Task<Void, Never>
+        let method: String
+        let isHistory: Bool
+    }
+
     /// One spawned `codex app-server` + its JSON-RPC bookkeeping. Reference type,
     /// only touched inside this actor's isolation.
     private final class Server {
@@ -353,7 +567,7 @@ private actor CodexAppServerConnection {
         let spawnConfiguration: SpawnConfiguration
         let stderr = StderrRingBuffer()
         var nextRequestID = 1
-        var pending: [Int: CheckedContinuation<Result<[String: Any], RequestFailure>, Never>] = [:]
+        var pending: [Int: PendingRequest] = [:]
         /// The thread the CURRENT conversation runs on — lets an in-sitting follow-up
         /// skip `thread/resume` (the thread is already live in this server).
         var activeThreadID: String?
@@ -364,7 +578,9 @@ private actor CodexAppServerConnection {
         /// failure or a waiter list carries the outcome to late joiners.
         var handshaked = false
         var handshakeFailure: RequestFailure?
-        var handshakeWaiters: [CheckedContinuation<Result<Void, RequestFailure>, Never>] = []
+        var handshakeWaiters: [
+            UUID: CheckedContinuation<Result<Void, RequestFailure>, Never>
+        ] = [:]
 
         init(
             process: SpawnedAgentProcess, generation: Int,
@@ -402,6 +618,7 @@ private actor CodexAppServerConnection {
 
     private final class ActiveTurn {
         let token: UUID
+        let ownerID: UUID
         let continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation
         var parser = CodexAppServerParser()
         var threadID: String?
@@ -417,13 +634,30 @@ private actor CodexAppServerConnection {
         /// was even sent; the start path checks this after every await.
         var interruptRequested = false
 
-        init(token: UUID, continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation) {
+        init(
+            token: UUID,
+            ownerID: UUID,
+            continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation
+        ) {
             self.token = token
+            self.ownerID = ownerID
             self.continuation = continuation
         }
     }
 
+    private struct QueuedTurn {
+        let token: UUID
+        let ownerID: UUID
+        let request: AgentTurnRequest
+        let continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation
+    }
+
     private var turn: ActiveTurn?
+    /// Scheduled work waits behind an active interactive turn instead of spawning a
+    /// second app-server. Interactive cross-window contention fails immediately with
+    /// a useful notice; it must never sit on “Responding…” behind background work.
+    private var queuedTurns: [QueuedTurn] = []
+    private var reservedTurn: QueuedTurn?
     /// Tokens interrupted BEFORE their `startTurn` ran (A1 — the consumer dropped the
     /// stream in the window between `send()` arming `onTermination` and the task).
     private var cancelledTokens: Set<UUID> = []
@@ -439,23 +673,57 @@ private actor CodexAppServerConnection {
 
     func startTurn(
         token: UUID,
+        ownerID: UUID,
         request: AgentTurnRequest,
         continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation
     ) async {
+        if retiredTokens.contains(token) {
+            continuation.finish()
+            return
+        }
         if cancelledTokens.remove(token) != nil {
             retire(token)
             continuation.finish()
             return
         }
-        // A2: one turn at a time per connection. A still-live prior turn means a
-        // serialization violation upstream — interrupt + finish it, not orphan it.
-        if let existing = turn, !existing.finished {
+        let ownsReservation = reservedTurn?.token == token
+        if ownsReservation {
+            reservedTurn = nil
+        }
+        // A2: one turn at a time per connection. A second send from the SAME wrapper
+        // preserves the provider's supersession contract. A different production
+        // surface must never displace another window or scheduled run.
+        if let existing = turn, !existing.finished, existing.ownerID == ownerID {
             logger.error("startTurn entered with an unfinished turn active — finishing the prior turn")
             requestInterrupt(existing)
             finishTurn(existing)
         }
+        if (turn?.finished == false || reservedTurn != nil) && !ownsReservation {
+            if request.executionMode == .scheduled {
+                queuedTurns.append(QueuedTurn(
+                    token: token, ownerID: ownerID,
+                    request: request, continuation: continuation))
+                continuation.yield(.providerNotice(
+                    "Waiting for the active Codex conversation to finish."))
+            } else {
+                continuation.yield(.providerNotice(
+                    "Codex is busy with another Rubien conversation. Try again when it finishes."))
+                continuation.yield(.turnCompleted(outcome: .failed, usage: nil))
+                retire(token)
+                continuation.finish()
+            }
+            return
+        }
 
-        let active = ActiveTurn(token: token, continuation: continuation)
+        // History is best-effort metadata; an explicit user turn always wins. Codex
+        // app-server can serialize a thread/read ahead of thread/start/resume, so a
+        // wedged transcript restore otherwise leaves the composer on “Responding…”
+        // until both requests time out. There is no request-cancel RPC: supersede the
+        // lookup and replace its idle server before marking this turn active.
+        prioritizeInteractiveTurn()
+
+        let active = ActiveTurn(
+            token: token, ownerID: ownerID, continuation: continuation)
         turn = active
 
         // 1. Server (lazy spawn + handshake; reused across turns).
@@ -468,8 +736,7 @@ private actor CodexAppServerConnection {
                     readOnlyLibrary: request.executionMode == .scheduled),
                 workspaceURL: request.workspaceURL)
         } catch let error as AgentProviderError {
-            turn = nil
-            continuation.finish(throwing: error)   // hard start failure — mirrors Claude
+            finishTurn(active, throwing: error)   // hard start failure — mirrors Claude
             return
         } catch let failure as RequestFailure {
             failTurn(active, failure)
@@ -591,15 +858,26 @@ private actor CodexAppServerConnection {
         cancelledTokens.remove(active.token)
         retire(active.token)
         if turn === active { turn = nil }
+        promoteNextQueuedTurnIfPossible()
         // A straggler notification for this now-finished turn can't reach a LATER turn:
         // the positive turn-id filter in `route` accepts only the current turn's id
         // (review #2) — no stale-id set to accumulate.
     }
 
+    private func finishTurn(_ active: ActiveTurn, throwing error: Error) {
+        guard !active.finished else { return }
+        active.finished = true
+        active.continuation.finish(throwing: error)
+        cancelledTokens.remove(active.token)
+        retire(active.token)
+        if turn === active { turn = nil }
+        promoteNextQueuedTurnIfPossible()
+    }
+
     // MARK: External controls
 
-    func respond(id: String, decision: ApprovalDecision) {
-        guard let active = turn, !active.finished,
+    func respond(id: String, decision: ApprovalDecision, token: UUID) {
+        guard let active = turn, active.token == token, !active.finished,
               let pendingApproval = active.pendingApprovals.removeValue(forKey: id),
               let srv = server
         else { return }
@@ -620,6 +898,16 @@ private actor CodexAppServerConnection {
         if let active = turn, active.token == token {
             guard !active.finished else { return }
             requestInterrupt(active)
+        } else if let index = queuedTurns.firstIndex(where: { $0.token == token }) {
+            let queued = queuedTurns.remove(at: index)
+            queued.continuation.finish()
+            retire(token)
+        } else if reservedTurn?.token == token {
+            let reserved = reservedTurn
+            reservedTurn = nil
+            reserved?.continuation.finish()
+            retire(token)
+            promoteNextQueuedTurnIfPossible()
         } else if !retiredTokens.contains(token) {
             // A1: the turn hasn't registered yet (drop raced ahead of startTurn).
             cancelledTokens.insert(token)
@@ -667,11 +955,34 @@ private actor CodexAppServerConnection {
         }
     }
 
+    private func promoteNextQueuedTurnIfPossible() {
+        guard !shutdownRequested, turn == nil, reservedTurn == nil,
+              !queuedTurns.isEmpty else { return }
+        let next = queuedTurns.removeFirst()
+        reservedTurn = next
+        Task { [weak self] in
+            await self?.startTurn(
+                token: next.token, ownerID: next.ownerID,
+                request: next.request, continuation: next.continuation)
+        }
+    }
+
     /// Window close: kill the server's whole tree. The turn stream (if any) is
     /// finished FIRST so the reader's EOF path sees a deliberate shutdown.
     func shutdown() {
-        if let active = turn { finishTurn(active) }
         shutdownRequested = true
+        let abandoned = queuedTurns
+        queuedTurns = []
+        if let reservedTurn {
+            reservedTurn.continuation.finish()
+            retire(reservedTurn.token)
+        }
+        reservedTurn = nil
+        for queued in abandoned {
+            queued.continuation.finish()
+            retire(queued.token)
+        }
+        if let active = turn { finishTurn(active) }
         initializeRecovery?.task.cancel()
         shuttingDown = true
         guard let srv = server else { return }
@@ -701,7 +1012,8 @@ private actor CodexAppServerConnection {
         configuration: SpawnConfiguration,
         workspaceURL: URL,
         reuseAnySpawnConfiguration: Bool = false,
-        allowInitializeRetry: Bool = true
+        allowInitializeRetry: Bool = true,
+        requestTimeoutOverride: Double? = nil
     ) async throws -> Server {
         guard await joinInitializeRecoveryIfNeeded() else {
             throw RequestFailure.serverExited
@@ -711,9 +1023,14 @@ private actor CodexAppServerConnection {
         if let srv = server {
             if reuseAnySpawnConfiguration || srv.spawnConfiguration == configuration {
                 do {
-                    try await joinHandshake(srv)   // fast path still waits for initialize
+                    try await joinHandshake(
+                        srv, timeoutOverride: requestTimeoutOverride
+                    )   // fast path still waits for initialize
                     return srv
                 } catch let failure as RequestFailure {
+                    // A bounded History join expiring says nothing about the
+                    // in-flight interactive initialize. Leave its server alone.
+                    if case .handshakeWaitTimeout = failure { throw failure }
                     // A failed handshake can never become usable. In particular, keeping
                     // an initialize timeout cached on a still-live process made every
                     // later send in this window fail immediately with the same notice.
@@ -729,11 +1046,15 @@ private actor CodexAppServerConnection {
                         configuration: configuration,
                         workspaceURL: workspaceURL,
                         reuseAnySpawnConfiguration: reuseAnySpawnConfiguration,
-                        allowInitializeRetry: false)
+                        allowInitializeRetry: false,
+                        requestTimeoutOverride: requestTimeoutOverride)
                 }
             }
             logger.info("spawn configuration changed — respawning codex app-server")
             killServer(srv)
+            guard await joinInitializeRecoveryIfNeeded() else {
+                throw RequestFailure.serverExited
+            }
         }
 
         guard let executable = CodexProvider.resolveExecutable(override: executableOverride) else {
@@ -778,7 +1099,12 @@ private actor CodexAppServerConnection {
 
         // The SPAWNER runs the handshake once; concurrent joiners await its outcome.
         do {
-            _ = try await sendRequest(srv, method: "initialize") { id in
+            _ = try await sendRequest(
+                srv,
+                method: "initialize",
+                timeoutOverride: requestTimeoutOverride,
+                isHistoryRequest: requestTimeoutOverride != nil
+            ) { id in
                 CodexAppServerProtocol.initialize(
                     requestID: id, clientName: "rubien-assistant",
                     version: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev")
@@ -799,7 +1125,8 @@ private actor CodexAppServerConnection {
                     configuration: configuration,
                     workspaceURL: workspaceURL,
                     reuseAnySpawnConfiguration: reuseAnySpawnConfiguration,
-                    allowInitializeRetry: false)
+                    allowInitializeRetry: false,
+                    requestTimeoutOverride: requestTimeoutOverride)
             }
             throw failure
         } catch {
@@ -811,31 +1138,61 @@ private actor CodexAppServerConnection {
 
     /// Await `srv`'s handshake: return immediately if done, throw its stored failure,
     /// or suspend until the spawner completes it.
-    private func joinHandshake(_ srv: Server) async throws {
+    private func joinHandshake(
+        _ srv: Server, timeoutOverride: Double? = nil
+    ) async throws {
         if srv.handshaked { return }
         if let failure = srv.handshakeFailure { throw failure }
+        let waiterID = UUID()
+        let timeout = timeoutOverride.map { max(0.001, min(requestTimeout, $0)) }
+        let generation = srv.generation
         let outcome: Result<Void, RequestFailure> = await withCheckedContinuation { continuation in
-            srv.handshakeWaiters.append(continuation)
+            srv.handshakeWaiters[waiterID] = continuation
+            if let timeout {
+                Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(timeout))
+                    await self?.timeoutHandshakeWaiter(
+                        generation: generation, waiterID: waiterID)
+                }
+            }
         }
         try outcome.get()
+    }
+
+    private func timeoutHandshakeWaiter(generation: Int, waiterID: UUID) {
+        guard let srv = server, srv.generation == generation,
+              let waiter = srv.handshakeWaiters.removeValue(forKey: waiterID)
+        else { return }
+        logger.error("codex History timed out waiting for initialize")
+        waiter.resume(returning: .failure(.handshakeWaitTimeout))
     }
 
     /// Resolve the handshake for the spawner + every waiter (exactly once).
     private func completeHandshake(_ srv: Server, _ outcome: Result<Void, RequestFailure>) {
         if case .failure(let failure) = outcome { srv.handshakeFailure = failure } else { srv.handshaked = true }
-        let waiters = srv.handshakeWaiters
-        srv.handshakeWaiters = []
+        let waiters = Array(srv.handshakeWaiters.values)
+        srv.handshakeWaiters = [:]
         for waiter in waiters { waiter.resume(returning: outcome) }
     }
 
-    /// Kill a server deliberately (respawn path) — turn-independent.
+    /// Kill a server deliberately (respawn path) — turn-independent. Installation
+    /// into the recovery gate is what prevents a replacement app-server from starting
+    /// before this process has actually reaped.
     private func killServer(_ srv: Server) {
         if server === srv { server = nil }
         failAllPending(srv, with: .serverExited)
         srv.process.closeStdin()
         srv.process.signalGroup(SIGKILL)
         let process = srv.process
-        Task { _ = await process.wait() }
+        let cleanupWait = Self.initializeCleanupWait
+        let task = Task { [logger] in
+            guard await process.wait(timeout: cleanupWait) != nil else {
+                logger.error("codex app-server replacement did not reap within the bounded wait")
+                return false
+            }
+            return true
+        }
+        initializeRecovery = InitializeRecovery(token: UUID(), task: task)
     }
 
     /// Join the recovery owner across actor suspension points. The token prevents a
@@ -896,8 +1253,9 @@ private actor CodexAppServerConnection {
     private func failAllPending(_ srv: Server, with failure: RequestFailure) {
         let waiting = srv.pending
         srv.pending = [:]
-        for (_, continuation) in waiting {
-            continuation.resume(returning: .failure(failure))
+        for (_, request) in waiting {
+            request.timeoutTask.cancel()
+            request.continuation.resume(returning: .failure(failure))
         }
         if !srv.handshaked && srv.handshakeFailure == nil {
             completeHandshake(srv, .failure(failure))
@@ -945,9 +1303,10 @@ private actor CodexAppServerConnection {
             guard case .number(let requestID) = id,
                   let waiter = srv.pending.removeValue(forKey: requestID)
             else { return }  // a response we never asked for / already timed out
+            waiter.timeoutTask.cancel()
             if let error {
                 let message = (error["message"] as? String) ?? "The assistant reported an error."
-                waiter.resume(returning: .failure(.serverError(message: message)))
+                waiter.continuation.resume(returning: .failure(.serverError(message: message)))
             } else {
                 // Learn the turn id from the AUTHORITATIVE turn/start response, HERE,
                 // before the following notification lines are routed — so the positive
@@ -956,7 +1315,7 @@ private actor CodexAppServerConnection {
                    let turnID = (result?["turn"] as? [String: Any])?["id"] as? String {
                     active.turnID = turnID
                 }
-                waiter.resume(returning: .success(result ?? [:]))
+                waiter.continuation.resume(returning: .success(result ?? [:]))
             }
 
         case .serverRequest(let id, let method, let params):
@@ -1032,9 +1391,41 @@ private actor CodexAppServerConnection {
         // closed stdout WITHOUT exiting to die, so `wait()` returns promptly instead of
         // hanging every pending request (review #4). Runs BEFORE `wait()` sets
         // `hasExited`, so the A3 no-signal-after-reap invariant holds.
-        srv.process.signalGroup(SIGKILL)
-        let status = await srv.process.wait()
         failAllPending(srv, with: .serverExited)
+        let process = srv.process
+        // A normal crash closes stdout just before exit. Give that tiny handoff a
+        // chance to publish its real status, then always sweep the process group:
+        // an already-exited leader can still have live MCP/helper children. Signal
+        // before the nonblocking reap so the stable group id cannot be recycled.
+        try? await Task.sleep(for: .milliseconds(10))
+        process.signalGroup(SIGKILL)
+        let naturalStatus = process.pollReapedStatus()
+        let cleanupWait = Self.initializeCleanupWait
+        let recovery = InitializeRecovery(token: UUID(), task: Task { [logger] in
+            if naturalStatus != nil { return true }
+            guard await process.wait(timeout: cleanupWait) != nil else {
+                logger.error("crashed codex app-server did not reap within the bounded wait")
+                return false
+            }
+            return true
+        })
+        initializeRecovery = recovery
+        let recovered = await recovery.task.value
+        if !recovered { initializeRecoveryBlocked = true }
+        if initializeRecovery?.token == recovery.token {
+            initializeRecovery = nil
+        }
+        // `wait(timeout:)` cached the real wait status when recovery succeeded.
+        // A failed bounded reap is reported as unknown and permanently blocks this
+        // connection from spawning over a possibly-live predecessor.
+        let status: Int32
+        if let naturalStatus {
+            status = naturalStatus
+        } else if recovered {
+            status = await process.wait()
+        } else {
+            status = -1
+        }
 
         if let active = turn, !active.finished, !shuttingDown {
             active.continuation.yield(.providerNotice(
@@ -1049,31 +1440,59 @@ private actor CodexAppServerConnection {
     /// The continuation is resolved exactly once: by `route` (response), by a failure
     /// sweep (server exit), or by the timeout task — all actor-isolated.
     private func sendRequest(
-        _ srv: Server, method: String, build: (Int) -> String
+        _ srv: Server,
+        method: String,
+        timeoutOverride: Double? = nil,
+        resetServerOnTimeout: Bool = false,
+        isHistoryRequest: Bool = false,
+        build: (Int) -> String
     ) async throws -> [String: Any] {
         let requestID = srv.nextRequestID
         srv.nextRequestID += 1
         let line = build(requestID)
         let generation = srv.generation
-        let timeout = requestTimeout
+        let timeout = max(0.001, min(requestTimeout, timeoutOverride ?? requestTimeout))
 
         let outcome: Result<[String: Any], RequestFailure> = await withCheckedContinuation { continuation in
-            srv.pending[requestID] = continuation
-            srv.process.writeLine(line)
-            Task { [weak self] in
+            let timeoutTask = Task { [weak self] in
                 try? await Task.sleep(for: .seconds(timeout))
-                await self?.timeoutRequest(generation: generation, requestID: requestID, method: method)
+                guard !Task.isCancelled else { return }
+                await self?.timeoutRequest(
+                    generation: generation,
+                    requestID: requestID,
+                    method: method,
+                    timeout: timeout,
+                    resetServerOnTimeout: resetServerOnTimeout)
             }
+            srv.pending[requestID] = PendingRequest(
+                continuation: continuation,
+                timeoutTask: timeoutTask,
+                method: method,
+                isHistory: isHistoryRequest)
+            srv.process.writeLine(line)
         }
         return try outcome.get()
     }
 
-    private func timeoutRequest(generation: Int, requestID: Int, method: String) {
+    private func timeoutRequest(
+        generation: Int,
+        requestID: Int,
+        method: String,
+        timeout: Double,
+        resetServerOnTimeout: Bool
+    ) {
         guard let srv = server, srv.generation == generation,
               let waiter = srv.pending.removeValue(forKey: requestID)
         else { return }
-        logger.error("codex request \(method) timed out after \(self.requestTimeout)s")
-        waiter.resume(returning: .failure(.timeout(method: method)))
+        logger.error("codex request \(method) timed out after \(timeout)s")
+        waiter.continuation.resume(returning: .failure(.timeout(method: method)))
+        // A timed-out metadata request has proven this stdio server unhealthy.
+        // Reset it so Retry gets a clean process instead of writing to the same
+        // poisoned pipe. Never kill a server carrying a live interactive turn.
+        if resetServerOnTimeout, turn == nil {
+            logger.error("resetting wedged codex History app-server")
+            killServer(srv)
+        }
     }
 
     // MARK: History over the wire (thread/list · thread/search · thread/read — 3b-4)
@@ -1089,26 +1508,76 @@ private actor CodexAppServerConnection {
     private static let filterOverfetch = 5
     private static let historyReadConcurrency = 4
     private static let historyCacheLimit = 64
+    private var historyLookupGeneration = 0
+
+    /// Supersede best-effort History work before admitting an interactive turn. A
+    /// pending History RPC cannot be cancelled server-side, so its stdio process must
+    /// be replaced; completed History queries leave no pending marker and retain the
+    /// normal long-lived-server reuse path.
+    private func prioritizeInteractiveTurn() {
+        historyLookupGeneration &+= 1
+        guard let srv = server,
+              srv.pending.values.contains(where: \.isHistory)
+        else { return }
+        logger.info("interactive turn is replacing a codex server with pending History work")
+        killServer(srv)
+    }
+
+    /// Only one History lookup owns this connection at a time. A new recents/search
+    /// request supersedes hidden work from a prior scope/query and resolves its IPC
+    /// waiters without resetting the healthy server.
+    private func beginHistoryLookup() -> Int {
+        historyLookupGeneration &+= 1
+        if let srv = server {
+            let requestIDs = srv.pending.compactMap { id, request in
+                // A newer History lookup can join the same cold handshake. Removing
+                // `initialize` here would discard its eventual response without any
+                // protocol-level cancellation, poisoning the server for both lookups.
+                request.isHistory && request.method != "initialize" ? id : nil
+            }
+            for requestID in requestIDs {
+                guard let request = srv.pending.removeValue(forKey: requestID) else { continue }
+                request.timeoutTask.cancel()
+                request.continuation.resume(returning: .failure(.historySuperseded))
+            }
+        }
+        return historyLookupGeneration
+    }
 
     /// Recent conversations for `workspaceURL`, newest first (History picker).
     /// `thread/list` returns summaries with `turns: []` (verified 0.142), so candidates
     /// are projected through bounded-concurrent `thread/read` calls. This is the only
     /// reliable way to hide complete or truncated private manifests. A non-nil
     /// `referenceID` also inspects rubien tool attribution from the same reads.
-    func recentThreads(workspaceURL: URL, limit: Int, referenceID: Int64? = nil) async -> [AgentSessionSummary] {
-        guard limit > 0 else { return [] }
+    func recentThreads(
+        workspaceURL: URL, limit: Int, referenceID: Int64? = nil,
+        deadline requestedDeadline: Date? = nil
+    ) async -> AgentSessionQueryResult {
+        guard limit > 0 else { return .completed([]) }
+        let lookupGeneration = beginHistoryLookup()
+        let deadline = historyDeadline(notAfter: requestedDeadline)
         let fetch = limit * Self.filterOverfetch
-        let candidates = await query(
+        let candidates = await historyQuery(
             workspaceURL: workspaceURL, method: "thread/list",
+            deadline: deadline,
+            lookupGeneration: lookupGeneration,
             build: { CodexAppServerProtocol.threadList(requestID: $0, cwd: workspaceURL.path, limit: fetch) },
             decode: CodexAppServerProtocol.decodeThreadList)
-        return await visibleSummaries(
-            candidates,
+        guard !candidates.didTimeOut else {
+            return AgentSessionQueryResult(sessions: [], didTimeOut: true)
+        }
+        guard lookupGeneration == historyLookupGeneration else { return .completed([]) }
+        let visible = await visibleSummaries(
+            candidates.value,
             matching: nil,
             referenceID: referenceID,
             workspaceURL: workspaceURL,
-            limit: limit
+            limit: limit,
+            deadline: deadline,
+            lookupGeneration: lookupGeneration
         )
+        return AgentSessionQueryResult(
+            sessions: visible.value, didTimeOut: visible.didTimeOut)
     }
 
     /// Content search over `workspaceURL`'s threads (History search field). Search is
@@ -1116,22 +1585,40 @@ private actor CodexAppServerConnection {
     /// re-apply the query to safely decoded visible rows before capping at `limit`.
     /// A non-nil `referenceID` additionally scopes hits like `recentThreads`.
     func searchThreads(
-        searchTerm: String, workspaceURL: URL, limit: Int, referenceID: Int64? = nil
-    ) async -> [AgentSessionSummary] {
+        searchTerm: String, workspaceURL: URL, limit: Int,
+        referenceID: Int64? = nil, deadline requestedDeadline: Date? = nil
+    ) async -> AgentSessionQueryResult {
         let term = searchTerm.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !term.isEmpty, limit > 0 else { return [] }
-        let hits = await query(
+        guard !term.isEmpty, limit > 0 else { return .completed([]) }
+        let lookupGeneration = beginHistoryLookup()
+        let deadline = historyDeadline(notAfter: requestedDeadline)
+        let hits = await historyQuery(
             workspaceURL: workspaceURL, method: "thread/search",
+            deadline: deadline,
+            lookupGeneration: lookupGeneration,
             build: { CodexAppServerProtocol.threadSearch(
                 requestID: $0, searchTerm: term, limit: limit * Self.filterOverfetch, cwd: workspaceURL.path) },
             decode: { CodexAppServerProtocol.decodeThreadSearch($0, cwd: workspaceURL.path) })
-        return await visibleSummaries(
-            hits,
+        guard !hits.didTimeOut else {
+            return AgentSessionQueryResult(sessions: [], didTimeOut: true)
+        }
+        guard lookupGeneration == historyLookupGeneration else { return .completed([]) }
+        let visible = await visibleSummaries(
+            hits.value,
             matching: term,
             referenceID: referenceID,
             workspaceURL: workspaceURL,
-            limit: limit
+            limit: limit,
+            deadline: deadline,
+            lookupGeneration: lookupGeneration
         )
+        return AgentSessionQueryResult(
+            sessions: visible.value, didTimeOut: visible.didTimeOut)
+    }
+
+    private struct HistoryLookup<Value> {
+        let value: Value
+        let didTimeOut: Bool
     }
 
     private struct HistoryCacheEntry: Sendable {
@@ -1159,15 +1646,18 @@ private actor CodexAppServerConnection {
         matching searchTerm: String?,
         referenceID: Int64?,
         workspaceURL: URL,
-        limit: Int
-    ) async -> [AgentSessionSummary] {
+        limit: Int,
+        deadline: Date,
+        lookupGeneration: Int
+    ) async -> HistoryLookup<[AgentSessionSummary]> {
         var visited: Set<String> = []
         let uniqueCandidates = candidates.filter { visited.insert($0.id).inserted }
         var kept: [AgentSessionSummary] = []
 
         var batchStart = 0
         while batchStart < uniqueCandidates.count {
-            if kept.count >= limit || Task.isCancelled { break }
+            if kept.count >= limit || Task.isCancelled
+                || lookupGeneration != historyLookupGeneration { break }
             let batchSize = min(
                 Self.historyReadConcurrency,
                 max(1, limit - kept.count)
@@ -1179,22 +1669,28 @@ private actor CodexAppServerConnection {
             let batch = Array(uniqueCandidates[batchStart..<batchEnd])
             batchStart = batchEnd
             var histories: [Int: HistoryCacheEntry] = [:]
+            var didTimeOut = false
 
-            await withTaskGroup(of: (Int, HistoryCacheEntry?).self) { group in
+            await withTaskGroup(of: (Int, HistoryLookup<HistoryCacheEntry?>).self) { group in
                 for (index, candidate) in batch.enumerated() {
                     group.addTask { [weak self] in
-                        guard let self else { return (index, nil) }
+                        guard let self else {
+                            return (index, HistoryLookup(value: nil, didTimeOut: false))
+                        }
                         return (
                             index,
                             await self.threadHistory(
                                 for: candidate,
-                                workspaceURL: workspaceURL
+                                workspaceURL: workspaceURL,
+                                deadline: deadline,
+                                lookupGeneration: lookupGeneration
                             )
                         )
                     }
                 }
                 for await (index, history) in group {
-                    if let history { histories[index] = history }
+                    didTimeOut = didTimeOut || history.didTimeOut
+                    if let entry = history.value { histories[index] = entry }
                 }
             }
 
@@ -1209,59 +1705,69 @@ private actor CodexAppServerConnection {
                 ) else { continue }
                 kept.append(visible)
             }
+            // One failed batch is enough evidence of contention. Preserve any rows
+            // that completed in that batch and stop instead of spending another
+            // full timeout on progressively older candidates.
+            if didTimeOut {
+                return HistoryLookup(value: kept, didTimeOut: true)
+            }
         }
-        return kept
+        return HistoryLookup(value: kept, didTimeOut: false)
     }
 
     private func threadHistory(
         for candidate: AgentSessionSummary,
-        workspaceURL: URL
-    ) async -> HistoryCacheEntry? {
+        workspaceURL: URL,
+        deadline: Date,
+        lookupGeneration: Int
+    ) async -> HistoryLookup<HistoryCacheEntry?> {
         let cacheKey = workspaceURL.standardizedFileURL.path + "\0" + candidate.id
         if let cached = historyCache[cacheKey], cached.date == candidate.date {
             touchHistoryCache(cacheKey)
-            return cached
+            return HistoryLookup(value: cached, didTimeOut: false)
         }
-        do {
-            let srv = try await ensureServer(
-                configuration: .historyDefault,
-                workspaceURL: workspaceURL,
-                reuseAnySpawnConfiguration: true)
-            let result = try await sendRequest(srv, method: "thread/read") {
+        let request = await historyRequest(
+            workspaceURL: workspaceURL,
+            method: "thread/read",
+            deadline: deadline,
+            lookupGeneration: lookupGeneration,
+            build: {
                 CodexAppServerProtocol.threadRead(requestID: $0, threadId: candidate.id)
-            }
-            let managedRoot = AssistantAttachmentStore.managedRootURL(for: workspaceURL)
-            let entry = HistoryCacheEntry(
-                date: candidate.date,
-                rows: CodexAppServerProtocol.decodeThreadTranscript(
-                    result, managedAttachmentsRoot: managedRoot
-                ),
-                referencedIDs: CodexAppServerProtocol.threadReferencedIDs(result)
-            )
-            if entry.rows.allSatisfy({ $0.attachments.isEmpty }) {
-                storeHistoryCache(entry, forKey: cacheKey)
-            } else {
-                historyCache.removeValue(forKey: cacheKey)
-                historyCacheOrder.removeAll { $0 == cacheKey }
-            }
-            return entry
-        } catch {
-            logger.error("codex history read failed: \(String(describing: error))")
-            return nil
+            })
+        guard let result = request.value else {
+            return HistoryLookup(value: nil, didTimeOut: request.didTimeOut)
         }
+        let managedRoot = AssistantAttachmentStore.managedRootURL(for: workspaceURL)
+        let entry = HistoryCacheEntry(
+            date: candidate.date,
+            rows: CodexAppServerProtocol.decodeThreadTranscript(
+                result, managedAttachmentsRoot: managedRoot
+            ),
+            referencedIDs: CodexAppServerProtocol.threadReferencedIDs(result)
+        )
+        if entry.rows.allSatisfy({ $0.attachments.isEmpty }) {
+            storeHistoryCache(entry, forKey: cacheKey)
+        } else {
+            historyCache.removeValue(forKey: cacheKey)
+            historyCacheOrder.removeAll { $0 == cacheKey }
+        }
+        return HistoryLookup(value: entry, didTimeOut: false)
     }
 
     /// A picked thread's renderable transcript, so a resume restores its content.
     /// `thread/read` is a read-only preview — NOT `thread/resume` (which would load +
     /// subscribe the thread); the actual continuation resumes on the next turn.
     func readTranscript(threadID: String, workspaceURL: URL) async -> [ChatRenderMessage] {
+        let lookupGeneration = beginHistoryLookup()
         let cacheKey = workspaceURL.standardizedFileURL.path + "\0" + threadID
         if let cached = historyCache[cacheKey] {
             touchHistoryCache(cacheKey)
             return cached.rows
         }
-        return await query(
+        let result = await historyQuery(
             workspaceURL: workspaceURL, method: "thread/read",
+            deadline: Date().addingTimeInterval(historyTimeout),
+            lookupGeneration: lookupGeneration,
             build: { CodexAppServerProtocol.threadRead(requestID: $0, threadId: threadID) },
             decode: {
                 CodexAppServerProtocol.decodeThreadTranscript(
@@ -1271,6 +1777,8 @@ private actor CodexAppServerConnection {
                     )
                 )
             })
+        guard lookupGeneration == historyLookupGeneration else { return [] }
+        return result.value
     }
 
     private func storeHistoryCache(_ entry: HistoryCacheEntry, forKey key: String) {
@@ -1286,23 +1794,125 @@ private actor CodexAppServerConnection {
         historyCacheOrder.append(key)
     }
 
-    /// One-shot read: ensure a live server (reuse ANY running one because History does
-    /// not depend on turn configuration; `historyDefault` only matters for a fresh
-    /// spawn), send the request, and decode. Any failure degrades to `[]`, never
-    /// throwing into the UI. `build`/`decode` are synchronous, so neither escapes.
-    private func query<T>(
-        workspaceURL: URL, method: String,
-        build: (Int) -> String, decode: ([String: Any]) -> [T]
-    ) async -> [T] {
+    private func remainingHistoryTimeout(until deadline: Date) -> Double? {
+        let remaining = deadline.timeIntervalSinceNow
+        guard remaining > 0 else { return nil }
+        return min(historyTimeout, remaining)
+    }
+
+    private func historyDeadline(notAfter requested: Date?) -> Date {
+        let own = Date().addingTimeInterval(historyTimeout)
+        guard let requested else { return own }
+        return min(own, requested)
+    }
+
+    /// One bounded metadata request within the caller's overall History deadline.
+    /// A timeout resets an idle server so the next user-initiated Retry starts clean.
+    private func historyQuery<T>(
+        workspaceURL: URL,
+        method: String,
+        deadline: Date,
+        lookupGeneration: Int,
+        build: (Int) -> String,
+        decode: ([String: Any]) -> [T]
+    ) async -> HistoryLookup<[T]> {
+        let request = await historyRequest(
+            workspaceURL: workspaceURL,
+            method: method,
+            deadline: deadline,
+            lookupGeneration: lookupGeneration,
+            build: build)
+        guard let response = request.value else {
+            return HistoryLookup(value: [], didTimeOut: request.didTimeOut)
+        }
+        return HistoryLookup(value: decode(response), didTimeOut: false)
+    }
+
+    /// Shared bounded IPC path for list/search/read. The generation check prevents
+    /// a superseded load that was awaiting initialize from sending new work later.
+    private func historyRequest(
+        workspaceURL: URL,
+        method: String,
+        deadline: Date,
+        lookupGeneration: Int,
+        build: (Int) -> String
+    ) async -> HistoryLookup<[String: Any]?> {
+        // A live/queued turn owns the single Codex runtime. Metadata is optional;
+        // fail fast so opening Home/History during a scheduled job shows Retry
+        // instead of competing for app-server initialization for 30 seconds.
+        guard turn == nil, reservedTurn == nil, queuedTurns.isEmpty else {
+            return HistoryLookup(value: nil, didTimeOut: true)
+        }
+        guard let timeout = remainingHistoryTimeout(until: deadline) else {
+            return HistoryLookup(value: nil, didTimeOut: true)
+        }
+        guard lookupGeneration == historyLookupGeneration, !Task.isCancelled else {
+            return HistoryLookup(value: nil, didTimeOut: false)
+        }
         do {
             let srv = try await ensureServer(
                 configuration: .historyDefault,
                 workspaceURL: workspaceURL,
-                reuseAnySpawnConfiguration: true)
-            return decode(try await sendRequest(srv, method: method, build: build))
+                reuseAnySpawnConfiguration: true,
+                allowInitializeRetry: false,
+                requestTimeoutOverride: timeout)
+            guard lookupGeneration == historyLookupGeneration, !Task.isCancelled else {
+                return HistoryLookup(value: nil, didTimeOut: false)
+            }
+            guard let requestTimeout = remainingHistoryTimeout(until: deadline) else {
+                return HistoryLookup(value: nil, didTimeOut: true)
+            }
+            let response = try await sendRequest(
+                srv,
+                method: method,
+                timeoutOverride: requestTimeout,
+                resetServerOnTimeout: true,
+                isHistoryRequest: true,
+                build: build)
+            return HistoryLookup(value: response, didTimeOut: false)
+        } catch let failure as RequestFailure {
+            logger.error("codex \(method) query failed: \(String(describing: failure))")
+            return HistoryLookup(
+                value: nil, didTimeOut: failure.makesHistoryIncomplete)
         } catch {
             logger.error("codex \(method) query failed: \(String(describing: error))")
-            return []
+            return HistoryLookup(value: nil, didTimeOut: false)
+        }
+    }
+
+    /// Model metadata over the same app-server used by every production Codex
+    /// surface. It is best effort: a live/queued turn wins immediately, and callers
+    /// can retry without ever creating a second runtime.
+    func fetchModelCatalog(
+        workspaceURL: URL,
+        timeout: Double
+    ) async -> CodexCatalog {
+        guard turn == nil, reservedTurn == nil, queuedTurns.isEmpty else {
+            return .unavailable
+        }
+        do {
+            let srv = try await ensureServer(
+                configuration: .historyDefault,
+                workspaceURL: workspaceURL,
+                reuseAnySpawnConfiguration: true,
+                allowInitializeRetry: false,
+                requestTimeoutOverride: timeout)
+            guard turn == nil, reservedTurn == nil, queuedTurns.isEmpty else {
+                return .unavailable
+            }
+            let result = try await sendRequest(
+                srv,
+                method: "model/list",
+                timeoutOverride: timeout,
+                resetServerOnTimeout: true,
+                isHistoryRequest: true,
+                build: { CodexAppServerProtocol.modelList(requestID: $0) })
+            return CodexCatalog(
+                models: CodexAppServerProtocol.decodeModelList(result),
+                fetchedOK: true)
+        } catch {
+            logger.error("codex model/list query failed: \(String(describing: error))")
+            return .unavailable
         }
     }
 
@@ -1330,7 +1940,8 @@ private actor CodexAppServerConnection {
                 binaryDirectory: (resolved as NSString).deletingLastPathComponent)
             guard let probedVersion = await AgentBinaryProbe.probeVersion(
                 executablePath: resolved,
-                environment: environment)
+                environment: environment,
+                retryOnce: true)
             else {
                 return .notFound(reason: "Found codex at \(resolved) but it did not respond to --version.")
             }

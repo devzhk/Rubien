@@ -5,7 +5,8 @@ import RubienCore
 enum AssistantProviderFactory {
     static func make(
         _ kind: AgentProviderKind,
-        contentChannel: MCPContentChannel?
+        contentChannel: MCPContentChannel?,
+        shareCodexAppServer: Bool = false
     ) -> any AgentProvider {
         switch kind {
         case .claude:
@@ -16,7 +17,8 @@ enum AssistantProviderFactory {
         case .codex:
             CodexProvider(
                 executableOverride: RubienPreferences.assistantCodexBinaryPath,
-                contentChannel: contentChannel
+                contentChannel: contentChannel,
+                shareAppServer: shareCodexAppServer
             )
         }
     }
@@ -77,7 +79,13 @@ enum ReaderChatSession {
         // the composer's provider picker (`switchProvider`). Each provider takes its
         // OWN binary-path override (the `claude` vs `codex` executables differ).
         let providerFactory: (AgentProviderKind) -> any AgentProvider = { kind in
-            AssistantProviderFactory.make(kind, contentChannel: contentChannel)
+            AssistantProviderFactory.make(
+                kind,
+                contentChannel: contentChannel,
+                // Home, every reader, and scheduled work use the same Codex runtime.
+                // A second app-server can otherwise wedge in shared ~/.codex
+                // initialization while the first surface's server remains alive.
+                shareCodexAppServer: true)
         }
 
         // The live pref snapshot for a backend, re-read on every fresh conversation so

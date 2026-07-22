@@ -664,8 +664,8 @@ final class ChatSessionController: ObservableObject {
         statusText = "Responding…"
         busyElsewhere = false
 
-        // The pre-turn id is both the `--resume` target and the gate key; nil for a
-        // fresh conversation (unkeyed, always admitted).
+        // The pre-turn id is both the `--resume` target and Claude's gate key. Codex
+        // uses one shared interactive-runtime key even when this id is nil.
         let resumeID = liveSessionID
         let attachments = pendingAttachments
         let providerPrompt = AssistantAttachmentManifest.providerPrompt(
@@ -960,8 +960,14 @@ final class ChatSessionController: ObservableObject {
     /// holds `self` strongly until its stream ends, so this must be called
     /// explicitly — deinit would fire too late.
     func teardown() {
-        // Window close: end the provider entirely (kills a long-lived Codex server;
-        // for Claude the default forwards to cancel()).
+        // Invalidate admission work before closing the provider wrapper. A task can
+        // otherwise acquire the global gate after teardown and call send() through a
+        // released wrapper, leaking the gate until that invisible turn finishes.
+        turnTask?.cancel()
+        turnTask = nil
+        generation += 1
+        // Window close: release this provider wrapper. A dedicated Codex server dies;
+        // the shared Home/reader server remains available for the app lifetime.
         provider.shutdown()
         let capturedAttachments = pendingAttachments
         attachmentTask?.cancel()
@@ -1143,8 +1149,8 @@ final class ChatSessionController: ObservableObject {
     }
 
     /// Switch this conversation's backend runtime (composer picker, Phase 3b-3).
-    /// A switch is a hard cut: the OLD runtime is torn down — its long-lived Codex
-    /// server is killed (not just interrupted like `cancel()`), the new provider is
+    /// A switch is a hard cut for this window: the OLD runtime wrapper is torn down
+    /// (an interactive Codex connection remains app-lifetime shared), the new provider is
     /// built from the factory, and a FRESH conversation starts adopting the new
     /// backend's defaults (model/effort/sandbox are backend-specific — Claude's
     /// `opus` is meaningless to Codex). No-op if the kind is unchanged or the
@@ -1156,9 +1162,8 @@ final class ChatSessionController: ObservableObject {
               !hasAttachmentRehomeFailure,
               let providerFactory,
               kind != providerKind else { return }
-        // Request teardown of the outgoing runtime. `shutdown()` may reap the server
-        // asynchronously, but the old runtime is a separate process on its own pipes —
-        // it can't touch the freshly-built provider below, and any in-flight turn's
+        // Request teardown of the outgoing wrapper. Token-scoped interruption keeps
+        // any stale turn from touching another window, and the in-flight turn's
         // still-draining stream is invalidated by the `generation` bump in
         // `newConversation`. The captured `turnProvider` in `send` keeps that stale
         // turn pinned to the outgoing runtime, never the new one.
@@ -1204,15 +1209,30 @@ final class ChatSessionController: ObservableObject {
     /// rubien tool calls in the session, since neither provider history surface
     /// exposes the instructions.
     func listRecentSessions(limit: Int = 25, scopedToReference: Bool = false) async -> [AgentSessionSummary] {
+        await loadRecentSessions(
+            limit: limit, scopedToReference: scopedToReference
+        ).sessions
+    }
+
+    /// Status-preserving History load for the UI. Array-only callers keep using
+    /// `listRecentSessions`; a timeout may still carry partial rows here.
+    func loadRecentSessions(
+        limit: Int = 25, scopedToReference: Bool = false
+    ) async -> AgentSessionQueryResult {
+        let deadline = Date().addingTimeInterval(AgentHistoryPolicy.loadTimeout)
         guard surfaceDefaultContext == .library, let attributionStore else {
-            return await provider.recentSessions(
+            return await provider.recentSessionsResult(
                 workspaceURL: workspaceURL,
                 limit: limit,
-                referenceID: scopedToReference ? activeConversationContext.referenceID : nil)
+                referenceID: scopedToReference ? activeConversationContext.referenceID : nil,
+                deadline: deadline)
         }
-        return await attributedLibrarySessions(limit: limit, store: attributionStore) { requested in
-            await provider.recentSessions(
-                workspaceURL: workspaceURL, limit: requested, referenceID: nil)
+        return await attributedLibrarySessions(
+            limit: limit, store: attributionStore, deadline: deadline
+        ) { requested in
+            await provider.recentSessionsResult(
+                workspaceURL: workspaceURL, limit: requested, referenceID: nil,
+                deadline: deadline)
         }
     }
 
@@ -1221,16 +1241,30 @@ final class ChatSessionController: ObservableObject {
     func searchSessions(
         _ query: String, limit: Int = 25, scopedToReference: Bool = false
     ) async -> [AgentSessionSummary] {
+        await loadSearchSessions(
+            query, limit: limit, scopedToReference: scopedToReference
+        ).sessions
+    }
+
+    /// Status-preserving content search for the History UI.
+    func loadSearchSessions(
+        _ query: String, limit: Int = 25, scopedToReference: Bool = false
+    ) async -> AgentSessionQueryResult {
+        let deadline = Date().addingTimeInterval(AgentHistoryPolicy.loadTimeout)
         guard surfaceDefaultContext == .library, let attributionStore else {
-            return await provider.searchSessions(
+            return await provider.searchSessionsResult(
                 query: query,
                 workspaceURL: workspaceURL,
                 limit: limit,
-                referenceID: scopedToReference ? activeConversationContext.referenceID : nil)
+                referenceID: scopedToReference ? activeConversationContext.referenceID : nil,
+                deadline: deadline)
         }
-        return await attributedLibrarySessions(limit: limit, store: attributionStore) { requested in
-            await provider.searchSessions(
-                query: query, workspaceURL: workspaceURL, limit: requested, referenceID: nil)
+        return await attributedLibrarySessions(
+            limit: limit, store: attributionStore, deadline: deadline
+        ) { requested in
+            await provider.searchSessionsResult(
+                query: query, workspaceURL: workspaceURL, limit: requested,
+                referenceID: nil, deadline: deadline)
         }
     }
 
@@ -1241,16 +1275,28 @@ final class ChatSessionController: ObservableObject {
     private func attributedLibrarySessions(
         limit: Int,
         store: AssistantSessionAttributionStore,
-        fetch: (Int) async -> [AgentSessionSummary]
-    ) async -> [AgentSessionSummary] {
+        deadline: Date,
+        fetch: (Int) async -> AgentSessionQueryResult
+    ) async -> AgentSessionQueryResult {
         var requested = 50
+        var latestMatches: [AgentSessionSummary] = []
         while true {
-            let results = await fetch(requested)
+            guard Date() < deadline else {
+                return AgentSessionQueryResult(
+                    sessions: Array(latestMatches.prefix(limit)), didTimeOut: true)
+            }
+            let result = await fetch(requested)
+            let sessions = result.sessions
             let ids = await store.librarySessionIDs(
-                results.map(\.id), provider: providerKind, workspaceURL: workspaceURL)
-            let matches = results.filter { ids.contains($0.id) }
-            if matches.count >= limit || results.count < requested || requested == 500 {
-                return Array(matches.prefix(limit))
+                sessions.map(\.id), provider: providerKind, workspaceURL: workspaceURL)
+            let matches = sessions.filter { ids.contains($0.id) }
+            latestMatches = matches
+            let deadlineExpired = Date() >= deadline
+            if result.didTimeOut || deadlineExpired || matches.count >= limit
+                || sessions.count < requested || requested == 500 {
+                return AgentSessionQueryResult(
+                    sessions: Array(matches.prefix(limit)),
+                    didTimeOut: result.didTimeOut || deadlineExpired)
             }
             requested = min(requested * 2, 500)
         }
