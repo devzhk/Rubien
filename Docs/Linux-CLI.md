@@ -4,7 +4,7 @@
 
 ## Install the prebuilt binary
 
-The published Linux archive targets Ubuntu 22.04 or later on x86_64 with glibc 2.35 or later. Download `rubien-cli-<version>-linux-x86_64.tar.gz` from the [latest release](https://github.com/devzhk/Rubien-releases/releases/latest).
+The published Linux archive targets Ubuntu 22.04 or later on x86_64 with glibc 2.35 or later. Download `rubien-cli-<version>-linux-x86_64.tar.gz` from the [latest release](https://github.com/devzhk/Rubien/releases/latest).
 
 Install the runtime dependencies:
 

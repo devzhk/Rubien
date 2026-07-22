@@ -4,13 +4,14 @@
   "description": "MCP server wrapping rubien-cli so Claude Code and claude.ai can manage the Rubien reference library.",
   "license": "Apache-2.0",
   "author": "devzhk",
-  "homepage": "https://github.com/devzhk/Rubien-releases#readme",
+  "homepage": "https://github.com/devzhk/Rubien#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/devzhk/Rubien-releases.git"
+    "url": "git+https://github.com/devzhk/Rubien.git",
+    "directory": "mcp-server"
   },
   "bugs": {
-    "url": "https://github.com/devzhk/Rubien-releases/issues"
+    "url": "https://github.com/devzhk/Rubien/issues"
   },
   "keywords": [
     "mcp",

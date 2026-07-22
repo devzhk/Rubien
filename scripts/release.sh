@@ -28,7 +28,7 @@ cd "$PROJECT_DIR"
 source "$SCRIPT_DIR/lib/appcast.sh"
 
 NOTARY_PROFILE="${NOTARY_PROFILE:-RubienNotary}"
-RELEASES_REPO="${RELEASES_REPO:-devzhk/Rubien-releases}"   # public DMG host (Sparkle downloads anonymously; private-repo assets 404)
+readonly RELEASES_REPO="devzhk/Rubien"
 APPCAST_TARGET="${APPCAST_TARGET:-production}"
 case "$APPCAST_TARGET" in
     production) APPCAST_PATH="$PROJECT_DIR/Docs/appcast.xml" ;;
@@ -86,6 +86,17 @@ fi
 # 2. Read VERSION and BUILD
 VERSION="$(cat VERSION | tr -d '[:space:]')"
 BUILD_NUMBER="$(cat BUILD.txt | tr -d '[:space:]')"
+if [ "$APPCAST_TARGET" = "production" ]; then
+    can_publish="$(gh api "repos/${RELEASES_REPO}" --jq '.permissions.push')"
+    if [ "$can_publish" != "true" ]; then
+        echo "✗ gh authentication cannot publish releases to ${RELEASES_REPO}" >&2
+        exit 1
+    fi
+    if gh release view "v${VERSION}" --repo "$RELEASES_REPO" >/dev/null 2>&1; then
+        echo "✗ Canonical release v${VERSION} already exists in ${RELEASES_REPO}" >&2
+        exit 1
+    fi
+fi
 # Regenerate the CLI version constant so the built binary reports this release's
 # version/build (the MCP version guard compares the build number).
 "$PROJECT_DIR/scripts/generate-cli-version.sh"
@@ -241,40 +252,65 @@ export RELEASE_NOTES_TEXT="${RELEASE_NOTES_TEXT:-Rubien ${VERSION} (Beta). See G
 # 13. Update appcast
 rubien_appcast_prepend_item
 
-# 14. Push appcast change first
+# 14. Commit the appcast locally. Production publication deliberately pushes
+#     the tag and stages the GitHub release before pushing main, so Sparkle's
+#     live feed can never point at an asset that does not exist yet.
 git add "$APPCAST_PATH" Sources/RubienCLI/GeneratedVersion.swift
 git commit -m "Release v${VERSION} (build ${BUILD_NUMBER}): update ${APPCAST_TARGET} appcast"
-if [ "$APPCAST_TARGET" = "production" ]; then
-    git push origin main
-fi
 
-# 15. Tag the source commit on the PRIVATE repo. The gh release below now
-#     targets the public releases repo, so without this explicit tag the
-#     source would be left untagged for this version (gh release create was
-#     previously the only step creating the v$VERSION tag).
+# 15. Tag the source commit and publish the tag. The tag carries the appcast
+#     commit to GitHub before its main-branch/Pages publication.
 if [ "$APPCAST_TARGET" = "production" ]; then
     git tag -a "v${VERSION}" -m "Rubien ${VERSION} (build ${BUILD_NUMBER})"
-    git push origin "v${VERSION}"
+    if ! git push origin "v${VERSION}"; then
+        echo "✗ Local appcast commit and v${VERSION} tag exist, but the tag push failed." >&2
+        echo "  The live appcast is unchanged. Recover with: git push origin v${VERSION}" >&2
+        echo "  Then publish the canonical draft, push main, and dispatch Linux CI." >&2
+        echo "  Do not rerun release.sh." >&2
+        exit 1
+    fi
 fi
 
-# 16. Create the GitHub release with the DMG and ready-to-unzip Chrome
-#     extension on the PUBLIC releases repo. The appcast itself stays on the
-#     private repo's Pages (Docs/appcast.xml -> devzhk.github.io/Rubien/appcast.xml).
+# 16. Upload into a draft first, then publish it. The live appcast is still on
+#     the previous version throughout this step, so upload/publication failures
+#     cannot expose a 404 update enclosure.
 if [ "$APPCAST_TARGET" = "production" ]; then
-    gh release create "v${VERSION}" "$DMG_PATH" "$BROWSER_EXTENSION_PATH" \
+    if ! gh release create "v${VERSION}" "$DMG_PATH" "$BROWSER_EXTENSION_PATH" \
         --repo "$RELEASES_REPO" \
         --title "Rubien ${VERSION} — Beta" \
         --notes "$RELEASE_NOTES_TEXT" \
-        --latest
+        --draft --verify-tag; then
+        echo "✗ Canonical draft release upload failed; the live appcast is unchanged." >&2
+        echo "  Recover the v${VERSION} draft in ${RELEASES_REPO}, publish it, push main," >&2
+        echo "  then dispatch linux-cli-release.yml. Do not rerun release.sh." >&2
+        exit 1
+    fi
+    if ! gh release edit "v${VERSION}" --repo "$RELEASES_REPO" \
+        --draft=false --prerelease=false --latest; then
+        echo "✗ Canonical release remains a draft; the live appcast is unchanged." >&2
+        echo "  Publish the draft, push main, then dispatch linux-cli-release.yml." >&2
+        echo "  Do not rerun release.sh." >&2
+        exit 1
+    fi
 fi
 
-# 17. Dispatch the Linux rubien-cli build (async, best-effort). The Mac release
-#     above is already LIVE; a Linux build/upload failure does NOT affect Mac.
-#     gh defaults to the origin (private source) repo, where the workflow lives.
+# 17. Publish the appcast only after the canonical release assets are live.
 if [ "$APPCAST_TARGET" = "production" ]; then
-    if gh workflow run linux-cli-release.yml -f tag="v${VERSION}"; then
+    if ! git push origin main; then
+        echo "✗ Canonical release is live, but the appcast push failed." >&2
+        echo "  Recover with: git push origin main" >&2
+        echo "  Then dispatch linux-cli-release.yml. Do not rerun release.sh." >&2
+        exit 1
+    fi
+fi
+
+# 18. Dispatch the Linux rubien-cli build (async, best-effort). The Mac release
+#     above is already LIVE; a Linux build/upload failure does NOT affect Mac.
+#     Pass the canonical repo explicitly so GH_REPO cannot redirect the call.
+if [ "$APPCAST_TARGET" = "production" ]; then
+    if gh workflow run linux-cli-release.yml --repo "$RELEASES_REPO" -f tag="v${VERSION}"; then
         sleep 3
-        RUN_URL="$(gh run list --workflow=linux-cli-release.yml --limit=1 --json url --jq '.[0].url' 2>/dev/null || true)"
+        RUN_URL="$(gh run list --repo "$RELEASES_REPO" --workflow=linux-cli-release.yml --limit=1 --json url --jq '.[0].url' 2>/dev/null || true)"
         echo "   ↗ Linux CLI build dispatched: ${RUN_URL:-<not yet listed — use: gh run watch>}"
         echo "     If it fails, re-run: gh workflow run linux-cli-release.yml -f tag=v${VERSION}"
     else

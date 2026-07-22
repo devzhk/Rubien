@@ -16,7 +16,7 @@ The server is only a wrapper. It needs **Node.js ≥ 20** and the `rubien-cli` b
   # download rubien-cli-*-linux-x86_64.tar.gz, extract, then:
   export RUBIEN_CLI=/path/to/extracted/rubien-cli
   ```
-  Tarball: <https://github.com/devzhk/Rubien-releases/releases>. Don't put the bare binary on `PATH` alone — it loses its resource bundles.
+  Tarball: <https://github.com/devzhk/Rubien/releases>. Don't put the bare binary on `PATH` alone — it loses its resource bundles.
 
 The server checks the CLI's build (`MIN_CLI_BUILD`). In stdio mode it starts either way: if the CLI is missing or too old, every tool call returns the update instruction as its result, re-checked per call — so updating Rubien mid-session recovers on the next call, with no client restart. (Versions ≤ 0.3.0 exited at startup instead, which Claude Desktop rendered as an opaque "Server disconnected" — see [Troubleshooting](#troubleshooting-server-disconnected-in-claude-desktop).) In `--http` mode the server still exits at startup, where stderr is visible in your terminal. Update via Rubien.app / Sparkle on Mac, or `rubien-cli self-update` on Linux.
 

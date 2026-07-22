@@ -19,7 +19,7 @@ struct SelfUpdate: AsyncParsableCommand {
     // Raw 32-byte ed25519 public key (hex) for the dedicated Linux-CLI signing key.
     static let publicKeyHex = "9a9e3cf8ae279d9c7ecbe8efdc82c51292417911745f6e6e8c31627b8b108fc8"
     static let latestURL = URL(string:
-        "https://api.github.com/repos/devzhk/Rubien-releases/releases/latest")!
+        "https://api.github.com/repos/devzhk/Rubien/releases/latest")!
 
     func run() async throws {
         #if os(Linux)

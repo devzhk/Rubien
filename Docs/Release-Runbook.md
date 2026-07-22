@@ -2,17 +2,28 @@
 
 Operator runbook for cutting a Rubien release. The design rationale lives in `Docs/specs/2026-05-16-mac-auto-updater-design.md`; this document is the recipe.
 
-## Where releases are hosted (two repos)
+## Where releases are hosted
 
-The source repo `devzhk/Rubien` is **private**, but Sparkle downloads update DMGs **anonymously** — and GitHub release assets on a private repo return **HTTP 404** without auth. So hosting is split:
+The public source repository `devzhk/Rubien` is the canonical home for source,
+tags, release notes, and downloadable artifacts:
 
 | Artifact | Repo | Why |
 |---|---|---|
-| Source, `Docs/appcast.xml`, Pages workflow | private `devzhk/Rubien` | code stays private; Pages is public even for a private repo |
-| Sparkle appcast (served) | private `devzhk/Rubien` Pages → `https://devzhk.github.io/Rubien/appcast.xml` | one stable feed URL; never changes |
-| DMG and browser-extension assets | **public `devzhk/Rubien-releases`** | Sparkle and Chrome users can download anonymously |
+| Source, tags, release notes | `devzhk/Rubien` | canonical project history |
+| DMG, browser extension, Linux CLI | `devzhk/Rubien` Releases | one public download location |
+| Sparkle appcast | `devzhk/Rubien` Pages → `https://devzhk.github.io/Rubien/appcast.xml` | stable feed URL for every shipped app |
 
-**The appcast URL and the app's `SUFeedURL` never change** — only the `<enclosure>` URLs point at the public repo. That is what lets already-installed clients self-heal: repointing the enclosures in `Docs/appcast.xml` fixes every shipped install on its next check, with no new build. `release.sh` targets `$RELEASES_REPO` (default `devzhk/Rubien-releases`) for the DMG and separately runs `git tag` on the private repo for source traceability. Override `RELEASES_REPO` to host under a different account/repo.
+**The appcast URL and the app's `SUFeedURL` never change.** Historical
+`<enclosure>` URLs still point at `devzhk/Rubien-releases`; those signed assets
+remain available there. New entries point at `devzhk/Rubien`.
+
+Version 0.6.3 is the one-time Linux compatibility bridge. CLIs through 0.6.2
+query `devzhk/Rubien-releases/releases/latest`, so the Linux workflow creates a
+legacy 0.6.3 release containing the signed CLI archive and signature. The 0.6.3
+CLI queries `devzhk/Rubien`, allowing every later release to live only in the
+source repository. Mac clients need no mirror because they follow the unchanged
+Sparkle feed, and Chrome has no repository-based updater. Do not remove the
+legacy 0.6.3 release or its Linux assets.
 
 ## One-time setup
 
@@ -50,7 +61,7 @@ Host prerequisites: `gh` authenticated, the Developer ID identity available, the
 
 The order is strict: **prepare and commit → push and satisfy the CI gate → smoke-test release-candidate browser assets → obtain explicit approval and sign/publish with host access → verify published Mac and Linux artifacts → publish any coupled npm package**. Normally the green run must match `HEAD` exactly. The only exception is a descendant containing Markdown-only documentation changes after an already-green release-preparation SHA; the commands below prove that no release input changed. Do not start signing while release-preparation commits exist only locally.
 
-> **An agent may run the signed release pipeline only after the user explicitly approves the release command.** Before requesting approval, show the exact version/build and release notes and confirm the release-preparation SHA passed the CI gate. The approval authorizes the consequential effects of `release.sh`: signed build and notarization, an appcast commit and push, a source tag, a public GitHub release, and Linux-release workflow dispatch. Run it with elevated/unsandboxed host access so it can read the Developer ID and Sparkle EdDSA keys, use the `RubienNotary` login-Keychain profile, write `build/`, access the network, and update Git/GitHub. A failed credential check inside the ordinary sandbox does **not** prove a credential is missing; repeat the read-only preflight with approved host access. Once explicit approval is recorded, no separate interactive-host handoff is required.
+> **An agent may run the signed release pipeline only after the user explicitly approves the release command.** Before requesting approval, show the exact version/build and release notes and confirm the release-preparation SHA passed the CI gate. The approval authorizes the consequential effects of `release.sh`: signed build and notarization, an appcast commit and push, a source tag, a public GitHub release, and Linux-release workflow dispatch. For 0.6.3 it also authorizes the compatibility-mirror release in `devzhk/Rubien-releases`. Run it with elevated/unsandboxed host access so it can read the Developer ID and Sparkle EdDSA keys, use the `RubienNotary` login-Keychain profile, write `build/`, access the network, and update Git/GitHub. A failed credential check inside the ordinary sandbox does **not** prove a credential is missing; repeat the read-only preflight with approved host access. Once explicit approval is recorded, no separate interactive-host handoff is required.
 
 ```bash
 # 1. Start from a clean, current main
@@ -107,17 +118,18 @@ RELEASE_NOTES_TEXT=$'• This release change\n• Another release change' ./scri
 # 7. Wait for notarization (5-15 minutes). The script blocks.
 
 # 8. Confirm the Mac + browser-extension publication
-# - https://github.com/devzhk/Rubien-releases/releases/latest shows both the
-#   new DMG and Rubien-Browser-Extension-X.Y.Z.zip (public host)
+# - https://github.com/devzhk/Rubien/releases/latest shows both the new DMG
+#   and Rubien-Browser-Extension-X.Y.Z.zip
 # - https://devzhk.github.io/Rubien/appcast.xml has the new <item>
-# - The private source repo has the matching vX.Y.Z tag
+# - The source repo has the matching vX.Y.Z tag
+# - For 0.6.3 only, devzhk/Rubien-releases has the compatibility mirror
 # - Within ~24 hours, existing installs see the "Update ready" indicator
 
 # 9. Watch the Linux CLI run printed by release.sh, then inspect all assets
 LINUX_RUN_ID="paste the run ID printed by release.sh here"
 gh run watch "$LINUX_RUN_ID" --exit-status
 gh release view "v$(tr -d '[:space:]' < VERSION)" \
-    --repo devzhk/Rubien-releases --json assets --jq '.assets[].name'
+    --repo devzhk/Rubien --json assets --jq '.assets[].name'
 # Expect Rubien-X.Y.Z.dmg, Rubien-Browser-Extension-X.Y.Z.zip, the Linux
 # .tar.gz, and its .tar.gz.sig.
 # Copy the dSYM zip path printed by build-app.sh to durable private storage.
@@ -125,7 +137,55 @@ gh release view "v$(tr -d '[:space:]' < VERSION)" \
 
 **You must bump `VERSION` (if the marketing version is changing) and `BUILD.txt` (every release) before running — `release.sh` does not bump them for you. Then run `./scripts/generate-cli-version.sh` and commit the regenerated `Sources/RubienCLI/GeneratedVersion.swift` alongside the bump; the file is checked in and CI's "Verify generated CLI version is in sync" step fails the build if it drifts from `VERSION` + `BUILD.txt`. Push that commit and watch the CI run for its exact SHA to a successful conclusion. If CI fails, stop: fix the issue in a new commit, push, and watch again. A green run for an older commit and local test results are not substitutes unless `HEAD` is a Markdown-only descendant and the explicit diff check above passes.**
 
-Only after that gate is green is `release.sh` the single entry point: it calls `scripts/build-app.sh` (which assembles + signs + embeds Sparkle, then builds the DMG and browser-extension ZIP), notarizes, signs the appcast item with `sign_update`, prepends the item to `Docs/appcast.xml`, commits + pushes the appcast change, tags the source commit on the private repo, and creates the GitHub release with the DMG and browser-extension ZIP on the public `devzhk/Rubien-releases` repo via `gh release create --repo`. Its later appcast push is part of publication; it is not a substitute for pushing and validating the release-preparation commit before signing starts.
+Only after that gate is green is `release.sh` the single entry point: it calls `scripts/build-app.sh` (which assembles + signs + embeds Sparkle, then builds the DMG and browser-extension ZIP), notarizes, signs the appcast item with `sign_update`, and commits the new `Docs/appcast.xml` item locally. It pushes the source tag, uploads and publishes the canonical GitHub release in `devzhk/Rubien`, and only then pushes `main` so the live Sparkle feed cannot point at a missing asset. For 0.6.3 the dispatched Linux workflow also creates the legacy CLI compatibility bridge described above. These publication pushes are not substitutes for pushing and validating the release-preparation commit before signing starts.
+
+If the tag push, canonical GitHub draft upload, or publication fails, the live
+appcast is still unchanged, but the local appcast commit and tag already exist.
+**Do not rerun `release.sh`.** Verify that the ignored local artifacts still
+match the committed appcast item, reuse the same release notes to complete the
+idempotent publication step, then push the appcast and dispatch Linux CI:
+
+```bash
+VERSION="$(tr -d '[:space:]' < VERSION)"
+DMG="build/Rubien-${VERSION}.dmg"
+EXTENSION="build/Rubien-Browser-Extension-${VERSION}.zip"
+# Recompose the exact approved notes; the inline value passed to release.sh is
+# scoped to that process and is not left in this shell.
+RELEASE_NOTES_TEXT=$'• The approved release note\n• Another approved note'
+
+# Refuse stale/rebuilt artifacts. These values came from the same files when
+# release.sh committed the newest appcast item.
+EXPECTED_LENGTH="$(sed -n 's/.*length="\([0-9][0-9]*\)".*/\1/p' Docs/appcast.xml | tail -1)"
+EXPECTED_SIGNATURE="$(sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p' Docs/appcast.xml | tail -1)"
+test -n "$EXPECTED_LENGTH" && test -n "$EXPECTED_SIGNATURE"
+test "$(stat -f '%z' "$DMG")" = "$EXPECTED_LENGTH"
+SIGN_UPDATE="$(find .build -name sign_update -type f -perm -111 | head -1)"
+test -n "$SIGN_UPDATE"
+"$SIGN_UPDATE" --verify "$DMG" "$EXPECTED_SIGNATURE"
+unzip -tq "$EXTENSION"
+test "$(unzip -p "$EXTENSION" '*/manifest.json' | \
+  plutil -extract version raw -o - -)" = "$VERSION"
+
+# Safe whether the first tag push failed or already succeeded.
+git push origin "v${VERSION}"
+if gh release view "v${VERSION}" --repo devzhk/Rubien >/dev/null 2>&1; then
+  gh release upload "v${VERSION}" \
+    "$DMG" "$EXTENSION" \
+    --repo devzhk/Rubien --clobber
+  gh release edit "v${VERSION}" --repo devzhk/Rubien \
+    --title "Rubien ${VERSION} — Beta" --notes "$RELEASE_NOTES_TEXT" \
+    --draft=false --prerelease=false --latest
+else
+  gh release create "v${VERSION}" \
+    "$DMG" "$EXTENSION" \
+    --repo devzhk/Rubien --title "Rubien ${VERSION} — Beta" \
+    --notes "$RELEASE_NOTES_TEXT" --draft --verify-tag
+  gh release edit "v${VERSION}" --repo devzhk/Rubien \
+    --draft=false --prerelease=false --latest
+fi
+git push origin main
+gh workflow run linux-cli-release.yml --repo devzhk/Rubien -f tag="v${VERSION}"
+```
 
 ### Browser-extension release contract
 
@@ -246,16 +306,21 @@ After publishing, copy the printed dSYM zip to durable private storage;
 
 ## Linux `rubien-cli` build (automatic)
 
-`release.sh` dispatches the `linux-cli-release.yml` workflow automatically after publishing the Mac release (production target). It builds a static-stdlib x86_64 binary, smoke-tests it from the tarball in a clean container, signs it (ed25519), and uploads the `.tar.gz` + `.tar.gz.sig` to `devzhk/Rubien-releases`. To re-run manually:
+`release.sh` dispatches the `linux-cli-release.yml` workflow automatically after publishing the Mac release (production target). It builds a static-stdlib x86_64 binary, smoke-tests it from the tarball in a clean container, signs it (ed25519), and uploads the `.tar.gz` + `.tar.gz.sig` to the release in `devzhk/Rubien`. For `v0.6.3` only, it also uploads them to the compatibility release in `devzhk/Rubien-releases`. To re-run manually:
 
 ```bash
 gh workflow run linux-cli-release.yml -f tag=vX.Y.Z
 gh run watch
 ```
 
-**Required CI secrets** (private source repo → Settings → Secrets and variables → Actions):
-- `RELEASES_UPLOAD_TOKEN` — fine-grained PAT with **Contents: Read and write** on `devzhk/Rubien-releases`.
+**Required CI secrets** (`devzhk/Rubien` → Settings → Secrets and variables → Actions):
+- `RELEASES_UPLOAD_TOKEN` — needed only to upload the `v0.6.3` compatibility bridge; fine-grained PAT with **Contents: Read and write** on `devzhk/Rubien-releases`. Keep it available for a possible bridge-workflow rerun.
 - `RUBIEN_CLI_SIGNING_KEY` — the dedicated **ed25519 private key (PEM)** that signs the tarball (public key is compiled into `rubien-cli`; `self-update` verifies it). Generate per Phase F1. **Back it up like the Sparkle key — losing/rotating it breaks `self-update` for shipped binaries.**
+
+If the 0.6.3 bridge step fails, fix its credential/release error and rerun
+`gh workflow run linux-cli-release.yml -f tag=v0.6.3`; both uploads use
+`--clobber`, and the workflow normalizes the bridge to a published, non-preview
+latest release after its signed assets are present.
 
 ## Publish the MCP server to npm (after the release is live)
 
@@ -358,10 +423,10 @@ Avoid losing both anchors simultaneously by storing them in independent failure 
 - `VERSION` — marketing version string, becomes `CFBundleShortVersionString`. Use SemVer `0.x` while in alpha and advance to `1.0.0` for the first stable release.
 - `BUILD.txt` — monotonic build counter, becomes `CFBundleVersion`. Sparkle uses this counter—not the marketing version—to decide whether an update is newer. Named with the `.txt` extension because APFS is case-insensitive by default and a bare `BUILD` file would alias the `build/` output directory.
 - `.sparkle-public-key` — gitignored; base64 EdDSA public key (private key in Keychain + backups).
-- `Docs/appcast.xml` — production Sparkle feed (served by GitHub Pages from the private repo; its `<enclosure>` DMG URLs point at the public `devzhk/Rubien-releases` repo).
+- `Docs/appcast.xml` — production Sparkle feed served by GitHub Pages. Historical enclosures remain on `devzhk/Rubien-releases`; new releases point at `devzhk/Rubien`.
 - `Docs/staging-appcast.xml` — staging feed for end-to-end tests.
 - `Docs/index.md` — GitHub Pages landing page.
-- `scripts/release.sh` — orchestrator. Reads (does not bump) `VERSION` + `BUILD.txt`, calls `build-app.sh`, notarizes, signs the appcast item, commits + pushes the appcast, tags the source on the private repo, and calls `gh release create --repo "$RELEASES_REPO"` to upload the DMG and browser-extension ZIP to the public releases repo.
+- `scripts/release.sh` — orchestrator. Reads (does not bump) `VERSION` + `BUILD.txt`, calls `build-app.sh`, notarizes, signs the appcast item, commits + pushes the appcast, tags the source, and calls `gh release create --repo "$RELEASES_REPO"` to upload the DMG and browser-extension ZIP to `devzhk/Rubien`. The dispatched Linux workflow creates the one-time 0.6.3 CLI compatibility bridge in the legacy repository.
 - `scripts/build-app.sh` — assembles + signs the `.app` bundle and the DMG, then packages a ready-to-unzip Chrome extension ZIP. Also usable standalone for dev builds.
   - The `embed_sparkle_framework` step inside this script manually copies `Sparkle.framework` into the bundle's `Contents/Frameworks/`. SwiftPM-via-`xcodebuild` does not auto-embed framework dependencies into the assembled bundle, so the script handles it explicitly before code-signing runs.
 - `scripts/lib/codesign.sh` — ordered Sparkle component signing. The order matters: `Installer.xpc → Downloader.xpc → Autoupdate → Updater.app → Sparkle.framework`. Never use `--deep`. `Downloader.xpc` needs `--preserve-metadata=entitlements`.

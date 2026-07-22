@@ -649,7 +649,7 @@ rubien-cli self-update [--check]
 
 - `--check` — report the latest available version as JSON and change nothing.
 
-On Linux, `self-update` downloads the latest `rubien-cli-*-linux-x86_64.tar.gz` and its `.sig` from the public releases repo, verifies the ed25519 signature with the public key compiled into the binary, and only then replaces the binary and its `*.resources` bundles (transactionally, with rollback on failure). It refuses to replace the binary with a build that is not strictly newer than the running one.
+On Linux, `self-update` downloads the latest `rubien-cli-*-linux-x86_64.tar.gz` and its `.sig` from the [Rubien GitHub release](https://github.com/devzhk/Rubien/releases/latest), verifies the ed25519 signature with the public key compiled into the binary, and only then replaces the binary and its `*.resources` bundles (transactionally, with rollback on failure). It refuses to replace the binary with a build that is not strictly newer than the running one.
 
 **Output** (`--check`):
 ```json

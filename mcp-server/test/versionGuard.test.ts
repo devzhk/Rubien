@@ -26,6 +26,8 @@ describe("evaluateCliProbe", () => {
     expect(r.message).toContain("build 18");
     expect(r.message).toContain(">= 28");
     expect(r.message).toMatch(/Update Rubien\.app|download a newer rubien-cli/i);
+    expect(r.message).toContain("github.com/devzhk/Rubien/releases");
+    expect(r.message).not.toContain("Rubien-releases");
     expect(r.message).not.toContain("RUBIEN_CLI override");
   });
 

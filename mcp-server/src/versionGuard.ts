@@ -18,7 +18,7 @@ export type GuardResult =
   | { ok: true; info?: CliVersion }
   | { ok: false; message: string };
 
-const RELEASES = "https://github.com/devzhk/Rubien-releases/releases";
+const RELEASES = "https://github.com/devzhk/Rubien/releases";
 const UPDATE_HINT = `Update Rubien.app (Mac) or download a newer rubien-cli from ${RELEASES} (Linux).`;
 
 /** When rubien-cli came from $RUBIEN_CLI, "update the app" is dead advice —

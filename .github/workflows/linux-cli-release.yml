@@ -8,6 +8,13 @@ on:
         required: true
         type: string
 
+permissions:
+  contents: write
+
+env:
+  CANONICAL_RELEASES_REPO: ${{ github.repository }}
+  LEGACY_RELEASES_REPO: devzhk/Rubien-releases
+
 jobs:
   build:
     name: Build + smoke + upload (x86_64)
@@ -81,11 +88,31 @@ jobs:
           rm -f /tmp/cli-signing.pem
           test "$(wc -c < "rubien-cli-${{ inputs.tag }}-linux-x86_64.tar.gz.sig")" -eq 64
 
-      - name: Upload to the public releases repo
+      - name: Upload to the canonical release
         env:
-          GH_TOKEN: ${{ secrets.RELEASES_UPLOAD_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "${{ inputs.tag }}" \
             "rubien-cli-${{ inputs.tag }}-linux-x86_64.tar.gz" \
             "rubien-cli-${{ inputs.tag }}-linux-x86_64.tar.gz.sig" \
-            --repo devzhk/Rubien-releases --clobber
+            --repo "$CANONICAL_RELEASES_REPO" --clobber
+
+      - name: Upload the 0.6.3 compatibility bridge
+        if: ${{ inputs.tag == 'v0.6.3' }}
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_UPLOAD_TOKEN }}
+        run: |
+          if ! gh release view "${{ inputs.tag }}" --repo "$LEGACY_RELEASES_REPO" >/dev/null 2>&1; then
+            gh release create "${{ inputs.tag }}" \
+              --repo "$LEGACY_RELEASES_REPO" \
+              --title "Rubien 0.6.3 — Compatibility bridge" \
+              --notes "Compatibility bridge for existing Linux CLI installations. Future releases are hosted at https://github.com/${CANONICAL_RELEASES_REPO}/releases." \
+              --draft
+          fi
+          gh release upload "${{ inputs.tag }}" \
+            "rubien-cli-${{ inputs.tag }}-linux-x86_64.tar.gz" \
+            "rubien-cli-${{ inputs.tag }}-linux-x86_64.tar.gz.sig" \
+            --repo "$LEGACY_RELEASES_REPO" --clobber
+          gh release edit "${{ inputs.tag }}" \
+            --repo "$LEGACY_RELEASES_REPO" \
+            --draft=false --prerelease=false --latest

@@ -8,7 +8,7 @@
 
 Rubien is a local research library with native readers for papers, books, and web sources. Its in-library assistant helps you discover new work, work through dense papers, connect ideas across sources, manage the library, and act through the tools available to your agent.
 
-- [Download Rubien](https://github.com/devzhk/Rubien-releases/releases/latest).
+- [Download Rubien](https://github.com/devzhk/Rubien/releases/latest).
   - Requires macOS 14.4+ and Apple Silicon; macOS 26.0 or later is recommended.
   - Requires Codex CLI or Claude Code CLI to drive the in-library assistant.
 - [Demo video](https://youtu.be/XW-xJaE8-8M)
