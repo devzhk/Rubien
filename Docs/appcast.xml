@@ -561,5 +561,20 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.6.3</title>
+            <description sparkle:format="plain-text"><![CDATA[• Prevent Codex Assistant history loading from blocking or delaying new interactive turns across app surfaces.
+• Consolidate official downloads in the public Rubien repository while preserving compatibility for existing Linux CLI installations.]]></description>
+            <pubDate>Wed, 22 Jul 2026 19:52:31 +0000</pubDate>
+            <sparkle:version>37</sparkle:version>
+            <sparkle:shortVersionString>0.6.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien/releases/download/v0.6.3/Rubien-0.6.3.dmg"
+                sparkle:edSignature="1EKDnxsKw3n/P+4rqHvAh7L8/iBfS+Y6b0Cqt0hclIsKIFQKVWEh7gCgm7SnTJVYdhpw41RLhxhTo9kCfk04AQ=="
+                length="16802625"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
