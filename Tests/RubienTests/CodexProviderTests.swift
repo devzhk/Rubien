@@ -1166,6 +1166,73 @@ final class CodexProviderTests: XCTestCase {
         try await assertEventuallyDead(historyPID, timeout: 3)
     }
 
+    func testInteractiveTurnPreemptsSupersededTranscriptStillRunningOnServer() async throws {
+        let workspace = try makeWorkspace()
+        let transcripts: [String: Any] = [
+            "TH-CACHED": ["turns": [["items": [
+                ["type": "userMessage", "content": [[
+                    "type": "text", "text": "Cached question",
+                ]]],
+                ["type": "agentMessage", "text": "Cached transcript"],
+            ]]]],
+            "TH-SLOW": ["turns": [["items": [
+                ["type": "userMessage", "content": [[
+                    "type": "text", "text": "Slow question",
+                ]]],
+                ["type": "agentMessage", "text": "Slow transcript"],
+            ]]]],
+        ]
+        try writeConfig([
+            "threads": [[
+                "id": "TH-CACHED", "preview": "Cached transcript",
+                "updatedAt": 1_700_000_200,
+            ]],
+            "transcripts": transcripts,
+        ], into: workspace)
+        let provider = CodexProvider(
+            executableOverride: fakeServerPath,
+            requestTimeout: 2,
+            historyTimeout: 10)
+        defer { provider.shutdown() }
+
+        let primed = await provider.recentSessionsResult(
+            workspaceURL: workspace, limit: 1, referenceID: nil)
+        XCTAssertEqual(primed.sessions.map(\.id), ["TH-CACHED"],
+            "the History projection must prime the transcript cache")
+
+        try writeConfig([
+            "threadReadDelayOnceMs": 5_000,
+            "transcripts": transcripts,
+            "assistantText": "orphaned History work was preempted",
+        ], into: workspace)
+        let slowHistoryTask = Task {
+            await provider.sessionTranscript(
+                sessionID: "TH-SLOW", workspaceURL: workspace)
+        }
+        try await waitForObserved(in: workspace, timeout: 3) { observed in
+            (observed["threadReadIds"] as? [String]) == ["TH-CACHED", "TH-SLOW"]
+        }
+        let historyPID = pid_t(try XCTUnwrap(
+            try readObserved(in: workspace)["pid"] as? Int))
+
+        let cachedAgain = await provider.sessionTranscript(
+            sessionID: "TH-CACHED", workspaceURL: workspace)
+        let supersededHistory = await slowHistoryTask.value
+        XCTAssertEqual(cachedAgain.count, 2)
+        XCTAssertTrue(supersededHistory.isEmpty)
+
+        let events = try await collectAllEvents(
+            provider.send(turn: turn(workspace: workspace)), timeout: 4)
+        let turnPID = pid_t(try XCTUnwrap(
+            try readObserved(in: workspace)["pid"] as? Int))
+
+        XCTAssertTrue(events.contains(.assistantMessageCompleted(
+            text: "orphaned History work was preempted")))
+        XCTAssertNotEqual(turnPID, historyPID,
+            "a turn must replace a server still executing a superseded History RPC")
+        try await assertEventuallyDead(historyPID, timeout: 3)
+    }
+
     func testInteractiveTurnPreemptsHistoryOwnedColdInitialize() async throws {
         let workspace = try makeWorkspace()
         try writeConfig([

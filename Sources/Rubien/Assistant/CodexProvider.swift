@@ -568,6 +568,10 @@ private actor CodexAppServerConnection {
         let stderr = StderrRingBuffer()
         var nextRequestID = 1
         var pending: [Int: PendingRequest] = [:]
+        /// History waiters Rubien superseded while their RPCs may still be executing
+        /// inside Codex. The response clears the marker; an interactive turn replaces
+        /// the server while any marker remains because JSON-RPC offers no cancellation.
+        var supersededHistoryRequestIDs: Set<Int> = []
         /// The thread the CURRENT conversation runs on — lets an in-sitting follow-up
         /// skip `thread/resume` (the thread is already live in this server).
         var activeThreadID: String?
@@ -1300,8 +1304,11 @@ private actor CodexAppServerConnection {
 
         switch inbound {
         case .response(let id, let result, let error):
-            guard case .number(let requestID) = id,
-                  let waiter = srv.pending.removeValue(forKey: requestID)
+            guard case .number(let requestID) = id else { return }
+            if srv.supersededHistoryRequestIDs.remove(requestID) != nil {
+                return
+            }
+            guard let waiter = srv.pending.removeValue(forKey: requestID)
             else { return }  // a response we never asked for / already timed out
             waiter.timeoutTask.cancel()
             if let error {
@@ -1511,15 +1518,16 @@ private actor CodexAppServerConnection {
     private var historyLookupGeneration = 0
 
     /// Supersede best-effort History work before admitting an interactive turn. A
-    /// pending History RPC cannot be cancelled server-side, so its stdio process must
-    /// be replaced; completed History queries leave no pending marker and retain the
-    /// normal long-lived-server reuse path.
+    /// History RPC cannot be cancelled server-side, so its stdio process must be
+    /// replaced while it is pending OR while Codex is still executing a request whose
+    /// Rubien waiter was superseded. Completed queries retain normal server reuse.
     private func prioritizeInteractiveTurn() {
         historyLookupGeneration &+= 1
         guard let srv = server,
               srv.pending.values.contains(where: \.isHistory)
+                || !srv.supersededHistoryRequestIDs.isEmpty
         else { return }
-        logger.info("interactive turn is replacing a codex server with pending History work")
+        logger.info("interactive turn is replacing a codex server with unfinished History work")
         killServer(srv)
     }
 
@@ -1537,6 +1545,7 @@ private actor CodexAppServerConnection {
             }
             for requestID in requestIDs {
                 guard let request = srv.pending.removeValue(forKey: requestID) else { continue }
+                srv.supersededHistoryRequestIDs.insert(requestID)
                 request.timeoutTask.cancel()
                 request.continuation.resume(returning: .failure(.historySuperseded))
             }
