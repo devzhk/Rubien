@@ -524,7 +524,7 @@ final class CodexProviderTests: XCTestCase {
         await registry.shutdownAll()
     }
 
-    func testInteractiveSharedProviderCannotDisplaceAnotherSurfaceTurn() async throws {
+    func testInteractiveSharedProvidersRunDifferentConversationsConcurrently() async throws {
         let workspace = try makeWorkspace()
         try writeConfig(["hang": true], into: workspace)
         let registry = CodexSharedConnectionRegistry()
@@ -543,18 +543,13 @@ final class CodexProviderTests: XCTestCase {
             ($0["turnStarts"] as? Int) == 1
         }
 
-        let started = Date()
-        let readerEvents = try await collectAllEvents(
-            reader.send(turn: turn(workspace: workspace)), timeout: 2)
-
-        XCTAssertLessThan(Date().timeIntervalSince(started), 1)
-        XCTAssertTrue(readerEvents.contains { event in
-            if case .providerNotice(let text) = event { return text.contains("busy") }
-            return false
-        })
-        XCTAssertEqual(readerEvents.turnCompletion?.outcome, .failed)
-        XCTAssertEqual(try readObserved(in: workspace)["turnStarts"] as? Int, 1,
-            "a reader must not replace Home's active Codex turn")
+        let readerEvents = Task {
+            try await collectAllEvents(
+                reader.send(turn: turn(workspace: workspace)), timeout: 8)
+        }
+        try await waitForObserved(in: workspace, timeout: 5) {
+            ($0["turnStarts"] as? Int) == 2
+        }
 
         let historyStarted = Date()
         let history = await reader.recentSessionsResult(
@@ -564,9 +559,261 @@ final class CodexProviderTests: XCTestCase {
             "History must fail fast while another surface owns Codex")
 
         home.cancel()
+        reader.cancel()
         _ = try await homeEvents.value
+        _ = try await readerEvents.value
         home.shutdown()
         reader.shutdown()
+        await registry.shutdownAll()
+    }
+
+    func testConcurrentTurnsKeepConversationEventsIsolated() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "deltas": ["streaming {threadId}"],
+            "completionDelayMs": 500,
+            "assistantText": "answer for {threadId}",
+        ], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let first = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+        let second = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+        defer {
+            first.shutdown()
+            second.shutdown()
+        }
+
+        let firstEvents = Task {
+            try await collectAllEvents(
+                first.send(turn: turn(workspace: workspace)), timeout: 8)
+        }
+        try await waitForObserved(in: workspace, timeout: 5) {
+            ($0["turnStarts"] as? Int) == 1
+        }
+        let secondEvents = Task {
+            try await collectAllEvents(
+                second.send(turn: turn(workspace: workspace)), timeout: 8)
+        }
+        try await waitForObserved(in: workspace, timeout: 5) {
+            ($0["turnStarts"] as? Int) == 2
+        }
+
+        let firstResult = try await firstEvents.value
+        let secondResult = try await secondEvents.value
+
+        XCTAssertEqual(firstResult.sessionIDs, ["TH-1"])
+        XCTAssertEqual(secondResult.sessionIDs, ["TH-2"])
+        XCTAssertTrue(firstResult.contains(
+            .assistantMessageCompleted(text: "answer for TH-1")))
+        XCTAssertTrue(secondResult.contains(
+            .assistantMessageCompleted(text: "answer for TH-2")))
+        XCTAssertTrue(firstResult.contains(.assistantDelta(text: "streaming TH-1")))
+        XCTAssertTrue(secondResult.contains(.assistantDelta(text: "streaming TH-2")))
+        XCTAssertFalse(firstResult.contains(.assistantDelta(text: "streaming TH-2")))
+        XCTAssertFalse(secondResult.contains(.assistantDelta(text: "streaming TH-1")))
+        XCTAssertFalse(firstResult.contains(
+            .assistantMessageCompleted(text: "answer for TH-2")))
+        XCTAssertFalse(secondResult.contains(
+            .assistantMessageCompleted(text: "answer for TH-1")))
+
+        await registry.shutdownAll()
+    }
+
+    func testConcurrentApprovalsAreAnsweredByTheirOwningConversation() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "approval": [
+                "reason": "Approve {threadId}?",
+                "command": "touch concurrent",
+            ],
+            "assistantText": "done {threadId}",
+        ], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let first = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+        let second = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+        defer {
+            first.shutdown()
+            second.shutdown()
+        }
+        let firstApproval = LockedApprovalID()
+        let secondApproval = LockedApprovalID()
+
+        let firstEvents = Task {
+            try await collectAllEvents(
+                first.send(turn: turn(workspace: workspace)), timeout: 8
+            ) { event in
+                if case .approvalRequested(let id, _, _) = event {
+                    firstApproval.store(id)
+                }
+            }
+        }
+        _ = try await waitForApprovalID(firstApproval)
+        let secondEvents = Task {
+            try await collectAllEvents(
+                second.send(turn: turn(workspace: workspace)), timeout: 8
+            ) { event in
+                if case .approvalRequested(let id, _, _) = event {
+                    secondApproval.store(id)
+                }
+            }
+        }
+        _ = try await waitForApprovalID(secondApproval)
+
+        first.respondToApproval(id: try XCTUnwrap(firstApproval.value), .allowOnce)
+        second.respondToApproval(id: try XCTUnwrap(secondApproval.value), .deny)
+        let firstResult = try await firstEvents.value
+        let secondResult = try await secondEvents.value
+
+        XCTAssertEqual(firstResult.approvalSummaries, ["Approve TH-1?"])
+        XCTAssertEqual(secondResult.approvalSummaries, ["Approve TH-2?"])
+        let approvals = try XCTUnwrap(
+            try readObserved(in: workspace)["approvalsByThread"]
+                as? [String: [String: Any]]
+        )
+        XCTAssertEqual(approvals["TH-1"]?["decision"] as? String, "accept")
+        XCTAssertEqual(approvals["TH-2"]?["decision"] as? String, "decline")
+
+        await registry.shutdownAll()
+    }
+
+    func testCancellingOneConcurrentTurnDoesNotInterruptAnother() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["deltas": ["first"], "hang": true], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let first = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+        let second = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+        defer {
+            first.shutdown()
+            second.shutdown()
+        }
+
+        let firstEvents = Task {
+            try await collectAllEvents(
+                first.send(turn: turn(workspace: workspace)), timeout: 8)
+        }
+        try await waitForObserved(in: workspace, timeout: 5) {
+            ($0["turnStarts"] as? Int) == 1
+        }
+        try writeConfig([
+            "completionDelayMs": 400,
+            "assistantText": "second completed",
+        ], into: workspace)
+        let secondEvents = Task {
+            try await collectAllEvents(
+                second.send(turn: turn(workspace: workspace)), timeout: 8)
+        }
+        try await waitForObserved(in: workspace, timeout: 5) {
+            ($0["turnStarts"] as? Int) == 2
+        }
+
+        first.cancel()
+        let firstResult = try await firstEvents.value
+        let secondResult = try await secondEvents.value
+
+        XCTAssertEqual(firstResult.turnCompletion?.outcome, .interrupted)
+        XCTAssertEqual(secondResult.turnCompletion?.outcome, .succeeded)
+        XCTAssertTrue(secondResult.contains(
+            .assistantMessageCompleted(text: "second completed")))
+        XCTAssertEqual(try readObserved(in: workspace)["interrupts"] as? Int, 1)
+
+        await registry.shutdownAll()
+    }
+
+    func testConcurrentReadOnlyStartsJoinOneServerAfterIsolationProbe() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "mcpListDelayMs": 350,
+            "assistantText": "scheduled {threadId}",
+        ], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let first = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+        let second = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+        defer {
+            first.shutdown()
+            second.shutdown()
+        }
+
+        async let firstEvents = collectAllEvents(
+            first.send(turn: turn(
+                workspace: workspace,
+                executionMode: .scheduled)),
+            timeout: 8)
+        async let secondEvents = collectAllEvents(
+            second.send(turn: turn(
+                workspace: workspace,
+                executionMode: .scheduled)),
+            timeout: 8)
+        let results = try await [firstEvents, secondEvents]
+
+        XCTAssertTrue(results.allSatisfy {
+            $0.turnCompletion?.outcome == .succeeded
+        })
+        XCTAssertEqual(try readObserved(in: workspace)["turnStarts"] as? Int, 2,
+            "both turns must share the one server installed after the async probe")
+
+        await registry.shutdownAll()
+    }
+
+    func testFifthCompatibleConversationQueuesUntilCapacityOpens() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["deltas": ["holding {threadId}"], "hang": true], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let providers = (0..<5).map { _ in
+            CodexProvider(
+                executableOverride: fakeServerPath,
+                sharedConnectionRegistry: registry)
+        }
+        defer { providers.forEach { $0.shutdown() } }
+        var tasks: [Task<[AgentEvent], Error>] = []
+
+        for provider in providers.prefix(4) {
+            tasks.append(Task {
+                try await collectAllEvents(
+                    provider.send(turn: turn(workspace: workspace)), timeout: 10)
+            })
+        }
+        try await waitForObserved(in: workspace, timeout: 5) {
+            ($0["turnStarts"] as? Int) == 4
+        }
+
+        let fifth = Task {
+            try await collectAllEvents(
+                providers[4].send(turn: turn(workspace: workspace)), timeout: 10)
+        }
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(try readObserved(in: workspace)["turnStarts"] as? Int, 4)
+
+        try writeConfig(["assistantText": "fifth completed"], into: workspace)
+        providers[0].cancel()
+        let fifthEvents = try await fifth.value
+        XCTAssertTrue(fifthEvents.contains(
+            .providerNotice("Waiting for an available Codex conversation slot.")))
+        XCTAssertTrue(fifthEvents.contains(
+            .assistantMessageCompleted(text: "fifth completed")))
+
+        for provider in providers.dropFirst().prefix(3) {
+            provider.cancel()
+        }
+        for task in tasks {
+            _ = try await task.value
+        }
+        XCTAssertEqual(try readObserved(in: workspace)["turnStarts"] as? Int, 5)
+
         await registry.shutdownAll()
     }
 
@@ -1010,6 +1257,54 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertNil(observed["protocolViolation"],
                      "a thread/start reached the server before initialized — handshake gate failed")
         XCTAssertEqual(observed["initialized"] as? Bool, true)
+    }
+
+    func testRapidSameWrapperSendsKeepOnlyTheNewestSuccessor() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "initDelayMs": 500,
+            "assistantText": "newest turn",
+        ], into: workspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        let firstStream = provider.send(
+            turn: turn(workspace: workspace, prompt: "first"))
+        let first = Task {
+            try await collectAllEvents(
+                firstStream, timeout: 5)
+        }
+        try await waitForObserved(in: workspace, timeout: 3) {
+            $0["pid"] is Int && $0["initialized"] == nil
+        }
+        let secondStream = provider.send(
+            turn: turn(workspace: workspace, prompt: "second"))
+        let second = Task {
+            try await collectAllEvents(
+                secondStream, timeout: 5)
+        }
+        let thirdStream = provider.send(
+            turn: turn(workspace: workspace, prompt: "third"))
+        let third = Task {
+            try await collectAllEvents(
+                thirdStream, timeout: 5)
+        }
+
+        let firstResult = try await first.value
+        let secondResult = try await second.value
+        let thirdResult = try await third.value
+
+        XCTAssertFalse(firstResult.contains {
+            if case .assistantMessageCompleted = $0 { return true }
+            return false
+        })
+        XCTAssertFalse(secondResult.contains {
+            if case .assistantMessageCompleted = $0 { return true }
+            return false
+        })
+        XCTAssertTrue(thirdResult.contains(
+            .assistantMessageCompleted(text: "newest turn")))
+        XCTAssertEqual(try readObserved(in: workspace)["turnStarts"] as? Int, 1)
     }
 
     func testHistoryDeadlineBoundsJoiningAnInteractiveInitialize() async throws {
@@ -2313,6 +2608,20 @@ private extension Array where Element == AgentEvent {
             if case .turnCompleted(let completion) = event { return completion }
         }
         return nil
+    }
+
+    var sessionIDs: [String] {
+        compactMap {
+            if case .sessionStarted(let sessionID) = $0 { return sessionID }
+            return nil
+        }
+    }
+
+    var approvalSummaries: [String] {
+        compactMap {
+            if case .approvalRequested(_, _, let summary) = $0 { return summary }
+            return nil
+        }
     }
 }
 

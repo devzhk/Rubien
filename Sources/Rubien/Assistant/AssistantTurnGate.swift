@@ -3,16 +3,14 @@ import Foundation
 // MARK: - Turn serialization across windows (§4.1)
 //
 // The PDF reader and the web reader can be open on the SAME reference at once, and
-// both sidebars can drive the same provider session. Two turns that `--resume` the
-// same session id concurrently **fork the provider's session file** — the classic
-// claude-code-chat footgun. Codex has a second constraint: interactive windows share
-// one app-server connection, whose notification parser admits one active turn. This
-// process-wide actor is the single serialization point: Claude claims its resumed
-// session; Codex claims its shared runtime. A conflicting window is told it is busy
-// instead of corrupting history or displacing the live turn.
+// both sidebars can drive the same provider session. Two turns that resume the same
+// session concurrently can fork or reorder its history. This process-wide actor
+// serializes each resumed provider session while allowing independent conversations
+// to run concurrently.
 //
-// A brand-new Claude conversation (`resumeSessionID == nil`) has no id to fork yet,
-// so it remains unkeyed. A fresh Codex conversation still claims the shared runtime.
+// A brand-new conversation (`resumeSessionID == nil`) has no provider id to conflict
+// with yet, so it remains unkeyed. Each provider wrapper still serializes its own
+// early sends before the provider publishes that id.
 
 actor AssistantTurnGate {
 
@@ -25,8 +23,6 @@ actor AssistantTurnGate {
         let sessionID: String
     }
 
-    private static let codexRuntimeID = "rubien:shared-interactive-runtime"
-
     private var busy: Set<SessionKey> = []
 
     init() {}
@@ -35,7 +31,7 @@ actor AssistantTurnGate {
     ///
     /// - Returns: `true` when claimed (the caller must `release` when the turn ends),
     ///   `false` when another turn already holds it (busy in another window). A `nil`
-    ///   `sessionID` is unkeyed for Claude; Codex still claims its shared runtime.
+    ///   `sessionID` is unkeyed for either provider.
     func tryAcquire(provider: AgentProviderKind, sessionID: String?) -> Bool {
         guard let key = key(provider: provider, sessionID: sessionID) else { return true }
         if busy.contains(key) { return false }
@@ -61,9 +57,6 @@ actor AssistantTurnGate {
         provider: AgentProviderKind,
         sessionID: String?
     ) -> SessionKey? {
-        if provider == .codex {
-            return SessionKey(provider: provider, sessionID: Self.codexRuntimeID)
-        }
         guard let sessionID, !sessionID.isEmpty else { return nil }
         return SessionKey(provider: provider, sessionID: sessionID)
     }

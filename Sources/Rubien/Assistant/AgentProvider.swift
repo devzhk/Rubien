@@ -541,9 +541,10 @@ enum ReferenceAttribution {
     }
 }
 
-/// The engine a chat sidebar drives. One instance per provider kind; a turn is one
-/// subprocess (D3). Serialization across windows is the caller's job via
-/// `AssistantTurnGate`.
+/// The engine a chat sidebar drives. Each sidebar owns a provider wrapper: Claude
+/// launches one subprocess per turn, while Codex wrappers multiplex independent
+/// conversations over an app-lifetime app-server. `AssistantTurnGate` serializes
+/// only concurrent resumes of the same provider session.
 protocol AgentProvider: Sendable {
     var kind: AgentProviderKind { get }
 

@@ -134,6 +134,11 @@ final class CodexProvider: AgentProvider {
                 Task { await connection.interruptIfCurrent(token: token) }
             }
             Task {
+                guard turnTokens.current == token else {
+                    continuation.finish()
+                    await identityObserver?.close()
+                    return
+                }
                 await connection.startTurn(
                     token: token, ownerID: ownerID,
                     request: turn, continuation: continuation,
@@ -621,19 +626,6 @@ private actor CodexRuntimeBroker {
 
     // MARK: Long-lived server state
 
-    /// Every option fixed when `codex app-server` starts. Turns can reuse a server
-    /// only when this snapshot matches; History may explicitly reuse any live one.
-    private struct SpawnConfiguration: Equatable {
-        let webAccess: Bool
-        let loadUserTools: Bool
-        let readOnlyLibrary: Bool
-
-        /// A fresh History-only server uses the normal web default and isolated Apps
-        /// posture. If a turn follows with different settings it will respawn once.
-        static let historyDefault = SpawnConfiguration(
-            webAccess: true, loadUserTools: false, readOnlyLibrary: false)
-    }
-
     private struct PendingRequest {
         let continuation: CheckedContinuation<
             Result<[String: Any], RequestFailure>, Never
@@ -648,7 +640,7 @@ private actor CodexRuntimeBroker {
     private final class Server {
         let process: SpawnedAgentProcess
         let generation: Int
-        let spawnConfiguration: SpawnConfiguration
+        let spawnConfiguration: CodexRuntimeProfile
         let stderr = StderrRingBuffer()
         var nextRequestID = 1
         var pending: [Int: PendingRequest] = [:]
@@ -656,9 +648,9 @@ private actor CodexRuntimeBroker {
         /// inside Codex. The response clears the marker; an interactive turn replaces
         /// the server while any marker remains because JSON-RPC offers no cancellation.
         var supersededHistoryRequestIDs: Set<Int> = []
-        /// The thread the CURRENT conversation runs on — lets an in-sitting follow-up
-        /// skip `thread/resume` (the thread is already live in this server).
-        var activeThreadID: String?
+        /// Threads already loaded in this server. In-sitting follow-ups can skip
+        /// `thread/resume` while unrelated loaded threads run concurrently.
+        var loadedThreadIDs: Set<String> = []
         /// The initialize/initialized handshake gate. Every caller — the spawner AND a
         /// fast-path reuser — awaits this before any thread/turn request, so a second
         /// turn entering during the spawner's `await initialize` can't send `thread/start`
@@ -672,7 +664,7 @@ private actor CodexRuntimeBroker {
 
         init(
             process: SpawnedAgentProcess, generation: Int,
-            spawnConfiguration: SpawnConfiguration
+            spawnConfiguration: CodexRuntimeProfile
         ) {
             self.process = process
             self.generation = generation
@@ -750,21 +742,28 @@ private actor CodexRuntimeBroker {
         let identityObserver: AgentIdentityObserver?
     }
 
-    private var turn: ActiveTurn?
+    private var activeTurnsByToken: [UUID: ActiveTurn] = [:]
+    private var activeTurnsByTurnID: [String: ActiveTurn] = [:]
     /// Admission policy is intentionally separate from process and JSON-RPC state.
     /// Payloads stay here while the pure scheduler owns only stable work identities.
     private var workScheduler = CodexWorkScheduler()
     private var scheduledPayloads: [UUID: QueuedTurn] = [:]
     /// A same-wrapper send can supersede its own still-starting turn. It waits
     /// outside the scheduled queue until the outgoing identity gate closes.
-    private var sameOwnerSuccessorToken: UUID?
+    private var sameOwnerSuccessorTokens: [UUID: UUID] = [:]
     private struct IdentityRetirement {
         let token: UUID
+        let ownerID: UUID
         let task: Task<Void, Never>
     }
     /// Admission may reopen before a completed stream's consumer submits its next
     /// turn, but no new provider work starts until this identity close has drained.
-    private var identityRetirement: IdentityRetirement?
+    private var identityRetirements: [UUID: IdentityRetirement] = [:]
+    private var ownerRetirementTokens: [UUID: UUID] = [:]
+    /// A turn can finish from a notification before its suspended start path
+    /// resumes. Keep its owner occupied across that gap so a same-wrapper send
+    /// becomes the successor instead of overlapping its own conversation.
+    private var ownerFinishingStartTokens: [UUID: UUID] = [:]
     /// Tokens interrupted BEFORE their `startTurn` ran (A1 — the consumer dropped the
     /// stream in the window between `send()` arming `onTermination` and the task).
     private var cancelledTokens: Set<UUID> = []
@@ -803,20 +802,14 @@ private actor CodexRuntimeBroker {
             await identityObserver?.close()
             return
         }
-        // A2: one turn at a time per connection. A second send from the SAME wrapper
-        // preserves the provider's supersession contract. A different production
-        // surface must never displace another window or scheduled run.
-        if let existing = turn, !existing.finished, existing.ownerID == ownerID {
-            logger.error("startTurn entered with an unfinished turn active — finishing the prior turn")
-            requestInterrupt(existing)
-            finishTurn(existing)
-            if workScheduler.activeTurn != nil {
-                if let replacedToken = sameOwnerSuccessorToken,
-                   let replaced = scheduledPayloads.removeValue(forKey: replacedToken) {
-                    replaced.continuation.finish()
-                    retire(replacedToken)
-                    await replaced.identityObserver?.close()
-                }
+        // A newer send can arrive while this owner's interrupted turn is still
+        // retiring and its chosen successor has not started. Keep only the newest
+        // successor; if retirement already completed, dispatch it immediately.
+        if let pendingToken = sameOwnerSuccessorTokens[ownerID] {
+            if pendingToken == token {
+                sameOwnerSuccessorTokens.removeValue(forKey: ownerID)
+            } else {
+                let replaced = scheduledPayloads.removeValue(forKey: pendingToken)
                 scheduledPayloads[token] = QueuedTurn(
                     token: token,
                     ownerID: ownerID,
@@ -824,10 +817,61 @@ private actor CodexRuntimeBroker {
                     continuation: continuation,
                     identityObserver: identityObserver
                 )
-                sameOwnerSuccessorToken = token
+                sameOwnerSuccessorTokens[ownerID] = token
+                if let replaced {
+                    replaced.continuation.finish()
+                    retire(pendingToken)
+                    await replaced.identityObserver?.close()
+                }
+                if ownerRetirementTokens[ownerID] == nil {
+                    dispatchSameOwnerSuccessorIfNeeded(ownerID: ownerID)
+                }
                 return
             }
         }
+        if ownerFinishingStartTokens[ownerID] != nil
+            || ownerRetirementTokens[ownerID] != nil {
+            scheduledPayloads[token] = QueuedTurn(
+                token: token,
+                ownerID: ownerID,
+                request: request,
+                continuation: continuation,
+                identityObserver: identityObserver
+            )
+            sameOwnerSuccessorTokens[ownerID] = token
+            return
+        }
+        // A second send from the SAME wrapper preserves the provider's supersession
+        // contract. Independent wrappers are separate conversations and may proceed.
+        if let existing = activeTurnsByToken.values.first(where: {
+            !$0.finished && $0.ownerID == ownerID
+        }) {
+            logger.error("startTurn entered with an unfinished turn active — finishing the prior turn")
+            requestInterrupt(existing)
+            finishTurn(existing)
+            if let replacedToken = sameOwnerSuccessorTokens[ownerID],
+               let replaced = scheduledPayloads.removeValue(forKey: replacedToken) {
+                replaced.continuation.finish()
+                retire(replacedToken)
+                await replaced.identityObserver?.close()
+            }
+            scheduledPayloads[token] = QueuedTurn(
+                token: token,
+                ownerID: ownerID,
+                request: request,
+                continuation: continuation,
+                identityObserver: identityObserver
+            )
+            sameOwnerSuccessorTokens[ownerID] = token
+            return
+        }
+        await joinIdentityRetirementIfNeeded(ownerID: ownerID)
+        let runtimeProfile = CodexRuntimeProfile(
+            webAccess: request.webAccess,
+            loadUserTools: request.loadUserTools,
+            readOnlyLibrary: request.executionMode == .scheduled,
+            workingDirectory: request.workspaceURL.standardizedFileURL.path
+        )
         let work = CodexScheduledWork(
             workID: token,
             purpose: request.executionMode == .scheduled
@@ -838,7 +882,8 @@ private actor CodexRuntimeBroker {
                 : .interactive(
                     ownerID: ownerID,
                     conversationID: request.conversationID,
-                    turnID: token)
+                    turnID: token),
+            runtimeProfile: runtimeProfile
         )
         switch workScheduler.requestTurn(work) {
         case .admitted:
@@ -852,26 +897,10 @@ private actor CodexRuntimeBroker {
                 identityObserver: identityObserver)
             continuation.yield(CodexProviderEvent(
                 event: .providerNotice(
-                    "Waiting for the active Codex conversation to finish."),
+                    "Waiting for an available Codex conversation slot."),
                 providerItemID: nil,
                 runtimeGeneration: nil
             ))
-            return
-        case .busy:
-            continuation.yield(CodexProviderEvent(
-                event: .providerNotice(
-                    "Codex is busy with another Rubien conversation. Try again when it finishes."),
-                providerItemID: nil,
-                runtimeGeneration: nil
-            ))
-            continuation.yield(CodexProviderEvent(
-                event: .turnCompleted(outcome: .failed, usage: nil),
-                providerItemID: nil,
-                runtimeGeneration: nil
-            ))
-            retire(token)
-            continuation.finish()
-            await identityObserver?.close()
             return
         case .metadataUnavailable:
             assertionFailure("turn admission returned metadata-only result")
@@ -883,7 +912,6 @@ private actor CodexRuntimeBroker {
         // A cold Settings/version/auth probe is disposable metadata. Admission
         // above reserves this turn first; cancellation then kills and reaps that
         // standalone process group before app-server can spawn.
-        await joinIdentityRetirementIfNeeded()
         await preemptAvailabilityProbeIfNeeded()
 
         // Cancellation can arrive while the actor is suspended above waiting for
@@ -894,7 +922,7 @@ private actor CodexRuntimeBroker {
             retire(token)
             continuation.finish()
             await identityObserver?.close()
-            dispatchReservedTurn(workScheduler.finishTurn(workID: token))
+            dispatchReservedTurns(workScheduler.finishTurn(workID: token))
             return
         }
 
@@ -910,17 +938,14 @@ private actor CodexRuntimeBroker {
             ownerID: ownerID,
             continuation: continuation,
             identityObserver: identityObserver)
-        turn = active
+        activeTurnsByToken[token] = active
         defer { markStartPathFinished(active) }
 
         // 1. Server (lazy spawn + handshake; reused across turns).
         let srv: Server
         do {
             srv = try await ensureServer(
-                configuration: SpawnConfiguration(
-                    webAccess: request.webAccess,
-                    loadUserTools: request.loadUserTools,
-                    readOnlyLibrary: request.executionMode == .scheduled),
+                configuration: runtimeProfile,
                 workspaceURL: request.workspaceURL)
         } catch let error as AgentProviderError {
             finishTurn(active, throwing: error)   // hard start failure — mirrors Claude
@@ -941,7 +966,7 @@ private actor CodexRuntimeBroker {
             let threadID: String
             var resolvedModel: String?
             if let resume = request.resumeSessionID, !resume.isEmpty {
-                if srv.activeThreadID == resume {
+                if srv.loadedThreadIDs.contains(resume) {
                     threadID = resume   // already live in this server — just turn/start
                 } else {
                     let result = try await sendRequest(srv, method: "thread/resume") { id in
@@ -968,7 +993,7 @@ private actor CodexRuntimeBroker {
                 resolvedModel = CodexAppServerProtocol.resolvedModel(fromThreadResponse: result)
             }
             guard stillCurrent(active) else { return }
-            srv.activeThreadID = threadID
+            srv.loadedThreadIDs.insert(threadID)
             active.threadID = threadID
             await active.identityObserver?.sessionStarted(
                 threadID,
@@ -1005,8 +1030,11 @@ private actor CodexRuntimeBroker {
             // response in case the response was resolved without the route fast-path.
             let turnID = active.turnID ?? (result["turn"] as? [String: Any])?["id"] as? String
             active.turnID = turnID
+            if let turnID, activeTurnsByToken[active.token] === active {
+                activeTurnsByTurnID[turnID] = active
+            }
             logger.info("codex turn started thread=\(threadID) turn=\(turnID ?? "?")")
-            if active.finished || turn !== active {
+            if active.finished || activeTurnsByToken[active.token] !== active {
                 // The stream ended / was superseded while starting (stop watchdog, A2) —
                 // don't leave the server-side turn running headless. A straggler
                 // `turn/completed` for it can't leak into the next turn: its `turnID`
@@ -1029,7 +1057,9 @@ private actor CodexRuntimeBroker {
     /// Pre-send guard (server/thread phases — nothing turn-shaped exists server-side
     /// yet): a superseded turn just stops; an interrupt-before-send ends the stream.
     private func stillCurrent(_ active: ActiveTurn) -> Bool {
-        guard let current = turn, current === active, !active.finished else { return false }
+        guard activeTurnsByToken[active.token] === active, !active.finished else {
+            return false
+        }
         if active.interruptRequested {
             finishTurn(active)
             return false
@@ -1059,23 +1089,32 @@ private actor CodexRuntimeBroker {
     private func finishTurn(_ active: ActiveTurn) {
         guard !active.finished else { return }
         active.finished = true
+        ownerFinishingStartTokens[active.ownerID] = active.token
         cancelledTokens.remove(active.token)
         retire(active.token)
-        if turn === active { turn = nil }
+        removeActiveTurn(active)
         finalizeFinishedTurnIfReady(active)
-        // A straggler notification for this now-finished turn can't reach a LATER turn:
-        // the positive turn-id filter in `route` accepts only the current turn's id
-        // (review #2) — no stale-id set to accumulate.
     }
 
     private func finishTurn(_ active: ActiveTurn, throwing error: Error) {
         guard !active.finished else { return }
         active.finished = true
         active.finishError = error
+        ownerFinishingStartTokens[active.ownerID] = active.token
         cancelledTokens.remove(active.token)
         retire(active.token)
-        if turn === active { turn = nil }
+        removeActiveTurn(active)
         finalizeFinishedTurnIfReady(active)
+    }
+
+    private func removeActiveTurn(_ active: ActiveTurn) {
+        if activeTurnsByToken[active.token] === active {
+            activeTurnsByToken.removeValue(forKey: active.token)
+        }
+        if let turnID = active.turnID,
+           activeTurnsByTurnID[turnID] === active {
+            activeTurnsByTurnID.removeValue(forKey: turnID)
+        }
     }
 
     private func markStartPathFinished(_ active: ActiveTurn) {
@@ -1093,15 +1132,25 @@ private actor CodexRuntimeBroker {
               !active.retirementScheduled else { return }
         active.retirementScheduled = true
         let reserved = workScheduler.finishTurn(workID: active.token)
+        // Scheduler reservations belong to independent conversations and need not
+        // wait for this owner's durable identity channel to close. Same-owner
+        // successors remain gated below by `ownerRetirementTokens`.
+        dispatchReservedTurns(reserved)
         let retirementTask = Task<Void, Never> {
             if let identityObserver = active.identityObserver {
                 await identityObserver.close()
             }
         }
-        identityRetirement = IdentityRetirement(
+        let retirement = IdentityRetirement(
             token: active.token,
+            ownerID: active.ownerID,
             task: retirementTask
         )
+        identityRetirements[active.token] = retirement
+        ownerRetirementTokens[active.ownerID] = active.token
+        if ownerFinishingStartTokens[active.ownerID] == active.token {
+            ownerFinishingStartTokens.removeValue(forKey: active.ownerID)
+        }
         if let error = active.finishError {
             active.continuation.finish(throwing: error)
         } else {
@@ -1110,38 +1159,31 @@ private actor CodexRuntimeBroker {
         Task { [weak self] in
             await retirementTask.value
             await self?.completeTurnRetirement(
-                token: active.token,
-                reserved: reserved
+                token: active.token
             )
         }
     }
 
-    private func joinIdentityRetirementIfNeeded() async {
-        while let retirement = identityRetirement {
+    private func joinIdentityRetirementIfNeeded(ownerID: UUID) async {
+        while let token = ownerRetirementTokens[ownerID],
+              let retirement = identityRetirements[token] {
             await retirement.task.value
-            if identityRetirement?.token == retirement.token {
-                identityRetirement = nil
-            }
+            completeTurnRetirement(token: token)
         }
     }
 
-    private func completeTurnRetirement(
-        token: UUID,
-        reserved: CodexScheduledWork?
-    ) {
-        if identityRetirement?.token == token {
-            identityRetirement = nil
+    private func completeTurnRetirement(token: UUID) {
+        guard let retirement = identityRetirements.removeValue(forKey: token)
+        else { return }
+        if ownerRetirementTokens[retirement.ownerID] == token {
+            ownerRetirementTokens.removeValue(forKey: retirement.ownerID)
         }
-        dispatchReservedTurn(reserved)
-        if reserved == nil {
-            dispatchSameOwnerSuccessorIfNeeded()
-        }
+        dispatchSameOwnerSuccessorIfNeeded(ownerID: retirement.ownerID)
     }
 
-    private func dispatchSameOwnerSuccessorIfNeeded() {
-        guard let token = sameOwnerSuccessorToken,
+    private func dispatchSameOwnerSuccessorIfNeeded(ownerID: UUID) {
+        guard let token = sameOwnerSuccessorTokens[ownerID],
               let next = scheduledPayloads[token] else { return }
-        sameOwnerSuccessorToken = nil
         Task { [weak self] in
             await self?.startTurn(
                 token: next.token,
@@ -1156,7 +1198,7 @@ private actor CodexRuntimeBroker {
     // MARK: External controls
 
     func respond(id: String, decision: ApprovalDecision, token: UUID) {
-        guard let active = turn, active.token == token, !active.finished,
+        guard let active = activeTurnsByToken[token], !active.finished,
               let pendingApproval = active.pendingApprovals.removeValue(forKey: id),
               let srv = server
         else { return }
@@ -1168,30 +1210,25 @@ private actor CodexRuntimeBroker {
         ))
     }
 
-    func interruptCurrent() {
-        guard let active = turn, !active.finished else { return }
-        requestInterrupt(active)
-    }
-
     func interruptIfCurrent(token: UUID) {
-        if let active = turn, active.token == token {
+        if let active = activeTurnsByToken[token] {
             guard !active.finished else { return }
             requestInterrupt(active)
-        } else if sameOwnerSuccessorToken == token,
+        } else if let ownerID = sameOwnerSuccessorTokens.first(where: {
+            $0.value == token
+        })?.key,
                   let pending = scheduledPayloads.removeValue(forKey: token) {
-            sameOwnerSuccessorToken = nil
+            sameOwnerSuccessorTokens.removeValue(forKey: ownerID)
             pending.continuation.finish()
             retire(token)
             Task { await pending.identityObserver?.close() }
         } else if let pending = scheduledPayloads.removeValue(forKey: token) {
-            let priorReservation = workScheduler.reservedTurn?.workID
-            guard workScheduler.cancel(workID: token) else { return }
+            let cancellation = workScheduler.cancel(workID: token)
+            guard cancellation.didCancel else { return }
             pending.continuation.finish()
             retire(token)
             Task { await pending.identityObserver?.close() }
-            if workScheduler.reservedTurn?.workID != priorReservation {
-                dispatchReservedTurn(workScheduler.reservedTurn)
-            }
+            dispatchReservedTurns(cancellation.newlyReserved)
         } else if !retiredTokens.contains(token) {
             // A1: the turn hasn't registered yet (drop raced ahead of startTurn).
             cancelledTokens.insert(token)
@@ -1226,7 +1263,7 @@ private actor CodexRuntimeBroker {
     }
 
     private func forceFinishIfStuck(token: UUID) {
-        guard let active = turn, active.token == token, !active.finished else { return }
+        guard let active = activeTurnsByToken[token], !active.finished else { return }
         logger.error("turn/interrupt was not acknowledged — force-finishing the turn stream")
         finishTurn(active)
     }
@@ -1239,15 +1276,17 @@ private actor CodexRuntimeBroker {
         }
     }
 
-    private func dispatchReservedTurn(_ work: CodexScheduledWork?) {
-        guard !shutdownRequested, let work,
-              let next = scheduledPayloads[work.workID] else { return }
-        Task { [weak self] in
-            await self?.startTurn(
-                token: next.token, ownerID: next.ownerID,
-                request: next.request,
-                continuation: next.continuation,
-                identityObserver: next.identityObserver)
+    private func dispatchReservedTurns(_ works: [CodexScheduledWork]) {
+        guard !shutdownRequested else { return }
+        for work in works {
+            guard let next = scheduledPayloads[work.workID] else { continue }
+            Task { [weak self] in
+                await self?.startTurn(
+                    token: next.token, ownerID: next.ownerID,
+                    request: next.request,
+                    continuation: next.continuation,
+                    identityObserver: next.identityObserver)
+            }
         }
     }
 
@@ -1255,9 +1294,11 @@ private actor CodexRuntimeBroker {
     /// finished FIRST so the reader's EOF path sees a deliberate shutdown.
     func shutdown() async {
         shutdownRequested = true
-        if let token = sameOwnerSuccessorToken,
-           let pending = scheduledPayloads.removeValue(forKey: token) {
-            sameOwnerSuccessorToken = nil
+        let successorTokens = Array(sameOwnerSuccessorTokens.values)
+        sameOwnerSuccessorTokens.removeAll()
+        for token in successorTokens {
+            guard let pending = scheduledPayloads.removeValue(forKey: token)
+            else { continue }
             pending.continuation.finish()
             retire(token)
             await pending.identityObserver?.close()
@@ -1279,7 +1320,9 @@ private actor CodexRuntimeBroker {
             retire(pending.token)
             await pending.identityObserver?.close()
         }
-        if let active = turn { finishTurn(active) }
+        for active in Array(activeTurnsByToken.values) {
+            finishTurn(active)
+        }
         initializeRecovery?.task.cancel()
         shuttingDown = true
         guard let srv = server else { return }
@@ -1319,7 +1362,7 @@ private actor CodexRuntimeBroker {
     /// a fast-path reuser — awaits the handshake before returning, so a request can
     /// never hit an un-initialized server (review #1).
     private func ensureServer(
-        configuration: SpawnConfiguration,
+        configuration: CodexRuntimeProfile,
         workspaceURL: URL,
         reuseAnySpawnConfiguration: Bool = false,
         allowInitializeRetry: Bool = true,
@@ -1366,6 +1409,17 @@ private actor CodexRuntimeBroker {
                 throw RequestFailure.serverExited
             }
             guard !shutdownRequested else { throw RequestFailure.serverExited }
+            // Another compatible caller may have completed recovery and installed
+            // the replacement while this actor was suspended above.
+            if server != nil {
+                return try await ensureServer(
+                    configuration: configuration,
+                    workspaceURL: workspaceURL,
+                    reuseAnySpawnConfiguration: reuseAnySpawnConfiguration,
+                    allowInitializeRetry: allowInitializeRetry,
+                    requestTimeoutOverride: requestTimeoutOverride
+                )
+            }
         }
 
         guard let executable = CodexProvider.resolveExecutable(override: executableOverride) else {
@@ -1373,6 +1427,8 @@ private actor CodexRuntimeBroker {
         }
         let environment = CodexInvocation.environment(
             binaryDirectory: (executable as NSString).deletingLastPathComponent)
+        let processWorkingDirectory = configuration.workingDirectory
+            ?? workspaceURL.standardizedFileURL.path
         if cachedResolution == nil {
             cachedResolution = (path: executable, version: nil)
         }
@@ -1381,7 +1437,7 @@ private actor CodexRuntimeBroker {
             guard let names = await CodexInvocation.isolatedMCPServerNamesAsync(
                 executablePath: executable,
                 environment: environment,
-                workingDirectory: workspaceURL.path
+                workingDirectory: processWorkingDirectory
             ) else {
                 throw AgentProviderError.isolationUnavailable
             }
@@ -1390,6 +1446,18 @@ private actor CodexRuntimeBroker {
             disabledMCPServerNames = []
         }
         guard !shutdownRequested else { throw RequestFailure.serverExited }
+        // The read-only MCP catalog probe is asynchronous. A peer can install a
+        // server or begin crash recovery while it runs; join that owner instead of
+        // spawning a competing app-server and overwriting `server`.
+        if server != nil || initializeRecovery != nil {
+            return try await ensureServer(
+                configuration: configuration,
+                workspaceURL: workspaceURL,
+                reuseAnySpawnConfiguration: reuseAnySpawnConfiguration,
+                allowInitializeRetry: allowInitializeRetry,
+                requestTimeoutOverride: requestTimeoutOverride
+            )
+        }
         let arguments = CodexInvocation.arguments(
             rubienCLIPath: contentChannel?.cliURL.path,
             libraryRoot: contentChannel?.libraryRoot.path,
@@ -1403,7 +1471,7 @@ private actor CodexRuntimeBroker {
             executablePath: executable,
             arguments: arguments,
             environment: environment,
-            workingDirectory: workspaceURL.path)
+            workingDirectory: processWorkingDirectory)
         let srv = Server(
             process: process, generation: serverGeneration,
             spawnConfiguration: configuration)
@@ -1606,9 +1674,9 @@ private actor CodexRuntimeBroker {
         }
     }
 
-    /// The single inbound demux: decode ONCE, then route by frame kind (responses →
-    /// pending continuations; server requests → approvals or a conservative reply;
-    /// notifications → the active turn's parser/stream).
+    /// The single inbound demux: decode once, then route turn-scoped frames by their
+    /// protocol `turnId`/`threadId`. Independent conversations share one app-server
+    /// without sharing parsers, approvals, cancellation, or output streams.
     private func route(generation: Int, line: String) {
         guard let srv = server, srv.generation == generation else { return }  // stale reader
         guard let inbound = CodexAppServerProtocol.decodeInbound(line: line) else { return }
@@ -1629,9 +1697,12 @@ private actor CodexRuntimeBroker {
                 // Learn the turn id from the AUTHORITATIVE turn/start response, HERE,
                 // before the following notification lines are routed — so the positive
                 // filter below accepts exactly this turn (review #2).
-                if let active = turn, active.turnStartRequestID == requestID,
+                if let active = activeTurnsByToken.values.first(where: {
+                    $0.turnStartRequestID == requestID && !$0.finished
+                }),
                    let turnID = (result?["turn"] as? [String: Any])?["id"] as? String {
                     active.turnID = turnID
+                    activeTurnsByTurnID[turnID] = active
                 }
                 waiter.continuation.resume(returning: .success(result ?? [:]))
             }
@@ -1640,14 +1711,7 @@ private actor CodexRuntimeBroker {
             handleServerRequest(srv, id: id, method: method, params: params)
 
         case .notification(let method, let params):
-            guard let active = turn, !active.finished else { return }
-            // POSITIVE turn-id match (review #2): a notification tied to a turn is ours
-            // ONLY if its turnId equals the current turn's. A straggler from an old or
-            // abandoned turn (including one whose id we never learned, so `turnID` is
-            // still nil) is dropped — it can never finish or pollute the current stream.
-            // Thread-level notifications (no turnId, e.g. thread/started) pass through.
-            if let notificationTurnID = Self.turnID(inNotificationParams: params),
-               active.turnID != notificationTurnID {
+            guard let active = activeTurn(for: params), !active.finished else {
                 return
             }
             for parsed in active.parser.mapEnriched(
@@ -1670,6 +1734,26 @@ private actor CodexRuntimeBroker {
         return nil
     }
 
+    private static func threadID(inParams params: [String: Any]) -> String? {
+        if let id = params["threadId"] as? String, !id.isEmpty { return id }
+        if let thread = params["thread"] as? [String: Any],
+           let id = thread["id"] as? String, !id.isEmpty {
+            return id
+        }
+        return nil
+    }
+
+    private func activeTurn(for params: [String: Any]) -> ActiveTurn? {
+        if let turnID = Self.turnID(inNotificationParams: params) {
+            return activeTurnsByTurnID[turnID]
+        }
+        guard let threadID = Self.threadID(inParams: params) else { return nil }
+        let matches = activeTurnsByToken.values.filter {
+            !$0.finished && $0.threadID == threadID
+        }
+        return matches.count == 1 ? matches[0] : nil
+    }
+
     private func handleServerRequest(
         _ srv: Server, id: CodexRPCID, method: String, params: [String: Any]
     ) {
@@ -1681,7 +1765,7 @@ private actor CodexRuntimeBroker {
             return
         }
         let pendingApproval = CodexAppServerProtocol.pendingApproval(id: id, method: method, params: params)
-        guard let active = turn, !active.finished else {
+        guard let active = activeTurn(for: params), !active.finished else {
             // No live turn to ask (late/stray approval) — decline so nothing runs
             // un-reviewed and the server isn't left waiting.
             srv.process.writeLine(CodexAppServerProtocol.approvalResponse(
@@ -1715,14 +1799,19 @@ private actor CodexRuntimeBroker {
         // `hasExited`, so the A3 no-signal-after-reap invariant holds.
         failAllPending(srv, with: .serverExited)
         let process = srv.process
+        let affectedTurns = activeTurnsByToken.values.filter {
+            $0.runtimeGeneration == generation
+        }
         // A normal crash closes stdout just before exit. Give that tiny handoff a
         // chance to publish its real status, then always sweep the process group:
         // an already-exited leader can still have live MCP/helper children. Signal
         // before the nonblocking reap so the stable group id cannot be recycled.
-        try? await Task.sleep(for: .milliseconds(10))
-        process.signalGroup(SIGKILL)
+        // Install the recovery gate before the first suspension so a new turn
+        // cannot spawn beside this generation during the grace interval.
         let cleanupWait = Self.initializeCleanupWait
         let recovery = InitializeRecovery(token: UUID(), task: Task { [logger] in
+            try? await Task.sleep(for: .milliseconds(10))
+            process.signalGroup(SIGKILL)
             guard await process.wait(timeout: cleanupWait) != nil else {
                 logger.error("crashed codex app-server group did not disappear and reap within the bounded wait")
                 return false
@@ -1740,10 +1829,18 @@ private actor CodexRuntimeBroker {
         // blocks this connection from spawning over a possibly-live predecessor.
         let status = recovered ? await process.wait() : -1
 
-        if let active = turn, !active.finished, !shuttingDown {
-            emit(active, .providerNotice(
-                await AgentProcessExit.crashNotice(waitStatus: status, stderr: srv.stderr)))
-            finishTurn(active)
+        if !shuttingDown, !affectedTurns.isEmpty {
+            let notice = await AgentProcessExit.crashNotice(
+                waitStatus: status,
+                stderr: srv.stderr
+            )
+            for active in affectedTurns
+            where !active.finished
+                && activeTurnsByToken[active.token] === active
+                && active.runtimeGeneration == generation {
+                emit(active, .providerNotice(notice))
+                finishTurn(active)
+            }
         }
     }
 
@@ -1802,7 +1899,7 @@ private actor CodexRuntimeBroker {
         // A timed-out metadata request has proven this stdio server unhealthy.
         // Reset it so Retry gets a clean process instead of writing to the same
         // poisoned pipe. Never kill a server carrying a live interactive turn.
-        if resetServerOnTimeout, turn == nil {
+        if resetServerOnTimeout, activeTurnsByToken.isEmpty {
             logger.error("resetting wedged codex History app-server")
             killServer(srv)
         }
@@ -1829,7 +1926,8 @@ private actor CodexRuntimeBroker {
     /// Rubien waiter was superseded. Completed queries retain normal server reuse.
     private func prioritizeInteractiveTurn() {
         historyLookupGeneration &+= 1
-        guard let srv = server,
+        guard activeTurnsByToken.isEmpty,
+              let srv = server,
               srv.pending.values.contains(where: \.isHistory)
                 || !srv.supersededHistoryRequestIDs.isEmpty
         else { return }
@@ -2201,8 +2299,11 @@ private actor CodexRuntimeBroker {
             return HistoryLookup(value: nil, didTimeOut: false)
         }
         do {
+            let workingDirectory = workspaceURL.standardizedFileURL.path
             let srv = try await ensureServer(
-                configuration: .historyDefault,
+                configuration: .historyDefault(
+                    workingDirectory: workingDirectory
+                ),
                 workspaceURL: workspaceURL,
                 reuseAnySpawnConfiguration: true,
                 allowInitializeRetry: false,
@@ -2241,8 +2342,11 @@ private actor CodexRuntimeBroker {
         guard let lease = await beginMetadataWork(kind: .modelCatalog) else { return .unavailable }
         defer { finishMetadataWork(lease) }
         do {
+            let workingDirectory = workspaceURL.standardizedFileURL.path
             let srv = try await ensureServer(
-                configuration: .historyDefault,
+                configuration: .historyDefault(
+                    workingDirectory: workingDirectory
+                ),
                 workspaceURL: workspaceURL,
                 reuseAnySpawnConfiguration: true,
                 allowInitializeRetry: false,

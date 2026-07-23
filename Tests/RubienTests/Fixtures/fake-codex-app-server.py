@@ -3,9 +3,11 @@
 driving `CodexProviderTests` end-to-end WITHOUT the real binary (or a login).
 
 Long-lived like the real server: ONE process handles the initialize handshake and
-then any number of thread/turn requests. Behavior is configured per-TURN by a
-`fake-codex.json` file in the process cwd (the provider sets cwd = the turn's
-workspace; tests rewrite the file between sends). It:
+then any number of thread/turn requests. Each turn runs on its own worker so tests
+can exercise real app-server multiplexing while the main loop continues routing
+responses and interrupts. Behavior is configured per-TURN by a `fake-codex.json`
+file in the process cwd (the provider sets cwd = the turn's workspace; tests rewrite
+the file between sends). It:
 
   * answers `--version` (for `isAvailable()`),
   * records its argv (`fake-codex-argv.json`) so tests can assert the `--disable
@@ -18,18 +20,22 @@ workspace; tests rewrite the file between sends). It:
     response, raises an unknown server request, hangs until `turn/interrupt`, or
     exits non-zero after `turn/start` (crash path).
 
-Config keys (all optional): deltas[], assistantText (supports "{threadStarts}"),
+Config keys (all optional): deltas[], assistantText (supports "{threadStarts}",
+"{threadId}", and "{turnId}"), completionDelayMs,
 usageLast{...}, approval{reason,command,availableDecisions[]},
 mcpApproval{server,tool,mutation}, unknownRequest(bool),
 hang(bool), exitAfterTurnStart(int), models[] / modelListError (model/list).
+`mcpListDelayMs` delays the standalone `mcp list --json` isolation probe.
 History (3b-4): threads[] (thread/list data), searchHits[] (thread/search data,
 each {thread,snippet}), transcript{turns:[…]} (thread/read), and
 threadReadDelayOnceMs (delay the first read across respawns). All record params.
 """
 import json
 import os
+import queue
 import subprocess
 import sys
+import threading
 import time
 
 OBSERVED = {
@@ -39,11 +45,14 @@ OBSERVED = {
     "turnStarts": 0,
     "interrupts": 0,
 }
+OUTPUT_LOCK = threading.Lock()
+OBSERVED_LOCK = threading.RLock()
 
 
 def emit(obj):
-    sys.stdout.write(json.dumps(obj) + "\n")
-    sys.stdout.flush()
+    with OUTPUT_LOCK:
+        sys.stdout.write(json.dumps(obj) + "\n")
+        sys.stdout.flush()
 
 
 def notify(method, params):
@@ -66,16 +75,33 @@ def _atomic_write_json(filename, obj):
 
 
 def record(**kv):
-    OBSERVED.update(kv)
-    try:
-        _atomic_write_json("fake-codex-observed.json", OBSERVED)
-    except OSError:
-        pass
+    with OBSERVED_LOCK:
+        OBSERVED.update(kv)
+        try:
+            _atomic_write_json("fake-codex-observed.json", OBSERVED)
+        except OSError:
+            pass
 
 
-def load_config():
+def increment_observed(key, **kv):
+    with OBSERVED_LOCK:
+        value = OBSERVED.get(key, 0) + 1
+        record(**{key: value}, **kv)
+        return value
+
+
+def record_approval(thread_id, key, value):
+    with OBSERVED_LOCK:
+        by_thread_key = key + "sByThread"
+        by_thread = dict(OBSERVED.get(by_thread_key, {}))
+        by_thread[thread_id] = value
+        record(**{key: value, by_thread_key: by_thread})
+
+
+def load_config(directory=None):
     try:
-        with open("fake-codex.json") as handle:
+        path = os.path.join(directory or os.curdir, "fake-codex.json")
+        with open(path) as handle:
             return json.load(handle)
     except Exception:
         return {}
@@ -125,43 +151,57 @@ def spawn_grandchild():
 class Server:
     def __init__(self):
         self.thread_id = "TH-1"
+        self.thread_seq = 0
         self.turn_seq = 0
         self.server_req_seq = 0  # server-initiated request ids: 0, 1, 2… (real codex)
         self.seen_initialized = False
+        self.state_lock = threading.RLock()
+        self.response_waiters = {}
+        self.turn_interrupts = {}
+        self.thread_workspaces = {}
+        self.shutdown_event = threading.Event()
 
     def next_server_request(self, method, params):
-        req_id = self.server_req_seq
-        self.server_req_seq += 1
+        with self.state_lock:
+            req_id = self.server_req_seq
+            self.server_req_seq += 1
+            self.response_waiters[req_id] = queue.Queue(maxsize=1)
         emit({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
         return req_id
 
-    def wait_for_response(self, req_id):
-        """Read messages until the response to `req_id` arrives. Handles a
-        `turn/interrupt` arriving mid-wait (returns ("interrupted", None))."""
-        while True:
-            msg = read_message()
-            if msg is None:
-                return ("eof", None)
-            if msg.get("id") is not None and "method" not in msg:
-                if msg["id"] == req_id:
+    def wait_for_response(self, req_id, interrupt_event):
+        """Wait without consuming stdin. The main loop demultiplexes responses and
+        interrupts so several turn workers can block independently."""
+        with self.state_lock:
+            waiter = self.response_waiters.get(req_id)
+        if waiter is None:
+            return ("eof", None)
+        try:
+            while not self.shutdown_event.is_set():
+                if interrupt_event.is_set():
+                    return ("interrupted", None)
+                try:
+                    msg = waiter.get(timeout=0.05)
                     id_type = "int" if isinstance(msg["id"], int) else "str"
                     return ("response", {"message": msg, "idType": id_type})
-                continue  # a response to something else — ignore
-            if msg.get("method") == "turn/interrupt":
-                record(interrupts=OBSERVED["interrupts"] + 1)
-                respond(msg["id"], {})
-                return ("interrupted", None)
-            # Other client requests mid-wait are unexpected; answer emptily.
-            if msg.get("id") is not None:
-                respond(msg["id"], {})
+                except queue.Empty:
+                    pass
+            return ("eof", None)
+        finally:
+            with self.state_lock:
+                self.response_waiters.pop(req_id, None)
 
     def run_turn(self, req_id, params):
-        cfg = load_config()
-        self.turn_seq += 1
-        turn_id = f"TU-{self.turn_seq}"
-        record(turnStarts=OBSERVED["turnStarts"] + 1, lastTurnParams=params)
+        with self.state_lock:
+            self.turn_seq += 1
+            turn_id = f"TU-{self.turn_seq}"
+            interrupt_event = threading.Event()
+            self.turn_interrupts[turn_id] = interrupt_event
+            thread_id = params.get("threadId", self.thread_id)
+            thread_workspace = self.thread_workspaces.get(thread_id)
+        cfg = load_config(thread_workspace)
+        increment_observed("turnStarts", lastTurnParams=params)
         respond(req_id, {"turn": {"id": turn_id, "status": "inProgress"}})
-        thread_id = params.get("threadId", self.thread_id)
         base = {"threadId": thread_id, "turnId": turn_id}
         notify("turn/started", {"threadId": thread_id, "turn": {"id": turn_id}})
 
@@ -185,7 +225,7 @@ class Server:
         if cfg.get("exitAfterTurnStart") is not None:
             sys.stderr.write("fake-codex: deliberate crash\n")
             sys.stderr.flush()
-            sys.exit(int(cfg["exitAfterTurnStart"]))
+            os._exit(int(cfg["exitAfterTurnStart"]))
 
         # Approval flow: item/started(commandExecution) → server request → wait.
         if "approval" in cfg:
@@ -202,21 +242,26 @@ class Server:
                 "turnId": turn_id,
                 "itemId": "call_FAKE",
                 "startedAtMs": 0,
-                "reason": approval.get("reason", "Allow writing out.txt?"),
+                "reason": approval.get("reason", "Allow writing out.txt?").replace(
+                    "{threadId}", thread_id
+                ),
                 "command": approval.get("command", "touch out.txt"),
                 "availableDecisions": approval.get(
                     "availableDecisions", ["accept", "acceptForSession", "decline", "cancel"]
                 ),
             }
             server_req = self.next_server_request("item/commandExecution/requestApproval", req)
-            kind, payload = self.wait_for_response(server_req)
+            kind, payload = self.wait_for_response(server_req, interrupt_event)
             if kind == "eof":
                 return False
             if kind == "interrupted":
                 notify("turn/completed", {"threadId": thread_id, "turn": {"id": turn_id, "status": "interrupted", "error": None}})
                 return True
             decision = (payload["message"].get("result") or {}).get("decision")
-            record(approval={"decision": decision, "idType": payload["idType"]})
+            record_approval(
+                thread_id, "approval",
+                {"decision": decision, "idType": payload["idType"]}
+            )
             notify("serverRequest/resolved", {"threadId": thread_id, "requestId": server_req})
             accepted = isinstance(decision, str) and decision.startswith("accept")
             item_done = dict(item, status="completed" if accepted else "declined")
@@ -253,14 +298,17 @@ class Server:
                 "requestedSchema": {"type": "object", "properties": {}},
             }
             server_req = self.next_server_request("mcpServer/elicitation/request", req)
-            kind, payload = self.wait_for_response(server_req)
+            kind, payload = self.wait_for_response(server_req, interrupt_event)
             if kind == "eof":
                 return False
             if kind == "interrupted":
                 notify("turn/completed", {"threadId": thread_id, "turn": {"id": turn_id, "status": "interrupted", "error": None}})
                 return True
             action = (payload["message"].get("result") or {}).get("action")
-            record(mcpApproval={"action": action, "idType": payload["idType"]})
+            record_approval(
+                thread_id, "mcpApproval",
+                {"action": action, "idType": payload["idType"]}
+            )
             notify("serverRequest/resolved", {"threadId": thread_id, "requestId": server_req})
             accepted = action == "accept"
             mutation = approval.get("mutation")
@@ -284,7 +332,7 @@ class Server:
         # An unsupported server request the client must still answer (no wedge).
         if cfg.get("unknownRequest"):
             server_req = self.next_server_request("mock/experimentalThing", {"threadId": thread_id})
-            kind, payload = self.wait_for_response(server_req)
+            kind, payload = self.wait_for_response(server_req, interrupt_event)
             if kind == "eof":
                 return False
             if kind == "response":
@@ -292,25 +340,31 @@ class Server:
                                         "hadError": "error" in payload["message"]})
 
         for delta in cfg.get("deltas", ["Hel", "lo"]):
+            delta = delta.replace("{threadId}", thread_id)
+            delta = delta.replace("{turnId}", turn_id)
             notify("item/agentMessage/delta", dict(base, itemId="msg_1", delta=delta))
 
         if cfg.get("hang"):
             # No completion — wait for turn/interrupt (the stop path), then finish
             # the turn as interrupted. The SERVER keeps running afterwards.
-            while True:
-                msg = read_message()
-                if msg is None:
-                    return False
-                if msg.get("method") == "turn/interrupt":
-                    record(interrupts=OBSERVED["interrupts"] + 1)
-                    respond(msg["id"], {})
+            while not self.shutdown_event.is_set():
+                if interrupt_event.wait(timeout=0.05):
                     notify("turn/completed", {"threadId": thread_id, "turn": {"id": turn_id, "status": "interrupted", "error": None}})
                     return True
-                if msg.get("id") is not None and "method" in msg:
-                    respond(msg["id"], {})
+            return False
+
+        if cfg.get("completionDelayMs"):
+            interrupted = interrupt_event.wait(
+                timeout=int(cfg["completionDelayMs"]) / 1000.0
+            )
+            if interrupted:
+                notify("turn/completed", {"threadId": thread_id, "turn": {"id": turn_id, "status": "interrupted", "error": None}})
+                return True
 
         text = cfg.get("assistantText", "Hello")
         text = text.replace("{threadStarts}", str(OBSERVED["threadStarts"]))
+        text = text.replace("{threadId}", thread_id)
+        text = text.replace("{turnId}", turn_id)
         notify("item/completed", dict(base, item={"type": "agentMessage", "id": "msg_1", "text": text}))
         usage = cfg.get("usageLast", {"inputTokens": 100, "outputTokens": 5, "cachedInputTokens": 20})
         notify("thread/tokenUsage/updated", dict(base, tokenUsage={"total": {"inputTokens": 999999}, "last": usage}))
@@ -321,10 +375,22 @@ class Server:
         while True:
             msg = read_message()
             if msg is None:
+                self.shutdown_event.set()
+                with self.state_lock:
+                    for event in self.turn_interrupts.values():
+                        event.set()
                 return 0
             method = msg.get("method")
             req_id = msg.get("id")
-            if method == "initialize":
+            if method is None and req_id is not None:
+                with self.state_lock:
+                    waiter = self.response_waiters.get(req_id)
+                if waiter is not None:
+                    try:
+                        waiter.put_nowait(msg)
+                    except queue.Full:
+                        pass
+            elif method == "initialize":
                 cfg = load_config()
                 if cfg.get("grandchild"):
                     spawn_grandchild()
@@ -350,20 +416,40 @@ class Server:
                     # A thread request BEFORE the initialized handshake completed is a
                     # protocol violation — the handshake gate must prevent it (review #1).
                     record(protocolViolation="thread/start before initialized")
-                record(threadStarts=OBSERVED["threadStarts"] + 1, lastThreadStartParams=msg.get("params", {}))
-                respond(req_id, {"thread": {"id": self.thread_id, "preview": ""}, "model": "gpt-5.5-fake"})
-                notify("thread/started", {"thread": {"id": self.thread_id}})
+                with self.state_lock:
+                    self.thread_seq += 1
+                    thread_id = f"TH-{self.thread_seq}"
+                    cwd = (msg.get("params") or {}).get("cwd")
+                    if cwd:
+                        self.thread_workspaces[thread_id] = cwd
+                increment_observed(
+                    "threadStarts",
+                    lastThreadStartParams=msg.get("params", {})
+                )
+                respond(req_id, {"thread": {"id": thread_id, "preview": ""}, "model": "gpt-5.5-fake"})
+                notify("thread/started", {"thread": {"id": thread_id}})
             elif method == "thread/resume":
                 resumed = (msg.get("params") or {}).get("threadId", self.thread_id)
-                record(threadResumes=OBSERVED["threadResumes"] + 1)
+                with self.state_lock:
+                    self.thread_workspaces.setdefault(resumed, os.getcwd())
+                increment_observed("threadResumes")
                 respond(req_id, {"thread": {"id": resumed, "preview": ""}, "model": "gpt-5.5-fake"})
                 notify("thread/started", {"thread": {"id": resumed}})
             elif method == "turn/start":
-                if not self.run_turn(req_id, msg.get("params") or {}):
-                    return 0
+                threading.Thread(
+                    target=self.run_turn,
+                    args=(req_id, msg.get("params") or {}),
+                    daemon=True,
+                ).start()
             elif method == "turn/interrupt":
-                # Stray interrupt outside a hanging turn: acknowledge it.
-                record(interrupts=OBSERVED["interrupts"] + 1)
+                params = msg.get("params") or {}
+                with self.state_lock:
+                    interrupt_event = self.turn_interrupts.get(
+                        params.get("turnId")
+                    )
+                if interrupt_event is not None:
+                    interrupt_event.set()
+                increment_observed("interrupts")
                 respond(req_id, {})
             elif method == "thread/list":
                 # History recents (3b-4). `data[]` of thread summaries; the real server
@@ -463,7 +549,10 @@ def main():
         sys.stdout.flush()
         return 0
     if len(sys.argv) >= 4 and sys.argv[-3:] == ["mcp", "list", "--json"]:
-        sys.stdout.write(json.dumps(load_config().get("mcpServers", [])) + "\n")
+        cfg = load_config()
+        if cfg.get("mcpListDelayMs"):
+            time.sleep(int(cfg["mcpListDelayMs"]) / 1000.0)
+        sys.stdout.write(json.dumps(cfg.get("mcpServers", [])) + "\n")
         sys.stdout.flush()
         return 0
     try:

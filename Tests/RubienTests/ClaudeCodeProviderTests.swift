@@ -655,6 +655,64 @@ final class ClaudeCodeProviderTests: XCTestCase {
         _ = try? await firstConsumer.value
     }
 
+    func testIndependentProvidersRunSeparateClaudeProcessesConcurrently() async throws {
+        let firstWorkspace = try makeWorkspace()
+        let secondWorkspace = try makeWorkspace()
+        let hangingConfig: [String: Any] = [
+            "hang": true,
+            "emitResult": false,
+            "cooperativeInterrupt": true,
+        ]
+        try writeConfig(hangingConfig, into: firstWorkspace)
+        try writeConfig(hangingConfig, into: secondWorkspace)
+        let coordinator = ClaudeSessionLeaseCoordinator()
+        let firstProvider = ClaudeCodeProvider(
+            executableOverride: fakeCLIPath,
+            leaseCoordinator: coordinator)
+        let secondProvider = ClaudeCodeProvider(
+            executableOverride: fakeCLIPath,
+            leaseCoordinator: coordinator)
+
+        let firstStream = firstProvider.send(turn: turn(
+            workspace: firstWorkspace,
+            conversationID: UUID()))
+        let firstConsumer = Task { () -> Void in
+            for try await _ in firstStream {}
+        }
+        _ = try await waitForFile(
+            named: "fake-claude-user.json",
+            in: firstWorkspace,
+            timeout: 12)
+
+        let secondStream = secondProvider.send(turn: turn(
+            workspace: secondWorkspace,
+            conversationID: UUID()))
+        let secondConsumer = Task { () -> Void in
+            for try await _ in secondStream {}
+        }
+        _ = try await waitForFile(
+            named: "fake-claude-user.json",
+            in: secondWorkspace,
+            timeout: 12)
+
+        let firstPID = pid_t(try XCTUnwrap(
+            try readSpawnRecords(in: firstWorkspace).first?["pid"] as? Int
+        ))
+        let secondPID = pid_t(try XCTUnwrap(
+            try readSpawnRecords(in: secondWorkspace).first?["pid"] as? Int
+        ))
+        XCTAssertNotEqual(firstPID, secondPID)
+        XCTAssertTrue(isAlive(firstPID))
+        XCTAssertTrue(isAlive(secondPID))
+
+        firstConsumer.cancel()
+        secondConsumer.cancel()
+        _ = try? await firstConsumer.value
+        _ = try? await secondConsumer.value
+        firstProvider.shutdown()
+        secondProvider.shutdown()
+    }
+
     func testProcessWideLeaseBlocksSecondProviderUntilInterruptedLeaderIsReaped() async throws {
         let workspace = try makeWorkspace()
         let conversationID = UUID()

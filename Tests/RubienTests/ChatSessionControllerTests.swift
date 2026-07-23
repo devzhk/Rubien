@@ -2199,6 +2199,37 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertFalse(sink.calls.contains(.addUserMessage("q2")), "a refused message must not be rendered")
     }
 
+    func testIndependentClaudeConversationsRunConcurrentlyAcrossWindows() async {
+        let gate = AssistantTurnGate()
+        let firstProvider = MockAgentProvider(kind: .claude)
+        let secondProvider = MockAgentProvider(kind: .claude)
+        let first = makeController(
+            provider: firstProvider,
+            sink: SpyTranscriptSink(),
+            gate: gate)
+        let second = makeController(
+            provider: secondProvider,
+            sink: SpyTranscriptSink(),
+            gate: gate)
+
+        first.send("first")
+        second.send("second")
+        await firstProvider.waitUntilStreaming()
+        await secondProvider.waitUntilStreaming()
+
+        XCTAssertEqual(firstProvider.requests.map(\.prompt), ["first"])
+        XCTAssertEqual(secondProvider.requests.map(\.prompt), ["second"])
+        XCTAssertFalse(first.busyElsewhere)
+        XCTAssertFalse(second.busyElsewhere)
+
+        firstProvider.emit(.turnCompleted(usage: nil))
+        secondProvider.emit(.turnCompleted(usage: nil))
+        firstProvider.finishStream()
+        secondProvider.finishStream()
+        await first.turnTask?.value
+        await second.turnTask?.value
+    }
+
     func testCommitCallbackRunsOnlyAfterGateAdmission() async {
         let gate = AssistantTurnGate()
         let provider = MockAgentProvider()
