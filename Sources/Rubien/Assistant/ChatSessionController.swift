@@ -2542,6 +2542,7 @@ final class ChatSessionController: ObservableObject {
         availabilityProbeToken += 1
         let token = availabilityProbeToken
         guard await prepareProviderAccessIfNeeded() else {
+            guard token == availabilityProbeToken else { return }
             availability = .notFound(
                 reason: executionOwnership?.unavailableReason
                     ?? "Assistant execution is owned by another Rubien process."

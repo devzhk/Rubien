@@ -70,6 +70,61 @@ final class AssistantExecutionOwnershipTests: XCTestCase {
     }
 
     @MainActor
+    func testConcurrentPreparationWaitersSharePublishedSuccess() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "assistant-ownership-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: root,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // Hold the serial database connection so both launch callers enter and
+        // join the same detached recovery task before either can complete.
+        let blocker = OwnershipDatabaseWriterBlocker()
+        defer { blocker.release() }
+        let blockedWriter = Task.detached {
+            try database.dbWriter.write { _ in blocker.hold() }
+        }
+        while !blocker.hasEntered {
+            await Task.yield()
+        }
+
+        let ownership = AssistantExecutionOwnership()
+        let first = Task { @MainActor in
+            await ownership.prepareIfNeededAsync(
+                database: database,
+                libraryRoot: root,
+                ownerDescription: "first-startup-caller"
+            )
+        }
+        await Task.yield()
+        let second = Task { @MainActor in
+            await ownership.prepareIfNeededAsync(
+                database: database,
+                libraryRoot: root,
+                ownerDescription: "second-startup-caller"
+            )
+        }
+        try await Task.sleep(for: .milliseconds(50))
+
+        blocker.release()
+        let results = await [first.value, second.value]
+        _ = try await blockedWriter.value
+
+        XCTAssertEqual(
+            results,
+            [true, true],
+            "every caller joined to successful startup recovery must be admitted"
+        )
+        ownership.release()
+    }
+
+    @MainActor
     func testMaintenanceBlocksTurnPreparationUntilBackgroundWorkFinishes() throws {
         let database = try AppDatabase(DatabaseQueue())
         let root = FileManager.default.temporaryDirectory
@@ -183,6 +238,33 @@ final class AssistantExecutionOwnershipTests: XCTestCase {
             allowConversationCreation: true
         )
         return (conversationID, turnID)
+    }
+}
+
+private final class OwnershipDatabaseWriterBlocker: @unchecked Sendable {
+    private let stateLock = NSLock()
+    private let releaseSemaphore = DispatchSemaphore(value: 0)
+    private var entered = false
+    private var released = false
+
+    var hasEntered: Bool {
+        stateLock.withLock { entered }
+    }
+
+    func hold() {
+        stateLock.withLock { entered = true }
+        releaseSemaphore.wait()
+    }
+
+    func release() {
+        let shouldSignal = stateLock.withLock {
+            guard !released else { return false }
+            released = true
+            return true
+        }
+        if shouldSignal {
+            releaseSemaphore.signal()
+        }
     }
 }
 #endif

@@ -151,6 +151,16 @@ final class AssistantExecutionOwnership: ObservableObject {
         }
 
         let failure = await task.value
+        // Another caller awaiting this same task may have resumed first and
+        // already published its success. Joined startup waiters must observe that
+        // prepared state instead of treating the cleared task identity as a
+        // failed ownership attempt.
+        if preparedRoot == root,
+           attemptedRoot == root,
+           executionLock != nil,
+           isOwner {
+            return true
+        }
         guard preparationID == id,
               preparationRoot == root,
               attemptedRoot == root,
