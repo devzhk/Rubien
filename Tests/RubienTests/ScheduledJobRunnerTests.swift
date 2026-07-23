@@ -49,6 +49,45 @@ final class ScheduledJobRunnerTests: XCTestCase {
     }
 
     @MainActor
+    func testSuccessfulRunStaysFinishingUntilLateIdentityChannelCloses() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let claim = try makeClaim(database: database)
+        let identityGate = ScheduledIdentityCloseGate()
+        let provider = ScheduledProviderStub(
+            events: [
+                .sessionStarted(sessionID: "scheduled-session"),
+                .assistantMessageCompleted(text: "Done"),
+                .turnCompleted(usage: nil),
+            ],
+            identityCloseGate: identityGate
+        )
+        let runner = ScheduledJobRunner(
+            database: database,
+            providerFactory: { _ in provider },
+            workspaceProvider: { FileManager.default.temporaryDirectory },
+            attributionStore: nil
+        )
+
+        let execution = Task { await runner.execute(claim) }
+        await identityGate.waitUntilBlocked()
+        try await waitUntil {
+            try database.fetchScheduledJobRun(id: claim.run.id)?
+                .assistantTranscriptState == .finishingIdentity
+        }
+        XCTAssertFalse(try database.canContinueScheduledAssistantConversation(
+            runID: claim.run.id
+        ))
+
+        await identityGate.release()
+        let executionResult = await execution.value
+        let result = try XCTUnwrap(executionResult)
+        XCTAssertEqual(result.assistantTranscriptState, .available)
+        XCTAssertTrue(try database.canContinueScheduledAssistantConversation(
+            runID: claim.run.id
+        ))
+    }
+
+    @MainActor
     func testDeniedOptionalApprovalCanRecoverAndSucceed() async throws {
         let database = try AppDatabase(DatabaseQueue())
         let claim = try makeClaim(database: database)
@@ -138,6 +177,41 @@ final class ScheduledJobRunnerTests: XCTestCase {
 
         XCTAssertEqual(result.status, .failed)
         XCTAssertEqual(result.failureKind, .interrupted)
+    }
+
+    @MainActor
+    func testFinalTranscriptFailureDoesNotReturnPreterminalRunAsCompleted() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let claim = try makeClaim(database: database)
+        try await database.dbWriter.write { db in
+            try db.execute(sql: """
+                CREATE TRIGGER failScheduledTerminalUpdate
+                BEFORE UPDATE OF status ON scheduledJobRun
+                WHEN NEW.status IN ('succeeded', 'failed', 'cancelled')
+                BEGIN
+                    SELECT RAISE(FAIL, 'injected finalization failure');
+                END
+                """)
+        }
+        let provider = ScheduledProviderStub(events: [
+            .sessionStarted(sessionID: "scheduled-session"),
+            .assistantMessageCompleted(text: "Durable partial"),
+            .turnCompleted(usage: nil),
+        ])
+        let runner = ScheduledJobRunner(
+            database: database,
+            providerFactory: { _ in provider },
+            workspaceProvider: { FileManager.default.temporaryDirectory },
+            attributionStore: nil
+        )
+
+        let result = await runner.execute(claim)
+
+        XCTAssertNil(result)
+        XCTAssertEqual(
+            try database.fetchScheduledJobRun(id: claim.run.id)?.status,
+            .running
+        )
     }
 
     @MainActor
@@ -247,6 +321,17 @@ final class ScheduledJobRunnerTests: XCTestCase {
         ))
         return try database.claimManualScheduledJob(id: job.id)
     }
+
+    private func waitUntil(
+        _ condition: @escaping () throws -> Bool,
+        ticks: Int = 500
+    ) async throws {
+        for _ in 0..<ticks {
+            if try condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("condition did not become true")
+    }
 }
 
 private final class ScheduledProviderStub: AgentProvider, @unchecked Sendable {
@@ -254,17 +339,20 @@ private final class ScheduledProviderStub: AgentProvider, @unchecked Sendable {
     let events: [AgentEvent]
     let ready: Bool
     let availabilityDelay: Duration?
+    let identityCloseGate: ScheduledIdentityCloseGate?
     private(set) var lastRequest: AgentTurnRequest?
     private(set) var decisions: [String: ApprovalDecision] = [:]
 
     init(
         events: [AgentEvent],
         ready: Bool = true,
-        availabilityDelay: Duration? = nil
+        availabilityDelay: Duration? = nil,
+        identityCloseGate: ScheduledIdentityCloseGate? = nil
     ) {
         self.events = events
         self.ready = ready
         self.availabilityDelay = availabilityDelay
+        self.identityCloseGate = identityCloseGate
     }
 
     func isAvailable() async -> AgentAvailability {
@@ -282,10 +370,70 @@ private final class ScheduledProviderStub: AgentProvider, @unchecked Sendable {
         }
     }
 
+    func sendEnvelopes(
+        turn: AgentTurnRequest,
+        attempt: AssistantAttemptIdentity,
+        identityObserver: AgentIdentityObserver?
+    ) -> AsyncThrowingStream<AgentEventEnvelope, Error> {
+        lastRequest = turn
+        let events = events
+        let identityCloseGate = identityCloseGate
+        return AsyncThrowingStream { continuation in
+            Task {
+                for event in events {
+                    if case let .sessionStarted(sessionID) = event {
+                        await identityObserver?.sessionStarted(
+                            sessionID,
+                            runtimeGeneration: attempt.runtimeGeneration
+                        )
+                    }
+                    continuation.yield(AgentEventEnvelope(
+                        attempt: attempt,
+                        providerItemID: nil,
+                        event: event
+                    ))
+                }
+                continuation.finish()
+                if let identityCloseGate {
+                    await identityCloseGate.wait()
+                }
+                await identityObserver?.close()
+            }
+        }
+    }
+
     func respondToApproval(id: String, _ decision: ApprovalDecision) {
         decisions[id] = decision
     }
 
     func cancel() {}
+}
+
+private actor ScheduledIdentityCloseGate {
+    private var isReleased = false
+    private var isBlocked = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var blockedWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !isReleased else { return }
+        isBlocked = true
+        let observers = blockedWaiters
+        blockedWaiters.removeAll()
+        for observer in observers { observer.resume() }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func waitUntilBlocked() async {
+        guard !isBlocked else { return }
+        await withCheckedContinuation { blockedWaiters.append($0) }
+    }
+
+    func release() {
+        isReleased = true
+        let pending = waiters
+        waiters.removeAll()
+        for waiter in pending { waiter.resume() }
+    }
 }
 #endif

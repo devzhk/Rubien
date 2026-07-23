@@ -4,6 +4,11 @@ import SwiftUI
 import RubienCore
 import RubienSync
 
+private enum AssistantConversationClearOutcome: Sendable {
+    case success(Int)
+    case failure(String)
+}
+
 struct RubienSettingsView: View {
     @EnvironmentObject private var coordinator: SyncCoordinator
     @State private var cacheBytes: Int64 = 0
@@ -59,6 +64,8 @@ struct RubienSettingsView: View {
     @State private var showClearReadingConfirmation = false
     @State private var showClearAssistantConfirmation = false
     @State private var activityStatusMessage: String?
+    @State private var showClearAssistantConversationsConfirmation = false
+    @State private var assistantConversationStatusMessage: String?
     /// Latched at the start of an upload session so the indicator can render
     /// as "Uploading 4 of 31 PDFs to iCloud". Cleared back to nil when the
     /// queue reaches 0 so the next upload session re-latches with its own
@@ -377,6 +384,7 @@ struct RubienSettingsView: View {
             assistantWorkspaceSection
             assistantDefaultsSection
             assistantPromptsSection
+            assistantConversationStorageSection
             assistantClaudeCLISection
             assistantCodexCLISection
         }
@@ -444,6 +452,115 @@ struct RubienSettingsView: View {
         .onDisappear {
             promptSaveTask?.cancel()
             persistPromptOverrides()
+        }
+    }
+
+    @ViewBuilder
+    private var assistantConversationStorageSection: some View {
+        Section {
+            Button(
+                String(localized: "Clear Assistant Conversations…", bundle: .module),
+                role: .destructive
+            ) {
+                showClearAssistantConversationsConfirmation = true
+            }
+            if let assistantConversationStatusMessage {
+                Text(assistantConversationStatusMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            Text(String(localized: "Conversation Storage", bundle: .module))
+        } footer: {
+            Text(String(
+                localized: "Rubien saves normalized local transcripts so Home, reader, and scheduled-run History can open without starting the provider.",
+                bundle: .module
+            ))
+        }
+        .confirmationDialog(
+            String(localized: "Clear Assistant Conversations?", bundle: .module),
+            isPresented: $showClearAssistantConversationsConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(
+                String(localized: "Clear Assistant Conversations", bundle: .module),
+                role: .destructive
+            ) {
+                clearAssistantConversations()
+            }
+            Button(String(localized: "Cancel", bundle: .module), role: .cancel) {}
+        } message: {
+            Text(String(
+                localized: "This deletes idle local Assistant transcripts and their managed attachments. It does not delete AI session statistics or conversations in Claude Code or Codex Provider History.",
+                bundle: .module
+            ))
+        }
+    }
+
+    private func clearAssistantConversations() {
+        assistantConversationStatusMessage = String(
+            localized: "Clearing conversations…",
+            bundle: .module
+        )
+        let database = AppDatabase.shared
+        guard AssistantExecutionOwnership.shared.beginMaintenance(
+            database: database
+        ) else {
+            assistantConversationStatusMessage = AssistantExecutionOwnership.shared
+                .unavailableReason
+                ?? String(
+                    localized: "Assistant execution is owned by another Rubien process.",
+                    bundle: .module
+                )
+            return
+        }
+        let libraryRoot = AppDatabase.libraryRootURL
+        Task {
+            let outcome = await Task.detached(
+                priority: .userInitiated
+            ) { () -> AssistantConversationClearOutcome in
+                do {
+                    let count = try database.clearAssistantConversations()
+                    try DurableAssistantAttachmentStore.reconcile(
+                        database: database,
+                        libraryRoot: libraryRoot
+                    )
+                    return .success(count)
+                } catch {
+                    return .failure(error.localizedDescription)
+                }
+            }.value
+            switch outcome {
+            case .success(let count):
+                AssistantExecutionOwnership.shared.finishMaintenance(
+                    libraryRoot: libraryRoot,
+                    prepared: true
+                )
+                NotificationCenter.default.post(
+                    name: .rubienAssistantConversationsDidChange,
+                    object: nil
+                )
+                assistantConversationStatusMessage = String(
+                    format: String(
+                        localized: "Cleared %d local Assistant conversations.",
+                        bundle: .module
+                    ),
+                    count
+                )
+            case .failure(let message):
+                AssistantExecutionOwnership.shared.finishMaintenance(
+                    libraryRoot: libraryRoot,
+                    prepared: false,
+                    failureMessage: "Assistant conversation maintenance failed: \(message)"
+                )
+                assistantConversationStatusMessage = String(
+                    format: String(
+                        localized: "Could not clear conversations: %@",
+                        bundle: .module
+                    ),
+                    message
+                )
+            }
         }
     }
 
@@ -914,6 +1031,14 @@ struct RubienSettingsView: View {
         isProbingClaude = true
         let override = RubienPreferences.assistantBinaryPath
         Task {
+            guard await prepareSettingsAssistantExecution() else {
+                claudeAvailability = .notFound(
+                    reason: AssistantExecutionOwnership.shared.unavailableReason
+                        ?? "Assistant execution is owned by another Rubien process."
+                )
+                isProbingClaude = false
+                return
+            }
             let availability = await ClaudeCodeProvider(executableOverride: override).isAvailable()
             guard generation == probeGeneration else { return }  // superseded by a newer probe
             claudeAvailability = availability
@@ -936,7 +1061,20 @@ struct RubienSettingsView: View {
         isProbingCodex = true
         let override = RubienPreferences.assistantCodexBinaryPath
         Task { @MainActor in
-            let availability = await CodexProvider(executableOverride: override).isAvailable()
+            guard await prepareSettingsAssistantExecution() else {
+                codexAvailability = .notFound(
+                    reason: AssistantExecutionOwnership.shared.unavailableReason
+                        ?? "Assistant execution is owned by another Rubien process."
+                )
+                codexCatalogModels = []
+                isProbingCodex = false
+                return
+            }
+            let availability = await CodexProvider(
+                executableOverride: override,
+                contentChannel: MCPContentChannel.resolveBundled(),
+                shareAppServer: true
+            ).isAvailable()
             guard probeGeneration == codexProbeGeneration else { return }
             codexAvailability = availability
 
@@ -972,12 +1110,22 @@ struct RubienSettingsView: View {
         let generation = codexCatalogLoadGeneration
         let override = RubienPreferences.assistantCodexBinaryPath
         Task { @MainActor in
+            guard await prepareSettingsAssistantExecution() else {
+                codexCatalogModels = []
+                return
+            }
             let models = await CodexModelCatalog.shared
                 .catalog(executableOverride: override)
                 .visibleModels
             guard generation == codexCatalogLoadGeneration else { return }  // superseded by a newer load
             codexCatalogModels = models
         }
+    }
+
+    private func prepareSettingsAssistantExecution() async -> Bool {
+        await AssistantExecutionOwnership.shared.prepareIfNeededAsync(
+            database: .shared
+        )
     }
 
     private func pickWorkspace() {

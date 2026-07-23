@@ -53,6 +53,102 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertEqual(availability.version, "0.145.0")
     }
 
+    func testConcurrentColdAvailabilityChecksJoinOneProbe() async throws {
+        let fixture = try makeSlowVersionProbeCLI()
+        let provider = CodexProvider(executableOverride: fixture.cli.path)
+
+        async let first = provider.isAvailable()
+        async let second = provider.isAvailable()
+        let results = await [first, second]
+
+        XCTAssertTrue(results.allSatisfy(\.isReady))
+        let invocations = (try String(contentsOf: fixture.countFile))
+            .split(separator: "\n")
+        XCTAssertEqual(invocations.count, 1, "cold Recheck calls must join one root process")
+    }
+
+    func testInteractiveTurnReapsColdAvailabilityProbeBeforeAppServerSpawn() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["assistantText": "turn won"], into: workspace)
+        let fixture = try makePreemptibleVersionProbeCLI()
+        let provider = CodexProvider(executableOverride: fixture.cli.path)
+        defer { provider.shutdown() }
+
+        let availabilityTask = Task { await provider.isAvailable() }
+        try await waitForFile(fixture.pidFile, timeout: 3)
+
+        let events = try await collectAllEvents(
+            provider.send(turn: turn(workspace: workspace)), timeout: 6)
+        _ = await availabilityTask.value
+
+        XCTAssertTrue(events.contains(.assistantMessageCompleted(text: "turn won")))
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fixture.overlapFile.path),
+            "app-server must not spawn until the cancelled version process group is gone"
+        )
+    }
+
+    func testCancelledTurnDuringAvailabilityPreemptionNeverSpawns() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["assistantText": "must not run"], into: workspace)
+        let fixture = try makePreemptibleVersionProbeCLI()
+        let barrier = AvailabilityPreemptionBarrier()
+        let provider = CodexProvider(
+            executableOverride: fixture.cli.path,
+            availabilityPreemptionHook: { await barrier.suspendPreemption() }
+        )
+        defer { provider.shutdown() }
+
+        let availabilityTask = Task { await provider.isAvailable() }
+        try await waitForFile(fixture.pidFile, timeout: 3)
+
+        let stream = provider.send(turn: turn(workspace: workspace))
+        let consumer = Task {
+            do { for try await _ in stream {} } catch {}
+        }
+        await barrier.waitUntilSuspended()
+        consumer.cancel()
+        // Let the stream's token-scoped cancellation reach the re-entrant broker
+        // while startTurn is still suspended inside probe retirement.
+        try await Task.sleep(for: .milliseconds(100))
+        await barrier.resumePreemption()
+
+        await consumer.value
+        _ = await availabilityTask.value
+        try await Task.sleep(for: .milliseconds(250))
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: workspace.appendingPathComponent(
+                    "fake-codex-observed.json"
+                ).path
+            ),
+            "a turn cancelled during probe reap must never spawn app-server"
+        )
+    }
+
+    func testHistoryReapsColdAvailabilityProbeBeforeAppServerSpawn() async throws {
+        let workspace = try makeWorkspace()
+        let fixture = try makePreemptibleVersionProbeCLI()
+        let provider = CodexProvider(executableOverride: fixture.cli.path)
+        defer { provider.shutdown() }
+
+        let availabilityTask = Task { await provider.isAvailable() }
+        try await waitForFile(fixture.pidFile, timeout: 3)
+
+        let history = await provider.recentSessionsResult(
+            workspaceURL: workspace,
+            limit: 1,
+            referenceID: nil
+        )
+        _ = await availabilityTask.value
+
+        XCTAssertFalse(history.didTimeOut)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fixture.overlapFile.path),
+            "History app-server must wait until the version process group is gone"
+        )
+    }
+
     func testIsAvailableReportsUnauthenticatedWhenCodexLoginStatusIsSignedOut() async throws {
         let cli = try makeCodexAuthProbeCLI(
             authOutput: "Not logged in. Run codex login to authenticate.",
@@ -92,6 +188,9 @@ final class CodexProviderTests: XCTestCase {
           printf '%s\\n' 'codex-cli 0.142.5'
           exit 0
         fi
+        if [ "$1" = "app-server" ]; then
+          exec '(fakeServerPath)' "$@"
+        fi
         if [ "$1" = "login" ] && [ "$2" = "status" ]; then
           if [ "$(cat '\(stateFile.path)')" = "in" ]; then
             printf '%s\\n' 'Logged in using ChatGPT'
@@ -106,8 +205,16 @@ final class CodexProviderTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cli.path)
 
         let provider = CodexProvider(executableOverride: cli.path)
+        defer { provider.shutdown() }
         let first = await provider.isAvailable()
         XCTAssertTrue(first.isReady, "signed in on the first probe")
+
+        // Leave a healthy, idle app-server behind. Recheck must retire it before
+        // the standalone login probe rather than treating process liveness as auth.
+        try writeConfig(["assistantText": "idle"], into: workspace)
+        _ = try await collectAllEvents(
+            provider.send(turn: turn(workspace: workspace))
+        )
 
         try "out".write(to: stateFile, atomically: true, encoding: .utf8)
         let second = await provider.isAvailable()
@@ -507,6 +614,38 @@ final class CodexProviderTests: XCTestCase {
 
         home.shutdown()
         scheduler.shutdown()
+        await registry.shutdownAll()
+    }
+
+    func testTranscriptResultReportsUnadmittedWhileTurnOwnsRuntime() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["hang": true], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let provider = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry
+        )
+        let turnEvents = Task {
+            try await collectAllEvents(
+                provider.send(turn: turn(workspace: workspace)),
+                timeout: 10
+            )
+        }
+        try await waitForObserved(in: workspace, timeout: 5) {
+            ($0["turnStarts"] as? Int) == 1
+        }
+
+        let result = await provider.sessionTranscriptResult(
+            sessionID: "busy-session",
+            workspaceURL: workspace
+        )
+
+        XCTAssertFalse(result.wasAdmitted)
+        XCTAssertTrue(result.messages.isEmpty)
+        XCTAssertNil(try readObserved(in: workspace)["threadReadIds"])
+        provider.cancel()
+        _ = try await turnEvents.value
+        provider.shutdown()
         await registry.shutdownAll()
     }
 
@@ -1949,6 +2088,63 @@ final class CodexProviderTests: XCTestCase {
         return cli
     }
 
+    private func makeSlowVersionProbeCLI() throws -> (cli: URL, countFile: URL) {
+        let workspace = try makeWorkspace()
+        let cli = workspace.appendingPathComponent("fake-codex-slow-version")
+        let countFile = workspace.appendingPathComponent("version-count")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then
+          printf '%s\n' probe >> '\(countFile.path)'
+          sleep 1
+          printf '%s\n' 'codex 0.145.0'
+          exit 0
+        fi
+        if [ "$1" = "login" ] && [ "$2" = "status" ]; then
+          printf '%s\n' 'Logged in using ChatGPT'
+          exit 0
+        fi
+        exit 0
+        """
+        try script.write(to: cli, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: cli.path)
+        return (cli, countFile)
+    }
+
+    private func makePreemptibleVersionProbeCLI() throws -> (
+        cli: URL, pidFile: URL, overlapFile: URL
+    ) {
+        let workspace = try makeWorkspace()
+        let cli = workspace.appendingPathComponent("fake-codex-preemptible-version")
+        let pidFile = workspace.appendingPathComponent("version-pid")
+        let overlapFile = workspace.appendingPathComponent("process-overlap")
+        let script = """
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then
+          printf '%s\n' "$$" > '\(pidFile.path)'
+          sleep 20
+          printf '%s\n' 'codex 0.145.0'
+          exit 0
+        fi
+        if [ "$1" = "app-server" ]; then
+          if [ -f '\(pidFile.path)' ] && kill -0 "$(cat '\(pidFile.path)')" 2>/dev/null; then
+            touch '\(overlapFile.path)'
+          fi
+          exec '\(fakeServerPath)' "$@"
+        fi
+        if [ "$1" = "login" ] && [ "$2" = "status" ]; then
+          printf '%s\n' 'Logged in using ChatGPT'
+          exit 0
+        fi
+        exit 0
+        """
+        try script.write(to: cli, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755], ofItemAtPath: cli.path)
+        return (cli, pidFile, overlapFile)
+    }
+
     private func turn(
         workspace: URL, prompt: String = "hello", resume: String? = nil,
         webAccess: Bool = true, attachments: [ChatAttachment] = [],
@@ -1985,6 +2181,15 @@ final class CodexProviderTests: XCTestCase {
             try await Task.sleep(nanoseconds: 100_000_000)
         }
         XCTFail("fake-codex-observed.json never matched the expected state within \(timeout)s")
+    }
+
+    private func waitForFile(_ url: URL, timeout: TimeInterval) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if FileManager.default.fileExists(atPath: url.path) { return }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        throw TestTimeout()
     }
 
     private func waitForApprovalID(
@@ -2042,6 +2247,38 @@ private final class LockedApprovalID: @unchecked Sendable {
         lock.lock()
         stored = value
         lock.unlock()
+    }
+}
+
+private actor AvailabilityPreemptionBarrier {
+    private var isSuspended = false
+    private var isResumed = false
+    private var suspendedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var resumeWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func suspendPreemption() async {
+        isSuspended = true
+        let waiters = suspendedWaiters
+        suspendedWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+        if isResumed { return }
+        await withCheckedContinuation { continuation in
+            resumeWaiters.append(continuation)
+        }
+    }
+
+    func waitUntilSuspended() async {
+        if isSuspended { return }
+        await withCheckedContinuation { continuation in
+            suspendedWaiters.append(continuation)
+        }
+    }
+
+    func resumePreemption() {
+        isResumed = true
+        let waiters = resumeWaiters
+        resumeWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
     }
 }
 

@@ -1,4 +1,5 @@
 import Foundation
+import RubienCore
 #if canImport(CoreFoundation)
 import CoreFoundation  // CFGetTypeID/CFBooleanGetTypeID: not re-exported by Foundation on Linux
 #endif
@@ -20,6 +21,21 @@ import CoreFoundation  // CFGetTypeID/CFBooleanGetTypeID: not re-exported by Fou
 enum AgentProviderKind: String, Codable, Sendable, Equatable, CaseIterable {
     case claude
     case codex
+
+    var storedProvider: AssistantProvider {
+        switch self {
+        case .claude: .claude
+        case .codex: .codex
+        }
+    }
+
+    init?(_ storedProvider: AssistantProvider) {
+        switch storedProvider {
+        case .claude: self = .claude
+        case .codex: self = .codex
+        case .unknown: return nil
+        }
+    }
 }
 
 /// Codex OS-sandbox mode (D6). Carried on every turn request for a uniform shape
@@ -77,6 +93,9 @@ struct AgentTurnRequest: Sendable, Equatable {
     let effortOverride: String?
     /// Interactive chat or unattended scheduled execution.
     let executionMode: AgentExecutionMode
+    /// Stable scheduled-run identity used by the Codex broker for admission and
+    /// diagnostics. Interactive turns leave this nil.
+    let scheduledRunID: String?
 
     init(
         workspaceURL: URL,
@@ -90,7 +109,8 @@ struct AgentTurnRequest: Sendable, Equatable {
         codexSandbox: CodexSandbox = .readOnly,
         modelOverride: String? = nil,
         effortOverride: String? = nil,
-        executionMode: AgentExecutionMode = .interactive
+        executionMode: AgentExecutionMode = .interactive,
+        scheduledRunID: String? = nil
     ) {
         self.workspaceURL = workspaceURL
         self.conversationID = conversationID
@@ -104,6 +124,7 @@ struct AgentTurnRequest: Sendable, Equatable {
         self.modelOverride = modelOverride
         self.effortOverride = effortOverride
         self.executionMode = executionMode
+        self.scheduledRunID = scheduledRunID
     }
 }
 
@@ -158,7 +179,7 @@ struct AgentTurnCompletion: Sendable, Equatable {
 /// stream-json lines is in `ClaudeStreamParser` (§4.2).
 enum AgentEvent: Sendable, Equatable {
     /// The turn's session id. Emitted from `system/init` at turn start **and again**
-    /// from every `result` — the id **rotates each resume turn** (D5), so the
+    /// from every `result` — the id **rotates each resume turn**, so the
     /// controller must treat the latest `sessionStarted` as the id to `--resume`.
     case sessionStarted(sessionID: String)
     /// The model the runtime RESOLVED for this conversation — reported by codex's
@@ -197,6 +218,102 @@ enum AgentEvent: Sendable, Equatable {
     /// Constructor used by provider parsers, where terminal status is explicit.
     static func turnCompleted(outcome: AgentTurnOutcome, usage: AgentUsage?) -> AgentEvent {
         .turnCompleted(AgentTurnCompletion(outcome: outcome, usage: usage))
+    }
+}
+
+/// Immutable identity carried by every provider event that may enter durable
+/// transcript storage. Runtime generation is nil for Claude's current per-turn
+/// process adapter and for imported history; the Codex broker fills it.
+struct AssistantAttemptIdentity: Sendable, Equatable, Hashable {
+    let conversationID: UUID
+    let conversationEpoch: Int
+    let turnID: UUID
+    let workID: UUID
+    let runtimeGeneration: Int?
+}
+
+/// Provider-neutral event envelope. `providerItemID` is a native Codex item ID
+/// or Claude message/tool-use ID when available; adapters may leave it nil and
+/// let the recorder assign one stable synthetic logical item.
+struct AgentEventEnvelope: Sendable, Equatable {
+    let attempt: AssistantAttemptIdentity
+    let providerItemID: String?
+    let event: AgentEvent
+}
+
+/// Bridges one async provider stream into another without duplicating forwarding,
+/// error propagation, and cancellation wiring at every adapter boundary.
+func forwardingAgentStream<Input: Sendable, Output: Sendable>(
+    _ source: AsyncThrowingStream<Input, Error>,
+    transform: @escaping @Sendable (Input) async -> Output,
+    onFinish: @escaping @Sendable () async -> Void = {}
+) -> AsyncThrowingStream<Output, Error> {
+    AsyncThrowingStream { continuation in
+        let task = Task.detached {
+            do {
+                for try await value in source {
+                    continuation.yield(await transform(value))
+                }
+                continuation.finish()
+            } catch {
+                continuation.finish(throwing: error)
+            }
+            await onFinish()
+        }
+        continuation.onTermination = { @Sendable termination in
+            guard case .cancelled = termination else { return }
+            task.cancel()
+        }
+    }
+}
+
+/// A turn-lifetime identity channel that outlives cancellation of the visible
+/// event stream. Providers close it only after their exact turn/process has
+/// retired, so a late same-attempt session id can remain continuable without
+/// allowing late content back into the transcript.
+actor AgentIdentityObserver {
+    private enum State: Equatable {
+        case open
+        case closing
+        case closed
+    }
+
+    private let onSessionStarted: @Sendable (String, Int?) async -> Void
+    private let onClosed: @Sendable () async -> Void
+    private var state: State = .open
+    private var closeWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(
+        onSessionStarted: @escaping @Sendable (String, Int?) async -> Void,
+        onClosed: @escaping @Sendable () async -> Void
+    ) {
+        self.onSessionStarted = onSessionStarted
+        self.onClosed = onClosed
+    }
+
+    func sessionStarted(_ sessionID: String, runtimeGeneration: Int?) async {
+        guard state == .open else { return }
+        await onSessionStarted(sessionID, runtimeGeneration)
+    }
+
+    func close() async {
+        guard state == .open else {
+            if state == .closing { await waitUntilClosed() }
+            return
+        }
+        state = .closing
+        await onClosed()
+        state = .closed
+        let waiters = closeWaiters
+        closeWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+
+    func waitUntilClosed() async {
+        if state == .closed { return }
+        await withCheckedContinuation { continuation in
+            closeWaiters.append(continuation)
+        }
     }
 }
 
@@ -261,8 +378,8 @@ struct AgentAvailability: Sendable, Equatable {
     }
 }
 
-/// One past conversation the provider owns, surfaced in the History picker (§5.3).
-/// Rubien stores no transcripts (D5) — this is a light read of the runtime's OWN
+/// One past conversation summary. Normal History projects Rubien's local store;
+/// the provider implementations supply the explicit Provider History surface.
 /// session store (Claude: `~/.claude/projects/<cwd>/<id>.jsonl`), just enough to
 /// pick one to `--resume`. `id` is the runtime session id (the resume target).
 struct AgentSessionSummary: Identifiable, Sendable, Equatable {
@@ -282,10 +399,44 @@ struct AgentSessionSummary: Identifiable, Sendable, Equatable {
 struct AgentSessionQueryResult: Sendable, Equatable {
     let sessions: [AgentSessionSummary]
     let didTimeOut: Bool
+    let failureMessage: String?
+
+    init(
+        sessions: [AgentSessionSummary],
+        didTimeOut: Bool,
+        failureMessage: String? = nil
+    ) {
+        self.sessions = sessions
+        self.didTimeOut = didTimeOut
+        self.failureMessage = failureMessage
+    }
 
     static func completed(_ sessions: [AgentSessionSummary]) -> Self {
         Self(sessions: sessions, didTimeOut: false)
     }
+
+    static func failed(_ error: any Error) -> Self {
+        Self(
+            sessions: [],
+            didTimeOut: false,
+            failureMessage: error.localizedDescription
+        )
+    }
+}
+
+/// A provider transcript lookup distinguishes a completed read (which may
+/// legitimately find no rows) from a metadata scheduler that never admitted the
+/// request. Migrated scheduled imports use this bit to preserve retry eligibility
+/// while an interactive turn owns the provider runtime.
+struct AgentTranscriptQueryResult: Sendable, Equatable {
+    let messages: [ChatRenderMessage]
+    let wasAdmitted: Bool
+
+    static func completed(_ messages: [ChatRenderMessage]) -> Self {
+        Self(messages: messages, wasAdmitted: true)
+    }
+
+    static let unavailable = Self(messages: [], wasAdmitted: false)
 }
 
 enum AgentHistoryPolicy {
@@ -406,6 +557,15 @@ protocol AgentProvider: Sendable {
     /// app-server stays alive (Phase 3b).
     func send(turn: AgentTurnRequest) -> AsyncThrowingStream<AgentEvent, Error>
 
+    /// Identity-enriched stream used by durable capture. Existing provider
+    /// implementations inherit a compatibility adapter; native IDs can be added
+    /// backend-by-backend without changing recorder/controller contracts.
+    func sendEnvelopes(
+        turn: AgentTurnRequest,
+        attempt: AssistantAttemptIdentity,
+        identityObserver: AgentIdentityObserver?
+    ) -> AsyncThrowingStream<AgentEventEnvelope, Error>
+
     /// Answer a pending `approvalRequested`. Claude: writes the `control_response`
     /// to the live turn's stdin. Codex: answers the server-initiated JSON-RPC
     /// approval request (Phase 3b).
@@ -424,8 +584,7 @@ protocol AgentProvider: Sendable {
     func shutdown()
 
     /// The runtime's own recent sessions for `workspaceURL`, newest first, for the
-    /// History picker (§5.3). A light read of the runtime's session store — Rubien
-    /// stores nothing. A non-nil `referenceID` keeps only sessions attributed to
+    /// explicit Provider History picker. A non-nil `referenceID` keeps only sessions attributed to
     /// that reference (the popover's "This document" scope): neither provider's
     /// history surface exposes the instructions, so attribution is the rubien MCP
     /// tool calls whose arguments carry the reference id. `deadline` lets a caller
@@ -435,9 +594,16 @@ protocol AgentProvider: Sendable {
     ) async -> AgentSessionQueryResult
 
     /// A picked session's full renderable transcript, so a resume restores the
-    /// conversation's content (still read from the runtime's own store — Rubien
-    /// stores nothing). Default `[]` → the caller shows a preview notice instead.
+    /// conversation's content for explicit import compatibility. Normal local
+    /// History never calls this method. Default `[]` means import is unavailable.
     func sessionTranscript(sessionID: String, workspaceURL: URL) async -> [ChatRenderMessage]
+
+    /// Status-preserving form used where an unadmitted metadata read must not be
+    /// confused with an admitted read whose session is absent.
+    func sessionTranscriptResult(
+        sessionID: String,
+        workspaceURL: URL
+    ) async -> AgentTranscriptQueryResult
 
     /// Content search over the runtime's sessions for `workspaceURL` (the visible
     /// user/assistant text, not tool payloads), newest first, each hit carrying a
@@ -464,6 +630,15 @@ extension AgentProvider {
         .completed([])
     }
     func sessionTranscript(sessionID: String, workspaceURL: URL) async -> [ChatRenderMessage] { [] }
+    func sessionTranscriptResult(
+        sessionID: String,
+        workspaceURL: URL
+    ) async -> AgentTranscriptQueryResult {
+        .completed(await sessionTranscript(
+            sessionID: sessionID,
+            workspaceURL: workspaceURL
+        ))
+    }
     func searchSessionsResult(
         query: String, workspaceURL: URL, limit: Int, referenceID: Int64?,
         deadline: Date?
@@ -471,6 +646,46 @@ extension AgentProvider {
         .completed([])
     }
     func availableModels() async -> CodexCatalog? { nil }
+
+    func sendEnvelopes(
+        turn: AgentTurnRequest,
+        attempt: AssistantAttemptIdentity,
+        identityObserver: AgentIdentityObserver?
+    ) -> AsyncThrowingStream<AgentEventEnvelope, Error> {
+        let events = send(turn: turn)
+        // Do not inherit a UI caller's MainActor. Compatibility providers often
+        // implement their stream with a delayed producer task.
+        return forwardingAgentStream(
+            events,
+            transform: { event in
+                if case let .sessionStarted(sessionID) = event {
+                    await identityObserver?.sessionStarted(
+                        sessionID,
+                        runtimeGeneration: attempt.runtimeGeneration
+                    )
+                }
+                return AgentEventEnvelope(
+                    attempt: attempt,
+                    providerItemID: nil,
+                    event: event
+                )
+            },
+            onFinish: {
+                await identityObserver?.close()
+            }
+        )
+    }
+
+    func sendEnvelopes(
+        turn: AgentTurnRequest,
+        attempt: AssistantAttemptIdentity
+    ) -> AsyncThrowingStream<AgentEventEnvelope, Error> {
+        sendEnvelopes(
+            turn: turn,
+            attempt: attempt,
+            identityObserver: nil
+        )
+    }
 
     /// Array-only and no-deadline conveniences for existing callers/tests. The
     /// status-preserving result methods above are the provider implementation seam.

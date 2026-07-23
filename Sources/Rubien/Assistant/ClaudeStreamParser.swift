@@ -157,7 +157,7 @@ struct ClaudeStreamParser {
 
     private mutating func parseResult(_ object: [String: Any]) -> [AgentEvent] {
         var events: [AgentEvent] = []
-        // Re-capture the (rotated) session id from EVERY result (D5 / Risk #5),
+        // Re-capture the (rotated) session id from EVERY result (Risk #5),
         // even if unchanged — this is the only channel the controller has to learn
         // the next `--resume` id.
         if let sessionID = object["session_id"] as? String, !sessionID.isEmpty {

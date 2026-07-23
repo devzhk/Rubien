@@ -1,5 +1,10 @@
 # Agent Home and Reading Activity — Design Spec
 
+> **Persistence update (2026-07-22):** Statements below that Rubien does not store
+> Assistant transcripts are superseded by
+> [Rubien-owned Assistant transcripts and Codex runtime broker](2026-07-21-assistant-transcript-and-codex-runtime-design.md).
+> Assistant activity statistics remain separate from local conversation content.
+
 **Date:** 2026-07-15
 **Status:** Implemented on `codex/agent-home`; technical review incorporated
 2026-07-15 and final visual-QA decisions reconciled 2026-07-16

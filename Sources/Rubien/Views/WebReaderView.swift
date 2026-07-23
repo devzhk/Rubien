@@ -1777,7 +1777,7 @@ struct WebReaderView: View {
 
     // Assistant chat (Phase 2c, floating card since Phase 3a): one renderer +
     // session controller per reader window; conversation state is in-memory
-    // only (D5).
+    // only; transcript content itself is durable in Rubien's local library.
     @StateObject private var chatRenderer: ChatTranscriptController
     @StateObject private var chatSession: ChatSessionController
 

@@ -119,6 +119,47 @@ final class AssistantAttachmentManifestTests: XCTestCase {
         XCTAssertEqual(parsedAttachmentOnly.attachments.map(\.byteCount), [0])
     }
 
+    func testAvailableManagedAttachmentRetainsValidatedImportSource() throws {
+        let fixtureRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("attachment-manifest-source-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: fixtureRoot) }
+        let managedRoot = fixtureRoot
+            .appendingPathComponent(".rubien/attachments", isDirectory: true)
+        let conversationID = UUID()
+        let attachmentID = UUID()
+        let fileURL = managedRoot
+            .appendingPathComponent(conversationID.uuidString, isDirectory: true)
+            .appendingPathComponent("\(attachmentID.uuidString)-notes.md")
+        try FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let data = Data("managed history attachment".utf8)
+        try data.write(to: fileURL)
+        let prompt = AssistantAttachmentManifest.providerPrompt(
+            visibleText: "Review",
+            attachments: [ChatAttachment(
+                id: attachmentID,
+                displayName: "notes.md",
+                kind: .text,
+                stagedURL: fileURL,
+                mediaType: "text/markdown",
+                byteCount: Int64(data.count),
+                sourceIdentity: fileURL.path
+            )]
+        )
+
+        let parsed = AssistantAttachmentManifest.parse(
+            prompt,
+            managedRoot: managedRoot
+        )
+
+        let attachment = try XCTUnwrap(parsed.attachments.first)
+        XCTAssertTrue(attachment.isAvailable)
+        XCTAssertEqual(attachment.managedSourceURL, fileURL.resolvingSymlinksInPath())
+        XCTAssertEqual(attachment.managedMediaType, "text/markdown")
+    }
+
     func testMentionContextCarriesStableIDsButRestoresOnlyVisibleText() throws {
         let prompt = AssistantAttachmentManifest.providerPrompt(
             visibleText: "Compare @BERT with this paper",

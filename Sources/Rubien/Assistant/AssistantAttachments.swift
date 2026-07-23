@@ -109,6 +109,61 @@ struct ChatAttachmentPresentation: Codable, Sendable, Equatable, Identifiable {
     let byteCount: Int64
     let isAvailable: Bool
     let thumbnailDataURL: String?
+
+    /// Provider-history parsing keeps the validated managed source long enough
+    /// for Rubien to adopt its bytes into transcript-owned storage. This is
+    /// deliberately omitted from Codable and equality: it is process-local
+    /// import state, never part of the renderer or stored transcript contract.
+    let managedSourceURL: URL?
+    let managedMediaType: String?
+
+    init(
+        id: UUID,
+        displayName: String,
+        kind: ChatAttachmentKind,
+        byteCount: Int64,
+        isAvailable: Bool,
+        thumbnailDataURL: String?,
+        managedSourceURL: URL? = nil,
+        managedMediaType: String? = nil
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.kind = kind
+        self.byteCount = byteCount
+        self.isAvailable = isAvailable
+        self.thumbnailDataURL = thumbnailDataURL
+        self.managedSourceURL = managedSourceURL
+        self.managedMediaType = managedMediaType
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, displayName, kind, byteCount, isAvailable, thumbnailDataURL
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        displayName = try container.decode(String.self, forKey: .displayName)
+        kind = try container.decode(ChatAttachmentKind.self, forKey: .kind)
+        byteCount = try container.decode(Int64.self, forKey: .byteCount)
+        isAvailable = try container.decode(Bool.self, forKey: .isAvailable)
+        thumbnailDataURL = try container.decodeIfPresent(
+            String.self,
+            forKey: .thumbnailDataURL
+        )
+        managedSourceURL = nil
+        managedMediaType = nil
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.id == rhs.id
+            && lhs.displayName == rhs.displayName
+            && lhs.kind == rhs.kind
+            && lhs.byteCount == rhs.byteCount
+            && lhs.isAvailable == rhs.isAvailable
+            && lhs.thumbnailDataURL == rhs.thumbnailDataURL
+    }
 }
 
 struct ChatAttachmentIssue: Identifiable, Sendable, Equatable {
@@ -354,14 +409,22 @@ enum AssistantAttachmentManifest {
                 return unchanged
             }
 
+            let availableSource = validatedManagedSource(
+                stagedURL,
+                id: entry.id,
+                managedRoot: managedRoot,
+                fileManager: fileManager
+            )
             presentations.append(
                 ChatAttachmentPresentation(
                     id: entry.id,
                     displayName: entry.displayName,
                     kind: entry.kind,
                     byteCount: entry.byteCount,
-                    isAvailable: fileManager.fileExists(atPath: stagedURL.path),
-                    thumbnailDataURL: nil
+                    isAvailable: availableSource != nil,
+                    thumbnailDataURL: nil,
+                    managedSourceURL: availableSource,
+                    managedMediaType: entry.mediaType
                 )
             )
         }
@@ -374,6 +437,32 @@ enum AssistantAttachmentManifest {
 
     private static func sha256(_ value: String) -> String {
         SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func validatedManagedSource(
+        _ candidate: URL,
+        id: UUID,
+        managedRoot: URL,
+        fileManager: FileManager
+    ) -> URL? {
+        guard AssistantManagedAttachmentPath.isCanonical(
+            candidate,
+            id: id,
+            managedRoot: managedRoot
+        ) else { return nil }
+        let root = managedRoot.standardizedFileURL.resolvingSymlinksInPath()
+        let resolved = candidate.standardizedFileURL.resolvingSymlinksInPath()
+        guard root.pathComponents == managedRoot.standardizedFileURL.pathComponents,
+              resolved.pathComponents.starts(with: root.pathComponents),
+              let values = try? candidate.resourceValues(forKeys: [
+                  .isRegularFileKey, .isReadableKey, .isSymbolicLinkKey,
+              ]),
+              values.isRegularFile == true,
+              values.isReadable == true,
+              values.isSymbolicLink != true,
+              fileManager.fileExists(atPath: resolved.path)
+        else { return nil }
+        return resolved
     }
 
     private static func sanitizedOptional(_ value: String?, maxLength: Int) -> String? {

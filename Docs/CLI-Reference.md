@@ -56,6 +56,7 @@ Linux needs system deps first — see [Linux CLI](../README.md#linux-cli). For d
 | `stats` | Report tracked reading and Rubien Assistant activity; `--year` selects only the daily calendar slice |
 | `stats-clear` | Clear Reading or Assistant statistics behind an explicit `--yes` confirmation and synced reset boundary |
 | `jobs` | Manage local scheduled Assistant jobs and inspect their run history |
+| `assistant-conversations` | Search, inspect, and delete Rubien-owned local Assistant transcripts (never provider-owned History) |
 | `styles` | List available citation styles |
 | `version` | Print the CLI marketing version and monotonic build number as JSON (`{"build":8,"version":"0.1.7"}`); the MCP server's version guard requires `build >= MIN_CLI_BUILD` |
 | `self-update` | (Linux) Download the latest signed release and replace `rubien-cli` in place after verifying an ed25519 signature; `--check` reports `{current, latest, updateAvailable}` as JSON and changes nothing. On macOS it is a no-op (Rubien.app/Sparkle manages the bundled CLI). |
@@ -1070,7 +1071,10 @@ clear that override.
 The JSON job shape includes `id`, `name`, `prompt`, `weekdayMask`, `weekdays`,
 `localTime`, `enabled`, provider options, `nextRunAt`, `createdAt`, and
 `dateModified`. Run rows include their trigger, local occurrence key, lifecycle
-timestamps, status, provider session ID, failure kind, and unread state.
+timestamps, status, provider session ID, failure kind, unread state,
+`assistantTranscriptState`, and optional `assistantTranscriptStatusCode`. The
+transcript fields describe local capture/import availability; they never replace
+the provider execution `failureKind`.
 `jobs delete-run` accepts only a terminal run. It removes the run from Rubien's
 visible history and clears Rubien's local provider-session link, but does not
 delete the provider-owned conversation. A minimal hidden occurrence marker is
@@ -1081,6 +1085,42 @@ retained so a scheduled occurrence cannot execute a second time.
 > `~/Library/Application Support/Rubien/`. When managing the installed app's
 > schedules from a development CLI, set `RUBIEN_LIBRARY_ROOT` to the app's active
 > root explicitly; otherwise you will create jobs in a different library.
+
+## assistant-conversations
+
+Reads and manages the normalized transcripts Rubien has saved locally. These
+commands never scan Claude/Codex History, start a provider process, expose
+attachment bytes, or delete provider-owned sessions.
+
+```bash
+rubien-cli assistant-conversations list --provider codex --limit 20
+rubien-cli assistant-conversations list --reference-id 42 --search "encoder free"
+rubien-cli assistant-conversations get <conversation-id>
+rubien-cli assistant-conversations delete <conversation-id>
+rubien-cli assistant-conversations clear --before 2026-07-01T00:00:00Z --confirm
+rubien-cli assistant-conversations clear --confirm
+```
+
+`list` accepts `--provider claude|codex`, `--reference-id`, `--search`, and a
+positive `--limit` (default 50). It returns conversation metadata, a bounded
+preview, and turn count. Search uses local FTS over visible user/assistant text
+and paper titles; internal reasoning, raw tool traffic, and attachment metadata
+are not indexed.
+
+`get` returns the conversation, deterministically ordered turns and normalized
+entries, and attachment metadata. Attachment paths are library-relative and may
+be absent for provider imports; absolute paths and file bytes are never returned.
+
+`delete` requires an explicit conversation ID and rejects active turns. `clear`
+requires `--confirm`, optionally accepts an ISO-8601 `--before` cutoff, rejects
+the whole operation if any targeted conversation is active, and prints
+`{"cleared": <count>}`. Deleting a local
+transcript does not delete its Claude/Codex session. A linked scheduled run keeps
+a durable local-deletion state so reopening it cannot silently re-import the
+transcript. Managed local attachment files are removed with the transcript.
+Reads remain available while Rubien is running; delete/clear returns the stable
+`assistant-execution-busy` error when another app/CLI process owns Assistant
+execution for that library.
 
 ## mcp
 

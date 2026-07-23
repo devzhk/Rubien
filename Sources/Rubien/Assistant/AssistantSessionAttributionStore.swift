@@ -153,13 +153,10 @@ actor AssistantSessionAttributionStore {
         provider: AgentProviderKind,
         workspaceURL: URL
     ) -> String {
-        let identity = [
-            workspaceURL.standardizedFileURL.path,
-            provider.rawValue,
-            sessionID,
-        ].joined(separator: "\u{1f}")
-        return SHA256.hash(data: Data(identity.utf8))
-            .map { String(format: "%02x", $0) }
-            .joined()
+        return AssistantSessionIdentity.aliasKeyHash(
+            workspaceURL: workspaceURL,
+            provider: provider.storedProvider,
+            providerSessionID: sessionID
+        )
     }
 }

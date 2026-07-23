@@ -1,5 +1,6 @@
 #if os(macOS)
 import Foundation
+import RubienCore
 import UniformTypeIdentifiers
 
 enum AssistantAttachmentStoreError: LocalizedError, Equatable {
@@ -484,26 +485,6 @@ actor AssistantAttachmentStore {
         managedRoot.appendingPathComponent(conversationID.uuidString, isDirectory: true)
     }
 
-    private func sanitizeBasename(_ displayName: String) -> String {
-        let basename = (displayName as NSString).deletingPathExtension
-        let sanitizedScalars = basename.unicodeScalars.map { scalar -> Character in
-            if
-                CharacterSet.controlCharacters.contains(scalar)
-                    || scalar == "/"
-                    || scalar == "\\"
-                    || scalar == ":"
-            {
-                return "-"
-            }
-            return Character(String(scalar))
-        }
-        let sanitized = String(sanitizedScalars)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return sanitized.isEmpty || sanitized == "." || sanitized == ".."
-            ? "attachment"
-            : sanitized
-    }
-
     private func stagedFilename(
         id: UUID,
         displayName: String,
@@ -512,20 +493,11 @@ actor AssistantAttachmentStore {
         let prefix = id.uuidString + "-"
         let suffix = pathExtension.isEmpty ? "" : "." + pathExtension
         let basenameBudget = max(0, 255 - prefix.utf8.count - suffix.utf8.count)
-        let basename = truncateUTF8(sanitizeBasename(displayName), to: basenameBudget)
+        let basename = AssistantAttachmentFiles.truncateUTF8(
+            AssistantAttachmentFiles.sanitizeBasename(displayName),
+            to: basenameBudget
+        )
         return prefix + basename + suffix
-    }
-
-    private func truncateUTF8(_ value: String, to byteLimit: Int) -> String {
-        var result = ""
-        var byteCount = 0
-        for character in value {
-            let characterBytes = String(character).utf8.count
-            guard byteCount + characterBytes <= byteLimit else { break }
-            result.append(character)
-            byteCount += characterBytes
-        }
-        return result
     }
 
     private func createManagedDirectory(_ directory: URL, displayName: String) throws {
@@ -618,7 +590,11 @@ actor AssistantAttachmentStore {
         let resolvedTarget = target
             .resolvingSymlinksInPath()
             .standardizedFileURL
-        guard isContained(resolvedTarget, in: resolvedWorkspace) else {
+        guard AssistantAttachmentFiles.isContained(
+            resolvedTarget,
+            in: resolvedWorkspace,
+            allowRoot: true
+        ) else {
             throw ManagedPathError.outsideRoot
         }
 
@@ -627,23 +603,24 @@ actor AssistantAttachmentStore {
                 .resolvingSymlinksInPath()
                 .standardizedFileURL
             guard
-                isContained(resolvedManagedRoot, in: resolvedWorkspace),
-                isContained(resolvedTarget, in: resolvedManagedRoot)
+                AssistantAttachmentFiles.isContained(
+                    resolvedManagedRoot,
+                    in: resolvedWorkspace,
+                    allowRoot: true
+                ),
+                AssistantAttachmentFiles.isContained(
+                    resolvedTarget,
+                    in: resolvedManagedRoot,
+                    allowRoot: true
+                )
             else {
                 throw ManagedPathError.outsideRoot
             }
         }
     }
 
-    private func isContained(_ candidate: URL, in root: URL) -> Bool {
-        let rootComponents = root.standardizedFileURL.pathComponents
-        let candidateComponents = candidate.standardizedFileURL.pathComponents
-        return candidateComponents.count >= rootComponents.count
-            && candidateComponents.starts(with: rootComponents)
-    }
-
     private func isSymbolicLink(at url: URL) -> Bool {
-        (try? fileManager.destinationOfSymbolicLink(atPath: url.path)) != nil
+        AssistantAttachmentFiles.isSymbolicLink(url, fileManager: fileManager)
     }
 
     private func pathEntryExists(at url: URL) -> Bool {

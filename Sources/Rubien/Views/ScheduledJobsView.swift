@@ -116,7 +116,7 @@ struct ScheduledJobsPopover: View {
             Button("Delete", role: .destructive) { delete(job) }
             Button("Cancel", role: .cancel) { deleteTarget = nil }
         } message: { job in
-            Text("“\(job.name)” and its run history will be deleted.")
+            Text(ScheduledJobFormatting.deleteJobConfirmation(jobName: job.name))
         }
         .alert(
             "Delete run history?",
@@ -129,12 +129,10 @@ struct ScheduledJobsPopover: View {
             Button("Delete Run", role: .destructive) { deleteRun(run) }
             Button("Cancel", role: .cancel) { deleteRunTarget = nil }
         } message: { run in
-            Text(String(
-                format: ScheduledJobFormatting.localized("scheduled.deleteRun.confirmation"),
-                locale: .current,
-                coordinator.job(id: run.jobId)?.name
+            Text(ScheduledJobFormatting.deleteRunConfirmation(
+                jobName: coordinator.job(id: run.jobId)?.name
                     ?? ScheduledJobFormatting.localized("scheduled.job.fallbackName"),
-                ScheduledJobFormatting.runDetail(run)
+                runDetail: ScheduledJobFormatting.runDetail(run)
             ))
         }
     }
@@ -1032,7 +1030,27 @@ enum ScheduledJobEditorOptions {
     }
 }
 
+enum ScheduledRunTranscriptOpenAction: Equatable {
+    case presentLocal
+    case importLegacy(isRetry: Bool)
+}
+
 enum ScheduledJobFormatting {
+    static func transcriptOpenAction(
+        for run: ScheduledJobRun
+    ) -> ScheduledRunTranscriptOpenAction {
+        if run.assistantTranscriptState.requiresInitialLegacyImport {
+            return .importLegacy(isRetry: false)
+        }
+        if run.shouldReconcileLegacyTranscriptOnOpen {
+            return .importLegacy(isRetry: true)
+        }
+        // Every other state is presented from Rubien's local run/transcript
+        // projection. Provider reads are reserved for the explicit legacy-import
+        // and Provider History flows.
+        return .presentLocal
+    }
+
     static func localized(_ key: String) -> String {
         String(localized: String.LocalizationValue(key), bundle: .module)
     }
@@ -1060,6 +1078,23 @@ enum ScheduledJobFormatting {
             locale: .current,
             days,
             date.formatted(date: .omitted, time: .shortened)
+        )
+    }
+
+    static func deleteJobConfirmation(jobName: String) -> String {
+        String(
+            format: localized("scheduled.deleteJob.confirmation"),
+            locale: .current,
+            jobName
+        )
+    }
+
+    static func deleteRunConfirmation(jobName: String, runDetail: String) -> String {
+        String(
+            format: localized("scheduled.deleteRun.confirmation"),
+            locale: .current,
+            jobName,
+            runDetail
         )
     }
 
@@ -1095,6 +1130,7 @@ enum ScheduledJobFormatting {
         case .interruptedBeforeStart, .interrupted: localized("scheduled.failure.interrupted")
         case .launchFailed: localized("scheduled.failure.launchFailed")
         case .providerFailed: localized("scheduled.failure.providerFailed")
+        case .storageFailure: localized("scheduled.failure.storageFailure")
         case .unknown(let value): value
         }
     }
@@ -1113,6 +1149,8 @@ enum ScheduledJobFormatting {
             localized("scheduled.failureDetail.launchFailed")
         case .providerFailed:
             localized("scheduled.failureDetail.providerFailed")
+        case .storageFailure:
+            localized("scheduled.failureDetail.storageFailure")
         case .unknown(let value):
             value
         }

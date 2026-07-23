@@ -20,6 +20,39 @@ enum AssistantImageNormalizer {
     private static let candidateEdges = [2_576, 2_048, 1_600, 1_280, 1_024, 768, 512]
     private static let jpegQualities: [Double] = [0.90, 0.82, 0.74, 0.64, 0.52]
     private static let thumbnailPixelSize = 160
+    private static let maximumTranscriptThumbnailBytes = 256 * 1_024
+
+    /// Rebuilds only the bounded preview needed by a durable transcript. The full
+    /// library-owned image stays URL-backed; this never materializes or returns an
+    /// unbounded source payload to the renderer.
+    static func transcriptThumbnailDataURL(
+        fileURL: URL,
+        maxBytes: Int = maximumTranscriptThumbnailBytes
+    ) -> String? {
+        guard maxBytes > 0 else { return nil }
+        let options = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithURL(fileURL as CFURL, options),
+              let image = thumbnail(from: source, edge: thumbnailPixelSize)
+        else { return nil }
+
+        let candidates: [(Data?, String)]
+        if hasAlpha(image) {
+            candidates = [
+                (encode(image, type: .png, quality: nil), "data:image/png;base64,"),
+                (compositeOnWhite(image).flatMap {
+                    encode($0, type: .jpeg, quality: 0.74)
+                }, "data:image/jpeg;base64,"),
+            ]
+        } else {
+            candidates = [0.74, 0.52].map {
+                (encode(image, type: .jpeg, quality: $0), "data:image/jpeg;base64,")
+            }
+        }
+        guard let (data, prefix) = candidates.compactMap({ candidate in
+            candidate.0.map { ($0, candidate.1) }
+        }).first(where: { $0.0.count <= maxBytes }) else { return nil }
+        return prefix + data.base64EncodedString()
+    }
 
     static func normalize(
         _ data: Data,

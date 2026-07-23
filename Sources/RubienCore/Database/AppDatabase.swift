@@ -52,7 +52,7 @@ public struct ReferenceMentionCandidate: Sendable, Equatable {
 public final class AppDatabase: Sendable {
     /// Bumped whenever a new migration is registered. Surfaced in
     /// `rubien-cli sync status` JSON for diagnostics.
-    public static let currentSchemaVersion = "v9"
+    public static let currentSchemaVersion = "v10"
 
     public let dbWriter: any DatabaseWriter
 
@@ -611,6 +611,14 @@ public final class AppDatabase: Sendable {
             try Self.applyV9Body(db)
         }
 
+        // v10 (2026-07): Rubien-owned, local-only Assistant transcripts and
+        // scheduled-run transcript lifecycle. Provider session IDs remain the
+        // continuation authority; these tables are the durable presentation
+        // source and deliberately have no CloudKit dirty triggers.
+        migrator.registerMigration("v10") { db in
+            try Self.applyV10Body(db)
+        }
+
         return migrator
     }
 
@@ -698,6 +706,207 @@ public final class AppDatabase: Sendable {
         try db.alter(table: "scheduledJobRun") { table in
             table.add(column: "hiddenAt", .datetime)
         }
+    }
+
+    fileprivate static func applyV10Body(_ db: Database) throws {
+        try db.alter(table: "scheduledJobRun") { table in
+            table.add(column: "assistantTranscriptState", .text)
+                .notNull()
+                .defaults(to: "none")
+            table.add(column: "assistantTranscriptStatusCode", .text)
+        }
+        try db.execute(sql: """
+            UPDATE scheduledJobRun
+            SET assistantTranscriptState = CASE
+                WHEN hiddenAt IS NOT NULL THEN 'deleted'
+                WHEN providerSessionId IS NOT NULL
+                     AND length(trim(providerSessionId)) > 0 THEN 'legacyEligible'
+                ELSE 'none'
+            END
+            """)
+        try db.create(
+            index: "scheduledJobRun_assistantTranscriptState",
+            on: "scheduledJobRun",
+            columns: ["assistantTranscriptState"]
+        )
+
+        try db.execute(sql: """
+            CREATE TABLE assistantConversation (
+                id TEXT NOT NULL PRIMARY KEY,
+                provider TEXT NOT NULL,
+                origin TEXT NOT NULL,
+                workspaceIdentityHash TEXT,
+                contextKind TEXT NOT NULL,
+                referenceId INTEGER REFERENCES reference(id) ON DELETE SET NULL,
+                scheduledJobRunId TEXT UNIQUE
+                    REFERENCES scheduledJobRun(id) ON DELETE CASCADE,
+                continuedFromConversationId TEXT UNIQUE
+                    REFERENCES assistantConversation(id) ON DELETE SET NULL,
+                continuationTransferredAt DATETIME,
+                latestProviderSessionId TEXT,
+                latestSessionTurnOrdinal INTEGER,
+                latestSessionEventOrdinal INTEGER,
+                createdAt DATETIME NOT NULL,
+                lastActivityAt DATETIME NOT NULL,
+                archivedAt DATETIME,
+                CHECK (length(trim(provider)) > 0),
+                CHECK (length(trim(origin)) > 0),
+                CHECK (length(trim(contextKind)) > 0),
+                CHECK (contextKind = 'reference' OR referenceId IS NULL),
+                CHECK (
+                    continuedFromConversationId IS NULL
+                    OR continuedFromConversationId != id
+                ),
+                CHECK (
+                    (latestProviderSessionId IS NULL
+                        AND latestSessionTurnOrdinal IS NULL
+                        AND latestSessionEventOrdinal IS NULL)
+                    OR
+                    (latestProviderSessionId IS NOT NULL
+                        AND latestSessionTurnOrdinal IS NOT NULL
+                        AND latestSessionEventOrdinal IS NOT NULL
+                        AND latestSessionTurnOrdinal >= 0
+                        AND latestSessionEventOrdinal >= 0)
+                )
+            )
+            """)
+        try db.create(
+            index: "assistantConversation_workspace_activity",
+            on: "assistantConversation",
+            columns: ["workspaceIdentityHash", "lastActivityAt", "id"]
+        )
+        try db.create(
+            index: "assistantConversation_context_activity",
+            on: "assistantConversation",
+            columns: ["contextKind", "referenceId", "lastActivityAt"]
+        )
+        try db.create(
+            index: "assistantConversation_origin_workspace_activity",
+            on: "assistantConversation",
+            columns: ["origin", "workspaceIdentityHash", "lastActivityAt"]
+        )
+        try db.create(
+            index: "assistantConversation_archive_activity",
+            on: "assistantConversation",
+            columns: ["archivedAt", "lastActivityAt"]
+        )
+
+        try db.execute(sql: """
+            CREATE TABLE assistantTurn (
+                id TEXT NOT NULL PRIMARY KEY,
+                conversationId TEXT NOT NULL
+                    REFERENCES assistantConversation(id) ON DELETE CASCADE,
+                ordinal INTEGER NOT NULL CHECK (ordinal > 0),
+                providerTurnId TEXT,
+                status TEXT NOT NULL,
+                requestedModel TEXT,
+                requestedEffort TEXT,
+                resolvedModel TEXT,
+                resolvedEffort TEXT,
+                failureKind TEXT,
+                inputTokens INTEGER CHECK (inputTokens IS NULL OR inputTokens >= 0),
+                outputTokens INTEGER CHECK (outputTokens IS NULL OR outputTokens >= 0),
+                cacheReadTokens INTEGER CHECK (cacheReadTokens IS NULL OR cacheReadTokens >= 0),
+                cacheCreationTokens INTEGER CHECK (cacheCreationTokens IS NULL OR cacheCreationTokens >= 0),
+                totalCostUSD REAL CHECK (totalCostUSD IS NULL OR totalCostUSD >= 0),
+                startedAt DATETIME,
+                finishedAt DATETIME,
+                dateModified DATETIME NOT NULL,
+                UNIQUE (conversationId, ordinal),
+                CHECK (length(trim(status)) > 0)
+            )
+            """)
+        try db.create(
+            index: "assistantTurn_status",
+            on: "assistantTurn",
+            columns: ["status"]
+        )
+
+        try db.execute(sql: """
+            CREATE TABLE assistantTranscriptEntry (
+                rowId INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT NOT NULL UNIQUE,
+                turnId TEXT NOT NULL REFERENCES assistantTurn(id) ON DELETE CASCADE,
+                sequence INTEGER NOT NULL CHECK (sequence >= 0),
+                providerItemId TEXT,
+                kind TEXT NOT NULL,
+                body TEXT NOT NULL,
+                payloadVersion INTEGER NOT NULL CHECK (payloadVersion > 0),
+                payloadJSON TEXT,
+                searchText TEXT NOT NULL,
+                status TEXT,
+                createdAt DATETIME NOT NULL,
+                dateModified DATETIME NOT NULL,
+                UNIQUE (turnId, sequence),
+                CHECK (length(trim(kind)) > 0)
+            )
+            """)
+        try db.execute(sql: """
+            CREATE UNIQUE INDEX assistantTranscriptEntry_turn_providerItem
+            ON assistantTranscriptEntry(turnId, providerItemId)
+            WHERE providerItemId IS NOT NULL
+            """)
+
+        try db.create(
+            virtualTable: "assistantTranscriptEntryFts",
+            using: FTS5()
+        ) { table in
+            table.synchronize(withTable: "assistantTranscriptEntry")
+            table.tokenizer = .unicode61()
+            table.column("searchText")
+        }
+
+        try db.execute(sql: """
+            CREATE TABLE assistantAttachment (
+                id TEXT NOT NULL PRIMARY KEY,
+                entryId TEXT NOT NULL
+                    REFERENCES assistantTranscriptEntry(id) ON DELETE CASCADE,
+                displayName TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                relativePath TEXT,
+                mediaType TEXT NOT NULL,
+                byteCount INTEGER NOT NULL CHECK (byteCount >= 0),
+                sha256 TEXT,
+                createdAt DATETIME NOT NULL,
+                CHECK (length(trim(displayName)) > 0),
+                CHECK (length(trim(kind)) > 0),
+                CHECK (length(trim(mediaType)) > 0)
+            )
+            """)
+        try db.create(
+            index: "assistantAttachment_entryId",
+            on: "assistantAttachment",
+            columns: ["entryId"]
+        )
+
+        try db.execute(sql: """
+            CREATE TABLE assistantSessionAlias (
+                keyHash TEXT NOT NULL PRIMARY KEY,
+                conversationId TEXT
+                    REFERENCES assistantConversation(id) ON DELETE SET NULL,
+                provider TEXT NOT NULL,
+                ownerRevision INTEGER NOT NULL CHECK (ownerRevision > 0),
+                recordedAt DATETIME NOT NULL,
+                CHECK (length(trim(keyHash)) > 0),
+                CHECK (length(trim(provider)) > 0)
+            )
+            """)
+        try db.create(
+            index: "assistantSessionAlias_conversationId",
+            on: "assistantSessionAlias",
+            columns: ["conversationId"]
+        )
+        try db.execute(sql: """
+            CREATE TRIGGER assistantConversation_alias_tombstone_bd
+            BEFORE DELETE ON assistantConversation
+            BEGIN
+                UPDATE assistantSessionAlias
+                SET conversationId = NULL,
+                    ownerRevision = ownerRevision + 1,
+                    recordedAt = \(sqlNowISO8601)
+                WHERE conversationId = OLD.id;
+            END
+            """)
     }
 
     fileprivate static func applyV7Body(_ db: Database) throws {
@@ -1061,6 +1270,14 @@ public final class AppDatabase: Sendable {
     public static func runV9MigrationForTesting(on queue: DatabaseQueue) throws {
         try queue.write { db in
             try Self.applyV9Body(db)
+        }
+    }
+
+    /// Test-only: applies the immutable v10 local Assistant transcript schema
+    /// to a v9-shaped queue. Used by `MigrationV10Tests` for upgrade coverage.
+    public static func runV10MigrationForTesting(on queue: DatabaseQueue) throws {
+        try queue.write { db in
+            try Self.applyV10Body(db)
         }
     }
 

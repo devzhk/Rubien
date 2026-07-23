@@ -53,6 +53,62 @@ final class ScheduledJobCoordinatorTests: XCTestCase {
     }
 
     @MainActor
+    func testOwnedButUnpreparedCoordinatorNeverClaimsDueWork() throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let calendar = utcCalendar()
+        let job = try database.createScheduledJob(
+            .init(
+                name: "Blocked recovery",
+                prompt: "Find papers",
+                recurrence: .init(weekdayMask: 127, localMinuteOfDay: 8 * 60),
+                provider: .claude,
+                notifyOnCompletion: false
+            ),
+            now: date("2026-07-13T07:00:00Z"),
+            calendar: calendar
+        )
+        // Force attachment reconciliation to fail after the ownership lock is
+        // acquired. A later scheduler scan must retry preparation, not treat
+        // `isOwner` alone as authorization to claim the overdue job.
+        try database.dbWriter.write { db in
+            try db.drop(table: "assistantAttachment")
+        }
+        let provider = CoordinatorProviderStub()
+        let runner = ScheduledJobRunner(
+            database: database,
+            providerFactory: { _ in provider },
+            workspaceProvider: { FileManager.default.temporaryDirectory },
+            attributionStore: nil
+        )
+        let ownership = AssistantExecutionOwnership()
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("assistant-coordinator-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer {
+            ownership.release()
+            try? FileManager.default.removeItem(at: root)
+        }
+        let coordinator = ScheduledJobCoordinator(
+            database: database,
+            runner: runner,
+            executionOwnership: ownership,
+            executionLibraryRoot: root,
+            now: { self.date("2026-07-13T08:01:00Z") },
+            calendar: { calendar },
+            usesBackgroundScheduler: false
+        )
+
+        coordinator.start()
+        XCTAssertTrue(ownership.isOwner)
+        XCTAssertFalse(try coordinator.setEnabled(id: job.id, isEnabled: false).isEnabled)
+        XCTAssertTrue(try coordinator.setEnabled(id: job.id, isEnabled: true).isEnabled)
+
+        XCTAssertNil(coordinator.activeRun)
+        XCTAssertTrue(coordinator.recentRuns.isEmpty)
+        XCTAssertEqual(provider.availabilityCallCount, 0)
+    }
+
+    @MainActor
     func testSequentialDueRunsRetainTheirClaimedPromptsAndProgress() async throws {
         let database = try AppDatabase(DatabaseQueue())
         let calendar = utcCalendar()
@@ -249,6 +305,64 @@ final class ScheduledJobCoordinatorTests: XCTestCase {
     }
 
     @MainActor
+    func testDeleteRunCannotReconcileWhileAssistantWorkIsStaging() throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("assistant-coordinator-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let ownership = AssistantExecutionOwnership()
+        defer { ownership.release() }
+        XCTAssertTrue(ownership.prepareIfNeeded(
+            database: database,
+            libraryRoot: root,
+            ownerDescription: "coordinator-test"
+        ))
+
+        let job = try database.createScheduledJob(
+            .init(
+                name: "Finished scan",
+                prompt: "Find papers",
+                recurrence: .init(weekdayMask: 127, localMinuteOfDay: 8 * 60),
+                provider: .claude,
+                notifyOnCompletion: false
+            )
+        )
+        let claim = try database.claimManualScheduledJob(id: job.id)
+        XCTAssertTrue(try database.finishScheduledJobRun(
+            id: claim.run.id,
+            status: .succeeded
+        ))
+        let runner = ScheduledJobRunner(
+            database: database,
+            providerFactory: { _ in CoordinatorProviderStub() },
+            workspaceProvider: { FileManager.default.temporaryDirectory },
+            attributionStore: nil
+        )
+        let coordinator = ScheduledJobCoordinator(
+            database: database,
+            runner: runner,
+            executionOwnership: ownership,
+            executionLibraryRoot: root,
+            usesBackgroundScheduler: false
+        )
+        let stagingToken = try XCTUnwrap(
+            ownership.beginAssistantWork(libraryRoot: root)
+        )
+
+        XCTAssertThrowsError(try coordinator.deleteRun(id: claim.run.id)) { error in
+            guard case ScheduledJobError.runnerBusy = error else {
+                return XCTFail("expected runnerBusy, got \(error)")
+            }
+        }
+        XCTAssertNotNil(try database.fetchScheduledJobRun(id: claim.run.id))
+
+        ownership.finishAssistantWork(stagingToken)
+        try coordinator.deleteRun(id: claim.run.id)
+        XCTAssertNil(try database.fetchScheduledJobRun(id: claim.run.id))
+    }
+
+    @MainActor
     func testExternalNotifyingJobRequestsNotificationAuthorization() async throws {
         let database = try AppDatabase(DatabaseQueue())
         let calendar = utcCalendar()
@@ -343,8 +457,9 @@ private final class CoordinatorProviderStub: AgentProvider, @unchecked Sendable 
 
     func send(turn: AgentTurnRequest) -> AsyncThrowingStream<AgentEvent, Error> {
         let completionDelay = completionDelay
+        let sessionID = "coordinator-session-\(turn.conversationID?.uuidString ?? UUID().uuidString)"
         return AsyncThrowingStream<AgentEvent, Error> { continuation in
-            continuation.yield(.sessionStarted(sessionID: "coordinator-session"))
+            continuation.yield(.sessionStarted(sessionID: sessionID))
             continuation.yield(.assistantDelta(text: "Scanning the library…"))
             Task {
                 try? await Task.sleep(for: completionDelay)

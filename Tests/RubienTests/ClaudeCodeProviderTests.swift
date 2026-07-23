@@ -454,6 +454,72 @@ final class ClaudeCodeProviderTests: XCTestCase {
         _ = try? await firstConsumer.value
     }
 
+    func testCancelledEnvelopeStreamPreservesLateRotatedIdentityOnly() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "hang": true,
+            "emitResult": false,
+            "cooperativeInterrupt": true,
+            "sessionInit": "identity-before-stop",
+            "sessionResult": "identity-after-stop",
+            "delayInterruptResultMs": 150,
+        ], into: workspace)
+        let provider = ClaudeCodeProvider(
+            executableOverride: fakeCLIPath,
+            leaseCoordinator: ClaudeSessionLeaseCoordinator())
+        defer { provider.shutdown() }
+        let capture = IdentityCapture()
+        let observer = AgentIdentityObserver(
+            onSessionStarted: { sessionID, _ in
+                await capture.append(sessionID)
+            },
+            onClosed: {
+                await capture.markClosed()
+            }
+        )
+        let conversationID = UUID()
+        let attempt = AssistantAttemptIdentity(
+            conversationID: conversationID,
+            conversationEpoch: 0,
+            turnID: UUID(),
+            workID: UUID(),
+            runtimeGeneration: nil
+        )
+        let stream = provider.sendEnvelopes(
+            turn: turn(workspace: workspace, conversationID: conversationID),
+            attempt: attempt,
+            identityObserver: observer
+        )
+        let consumer = Task { () -> [String] in
+            var visibleSessionIDs: [String] = []
+            do {
+                for try await envelope in stream {
+                    if case let .sessionStarted(sessionID) = envelope.event {
+                        visibleSessionIDs.append(sessionID)
+                    }
+                }
+            } catch {}
+            return visibleSessionIDs
+        }
+
+        try await waitForIdentity("identity-before-stop", in: capture, timeout: 12)
+        consumer.cancel()
+        await observer.waitUntilClosed()
+
+        let capturedSessionIDs = await capture.sessionIDs
+        let identityClosed = await capture.closed
+        let visibleSessionIDs = await consumer.value
+        XCTAssertEqual(
+            capturedSessionIDs,
+            ["identity-before-stop", "identity-after-stop"]
+        )
+        XCTAssertTrue(identityClosed)
+        XCTAssertFalse(
+            visibleSessionIDs.contains("identity-after-stop"),
+            "late continuation identity must not re-enter visible content"
+        )
+    }
+
     func testExplicitCancelSnapshotsOldTokenBeforeImmediateSend() async throws {
         let workspace = try makeWorkspace()
         let conversationID = UUID()
@@ -1202,6 +1268,19 @@ final class ClaudeCodeProviderTests: XCTestCase {
         throw TestTimeout()
     }
 
+    private func waitForIdentity(
+        _ sessionID: String,
+        in capture: IdentityCapture,
+        timeout: TimeInterval
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if await capture.sessionIDs.contains(sessionID) { return }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        throw TestTimeout()
+    }
+
     private func probeEscapedOutputHandles(
         in workspace: URL, timeout: TimeInterval
     ) async throws -> String {
@@ -1237,6 +1316,19 @@ final class ClaudeCodeProviderTests: XCTestCase {
             for try await event in stream { events.append(event) }
             return events
         }
+    }
+}
+
+private actor IdentityCapture {
+    private(set) var sessionIDs: [String] = []
+    private(set) var closed = false
+
+    func append(_ sessionID: String) {
+        sessionIDs.append(sessionID)
+    }
+
+    func markClosed() {
+        closed = true
     }
 }
 

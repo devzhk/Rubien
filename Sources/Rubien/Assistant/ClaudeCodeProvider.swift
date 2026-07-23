@@ -54,7 +54,32 @@ final class ClaudeCodeProvider: AgentProvider {
     }
 
     func send(turn: AgentTurnRequest) -> AsyncThrowingStream<AgentEvent, Error> {
+        sendEvents(turn: turn, identityObserver: nil)
+    }
+
+    func sendEnvelopes(
+        turn: AgentTurnRequest,
+        attempt: AssistantAttemptIdentity,
+        identityObserver: AgentIdentityObserver?
+    ) -> AsyncThrowingStream<AgentEventEnvelope, Error> {
+        let events = sendEvents(turn: turn, identityObserver: identityObserver)
+        // Cancelling visible consumption retires the native turn. The engine
+        // retains `identityObserver` until the exact process is reaped.
+        return forwardingAgentStream(events) { event in
+            AgentEventEnvelope(
+                attempt: attempt,
+                providerItemID: nil,
+                event: event
+            )
+        }
+    }
+
+    private func sendEvents(
+        turn: AgentTurnRequest,
+        identityObserver: AgentIdentityObserver?
+    ) -> AsyncThrowingStream<AgentEvent, Error> {
         guard let ticket = controlState.beginSend() else {
+            Task { await identityObserver?.close() }
             return AsyncThrowingStream { $0.finish() }
         }
         let token = ticket.token
@@ -76,7 +101,8 @@ final class ClaudeCodeProvider: AgentProvider {
                 await engine.startTurn(
                     token: token, sequence: ticket.sequence, request: turn,
                     executableOverride: override, mcpConfig: mcpConfig,
-                    continuation: continuation)
+                    continuation: continuation,
+                    identityObserver: identityObserver)
             }
         }
     }
@@ -208,6 +234,7 @@ actor ClaudeTurnEngine {
         let executableOverride: String?
         let mcpConfig: String?
         let continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation
+        let identityObserver: AgentIdentityObserver?
         var acquisitionTask: Task<Void, Never>?
 
         init(
@@ -215,13 +242,15 @@ actor ClaudeTurnEngine {
             request: AgentTurnRequest,
             executableOverride: String?,
             mcpConfig: String?,
-            continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation
+            continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation,
+            identityObserver: AgentIdentityObserver?
         ) {
             self.token = token
             self.request = request
             self.executableOverride = executableOverride
             self.mcpConfig = mcpConfig
             self.continuation = continuation
+            self.identityObserver = identityObserver
         }
     }
 
@@ -231,6 +260,7 @@ actor ClaudeTurnEngine {
         let continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation
         let conversationID: UUID?
         let lease: ClaudeSessionLeaseCoordinator.Grant
+        let identityObserver: AgentIdentityObserver?
         var parser = ClaudeStreamParser()
         var pendingApprovals: [String: ClaudeControlProtocol.PendingApproval] = [:]
         let stderr = StderrRingBuffer()
@@ -248,7 +278,8 @@ actor ClaudeTurnEngine {
             continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation,
             conversationID: UUID?,
             lease: ClaudeSessionLeaseCoordinator.Grant,
-            latestSessionID: String?
+            latestSessionID: String?,
+            identityObserver: AgentIdentityObserver?
         ) {
             self.token = token
             self.process = process
@@ -256,6 +287,7 @@ actor ClaudeTurnEngine {
             self.conversationID = conversationID
             self.lease = lease
             self.latestSessionID = latestSessionID
+            self.identityObserver = identityObserver
         }
     }
 
@@ -267,27 +299,32 @@ actor ClaudeTurnEngine {
         request: AgentTurnRequest,
         executableOverride: String?,
         mcpConfig: String?,
-        continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation
-    ) {
+        continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation,
+        identityObserver: AgentIdentityObserver? = nil
+    ) async {
         guard !isShuttingDown else {
             continuation.finish()
+            await identityObserver?.close()
             return
         }
         let wasCancelledBeforeStart = cancelledTokens.remove(token) != nil
         guard sequence >= latestStartSequence else {
             continuation.finish()
+            await identityObserver?.close()
             return
         }
         latestStartSequence = sequence
         if wasCancelledBeforeStart {
             continuation.finish()
+            await identityObserver?.close()
             return
         }
 
         let start = PendingStart(
             token: token, request: request, executableOverride: executableOverride,
-            mcpConfig: mcpConfig, continuation: continuation)
-        if let replaced = pending { cancelPending(replaced) }
+            mcpConfig: mcpConfig, continuation: continuation,
+            identityObserver: identityObserver)
+        if let replaced = pending { await cancelPending(replaced) }
         pending = start
 
         if let turn = current {
@@ -330,7 +367,7 @@ actor ClaudeTurnEngine {
         }
         start.acquisitionTask = nil
         guard let grant else {
-            cancelPending(start)
+            await cancelPending(start)
             return
         }
         await spawn(start, lease: grant, resumeSessionID: grant.latestSessionID)
@@ -387,11 +424,12 @@ actor ClaudeTurnEngine {
         guard !isShuttingDown, pending?.token == start.token else {
             process.signalGroup(SIGKILL)
             process.closeOutputHandles()
-            Task { [coordinator = leaseCoordinator] in
+            Task { [coordinator = leaseCoordinator, identityObserver = start.identityObserver] in
                 guard await process.observeExit() else { return }
                 process.signalGroup(SIGKILL)
                 guard await process.reap() != nil else { return }
                 await coordinator.release(lease, latestSessionID: resumeSessionID)
+                await identityObserver?.close()
             }
             start.continuation.finish()
             return
@@ -401,7 +439,8 @@ actor ClaudeTurnEngine {
         let turn = Turn(
             token: start.token, process: process, continuation: start.continuation,
             conversationID: start.request.conversationID, lease: lease,
-            latestSessionID: resumeSessionID)
+            latestSessionID: resumeSessionID,
+            identityObserver: start.identityObserver)
         pending = nil
         current = turn
         startReaders(turn: turn)
@@ -421,6 +460,7 @@ actor ClaudeTurnEngine {
         if pending?.token == start.token { pending = nil }
         start.continuation.finish(throwing: error)
         await leaseCoordinator.release(lease, latestSessionID: resumeSessionID)
+        await start.identityObserver?.close()
     }
 
     /// Materialize all native image blocks before any process is spawned or stdin
@@ -472,6 +512,10 @@ actor ClaudeTurnEngine {
                 // that visible id; it must join this already-held lease rather
                 // than creating a second live owner.
                 await leaseCoordinator.update(turn.lease, latestSessionID: sessionID)
+                await turn.identityObserver?.sessionStarted(
+                    sessionID,
+                    runtimeGeneration: nil
+                )
             }
             if !turn.cancelled { turn.continuation.yield(event) }
             if case .turnCompleted = event { onResult(turn) }
@@ -498,11 +542,11 @@ actor ClaudeTurnEngine {
         turn.process.writeLine(ClaudeControlProtocol.controlResponse(for: pending, decision: decision))
     }
 
-    func cancelIfCurrent(token: UUID, sequence: UInt64) {
+    func cancelIfCurrent(token: UUID, sequence: UInt64) async {
         if let turn = current, turn.token == token {
             beginRetirement(turn)
         } else if let start = pending, start.token == token {
-            cancelPending(start)
+            await cancelPending(start)
         } else if sequence > latestStartSequence {
             // A newer send can be cancelled before either its own start task or an
             // older delayed start reaches the actor. Advancing the watermark makes
@@ -510,15 +554,15 @@ actor ClaudeTurnEngine {
             // acquisition as well. A live older turn is left alone because the
             // cancelled successor never became an interruption request.
             latestStartSequence = sequence
-            if let olderPending = pending { cancelPending(olderPending) }
+            if let olderPending = pending { await cancelPending(olderPending) }
             cancelledTokens.insert(token)
         }
     }
 
-    func shutdown() {
+    func shutdown() async {
         guard !isShuttingDown else { return }
         isShuttingDown = true
-        if let start = pending { cancelPending(start) }
+        if let start = pending { await cancelPending(start) }
         guard let turn = current, !turn.finished else { return }
         turn.cancelled = true
         turn.forceFinalize = true
@@ -563,12 +607,13 @@ actor ClaudeTurnEngine {
         if turn.leaderExited, turn.sawResult { beginFinalize(turn) }
     }
 
-    private func cancelPending(_ start: PendingStart) {
+    private func cancelPending(_ start: PendingStart) async {
         guard pending?.token == start.token else { return }
         pending = nil
         start.acquisitionTask?.cancel()
         start.continuation.finish()
         cancelledTokens.remove(start.token)
+        await start.identityObserver?.close()
     }
 
     private func beginFinalize(_ turn: Turn) {
@@ -607,6 +652,7 @@ actor ClaudeTurnEngine {
         current = nil
 
         await leaseCoordinator.update(turn.lease, latestSessionID: turn.latestSessionID)
+        await turn.identityObserver?.close()
         if !isShuttingDown,
            let start = pending,
            let conversationID = turn.conversationID,
