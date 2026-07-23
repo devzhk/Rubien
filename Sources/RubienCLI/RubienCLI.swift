@@ -1720,9 +1720,40 @@ struct AssistantConversationsGet: ParsableCommand {
     )
 
     @Argument(help: "Assistant conversation ID") var id: String
+    @Option(help: "Maximum transcript entries")
+    var limit = AssistantConversationDetail.defaultPageLimit
+    @Option(help: "Opaque olderCursor from the previous page")
+    var cursor: String?
 
     func run() throws {
-        guard let detail = try AppDatabase.shared.fetchAssistantConversationDetail(id: id) else {
+        guard (1...AssistantConversationDetail.maximumPageLimit).contains(limit) else {
+            printJSONError(
+                "--limit must be between 1 and "
+                    + "\(AssistantConversationDetail.maximumPageLimit)"
+            )
+            throw ExitCode.failure
+        }
+        let parsedCursor: AssistantTranscriptCursor?
+        if let cursor {
+            guard let value = AssistantTranscriptCursor(token: cursor) else {
+                printJSONError("--cursor is not a valid Assistant transcript cursor")
+                throw ExitCode.failure
+            }
+            parsedCursor = value
+        } else {
+            parsedCursor = nil
+        }
+        if let parsedCursor, parsedCursor.conversationID != id {
+            printJSONError(
+                "--cursor belongs to a different Assistant conversation"
+            )
+            throw ExitCode.failure
+        }
+        guard let detail = try AppDatabase.shared.fetchAssistantConversationDetail(
+            id: id,
+            before: parsedCursor,
+            limit: limit
+        ) else {
             printJSONError("Assistant conversation \(id) not found")
             throw ExitCode.failure
         }

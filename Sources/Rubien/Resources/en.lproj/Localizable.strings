@@ -195,6 +195,7 @@
 "scheduled.result.localTranscriptDeleted" = "The local transcript was deleted. Use Provider History to import it again explicitly.";
 "scheduled.result.continuationDeleted" = "The continuation was deleted locally.";
 "assistant.history.scheduledContinuation" = "Scheduled result — continuing below";
+"assistant.history.loadEarlier" = "Load earlier messages";
 "Clear Assistant Conversations…" = "Clear Assistant Conversations…";
 "Clear Assistant Conversations?" = "Clear Assistant Conversations?";
 "Clear Assistant Conversations" = "Clear Assistant Conversations";

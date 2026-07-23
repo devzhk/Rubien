@@ -446,6 +446,7 @@ struct ChatSurfaceView: View {
     @ViewBuilder private var content: some View {
         if configuration.isHome {
             if homeConversationIsDocked {
+                transcriptHistoryPager
                 ChatTranscriptView(
                     controller: renderer,
                     onOpenReference: configuration.onOpenReference,
@@ -468,11 +469,14 @@ struct ChatSurfaceView: View {
             ZStack {
                 // Kept in the hierarchy while covered so the WebView is loaded
                 // and ready the moment the first turn starts streaming.
-                ChatTranscriptView(
-                    controller: renderer,
-                    onOpenReference: configuration.onOpenReference,
-                    onOpenPaperSource: configuration.onOpenPaperSource,
-                    onAddPaperSource: configuration.onAddPaperSource)
+                VStack(spacing: 0) {
+                    transcriptHistoryPager
+                    ChatTranscriptView(
+                        controller: renderer,
+                        onOpenReference: configuration.onOpenReference,
+                        onOpenPaperSource: configuration.onOpenPaperSource,
+                        onAddPaperSource: configuration.onAddPaperSource)
+                }
                 if !session.hasMessages {
                     startPage
                 }
@@ -498,6 +502,15 @@ struct ChatSurfaceView: View {
 
     private var homeConversationIsDocked: Bool {
         session.hasMessages || homeResumeRequested
+    }
+
+    @ViewBuilder private var transcriptHistoryPager: some View {
+        if session.canLoadOlderTranscript || session.isLoadingOlderTranscript {
+            TranscriptHistoryPager(
+                isLoading: session.isLoadingOlderTranscript,
+                action: session.loadOlderTranscript
+            )
+        }
     }
 
     /// Home keeps one composer footprint across the empty and transcript

@@ -54,11 +54,34 @@ const tick = (ms = 80) => new Promise((r) => setTimeout(r, ms))
 test('window.RubienChat exposes the full contract', async () => {
   const { R } = await boot()
   assert.ok(R && typeof R === 'object', 'window.RubienChat installed')
-  for (const m of ['reset', 'loadTranscript', 'addUserMessage', 'beginAssistantMessage',
+  for (const m of ['reset', 'loadTranscript', 'prependTranscript', 'addUserMessage', 'beginAssistantMessage',
     'appendDelta', 'commitAssistantMessage', 'addToolChip', 'addPaperGroup',
     'addNotice', 'setTheme']) {
     assert.equal(typeof R[m], 'function', `RubienChat.${m} is a function`)
   }
+})
+
+test('older transcript pages prepend in sequence order without replacing newer rows', async () => {
+  const { R, T } = await boot()
+  R.loadTranscript([
+    { role: 'user', body: 'newer question', seq: 0 },
+    { role: 'assistant', body: 'newer answer', seq: 1 },
+  ])
+  Object.defineProperty(T(), 'scrollHeight', {
+    configurable: true,
+    get: () => T().children.length * 40,
+  })
+  T().scrollTop = 25
+  R.prependTranscript([
+    { role: 'assistant', body: 'older answer', seq: 1 },
+    { role: 'user', body: 'older question', seq: 0 },
+  ])
+  await tick()
+  assert.deepEqual(
+    [...T().children].map((node) => node.textContent.trim()),
+    ['older question', 'older answer', 'newer question', 'newer answer'],
+  )
+  assert.equal(T().scrollTop, 105, 'viewport remains anchored after an 80px prepend')
 })
 
 test('transcript uses the native scrollbar with a muted color', async () => {

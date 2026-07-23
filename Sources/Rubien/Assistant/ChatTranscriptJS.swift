@@ -25,6 +25,11 @@ enum ChatTranscriptJS {
         jsCall("loadTranscript", [encodeArg(messages)])
     }
 
+    /// `prependTranscript(messages)` — insert an older page without moving the viewport.
+    static func prependTranscript(_ messages: [ChatRenderMessage]) -> String {
+        jsCall("prependTranscript", [encodeArg(messages)])
+    }
+
     /// `addUserMessage(payload)` — structured body plus attachment presentation.
     static func addUserMessage(_ payload: ChatUserMessagePayload) -> String {
         jsCall("addUserMessage", [encodeArg(payload)])

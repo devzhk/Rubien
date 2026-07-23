@@ -1095,7 +1095,8 @@ attachment bytes, or delete provider-owned sessions.
 ```bash
 rubien-cli assistant-conversations list --provider codex --limit 20
 rubien-cli assistant-conversations list --reference-id 42 --search "encoder free"
-rubien-cli assistant-conversations get <conversation-id>
+rubien-cli assistant-conversations get <conversation-id> --limit 200
+rubien-cli assistant-conversations get <conversation-id> --cursor <older-cursor>
 rubien-cli assistant-conversations delete <conversation-id>
 rubien-cli assistant-conversations clear --before 2026-07-01T00:00:00Z --confirm
 rubien-cli assistant-conversations clear --confirm
@@ -1107,9 +1108,13 @@ preview, and turn count. Search uses local FTS over visible user/assistant text
 and paper titles; internal reasoning, raw tool traffic, and attachment metadata
 are not indexed.
 
-`get` returns the conversation, deterministically ordered turns and normalized
-entries, and attachment metadata. Attachment paths are library-relative and may
-be absent for provider imports; absolute paths and file bytes are never returned.
+`get` returns the newest page of deterministically ordered normalized entries,
+the turns and attachment metadata referenced by that page, and an opaque
+`olderCursor` when earlier entries remain. Pass that value back with `--cursor`
+to read the next older page of the same conversation; cursors are
+conversation-scoped. `--limit` defaults to 200 and accepts 1–500.
+Attachment paths are library-relative and may be absent for provider imports;
+absolute paths and file bytes are never returned.
 
 `delete` requires an explicit conversation ID and rejects active turns. `clear`
 requires `--confirm`, optionally accepts an ISO-8601 `--before` cutoff, rejects

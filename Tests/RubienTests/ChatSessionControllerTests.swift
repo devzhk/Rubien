@@ -207,7 +207,7 @@ final class ChatSessionControllerTests: XCTestCase {
             libraryRoot: libraryRoot
         )
         let provider = MockAgentProvider(kind: .claude)
-        provider.setTranscript([
+        let providerRows = [
             ChatRenderMessage(
                 role: .user,
                 body: "Read my notes",
@@ -224,7 +224,9 @@ final class ChatSessionControllerTests: XCTestCase {
                 )]
             ),
             ChatRenderMessage(role: .assistant, body: "Done", seq: 1),
-        ], for: "provider-with-attachment")
+        ]
+        provider.setTranscript(providerRows, for: "provider-with-attachment")
+        provider.setTranscript(providerRows, for: "provider-copy-with-attachment")
         let controller = ChatSessionController(
             provider: provider,
             transcript: SpyTranscriptSink(),
@@ -236,29 +238,37 @@ final class ChatSessionControllerTests: XCTestCase {
             durableTranscriptAttachmentStore: durableStore
         )
 
-        let result = await controller.importProviderSession(AgentSessionSummary(
-            id: "provider-with-attachment",
-            preview: "Read my notes",
-            date: Date(timeIntervalSince1970: 1_800_000_000)
-        ))
-
-        guard case .opened = result else {
-            return XCTFail("expected provider history import, got \(result)")
+        for sessionID in [
+            "provider-with-attachment",
+            "provider-copy-with-attachment",
+        ] {
+            let result = await controller.importProviderSession(AgentSessionSummary(
+                id: sessionID,
+                preview: "Read my notes",
+                date: Date(timeIntervalSince1970: 1_800_000_000)
+            ))
+            guard case .opened = result else {
+                return XCTFail("expected provider history import, got \(result)")
+            }
         }
-        let conversation = try XCTUnwrap(
-            database.fetchAssistantConversationSummaries().first?.conversation
-        )
-        let detail = try XCTUnwrap(
-            database.fetchAssistantConversationDetail(id: conversation.id)
-        )
-        let attachment = try XCTUnwrap(detail.attachments.first)
-        XCTAssertNotNil(attachment.relativePath)
-        XCTAssertNotNil(attachment.sha256)
-        let durableURL = await durableStore.resolvedURL(
-            conversationID: conversation.id,
-            attachment: attachment
-        )
-        XCTAssertEqual(try durableURL.map { try Data(contentsOf: $0) }, sourceData)
+        let conversations = try database.fetchAssistantConversationSummaries()
+            .map(\.conversation)
+        XCTAssertEqual(conversations.count, 2)
+        var storedAttachmentIDs = Set<String>()
+        for conversation in conversations {
+            let detail = try XCTUnwrap(
+                database.fetchAssistantConversationDetail(id: conversation.id)
+            )
+            let attachment = try XCTUnwrap(detail.attachments.first)
+            XCTAssertTrue(storedAttachmentIDs.insert(attachment.id).inserted)
+            XCTAssertNotNil(attachment.relativePath)
+            XCTAssertNotNil(attachment.sha256)
+            let durableURL = await durableStore.resolvedURL(
+                conversationID: conversation.id,
+                attachment: attachment
+            )
+            XCTAssertEqual(try durableURL.map { try Data(contentsOf: $0) }, sourceData)
+        }
     }
 
     func testHomeLocalHistoryExcludesReaderConversations() async throws {
@@ -705,6 +715,74 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertEqual(codex.catalogCallCount, 0)
         XCTAssertEqual(codex.transcriptCallCount, 0)
         XCTAssertEqual(controller.liveSessionID, "codex-thread")
+    }
+
+    func testLocalResumeLoadsOlderTranscriptPageIncrementally() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let workspace = URL(fileURLWithPath: "/tmp/ws")
+        let conversation = try database.createAssistantConversation(.init(
+            provider: .claude,
+            workspaceIdentityHash: AssistantSessionIdentity.workspaceHash(workspace),
+            contextKind: .library
+        ))
+        let turn = AssistantTurn(conversationId: conversation.id, ordinal: 1)
+        try database.beginAssistantTurn(
+            turn,
+            userEntry: .init(
+                id: "entry-000",
+                turnId: turn.id,
+                sequence: 0,
+                kind: .user,
+                body: "Message 0"
+            )
+        )
+        for sequence in 1...200 {
+            try database.upsertAssistantTranscriptEntry(.init(
+                id: String(format: "entry-%03d", sequence),
+                turnId: turn.id,
+                sequence: sequence,
+                kind: .assistant,
+                body: "Message \(sequence)"
+            ))
+        }
+        XCTAssertTrue(try database.finishAssistantTurn(
+            id: turn.id,
+            status: .succeeded
+        ))
+
+        let sink = SpyTranscriptSink()
+        let controller = ChatSessionController(
+            provider: MockAgentProvider(kind: .claude),
+            transcript: sink,
+            conversationContext: .library,
+            workspaceURL: workspace,
+            gate: AssistantTurnGate(),
+            initialAvailability: .installed(version: "test", path: "/fake/claude"),
+            conversationDatabase: database
+        )
+        controller.resume(AgentSessionSummary(
+            id: conversation.id,
+            preview: "Message 0",
+            date: conversation.lastActivityAt
+        ))
+        await waitUntil { !controller.isResuming }
+
+        XCTAssertTrue(controller.canLoadOlderTranscript)
+        guard case .loadTranscript(let newest)? = sink.calls.last else {
+            return XCTFail("expected newest transcript page")
+        }
+        XCTAssertEqual(newest.count, 200)
+        XCTAssertEqual(newest.first?.body, "Message 1")
+        XCTAssertEqual(newest.last?.body, "Message 200")
+
+        controller.loadOlderTranscript()
+        await waitUntil { !controller.isLoadingOlderTranscript }
+
+        XCTAssertFalse(controller.canLoadOlderTranscript)
+        guard case .prependTranscript(let older)? = sink.calls.last else {
+            return XCTFail("expected one prepended transcript page")
+        }
+        XCTAssertEqual(older.map(\.body), ["Message 0"])
     }
 
     func testScheduledResultOpenedFromHistoryRemainsReadOnly() async throws {
@@ -4026,6 +4104,7 @@ final class SpyTranscriptSink: ChatTranscriptSink {
     enum Call: Equatable {
         case reset
         case loadTranscript([ChatRenderMessage])
+        case prependTranscript([ChatRenderMessage])
         case addUserMessage(String)
         case addUserPayload(ChatUserMessagePayload)
         case appendDelta(String)
@@ -4040,6 +4119,9 @@ final class SpyTranscriptSink: ChatTranscriptSink {
 
     func reset() { calls.append(.reset) }
     func loadTranscript(_ messages: [ChatRenderMessage]) { calls.append(.loadTranscript(messages)) }
+    func prependTranscript(_ messages: [ChatRenderMessage]) {
+        calls.append(.prependTranscript(messages))
+    }
     func addUserMessage(_ markdown: String) { calls.append(.addUserMessage(markdown)) }
     func addUserMessage(_ payload: ChatUserMessagePayload) { calls.append(.addUserPayload(payload)) }
     func appendDelta(_ text: String) { calls.append(.appendDelta(text)) }

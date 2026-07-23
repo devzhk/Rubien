@@ -68,6 +68,180 @@ final class AssistantConversationDatabaseTests: XCTestCase {
         XCTAssertEqual(summaries.map(\.conversation.id), [library.id])
     }
 
+    func testSummaryPreviewIsWhitespaceNormalizedAndBounded() throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let conversation = try database.createAssistantConversation(.init(
+            provider: .codex,
+            workspaceIdentityHash: "workspace",
+            contextKind: .library
+        ))
+        let turn = AssistantTurn(conversationId: conversation.id, ordinal: 1)
+        try database.beginAssistantTurn(
+            turn,
+            userEntry: .init(
+                turnId: turn.id,
+                sequence: 0,
+                kind: .user,
+                body: String(repeating: "  a long\nquestion\t", count: 80)
+            )
+        )
+
+        let preview = try XCTUnwrap(
+            database.fetchAssistantConversationSummaries().first?.preview
+        )
+        XCTAssertLessThanOrEqual(
+            preview.count,
+            AssistantConversationSummary.previewCharacterLimit
+        )
+        XCTAssertTrue(preview.hasSuffix("…"))
+        XCTAssertFalse(preview.contains("\n"))
+        XCTAssertFalse(preview.contains("\t"))
+        XCTAssertFalse(preview.contains("  "))
+    }
+
+    func testTranscriptDetailPagesNewestEntriesWithScopedTurnsAndAttachments() throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let conversation = try database.createAssistantConversation(.init(
+            provider: .claude,
+            workspaceIdentityHash: "workspace",
+            contextKind: .library
+        ))
+        for ordinal in 1...3 {
+            let turn = AssistantTurn(
+                id: "turn-\(ordinal)",
+                conversationId: conversation.id,
+                ordinal: ordinal
+            )
+            let entry = AssistantTranscriptEntry(
+                id: "entry-\(ordinal)",
+                turnId: turn.id,
+                sequence: 0,
+                kind: .user,
+                body: "Prompt \(ordinal)"
+            )
+            try database.beginAssistantTurn(
+                turn,
+                userEntry: entry,
+                attachments: [.init(
+                    id: "attachment-\(ordinal)",
+                    entryId: entry.id,
+                    displayName: "note-\(ordinal).md",
+                    kind: .text,
+                    relativePath: nil,
+                    mediaType: "text/markdown",
+                    byteCount: Int64(ordinal)
+                )]
+            )
+            XCTAssertTrue(try database.finishAssistantTurn(
+                id: turn.id,
+                status: .succeeded
+            ))
+        }
+
+        let newest = try XCTUnwrap(database.fetchAssistantConversationDetail(
+            id: conversation.id,
+            limit: 2
+        ))
+        XCTAssertEqual(newest.entries.map(\.body), ["Prompt 2", "Prompt 3"])
+        XCTAssertEqual(newest.turns.map(\.ordinal), [2, 3])
+        XCTAssertEqual(
+            Set(newest.attachments.map(\.id)),
+            Set(["attachment-2", "attachment-3"])
+        )
+        let cursor = try XCTUnwrap(newest.olderCursor)
+        XCTAssertEqual(
+            AssistantTranscriptCursor(token: cursor.token),
+            cursor
+        )
+
+        let older = try XCTUnwrap(database.fetchAssistantConversationDetail(
+            id: conversation.id,
+            before: cursor,
+            limit: 2
+        ))
+        XCTAssertEqual(older.entries.map(\.body), ["Prompt 1"])
+        XCTAssertEqual(older.turns.map(\.ordinal), [1])
+        XCTAssertEqual(older.attachments.map(\.id), ["attachment-1"])
+        XCTAssertNil(older.olderCursor)
+
+        let otherConversation = try database.createAssistantConversation(.init(
+            provider: .claude,
+            workspaceIdentityHash: "workspace",
+            contextKind: .library
+        ))
+        XCTAssertThrowsError(
+            try database.fetchAssistantConversationDetail(
+                id: otherConversation.id,
+                before: cursor,
+                limit: 2
+            )
+        ) {
+            XCTAssertEqual(
+                $0 as? AssistantConversationError,
+                .invalidTranscriptCursor
+            )
+        }
+    }
+
+    func testTranscriptDetailPagesWithinOneLargeTurn() throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let conversation = try database.createAssistantConversation(.init(
+            provider: .codex,
+            workspaceIdentityHash: "workspace",
+            contextKind: .library
+        ))
+        let turn = AssistantTurn(
+            id: "large-turn",
+            conversationId: conversation.id,
+            ordinal: 1
+        )
+        try database.beginAssistantTurn(
+            turn,
+            userEntry: AssistantTranscriptEntry(
+                id: "large-entry-0",
+                turnId: turn.id,
+                sequence: 0,
+                kind: .user,
+                body: "Prompt"
+            )
+        )
+        try database.dbWriter.write { db in
+            for sequence in 1...1_000 {
+                var entry = AssistantTranscriptEntry(
+                    id: "large-entry-\(sequence)",
+                    turnId: turn.id,
+                    sequence: sequence,
+                    kind: .tool,
+                    body: "Tool \(sequence)"
+                )
+                try entry.insert(db)
+            }
+        }
+
+        let newest = try XCTUnwrap(
+            database.fetchAssistantConversationDetail(
+                id: conversation.id,
+                limit: 7
+            )
+        )
+        XCTAssertEqual(
+            newest.entries.map(\.sequence),
+            Array(994...1_000)
+        )
+
+        let older = try XCTUnwrap(
+            database.fetchAssistantConversationDetail(
+                id: conversation.id,
+                before: try XCTUnwrap(newest.olderCursor),
+                limit: 7
+            )
+        )
+        XCTAssertEqual(
+            older.entries.map(\.sequence),
+            Array(987...993)
+        )
+    }
+
     func testBeginUpsertSearchAndDirectCascadeKeepFTSConsistent() throws {
         let queue = try DatabaseQueue()
         let database = try AppDatabase(queue)

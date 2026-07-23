@@ -197,13 +197,22 @@ struct ScheduledRunTranscriptView: View {
     @StateObject private var renderer = ChatTranscriptController()
     @State private var renderedProgress: ScheduledJobProgress?
     @State private var storedDetail: AssistantConversationDetail?
+    @State private var newestStoredDetail: AssistantConversationDetail?
+    @State private var hasLoadedOlderTranscript = false
     @State private var canContinueStoredResult = false
+    @State private var isLoadingOlderTranscript = false
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider().opacity(0.55)
+            if storedDetail?.olderCursor != nil || isLoadingOlderTranscript {
+                TranscriptHistoryPager(
+                    isLoading: isLoadingOlderTranscript,
+                    action: loadOlderTranscript
+                )
+            }
             ChatTranscriptView(
                 controller: renderer,
                 onOpenReference: onOpenReference,
@@ -474,7 +483,7 @@ struct ScheduledRunTranscriptView: View {
     private func refreshStoredTranscript() async {
         let database = database
         let runID = run.id
-        let previous = storedDetail
+        let previousNewest = newestStoredDetail
         let previousCanContinue = canContinueStoredResult
         let result = await Task.detached(priority: .utility) {
             let detail = try? database.fetchAssistantConversationDetail(
@@ -484,14 +493,109 @@ struct ScheduledRunTranscriptView: View {
                 .canContinueScheduledAssistantConversation(runID: runID)) ?? false
             return StoredTranscriptLoadResult(
                 detail: detail,
-                canContinue: canContinue,
-                changed: detail != previous || canContinue != previousCanContinue
+                canContinue: canContinue
             )
         }.value
-        guard !Task.isCancelled, result.changed else { return }
-        storedDetail = result.detail
+        guard !Task.isCancelled else { return }
+
+        let newestChanged = result.detail != previousNewest
+        let continuationChanged = result.canContinue != previousCanContinue
+        guard newestChanged || continuationChanged else { return }
         canContinueStoredResult = result.canContinue
+
+        guard newestChanged else {
+            renderSnapshot()
+            return
+        }
+        newestStoredDetail = result.detail
+
+        guard let newest = result.detail else {
+            storedDetail = nil
+            hasLoadedOlderTranscript = false
+            renderSnapshot()
+            return
+        }
+
+        if hasLoadedOlderTranscript,
+           let current = storedDetail,
+           current.conversation.id == newest.conversation.id {
+            // Stored scheduled transcripts are immutable once presented. A
+            // global conversation-change notification can still refresh this
+            // view, so retain pages the user already loaded while replacing
+            // the newest page snapshot.
+            storedDetail = AssistantConversationDetail(
+                conversation: newest.conversation,
+                turns: replacing(current.turns, with: newest.turns),
+                entries: replacing(current.entries, with: newest.entries),
+                attachments: replacing(
+                    current.attachments,
+                    with: newest.attachments
+                ),
+                olderCursor: current.olderCursor
+            )
+        } else {
+            storedDetail = newest
+            hasLoadedOlderTranscript = false
+        }
         renderSnapshot()
+    }
+
+    private func loadOlderTranscript() {
+        guard !isLoadingOlderTranscript,
+              let current = storedDetail,
+              let cursor = current.olderCursor
+        else { return }
+        isLoadingOlderTranscript = true
+        let conversationID = current.conversation.id
+        Task { @MainActor in
+            let page = await Task.detached(priority: .userInitiated) {
+                try? database.fetchAssistantConversationDetail(
+                    id: conversationID,
+                    before: cursor
+                )
+            }.value
+            guard let page,
+                  storedDetail == current
+            else {
+                isLoadingOlderTranscript = false
+                return
+            }
+
+            let messages = await Task.detached(priority: .userInitiated) {
+                StoredAssistantTranscriptProjection.messages(from: page)
+            }.value
+            renderer.prependTranscript(messages)
+            storedDetail = AssistantConversationDetail(
+                conversation: current.conversation,
+                turns: merged(page.turns, with: current.turns),
+                entries: merged(page.entries, with: current.entries),
+                attachments: merged(page.attachments, with: current.attachments),
+                olderCursor: page.olderCursor
+            )
+            hasLoadedOlderTranscript = true
+            isLoadingOlderTranscript = false
+        }
+    }
+
+    private func merged<Element: Identifiable>(
+        _ older: [Element],
+        with newer: [Element]
+    ) -> [Element] where Element.ID: Hashable {
+        var seen = Set<Element.ID>()
+        return (older + newer).filter { seen.insert($0.id).inserted }
+    }
+
+    private func replacing<Element: Identifiable>(
+        _ current: [Element],
+        with refreshed: [Element]
+    ) -> [Element] where Element.ID: Hashable {
+        let replacements = Dictionary(
+            refreshed.map { ($0.id, $0) },
+            uniquingKeysWith: { _, latest in latest }
+        )
+        let currentIDs = Set(current.map(\.id))
+        return current.map { replacements[$0.id] ?? $0 }
+            + refreshed.filter { !currentIDs.contains($0.id) }
     }
 }
 
@@ -505,6 +609,5 @@ private struct StoredTranscriptLoadID: Hashable {
 private struct StoredTranscriptLoadResult: Sendable {
     let detail: AssistantConversationDetail?
     let canContinue: Bool
-    let changed: Bool
 }
 #endif

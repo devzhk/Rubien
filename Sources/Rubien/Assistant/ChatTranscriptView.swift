@@ -250,4 +250,30 @@ enum ChatExternalLinkOpener {
         return alert.runModal() == .alertFirstButtonReturn
     }
 }
+
+struct TranscriptHistoryPager: View {
+    let isLoading: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: "arrow.up")
+                }
+                Text(String(localized: "assistant.history.loadEarlier"))
+            }
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 6)
+        }
+        .buttonStyle(.plain)
+        .disabled(isLoading)
+        .background(Color.primary.opacity(0.025))
+    }
+}
 #endif

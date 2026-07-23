@@ -38,18 +38,24 @@ extension AppDatabase {
     }
 
     public func fetchAssistantConversationDetail(
-        id: String
+        id: String,
+        before cursor: AssistantTranscriptCursor? = nil,
+        limit: Int = AssistantConversationDetail.defaultPageLimit
     ) throws -> AssistantConversationDetail? {
         try dbWriter.read { db in
             try Self.fetchAssistantConversationDetail(
                 conversationID: id,
+                before: cursor,
+                limit: limit,
                 in: db
             )
         }
     }
 
     public func fetchAssistantConversationDetail(
-        scheduledJobRunID: String
+        scheduledJobRunID: String,
+        before cursor: AssistantTranscriptCursor? = nil,
+        limit: Int = AssistantConversationDetail.defaultPageLimit
     ) throws -> AssistantConversationDetail? {
         try dbWriter.read { db in
             guard let conversationID = try String.fetchOne(
@@ -62,6 +68,8 @@ extension AppDatabase {
             ) else { return nil }
             return try Self.fetchAssistantConversationDetail(
                 conversationID: conversationID,
+                before: cursor,
+                limit: limit,
                 in: db
             )
         }
@@ -127,12 +135,19 @@ extension AppDatabase {
                 repeating: "?",
                 count: conversationIDs.count
             ).joined(separator: ",")
+            var previewArguments = StatementArguments([
+                AssistantConversationSummary.previewSourceCharacterLimit
+            ])
+            _ = previewArguments.append(
+                contentsOf: StatementArguments(conversationIDs)
+            )
             let previewRows = try Row.fetchAll(
                 db,
                 sql: """
                     SELECT conversationId, body
                     FROM (
-                        SELECT turn.conversationId, entry.body,
+                        SELECT turn.conversationId,
+                               substr(entry.body, 1, ?) AS body,
                                ROW_NUMBER() OVER (
                                    PARTITION BY turn.conversationId
                                    ORDER BY turn.ordinal ASC, entry.sequence ASC,
@@ -145,11 +160,16 @@ extension AppDatabase {
                     )
                     WHERE rowNumber = 1
                     """,
-                arguments: StatementArguments(conversationIDs)
+                arguments: previewArguments
             )
             let previews = Dictionary(
                 uniqueKeysWithValues: previewRows.map { row in
-                    (row["conversationId"] as String, row["body"] as String)
+                    (
+                        row["conversationId"] as String,
+                        AssistantConversationSummary.boundedPreview(
+                            row["body"] as String
+                        )
+                    )
                 }
             )
             let countRows = try Row.fetchAll(
@@ -1731,32 +1751,123 @@ extension AppDatabase {
 
     private static func fetchAssistantConversationDetail(
         conversationID: String,
+        before cursor: AssistantTranscriptCursor?,
+        limit: Int,
         in db: Database
     ) throws -> AssistantConversationDetail? {
         guard let conversation = try AssistantConversation.fetchOne(
             db,
             key: conversationID
         ) else { return nil }
+
+        let pageLimit = min(
+            max(limit, 1),
+            AssistantConversationDetail.maximumPageLimit
+        )
+        if let cursor, cursor.conversationID != conversationID {
+            throw AssistantConversationError.invalidTranscriptCursor
+        }
+
+        var turnArguments = StatementArguments([conversationID])
+        let turnCursorPredicate: String
+        if let cursor {
+            turnCursorPredicate = "AND ordinal <= ?"
+            _ = turnArguments.append(contentsOf: [cursor.turnOrdinal])
+        } else {
+            turnCursorPredicate = ""
+        }
+        _ = turnArguments.append(contentsOf: [pageLimit + 1])
+        let candidateTurns = try Row.fetchAll(
+            db,
+            sql: """
+                SELECT id, ordinal
+                FROM assistantTurn
+                WHERE conversationId = ?
+                \(turnCursorPredicate)
+                ORDER BY ordinal DESC
+                LIMIT ?
+                """,
+            arguments: turnArguments
+        )
+
+        // Query each candidate turn through UNIQUE(turnId, sequence). This keeps
+        // work proportional to the requested page even when one turn contains
+        // a very large tool trace; joining all entries before the cross-turn
+        // ORDER BY makes SQLite sort that entire trace.
+        var descendingEntries: [(entry: AssistantTranscriptEntry, ordinal: Int)] = []
+        descendingEntries.reserveCapacity(pageLimit + 1)
+        for turnRow in candidateTurns where descendingEntries.count <= pageLimit {
+            let turnID: String = turnRow["id"]
+            let turnOrdinal: Int = turnRow["ordinal"]
+            var entryArguments = StatementArguments([turnID])
+            let entryCursorPredicate: String
+            if let cursor, cursor.turnOrdinal == turnOrdinal {
+                entryCursorPredicate = "AND sequence < ?"
+                _ = entryArguments.append(contentsOf: [cursor.sequence])
+            } else {
+                entryCursorPredicate = ""
+            }
+            _ = entryArguments.append(
+                contentsOf: [pageLimit + 1 - descendingEntries.count]
+            )
+            let rows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT *
+                    FROM assistantTranscriptEntry
+                    WHERE turnId = ?
+                    \(entryCursorPredicate)
+                    ORDER BY sequence DESC
+                    LIMIT ?
+                    """,
+                arguments: entryArguments
+            )
+            descendingEntries.append(contentsOf: rows.map {
+                (AssistantTranscriptEntry(row: $0), turnOrdinal)
+            })
+        }
+
+        let hasOlderEntries = descendingEntries.count > pageLimit
+        let pageEntries = Array(descendingEntries.prefix(pageLimit))
+        let olderCursor = hasOlderEntries
+            ? pageEntries.last.map {
+                AssistantTranscriptCursor(
+                    conversationID: conversationID,
+                    turnOrdinal: $0.ordinal,
+                    sequence: $0.entry.sequence
+                )
+            }
+            : nil
+        let entries = pageEntries.map(\.entry).reversed()
+
+        let turnIDs = Array(Set(entries.map(\.turnId))).sorted()
+        let entryIDs = entries.map(\.id)
+        guard !entryIDs.isEmpty else {
+            return AssistantConversationDetail(
+                conversation: conversation,
+                turns: [],
+                entries: [],
+                attachments: []
+            )
+        }
+
+        let turnPlaceholders = Array(
+            repeating: "?",
+            count: turnIDs.count
+        ).joined(separator: ",")
         let turns = try AssistantTurn.fetchAll(
             db,
             sql: """
                 SELECT * FROM assistantTurn
-                WHERE conversationId = ?
+                WHERE id IN (\(turnPlaceholders))
                 ORDER BY ordinal ASC, id ASC
                 """,
-            arguments: [conversationID]
+            arguments: StatementArguments(turnIDs)
         )
-        let entries = try AssistantTranscriptEntry.fetchAll(
-            db,
-            sql: """
-                SELECT entry.*
-                FROM assistantTranscriptEntry AS entry
-                JOIN assistantTurn AS turn ON turn.id = entry.turnId
-                WHERE turn.conversationId = ?
-                ORDER BY turn.ordinal ASC, entry.sequence ASC, entry.id ASC
-                """,
-            arguments: [conversationID]
-        )
+        let entryPlaceholders = Array(
+            repeating: "?",
+            count: entryIDs.count
+        ).joined(separator: ",")
         let attachments = try StoredAssistantAttachment.fetchAll(
             db,
             sql: """
@@ -1764,17 +1875,18 @@ extension AppDatabase {
                 FROM assistantAttachment AS attachment
                 JOIN assistantTranscriptEntry AS entry ON entry.id = attachment.entryId
                 JOIN assistantTurn AS turn ON turn.id = entry.turnId
-                WHERE turn.conversationId = ?
+                WHERE entry.id IN (\(entryPlaceholders))
                 ORDER BY turn.ordinal ASC, entry.sequence ASC,
                          attachment.createdAt ASC, attachment.id ASC
                 """,
-            arguments: [conversationID]
+            arguments: StatementArguments(entryIDs)
         )
         return AssistantConversationDetail(
             conversation: conversation,
             turns: turns,
-            entries: entries,
-            attachments: attachments
+            entries: Array(entries),
+            attachments: attachments,
+            olderCursor: olderCursor
         )
     }
 

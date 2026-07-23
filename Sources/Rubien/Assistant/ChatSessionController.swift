@@ -19,6 +19,7 @@ extension Notification.Name {
 protocol ChatTranscriptSink: AnyObject {
     func reset()
     func loadTranscript(_ messages: [ChatRenderMessage])
+    func prependTranscript(_ messages: [ChatRenderMessage])
     func addUserMessage(_ markdown: String)
     func addUserMessage(_ payload: ChatUserMessagePayload)
     // Deliberately NO beginAssistantMessage: the renderer opens the bubble
@@ -92,12 +93,15 @@ enum ScheduledLegacyImportResult: Equatable {
 }
 
 private enum LocalConversationLoadResult: Sendable {
-    case loaded(
-        detail: AssistantConversationDetail,
-        parent: AssistantConversationDetail?
-    )
+    case loaded(detail: AssistantConversationDetail)
     case missing
     case failed
+}
+
+private struct LocalTranscriptPagination {
+    var conversationID: String
+    var cursor: AssistantTranscriptCursor?
+    var parentConversationID: String?
 }
 
 // MARK: - Per-window chat session controller (Phase 2c)
@@ -123,6 +127,8 @@ final class ChatSessionController: ObservableObject {
     // MARK: Published UI state
     @Published private(set) var isResponding = false
     @Published private(set) var isResuming = false
+    @Published private(set) var canLoadOlderTranscript = false
+    @Published private(set) var isLoadingOlderTranscript = false
     /// True between accepting a send and the global turn gate admitting it. Queueing
     /// is enabled only after admission, so a retained Home draft cannot be submitted
     /// a second time during this short window.
@@ -257,6 +263,8 @@ final class ChatSessionController: ObservableObject {
     /// await it). Stale loads are dropped by the `conversationEpoch` guard, not
     /// cancelled.
     private(set) var resumeTask: Task<Void, Never>?
+    private var olderTranscriptTask: Task<Void, Never>?
+    private var localTranscriptPagination: LocalTranscriptPagination?
     /// Bumped ONLY when the conversation identity changes (the reset shared by
     /// `newConversation`/`resume`) — unlike `generation`, which also advances on
     /// every send. The resume restore keys on THIS: a quick follow-up send must
@@ -1203,6 +1211,8 @@ final class ChatSessionController: ObservableObject {
         // released wrapper, leaking the gate until that invisible turn finishes.
         turnTask?.cancel()
         turnTask = nil
+        olderTranscriptTask?.cancel()
+        olderTranscriptTask = nil
         generation += 1
         // Window close: release this provider wrapper. A dedicated Codex server dies;
         // the shared Home/reader server remains available for the app lifetime.
@@ -1266,6 +1276,8 @@ final class ChatSessionController: ObservableObject {
         // and terminate the new turn instead of the superseded one.
         turnTask?.cancel()
         turnTask = nil
+        olderTranscriptTask?.cancel()
+        olderTranscriptTask = nil
         generation += 1
         cancelledTurnGeneration = nil
         turnOutcome = AssistantTurnOutcome(
@@ -1280,6 +1292,9 @@ final class ChatSessionController: ObservableObject {
         streamingAssistantText = ""
         isResponding = false
         isResuming = false
+        canLoadOlderTranscript = false
+        isLoadingOlderTranscript = false
+        localTranscriptPagination = nil
         isAwaitingTurnAdmission = false
         statusText = nil
         busyElsewhere = false
@@ -2015,8 +2030,13 @@ final class ChatSessionController: ObservableObject {
             var adoptable: [ChatAttachment] = []
             for attachment in row.attachments
             where seenAttachmentIDs.insert(attachment.id).inserted {
+                // Provider attachment IDs are only stable inside that provider
+                // transcript. Local attachment identity is database-wide, so
+                // every import receives a fresh UUID while duplicates within
+                // one transcript remain collapsed by the source ID above.
+                let localAttachmentID = UUID()
                 attachments.append(StoredAssistantAttachment(
-                    id: attachment.id.uuidString.lowercased(),
+                    id: localAttachmentID.uuidString.lowercased(),
                     entryId: entryID,
                     displayName: attachment.displayName,
                     kind: attachment.kind == .image ? .image : .text,
@@ -2029,7 +2049,7 @@ final class ChatSessionController: ObservableObject {
                 if attachment.isAvailable,
                    let sourceURL = attachment.managedSourceURL {
                     adoptable.append(ChatAttachment(
-                        id: attachment.id,
+                        id: localAttachmentID,
                         displayName: attachment.displayName,
                         kind: attachment.kind,
                         stagedURL: sourceURL,
@@ -2184,22 +2204,16 @@ final class ChatSessionController: ObservableObject {
                             .fetchAssistantConversationDetail(id: summary.id) else {
                             return .missing
                         }
-                        let parent = try detail.conversation
-                            .continuedFromConversationId.flatMap {
-                                try database.fetchAssistantConversationDetail(id: $0)
-                            }
-                        return .loaded(detail: detail, parent: parent)
+                        return .loaded(detail: detail)
                     } catch {
                         return .failed
                     }
                 }.value
                 guard requestGeneration == self.resumeRequestGeneration else { return }
                 let detail: AssistantConversationDetail
-                let parentDetail: AssistantConversationDetail?
                 switch loaded {
-                case let .loaded(stored, parent):
+                case let .loaded(stored):
                     detail = stored
-                    parentDetail = parent
                 case .missing:
                     self.isResuming = false
                     self.renderNotice(
@@ -2213,54 +2227,7 @@ final class ChatSessionController: ObservableObject {
                     )
                     return
                 }
-                var assets = StoredAssistantAttachmentPresentationAssets()
-                if let store = self.durableTranscriptAttachmentStore {
-                    assets = await store.presentationAssets(
-                        conversationID: detail.conversation.id,
-                        attachments: detail.attachments
-                    )
-                    if let parentDetail {
-                        assets.formUnion(await store.presentationAssets(
-                            conversationID: parentDetail.conversation.id,
-                            attachments: parentDetail.attachments
-                        ))
-                    }
-                }
-                guard requestGeneration == self.resumeRequestGeneration else { return }
-                let messages = await Task.detached(
-                    priority: .userInitiated
-                ) { () -> [ChatRenderMessage] in
-                    var rows = parentDetail.map {
-                        StoredAssistantTranscriptProjection.messages(
-                            from: $0,
-                            attachmentIsAvailable: {
-                                assets.availableIDs.contains($0.id)
-                            },
-                            attachmentThumbnailDataURL: {
-                                assets.thumbnailDataURLs[$0.id]
-                            }
-                        )
-                    } ?? []
-                    if !rows.isEmpty {
-                        rows.append(ChatRenderMessage(
-                            role: .notice,
-                            body: String(
-                                localized: "assistant.history.scheduledContinuation"
-                            ),
-                            seq: rows.count
-                        ))
-                    }
-                    rows.append(contentsOf: StoredAssistantTranscriptProjection.messages(
-                        from: detail,
-                        attachmentIsAvailable: {
-                            assets.availableIDs.contains($0.id)
-                        },
-                        attachmentThumbnailDataURL: {
-                            assets.thumbnailDataURLs[$0.id]
-                        }
-                    ))
-                    return rows
-                }.value
+                let messages = await self.projectStoredTranscriptPage(detail)
                 guard requestGeneration == self.resumeRequestGeneration else { return }
                 let context = Self.conversationContext(for: detail.conversation)
                 if let targetKind = AgentProviderKind(
@@ -2279,6 +2246,13 @@ final class ChatSessionController: ObservableObject {
                     context: context,
                     messages: messages
                 )
+                self.localTranscriptPagination = LocalTranscriptPagination(
+                    conversationID: detail.conversation.id,
+                    cursor: detail.olderCursor,
+                    parentConversationID: detail.conversation
+                        .continuedFromConversationId
+                )
+                self.updateOlderTranscriptAvailability()
             }
             return
         }
@@ -2351,6 +2325,126 @@ final class ChatSessionController: ObservableObject {
         restoreResumeHistory(restoredMessages)
     }
 
+    /// Fetch the next older local page without involving the provider runtime.
+    /// When a continued scheduled result reaches the beginning of its child
+    /// conversation, the next request transparently moves into the parent.
+    func loadOlderTranscript() {
+        guard !isLoadingOlderTranscript,
+              let database = conversationDatabase,
+              let pagination = localTranscriptPagination,
+              pagination.cursor != nil || pagination.parentConversationID != nil
+        else { return }
+
+        let isEnteringParent = pagination.cursor == nil
+        guard let targetConversationID = isEnteringParent
+            ? pagination.parentConversationID
+            : pagination.conversationID
+        else { return }
+        let cursor = isEnteringParent ? nil : pagination.cursor
+        let requestGeneration = resumeRequestGeneration
+        isLoadingOlderTranscript = true
+
+        olderTranscriptTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let detail = await Task.detached(priority: .userInitiated) {
+                try? database.fetchAssistantConversationDetail(
+                    id: targetConversationID,
+                    before: cursor
+                )
+            }.value
+            guard !Task.isCancelled,
+                  requestGeneration == self.resumeRequestGeneration
+            else {
+                if requestGeneration == self.resumeRequestGeneration {
+                    self.isLoadingOlderTranscript = false
+                }
+                return
+            }
+            guard let detail else {
+                if isEnteringParent {
+                    self.localTranscriptPagination?.parentConversationID = nil
+                    self.updateOlderTranscriptAvailability()
+                }
+                self.isLoadingOlderTranscript = false
+                self.olderTranscriptTask = nil
+                return
+            }
+
+            var messages = await self.projectStoredTranscriptPage(detail)
+            if isEnteringParent, !messages.isEmpty {
+                messages.append(ChatRenderMessage(
+                    role: .notice,
+                    body: String(
+                        localized: "assistant.history.scheduledContinuation"
+                    ),
+                    seq: messages.count
+                ))
+            }
+            guard !Task.isCancelled,
+                  requestGeneration == self.resumeRequestGeneration
+            else { return }
+
+            self.prependResumeHistory(messages)
+            self.localTranscriptPagination = LocalTranscriptPagination(
+                conversationID: targetConversationID,
+                cursor: detail.olderCursor,
+                parentConversationID: isEnteringParent
+                    ? nil
+                    : pagination.parentConversationID
+            )
+            self.isLoadingOlderTranscript = false
+            self.olderTranscriptTask = nil
+            self.updateOlderTranscriptAvailability()
+        }
+    }
+
+    private func updateOlderTranscriptAvailability() {
+        canLoadOlderTranscript = localTranscriptPagination.map {
+            $0.cursor != nil || $0.parentConversationID != nil
+        } ?? false
+    }
+
+    private func projectStoredTranscriptPage(
+        _ detail: AssistantConversationDetail
+    ) async -> [ChatRenderMessage] {
+        var assets = StoredAssistantAttachmentPresentationAssets()
+        if let store = durableTranscriptAttachmentStore {
+            assets = await store.presentationAssets(
+                conversationID: detail.conversation.id,
+                attachments: detail.attachments
+            )
+        }
+        return await Task.detached(priority: .userInitiated) {
+            StoredAssistantTranscriptProjection.messages(
+                from: detail,
+                attachmentIsAvailable: {
+                    assets.availableIDs.contains($0.id)
+                },
+                attachmentThumbnailDataURL: {
+                    assets.thumbnailDataURLs[$0.id]
+                }
+            )
+        }.value
+    }
+
+    private func prependResumeHistory(_ history: [ChatRenderMessage]) {
+        guard !history.isEmpty else { return }
+        transcript.prependTranscript(history)
+        let firstSequence = renderLog.first?.seq ?? 0
+        let startSequence = firstSequence - history.count
+        let prepended = history.enumerated().map { index, row in
+            ChatRenderMessage(
+                role: row.role,
+                body: row.body,
+                turnStatus: row.turnStatus,
+                seq: startSequence + index,
+                attachments: row.attachments
+            )
+        }
+        renderLog.insert(contentsOf: prepended, at: 0)
+        hasMessages = true
+    }
+
     private func resume(
         _ summary: AgentSessionSummary,
         attribution: AssistantSessionAttributionStore.Attribution?,
@@ -2402,11 +2496,16 @@ final class ChatSessionController: ObservableObject {
     /// asynchronous read was in flight, then re-render with fresh sequence IDs.
     private func restoreResumeHistory(_ history: [ChatRenderMessage]) {
         let tail = renderLog
-        renderLog = []
-        renderSeq = 0
-        for row in history + tail {
-            appendToLog(row.role, row.body, attachments: row.attachments)
+        renderLog = (history + tail).enumerated().map { index, row in
+            ChatRenderMessage(
+                role: row.role,
+                body: row.body,
+                turnStatus: row.turnStatus,
+                seq: index,
+                attachments: row.attachments
+            )
         }
+        renderSeq = renderLog.count
         transcript.reset()
         transcript.loadTranscript(renderLog)
     }

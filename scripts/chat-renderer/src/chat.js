@@ -205,9 +205,9 @@ function makeToolGroup(earlierChips, latestChip, expanded = false) {
   return root
 }
 
-function appendToolChip(chip) {
+function appendToolChip(chip, container = transcript) {
   const nextChip = makeToolChip(chip)
-  const last = transcript.lastElementChild
+  const last = container.lastElementChild
 
   // Extend an existing trailing group without rebuilding it, preserving the
   // user's expanded/collapsed choice while the live turn adds more calls.
@@ -249,12 +249,12 @@ function appendToolChip(chip) {
       ? document.activeElement
       : null
     const preserveInteraction = focusedElement != null || trailingChips.some((chip) => chip.open)
-    transcript.appendChild(makeToolGroup(trailingChips, nextChip, preserveInteraction))
+    container.appendChild(makeToolGroup(trailingChips, nextChip, preserveInteraction))
     // Moving a focused node through the detached group root clears focus in
     // WebKit/jsdom, so restore it once the complete group is back in the DOM.
     focusedElement?.focus({ preventScroll: true })
   } else {
-    transcript.appendChild(nextChip)
+    container.appendChild(nextChip)
   }
 }
 
@@ -571,7 +571,7 @@ function scheduleStreamRender() {
   })
 }
 
-function appendRecord(m) {
+function appendRecord(m, container = transcript) {
   const role = m?.role
   if (role === 'paper') {
     let group
@@ -581,7 +581,7 @@ function appendRecord(m) {
       return
     }
     const row = makePaperGroup(group)
-    if (row) transcript.appendChild(row)
+    if (row) container.appendChild(row)
     return
   }
   if (role === 'tool') {
@@ -591,13 +591,13 @@ function appendRecord(m) {
     } catch (_) {
       chip = { name: 'tool', detail: String(m?.body ?? ''), status: 'started' }
     }
-    appendToolChip(chip)
+    appendToolChip(chip, container)
     return
   }
   if (role === 'notice') {
     const n = makeNotice()
     n.body.innerHTML = renderMarkdown(m?.body ?? '')
-    transcript.appendChild(n.root)
+    container.appendChild(n.root)
     return
   }
   // user | assistant (default)
@@ -606,7 +606,7 @@ function appendRecord(m) {
     : makeBubble('assistant')
   if (role !== 'user') renderFull(bubble.body, m?.body ?? '', /* runKaTeX */ true)
   applyTurnStatus(bubble.root, m?.turnStatus)
-  transcript.appendChild(bubble.root)
+  container.appendChild(bubble.root)
 }
 
 // --- window.RubienChat (Swift contract) ---------------------------------------
@@ -631,6 +631,19 @@ const RubienChat = {
     list.sort((a, b) => (Number(a?.seq) || 0) - (Number(b?.seq) || 0))
     for (const m of list) appendRecord(m)
     jumpToLatest()
+  },
+
+  prependTranscript(messages) {
+    const list = Array.isArray(messages) ? messages.slice() : []
+    if (list.length === 0) return
+    list.sort((a, b) => (Number(a?.seq) || 0) - (Number(b?.seq) || 0))
+    const fragment = document.createDocumentFragment()
+    for (const m of list) appendRecord(m, fragment)
+    const oldScrollHeight = transcript.scrollHeight
+    const oldScrollTop = transcript.scrollTop
+    transcript.insertBefore(fragment, transcript.firstChild)
+    transcript.scrollTop = oldScrollTop + (transcript.scrollHeight - oldScrollHeight)
+    onUserScroll()
   },
 
   addUserMessage(payload) {

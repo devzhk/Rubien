@@ -66,7 +66,11 @@ Post-fix validation: `swift build` is clean; the focused regression suite passes
 
 ## Spec deviations (minor, should be fixed or consciously waived)
 
-- [ ] Unpaginated transcript reads and unbounded previews vs §14/§7.7 — both `fetchAssistantConversationDetail` overloads load all turns/entries/attachments with no cursor (`AssistantConversationDatabase.swift:40`, `:89`); summaries hand the full first-user body to `preview` untruncated (`:227-273`).
+- [x] Unpaginated transcript reads and unbounded previews vs §14/§7.7 — fixed
+  with a 240-character normalized preview, bounded SQL source reads, and opaque
+  keyset pagination (200 default / 500 maximum) across database, app, and CLI
+  consumers. Home, reader, and scheduled-run views prepend older pages on demand
+  while preserving the transcript viewport.
 - [ ] Live `capturing` run view renders from the in-memory `ScheduledJobProgress`, with DB reads only for terminal `.available` (`ScheduledRunTranscriptView.renderSnapshot`) — user-facing guarantees hold, but §9.2/§13.2's "database observation within 500 ms" is literally met only for terminal transcripts.
 - [x] §13.3 "Finishing session identity" state absent: the runner marks `.available` before `identityObserver.waitUntilClosed()`, so Continue can be offered during the identity-open window. Alias CAS makes this safe (rejects as `aliasConflict`), but the UX is an error where the spec wants a brief wait, and §18.2's "Continue disabled until identity closes" is untested.
 - [ ] Provider History sheet lacks the §13.1 "slower / requires idle runtime" caveat; the busy condition only surfaces reactively.

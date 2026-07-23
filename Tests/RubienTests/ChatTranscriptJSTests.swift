@@ -134,6 +134,20 @@ final class ChatTranscriptJSTests: XCTestCase {
         XCTAssertEqual(ChatTranscriptJS.loadTranscript([]), "window.RubienChat.loadTranscript([])")
     }
 
+    func testPrependTranscriptArrayRoundTrip() throws {
+        let messages = [
+            ChatRenderMessage(role: .user, body: tricky, seq: 1),
+            ChatRenderMessage(role: .assistant, body: "older", seq: 0),
+        ]
+        let call = ChatTranscriptJS.prependTranscript(messages)
+        let arg = try extractArgument(from: call, fn: "prependTranscript")
+        XCTAssertEqual(
+            try JSONDecoder().decode([ChatRenderMessage].self, from: Data(arg.utf8)),
+            messages
+        )
+        XCTAssertFalse(arg.contains("</script>"))
+    }
+
     func testStructuredUserPayloadAndLegacyDecode() throws {
         let attachment = ChatAttachmentPresentation(
             id: UUID(),

@@ -61,6 +61,11 @@ final class ChatTranscriptController: ObservableObject {
         evaluateOrEnqueue(ChatTranscriptJS.loadTranscript(messages))
     }
 
+    /// Insert an older restored page above the visible transcript.
+    func prependTranscript(_ messages: [ChatRenderMessage]) {
+        evaluateOrEnqueue(ChatTranscriptJS.prependTranscript(messages))
+    }
+
     /// Append a user message (markdown).
     func addUserMessage(_ markdown: String) {
         evaluateOrEnqueue(ChatTranscriptJS.addUserMessage(markdown))

@@ -117,6 +117,36 @@ final class AssistantConversationsCommandTests: XCTestCase {
         XCTAssertEqual(attachments.first?["relativePath"] as? String, "attachment-1/note.txt")
         XCTAssertNil(attachments.first?["absolutePath"])
 
+        let newestPage = try runCLI([
+            "assistant-conversations", "get", "conversation-1", "--limit", "1",
+        ])
+        XCTAssertEqual(newestPage.exitCode, 0, newestPage.stderr)
+        let newestDetail = try object(newestPage.stdout)
+        XCTAssertEqual(
+            (newestDetail["entries"] as? [[String: Any]])?.first?["id"] as? String,
+            "entry-1"
+        )
+        let olderCursor = try XCTUnwrap(newestDetail["olderCursor"] as? String)
+
+        let olderPage = try runCLI([
+            "assistant-conversations", "get", "conversation-1",
+            "--limit", "1", "--cursor", olderCursor,
+        ])
+        XCTAssertEqual(olderPage.exitCode, 0, olderPage.stderr)
+        let olderDetail = try object(olderPage.stdout)
+        XCTAssertEqual(
+            (olderDetail["entries"] as? [[String: Any]])?.first?["id"] as? String,
+            "entry-user"
+        )
+        XCTAssertTrue(olderDetail["olderCursor"] is NSNull)
+
+        let invalidCursor = try runCLI([
+            "assistant-conversations", "get", "conversation-1",
+            "--cursor", "not-a-cursor",
+        ])
+        XCTAssertNotEqual(invalidCursor.exitCode, 0)
+        XCTAssertTrue(invalidCursor.stderr.contains("--cursor"))
+
         let missingConfirmation = try runCLI(["assistant-conversations", "clear"])
         XCTAssertNotEqual(missingConfirmation.exitCode, 0)
         XCTAssertTrue(missingConfirmation.stderr.contains("--confirm"))

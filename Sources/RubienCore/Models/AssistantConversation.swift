@@ -728,6 +728,9 @@ public enum ScheduledAssistantImportResult: Codable, Hashable, Sendable {
 }
 
 public struct AssistantConversationSummary: Codable, Hashable, Sendable {
+    public static let previewCharacterLimit = 240
+    static let previewSourceCharacterLimit = 2_048
+
     public var conversation: AssistantConversation
     public var preview: String
     public var turnCount: Int
@@ -736,6 +739,17 @@ public struct AssistantConversationSummary: Codable, Hashable, Sendable {
         self.conversation = conversation
         self.preview = preview
         self.turnCount = turnCount
+    }
+
+    static func boundedPreview(_ raw: String) -> String {
+        let normalized = raw
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        guard normalized.count > previewCharacterLimit else {
+            return normalized
+        }
+        return String(normalized.prefix(previewCharacterLimit - 1)) + "…"
     }
 }
 
@@ -767,22 +781,154 @@ public struct AssistantConversationQuery: Hashable, Sendable {
     }
 }
 
+/// Opaque keyset position for reading older transcript entries.
+///
+/// The token is intentionally the only serialized representation so callers do
+/// not take a dependency on the database ordering fields.
+public struct AssistantTranscriptCursor: Hashable, Sendable {
+    package let conversationID: String
+    package let turnOrdinal: Int
+    package let sequence: Int
+
+    package init(
+        conversationID: String,
+        turnOrdinal: Int,
+        sequence: Int
+    ) {
+        self.conversationID = conversationID
+        self.turnOrdinal = turnOrdinal
+        self.sequence = sequence
+    }
+
+    public init?(token: String) {
+        guard token.count <= 4_096 else { return nil }
+        var base64 = token
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = base64.count % 4
+        if remainder != 0 {
+            base64.append(String(repeating: "=", count: 4 - remainder))
+        }
+        guard let data = Data(base64Encoded: base64),
+              let payload = try? JSONDecoder().decode(Payload.self, from: data),
+              !payload.conversationID.isEmpty,
+              payload.conversationID.count <= 512,
+              payload.conversationID.trimmingCharacters(
+                in: .whitespacesAndNewlines
+              ) == payload.conversationID,
+              payload.turnOrdinal >= 0,
+              payload.sequence >= 0
+        else {
+            return nil
+        }
+        self.init(
+            conversationID: payload.conversationID,
+            turnOrdinal: payload.turnOrdinal,
+            sequence: payload.sequence
+        )
+    }
+
+    public var token: String {
+        let payload = Payload(
+            conversationID: conversationID,
+            turnOrdinal: turnOrdinal,
+            sequence: sequence
+        )
+        guard let data = try? JSONEncoder().encode(payload) else {
+            return ""
+        }
+        return data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    private struct Payload: Codable {
+        let conversationID: String
+        let turnOrdinal: Int
+        let sequence: Int
+    }
+}
+
+extension AssistantTranscriptCursor: Codable {
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let token = try container.decode(String.self)
+        guard let cursor = Self(token: token) else {
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Invalid Assistant transcript cursor."
+            )
+        }
+        self = cursor
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(token)
+    }
+}
+
 public struct AssistantConversationDetail: Codable, Hashable, Sendable {
+    public static let defaultPageLimit = 200
+    public static let maximumPageLimit = 500
+
     public var conversation: AssistantConversation
     public var turns: [AssistantTurn]
     public var entries: [AssistantTranscriptEntry]
     public var attachments: [StoredAssistantAttachment]
+    public var olderCursor: AssistantTranscriptCursor?
 
     public init(
         conversation: AssistantConversation,
         turns: [AssistantTurn],
         entries: [AssistantTranscriptEntry],
-        attachments: [StoredAssistantAttachment]
+        attachments: [StoredAssistantAttachment],
+        olderCursor: AssistantTranscriptCursor? = nil
     ) {
         self.conversation = conversation
         self.turns = turns
         self.entries = entries
         self.attachments = attachments
+        self.olderCursor = olderCursor
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case conversation, turns, entries, attachments, olderCursor
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        conversation = try container.decode(
+            AssistantConversation.self,
+            forKey: .conversation
+        )
+        turns = try container.decode([AssistantTurn].self, forKey: .turns)
+        entries = try container.decode(
+            [AssistantTranscriptEntry].self,
+            forKey: .entries
+        )
+        attachments = try container.decode(
+            [StoredAssistantAttachment].self,
+            forKey: .attachments
+        )
+        olderCursor = try container.decodeIfPresent(
+            AssistantTranscriptCursor.self,
+            forKey: .olderCursor
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(conversation, forKey: .conversation)
+        try container.encode(turns, forKey: .turns)
+        try container.encode(entries, forKey: .entries)
+        try container.encode(attachments, forKey: .attachments)
+        if let olderCursor {
+            try container.encode(olderCursor, forKey: .olderCursor)
+        } else {
+            try container.encodeNil(forKey: .olderCursor)
+        }
     }
 }
 
@@ -798,6 +944,7 @@ public enum AssistantConversationError: Error, Equatable, LocalizedError {
     case staleSessionBinding
     case scheduledResultNotTerminal
     case continuationAlreadyTransferred
+    case invalidTranscriptCursor
 
     public var errorDescription: String? {
         switch self {
@@ -812,6 +959,8 @@ public enum AssistantConversationError: Error, Equatable, LocalizedError {
         case .staleSessionBinding: "A newer provider session binding already exists."
         case .scheduledResultNotTerminal: "The scheduled result is not ready to continue."
         case .continuationAlreadyTransferred: "This scheduled result already transferred its continuation."
+        case .invalidTranscriptCursor:
+            "The Assistant transcript cursor belongs to a different conversation."
         }
     }
 }
