@@ -157,7 +157,9 @@ enum ReaderChatSession {
                 }
             },
             activityDatabase: database,
-            attributionStore: .shared)
+            attributionStore: .shared,
+            conversationDatabase: database,
+            executionOwnership: .shared)
     }
 }
 #endif

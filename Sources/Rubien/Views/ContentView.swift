@@ -1233,7 +1233,9 @@ struct ContentView: View {
                     onAddPapers: { showAddReferenceFlow = true },
                     onImportPDFs: { showAddReferenceFlow = true },
                     onCompactLayoutChange: { homeUsesCompactLayout = $0 },
-                    onOpenScheduledRun: openScheduledRun)
+                    onOpenScheduledRun: openScheduledRun,
+                    onContinueScheduledRun: continueScheduledRun,
+                    onRetryScheduledRunImport: retryScheduledRunImport)
                 .retainedDetailSurface(isActive: mainDestination == .home)
 
                 if hasPresentedLibrary || mainDestination == .library {
@@ -1657,59 +1659,73 @@ struct ContentView: View {
 
     private func openScheduledRun(_ run: ScheduledJobRun) {
         showHome()
-        if run.status.isActive {
-            homePresentedScheduledRunID = run.id
-            return
-        }
-        homePresentedScheduledRunID = nil
-        guard run.status == .succeeded else {
+        homePresentedScheduledRunID = run.id
+        if run.status.isTerminal {
             scheduledJobCoordinator.markRunRead(id: run.id)
-            presentRecentScheduledRuns(message: run.status == .cancelled
-                ? ScheduledJobFormatting.localized("scheduled.result.cancelledMessage")
-                : ScheduledJobFormatting.failedRunMessage(run))
-            return
         }
-        guard let sessionID = run.providerSessionId else {
-            scheduledJobCoordinator.markResultUnavailable(id: run.id)
-            scheduledJobCoordinator.markRunRead(id: run.id)
-            presentRecentScheduledRuns(message: ScheduledJobFormatting.localized(
-                "scheduled.result.noSessionMessage"
-            ))
-            return
+        if case let .importLegacy(isRetry) =
+            ScheduledJobFormatting.transcriptOpenAction(for: run)
+        {
+            importScheduledRun(
+                run,
+                isRetry: isRetry
+            )
         }
-        guard let kind = run.provider.agentProviderKind else {
-            scheduledJobCoordinator.markResultUnavailable(id: run.id)
-            scheduledJobCoordinator.markRunRead(id: run.id)
-            presentRecentScheduledRuns(message: ScheduledJobFormatting.localized(
-                "scheduled.result.providerUnavailableMessage"
-            ))
-            return
-        }
-        let jobName = scheduledJobCoordinator.job(id: run.jobId)?.name
-            ?? ScheduledJobFormatting.localized("scheduled.job.fallbackName")
-        let summary = AgentSessionSummary(
-            id: sessionID,
-            preview: jobName,
-            date: run.activityAt
-        )
+    }
+
+    private func retryScheduledRunImport(_ run: ScheduledJobRun) {
+        importScheduledRun(run, isRetry: true)
+    }
+
+    private func importScheduledRun(_ run: ScheduledJobRun, isRetry: Bool) {
         Task { @MainActor in
-            switch await homeSession.resumeScheduledResult(
-                summary,
-                providerKind: kind
+            switch await homeSession.importScheduledLegacyResult(
+                run,
+                isRetry: isRetry
             ) {
-            case .opened:
+            case .available:
+                scheduledJobCoordinator.refresh()
+                homePresentedScheduledRunID = run.id
                 scheduledJobCoordinator.markRunRead(id: run.id)
-                homeDraft = ""
-                homeSelectedMentions = []
-            case .unavailable:
-                scheduledJobCoordinator.markResultUnavailable(id: run.id)
-                scheduledJobCoordinator.markRunRead(id: run.id)
-                presentRecentScheduledRuns(message: ScheduledJobFormatting.localized(
-                    "scheduled.result.transcriptUnavailableMessage"
+            case let .openLocal(conversationID):
+                scheduledJobCoordinator.refresh()
+                homePresentedScheduledRunID = nil
+                homeSession.resume(AgentSessionSummary(
+                    id: conversationID,
+                    preview: scheduledJobCoordinator.job(id: run.jobId)?.name ?? "",
+                    date: run.activityAt
                 ))
+                scheduledJobCoordinator.markRunRead(id: run.id)
+            case .deletedLocally, .needsRetry:
+                scheduledJobCoordinator.refresh()
+                homePresentedScheduledRunID = run.id
+                scheduledJobCoordinator.markRunRead(id: run.id)
+            case .unavailable:
+                scheduledJobCoordinator.refresh()
+                homePresentedScheduledRunID = run.id
             case .superseded:
                 break
             }
+        }
+    }
+
+    private func continueScheduledRun(_ run: ScheduledJobRun) {
+        guard scheduledJobCoordinator.activeRun?.id != run.id else { return }
+        do {
+            try scheduledJobCoordinator.ensureAssistantExecutionOwner()
+            let child = try viewModel.db.createScheduledAssistantContinuation(
+                runID: run.id
+            )
+            homePresentedScheduledRunID = nil
+            homeSession.resume(AgentSessionSummary(
+                id: child.id,
+                preview: scheduledJobCoordinator.job(id: run.jobId)?.name ?? "",
+                date: child.lastActivityAt
+            ))
+            scheduledJobCoordinator.markRunRead(id: run.id)
+        } catch {
+            homePresentedScheduledRunID = nil
+            presentRecentScheduledRuns(message: error.localizedDescription)
         }
     }
 

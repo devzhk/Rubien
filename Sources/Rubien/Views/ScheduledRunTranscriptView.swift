@@ -3,10 +3,8 @@ import SwiftUI
 import RubienCore
 
 /// Projects the app-lifetime scheduled-run event snapshot into the same render
-/// model used by Home and reader conversations. Codex/Claude remain the durable
-/// transcript owners; this is only the live, read-only presentation while a run
-/// is still in progress. A small bounded cache also keeps recent terminal runs
-/// inspectable until their durable provider transcript is opened.
+/// model used by Home and reader conversations. This remains the immediate UI
+/// fallback until the Rubien-owned durable rows reach SQLite.
 enum ScheduledRunTranscript {
     enum IncrementalAction: Equatable {
         case beginAssistant
@@ -186,8 +184,11 @@ struct ScheduledRunTranscriptView: View {
     let run: ScheduledJobRun
     let job: ScheduledJob?
     let progress: ScheduledJobProgress?
+    let database: AppDatabase
     let onBack: () -> Void
     let onCancel: (() -> Void)?
+    let onContinue: (() -> Void)?
+    let onRetryImport: (() -> Void)?
     let onOpenResultOrDetails: () -> Void
     let onOpenReference: (Int64) -> Void
     let onOpenPaperSource: (String) -> Void
@@ -195,6 +196,8 @@ struct ScheduledRunTranscriptView: View {
 
     @StateObject private var renderer = ChatTranscriptController()
     @State private var renderedProgress: ScheduledJobProgress?
+    @State private var storedDetail: AssistantConversationDetail?
+    @State private var canContinueStoredResult = false
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
@@ -213,12 +216,25 @@ struct ScheduledRunTranscriptView: View {
             applyTheme(colorScheme)
             renderSnapshot()
         }
+        .task(id: StoredTranscriptLoadID(
+            runID: run.id,
+            transcriptState: run.assistantTranscriptState,
+            transcriptStatusCode: run.assistantTranscriptStatusCode,
+            runStatus: run.status
+        )) {
+            await refreshStoredTranscript()
+        }
         .onChange(of: colorScheme) { _, value in applyTheme(value) }
         .onChange(of: progress?.revision) { _, _ in renderProgressUpdate() }
         .onChange(of: run.status) { _, _ in
             // With real rows, status is header-only. Empty runs need their waiting
             // placeholder replaced by the terminal failure/cancel/success message.
             if progress?.entries.isEmpty != false { renderSnapshot() }
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: .rubienAssistantConversationsDidChange
+        )) { _ in
+            Task { await refreshStoredTranscript() }
         }
     }
 
@@ -257,14 +273,43 @@ struct ScheduledRunTranscriptView: View {
 
             Spacer()
 
-            if let onCancel {
+            if run.assistantTranscriptState.isFinalizingIdentity {
+                HStack(spacing: 5) {
+                    ProgressView().controlSize(.mini)
+                    Text(ScheduledJobFormatting.localized(
+                        "scheduled.status.finishingIdentity"
+                    ))
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            } else if let onCancel {
                 Button(
                     ScheduledJobFormatting.localized("scheduled.action.cancelRun"),
                     action: onCancel
                 )
                 .font(.caption)
                 .buttonStyle(ToolbarHoverButtonStyle())
-            } else if run.status.isTerminal {
+            } else if let onContinue, storedDetail != nil, canContinueStoredResult {
+                Button(action: onContinue) {
+                    Label(
+                        ScheduledJobFormatting.localized("scheduled.action.continue"),
+                        systemImage: "arrow.right.circle"
+                    )
+                    .font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(ToolbarHoverButtonStyle())
+            } else if let onRetryImport {
+                Button(action: onRetryImport) {
+                    Label(
+                        ScheduledJobFormatting.localized(
+                            "scheduled.action.retryImport"
+                        ),
+                        systemImage: "arrow.clockwise"
+                    )
+                    .font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(ToolbarHoverButtonStyle())
+            } else if run.status.isTerminal, storedDetail == nil {
                 Button(action: onOpenResultOrDetails) {
                     Label(
                         ScheduledJobFormatting.localized(
@@ -286,7 +331,10 @@ struct ScheduledRunTranscriptView: View {
     }
 
     private var statusLabel: String {
-        switch progress?.phase {
+        if run.assistantTranscriptState.isFinalizingIdentity {
+            return ScheduledJobFormatting.localized("scheduled.status.finishingIdentity")
+        }
+        return switch progress?.phase {
         case .preparing?:
             ScheduledJobFormatting.localized("scheduled.progress.preparing")
         case .running?:
@@ -308,11 +356,55 @@ struct ScheduledRunTranscriptView: View {
     }
 
     private func renderSnapshot() {
+        if run.assistantTranscriptState.presentsStoredTranscript,
+           let storedDetail,
+           !storedDetail.entries.isEmpty {
+            var messages = StoredAssistantTranscriptProjection.messages(from: storedDetail)
+            if storedDetail.conversation.continuationTransferredAt != nil,
+               !canContinueStoredResult {
+                messages.append(ChatRenderMessage(
+                    role: .notice,
+                    body: ScheduledJobFormatting.localized(
+                        "scheduled.result.continuationDeleted"
+                    ),
+                    seq: messages.count
+                ))
+            }
+            renderer.loadTranscript(messages)
+            renderedProgress = progress
+            return
+        }
         var messages = ScheduledRunTranscript.messages(
             run: run,
             fallbackPrompt: job?.prompt ?? "",
             progress: progress
         )
+        if storedDetail == nil,
+           run.assistantTranscriptState.isImportingLegacyTranscript {
+            messages = [ChatRenderMessage(
+                role: .notice,
+                body: ScheduledJobFormatting.localized(
+                    "scheduled.result.importingTranscript"
+                ),
+                seq: 0
+            )]
+        } else if storedDetail == nil,
+                  run.assistantTranscriptState.hasAttemptedLegacyImport {
+            messages = [ChatRenderMessage(
+                role: .notice,
+                body: legacyImportMessage,
+                seq: 0
+            )]
+        } else if storedDetail == nil,
+                  run.assistantTranscriptState.isLocallyDeleted {
+            messages = [ChatRenderMessage(
+                role: .notice,
+                body: ScheduledJobFormatting.localized(
+                    "scheduled.result.localTranscriptDeleted"
+                ),
+                seq: 0
+            )]
+        }
         // `loadTranscript` renders restored assistant rows as static bubbles. Keep
         // the current streaming row out of that restore and open it through the
         // incremental contract, so the next token extends the same bubble.
@@ -328,7 +420,30 @@ struct ScheduledRunTranscriptView: View {
         renderedProgress = progress
     }
 
+    private var legacyImportMessage: String {
+        switch run.assistantTranscriptStatusCode {
+        case .alreadyLocal:
+            ScheduledJobFormatting.localized("scheduled.result.alreadyLocal")
+        case .deletedLocal:
+            ScheduledJobFormatting.localized("scheduled.result.localTranscriptDeleted")
+        case .notFound:
+            ScheduledJobFormatting.localized("scheduled.result.importNotFound")
+        case .providerUnavailable:
+            ScheduledJobFormatting.localized("scheduled.result.providerUnavailableMessage")
+        case .cancelled, .interrupted:
+            ScheduledJobFormatting.localized("scheduled.result.importInterrupted")
+        case .storageFailure:
+            ScheduledJobFormatting.localized("scheduled.result.importStorageFailure")
+        case .none, .unknown:
+            ScheduledJobFormatting.localized("scheduled.result.importFailed")
+        }
+    }
+
     private func renderProgressUpdate() {
+        if run.assistantTranscriptState.presentsStoredTranscript,
+           storedDetail != nil {
+            return
+        }
         guard let previous = renderedProgress,
               let current = progress,
               let actions = ScheduledRunTranscript.incrementalActions(
@@ -355,5 +470,41 @@ struct ScheduledRunTranscriptView: View {
         }
         renderedProgress = current
     }
+
+    private func refreshStoredTranscript() async {
+        let database = database
+        let runID = run.id
+        let previous = storedDetail
+        let previousCanContinue = canContinueStoredResult
+        let result = await Task.detached(priority: .utility) {
+            let detail = try? database.fetchAssistantConversationDetail(
+                scheduledJobRunID: runID
+            )
+            let canContinue = (try? database
+                .canContinueScheduledAssistantConversation(runID: runID)) ?? false
+            return StoredTranscriptLoadResult(
+                detail: detail,
+                canContinue: canContinue,
+                changed: detail != previous || canContinue != previousCanContinue
+            )
+        }.value
+        guard !Task.isCancelled, result.changed else { return }
+        storedDetail = result.detail
+        canContinueStoredResult = result.canContinue
+        renderSnapshot()
+    }
+}
+
+private struct StoredTranscriptLoadID: Hashable {
+    let runID: String
+    let transcriptState: AssistantTranscriptState
+    let transcriptStatusCode: AssistantTranscriptStatusCode?
+    let runStatus: ScheduledJobRunStatus
+}
+
+private struct StoredTranscriptLoadResult: Sendable {
+    let detail: AssistantConversationDetail?
+    let canContinue: Bool
+    let changed: Bool
 }
 #endif

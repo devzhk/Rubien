@@ -73,6 +73,42 @@ final class JobsCommandTests: XCTestCase {
         XCTAssertTrue(invalid.stderr.contains("HH:mm"), invalid.stderr)
     }
 
+    func testRunsExposeLocalTranscriptLifecycleFields() throws {
+        try skipIfBinaryMissing()
+        let created = try runCLI([
+            "jobs", "create",
+            "--name", "Transcript fields",
+            "--prompt", "Find papers",
+            "--weekdays", "daily",
+            "--time", "08:00",
+        ])
+        XCTAssertEqual(created.exitCode, 0, created.stderr)
+        let jobID = try XCTUnwrap(try object(created.stdout)["id"] as? String)
+        let queue = try DatabaseQueue(
+            path: testLibraryRoot.appendingPathComponent("library.sqlite").path
+        )
+        try queue.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO scheduledJobRun (
+                        id, jobId, trigger, occurrenceKey, scheduledFor,
+                        status, provider, providerSessionId, isUnread,
+                        assistantTranscriptState, assistantTranscriptStatusCode
+                    ) VALUES ('transcript-run', ?, 'manual', 'manual/transcript', ?,
+                              'failed', 'codex', 'thread-1', 1,
+                              'legacyAttempted', 'providerUnavailable')
+                    """,
+                arguments: [jobID, Date()]
+            )
+        }
+
+        let result = try runCLI(["jobs", "runs", "--job-id", jobID])
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        let row = try XCTUnwrap(try array(result.stdout).first)
+        XCTAssertEqual(row["assistantTranscriptState"] as? String, "legacyAttempted")
+        XCTAssertEqual(row["assistantTranscriptStatusCode"] as? String, "providerUnavailable")
+    }
+
     func testDeleteRunHidesTerminalHistoryAndClearsProviderLink() throws {
         try skipIfBinaryMissing()
         let created = try runCLI([

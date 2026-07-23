@@ -75,6 +75,8 @@ struct AgentHomeView: View {
     let onImportPDFs: () -> Void
     let onCompactLayoutChange: (Bool) -> Void
     let onOpenScheduledRun: (ScheduledJobRun) -> Void
+    let onContinueScheduledRun: (ScheduledJobRun) -> Void
+    let onRetryScheduledRunImport: (ScheduledJobRun) -> Void
 
     var body: some View {
         GeometryReader { geometry in
@@ -122,9 +124,17 @@ struct AgentHomeView: View {
                     run: run,
                     job: scheduledJobs.job(id: run.jobId),
                     progress: scheduledJobs.progress(for: run.id),
+                    database: database,
                     onBack: { presentedScheduledRunID = nil },
                     onCancel: run.status.isActive && scheduledJobs.activeRun?.id == run.id
                         ? { scheduledJobs.cancelActiveRun(id: run.id) }
+                        : nil,
+                    onContinue: run.status.isTerminal
+                        && scheduledJobs.activeRun?.id != run.id
+                        ? { onContinueScheduledRun(run) }
+                        : nil,
+                    onRetryImport: run.canRetryLegacyTranscriptImport
+                        ? { onRetryScheduledRunImport(run) }
                         : nil,
                     onOpenResultOrDetails: {
                         presentedScheduledRunID = nil

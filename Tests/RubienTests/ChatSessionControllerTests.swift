@@ -88,6 +88,686 @@ final class ChatSessionControllerTests: XCTestCase {
             2)
     }
 
+    func testInteractiveTurnPersistsAndHistoryRestoresFromRubienStore() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let provider = MockAgentProvider(kind: .claude)
+        let sink = SpyTranscriptSink()
+        let controller = ChatSessionController(
+            provider: provider,
+            transcript: sink,
+            conversationContext: .library,
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"),
+            gate: AssistantTurnGate(),
+            initialAvailability: .installed(version: "test", path: "/fake/claude"),
+            conversationDatabase: database
+        )
+
+        await runTurn(
+            controller,
+            provider: provider,
+            send: "Summarize the paper",
+            events: [
+                .sessionStarted(sessionID: "local-history-session"),
+                .assistantMessageCompleted(text: "A durable summary."),
+                .turnCompleted(usage: nil),
+            ]
+        )
+
+        let summaries = try database.fetchAssistantConversationSummaries()
+        let stored = try XCTUnwrap(summaries.first)
+        let detail = try XCTUnwrap(
+            database.fetchAssistantConversationDetail(id: stored.conversation.id)
+        )
+        XCTAssertEqual(detail.entries.map(\.body), [
+            "Summarize the paper", "A durable summary.",
+        ])
+        XCTAssertEqual(detail.turns.first?.status, .succeeded)
+        XCTAssertEqual(
+            detail.conversation.latestProviderSessionId,
+            "local-history-session"
+        )
+
+        let history = await controller.listRecentSessions()
+        XCTAssertEqual(history.map(\.id), [stored.conversation.id])
+        controller.newConversation()
+        controller.resume(try XCTUnwrap(history.first))
+        await waitUntil { !controller.isResuming }
+        guard case .loadTranscript(let restored)? = sink.calls.last else {
+            return XCTFail("Expected a Rubien-owned transcript restore")
+        }
+        XCTAssertEqual(restored.map(\.body), [
+            "Summarize the paper", "A durable summary.",
+        ])
+        XCTAssertTrue(provider.recentsCalls.isEmpty)
+        XCTAssertTrue(provider.searches.isEmpty)
+        XCTAssertEqual(provider.transcriptCallCount, 0)
+    }
+
+    func testStreamingRenderDoesNotWaitForTranscriptPersistence() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let provider = MockAgentProvider(kind: .codex)
+        let sink = SpyTranscriptSink()
+        let controller = ChatSessionController(
+            provider: provider,
+            transcript: sink,
+            conversationContext: .library,
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"),
+            gate: AssistantTurnGate(),
+            initialAvailability: .installed(version: "test", path: "/fake/codex"),
+            conversationDatabase: database
+        )
+
+        controller.send("Stream without database latency")
+        let turnTask = controller.turnTask
+        await provider.waitUntilStreaming()
+
+        let writerBlocker = DatabaseWriterBlocker()
+        let blockedWriter = Task.detached {
+            try database.dbWriter.write { _ in
+                writerBlocker.hold()
+            }
+        }
+        await waitUntil { writerBlocker.hasEntered }
+        XCTAssertTrue(writerBlocker.hasEntered)
+
+        let delta = String(repeating: "x", count: 4_096)
+        provider.emit(.assistantDelta(text: delta))
+        await waitUntil {
+            sink.calls.contains(.appendDelta(delta))
+        }
+        XCTAssertTrue(sink.calls.contains(.appendDelta(delta)))
+
+        writerBlocker.release()
+        _ = try await blockedWriter.value
+        provider.emit(.assistantMessageCompleted(text: delta))
+        provider.emit(.turnCompleted(usage: nil))
+        provider.finishStream()
+        await turnTask?.value
+    }
+
+    func testProviderHistoryImportAdoptsAvailableAttachmentBytes() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("provider-history-import-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let workspace = root.appendingPathComponent("Workspace", isDirectory: true)
+        let libraryRoot = root.appendingPathComponent("Library", isDirectory: true)
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: libraryRoot, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent("notes.md")
+        let sourceData = Data("provider-owned notes".utf8)
+        try sourceData.write(to: source)
+        let staging = AssistantAttachmentStore(workspaceURL: workspace)
+        let staged = try await staging.stageFile(
+            source,
+            conversationID: UUID()
+        )
+        let database = try AppDatabase(DatabaseQueue())
+        let durableStore = DurableAssistantAttachmentStore(
+            database: database,
+            libraryRoot: libraryRoot
+        )
+        let provider = MockAgentProvider(kind: .claude)
+        provider.setTranscript([
+            ChatRenderMessage(
+                role: .user,
+                body: "Read my notes",
+                seq: 0,
+                attachments: [ChatAttachmentPresentation(
+                    id: staged.id,
+                    displayName: staged.displayName,
+                    kind: staged.kind,
+                    byteCount: staged.byteCount,
+                    isAvailable: true,
+                    thumbnailDataURL: nil,
+                    managedSourceURL: staged.stagedURL,
+                    managedMediaType: staged.mediaType
+                )]
+            ),
+            ChatRenderMessage(role: .assistant, body: "Done", seq: 1),
+        ], for: "provider-with-attachment")
+        let controller = ChatSessionController(
+            provider: provider,
+            transcript: SpyTranscriptSink(),
+            conversationContext: .library,
+            workspaceURL: workspace,
+            gate: AssistantTurnGate(),
+            initialAvailability: .installed(version: "test", path: "/fake/claude"),
+            conversationDatabase: database,
+            durableTranscriptAttachmentStore: durableStore
+        )
+
+        let result = await controller.importProviderSession(AgentSessionSummary(
+            id: "provider-with-attachment",
+            preview: "Read my notes",
+            date: Date(timeIntervalSince1970: 1_800_000_000)
+        ))
+
+        guard case .opened = result else {
+            return XCTFail("expected provider history import, got \(result)")
+        }
+        let conversation = try XCTUnwrap(
+            database.fetchAssistantConversationSummaries().first?.conversation
+        )
+        let detail = try XCTUnwrap(
+            database.fetchAssistantConversationDetail(id: conversation.id)
+        )
+        let attachment = try XCTUnwrap(detail.attachments.first)
+        XCTAssertNotNil(attachment.relativePath)
+        XCTAssertNotNil(attachment.sha256)
+        let durableURL = await durableStore.resolvedURL(
+            conversationID: conversation.id,
+            attachment: attachment
+        )
+        XCTAssertEqual(try durableURL.map { try Data(contentsOf: $0) }, sourceData)
+    }
+
+    func testHomeLocalHistoryExcludesReaderConversations() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let workspace = URL(fileURLWithPath: "/tmp/ws")
+        let workspaceHash = AssistantSessionIdentity.workspaceHash(workspace)
+        let library = try database.createAssistantConversation(.init(
+            provider: .claude,
+            workspaceIdentityHash: workspaceHash,
+            contextKind: .library
+        ))
+        var reference = Reference(title: "Reader context")
+        _ = try database.saveReference(&reference)
+        let reader = try database.createAssistantConversation(.init(
+            provider: .claude,
+            workspaceIdentityHash: workspaceHash,
+            contextKind: .reference,
+            referenceId: try XCTUnwrap(reference.id)
+        ))
+        for (conversation, prompt) in [
+            (library, "shared home topic"),
+            (reader, "shared reader topic"),
+        ] {
+            let turn = AssistantTurn(
+                conversationId: conversation.id,
+                ordinal: 1
+            )
+            try database.beginAssistantTurn(
+                turn,
+                userEntry: .init(
+                    turnId: turn.id,
+                    sequence: 0,
+                    kind: .user,
+                    body: prompt
+                )
+            )
+            XCTAssertTrue(try database.finishAssistantTurn(
+                id: turn.id,
+                status: .succeeded
+            ))
+        }
+        let controller = ChatSessionController(
+            provider: MockAgentProvider(kind: .claude),
+            transcript: SpyTranscriptSink(),
+            conversationContext: .library,
+            workspaceURL: workspace,
+            gate: AssistantTurnGate(),
+            initialAvailability: .installed(version: "test", path: "/fake/claude"),
+            conversationDatabase: database
+        )
+
+        let recent = await controller.listRecentSessions()
+        let search = await controller.searchSessions("shared")
+        XCTAssertEqual(recent.map(\.id), [library.id])
+        XCTAssertEqual(search.map(\.id), [library.id])
+    }
+
+    func testInteractiveTranscriptWriteFailureKeepsProviderResponseRunning() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let provider = MockAgentProvider(kind: .claude)
+        let sink = SpyTranscriptSink()
+        let controller = ChatSessionController(
+            provider: provider,
+            transcript: sink,
+            conversationContext: .library,
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"),
+            gate: AssistantTurnGate(),
+            initialAvailability: .installed(version: "test", path: "/fake/claude"),
+            conversationDatabase: database
+        )
+
+        controller.send("Keep answering")
+        let task = controller.turnTask
+        await provider.waitUntilStreaming()
+        try await database.dbWriter.write { db in
+            try db.execute(sql: """
+                CREATE TRIGGER failInteractiveAssistantCapture
+                BEFORE INSERT ON assistantTranscriptEntry
+                WHEN NEW.kind = 'assistant'
+                BEGIN
+                    SELECT RAISE(FAIL, 'injected transcript failure');
+                END
+                """)
+        }
+
+        provider.emit(.assistantDelta(text: String(repeating: "x", count: 4_096)))
+        await waitUntil {
+            sink.notices.contains { $0.contains("response will continue") }
+        }
+        provider.emit(.assistantMessageCompleted(text: "Complete despite storage failure."))
+        provider.emit(.turnCompleted(usage: nil))
+        provider.finishStream()
+        await task?.value
+
+        XCTAssertEqual(provider.cancelCount, 0)
+        XCTAssertTrue(sink.calls.contains(
+            .commitAssistantMessage("Complete despite storage failure.")
+        ))
+        XCTAssertEqual(controller.turnOutcome.phase, .succeeded)
+        let stored = try XCTUnwrap(
+            database.fetchAssistantConversationSummaries().first
+        )
+        let detail = try XCTUnwrap(
+            database.fetchAssistantConversationDetail(id: stored.conversation.id)
+        )
+        XCTAssertEqual(detail.turns.first?.status, .failed)
+        XCTAssertEqual(detail.turns.first?.failureKind, "storageFailure")
+    }
+
+    func testMissingLocalHistorySelectionNeverFallsThroughToProviderResume() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let provider = MockAgentProvider(kind: .claude)
+        let sink = SpyTranscriptSink()
+        let controller = ChatSessionController(
+            provider: provider,
+            transcript: sink,
+            conversationContext: .library,
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"),
+            gate: AssistantTurnGate(),
+            initialAvailability: .installed(version: "test", path: "/fake/claude"),
+            conversationDatabase: database
+        )
+
+        controller.resume(AgentSessionSummary(
+            id: UUID().uuidString.lowercased(),
+            preview: "Deleted local conversation",
+            date: Date()
+        ))
+        await waitUntil { !controller.isResuming }
+
+        XCTAssertEqual(provider.transcriptCallCount, 0)
+        XCTAssertNil(controller.liveSessionID)
+        XCTAssertTrue(sink.notices.contains { $0.contains("no longer available") })
+    }
+
+    func testScheduledLegacyImportResolvesLocalAliasBeforeProviderAvailability() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let workspace = URL(fileURLWithPath: "/tmp/ws")
+        let sessionID = "already-imported-session"
+        let job = try database.createScheduledJob(.init(
+            name: "Morning papers",
+            prompt: "Find recent papers",
+            recurrence: .init(weekdayMask: 127, localMinuteOfDay: 8 * 60),
+            provider: .claude
+        ))
+        let claim = try database.claimManualScheduledJob(id: job.id)
+        XCTAssertTrue(try database.setScheduledJobRunProviderSessionID(
+            id: claim.run.id,
+            sessionID: sessionID
+        ))
+        XCTAssertTrue(try database.markScheduledJobRunStarted(id: claim.run.id))
+        XCTAssertTrue(try database.finishScheduledJobRun(
+            id: claim.run.id,
+            status: .succeeded
+        ))
+        try await database.dbWriter.write { db in
+            try db.execute(
+                sql: """
+                    UPDATE scheduledJobRun
+                    SET assistantTranscriptState = 'legacyEligible'
+                    WHERE id = ?
+                    """,
+                arguments: [claim.run.id]
+            )
+        }
+
+        let conversation = try database.createAssistantConversation(.init(
+            provider: .claude,
+            workspaceIdentityHash: AssistantSessionIdentity.workspaceHash(workspace),
+            contextKind: .library
+        ))
+        let aliasKeyHash = AssistantSessionIdentity.aliasKeyHash(
+            workspaceURL: workspace,
+            provider: .claude,
+            providerSessionID: sessionID
+        )
+        XCTAssertEqual(
+            try database.claimAssistantSessionAlias(
+                keyHash: aliasKeyHash,
+                provider: .claude,
+                conversationID: conversation.id,
+                snapshot: .absent,
+                allowTombstoneReclaim: false
+            ),
+            conversation.id
+        )
+
+        let provider = MockAgentProvider(
+            kind: .claude,
+            availability: .notFound(reason: "provider is offline")
+        )
+        let controller = ChatSessionController(
+            provider: provider,
+            transcript: SpyTranscriptSink(),
+            conversationContext: .library,
+            workspaceURL: workspace,
+            gate: AssistantTurnGate(),
+            initialAvailability: .notFound(reason: "provider is offline"),
+            conversationDatabase: database
+        )
+        let run = try XCTUnwrap(database.fetchScheduledJobRun(id: claim.run.id))
+
+        let result = await controller.importScheduledLegacyResult(
+            run,
+            isRetry: false
+        )
+        XCTAssertEqual(result, .openLocal(conversationID: conversation.id))
+    }
+
+    func testScheduledLegacyImportPreservesEligibilityWhenMetadataIsBusy() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let workspace = URL(fileURLWithPath: "/tmp/ws")
+        let job = try database.createScheduledJob(.init(
+            name: "Morning papers",
+            prompt: "Find recent papers",
+            recurrence: .init(weekdayMask: 127, localMinuteOfDay: 8 * 60),
+            provider: .codex
+        ))
+        let claim = try database.claimManualScheduledJob(id: job.id)
+        XCTAssertTrue(try database.setScheduledJobRunProviderSessionID(
+            id: claim.run.id,
+            sessionID: "busy-session"
+        ))
+        XCTAssertTrue(try database.finishScheduledJobRun(
+            id: claim.run.id,
+            status: .succeeded
+        ))
+        try await database.dbWriter.write { db in
+            try db.execute(
+                sql: """
+                    UPDATE scheduledJobRun
+                    SET assistantTranscriptState = 'legacyEligible',
+                        assistantTranscriptStatusCode = NULL
+                    WHERE id = ?
+                    """,
+                arguments: [claim.run.id]
+            )
+        }
+        let provider = MockAgentProvider(kind: .codex)
+        provider.setTranscriptAdmission(false)
+        let controller = ChatSessionController(
+            provider: provider,
+            transcript: SpyTranscriptSink(),
+            conversationContext: .library,
+            workspaceURL: workspace,
+            gate: AssistantTurnGate(),
+            initialAvailability: .installed(version: "test", path: "/fake/codex"),
+            conversationDatabase: database
+        )
+        let run = try XCTUnwrap(database.fetchScheduledJobRun(id: claim.run.id))
+
+        let result = await controller.importScheduledLegacyResult(
+            run,
+            isRetry: false
+        )
+        XCTAssertEqual(result, .unavailable)
+        let stored = try XCTUnwrap(database.fetchScheduledJobRun(id: claim.run.id))
+        XCTAssertEqual(stored.assistantTranscriptState, .legacyEligible)
+        XCTAssertNil(stored.assistantTranscriptStatusCode)
+    }
+
+    func testUnknownStoredProviderOpensReadOnlyWithoutForeignContinuation() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let conversation = try database.createAssistantConversation(.init(
+            provider: .unknown("future-provider"),
+            workspaceIdentityHash: AssistantSessionIdentity.workspaceHash(
+                URL(fileURLWithPath: "/tmp/ws")
+            ),
+            contextKind: .library,
+            latestProviderSessionId: "future-session",
+            latestSessionTurnOrdinal: 1,
+            latestSessionEventOrdinal: 0
+        ))
+        let turn = AssistantTurn(
+            conversationId: conversation.id,
+            ordinal: 1,
+            status: .running
+        )
+        _ = try database.beginAssistantTurn(
+            turn,
+            userEntry: AssistantTranscriptEntry(
+                turnId: turn.id,
+                sequence: 0,
+                kind: .user,
+                body: "A future-provider conversation"
+            )
+        )
+        XCTAssertTrue(try database.finishAssistantTurn(
+            id: turn.id,
+            status: .succeeded
+        ))
+
+        let sink = SpyTranscriptSink()
+        let controller = ChatSessionController(
+            provider: MockAgentProvider(kind: .claude),
+            transcript: sink,
+            conversationContext: .library,
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"),
+            gate: AssistantTurnGate(),
+            initialAvailability: .installed(version: "test", path: "/fake/claude"),
+            conversationDatabase: database
+        )
+
+        controller.resume(AgentSessionSummary(
+            id: conversation.id,
+            preview: "Future conversation",
+            date: conversation.lastActivityAt
+        ))
+        await waitUntil { !controller.isResuming }
+
+        XCTAssertNil(controller.liveSessionID)
+        XCTAssertFalse(controller.canSend(draft: "Continue"))
+        guard case .loadTranscript(let rows)? = sink.calls.last else {
+            return XCTFail("Expected the stored transcript to remain readable")
+        }
+        XCTAssertEqual(rows.first?.body, "A future-provider conversation")
+        XCTAssertTrue(rows.last?.body.contains("read-only") == true)
+    }
+
+    func testClearNotificationInvalidatesDeletedResumeIdentityBeforeNextSend() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let provider = MockAgentProvider(kind: .claude)
+        let controller = ChatSessionController(
+            provider: provider,
+            transcript: SpyTranscriptSink(),
+            conversationContext: .library,
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"),
+            gate: AssistantTurnGate(),
+            initialAvailability: .installed(version: "test", path: "/fake/claude"),
+            conversationDatabase: database
+        )
+
+        await runTurn(
+            controller,
+            provider: provider,
+            send: "First prompt",
+            events: [.assistantMessageCompleted(text: "First answer"), .turnCompleted(usage: nil)]
+        )
+        let deletedID = try XCTUnwrap(
+            database.fetchAssistantConversationSummaries().first?.conversation.id
+        )
+        XCTAssertEqual(try database.clearAssistantConversations(), 1)
+        NotificationCenter.default.post(
+            name: .rubienAssistantConversationsDidChange,
+            object: nil
+        )
+        await Task.yield()
+
+        await runTurn(
+            controller,
+            provider: provider,
+            send: "Second prompt",
+            events: [.assistantMessageCompleted(text: "Second answer"), .turnCompleted(usage: nil)]
+        )
+        let replacement = try XCTUnwrap(
+            database.fetchAssistantConversationSummaries().first?.conversation.id
+        )
+        XCTAssertNotEqual(replacement, deletedID)
+        XCTAssertEqual(
+            try database.fetchAssistantConversationDetail(id: replacement)?.entries.first?.body,
+            "Second prompt"
+        )
+    }
+
+    func testDeletedConversationCannotBeResurrectedBeforeObserverRuns() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let provider = MockAgentProvider(kind: .claude)
+        let sink = SpyTranscriptSink()
+        let controller = ChatSessionController(
+            provider: provider,
+            transcript: sink,
+            conversationContext: .library,
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"),
+            gate: AssistantTurnGate(),
+            initialAvailability: .installed(version: "test", path: "/fake/claude"),
+            conversationDatabase: database
+        )
+        await runTurn(
+            controller,
+            provider: provider,
+            send: "First prompt",
+            events: [.assistantMessageCompleted(text: "First answer"), .turnCompleted(usage: nil)]
+        )
+        let deletedID = try XCTUnwrap(
+            database.fetchAssistantConversationSummaries().first?.conversation.id
+        )
+        try database.deleteAssistantConversation(id: deletedID)
+
+        controller.send("Must not resurrect")
+        await controller.turnTask?.value
+
+        XCTAssertNil(try database.fetchAssistantConversation(id: deletedID))
+        XCTAssertEqual(provider.requests.count, 1)
+        XCTAssertTrue(sink.notices.contains { $0.contains("could not save") })
+    }
+
+    func testCrossProviderLocalResumeDoesNotProbeProvider() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let workspace = URL(fileURLWithPath: "/tmp/ws")
+        let conversation = try database.createAssistantConversation(.init(
+            provider: .codex,
+            workspaceIdentityHash: AssistantSessionIdentity.workspaceHash(workspace),
+            contextKind: .library,
+            latestProviderSessionId: "codex-thread",
+            latestSessionTurnOrdinal: 1,
+            latestSessionEventOrdinal: 0
+        ))
+        let turn = AssistantTurn(conversationId: conversation.id, ordinal: 1)
+        try database.beginAssistantTurn(
+            turn,
+            userEntry: .init(
+                turnId: turn.id,
+                sequence: 0,
+                kind: .user,
+                body: "Stored Codex conversation"
+            )
+        )
+        XCTAssertTrue(try database.finishAssistantTurn(
+            id: turn.id,
+            status: .succeeded
+        ))
+        let claude = MockAgentProvider(kind: .claude)
+        let codex = MockAgentProvider(kind: .codex)
+        let controller = ChatSessionController(
+            provider: claude,
+            transcript: SpyTranscriptSink(),
+            conversationContext: .library,
+            workspaceURL: workspace,
+            gate: AssistantTurnGate(),
+            providerFactory: { kind in kind == .codex ? codex : claude },
+            initialAvailability: .installed(version: "test", path: "/fake/claude"),
+            conversationDatabase: database
+        )
+
+        controller.resume(AgentSessionSummary(
+            id: conversation.id,
+            preview: "Stored Codex conversation",
+            date: conversation.lastActivityAt
+        ))
+        await waitUntil { !controller.isResuming }
+
+        XCTAssertEqual(controller.providerKind, .codex)
+        XCTAssertEqual(codex.availabilityCallCount, 0)
+        XCTAssertEqual(codex.catalogCallCount, 0)
+        XCTAssertEqual(codex.transcriptCallCount, 0)
+        XCTAssertEqual(controller.liveSessionID, "codex-thread")
+    }
+
+    func testScheduledResultOpenedFromHistoryRemainsReadOnly() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let workspace = URL(fileURLWithPath: "/tmp/ws")
+        let job = try database.createScheduledJob(.init(
+            name: "Morning papers",
+            prompt: "Find papers",
+            recurrence: .init(weekdayMask: 127, localMinuteOfDay: 480),
+            provider: .codex
+        ))
+        let claim = try database.claimManualScheduledJob(id: job.id)
+        let conversation = try database.createAssistantConversation(.init(
+            provider: .codex,
+            workspaceIdentityHash: AssistantSessionIdentity.workspaceHash(workspace),
+            contextKind: .library,
+            scheduledJobRunId: claim.run.id,
+            latestProviderSessionId: "codex-thread",
+            latestSessionTurnOrdinal: 1,
+            latestSessionEventOrdinal: 0
+        ))
+        let turn = AssistantTurn(conversationId: conversation.id, ordinal: 1)
+        try database.beginAssistantTurn(
+            turn,
+            userEntry: .init(
+                turnId: turn.id,
+                sequence: 0,
+                kind: .user,
+                body: "Stored scheduled result"
+            )
+        )
+        XCTAssertTrue(try database.finishAssistantTurn(id: turn.id, status: .succeeded))
+        let provider = MockAgentProvider(kind: .codex)
+        let sink = SpyTranscriptSink()
+        let controller = ChatSessionController(
+            provider: provider,
+            transcript: sink,
+            conversationContext: .library,
+            workspaceURL: workspace,
+            gate: AssistantTurnGate(),
+            initialAvailability: .installed(version: "test", path: "/fake/codex"),
+            conversationDatabase: database
+        )
+
+        controller.resume(AgentSessionSummary(
+            id: conversation.id,
+            preview: "Stored scheduled result",
+            date: conversation.lastActivityAt
+        ))
+        await waitUntil { !controller.isResuming }
+
+        XCTAssertFalse(controller.canSend(draft: "Continue here"))
+        XCTAssertNil(controller.liveSessionID)
+        XCTAssertEqual(provider.transcriptCallCount, 0)
+        guard case .loadTranscript(let restored)? = sink.calls.last else {
+            return XCTFail("expected the stored scheduled transcript")
+        }
+        XCTAssertEqual(
+            restored.last?.body,
+            "Scheduled Assistant results are read-only. Use Continue from the run to start a follow-up conversation."
+        )
+    }
+
     /// Drive one full turn: send, wait for the provider stream, feed events, finish.
     private func runTurn(
         _ controller: ChatSessionController,
@@ -107,7 +787,14 @@ final class ChatSessionControllerTests: XCTestCase {
     /// controller's async for-await loop (buffered mock events process one per turn).
     private func waitUntil(_ condition: @escaping () -> Bool, ticks: Int = 200) async {
         var n = 0
-        while !condition() && n < ticks { await Task.yield(); n += 1 }
+        while !condition() && n < ticks {
+            // A yield-count is not a time bound: while image decoding runs on a
+            // different executor, thousands of main-actor yields can complete
+            // before that work advances. Give the worker a real scheduling
+            // window so attachment tests wait for the state they assert.
+            try? await Task.sleep(for: .milliseconds(1))
+            n += 1
+        }
     }
 
     func testTurnOutcomePublishesApprovalSuccessFailureAndCancellation() async {
@@ -1119,147 +1806,6 @@ final class ChatSessionControllerTests: XCTestCase {
             return XCTFail("expected replay: \(sink.calls)")
         }
         XCTAssertEqual(replayed.map(\.body), history.map(\.body))
-    }
-
-    func testScheduledResultRequiresTranscriptBeforeReplacingConversation() async {
-        let provider = MockAgentProvider()
-        let sink = SpyTranscriptSink()
-        let controller = makeController(provider: provider, sink: sink)
-        await runTurn(
-            controller,
-            provider: provider,
-            send: "current conversation",
-            events: [.sessionStarted(sessionID: "current-session"), .turnCompleted(usage: nil)]
-        )
-        let callsBeforePreflight = sink.calls
-
-        let opened = await controller.resumeScheduledResult(
-            AgentSessionSummary(
-                id: "pruned-session",
-                preview: "Scheduled result",
-                date: Date(timeIntervalSince1970: 0)
-            ),
-            providerKind: .claude
-        )
-
-        XCTAssertEqual(opened, .unavailable)
-        XCTAssertFalse(controller.isResuming)
-        XCTAssertEqual(controller.liveSessionID, "current-session")
-        XCTAssertTrue(controller.hasMessages)
-        XCTAssertEqual(
-            sink.calls,
-            callsBeforePreflight,
-            "a missing scheduled transcript must not reset or replace the visible conversation"
-        )
-    }
-
-    func testScheduledResultWithTranscriptOpensAndRestoresContent() async {
-        let provider = MockAgentProvider()
-        let sink = SpyTranscriptSink()
-        let controller = makeController(provider: provider, sink: sink)
-        let history = [
-            ChatRenderMessage(role: .user, body: "Scheduled question", seq: 0),
-            ChatRenderMessage(role: .assistant, body: "Scheduled answer", seq: 1),
-        ]
-        provider.setTranscript(history, for: "scheduled-session")
-
-        let opened = await controller.resumeScheduledResult(
-            AgentSessionSummary(
-                id: "scheduled-session",
-                preview: "Scheduled question",
-                date: Date(timeIntervalSince1970: 0)
-            ),
-            providerKind: .claude
-        )
-
-        XCTAssertEqual(opened, .opened)
-        XCTAssertFalse(controller.isResuming)
-        XCTAssertEqual(controller.liveSessionID, "scheduled-session")
-        guard case .loadTranscript(let messages)? = sink.calls.last else {
-            return XCTFail("expected the scheduled transcript to load: \(sink.calls)")
-        }
-        XCTAssertEqual(messages.map(\.body), history.map(\.body))
-        XCTAssertFalse(sink.calls.contains { if case .addNotice = $0 { return true }; return false })
-    }
-
-    func testOverlappingScheduledResultPreflightsReportTheOlderRequestAsSuperseded() async {
-        let provider = MockAgentProvider()
-        let sink = SpyTranscriptSink()
-        let controller = makeController(provider: provider, sink: sink)
-        provider.setTranscript(
-            [ChatRenderMessage(role: .assistant, body: "Older result", seq: 0)],
-            for: "older-session")
-        provider.setTranscript(
-            [ChatRenderMessage(role: .assistant, body: "Newer result", seq: 0)],
-            for: "newer-session")
-        provider.holdTranscripts()
-
-        let older = Task { @MainActor in
-            await controller.resumeScheduledResult(
-                AgentSessionSummary(
-                    id: "older-session",
-                    preview: "Older scheduled run",
-                    date: Date(timeIntervalSince1970: 0)),
-                providerKind: .claude)
-        }
-        await waitUntil { provider.pendingTranscriptReadCount == 1 }
-
-        let newer = Task { @MainActor in
-            await controller.resumeScheduledResult(
-                AgentSessionSummary(
-                    id: "newer-session",
-                    preview: "Newer scheduled run",
-                    date: Date(timeIntervalSince1970: 1)),
-                providerKind: .claude)
-        }
-        await waitUntil { provider.pendingTranscriptReadCount == 2 }
-
-        provider.releaseTranscripts()
-        let olderResult = await older.value
-        let newerResult = await newer.value
-
-        XCTAssertEqual(olderResult, .superseded)
-        XCTAssertEqual(newerResult, .opened)
-        XCTAssertEqual(controller.liveSessionID, "newer-session")
-        XCTAssertFalse(controller.isResuming)
-        guard case .loadTranscript(let messages)? = sink.calls.last else {
-            return XCTFail("expected the newer scheduled transcript to load: \(sink.calls)")
-        }
-        XCTAssertEqual(messages.map(\.body), ["Newer result"])
-    }
-
-    func testMissingCrossProviderFactoryClearsAnOlderScheduledPreflight() async {
-        let provider = MockAgentProvider()
-        let controller = makeController(provider: provider, sink: SpyTranscriptSink())
-        provider.setTranscript(
-            [ChatRenderMessage(role: .assistant, body: "Older result", seq: 0)],
-            for: "older-session")
-        provider.holdTranscripts()
-
-        let older = Task { @MainActor in
-            await controller.resumeScheduledResult(
-                AgentSessionSummary(
-                    id: "older-session",
-                    preview: "Older scheduled run",
-                    date: Date(timeIntervalSince1970: 0)),
-                providerKind: .claude)
-        }
-        await waitUntil { provider.pendingTranscriptReadCount == 1 }
-        XCTAssertTrue(controller.isResuming)
-
-        let unavailable = await controller.resumeScheduledResult(
-            AgentSessionSummary(
-                id: "codex-session",
-                preview: "Codex scheduled run",
-                date: Date(timeIntervalSince1970: 1)),
-            providerKind: .codex)
-
-        XCTAssertEqual(unavailable, .unavailable)
-        XCTAssertFalse(controller.isResuming)
-        provider.releaseTranscripts()
-        let olderResult = await older.value
-        XCTAssertEqual(olderResult, .superseded)
-        XCTAssertFalse(controller.isResuming)
     }
 
     func testSearchSessionsForwardsToTheProviderWithTheWorkspace() async {
@@ -3184,12 +3730,15 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
     private var _streamCancellationCount = 0
     private var _approvals: [(String, ApprovalDecision)] = []
     private var _availability: AgentAvailability
+    private var _availabilityCallCount = 0
     private var _availabilityHold = false
     private var _availabilityReleaseWaiters: [CheckedContinuation<Void, Never>] = []
     private var _availabilityProbeWaiters: [CheckedContinuation<Void, Never>] = []
     private var _continuation: AsyncThrowingStream<AgentEvent, Error>.Continuation?
     private var _streamingWaiters: [CheckedContinuation<Void, Never>] = []
     private var _transcripts: [String: [ChatRenderMessage]] = [:]
+    private var _transcriptWasAdmitted = true
+    private var _transcriptCallCount = 0
     private var _transcriptHold = false
     private var _transcriptWaiters: [CheckedContinuation<Void, Never>] = []
     private var _searches: [(query: String, limit: Int, referenceID: Int64?)] = []
@@ -3197,6 +3746,7 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
     private var _recentsCalls: [(limit: Int, referenceID: Int64?, deadline: Date?)] = []
     private var _recentResult: AgentSessionQueryResult?
     private var _catalog: CodexCatalog?
+    private var _catalogCallCount = 0
     private var _catalogHold = false
     private var _catalogReleaseWaiters: [CheckedContinuation<Void, Never>] = []
     private var _catalogProbeWaiters: [CheckedContinuation<Void, Never>] = []
@@ -3206,6 +3756,7 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
     }
 
     func availableModels() async -> CodexCatalog? {
+        lock.withLock { _catalogCallCount += 1 }
         // Park when held so a test can interleave a provider switch before this
         // fetch returns (mirrors the availability-hold pattern below).
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
@@ -3222,6 +3773,10 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
             }
         }
         lock.lock(); defer { lock.unlock() }; return _catalog
+    }
+
+    var catalogCallCount: Int {
+        lock.withLock { _catalogCallCount }
     }
 
     /// Make `availableModels` block until `releaseCatalog()`.
@@ -3256,6 +3811,7 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
     }
 
     func isAvailable() async -> AgentAvailability {
+        lock.withLock { _availabilityCallCount += 1 }
         // Park when held so a test can interleave a switch before this probe returns
         // (mirrors the transcript-hold pattern below).
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
@@ -3272,6 +3828,10 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
             }
         }
         lock.lock(); defer { lock.unlock() }; return _availability
+    }
+
+    var availabilityCallCount: Int {
+        lock.withLock { _availabilityCallCount }
     }
 
     /// Make `isAvailable` block until `releaseAvailability()`.
@@ -3303,6 +3863,11 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }; _transcripts[sessionID] = rows
     }
 
+    func setTranscriptAdmission(_ wasAdmitted: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        _transcriptWasAdmitted = wasAdmitted
+    }
+
     /// Make `sessionTranscript` block until `releaseTranscripts()` — lets tests
     /// interleave a send with an in-flight resume restore.
     func holdTranscripts() {
@@ -3323,6 +3888,9 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
     }
 
     func sessionTranscript(sessionID: String, workspaceURL: URL) async -> [ChatRenderMessage] {
+        lock.lock()
+        _transcriptCallCount += 1
+        lock.unlock()
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             lock.lock()
             if _transcriptHold {
@@ -3334,6 +3902,25 @@ final class MockAgentProvider: AgentProvider, @unchecked Sendable {
             }
         }
         lock.lock(); defer { lock.unlock() }; return _transcripts[sessionID] ?? []
+    }
+
+    func sessionTranscriptResult(
+        sessionID: String,
+        workspaceURL: URL
+    ) async -> AgentTranscriptQueryResult {
+        let messages = await sessionTranscript(
+            sessionID: sessionID,
+            workspaceURL: workspaceURL
+        )
+        let wasAdmitted = lock.withLock { _transcriptWasAdmitted }
+        return AgentTranscriptQueryResult(
+            messages: messages,
+            wasAdmitted: wasAdmitted
+        )
+    }
+
+    var transcriptCallCount: Int {
+        lock.lock(); defer { lock.unlock() }; return _transcriptCallCount
     }
 
     func setSearchResults(_ results: [AgentSessionSummary]) {
@@ -3465,5 +4052,24 @@ final class SpyTranscriptSink: ChatTranscriptSink {
     func setTheme(_ mode: ChatTheme) { calls.append(.setTheme(mode)) }
 
     var notices: [String] { calls.compactMap { if case .addNotice(let m) = $0 { return m }; return nil } }
+}
+
+private final class DatabaseWriterBlocker: @unchecked Sendable {
+    private let stateLock = NSLock()
+    private let releaseSemaphore = DispatchSemaphore(value: 0)
+    private var entered = false
+
+    var hasEntered: Bool {
+        stateLock.withLock { entered }
+    }
+
+    func hold() {
+        stateLock.withLock { entered = true }
+        releaseSemaphore.wait()
+    }
+
+    func release() {
+        releaseSemaphore.signal()
+    }
 }
 #endif

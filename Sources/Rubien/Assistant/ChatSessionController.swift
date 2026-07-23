@@ -3,6 +3,12 @@ import Foundation
 import Combine
 import RubienCore
 
+extension Notification.Name {
+    static let rubienAssistantConversationsDidChange = Notification.Name(
+        "com.rubien.assistant.conversations-did-change"
+    )
+}
+
 // MARK: - Renderer seam
 //
 // The controller drives the transcript through this narrow protocol rather than the
@@ -70,20 +76,34 @@ struct AssistantTurnOutcome: Equatable {
     let phase: Phase
 }
 
-/// Result of preflighting and opening a scheduled run's provider transcript.
-/// Callers distinguish a genuinely missing result from a request invalidated by
-/// a newer navigation action, so stale preflights do not permanently disable a
-/// valid Recent Runs row.
-enum ScheduledResultResumeResult: Equatable {
+enum ProviderHistoryImportResult: Equatable {
     case opened
     case unavailable
     case superseded
 }
 
+enum ScheduledLegacyImportResult: Equatable {
+    case available
+    case openLocal(conversationID: String)
+    case deletedLocally
+    case needsRetry
+    case unavailable
+    case superseded
+}
+
+private enum LocalConversationLoadResult: Sendable {
+    case loaded(
+        detail: AssistantConversationDetail,
+        parent: AssistantConversationDetail?
+    )
+    case missing
+    case failed
+}
+
 // MARK: - Per-window chat session controller (Phase 2c)
 //
-// One per reader window. Owns the conversation's in-memory state (nothing is
-// persisted — D5), maps a turn's `AgentEvent` stream onto the transcript renderer,
+// One per reader window. Owns live presentation state while RubienCore persists
+// the normalized conversation, maps a turn's `AgentEvent` stream onto the renderer,
 // gates concurrent resume-turns across windows, and surfaces approval + availability
 // to the view. The provider (Phase 2a) and the renderer (Phase 1) are injected.
 
@@ -221,13 +241,18 @@ final class ChatSessionController: ObservableObject {
     /// Present only in production composition roots. Tests remain database-free.
     private let activityDatabase: AppDatabase?
     private let attributionStore: AssistantSessionAttributionStore?
+    private let conversationDatabase: AppDatabase?
+    private let durableTranscriptAttachmentStore: DurableAssistantAttachmentStore?
+    private let executionOwnership: AssistantExecutionOwnership?
+    private var conversationChangeObserver: NSObjectProtocol?
 
-    // MARK: In-memory conversation state (never persisted — D5)
+    // MARK: Live conversation state
     /// The live provider session id. Captured from EVERY `.sessionStarted` because it
-    /// **rotates each resume turn** (D5 / Risk #5); always resume the latest.
+    /// **rotates each resume turn** (Risk #5); always resume the latest.
     private(set) var liveSessionID: String?
     /// The in-flight turn (exposed read-only so tests can await it).
     private(set) var turnTask: Task<Void, Never>?
+    private var activeConversationRecorder: AssistantConversationRecorder?
     /// The in-flight resume transcript restore (exposed read-only so tests can
     /// await it). Stale loads are dropped by the `conversationEpoch` guard, not
     /// cancelled.
@@ -251,7 +276,7 @@ final class ChatSessionController: ObservableObject {
     /// tool-completed event. Consume one completion per valid result so only
     /// malformed successful results fall back to a visible ordinary tool chip.
     private var paperCompletionSuppressions = 0
-    /// The render-only transcript log (D5: in-memory, per-window, never persisted).
+    /// The render-only transcript cache. Durable normalized rows live in RubienCore.
     /// Toggling the sidebar pane dismantles its WKWebView — `replayTranscript()`
     /// restores the visible transcript from this log when the pane remounts.
     private var renderLog: [ChatRenderMessage] = []
@@ -287,6 +312,8 @@ final class ChatSessionController: ObservableObject {
     /// Stable across retries and provider session-ID rotation; replaced only when
     /// Rubien creates a genuinely fresh conversation.
     private var rubienConversationID = UUID()
+    private var rubienConversationWasPersisted = false
+    private var currentConversationIsReadOnly = false
     private var assistantActivityContext: ActivityCaptureContext?
     /// Consumed on the first successful provider start even when capture is off,
     /// preventing a later preference change from counting the conversation.
@@ -375,7 +402,10 @@ final class ChatSessionController: ObservableObject {
         attachmentStore: AssistantAttachmentStore? = nil,
         mentionSearch: @escaping MentionSearch = { _, _ in [] },
         activityDatabase: AppDatabase? = nil,
-        attributionStore: AssistantSessionAttributionStore? = nil
+        attributionStore: AssistantSessionAttributionStore? = nil,
+        conversationDatabase: AppDatabase? = nil,
+        durableTranscriptAttachmentStore: DurableAssistantAttachmentStore? = nil,
+        executionOwnership: AssistantExecutionOwnership? = nil
     ) {
         self.provider = provider
         self.providerKind = provider.kind
@@ -401,6 +431,27 @@ final class ChatSessionController: ObservableObject {
         self.availability = initialAvailability
         self.activityDatabase = activityDatabase
         self.attributionStore = attributionStore
+        self.conversationDatabase = conversationDatabase
+        self.durableTranscriptAttachmentStore = durableTranscriptAttachmentStore
+            ?? conversationDatabase.map { DurableAssistantAttachmentStore(database: $0) }
+        self.executionOwnership = executionOwnership
+        if conversationDatabase != nil {
+            conversationChangeObserver = NotificationCenter.default.addObserver(
+                forName: .rubienAssistantConversationsDidChange,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.invalidateDeletedLocalConversationIfNeeded()
+                }
+            }
+        }
+    }
+
+    deinit {
+        if let conversationChangeObserver {
+            NotificationCenter.default.removeObserver(conversationChangeObserver)
+        }
     }
 
     // MARK: Turn lifecycle
@@ -423,6 +474,7 @@ final class ChatSessionController: ObservableObject {
 
     func canSend(draft: String) -> Bool {
         guard canSendWithCurrentAvailability,
+              !currentConversationIsReadOnly,
               !isResuming,
               !isStagingAttachments,
               !hasAttachmentRehomeFailure,
@@ -711,6 +763,134 @@ final class ChatSessionController: ObservableObject {
                 await self.gate.release(provider: kind, sessionID: resumeID)
                 return
             }
+            if let ownership = self.executionOwnership,
+               let database = self.conversationDatabase,
+               !(await ownership.prepareIfNeededAsync(database: database)) {
+                await self.gate.release(provider: kind, sessionID: resumeID)
+                self.renderNotice(
+                    ownership.unavailableReason
+                        ?? "Assistant execution is owned by another Rubien process."
+                )
+                self.finalize(gen: gen, terminalPhase: .failed)
+                return
+            }
+            let ownershipWorkToken: UUID?
+            if let ownership = self.executionOwnership {
+                guard let token = ownership.beginAssistantWork() else {
+                    await self.gate.release(provider: kind, sessionID: resumeID)
+                    self.renderNotice(
+                        ownership.unavailableReason
+                            ?? "Assistant conversation maintenance is in progress."
+                    )
+                    self.finalize(gen: gen, terminalPhase: .failed)
+                    return
+                }
+                ownershipWorkToken = token
+            } else {
+                ownershipWorkToken = nil
+            }
+            defer {
+                if let ownershipWorkToken {
+                    self.executionOwnership?.finishAssistantWork(ownershipWorkToken)
+                }
+            }
+
+            let durableTurnID = UUID()
+            let durableWorkID = UUID()
+            let durableUserEntryID = UUID()
+            let attempt = AssistantAttemptIdentity(
+                conversationID: self.rubienConversationID,
+                conversationEpoch: self.conversationEpoch,
+                turnID: durableTurnID,
+                workID: durableWorkID,
+                runtimeGeneration: nil
+            )
+            var recorder: AssistantConversationRecorder?
+            var identityObserver: AgentIdentityObserver?
+            if let database = self.conversationDatabase {
+                let date = Date()
+                let provider = kind.storedProvider
+                let storedContext = Self.storedContext(self.activeConversationContext)
+                let conversation = AssistantConversation(
+                    id: self.rubienConversationID.uuidString.lowercased(),
+                    provider: provider,
+                    workspaceIdentityHash: AssistantSessionIdentity.workspaceHash(
+                        self.workspaceURL
+                    ),
+                    contextKind: storedContext.kind,
+                    referenceId: storedContext.referenceID,
+                    createdAt: date
+                )
+                let proposedTurn = AssistantTurn(
+                    id: durableTurnID.uuidString.lowercased(),
+                    conversationId: conversation.id,
+                    ordinal: 0,
+                    status: .starting,
+                    requestedModel: self.modelOverride,
+                    requestedEffort: self.effortOverride,
+                    dateModified: date
+                )
+                let userEntry = AssistantTranscriptEntry(
+                    id: durableUserEntryID.uuidString.lowercased(),
+                    turnId: proposedTurn.id,
+                    sequence: 0,
+                    kind: .user,
+                    body: visible,
+                    status: .completed,
+                    createdAt: date
+                )
+                var prepared: PreparedAssistantAttachments?
+                do {
+                    if let store = self.durableTranscriptAttachmentStore {
+                        prepared = try await store.prepare(
+                            attachments,
+                            conversationID: self.rubienConversationID,
+                            entryID: durableUserEntryID,
+                            now: date
+                        )
+                    }
+                    let preparedRows = prepared?.rows ?? []
+                    let allowConversationCreation = !self.rubienConversationWasPersisted
+                    let turn = try await Task.detached(priority: .userInitiated) {
+                        let allocated = try database.beginInteractiveAssistantTurn(
+                            conversation: conversation,
+                            turn: proposedTurn,
+                            userEntry: userEntry,
+                            attachments: preparedRows,
+                            allowConversationCreation: allowConversationCreation
+                        )
+                        _ = try database.markAssistantTurnStarted(
+                            id: allocated.id,
+                            at: date
+                        )
+                        return allocated
+                    }.value
+                    self.rubienConversationWasPersisted = true
+                    let capture = AssistantConversationService.makeCapture(
+                        database: database,
+                        attempt: attempt,
+                        provider: provider,
+                        workspaceURL: self.workspaceURL,
+                        conversationID: conversation.id,
+                        turnID: turn.id,
+                        turnOrdinal: turn.ordinal,
+                        mode: .interactive
+                    )
+                    recorder = capture.recorder
+                    identityObserver = capture.identityObserver
+                    self.activeConversationRecorder = recorder
+                } catch {
+                    if let prepared, let store = self.durableTranscriptAttachmentStore {
+                        await store.rollback(prepared)
+                    }
+                    await self.gate.release(provider: kind, sessionID: resumeID)
+                    self.renderNotice(
+                        "Rubien could not save this Assistant turn: \(error.localizedDescription)"
+                    )
+                    self.finalize(gen: gen, terminalPhase: .failed)
+                    return
+                }
+            }
             self.isAwaitingTurnAdmission = false
             if queuedBatchCount > 0 {
                 let consumed = min(queuedBatchCount, self.queuedUserMessages.count)
@@ -745,11 +925,18 @@ final class ChatSessionController: ObservableObject {
             // incomplete protocol data, so start fail-closed and only promote an
             // explicit successful completion.
             var terminalPhase = AssistantTurnOutcome.Phase.failed
+            var terminalOutcome = AgentTurnOutcome.failed
             do {
                 // `turnProvider`, not `self.provider`: the latter may have been swapped
                 // by a switchProvider that raced this turn (see the pin comment above).
-                for try await event in turnProvider.send(turn: request) {
+                for try await envelope in turnProvider.sendEnvelopes(
+                    turn: request,
+                    attempt: attempt,
+                    identityObserver: identityObserver
+                ) {
+                    let event = envelope.event
                     if case .turnCompleted(let completion) = event {
+                        terminalOutcome = completion.outcome
                         switch completion.outcome {
                         case .succeeded:
                             terminalPhase = .succeeded
@@ -757,12 +944,59 @@ final class ChatSessionController: ObservableObject {
                             terminalPhase = .failed
                         }
                     }
+                    // Render before crossing the recorder actor. A scheduled
+                    // durability flush may contend on SQLite, but it must never
+                    // hold the token that is already available to the user.
                     self.handle(event, gen: gen)
+                    if let activeRecorder = recorder {
+                        do {
+                            try await activeRecorder.record(envelope)
+                        } catch {
+                            await activeRecorder
+                                .abandonInteractiveCaptureAfterStorageFailure()
+                            if self.activeConversationRecorder === activeRecorder {
+                                self.activeConversationRecorder = nil
+                            }
+                            recorder = nil
+                            if gen == self.generation {
+                                self.renderNotice(
+                                    "Rubien could not continue saving this Assistant turn. The response will continue, but this turn will not appear completely in History."
+                                )
+                            }
+                        }
+                    }
                 }
             } catch {
-                if gen == self.generation {
+                if gen == self.generation,
+                   self.cancelledTurnGeneration != gen,
+                   !Task.isCancelled {
                     self.renderNotice("The assistant turn failed: \(error.localizedDescription)")
                     terminalPhase = .failed
+                }
+            }
+            if self.cancelledTurnGeneration == gen || Task.isCancelled {
+                terminalOutcome = .interrupted
+            }
+            if let recorder {
+                do {
+                    let storageFailedDuringTimedFlush = try await recorder.finish(
+                        fallbackOutcome: terminalOutcome
+                    )
+                    if storageFailedDuringTimedFlush, gen == self.generation {
+                        self.renderNotice(
+                            "Rubien could not finish saving this Assistant turn."
+                        )
+                    }
+                } catch {
+                    if gen == self.generation {
+                        self.renderNotice(
+                            "Rubien could not finish saving this Assistant turn."
+                        )
+                        terminalPhase = .failed
+                    }
+                }
+                if self.activeConversationRecorder === recorder {
+                    self.activeConversationRecorder = nil
                 }
             }
             // Release BEFORE the task completes, so awaiting `turnTask` guarantees the
@@ -960,6 +1194,10 @@ final class ChatSessionController: ObservableObject {
     /// holds `self` strongly until its stream ends, so this must be called
     /// explicitly — deinit would fire too late.
     func teardown() {
+        if let conversationChangeObserver {
+            NotificationCenter.default.removeObserver(conversationChangeObserver)
+            self.conversationChangeObserver = nil
+        }
         // Invalidate admission work before closing the provider wrapper. A task can
         // otherwise acquire the global gate after teardown and call send() through a
         // released wrapper, leaking the gate until that invisible turn finishes.
@@ -1154,8 +1392,8 @@ final class ChatSessionController: ObservableObject {
     /// built from the factory, and a FRESH conversation starts adopting the new
     /// backend's defaults (model/effort/sandbox are backend-specific — Claude's
     /// `opus` is meaningless to Codex). No-op if the kind is unchanged or the
-    /// factory is absent (tests / DEBUG harness). The prior transcript is dropped
-    /// (nothing persisted — D5); History can resume a Codex thread later. A real
+    /// factory is absent (tests / DEBUG harness). The prior pane is cleared while
+    /// its durable local transcript remains in History. A real
     /// switch also becomes the default backend for future conversations.
     func switchProvider(to kind: AgentProviderKind, persistAsDefault: Bool = true) {
         guard !isStagingAttachments,
@@ -1190,6 +1428,32 @@ final class ChatSessionController: ObservableObject {
         Task { await recheckAvailability() }
     }
 
+    /// A local History selection may belong to the other backend. Swap only the
+    /// dormant wrapper and defaults needed for a future send; navigation itself
+    /// must not start availability, catalog, or provider-History metadata work.
+    private func adoptProviderForLocalConversation(
+        _ kind: AgentProviderKind,
+        context: AssistantConversationContext
+    ) -> Bool {
+        guard !isStagingAttachments,
+              !hasAttachmentRehomeFailure,
+              let providerFactory,
+              kind != providerKind else {
+            return kind == providerKind
+        }
+        provider.shutdown()
+        provider = providerFactory(kind)
+        providerKind = kind
+        availability = nil
+        availabilityProbeToken += 1
+        catalogFetchToken += 1
+        codexModels = []
+        if let defaults = defaultsProvider?(kind, context) {
+            applyConversationDefaults(defaults)
+        }
+        return true
+    }
+
     /// Keep every fresh-conversation entry point in lockstep when Settings gains a
     /// new default. Provider switches and the New conversation button both call it.
     private func applyConversationDefaults(_ defaults: AssistantConversationDefaults) {
@@ -1202,12 +1466,8 @@ final class ChatSessionController: ObservableObject {
         promptOverride = defaults.promptOverride
     }
 
-    /// The runtime's own recent sessions for this conversation's working folder, for
-    /// the History picker (§5.3). A light read of the provider's store; Rubien keeps
-    /// nothing. Off-main inside the provider. `scopedToReference` keeps only sessions
-    /// attributed to THIS document (the popover's default scope) — attribution is the
-    /// rubien tool calls in the session, since neither provider history surface
-    /// exposes the instructions.
+    /// Rubien-owned recent sessions for this conversation's working folder. This is
+    /// the normal History path and never starts or reads a provider runtime.
     func listRecentSessions(limit: Int = 25, scopedToReference: Bool = false) async -> [AgentSessionSummary] {
         await loadRecentSessions(
             limit: limit, scopedToReference: scopedToReference
@@ -1219,6 +1479,31 @@ final class ChatSessionController: ObservableObject {
     func loadRecentSessions(
         limit: Int = 25, scopedToReference: Bool = false
     ) async -> AgentSessionQueryResult {
+        if let conversationDatabase {
+            let contextKind = localHistoryContextKind(
+                scopedToReference: scopedToReference
+            )
+            let query = AssistantConversationQuery(
+                workspaceIdentityHash: AssistantSessionIdentity.workspaceHash(workspaceURL),
+                contextKind: contextKind,
+                referenceId: scopedToReference
+                    ? activeConversationContext.referenceID
+                    : nil,
+                limit: limit
+            )
+            let result = await Task.detached(priority: .userInitiated) {
+                do {
+                    return AgentSessionQueryResult.completed(
+                        try conversationDatabase.fetchAssistantConversationSummaries(
+                            query: query
+                        ).map(Self.localSessionSummary)
+                    )
+                } catch {
+                    return AgentSessionQueryResult.failed(error)
+                }
+            }.value
+            return result
+        }
         let deadline = Date().addingTimeInterval(AgentHistoryPolicy.loadTimeout)
         guard surfaceDefaultContext == .library, let attributionStore else {
             return await provider.recentSessionsResult(
@@ -1250,6 +1535,33 @@ final class ChatSessionController: ObservableObject {
     func loadSearchSessions(
         _ query: String, limit: Int = 25, scopedToReference: Bool = false
     ) async -> AgentSessionQueryResult {
+        if let conversationDatabase {
+            let contextKind = localHistoryContextKind(
+                scopedToReference: scopedToReference
+            )
+            let localQuery = AssistantConversationQuery(
+                workspaceIdentityHash: AssistantSessionIdentity.workspaceHash(workspaceURL),
+                contextKind: contextKind,
+                referenceId: scopedToReference
+                    ? activeConversationContext.referenceID
+                    : nil,
+                search: query,
+                limit: limit
+            )
+            return await Task.detached(priority: .userInitiated) {
+                do {
+                    let summaries = try conversationDatabase
+                        .fetchAssistantConversationSummaries(query: localQuery)
+                    return .completed(summaries.map {
+                        var summary = Self.localSessionSummary($0)
+                        summary.matchSnippet = $0.preview
+                        return summary
+                    })
+                } catch {
+                    return .failed(error)
+                }
+            }.value
+        }
         let deadline = Date().addingTimeInterval(AgentHistoryPolicy.loadTimeout)
         guard surfaceDefaultContext == .library, let attributionStore else {
             return await provider.searchSessionsResult(
@@ -1266,6 +1578,543 @@ final class ChatSessionController: ObservableObject {
                 query: query, workspaceURL: workspaceURL, limit: requested,
                 referenceID: nil, deadline: deadline)
         }
+    }
+
+    /// Home owns the library conversation bucket. Reader History deliberately
+    /// leaves its unscoped "All documents" query broad, while "This document"
+    /// remains constrained by `referenceId` below.
+    private func localHistoryContextKind(
+        scopedToReference: Bool
+    ) -> AssistantConversationContextKind? {
+        guard !scopedToReference else { return nil }
+        if case .library = surfaceDefaultContext { return .library }
+        return nil
+    }
+
+    /// Explicit compatibility surface. Normal History is local-only; these
+    /// methods are the only UI path that asks the provider for its own store.
+    func loadProviderRecentSessions(
+        limit: Int = 25,
+        scopedToReference: Bool = false
+    ) async -> AgentSessionQueryResult {
+        guard await prepareProviderAccessIfNeeded() else {
+            return AgentSessionQueryResult(sessions: [], didTimeOut: true)
+        }
+        return await provider.recentSessionsResult(
+            workspaceURL: workspaceURL,
+            limit: limit,
+            referenceID: scopedToReference ? activeConversationContext.referenceID : nil,
+            deadline: Date().addingTimeInterval(AgentHistoryPolicy.loadTimeout)
+        )
+    }
+
+    func loadProviderSearchSessions(
+        _ query: String,
+        limit: Int = 25,
+        scopedToReference: Bool = false
+    ) async -> AgentSessionQueryResult {
+        guard await prepareProviderAccessIfNeeded() else {
+            return AgentSessionQueryResult(sessions: [], didTimeOut: true)
+        }
+        return await provider.searchSessionsResult(
+            query: query,
+            workspaceURL: workspaceURL,
+            limit: limit,
+            referenceID: scopedToReference ? activeConversationContext.referenceID : nil,
+            deadline: Date().addingTimeInterval(AgentHistoryPolicy.loadTimeout)
+        )
+    }
+
+    /// Deletes one Rubien-owned transcript without touching provider History.
+    /// The execution owner prevents a CLI/second-app race; the database rejects
+    /// active turns before the managed attachment directory is removed.
+    func deleteLocalConversation(id: String) async -> String? {
+        guard let database = conversationDatabase else {
+            return "Local conversation storage is unavailable."
+        }
+        if let executionOwnership,
+           !(await executionOwnership.prepareIfNeededAsync(database: database)) {
+            return executionOwnership.unavailableReason
+                ?? "Assistant execution is owned by another Rubien process."
+        }
+        do {
+            try database.deleteAssistantConversation(id: id)
+            await durableTranscriptAttachmentStore?.removeConversation(id)
+            if rubienConversationID.uuidString.lowercased() == id.lowercased() {
+                newConversation()
+            }
+            NotificationCenter.default.post(
+                name: .rubienAssistantConversationsDidChange,
+                object: nil
+            )
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    /// Imports one explicitly selected provider conversation. The alias snapshot,
+    /// normalized rows, and ownership claim are committed atomically; the current
+    /// pane is not changed unless that commit succeeds.
+    func importProviderSession(
+        _ summary: AgentSessionSummary
+    ) async -> ProviderHistoryImportResult {
+        guard let database = conversationDatabase else { return .unavailable }
+        guard await prepareProviderAccessIfNeeded() else { return .unavailable }
+        let ownershipWorkToken: UUID?
+        if let executionOwnership {
+            guard let token = executionOwnership.beginAssistantWork() else {
+                return .unavailable
+            }
+            ownershipWorkToken = token
+        } else {
+            ownershipWorkToken = nil
+        }
+        defer {
+            if let ownershipWorkToken {
+                executionOwnership?.finishAssistantWork(ownershipWorkToken)
+            }
+        }
+        resumeRequestGeneration += 1
+        let requestGeneration = resumeRequestGeneration
+        let expectedProvider = providerKind
+        let expectedWorkspace = workspaceURL
+        let storedProvider = expectedProvider.storedProvider
+        let aliasKeyHash = AssistantSessionIdentity.aliasKeyHash(
+            workspaceURL: expectedWorkspace,
+            provider: storedProvider,
+            providerSessionID: summary.id
+        )
+        let snapshot: AssistantSessionAliasSnapshot
+        do {
+            snapshot = try database.assistantSessionAliasSnapshot(keyHash: aliasKeyHash)
+        } catch {
+            return .unavailable
+        }
+        if case .live(let conversationID, _) = snapshot {
+            guard requestGeneration == resumeRequestGeneration else { return .superseded }
+            resume(AgentSessionSummary(
+                id: conversationID,
+                preview: summary.preview,
+                date: summary.date
+            ))
+            return .opened
+        }
+
+        let rows = await provider.sessionTranscript(
+            sessionID: summary.id,
+            workspaceURL: expectedWorkspace
+        )
+        guard requestGeneration == resumeRequestGeneration,
+              expectedProvider == providerKind,
+              expectedWorkspace == workspaceURL else { return .superseded }
+        guard !rows.isEmpty else { return .unavailable }
+
+        let conversationID = UUID().uuidString.lowercased()
+        let context = Self.storedContext(activeConversationContext)
+        let conversation = AssistantConversation(
+            id: conversationID,
+            provider: storedProvider,
+            origin: .providerImport,
+            workspaceIdentityHash: AssistantSessionIdentity.workspaceHash(expectedWorkspace),
+            contextKind: context.kind,
+            referenceId: context.referenceID,
+            latestProviderSessionId: summary.id,
+            latestSessionTurnOrdinal: 1,
+            latestSessionEventOrdinal: 0,
+            createdAt: summary.date,
+            lastActivityAt: summary.date
+        )
+        let normalized = Self.normalizedProviderTranscript(
+            rows,
+            conversationID: conversationID,
+            date: summary.date
+        )
+        var preparedAttachments: [PreparedAssistantAttachments] = []
+        do {
+            let adoption = try await prepareProviderTranscriptAttachments(
+                normalized,
+                conversationID: conversationID,
+                date: summary.date
+            )
+            preparedAttachments = adoption.prepared
+            guard requestGeneration == resumeRequestGeneration,
+                  expectedProvider == providerKind,
+                  expectedWorkspace == workspaceURL else {
+                await rollbackProviderTranscriptAttachments(preparedAttachments)
+                return .superseded
+            }
+            let result = try database.importAssistantConversation(
+                conversation: conversation,
+                turns: normalized.turns,
+                entries: normalized.entries,
+                attachments: adoption.attachments,
+                aliasKeyHash: aliasKeyHash,
+                aliasSnapshot: snapshot,
+                allowTombstoneReclaim: true
+            )
+            if case .existing = result {
+                await rollbackProviderTranscriptAttachments(preparedAttachments)
+            }
+            guard requestGeneration == resumeRequestGeneration else { return .superseded }
+            resume(AgentSessionSummary(
+                id: result.conversationId,
+                preview: summary.preview,
+                date: summary.date
+            ))
+            return .opened
+        } catch {
+            await rollbackProviderTranscriptAttachments(preparedAttachments)
+            return .unavailable
+        }
+    }
+
+    /// Imports the provider-owned transcript for a migrated scheduled run. The
+    /// database admission result is the sole authority for provider traffic, so
+    /// concurrent opens/retries cannot issue duplicate reads or resurrect a
+    /// locally deleted alias.
+    func importScheduledLegacyResult(
+        _ run: ScheduledJobRun,
+        isRetry: Bool
+    ) async -> ScheduledLegacyImportResult {
+        guard let database = conversationDatabase,
+              let sessionID = run.providerSessionId,
+              !sessionID.isEmpty,
+              let targetKind = run.provider.agentProviderKind else {
+            return .unavailable
+        }
+        guard await prepareProviderAccessIfNeeded() else { return .unavailable }
+        let ownershipWorkToken: UUID?
+        if let executionOwnership {
+            guard let token = executionOwnership.beginAssistantWork() else {
+                return .unavailable
+            }
+            ownershipWorkToken = token
+        } else {
+            ownershipWorkToken = nil
+        }
+        defer {
+            if let ownershipWorkToken {
+                executionOwnership?.finishAssistantWork(ownershipWorkToken)
+            }
+        }
+        resumeRequestGeneration += 1
+        let requestGeneration = resumeRequestGeneration
+        let expectedWorkspace = workspaceURL
+        let originalProviderKind = providerKind
+        let storedProvider = targetKind.storedProvider
+        let aliasKeyHash = AssistantSessionIdentity.aliasKeyHash(
+            workspaceURL: expectedWorkspace,
+            provider: storedProvider,
+            providerSessionID: sessionID
+        )
+        let admission: ScheduledAssistantImportAdmission
+        do {
+            admission = try database.admitScheduledAssistantImport(
+                runID: run.id,
+                aliasKeyHash: aliasKeyHash,
+                isRetry: isRetry
+            )
+        } catch {
+            return .unavailable
+        }
+        switch admission {
+        case let .existing(conversationID):
+            return .openLocal(conversationID: conversationID)
+        case .deletedLocally:
+            return .deletedLocally
+        case let .notEligible(state):
+            switch state {
+            case .available: return .available
+            case .deleted: return .deletedLocally
+            case .legacyAttempted: return .needsRetry
+            case .legacyRetrying: return .unavailable
+            default: return .unavailable
+            }
+        case .admitted:
+            break
+        }
+
+        // Local alias ownership is authoritative and is resolved above without
+        // touching the provider. Only an actually admitted import needs a runtime
+        // or availability probe. From this point every early failure must close
+        // the crash-recoverable admission state.
+        let requiresProviderSwitch = targetKind != originalProviderKind
+        let transcriptProvider: any AgentProvider
+        if requiresProviderSwitch {
+            guard let providerFactory else {
+                _ = try? database.failScheduledAssistantImport(
+                    runID: run.id,
+                    status: .providerUnavailable
+                )
+                return .needsRetry
+            }
+            transcriptProvider = providerFactory(targetKind)
+        } else {
+            transcriptProvider = provider
+        }
+        defer {
+            if requiresProviderSwitch { transcriptProvider.shutdown() }
+        }
+
+        let availability = await transcriptProvider.isAvailable()
+        guard requestGeneration == resumeRequestGeneration,
+              originalProviderKind == providerKind,
+              expectedWorkspace == workspaceURL else {
+            _ = try? database.failScheduledAssistantImport(
+                runID: run.id,
+                status: .cancelled
+            )
+            return .superseded
+        }
+        guard availability.isReady else {
+            _ = try? database.failScheduledAssistantImport(
+                runID: run.id,
+                status: .providerUnavailable
+            )
+            return .needsRetry
+        }
+
+        let transcriptResult = await transcriptProvider.sessionTranscriptResult(
+            sessionID: sessionID,
+            workspaceURL: expectedWorkspace
+        )
+        guard requestGeneration == resumeRequestGeneration,
+              originalProviderKind == providerKind,
+              expectedWorkspace == workspaceURL else {
+            _ = try? database.failScheduledAssistantImport(
+                runID: run.id,
+                status: .cancelled
+            )
+            return .superseded
+        }
+        guard !Task.isCancelled else {
+            _ = try? database.failScheduledAssistantImport(
+                runID: run.id,
+                status: .cancelled
+            )
+            return .superseded
+        }
+        guard transcriptResult.wasAdmitted else {
+            _ = try? database.deferScheduledAssistantImport(
+                runID: run.id,
+                isRetry: isRetry
+            )
+            return .unavailable
+        }
+        let rows = transcriptResult.messages
+        guard !rows.isEmpty else {
+            _ = try? database.failScheduledAssistantImport(
+                runID: run.id,
+                status: .notFound
+            )
+            return .needsRetry
+        }
+
+        let date = run.activityAt
+        let conversationID = UUID().uuidString.lowercased()
+        let conversation = AssistantConversation(
+            id: conversationID,
+            provider: storedProvider,
+            origin: .providerImport,
+            workspaceIdentityHash: AssistantSessionIdentity.workspaceHash(expectedWorkspace),
+            contextKind: .library,
+            scheduledJobRunId: run.id,
+            latestProviderSessionId: sessionID,
+            latestSessionTurnOrdinal: 1,
+            latestSessionEventOrdinal: 0,
+            createdAt: date,
+            lastActivityAt: date
+        )
+        let normalized = Self.normalizedProviderTranscript(
+            rows,
+            conversationID: conversationID,
+            date: date
+        )
+        var preparedAttachments: [PreparedAssistantAttachments] = []
+        do {
+            let adoption = try await prepareProviderTranscriptAttachments(
+                normalized,
+                conversationID: conversationID,
+                date: date
+            )
+            preparedAttachments = adoption.prepared
+            guard requestGeneration == resumeRequestGeneration,
+                  originalProviderKind == providerKind,
+                  expectedWorkspace == workspaceURL,
+                  !Task.isCancelled else {
+                await rollbackProviderTranscriptAttachments(preparedAttachments)
+                _ = try? database.failScheduledAssistantImport(
+                    runID: run.id,
+                    status: .cancelled
+                )
+                return .superseded
+            }
+            let result = try database.completeScheduledAssistantImport(
+                runID: run.id,
+                conversation: conversation,
+                turns: normalized.turns,
+                entries: normalized.entries,
+                attachments: adoption.attachments,
+                aliasKeyHash: aliasKeyHash
+            )
+            switch result {
+            case .imported:
+                return .available
+            case let .existing(conversationID):
+                await rollbackProviderTranscriptAttachments(preparedAttachments)
+                return .openLocal(conversationID: conversationID)
+            case .deletedLocally:
+                await rollbackProviderTranscriptAttachments(preparedAttachments)
+                return .deletedLocally
+            }
+        } catch {
+            await rollbackProviderTranscriptAttachments(preparedAttachments)
+            _ = try? database.failScheduledAssistantImport(
+                runID: run.id,
+                status: .storageFailure
+            )
+            return .needsRetry
+        }
+    }
+
+    private struct ProviderAttachmentAdoption {
+        let entryID: UUID
+        let attachments: [ChatAttachment]
+    }
+
+    private struct NormalizedProviderTranscript {
+        let turns: [AssistantTurn]
+        let entries: [AssistantTranscriptEntry]
+        let attachments: [StoredAssistantAttachment]
+        let adoptions: [ProviderAttachmentAdoption]
+    }
+
+    private static func normalizedProviderTranscript(
+        _ rows: [ChatRenderMessage],
+        conversationID: String,
+        date: Date
+    ) -> NormalizedProviderTranscript {
+        let turnID = UUID().uuidString.lowercased()
+        let interrupted = rows.contains { $0.turnStatus == .interrupted }
+        let turn = AssistantTurn(
+            id: turnID,
+            conversationId: conversationID,
+            ordinal: 1,
+            status: interrupted ? .interrupted : .succeeded,
+            startedAt: date,
+            finishedAt: date,
+            dateModified: date
+        )
+        var attachments: [StoredAssistantAttachment] = []
+        var adoptions: [ProviderAttachmentAdoption] = []
+        var seenAttachmentIDs = Set<UUID>()
+        let entries = rows.enumerated().map { index, row in
+            let entryUUID = UUID()
+            let entryID = entryUUID.uuidString.lowercased()
+            var adoptable: [ChatAttachment] = []
+            for attachment in row.attachments
+            where seenAttachmentIDs.insert(attachment.id).inserted {
+                attachments.append(StoredAssistantAttachment(
+                    id: attachment.id.uuidString.lowercased(),
+                    entryId: entryID,
+                    displayName: attachment.displayName,
+                    kind: attachment.kind == .image ? .image : .text,
+                    relativePath: nil,
+                    mediaType: attachment.managedMediaType
+                        ?? (attachment.kind == .image ? "image/*" : "text/plain"),
+                    byteCount: attachment.byteCount,
+                    createdAt: date
+                ))
+                if attachment.isAvailable,
+                   let sourceURL = attachment.managedSourceURL {
+                    adoptable.append(ChatAttachment(
+                        id: attachment.id,
+                        displayName: attachment.displayName,
+                        kind: attachment.kind,
+                        stagedURL: sourceURL,
+                        mediaType: attachment.managedMediaType
+                            ?? (attachment.kind == .image ? "image/png" : "text/plain"),
+                        byteCount: attachment.byteCount,
+                        sourceIdentity: sourceURL.path
+                    ))
+                }
+            }
+            if !adoptable.isEmpty {
+                adoptions.append(ProviderAttachmentAdoption(
+                    entryID: entryUUID,
+                    attachments: adoptable
+                ))
+            }
+            let kind: AssistantTranscriptEntryKind
+            switch row.role {
+            case .user: kind = .user
+            case .assistant: kind = .assistant
+            case .tool: kind = .tool
+            case .notice: kind = .notice
+            case .paper: kind = .paper
+            }
+            return AssistantTranscriptEntry(
+                id: entryID,
+                turnId: turnID,
+                sequence: index,
+                kind: kind,
+                body: row.body,
+                payloadJSON: kind == .tool || kind == .paper ? row.body : nil,
+                searchText: AssistantTranscriptEntry.defaultSearchText(
+                    kind: kind,
+                    body: row.body
+                ),
+                status: row.turnStatus == .interrupted ? .interrupted : .completed,
+                createdAt: date
+            )
+        }
+        return NormalizedProviderTranscript(
+            turns: [turn],
+            entries: entries,
+            attachments: attachments,
+            adoptions: adoptions
+        )
+    }
+
+    private func prepareProviderTranscriptAttachments(
+        _ normalized: NormalizedProviderTranscript,
+        conversationID: String,
+        date: Date
+    ) async throws -> (
+        attachments: [StoredAssistantAttachment],
+        prepared: [PreparedAssistantAttachments]
+    ) {
+        guard let store = durableTranscriptAttachmentStore,
+              let conversationUUID = UUID(uuidString: conversationID)
+        else { return (normalized.attachments, []) }
+        var stored = normalized.attachments
+        var prepared: [PreparedAssistantAttachments] = []
+        do {
+            for adoption in normalized.adoptions {
+                let batch = try await store.prepare(
+                    adoption.attachments,
+                    conversationID: conversationUUID,
+                    entryID: adoption.entryID,
+                    now: date
+                )
+                prepared.append(batch)
+                let adoptedIDs = Set(batch.rows.map(\.id))
+                stored.removeAll { adoptedIDs.contains($0.id) }
+                stored.append(contentsOf: batch.rows)
+            }
+            return (stored, prepared)
+        } catch {
+            for batch in prepared { await store.rollback(batch) }
+            throw error
+        }
+    }
+
+    private func rollbackProviderTranscriptAttachments(
+        _ prepared: [PreparedAssistantAttachments]
+    ) async {
+        guard let store = durableTranscriptAttachmentStore else { return }
+        for batch in prepared { await store.rollback(batch) }
     }
 
     /// Provider History cannot filter on Rubien's local Home attribution, so fetch
@@ -1302,14 +2151,137 @@ final class ChatSessionController: ObservableObject {
         }
     }
 
-    /// Resume a past conversation from History: point the next turn at its session id
-    /// (`--resume`) and start with a clean pane (Rubien has no stored transcript — D5).
+    nonisolated private static func localSessionSummary(
+        _ stored: AssistantConversationSummary
+    ) -> AgentSessionSummary {
+        AgentSessionSummary(
+            id: stored.conversation.id,
+            preview: stored.preview,
+            date: stored.conversation.lastActivityAt
+        )
+    }
+
+    /// Resume a past conversation from History. Local rows render immediately;
+    /// the latest provider session ID is used only when the next turn is sent.
     /// The provider stores no Rubien conversation-default snapshot, so the pane's
     /// current web/approval/tool posture intentionally carries into the resume.
     /// Rubien re-applies the reconstructed instructions on the next provider turn;
     /// this is required for Claude and ignored by Codex when resuming a thread.
     /// A notice with the preview gives the user their bearings.
     func resume(_ summary: AgentSessionSummary) {
+        if let conversationDatabase {
+            resumeRequestGeneration += 1
+            let requestGeneration = resumeRequestGeneration
+            isResuming = true
+            let database = conversationDatabase
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let loaded = await Task.detached(
+                    priority: .userInitiated
+                ) { () -> LocalConversationLoadResult in
+                    do {
+                        guard let detail = try database
+                            .fetchAssistantConversationDetail(id: summary.id) else {
+                            return .missing
+                        }
+                        let parent = try detail.conversation
+                            .continuedFromConversationId.flatMap {
+                                try database.fetchAssistantConversationDetail(id: $0)
+                            }
+                        return .loaded(detail: detail, parent: parent)
+                    } catch {
+                        return .failed
+                    }
+                }.value
+                guard requestGeneration == self.resumeRequestGeneration else { return }
+                let detail: AssistantConversationDetail
+                let parentDetail: AssistantConversationDetail?
+                switch loaded {
+                case let .loaded(stored, parent):
+                    detail = stored
+                    parentDetail = parent
+                case .missing:
+                    self.isResuming = false
+                    self.renderNotice(
+                        "This local Assistant conversation is no longer available."
+                    )
+                    return
+                case .failed:
+                    self.isResuming = false
+                    self.renderNotice(
+                        "Rubien could not load this local Assistant conversation."
+                    )
+                    return
+                }
+                var assets = StoredAssistantAttachmentPresentationAssets()
+                if let store = self.durableTranscriptAttachmentStore {
+                    assets = await store.presentationAssets(
+                        conversationID: detail.conversation.id,
+                        attachments: detail.attachments
+                    )
+                    if let parentDetail {
+                        assets.formUnion(await store.presentationAssets(
+                            conversationID: parentDetail.conversation.id,
+                            attachments: parentDetail.attachments
+                        ))
+                    }
+                }
+                guard requestGeneration == self.resumeRequestGeneration else { return }
+                let messages = await Task.detached(
+                    priority: .userInitiated
+                ) { () -> [ChatRenderMessage] in
+                    var rows = parentDetail.map {
+                        StoredAssistantTranscriptProjection.messages(
+                            from: $0,
+                            attachmentIsAvailable: {
+                                assets.availableIDs.contains($0.id)
+                            },
+                            attachmentThumbnailDataURL: {
+                                assets.thumbnailDataURLs[$0.id]
+                            }
+                        )
+                    } ?? []
+                    if !rows.isEmpty {
+                        rows.append(ChatRenderMessage(
+                            role: .notice,
+                            body: String(
+                                localized: "assistant.history.scheduledContinuation"
+                            ),
+                            seq: rows.count
+                        ))
+                    }
+                    rows.append(contentsOf: StoredAssistantTranscriptProjection.messages(
+                        from: detail,
+                        attachmentIsAvailable: {
+                            assets.availableIDs.contains($0.id)
+                        },
+                        attachmentThumbnailDataURL: {
+                            assets.thumbnailDataURLs[$0.id]
+                        }
+                    ))
+                    return rows
+                }.value
+                guard requestGeneration == self.resumeRequestGeneration else { return }
+                let context = Self.conversationContext(for: detail.conversation)
+                if let targetKind = AgentProviderKind(
+                    detail.conversation.provider
+                ), targetKind != self.providerKind {
+                    guard self.adoptProviderForLocalConversation(
+                        targetKind,
+                        context: context
+                    ) else {
+                        self.isResuming = false
+                        return
+                    }
+                }
+                self.restoreLocalConversation(
+                    detail,
+                    context: context,
+                    messages: messages
+                )
+            }
+            return
+        }
         resumeRequestGeneration += 1
         let requestGeneration = resumeRequestGeneration
         if let attributionStore {
@@ -1334,83 +2306,49 @@ final class ChatSessionController: ObservableObject {
         resume(summary, attribution: nil)
     }
 
-    /// Open a completed scheduled job only when the provider still has its
-    /// transcript. Scheduled-run rows and notifications promise a result, unlike
-    /// the general History picker (which can still fall back to a preview notice),
-    /// so a pruned or unreadable provider session must not replace the current
-    /// conversation with an empty, misleading resume.
-    ///
-    /// The transcript is read before any conversation state changes. Callers can
-    /// therefore leave the run unread and route back to Recent Runs when this
-    /// returns `.unavailable`. A superseded preflight is reported separately so
-    /// callers do not mistake navigation races for a permanently missing result.
-    func resumeScheduledResult(
-        _ summary: AgentSessionSummary,
-        providerKind targetProviderKind: AgentProviderKind
-    ) async -> ScheduledResultResumeResult {
-        resumeRequestGeneration += 1
-        let requestGeneration = resumeRequestGeneration
-        let originalProviderKind = providerKind
-        let expectedWorkspaceURL = workspaceURL
-        let requiresProviderSwitch = targetProviderKind != originalProviderKind
-        let transcriptProvider: any AgentProvider
-        if requiresProviderSwitch {
-            guard let providerFactory else {
-                isResuming = false
-                return .unavailable
+    private func restoreLocalConversation(
+        _ detail: AssistantConversationDetail,
+        context: AssistantConversationContext? = nil,
+        messages: [ChatRenderMessage]
+    ) {
+        resetConversationState(attachments: .discard)
+        rubienConversationID = UUID(uuidString: detail.conversation.id) ?? UUID()
+        rubienConversationWasPersisted = true
+        assistantActivityContext = nil
+        assistantActivityStartConsumed = true
+        activeConversationContext = context
+            ?? Self.conversationContext(for: detail.conversation)
+        if let defaults = defaultsProvider?(providerKind, activeConversationContext) {
+            promptOverride = defaults.promptOverride
+        }
+        let supportsContinuation = AgentProviderKind(
+            detail.conversation.provider
+        ) != nil
+            && detail.conversation.scheduledJobRunId == nil
+            && detail.conversation.continuationTransferredAt == nil
+        currentConversationIsReadOnly = !supportsContinuation
+        liveSessionID = supportsContinuation
+            ? detail.conversation.latestProviderSessionId
+            : nil
+        hasMessages = !messages.isEmpty
+        isResuming = false
+        var restoredMessages = messages
+        if !supportsContinuation {
+            let notice: String
+            if AgentProviderKind(detail.conversation.provider) == nil {
+                notice = "This conversation uses an Assistant provider that this version of Rubien does not support. Its transcript is read-only."
+            } else if detail.conversation.scheduledJobRunId != nil {
+                notice = "Scheduled Assistant results are read-only. Use Continue from the run to start a follow-up conversation."
+            } else {
+                notice = "This Assistant result has already been continued in another conversation. Its transcript is read-only."
             }
-            transcriptProvider = providerFactory(targetProviderKind)
-        } else {
-            transcriptProvider = provider
+            restoredMessages.append(ChatRenderMessage(
+                role: .notice,
+                body: notice,
+                seq: restoredMessages.count
+            ))
         }
-        isResuming = true
-
-        let history = await transcriptProvider.sessionTranscript(
-            sessionID: summary.id,
-            workspaceURL: expectedWorkspaceURL
-        )
-        if requiresProviderSwitch {
-            transcriptProvider.shutdown()
-        }
-        guard requestGeneration == resumeRequestGeneration,
-              originalProviderKind == providerKind,
-              expectedWorkspaceURL == workspaceURL
-        else { return .superseded }
-        guard !history.isEmpty else {
-            isResuming = false
-            return .unavailable
-        }
-
-        let attribution: AssistantSessionAttributionStore.Attribution?
-        if let attributionStore {
-            attribution = await attributionStore.attribution(
-                sessionID: summary.id,
-                provider: targetProviderKind,
-                workspaceURL: expectedWorkspaceURL
-            )
-            guard requestGeneration == resumeRequestGeneration,
-                  originalProviderKind == providerKind,
-                  expectedWorkspaceURL == workspaceURL
-            else { return .superseded }
-        } else {
-            attribution = nil
-        }
-
-        if requiresProviderSwitch {
-            // The expensive/fallible transcript read has succeeded, so replacing
-            // the current Home conversation is now safe. The prefetched rows are
-            // handed directly to resume; the new provider need not read them again.
-            switchProvider(to: targetProviderKind, persistAsDefault: false)
-            guard providerKind == targetProviderKind else {
-                isResuming = false
-                // The transcript exists; a transient local guard (for example,
-                // attachment staging/rehome) prevented the provider switch. Let
-                // the caller retry without disabling this valid result row.
-                return .superseded
-            }
-        }
-        resume(summary, attribution: attribution, restoredHistory: history)
-        return .opened
+        restoreResumeHistory(restoredMessages)
     }
 
     private func resume(
@@ -1441,11 +2379,9 @@ final class ChatSessionController: ObservableObject {
             restoreResumeHistory(restoredHistory)
             return
         }
-        // Restore the conversation's content from the provider's own store (D5 —
-        // Rubien still persists nothing). The read is asynchronous but fast (one
-        // file); the epoch drops a stale load when another resume/newConversation
-        // won — but NOT when a quick follow-up send did (same conversation; the
-        // history must still prepend).
+        // Compatibility fallback for controllers without a local database (tests
+        // and the DEBUG harness). Production normal History resolves above from the
+        // Rubien-owned store; explicit Provider History passes prefetched rows.
         let epoch = conversationEpoch
         resumeTask = Task { [weak self] in
             guard let self else { return }
@@ -1506,6 +2442,13 @@ final class ChatSessionController: ObservableObject {
     func recheckAvailability() async {
         availabilityProbeToken += 1
         let token = availabilityProbeToken
+        guard await prepareProviderAccessIfNeeded() else {
+            availability = .notFound(
+                reason: executionOwnership?.unavailableReason
+                    ?? "Assistant execution is owned by another Rubien process."
+            )
+            return
+        }
         let result = await provider.isAvailable()
         guard token == availabilityProbeToken else { return }
         availability = result
@@ -1530,12 +2473,28 @@ final class ChatSessionController: ObservableObject {
         }
         let catalogProvider = provider
         Task { [weak self] in
+            guard let self,
+                  await self.prepareProviderAccessIfNeeded(),
+                  token == self.catalogFetchToken else {
+                self?.codexModels = []
+                return
+            }
             let catalog = await catalogProvider.availableModels()
-            guard let self, token == self.catalogFetchToken else { return }
+            guard token == self.catalogFetchToken else { return }
             self.codexModels = catalog?.visibleModels ?? []
             self.seedCodexModelIfUnset()  // seed an unset conversation onto a concrete model
             self.ensureEffortSupported()  // a pinned/seeded model's efforts are now known
         }
+    }
+
+    /// Provider processes and Assistant-state mutations are admitted only by the
+    /// app instance that owns this library. Tests/debug harnesses without the
+    /// production ownership composition remain unchanged.
+    private func prepareProviderAccessIfNeeded() async -> Bool {
+        guard let executionOwnership, let conversationDatabase else { return true }
+        return await executionOwnership.prepareIfNeededAsync(
+            database: conversationDatabase
+        )
     }
 
     /// The model picker's setter. On Codex a pick is REMEMBERED as the default for
@@ -1628,9 +2587,60 @@ final class ChatSessionController: ObservableObject {
 
     private func beginFreshRubienConversation() {
         rubienConversationID = UUID()
+        rubienConversationWasPersisted = false
+        currentConversationIsReadOnly = false
         assistantActivityContext = nil
         assistantActivityStartConsumed = false
         activeConversationContext = surfaceDefaultContext
+    }
+
+    private func invalidateDeletedLocalConversationIfNeeded() {
+        guard rubienConversationWasPersisted,
+              let conversationDatabase else { return }
+        let id = rubienConversationID.uuidString.lowercased()
+        do {
+            guard try conversationDatabase.fetchAssistantConversation(id: id) == nil else {
+                return
+            }
+            newConversation()
+        } catch {
+            // A transient read failure is not evidence of deletion. The next
+            // notification/send will retry without discarding visible state.
+        }
+    }
+
+    private static func storedContext(
+        _ context: AssistantConversationContext
+    ) -> (kind: AssistantConversationContextKind, referenceID: Int64?) {
+        switch context {
+        case .library:
+            (.library, nil)
+        case .reference(let reference):
+            (.reference, reference.id)
+        case .unclassifiedResume:
+            (.unclassified, nil)
+        }
+    }
+
+    private static func conversationContext(
+        for conversation: AssistantConversation
+    ) -> AssistantConversationContext {
+        switch conversation.contextKind {
+        case .library:
+            .library
+        case .reference:
+            if let id = conversation.referenceId {
+                .reference(ChatReference(
+                    id: id,
+                    title: "Reference \(id)",
+                    authors: ""
+                ))
+            } else {
+                .unclassifiedResume
+            }
+        case .unclassified, .unknown:
+            .unclassifiedResume
+        }
     }
 
     /// Snapshot the Assistant epoch only after the global turn gate admits the

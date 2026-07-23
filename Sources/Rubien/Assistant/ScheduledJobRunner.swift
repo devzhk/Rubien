@@ -90,16 +90,75 @@ final class ScheduledJobRunner {
             )
             return try? database.fetchScheduledJobRun(id: runID)
         }
-        guard (try? database.markScheduledJobRunStarted(
-            id: runID,
-            at: Date()
-        )) == true else {
+        let workspaceURL = AssistantContext.ensureWorkspace(workspaceProvider())
+        let conversationID = UUID()
+        let turnID = UUID()
+        let workID = UUID()
+        let startedAt = Date()
+        let conversation = AssistantConversation(
+            id: conversationID.uuidString.lowercased(),
+            provider: claim.job.provider,
+            workspaceIdentityHash: AssistantSessionIdentity.workspaceHash(workspaceURL),
+            contextKind: .library,
+            scheduledJobRunId: runID,
+            createdAt: startedAt
+        )
+        let turn = AssistantTurn(
+            id: turnID.uuidString.lowercased(),
+            conversationId: conversation.id,
+            ordinal: 1,
+            status: .running,
+            requestedModel: claim.job.model,
+            requestedEffort: claim.job.effort,
+            startedAt: startedAt,
+            dateModified: startedAt
+        )
+        let userEntry = AssistantTranscriptEntry(
+            turnId: turn.id,
+            sequence: 0,
+            kind: .user,
+            body: claim.job.prompt,
+            status: .completed,
+            createdAt: startedAt
+        )
+        do {
+            try database.beginScheduledAssistantCapture(
+                runID: runID,
+                conversation: conversation,
+                turn: turn,
+                userEntry: userEntry,
+                at: startedAt
+            )
+        } catch {
+            logger.error("scheduled run \(runID) could not create its transcript: \(error.localizedDescription)")
+            _ = try? database.finishScheduledJobRun(
+                id: runID,
+                status: .failed,
+                failureKind: .storageFailure
+            )
             return try? database.fetchScheduledJobRun(id: runID)
         }
         onStarted?()
 
-        let workspaceURL = AssistantContext.ensureWorkspace(workspaceProvider())
-        let conversationID = UUID()
+        let attempt = AssistantAttemptIdentity(
+            conversationID: conversationID,
+            conversationEpoch: 0,
+            turnID: turnID,
+            workID: workID,
+            runtimeGeneration: nil
+        )
+        let capture = AssistantConversationService.makeCapture(
+            database: database,
+            attempt: attempt,
+            provider: claim.job.provider,
+            workspaceURL: workspaceURL,
+            conversationID: conversation.id,
+            turnID: turn.id,
+            turnOrdinal: 1,
+            mode: .scheduled(runID: runID)
+        )
+        let recorder = capture.recorder
+        let identityObserver = capture.identityObserver
         let request = AgentTurnRequest(
             workspaceURL: workspaceURL,
             conversationID: conversationID,
@@ -110,25 +169,37 @@ final class ScheduledJobRunner {
             codexSandbox: .readOnly,
             modelOverride: claim.job.model,
             effortOverride: claim.job.effort,
-            executionMode: .scheduled
+            executionMode: .scheduled,
+            scheduledRunID: runID
         )
 
         var receivedSession = false
         var completion: AgentTurnCompletion?
         var permissionDenied = false
+        var storageFailed = false
+        var providerStreamFailed = false
         do {
-            for try await event in provider.send(turn: request) {
+            eventLoop: for try await envelope in provider.sendEnvelopes(
+                turn: request,
+                attempt: attempt,
+                identityObserver: identityObserver
+            ) {
                 if isCancellationRequested(for: runID) {
                     provider.cancel()
                 }
+                do {
+                    try await recorder.record(envelope)
+                } catch {
+                    storageFailed = true
+                    logger.error("scheduled run \(runID) lost transcript durability: \(error.localizedDescription)")
+                    provider.cancel()
+                    break eventLoop
+                }
+                let event = envelope.event
                 onEvent?(event)
                 switch event {
                 case .sessionStarted(let sessionID):
                     receivedSession = true
-                    _ = try? database.setScheduledJobRunProviderSessionID(
-                        id: runID,
-                        sessionID: sessionID
-                    )
                     if let attributionStore {
                         await attributionStore.record(
                             sessionID: sessionID,
@@ -155,25 +226,35 @@ final class ScheduledJobRunner {
                 }
             }
         } catch {
+            providerStreamFailed = true
             logger.error("scheduled run \(runID) failed: \(error.localizedDescription)")
         }
 
         let status: ScheduledJobRunStatus
         let failure: ScheduledJobFailureKind?
-        if isCancellationRequested(for: runID) {
+        let fallbackOutcome: AgentTurnOutcome
+        if storageFailed {
+            status = .failed
+            failure = .storageFailure
+            fallbackOutcome = .failed
+        } else if isCancellationRequested(for: runID) {
             status = .cancelled
             failure = nil
+            fallbackOutcome = .interrupted
         } else {
             switch completion?.outcome {
             case .succeeded:
                 status = .succeeded
                 failure = nil
+                fallbackOutcome = .succeeded
             case .interrupted:
                 status = .failed
                 failure = .interrupted
+                fallbackOutcome = .interrupted
             case .failed:
                 status = .failed
                 failure = permissionDenied ? .permissionDenied : .providerFailed
+                fallbackOutcome = .failed
             case nil:
                 status = .failed
                 if permissionDenied {
@@ -181,13 +262,24 @@ final class ScheduledJobRunner {
                 } else {
                     failure = receivedSession ? .providerFailed : .launchFailed
                 }
+                fallbackOutcome = providerStreamFailed ? .failed : .interrupted
             }
         }
-        _ = try? database.finishScheduledJobRun(
-            id: runID,
-            status: status,
-            failureKind: failure
-        )
+        do {
+            _ = try await recorder.finish(
+                fallbackOutcome: fallbackOutcome,
+                failureKind: failure?.rawValue,
+                scheduledRunStatusOverride: status,
+                scheduledRunFailureOverride: failure
+            )
+            await identityObserver.waitUntilClosed()
+            _ = try database.finishScheduledAssistantIdentity(runID: runID)
+        } catch {
+            // Keep the run/turn preterminal: startup recovery can classify the
+            // last durable partial without ever advertising provider success.
+            logger.error("scheduled run \(runID) final transcript transaction failed: \(error.localizedDescription)")
+            return nil
+        }
         return try? database.fetchScheduledJobRun(id: runID)
     }
 
@@ -213,11 +305,7 @@ final class ScheduledJobRunner {
 
 extension ScheduledJobProvider {
     var agentProviderKind: AgentProviderKind? {
-        switch self {
-        case .claude: .claude
-        case .codex: .codex
-        case .unknown: nil
-        }
+        AgentProviderKind(self)
     }
 
     var displayName: String {
@@ -225,10 +313,7 @@ extension ScheduledJobProvider {
     }
 
     init(_ kind: AgentProviderKind) {
-        switch kind {
-        case .claude: self = .claude
-        case .codex: self = .codex
-        }
+        self = kind.storedProvider
     }
 }
 #endif

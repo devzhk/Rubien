@@ -44,6 +44,70 @@ final class ScheduledJobFormattingTests: XCTestCase {
         ))
     }
 
+    func testDeleteJobConfirmationDisclosesTranscriptCascadeAndSurvivors() {
+        let message = ScheduledJobFormatting.deleteJobConfirmation(jobName: "Morning papers")
+
+        XCTAssertTrue(message.contains("Morning papers"))
+        XCTAssertTrue(message.contains("run transcripts and attachments"))
+        XCTAssertTrue(message.contains("Continuation chats"))
+        XCTAssertTrue(message.contains("provider History"))
+    }
+
+    func testDeleteRunConfirmationDisclosesLocalDeletionAndProviderSurvivor() {
+        let message = ScheduledJobFormatting.deleteRunConfirmation(
+            jobName: "Morning papers",
+            runDetail: "Finished today"
+        )
+
+        XCTAssertTrue(message.contains("Morning papers"))
+        XCTAssertTrue(message.contains("Finished today"))
+        XCTAssertTrue(message.contains("locally saved transcript and attachments"))
+        XCTAssertTrue(message.contains("provider conversation"))
+        XCTAssertTrue(message.contains("not deleted"))
+    }
+
+    func testTranscriptOpenRoutingKeepsNonLegacyStatesLocal() {
+        for state in [
+            AssistantTranscriptState.none,
+            .capturing,
+            .available,
+            .deleted,
+            .unknown("future-state"),
+        ] {
+            var (_, run) = fixture()
+            run.assistantTranscriptState = state
+            run.providerSessionId = "provider-session-that-must-not-be-read"
+            XCTAssertEqual(
+                ScheduledJobFormatting.transcriptOpenAction(for: run),
+                .presentLocal,
+                "state \(state.rawValue) must never trigger an implicit provider read"
+            )
+        }
+    }
+
+    func testTranscriptOpenRoutingImportsOnlyExplicitLegacyStates() {
+        var (_, eligible) = fixture()
+        eligible.assistantTranscriptState = .legacyEligible
+        XCTAssertEqual(
+            ScheduledJobFormatting.transcriptOpenAction(for: eligible),
+            .importLegacy(isRetry: false)
+        )
+
+        var attempted = eligible
+        attempted.assistantTranscriptState = .legacyAttempted
+        attempted.assistantTranscriptStatusCode = .deletedLocal
+        XCTAssertEqual(
+            ScheduledJobFormatting.transcriptOpenAction(for: attempted),
+            .importLegacy(isRetry: true)
+        )
+
+        attempted.assistantTranscriptStatusCode = .notFound
+        XCTAssertEqual(
+            ScheduledJobFormatting.transcriptOpenAction(for: attempted),
+            .presentLocal
+        )
+    }
+
     private func fixture() -> (ScheduledJob, ScheduledJobRun) {
         let date = Date(timeIntervalSince1970: 1_750_000_000)
         let job = ScheduledJob(

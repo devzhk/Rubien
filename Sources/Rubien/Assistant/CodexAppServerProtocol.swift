@@ -77,6 +77,11 @@ enum CodexRPCID: Equatable, Hashable {
 
 // MARK: - Inbound stream parser (notifications + approval requests → events)
 
+struct CodexParsedAgentEvent {
+    let providerItemID: String?
+    let event: AgentEvent
+}
+
 struct CodexAppServerParser {
 
     /// itemId → chip display name, so an `item/completed` (which may omit the friendly
@@ -103,6 +108,10 @@ struct CodexAppServerParser {
     /// line ONCE (`decodeInbound`) and calls this, so the high-frequency delta path is
     /// never re-parsed for event mapping (cleanup #5); `parse(line:)` layers decode on top.
     mutating func map(_ inbound: CodexInbound) -> [AgentEvent] {
+        mapEnriched(inbound).map(\.event)
+    }
+
+    mutating func mapEnriched(_ inbound: CodexInbound) -> [CodexParsedAgentEvent] {
         switch inbound {
         case .response:
             // A response to one of OUR client requests — the connection correlates it.
@@ -119,10 +128,28 @@ struct CodexAppServerParser {
                 ?? (params["command"] as? String)
                 ?? (params["message"] as? String)
                 ?? toolName
-            return [.approvalRequested(id: id.uiString, toolName: toolName, summary: summary)]
+            return [CodexParsedAgentEvent(
+                providerItemID: Self.providerItemID(method: method, params: params),
+                event: .approvalRequested(
+                    id: id.uiString, toolName: toolName, summary: summary)
+            )]
         case .notification(let method, let params):
-            return mapNotification(method: method, params: params)
+            let itemID = Self.providerItemID(method: method, params: params)
+            return mapNotification(method: method, params: params).map {
+                CodexParsedAgentEvent(providerItemID: itemID, event: $0)
+            }
         }
+    }
+
+    private static func providerItemID(
+        method: String,
+        params: [String: Any]
+    ) -> String? {
+        if let itemID = params["itemId"] as? String, !itemID.isEmpty { return itemID }
+        if let item = params["item"] as? [String: Any],
+           let itemID = item["id"] as? String, !itemID.isEmpty { return itemID }
+        // Turn- and thread-level events intentionally have no item identity.
+        return nil
     }
 
     private mutating func mapNotification(method: String, params: [String: Any]) -> [AgentEvent] {
@@ -598,7 +625,7 @@ enum CodexAppServerProtocol {
     /// `thread/search` result → summaries with a match snippet. Each `data[]` hit is
     /// `{thread:{…}, snippet}` (the thread wrapped, unlike `thread/list`). Search is
     /// GLOBAL on codex 0.142 (the `cwd` param is ignored), so hits are filtered to
-    /// `cwd` here — a search must not surface another workspace's conversations (D5).
+    /// `cwd` here — a provider search must not surface another workspace's conversations.
     static func decodeThreadSearch(_ result: [String: Any], cwd: String) -> [AgentSessionSummary] {
         let data = result["data"] as? [[String: Any]] ?? []
         return data.compactMap { hit in

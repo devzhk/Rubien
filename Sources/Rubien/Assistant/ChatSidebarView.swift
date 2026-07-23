@@ -293,7 +293,7 @@ struct ChatSurfaceView: View {
                     showingHistory = true
                 }
                 .popover(isPresented: $showingHistory, arrowEdge: .bottom) {
-                    HomeChatHistoryPopover(session: session) {
+                    ChatHistoryPopover(session: session, surface: .home) {
                         showingHistory = false
                         resetDraft()
                         pendingFreshHomeDraft = nil
@@ -343,7 +343,7 @@ struct ChatSurfaceView: View {
                     showingHistory = true
                 }
                 .popover(isPresented: $showingHistory, arrowEdge: .bottom) {
-                    ChatHistoryPopover(session: session) {
+                    ChatHistoryPopover(session: session, surface: .reader) {
                         showingHistory = false
                         resetDraft()
                     }
@@ -1959,142 +1959,17 @@ extension Color {
 
 // MARK: - History popover (2c-6)
 
-/// Home history is deliberately narrower than the reader history browser: the
-/// controller's library-context listing filters provider sessions through Rubien's
-/// content-free attribution store, so unrelated CLI conversations never appear.
-/// Search still reads visible transcript content from the provider's own store;
-/// Rubien keeps only attribution metadata, never a second transcript copy.
-private struct HomeChatHistoryPopover: View {
-    let session: ChatSessionController
-    let onResumed: () -> Void
-
-    private struct RecentLoadID: Hashable {
-        let generation: Int
-        let enabled: Bool
-    }
-
-    @State private var sessions: AgentSessionQueryResult?
-    @State private var reloadGeneration = 0
-    @State private var query = ""
-    @State private var searchResults: AgentSessionQueryResult?
-    @State private var searchTask: Task<Void, Never>?
-
-    private var trimmedQuery: String {
-        query.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("Home conversations")
-                .font(.system(size: 12, weight: .semibold))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-            HistorySearchField(
-                placeholder: "Search Home conversations",
-                query: $query
-            )
-            Divider()
-            content
-            Divider()
-            Text("Only conversations started from Rubien Home are shown.")
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-        }
-        .frame(width: 320)
-        .task(id: RecentLoadID(
-            generation: reloadGeneration,
-            enabled: trimmedQuery.isEmpty
-        )) {
-            guard trimmedQuery.isEmpty else { return }
-            sessions = nil
-            let loaded = await session.loadRecentSessions(limit: 25)
-            guard !Task.isCancelled else { return }
-            sessions = loaded
-        }
-        .onChange(of: query) { _, _ in scheduleSearch() }
-        .onDisappear { searchTask?.cancel() }
-    }
-
-    @ViewBuilder private var content: some View {
-        let highlight = trimmedQuery.isEmpty ? nil : trimmedQuery
-        let result = highlight == nil ? sessions : searchResults
-        if let result {
-            VStack(alignment: .leading, spacing: 0) {
-                if result.didTimeOut {
-                    HistoryTimeoutNotice(
-                        hasPartialResults: !result.sessions.isEmpty,
-                        retry: retryCurrentLoad)
-                }
-                if result.sessions.isEmpty, !result.didTimeOut {
-                    Text(highlight == nil
-                        ? "No Rubien Home conversations yet."
-                        : "No Home conversations match “\(trimmedQuery)”.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .padding(14)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } else if !result.sessions.isEmpty {
-                    ScrollView {
-                        VStack(spacing: 0) {
-                            ForEach(result.sessions) { summary in
-                                HistoryRow(summary: summary, highlightQuery: highlight) {
-                                    session.resume(summary)
-                                    onResumed()
-                                }
-                            }
-                        }
-                    }
-                    .frame(height: min(
-                        CGFloat(result.sessions.count) * HistoryRow.height, 340))
-                }
-            }
-        } else {
-            HStack {
-                Spacer()
-                ProgressView().controlSize(.small)
-                Spacer()
-            }
-            .padding(.vertical, 16)
-        }
-    }
-
-    private func scheduleSearch(debounce: Bool = true) {
-        searchTask?.cancel()
-        let trimmed = trimmedQuery
-        guard !trimmed.isEmpty else {
-            searchResults = nil
-            return
-        }
-        searchResults = nil
-        searchTask = Task {
-            if debounce {
-                try? await Task.sleep(nanoseconds: 250_000_000)
-            }
-            guard !Task.isCancelled else { return }
-            let hits = await session.loadSearchSessions(trimmed, limit: 25)
-            guard !Task.isCancelled else { return }
-            searchResults = hits
-        }
-    }
-
-    private func retryCurrentLoad() {
-        if trimmedQuery.isEmpty {
-            reloadGeneration += 1
-        } else {
-            scheduleSearch(debounce: false)
-        }
-    }
+/// Browses Rubien-owned local conversations for this working folder. The separately
+/// labeled Provider History surface performs compatibility reads from the provider
+/// store. Recents load lazily; typing switches to local FTS content search.
+private enum ChatHistorySurface {
+    case home
+    case reader
 }
 
-/// Browses the active provider's OWN sessions for this working folder (§5.3) and
-/// `--resume`s a pick. Rubien stores no transcripts (D5); this is a light read of
-/// the runtime's session store. Recents load lazily when the popover opens; typing
-/// in the search field switches to a debounced CONTENT search (the visible
-/// user/assistant text of every session, not just first-message previews).
 private struct ChatHistoryPopover: View {
     let session: ChatSessionController
+    let surface: ChatHistorySurface
     /// Called after a pick is resumed (the sidebar dismisses + clears the draft).
     var onResumed: () -> Void
 
@@ -2102,7 +1977,7 @@ private struct ChatHistoryPopover: View {
     /// (the default — attribution is the session's rubien tool calls), or every
     /// session in the working folder.
     private enum HistoryScope: Hashable {
-        case thisDocument, allDocuments
+        case home, thisDocument, allDocuments
     }
 
     private struct RecentLoadID: Hashable {
@@ -2111,7 +1986,7 @@ private struct ChatHistoryPopover: View {
         let enabled: Bool
     }
 
-    @State private var scope: HistoryScope = .thisDocument
+    @State private var scope: HistoryScope
     @State private var sessions: AgentSessionQueryResult?
     @State private var reloadGeneration = 0
     @State private var query = ""
@@ -2119,32 +1994,54 @@ private struct ChatHistoryPopover: View {
     /// the query is empty (recents show).
     @State private var searchResults: AgentSessionQueryResult?
     @State private var searchTask: Task<Void, Never>?
+    @State private var showingProviderHistory = false
+    @State private var pendingDeletion: AgentSessionSummary?
+    @State private var deletionError: String?
 
     private var trimmedQuery: String {
         query.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    init(
+        session: ChatSessionController,
+        surface: ChatHistorySurface,
+        onResumed: @escaping () -> Void
+    ) {
+        self.session = session
+        self.surface = surface
+        self.onResumed = onResumed
+        _scope = State(initialValue: surface == .home ? .home : .thisDocument)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Conversations")
+            Text(surface == .home ? "Home conversations" : "Conversations")
                 .font(.system(size: 12, weight: .semibold))
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-            scopePicker
+            if surface == .reader {
+                scopePicker
+            }
             HistorySearchField(
-                placeholder: "Search past conversations",
+                placeholder: surface == .home
+                    ? "Search Home conversations"
+                    : "Search past conversations",
                 query: $query
             )
             Divider()
             content
             Divider()
-            Text(scope == .thisDocument
-                ? "Conversations that read this document."
-                : "The assistant’s own sessions for this working folder.")
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
+            HStack {
+                Text(footerText)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Provider History…") { showingProviderHistory = true }
+                    .font(.system(size: 10, weight: .medium))
+                    .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
         }
         .frame(width: 320)
         // `task(id:)` (re)loads recents on open AND whenever the scope flips,
@@ -2157,7 +2054,9 @@ private struct ChatHistoryPopover: View {
             guard trimmedQuery.isEmpty else { return }
             sessions = nil
             let loaded = await session.loadRecentSessions(
-                scopedToReference: scope == .thisDocument)
+                limit: 25,
+                scopedToReference: scope == .thisDocument
+            )
             // Cancellation is cooperative: a superseded (cancelled) load can still
             // return, and without this guard its stale scope's rows would overwrite
             // the fresh flip's — exactly when the old scoped scan is the slow one.
@@ -2169,6 +2068,46 @@ private struct ChatHistoryPopover: View {
         // the scope at schedule time). Empty-query handling is scheduleSearch's own.
         .onChange(of: scope) { _, _ in scheduleSearch() }
         .onDisappear { searchTask?.cancel() }
+        .onReceive(NotificationCenter.default.publisher(
+            for: .rubienAssistantConversationsDidChange
+        )) { _ in
+            reload()
+        }
+        .confirmationDialog(
+            "Delete Conversation?",
+            isPresented: Binding(
+                get: { pendingDeletion != nil },
+                set: { if !$0 { pendingDeletion = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let pendingDeletion {
+                Button("Delete Conversation", role: .destructive) {
+                    delete(pendingDeletion)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This deletes the local transcript and its managed attachments. Provider History is not changed.")
+        }
+        .alert(
+            "Couldn’t Delete Conversation",
+            isPresented: Binding(
+                get: { deletionError != nil },
+                set: { if !$0 { deletionError = nil } }
+            )
+        ) {
+            Button("OK") { deletionError = nil }
+        } message: {
+            Text(deletionError ?? "")
+        }
+        .sheet(isPresented: $showingProviderHistory) {
+            ProviderHistoryImportView(
+                session: session,
+                scopedToReference: scope == .thisDocument,
+                onImported: onResumed
+            )
+        }
     }
 
     /// The reader sidebars' own tab control (hover highlight + sliding indicator)
@@ -2200,7 +2139,10 @@ private struct ChatHistoryPopover: View {
             }
             guard !Task.isCancelled else { return }
             let hits = await session.loadSearchSessions(
-                trimmed, scopedToReference: scoped)
+                trimmed,
+                limit: 25,
+                scopedToReference: scoped
+            )
             guard !Task.isCancelled else { return }
             searchResults = hits
         }
@@ -2213,12 +2155,15 @@ private struct ChatHistoryPopover: View {
         let result = highlight == nil ? sessions : searchResults
         if let result {
             VStack(alignment: .leading, spacing: 0) {
-                if result.didTimeOut {
+                if result.didTimeOut || result.failureMessage != nil {
                     HistoryTimeoutNotice(
                         hasPartialResults: !result.sessions.isEmpty,
-                        retry: retryCurrentLoad)
+                        failureMessage: result.failureMessage,
+                        retry: reload)
                 }
-                if result.sessions.isEmpty, !result.didTimeOut {
+                if result.sessions.isEmpty,
+                   !result.didTimeOut,
+                   result.failureMessage == nil {
                     emptyLabel(emptyText(searching: highlight != nil))
                 } else if !result.sessions.isEmpty {
                     rowList(result.sessions, highlight: highlight)
@@ -2233,7 +2178,11 @@ private struct ChatHistoryPopover: View {
         ScrollView {
             VStack(spacing: 0) {
                 ForEach(items) { summary in
-                    HistoryRow(summary: summary, highlightQuery: highlight) {
+                    HistoryRow(
+                        summary: summary,
+                        highlightQuery: highlight,
+                        deleteAction: { pendingDeletion = summary }
+                    ) {
                         session.resume(summary)
                         onResumed()
                     }
@@ -2252,6 +2201,10 @@ private struct ChatHistoryPopover: View {
     /// as data loss.
     private func emptyText(searching: Bool) -> String {
         switch (searching, scope) {
+        case (false, .home):
+            return "No Rubien Home conversations yet."
+        case (true, .home):
+            return "No Home conversations match “\(trimmedQuery)”."
         case (false, .thisDocument):
             return "No conversations for this document yet. “All documents” shows every conversation in this folder."
         case (false, .allDocuments):
@@ -2260,6 +2213,17 @@ private struct ChatHistoryPopover: View {
             return "No conversations for this document match “\(trimmedQuery)”."
         case (true, .allDocuments):
             return "No conversations match “\(trimmedQuery)”."
+        }
+    }
+
+    private var footerText: String {
+        switch scope {
+        case .home:
+            "Only conversations saved by Rubien are shown."
+        case .thisDocument:
+            "Conversations saved for this document."
+        case .allDocuments:
+            "Conversations saved by Rubien in this folder."
         }
     }
 
@@ -2281,11 +2245,175 @@ private struct ChatHistoryPopover: View {
         .padding(.vertical, 16)
     }
 
-    private func retryCurrentLoad() {
+    private func reload() {
         if trimmedQuery.isEmpty {
             reloadGeneration += 1
         } else {
             scheduleSearch(debounce: false)
+        }
+    }
+
+    private func delete(_ summary: AgentSessionSummary) {
+        pendingDeletion = nil
+        Task {
+            deletionError = await session.deleteLocalConversation(id: summary.id)
+        }
+    }
+}
+
+/// Explicit compatibility importer for conversations that predate Rubien-owned
+/// transcripts or were created outside Rubien. It is intentionally separate from
+/// normal History so provider metadata never runs on popover mount.
+private struct ProviderHistoryImportView: View {
+    let session: ChatSessionController
+    let scopedToReference: Bool
+    let onImported: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var query = ""
+    @State private var result: AgentSessionQueryResult?
+    @State private var searchTask: Task<Void, Never>?
+    @State private var importingID: String?
+    @State private var errorMessage: String?
+
+    private var trimmedQuery: String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Provider History")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("Choose a conversation to import into Rubien.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Done") { dismiss() }
+            }
+            .padding(12)
+
+            HistorySearchField(
+                placeholder: "Search provider conversations",
+                query: $query
+            )
+            Divider()
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.top, 8)
+            }
+            content
+        }
+        .frame(width: 360, height: 440)
+        .task { await reload() }
+        .onChange(of: query) { _, _ in scheduleSearch() }
+        .onDisappear { searchTask?.cancel() }
+        .interactiveDismissDisabled(importingID != nil)
+    }
+
+    @ViewBuilder private var content: some View {
+        if let result {
+            if result.sessions.isEmpty,
+               !result.didTimeOut,
+               result.failureMessage == nil {
+                Text(trimmedQuery.isEmpty
+                    ? "No provider conversations were found."
+                    : "No provider conversations match “\(trimmedQuery)”.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(14)
+            } else {
+                VStack(spacing: 0) {
+                    if result.didTimeOut || result.failureMessage != nil {
+                        HistoryTimeoutNotice(
+                            hasPartialResults: !result.sessions.isEmpty,
+                            failureMessage: result.failureMessage,
+                            retry: { Task { await reload() } }
+                        )
+                    }
+                    ScrollView {
+                        VStack(spacing: 0) {
+                            ForEach(result.sessions) { summary in
+                                ZStack(alignment: .trailing) {
+                                    HistoryRow(
+                                        summary: summary,
+                                        highlightQuery: trimmedQuery.isEmpty
+                                            ? nil : trimmedQuery
+                                    ) {
+                                        importSession(summary)
+                                    }
+                                    if importingID == summary.id {
+                                        ProgressView().controlSize(.mini).padding(.trailing, 10)
+                                    }
+                                }
+                                .disabled(importingID != nil)
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            HStack {
+                Spacer()
+                ProgressView().controlSize(.small)
+                Spacer()
+            }
+            .padding(.vertical, 18)
+        }
+    }
+
+    private func scheduleSearch() {
+        searchTask?.cancel()
+        result = nil
+        searchTask = Task {
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            await reload()
+        }
+    }
+
+    private func reload() async {
+        errorMessage = nil
+        let loaded: AgentSessionQueryResult
+        if trimmedQuery.isEmpty {
+            loaded = await session.loadProviderRecentSessions(
+                limit: 25,
+                scopedToReference: scopedToReference
+            )
+        } else {
+            loaded = await session.loadProviderSearchSessions(
+                trimmedQuery,
+                limit: 25,
+                scopedToReference: scopedToReference
+            )
+        }
+        guard !Task.isCancelled else { return }
+        result = loaded
+    }
+
+    private func importSession(_ summary: AgentSessionSummary) {
+        guard importingID == nil else { return }
+        importingID = summary.id
+        errorMessage = nil
+        Task {
+            let imported = await session.importProviderSession(summary)
+            importingID = nil
+            switch imported {
+            case .opened:
+                dismiss()
+                onImported()
+            case .unavailable:
+                errorMessage = "That conversation could not be imported. Try again."
+            case .superseded:
+                break
+            }
         }
     }
 }
@@ -2294,13 +2422,15 @@ private struct ChatHistoryPopover: View {
 /// Partial rows remain usable below this compact notice.
 private struct HistoryTimeoutNotice: View {
     let hasPartialResults: Bool
+    var failureMessage: String? = nil
     let retry: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
-            Text(hasPartialResults
-                ? "Some conversations couldn’t be loaded."
-                : "History is temporarily unavailable.")
+            Text(failureMessage.map { _ in "History couldn’t be loaded." }
+                ?? (hasPartialResults
+                    ? "Some conversations couldn’t be loaded."
+                    : "History is temporarily unavailable."))
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
             Spacer(minLength: 4)
@@ -2361,31 +2491,54 @@ private struct HistoryRow: View {
 
     let summary: AgentSessionSummary
     var highlightQuery: String? = nil
+    var deleteAction: (() -> Void)? = nil
     let action: () -> Void
     @State private var hovered = false
 
     var body: some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(summary.preview)
-                    .font(.system(size: 12))
-                    .foregroundStyle(Color.primary.opacity(0.9))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                secondLine
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+        HStack(spacing: 0) {
+            Button(action: action) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(summary.preview)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.primary.opacity(0.9))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    secondLine
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 12)
+                .padding(.trailing, deleteAction == nil ? 12 : 4)
+                .frame(height: Self.height)
+                .contentShape(Rectangle())
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 12)
-            .frame(height: Self.height)
-            .background(hovered ? Color.primary.opacity(0.06) : Color.clear)
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+
+            if let deleteAction {
+                Button(role: .destructive, action: deleteAction) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 10, weight: .medium))
+                        .frame(width: 28, height: Self.height)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Delete Conversation…")
+                .opacity(hovered ? 1 : 0)
+                .allowsHitTesting(hovered)
+            }
         }
-        .buttonStyle(.plain)
+        .background(hovered ? Color.primary.opacity(0.06) : Color.clear)
+        .contentShape(Rectangle())
         .onHover { hovered = $0 }
+        .contextMenu {
+            if let deleteAction {
+                Button("Delete Conversation…", role: .destructive, action: deleteAction)
+            }
+        }
     }
 
     /// The matched snippet (query bolded) for a search hit; the date otherwise.

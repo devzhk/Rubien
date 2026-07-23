@@ -32,6 +32,8 @@ final class ScheduledJobCoordinator: ObservableObject {
 
     private let database: AppDatabase
     private let runner: ScheduledJobRunner
+    private let executionOwnership: AssistantExecutionOwnership?
+    private let executionLibraryRoot: URL
     private let now: () -> Date
     private let calendar: () -> Calendar
     private let completionNotifier: (ScheduledJob, ScheduledJobRun) -> Void
@@ -44,6 +46,7 @@ final class ScheduledJobCoordinator: ObservableObject {
     private var timer: Timer?
     private var backgroundActivity: NSBackgroundActivityScheduler?
     private var dueRetryNotBefore: Date?
+    private var startupTask: Task<Void, Never>?
     private var executionTask: Task<Void, Never>?
     private var progressAccumulator: ScheduledJobProgress?
     private var pendingProgressAssistantDelta = ""
@@ -74,6 +77,7 @@ final class ScheduledJobCoordinator: ObservableObject {
         self.init(
             database: database,
             runner: runner,
+            executionOwnership: .shared,
             completionNotifier: ScheduledJobNotifications.post
         )
     }
@@ -81,6 +85,8 @@ final class ScheduledJobCoordinator: ObservableObject {
     init(
         database: AppDatabase,
         runner: ScheduledJobRunner,
+        executionOwnership: AssistantExecutionOwnership? = nil,
+        executionLibraryRoot: URL = AppDatabase.libraryRootURL,
         now: @escaping () -> Date = Date.init,
         calendar: @escaping () -> Calendar = { .autoupdatingCurrent },
         completionNotifier: @escaping (ScheduledJob, ScheduledJobRun) -> Void = { _, _ in },
@@ -91,6 +97,8 @@ final class ScheduledJobCoordinator: ObservableObject {
     ) {
         self.database = database
         self.runner = runner
+        self.executionOwnership = executionOwnership
+        self.executionLibraryRoot = executionLibraryRoot
         self.now = now
         self.calendar = calendar
         self.completionNotifier = completionNotifier
@@ -113,8 +121,40 @@ final class ScheduledJobCoordinator: ObservableObject {
         guard !started else { return }
         started = true
         installObservers()
+        if let executionOwnership {
+            guard executionOwnership.acquireIfNeeded(
+                libraryRoot: executionLibraryRoot
+            ) else {
+                logger.info("Assistant execution is read-only in this process: \(executionOwnership.unavailableReason ?? "owned elsewhere")")
+                refresh()
+                return
+            }
+            startupTask = Task { [weak self] in
+                guard let self else { return }
+                guard await executionOwnership.prepareIfNeededAsync(
+                    database: self.database,
+                    libraryRoot: self.executionLibraryRoot,
+                    now: self.now()
+                ) else {
+                    self.logger.info("Assistant startup preparation failed: \(executionOwnership.unavailableReason ?? "unknown error")")
+                    self.refresh()
+                    self.startupTask = nil
+                    return
+                }
+                self.startupTask = nil
+                self.completeStartup()
+            }
+            return
+        }
+        completeStartup()
+    }
+
+    private func completeStartup() {
         do {
-            _ = try database.recoverInterruptedScheduledJobRuns(at: now())
+            // Tests without app-level ownership still exercise recovery directly.
+            if executionOwnership == nil {
+                _ = try database.recoverInterruptedAssistantWork(at: now())
+            }
             try database.recalculateScheduledJobNextRuns(now: now(), calendar: calendar())
             refresh()
             requestNotificationAuthorizationIfNeeded()
@@ -176,11 +216,15 @@ final class ScheduledJobCoordinator: ObservableObject {
     }
 
     func delete(id: String) throws {
-        try database.deleteScheduledJob(id: id)
+        try performAssistantMaintenance {
+            try database.deleteScheduledJob(id: id)
+            reconcileAssistantAttachmentFiles()
+        }
         didMutate()
     }
 
     func runNow(id: String) throws {
+        try requireExecutionOwner()
         guard executionTask == nil else { throw ScheduledJobError.runnerBusy }
         let claim = try database.claimManualScheduledJob(id: id, now: now())
         beginExecution(with: claim)
@@ -210,7 +254,10 @@ final class ScheduledJobCoordinator: ObservableObject {
     }
 
     func deleteRun(id: String) throws {
-        try database.deleteScheduledJobRun(id: id, at: now())
+        try performAssistantMaintenance {
+            try database.deleteScheduledJobRun(id: id, at: now())
+            reconcileAssistantAttachmentFiles()
+        }
         unavailableResultRunIDs.remove(id)
         recentRunProgress[id] = nil
         recentRunProgressOrder.removeAll { $0 == id }
@@ -222,6 +269,10 @@ final class ScheduledJobCoordinator: ObservableObject {
             activeRunProgress = nil
         }
         refresh()
+    }
+
+    func ensureAssistantExecutionOwner() throws {
+        try requireExecutionOwner()
     }
 
     func markResultUnavailable(id: String) {
@@ -237,6 +288,20 @@ final class ScheduledJobCoordinator: ObservableObject {
 
     private func scanForDueJobs() {
         guard started, executionTask == nil else { return }
+        if let executionOwnership {
+            guard executionOwnership.prepareIfNeeded(
+                database: database,
+                libraryRoot: executionLibraryRoot,
+                now: now()
+            ) else {
+                // A second app instance stays read-only, and an owner whose startup
+                // reconciliation failed stays unprepared. Retry either condition at
+                // a bounded cadence; never claim work based on lock ownership alone.
+                dueRetryNotBefore = now().addingTimeInterval(5)
+                refresh()
+                return
+            }
+        }
         if let dueRetryNotBefore, dueRetryNotBefore > now() {
             refresh()
             return
@@ -259,7 +324,71 @@ final class ScheduledJobCoordinator: ObservableObject {
         }
     }
 
+    private func requireExecutionOwner() throws {
+        guard let executionOwnership else { return }
+        guard executionOwnership.prepareIfNeeded(
+            database: database,
+            libraryRoot: executionLibraryRoot,
+            now: now()
+        ) else {
+            throw ScheduledJobError.runnerBusy
+        }
+    }
+
+    private func reconcileAssistantAttachmentFiles() {
+        // Unit coordinators use in-memory databases and intentionally omit the
+        // app-lifetime ownership composition root; never reconcile those against
+        // the user's resolved production attachment directory.
+        guard executionOwnership != nil else { return }
+        guard let stored = try? database.fetchStoredAssistantAttachmentPaths() else {
+            return
+        }
+        AssistantAttachmentFiles.reconcile(
+            libraryRoot: executionLibraryRoot,
+            storedPaths: stored
+        )
+    }
+
+    private func performAssistantMaintenance(
+        _ operation: () throws -> Void
+    ) throws {
+        guard let executionOwnership else {
+            try operation()
+            return
+        }
+        guard executionOwnership.beginMaintenance(
+            database: database,
+            libraryRoot: executionLibraryRoot
+        ) else {
+            throw ScheduledJobError.runnerBusy
+        }
+        defer {
+            executionOwnership.finishMaintenance(
+                libraryRoot: executionLibraryRoot,
+                prepared: true
+            )
+        }
+        try operation()
+    }
+
     private func beginExecution(with initialClaim: ScheduledJobExecutionClaim) {
+        let ownershipWorkToken: UUID?
+        if let executionOwnership {
+            guard let token = executionOwnership.beginAssistantWork(
+                libraryRoot: executionLibraryRoot
+            ) else {
+                _ = try? database.finishScheduledJobRun(
+                    id: initialClaim.run.id,
+                    status: .failed,
+                    failureKind: .storageFailure
+                )
+                refresh()
+                return
+            }
+            ownershipWorkToken = token
+        } else {
+            ownershipWorkToken = nil
+        }
         timer?.invalidate()
         timer = nil
         backgroundActivity?.invalidate()
@@ -268,6 +397,11 @@ final class ScheduledJobCoordinator: ObservableObject {
         resetProgress(for: initialClaim.run, prompt: initialClaim.job.prompt)
         executionTask = Task { [weak self] in
             guard let self else { return }
+            defer {
+                if let ownershipWorkToken {
+                    self.executionOwnership?.finishAssistantWork(ownershipWorkToken)
+                }
+            }
             var claim: ScheduledJobExecutionClaim? = initialClaim
             while let currentClaim = claim, !Task.isCancelled {
                 self.activeRun = currentClaim.run

@@ -3,7 +3,7 @@ import Foundation
 // MARK: - Claude session store reader (Phase 2c-6)
 //
 // A light, read-only view of Claude Code's OWN session store so the History picker
-// can `--resume` a past conversation (§5.3). Rubien persists no transcripts (D5);
+// can `--resume` or explicitly import a past provider conversation (§5.3).
 // this reads the runtime's files and writes/deletes nothing.
 //
 // Layout (verified against claude 2.1.201): sessions live at

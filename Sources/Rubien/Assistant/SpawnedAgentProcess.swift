@@ -31,6 +31,7 @@ final class SpawnedAgentProcess: @unchecked Sendable {
     private let stateLock = NSLock()
     private var hasReaped = false
     private var reapedStatus: Int32?
+    private static let groupCleanupTimeout: TimeInterval = 2
 
     private init(pid: pid_t, stdin: FileHandle, stdout: FileHandle, stderr: FileHandle) {
         self.pid = pid
@@ -222,7 +223,8 @@ final class SpawnedAgentProcess: @unchecked Sendable {
     /// prevents PID reuse while the provider classifies normal vs retiring cleanup
     /// and signals any residual children in the still-stable process group.
     func observeExit() async -> Bool {
-        await withCheckedContinuation { continuation in
+        return await withCheckedContinuation {
+            (continuation: CheckedContinuation<Bool, Never>) in
             DispatchQueue.global(qos: .utility).async {
                 var info = siginfo_t()
                 var result: Int32
@@ -234,11 +236,16 @@ final class SpawnedAgentProcess: @unchecked Sendable {
         }
     }
 
-    /// Reap exactly once. Call after `observeExit()` when residual group signalling
-    /// is complete. The reaped flag is published under the same lock used by
-    /// `signalGroup`, before `waitpid`, so no signal can target a recycled pid.
-    func reap() async -> Int32? {
-        await withCheckedContinuation { continuation in
+    /// Reap exactly once, but only after every other member of the child's process
+    /// group has disappeared. The exited leader intentionally remains a zombie
+    /// until that proof succeeds: retaining its pid keeps the process-group identity
+    /// stable and prevents a signal from ever targeting a recycled pid/pgid.
+    func reap(timeout: TimeInterval = groupCleanupTimeout) async -> Int32? {
+        guard await waitForResidualGroupMembersToDisappear(timeout: timeout) else {
+            return nil
+        }
+        return await withCheckedContinuation {
+            (continuation: CheckedContinuation<Int32?, Never>) in
             DispatchQueue.global(qos: .utility).async {
                 self.stateLock.lock()
                 if let status = self.reapedStatus {
@@ -270,6 +277,9 @@ final class SpawnedAgentProcess: @unchecked Sendable {
         guard await observeExit() else {
             return cachedReapedStatus() ?? -1
         }
+        // A root process can exit while an MCP/helper child keeps the group alive.
+        // Sweep after observing (but before reaping) the leader.
+        signalGroup(SIGKILL)
         return await reap() ?? -1
     }
 
@@ -278,14 +288,21 @@ final class SpawnedAgentProcess: @unchecked Sendable {
         return reapedStatus
     }
 
-    /// Reap within a bounded interval, polling with `WNOHANG` so a child whose
-    /// process state is unexpectedly wedged cannot pin a provider actor forever.
-    /// A timed-out or cancelled wait leaves one background reaper responsible for
-    /// eventually collecting the child.
+    /// Observe leader exit and prove complete process-group disappearance within a
+    /// bounded interval. `waitid(..., WNOWAIT)` is load-bearing: `waitpid(WNOHANG)`
+    /// would reap the leader before helper membership had been inspected.
     func wait(timeout: TimeInterval) async -> Int32? {
         let deadline = ProcessInfo.processInfo.systemUptime + max(0, timeout)
         repeat {
-            if let status = pollReapedStatus() { return status }
+            if cachedReapedStatus() != nil { return cachedReapedStatus() }
+            if pollObservedExit() {
+                signalGroup(SIGKILL)
+                let remaining = max(
+                    0,
+                    deadline - ProcessInfo.processInfo.systemUptime
+                )
+                return await reap(timeout: remaining)
+            }
             guard ProcessInfo.processInfo.systemUptime < deadline else { break }
             do {
                 try await Task.sleep(for: .milliseconds(25))
@@ -294,26 +311,87 @@ final class SpawnedAgentProcess: @unchecked Sendable {
             }
         } while true
 
-        Task { _ = await self.wait() }
         return nil
     }
 
-    /// Nonblocking exit-status probe. Providers use this immediately after stdout
-    /// EOF to preserve a natural crash code before escalating a process that closed
-    /// its pipe without actually exiting.
-    func pollReapedStatus() -> Int32? {
-        stateLock.lock(); defer { stateLock.unlock() }
-        if let reapedStatus { return reapedStatus }
-
-        var status: Int32 = 0
-        var result: pid_t
+    /// Nonblocking leader-exit observation that deliberately leaves the child
+    /// waitable. Multiple waiters may observe the same exited leader safely.
+    private func pollObservedExit() -> Bool {
+        if cachedReapedStatus() != nil { return true }
+        var info = siginfo_t()
+        var result: Int32
         repeat {
-            result = waitpid(pid, &status, WNOHANG)
+            result = waitid(P_PID, id_t(pid), &info, WEXITED | WNOWAIT | WNOHANG)
         } while result < 0 && errno == EINTR
-        guard result == pid else { return nil }
-        hasReaped = true
-        reapedStatus = status
-        return status
+        return result == 0 && info.si_pid == pid
+    }
+
+    /// Wait until only the retained leader remains in the original process group.
+    /// `proc_listpids` + `PROC_PIDTBSDINFO` is used instead of `killpg(..., 0)`:
+    /// the latter necessarily reports the leader zombie itself and cannot tell us
+    /// whether a helper remains. An inspector failure fails closed and leaves the
+    /// leader unreaped, preventing an unsafe overlapping generation.
+    private func waitForResidualGroupMembersToDisappear(
+        timeout: TimeInterval
+    ) async -> Bool {
+        let deadline = ProcessInfo.processInfo.systemUptime + max(0, timeout)
+        repeat {
+            guard let members = processGroupMemberPIDs() else { return false }
+            if members.allSatisfy({ $0 == pid }) { return true }
+            signalGroup(SIGKILL)
+            guard ProcessInfo.processInfo.systemUptime < deadline else { return false }
+            do {
+                try await Task.sleep(for: .milliseconds(25))
+            } catch {
+                return false
+            }
+        } while true
+    }
+
+    /// Exact current members of this child's original group, including zombies.
+    /// The unreaped leader prevents `pid`/pgid reuse while this is consulted.
+    private func processGroupMemberPIDs() -> [pid_t]? {
+        var byteCapacity = max(
+            Int(proc_listpids(UInt32(PROC_ALL_PIDS), 0, nil, 0)),
+            256 * MemoryLayout<pid_t>.stride
+        ) + 64 * MemoryLayout<pid_t>.stride
+        for _ in 0..<3 {
+            var pids = [pid_t](
+                repeating: 0,
+                count: byteCapacity / MemoryLayout<pid_t>.stride
+            )
+            let bytes = pids.withUnsafeMutableBytes { buffer in
+                proc_listpids(
+                    UInt32(PROC_ALL_PIDS),
+                    0,
+                    buffer.baseAddress,
+                    Int32(buffer.count)
+                )
+            }
+            guard bytes >= 0 else { return nil }
+            if Int(bytes) >= byteCapacity {
+                byteCapacity *= 2
+                continue
+            }
+            let count = Int(bytes) / MemoryLayout<pid_t>.stride
+            var members: [pid_t] = []
+            for candidate in pids.prefix(count) where candidate > 0 {
+                var info = proc_bsdinfo()
+                let infoBytes = proc_pidinfo(
+                    candidate,
+                    PROC_PIDTBSDINFO,
+                    0,
+                    &info,
+                    Int32(MemoryLayout<proc_bsdinfo>.size)
+                )
+                // A zero/short read normally means the process exited between the
+                // list and detail calls. It is no longer evidence of a live member.
+                guard infoBytes == MemoryLayout<proc_bsdinfo>.size else { continue }
+                if pid_t(info.pbi_pgid) == pid { members.append(candidate) }
+            }
+            return members
+        }
+        return nil
     }
 
     /// Signal the whole process group (leader pgid == pid, since we set pgroup 0).
@@ -542,6 +620,7 @@ enum AgentBinaryProbe {
     ) async -> String? {
         let attempts = retryOnce ? 2 : 1
         for attempt in 0..<attempts {
+            guard !Task.isCancelled else { return nil }
             if let result = await runSpawnedCommand(
                 executablePath: executablePath,
                 arguments: ["--version"],
@@ -559,11 +638,15 @@ enum AgentBinaryProbe {
         return nil
     }
 
-    private static func runSpawnedCommand(
+    /// Async, cancellation-aware command probe in its own process group. A task
+    /// cancellation kills and reaps the complete root group before returning, so a
+    /// higher-priority broker turn can safely start a new Codex generation.
+    static func runSpawnedCommand(
         executablePath: String,
         arguments: [String],
         environment: [String: String],
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        workingDirectory: String? = nil
     ) async -> CommandResult? {
         let process: SpawnedAgentProcess
         do {
@@ -571,7 +654,8 @@ enum AgentBinaryProbe {
                 executablePath: executablePath,
                 arguments: arguments,
                 environment: environment,
-                workingDirectory: FileManager.default.temporaryDirectory.path)
+                workingDirectory: workingDirectory
+                    ?? FileManager.default.temporaryDirectory.path)
         } catch {
             return nil
         }
@@ -591,7 +675,12 @@ enum AgentBinaryProbe {
             process.signalGroup(SIGKILL)
             return true
         }
-        let waitStatus = await process.wait()
+        let waitStatus = await withTaskCancellationHandler {
+            await process.wait()
+        } onCancel: {
+            process.closeStdin()
+            process.signalGroup(SIGKILL)
+        }
         watchdog.cancel()
         let timedOut = await watchdog.value
         return CommandResult(
@@ -762,20 +851,13 @@ enum AgentAuthProbe {
         environment: [String: String],
         parser: @escaping @Sendable (AgentBinaryProbe.CommandResult) -> AgentAuthStatus
     ) async -> AgentAuthStatus {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                guard let result = AgentBinaryProbe.runCommand(
-                    executablePath: executablePath,
-                    arguments: arguments,
-                    environment: environment,
-                    timeout: 5)
-                else {
-                    continuation.resume(returning: .unknown)
-                    return
-                }
-                continuation.resume(returning: parser(result))
-            }
-        }
+        guard let result = await AgentBinaryProbe.runSpawnedCommand(
+            executablePath: executablePath,
+            arguments: arguments,
+            environment: environment,
+            timeout: 5
+        ) else { return .unknown }
+        return parser(result)
     }
 }
 

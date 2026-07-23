@@ -75,7 +75,9 @@ enum ChatPaperPresentation {
     }
 
     static func encodeHistoryGroup(_ group: ChatPaperGroup) -> String? {
-        guard let data = try? JSONEncoder().encode(group),
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(group),
               data.count <= maximumResultBytes
         else { return nil }
         return String(decoding: data, as: UTF8.self)

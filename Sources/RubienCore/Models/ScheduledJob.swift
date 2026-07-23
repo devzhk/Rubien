@@ -1,7 +1,7 @@
 import Foundation
 import GRDB
 
-public enum ScheduledJobProvider: Codable, Hashable, Sendable {
+public enum ScheduledJobProvider: RawStringCodable, Hashable, Sendable {
     case claude
     case codex
     case unknown(String)
@@ -31,18 +31,9 @@ public enum ScheduledJobProvider: Codable, Hashable, Sendable {
 
     public static let knownCases: [ScheduledJobProvider] = [.claude, .codex]
 
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        self.init(rawValue: try container.decode(String.self))
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        try container.encode(rawValue)
-    }
 }
 
-public enum ScheduledJobRunTrigger: Codable, Hashable, Sendable {
+public enum ScheduledJobRunTrigger: RawStringCodable, Hashable, Sendable {
     case scheduled
     case catchUp
     case manual
@@ -66,18 +57,9 @@ public enum ScheduledJobRunTrigger: Codable, Hashable, Sendable {
         }
     }
 
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        self.init(rawValue: try container.decode(String.self))
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        try container.encode(rawValue)
-    }
 }
 
-public enum ScheduledJobRunStatus: Codable, Hashable, Sendable {
+public enum ScheduledJobRunStatus: RawStringCodable, Hashable, Sendable {
     case pending
     case running
     case succeeded
@@ -121,18 +103,9 @@ public enum ScheduledJobRunStatus: Codable, Hashable, Sendable {
         }
     }
 
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        self.init(rawValue: try container.decode(String.self))
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        try container.encode(rawValue)
-    }
 }
 
-public enum ScheduledJobFailureKind: Codable, Hashable, Sendable {
+public enum ScheduledJobFailureKind: RawStringCodable, Hashable, Sendable {
     case providerUnavailable
     case libraryChannelUnavailable
     case permissionDenied
@@ -140,6 +113,7 @@ public enum ScheduledJobFailureKind: Codable, Hashable, Sendable {
     case interrupted
     case launchFailed
     case providerFailed
+    case storageFailure
     case unknown(String)
 
     public init(rawValue: String) {
@@ -151,6 +125,7 @@ public enum ScheduledJobFailureKind: Codable, Hashable, Sendable {
         case "interrupted": self = .interrupted
         case "launchFailed": self = .launchFailed
         case "providerFailed": self = .providerFailed
+        case "storageFailure": self = .storageFailure
         default: self = .unknown(rawValue)
         }
     }
@@ -164,19 +139,131 @@ public enum ScheduledJobFailureKind: Codable, Hashable, Sendable {
         case .interrupted: "interrupted"
         case .launchFailed: "launchFailed"
         case .providerFailed: "providerFailed"
+        case .storageFailure: "storageFailure"
         case let .unknown(value): value
         }
     }
 
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        self.init(rawValue: try container.decode(String.self))
+}
+
+public enum AssistantTranscriptState: RawStringCodable, Hashable, Sendable {
+    case none
+    case legacyEligible
+    case legacyAttempted
+    case legacyRetrying
+    case capturing
+    case finishingIdentity
+    case available
+    case deleted
+    case unknown(String)
+
+    public init(rawValue: String) {
+        switch rawValue {
+        case "none": self = .none
+        case "legacyEligible": self = .legacyEligible
+        case "legacyAttempted": self = .legacyAttempted
+        case "legacyRetrying": self = .legacyRetrying
+        case "capturing": self = .capturing
+        case "finishingIdentity": self = .finishingIdentity
+        case "available": self = .available
+        case "deleted": self = .deleted
+        default: self = .unknown(rawValue)
+        }
     }
 
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        try container.encode(rawValue)
+    public var rawValue: String {
+        switch self {
+        case .none: "none"
+        case .legacyEligible: "legacyEligible"
+        case .legacyAttempted: "legacyAttempted"
+        case .legacyRetrying: "legacyRetrying"
+        case .capturing: "capturing"
+        case .finishingIdentity: "finishingIdentity"
+        case .available: "available"
+        case .deleted: "deleted"
+        case let .unknown(value): value
+        }
     }
+
+    public var presentsStoredTranscript: Bool {
+        switch self {
+        case .available, .finishingIdentity: true
+        case .none, .legacyEligible, .legacyAttempted, .legacyRetrying,
+             .capturing, .deleted, .unknown: false
+        }
+    }
+
+    public var isFinalizingIdentity: Bool {
+        self == .finishingIdentity
+    }
+
+    public var isImportingLegacyTranscript: Bool {
+        switch self {
+        case .legacyEligible, .legacyRetrying: true
+        case .none, .legacyAttempted, .capturing, .finishingIdentity,
+             .available, .deleted, .unknown: false
+        }
+    }
+
+    public var requiresInitialLegacyImport: Bool {
+        self == .legacyEligible
+    }
+
+    public var hasAttemptedLegacyImport: Bool {
+        self == .legacyAttempted
+    }
+
+    public var isLocallyDeleted: Bool {
+        self == .deleted
+    }
+
+}
+
+public enum AssistantTranscriptStatusCode: RawStringCodable, Hashable, Sendable {
+    case alreadyLocal
+    case deletedLocal
+    case providerUnavailable
+    case notFound
+    case cancelled
+    case interrupted
+    case storageFailure
+    case unknown(String)
+
+    public init(rawValue: String) {
+        switch rawValue {
+        case "alreadyLocal": self = .alreadyLocal
+        case "deletedLocal": self = .deletedLocal
+        case "providerUnavailable": self = .providerUnavailable
+        case "notFound": self = .notFound
+        case "cancelled": self = .cancelled
+        case "interrupted": self = .interrupted
+        case "storageFailure": self = .storageFailure
+        default: self = .unknown(rawValue)
+        }
+    }
+
+    public var rawValue: String {
+        switch self {
+        case .alreadyLocal: "alreadyLocal"
+        case .deletedLocal: "deletedLocal"
+        case .providerUnavailable: "providerUnavailable"
+        case .notFound: "notFound"
+        case .cancelled: "cancelled"
+        case .interrupted: "interrupted"
+        case .storageFailure: "storageFailure"
+        case let .unknown(value): value
+        }
+    }
+
+    public var isRetryable: Bool {
+        switch self {
+        case .providerUnavailable, .notFound, .cancelled, .interrupted, .storageFailure:
+            true
+        case .alreadyLocal, .deletedLocal, .unknown:
+            false
+        }
+    }
+
 }
 
 /// Monday is bit 0 and Sunday is bit 6. This is independent of the user's
@@ -442,15 +529,63 @@ public struct ScheduledJobRun: Identifiable, Codable, Hashable, Sendable {
     public var providerSessionId: String?
     public var failureKind: ScheduledJobFailureKind?
     public var isUnread: Bool
+    public var assistantTranscriptState: AssistantTranscriptState
+    public var assistantTranscriptStatusCode: AssistantTranscriptStatusCode?
+
+    public init(
+        id: String,
+        jobId: String,
+        trigger: ScheduledJobRunTrigger,
+        occurrenceKey: String,
+        scheduledFor: Date,
+        startedAt: Date?,
+        finishedAt: Date?,
+        status: ScheduledJobRunStatus,
+        provider: ScheduledJobProvider,
+        providerSessionId: String?,
+        failureKind: ScheduledJobFailureKind?,
+        isUnread: Bool,
+        assistantTranscriptState: AssistantTranscriptState = .none,
+        assistantTranscriptStatusCode: AssistantTranscriptStatusCode? = nil
+    ) {
+        self.id = id
+        self.jobId = jobId
+        self.trigger = trigger
+        self.occurrenceKey = occurrenceKey
+        self.scheduledFor = scheduledFor
+        self.startedAt = startedAt
+        self.finishedAt = finishedAt
+        self.status = status
+        self.provider = provider
+        self.providerSessionId = providerSessionId
+        self.failureKind = failureKind
+        self.isUnread = isUnread
+        self.assistantTranscriptState = assistantTranscriptState
+        self.assistantTranscriptStatusCode = assistantTranscriptStatusCode
+    }
 
     /// The latest execution activity used to order and display run history.
     public var activityAt: Date {
         finishedAt ?? startedAt ?? scheduledFor
     }
 
+    public var canRetryLegacyTranscriptImport: Bool {
+        assistantTranscriptState.hasAttemptedLegacyImport
+            && assistantTranscriptStatusCode?.isRetryable == true
+    }
+
+    public var shouldReconcileLegacyTranscriptOnOpen: Bool {
+        guard assistantTranscriptState.hasAttemptedLegacyImport else {
+            return false
+        }
+        return assistantTranscriptStatusCode == .alreadyLocal
+            || assistantTranscriptStatusCode == .deletedLocal
+    }
+
     public enum Columns: String, ColumnExpression {
         case id, jobId, trigger, occurrenceKey, scheduledFor, startedAt, finishedAt
         case status, provider, providerSessionId, failureKind, isUnread
+        case assistantTranscriptState, assistantTranscriptStatusCode
     }
 }
 
@@ -468,6 +603,11 @@ extension ScheduledJobRun: FetchableRecord, MutablePersistableRecord {
         providerSessionId = row[Columns.providerSessionId]
         failureKind = (row[Columns.failureKind] as String?).map(ScheduledJobFailureKind.init(rawValue:))
         isUnread = row[Columns.isUnread]
+        assistantTranscriptState = AssistantTranscriptState(
+            rawValue: row[Columns.assistantTranscriptState]
+        )
+        assistantTranscriptStatusCode = (row[Columns.assistantTranscriptStatusCode] as String?)
+            .map(AssistantTranscriptStatusCode.init(rawValue:))
     }
 
     public func encode(to container: inout PersistenceContainer) {
@@ -483,6 +623,8 @@ extension ScheduledJobRun: FetchableRecord, MutablePersistableRecord {
         container[Columns.providerSessionId] = providerSessionId
         container[Columns.failureKind] = failureKind?.rawValue
         container[Columns.isUnread] = isUnread
+        container[Columns.assistantTranscriptState] = assistantTranscriptState.rawValue
+        container[Columns.assistantTranscriptStatusCode] = assistantTranscriptStatusCode?.rawValue
     }
 }
 

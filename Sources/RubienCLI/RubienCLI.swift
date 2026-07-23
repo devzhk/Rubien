@@ -39,6 +39,7 @@ struct RubienCLI: AsyncParsableCommand {
             Stats.self,
             StatsClear.self,
             Jobs.self,
+            AssistantConversations.self,
             MCPCommand.self,
         ]
 #if os(macOS)
@@ -92,6 +93,54 @@ func printJSONErrorEnvelope<T: Encodable>(_ envelope: T) {
     if let data = try? jsonEncoder.encode(envelope), let str = String(data: data, encoding: .utf8) {
         FileHandle.standardError.write(Data((str + "\n").utf8))
     }
+}
+
+enum AssistantCLIMutationError: Error, LocalizedError {
+    case busy
+
+    var errorDescription: String? {
+        switch self {
+        case .busy: "assistant-execution-busy"
+        }
+    }
+}
+
+/// Mutating transcript/run history can cascade local Assistant state. Acquire
+/// the same non-blocking library lock as the app before entering that database
+/// transaction; reads intentionally remain available while the app is running.
+func acquireAssistantCLIMutationLock() throws -> AssistantLibraryExecutionLock {
+    guard let lock = try AssistantLibraryExecutionLock.tryAcquire(
+        libraryRoot: AppDatabase.libraryRootURL,
+        ownerDescription: "rubien-cli"
+    ) else {
+        throw AssistantCLIMutationError.busy
+    }
+    return lock
+}
+
+/// A database delete commits before filesystem cleanup. Reconcile best-effort so
+/// the command's JSON truthfully reports the committed mutation; any interrupted
+/// cleanup is repeated at the next app launch or destructive CLI command.
+func reconcileAssistantAttachmentFiles() {
+    guard let stored = try? AppDatabase.shared.fetchStoredAssistantAttachmentPaths()
+    else { return }
+    AssistantAttachmentFiles.reconcile(
+        libraryRoot: AppDatabase.libraryRootURL,
+        storedPaths: stored
+    )
+}
+
+/// Shared boundary for destructive Assistant history mutations: one lock,
+/// one post-commit attachment sweep, and one app refresh notification.
+func withAssistantCLIMutation<Result>(
+    _ mutation: () throws -> Result
+) throws -> Result {
+    let executionLock = try acquireAssistantCLIMutationLock()
+    defer { executionLock.release() }
+    let result = try mutation()
+    reconcileAssistantAttachmentFiles()
+    notifyLibraryChanged()
+    return result
 }
 
 /// The `unresolved-selectors` error envelope shared by `properties` (list
@@ -1590,6 +1639,8 @@ struct ScheduledJobRunDTO: Encodable {
     let providerSessionId: String?
     let failureKind: String?
     let unread: Bool
+    let assistantTranscriptState: String
+    let assistantTranscriptStatusCode: String?
 
     init(_ run: ScheduledJobRun) {
         id = run.id
@@ -1604,7 +1655,146 @@ struct ScheduledJobRunDTO: Encodable {
         providerSessionId = run.providerSessionId
         failureKind = run.failureKind?.rawValue
         unread = run.isUnread
+        assistantTranscriptState = run.assistantTranscriptState.rawValue
+        assistantTranscriptStatusCode = run.assistantTranscriptStatusCode?.rawValue
     }
+}
+
+struct AssistantConversations: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "assistant-conversations",
+        abstract: "Read and manage Rubien-owned Assistant transcripts",
+        subcommands: [
+            AssistantConversationsList.self,
+            AssistantConversationsGet.self,
+            AssistantConversationsDelete.self,
+            AssistantConversationsClear.self,
+        ],
+        defaultSubcommand: AssistantConversationsList.self
+    )
+}
+
+struct AssistantConversationsList: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "list",
+        abstract: "List locally saved Assistant conversations"
+    )
+
+    @Option(help: "Provider: claude or codex") var provider: String?
+    @Option(name: .customLong("reference-id"), help: "Limit results to one reference")
+    var referenceId: Int64?
+    @Option(help: "Search locally indexed visible transcript text") var search: String?
+    @Option(help: "Maximum rows") var limit = 50
+
+    func run() throws {
+        guard limit > 0 else {
+            printJSONError("--limit must be greater than zero")
+            throw ExitCode.failure
+        }
+        let parsedProvider: AssistantProvider?
+        if let provider {
+            do {
+                parsedProvider = try parseScheduledProvider(provider)
+            } catch {
+                printJSONError("Invalid provider '\(provider)'. Use claude or codex.")
+                throw ExitCode.failure
+            }
+        } else {
+            parsedProvider = nil
+        }
+        printJSON(try AppDatabase.shared.fetchAssistantConversationSummaries(
+            query: .init(
+                provider: parsedProvider,
+                referenceId: referenceId,
+                search: search,
+                limit: limit
+            )
+        ))
+    }
+}
+
+struct AssistantConversationsGet: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "get",
+        abstract: "Get a locally saved Assistant transcript"
+    )
+
+    @Argument(help: "Assistant conversation ID") var id: String
+
+    func run() throws {
+        guard let detail = try AppDatabase.shared.fetchAssistantConversationDetail(id: id) else {
+            printJSONError("Assistant conversation \(id) not found")
+            throw ExitCode.failure
+        }
+        printJSON(detail)
+    }
+}
+
+struct AssistantConversationsDelete: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "delete",
+        abstract: "Delete one local Assistant transcript"
+    )
+
+    @Argument(help: "Assistant conversation ID") var id: String
+
+    func run() throws {
+        do {
+            try withAssistantCLIMutation {
+                try AppDatabase.shared.deleteAssistantConversation(id: id)
+            }
+            printJSON(["deleted": id])
+        } catch {
+            printJSONError(assistantConversationCLIErrorMessage(error))
+            throw ExitCode.failure
+        }
+    }
+}
+
+struct AssistantConversationsClear: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "clear",
+        abstract: "Delete local Assistant transcripts"
+    )
+
+    @Option(help: "Delete conversations older than this ISO-8601 timestamp")
+    var before: String?
+    @Flag(help: "Confirm destructive deletion") var confirm = false
+
+    func run() throws {
+        guard confirm else {
+            printJSONError("--confirm is required")
+            throw ExitCode.failure
+        }
+        let cutoff: Date?
+        if let before {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            cutoff = formatter.date(from: before) ?? ISO8601DateFormatter().date(from: before)
+            guard cutoff != nil else {
+                printJSONError("--before must be an ISO-8601 timestamp")
+                throw ExitCode.failure
+            }
+        } else {
+            cutoff = nil
+        }
+        do {
+            let count = try withAssistantCLIMutation {
+                try AppDatabase.shared.clearAssistantConversations(before: cutoff)
+            }
+            printJSON(["cleared": count])
+        } catch {
+            printJSONError(assistantConversationCLIErrorMessage(error))
+            throw ExitCode.failure
+        }
+    }
+}
+
+private func assistantConversationCLIErrorMessage(_ error: Error) -> String {
+    if let error = error as? AssistantConversationError {
+        return error.errorDescription ?? "Assistant conversation operation failed"
+    }
+    return error.localizedDescription
 }
 
 struct Jobs: ParsableCommand {
@@ -1742,8 +1932,9 @@ struct JobsDelete: ParsableCommand {
 
     func run() throws {
         do {
-            try AppDatabase.shared.deleteScheduledJob(id: id)
-            notifyLibraryChanged()
+            try withAssistantCLIMutation {
+                try AppDatabase.shared.deleteScheduledJob(id: id)
+            }
             printJSON(["deleted": id])
         } catch {
             printJSONError(scheduledJobCLIErrorMessage(error))
@@ -1797,8 +1988,9 @@ struct JobsDeleteRun: ParsableCommand {
 
     func run() throws {
         do {
-            try AppDatabase.shared.deleteScheduledJobRun(id: id)
-            notifyLibraryChanged()
+            try withAssistantCLIMutation {
+                try AppDatabase.shared.deleteScheduledJobRun(id: id)
+            }
             printJSON(["deletedRun": id])
         } catch {
             printJSONError(scheduledJobCLIErrorMessage(error))

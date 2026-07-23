@@ -228,13 +228,23 @@ extension AppDatabase {
             guard status.isTerminal else {
                 throw ScheduledJobError.activeRunPreventsRunDeletion
             }
+            // The run row is retained as a scrubbed recurrence tombstone, so
+            // its locally owned transcript does not cascade automatically.
+            // Remove it explicitly in this same transaction before hiding the
+            // run; ordinary continuation children survive through SET NULL.
+            try db.execute(
+                sql: "DELETE FROM assistantConversation WHERE scheduledJobRunId = ?",
+                arguments: [id]
+            )
             try db.execute(
                 sql: """
                     UPDATE scheduledJobRun
                     SET hiddenAt = ?, trigger = 'deleted', scheduledFor = ?,
                         startedAt = NULL, finishedAt = NULL, status = 'cancelled',
                         provider = 'deleted', providerSessionId = NULL,
-                        failureKind = NULL, isUnread = 0
+                        failureKind = NULL, isUnread = 0,
+                        assistantTranscriptState = 'deleted',
+                        assistantTranscriptStatusCode = 'deletedLocal'
                     WHERE id = ? AND hiddenAt IS NULL
                     """,
                 arguments: [date, date, id]
