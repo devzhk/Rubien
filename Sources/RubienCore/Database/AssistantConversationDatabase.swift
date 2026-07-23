@@ -1662,9 +1662,10 @@ extension AppDatabase {
         return trimmed
     }
 
-    /// Computes each matching conversation's best FTS rank once, then joins that
-    /// compact result to the filtered conversation rows. This avoids re-running
-    /// the MATCH/bm25 scan from a correlated ORDER BY subquery for every result.
+    /// Streams matching transcript entries in FTS rank order and keeps the first
+    /// row for each conversation. The first row is that conversation's best
+    /// match, so this preserves BM25 ordering without aggregating `bm25()` inside
+    /// a CTE, a context rejected by the SQLite version on Ubuntu 22.04.
     private static func fetchRankedAssistantConversations(
         query: AssistantConversationQuery,
         ftsQuery: String,
@@ -1701,36 +1702,38 @@ extension AppDatabase {
                 referenceID,
             ])
         }
-        _ = arguments.append(contentsOf: [min(query.limit, 500)])
-        return try AssistantConversation.fetchAll(
+        let rows = try Row.fetchCursor(
             db,
             sql: """
-                WITH matchedEntry AS MATERIALIZED (
-                    SELECT turn.conversationId,
-                           bm25(assistantTranscriptEntryFts) AS rank
-                    FROM assistantTranscriptEntryFts
-                    JOIN assistantTranscriptEntry AS entry
-                      ON entry.rowId = assistantTranscriptEntryFts.rowid
-                    JOIN assistantTurn AS turn ON turn.id = entry.turnId
-                    WHERE assistantTranscriptEntryFts MATCH ?
-                ),
-                rankedConversation AS (
-                    SELECT conversationId, MIN(rank) AS bestRank
-                    FROM matchedEntry
-                    GROUP BY conversationId
-                )
                 SELECT conversation.*
-                FROM rankedConversation AS ranked
+                FROM assistantTranscriptEntryFts
+                JOIN assistantTranscriptEntry AS entry
+                  ON entry.rowId = assistantTranscriptEntryFts.rowid
+                JOIN assistantTurn AS turn ON turn.id = entry.turnId
                 JOIN assistantConversation AS conversation
-                  ON conversation.id = ranked.conversationId
-                WHERE \(predicates.joined(separator: " AND "))
-                ORDER BY ranked.bestRank ASC,
+                  ON conversation.id = turn.conversationId
+                WHERE assistantTranscriptEntryFts MATCH ?
+                  AND \(predicates.joined(separator: " AND "))
+                ORDER BY bm25(assistantTranscriptEntryFts) ASC,
                          conversation.lastActivityAt DESC,
                          conversation.id DESC
-                LIMIT ?
                 """,
             arguments: arguments
         )
+        let limit = min(query.limit, 500)
+        var conversations: [AssistantConversation] = []
+        var seenConversationIDs = Set<String>()
+        while let row = try rows.next() {
+            let conversation = AssistantConversation(row: row)
+            guard seenConversationIDs.insert(conversation.id).inserted else {
+                continue
+            }
+            conversations.append(conversation)
+            if conversations.count == limit {
+                break
+            }
+        }
+        return conversations
     }
 
     private static func assistantFTSQuery(_ raw: String?) -> String? {

@@ -319,6 +319,79 @@ final class AssistantConversationDatabaseTests: XCTestCase {
         )
     }
 
+    func testSearchDeduplicatesMatchingEntriesBeforeApplyingConversationLimit() throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let older = try database.createAssistantConversation(.init(
+            id: "older-search-conversation",
+            provider: .codex,
+            workspaceIdentityHash: "workspace",
+            contextKind: .library,
+            createdAt: date("2026-07-22T10:00:00Z")
+        ))
+        let newer = try database.createAssistantConversation(.init(
+            id: "newer-search-conversation",
+            provider: .codex,
+            workspaceIdentityHash: "workspace",
+            contextKind: .library,
+            createdAt: date("2026-07-22T11:00:00Z")
+        ))
+
+        let olderTurn = AssistantTurn(
+            id: "older-search-turn",
+            conversationId: older.id,
+            ordinal: 1
+        )
+        try database.beginAssistantTurn(
+            olderTurn,
+            userEntry: .init(
+                id: "older-search-entry",
+                turnId: olderTurn.id,
+                sequence: 0,
+                kind: .user,
+                body: "spectral match",
+                createdAt: date("2026-07-22T10:00:01Z")
+            )
+        )
+
+        let newerTurn = AssistantTurn(
+            id: "newer-search-turn",
+            conversationId: newer.id,
+            ordinal: 1
+        )
+        try database.beginAssistantTurn(
+            newerTurn,
+            userEntry: .init(
+                id: "newer-search-entry-1",
+                turnId: newerTurn.id,
+                sequence: 0,
+                kind: .user,
+                body: "spectral match",
+                createdAt: date("2026-07-22T11:00:01Z")
+            )
+        )
+        _ = try database.upsertAssistantTranscriptEntry(.init(
+            id: "newer-search-entry-2",
+            turnId: newerTurn.id,
+            sequence: 1,
+            kind: .assistant,
+            body: "spectral match",
+            createdAt: date("2026-07-22T11:00:02Z")
+        ))
+
+        let results = try database.fetchAssistantConversationSummaries(
+            query: .init(
+                workspaceIdentityHash: "workspace",
+                search: "spectral",
+                limit: 2
+            )
+        )
+
+        XCTAssertEqual(
+            results.map(\.conversation.id),
+            [newer.id, older.id]
+        )
+    }
+
     func testSyntheticEntryIDUpsertKeepsRowAndSequence() throws {
         let database = try AppDatabase(DatabaseQueue())
         let conversation = try database.createAssistantConversation(.init(
