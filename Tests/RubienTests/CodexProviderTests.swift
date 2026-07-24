@@ -1487,6 +1487,7 @@ final class CodexProviderTests: XCTestCase {
         try writeConfig([
             "deltas": ["streaming {threadId}"],
             "completionDelayMs": 500,
+            "threadStartedNotificationDelayMs": 100,
             "assistantText": "answer for {threadId}",
         ], into: workspace)
         let registry = CodexSharedConnectionRegistry()

@@ -2611,6 +2611,14 @@ private actor CodexRuntimeBroker {
             handleServerRequest(srv, id: id, method: method, params: params)
 
         case .notification(let method, let params):
+            if method == "thread/started" {
+                // thread/start and thread/resume responses are authoritative and
+                // startTurn emits exactly one sessionStarted event from that response.
+                // Forwarding this redundant notification is timing-dependent: when it
+                // arrives after active.threadID is bound, the conversation sees a
+                // duplicate; when it arrives earlier, it cannot be routed at all.
+                return
+            }
             if method == "thread/closed",
                let threadID = Self.threadID(inParams: params) {
                 reconcileThreadClosed(srv, threadID: threadID)

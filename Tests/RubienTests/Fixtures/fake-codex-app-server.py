@@ -477,6 +477,8 @@ class Server:
                 if cfg.get("threadStartDelayMs"):
                     time.sleep(int(cfg["threadStartDelayMs"]) / 1000.0)
                 respond(req_id, {"thread": {"id": thread_id, "preview": ""}, "model": "gpt-5.5-fake"})
+                if cfg.get("threadStartedNotificationDelayMs"):
+                    time.sleep(int(cfg["threadStartedNotificationDelayMs"]) / 1000.0)
                 notify("thread/started", {"thread": {"id": thread_id}})
             elif method == "thread/resume":
                 params = msg.get("params") or {}
@@ -502,6 +504,8 @@ class Server:
                 if cfg.get("threadResumeDelayMs"):
                     time.sleep(int(cfg["threadResumeDelayMs"]) / 1000.0)
                 respond(req_id, {"thread": {"id": resumed, "preview": ""}, "model": "gpt-5.5-fake"})
+                if cfg.get("threadStartedNotificationDelayMs"):
+                    time.sleep(int(cfg["threadStartedNotificationDelayMs"]) / 1000.0)
                 notify("thread/started", {"thread": {"id": resumed}})
             elif method == "thread/unsubscribe":
                 thread_id = (msg.get("params") or {}).get("threadId", self.thread_id)
