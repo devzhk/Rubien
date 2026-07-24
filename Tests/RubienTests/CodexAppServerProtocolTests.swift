@@ -345,16 +345,41 @@ final class CodexAppServerProtocolTests: XCTestCase {
         XCTAssertEqual(caps?["experimentalApi"] as? Bool, true)
     }
 
+    func testConfigReadCarriesProjectWorkingDirectory() {
+        let obj = json(CodexAppServerProtocol.configRead(
+            requestID: 2,
+            cwd: "/project"
+        ))
+        XCTAssertEqual(obj["method"] as? String, "config/read")
+        let params = obj["params"] as? [String: Any]
+        XCTAssertEqual(params?["cwd"] as? String, "/project")
+        XCTAssertEqual(params?["includeLayers"] as? Bool, false)
+    }
+
     func testThreadStartCarriesSandboxApprovalAndSeed() {
+        let config: [String: Any] = [
+            "features": ["apps": false],
+            "mcp_servers": ["rubien": ["enabled": true]],
+        ]
         let obj = json(CodexAppServerProtocol.threadStart(
             requestID: 2, cwd: "/w", sandbox: "read-only", approvalPolicy: "on-request",
-            developerInstructions: "seed text", model: nil))
+            developerInstructions: "seed text", model: nil, config: config))
         let params = try! XCTUnwrap(obj["params"] as? [String: Any])
         XCTAssertEqual(params["sandbox"] as? String, "read-only")
         XCTAssertEqual(params["approvalPolicy"] as? String, "on-request")
         XCTAssertEqual(params["cwd"] as? String, "/w")
         XCTAssertEqual(params["developerInstructions"] as? String, "seed text")
         XCTAssertNil(params["model"], "empty/nil model override is omitted")
+        let encodedConfig = try! XCTUnwrap(params["config"] as? [String: Any])
+        XCTAssertEqual(
+            (encodedConfig["features"] as? [String: Any])?["apps"] as? Bool,
+            false
+        )
+        XCTAssertEqual(
+            ((encodedConfig["mcp_servers"] as? [String: Any])?["rubien"]
+                as? [String: Any])?["enabled"] as? Bool,
+            true
+        )
     }
 
     // SAFETY REGRESSION: without `approvalsReviewer: "user"`, codex falls back to the
@@ -369,10 +394,36 @@ final class CodexAppServerProtocolTests: XCTestCase {
                        "thread/start must not defer approvals to codex's own guardian")
 
         let resume = try! XCTUnwrap(json(CodexAppServerProtocol.threadResume(
-            requestID: 2, threadId: "t1"))["params"] as? [String: Any])
+            requestID: 2,
+            threadId: "t1",
+            cwd: "/resume",
+            config: ["features": ["apps": true]]
+        ))["params"] as? [String: Any])
         XCTAssertEqual(resume["approvalsReviewer"] as? String, "user",
                        "a resumed conversation keeps the client-approval invariant")
         XCTAssertEqual(resume["threadId"] as? String, "t1")
+        XCTAssertEqual(resume["cwd"] as? String, "/resume")
+        XCTAssertEqual(
+            ((resume["config"] as? [String: Any])?["features"]
+                as? [String: Any])?["apps"] as? Bool,
+            true
+        )
+    }
+
+    func testThreadUnsubscribeCarriesThreadIdentity() {
+        let obj = json(CodexAppServerProtocol.threadUnsubscribe(
+            requestID: 3, threadId: "thread-lease"))
+        XCTAssertEqual(obj["method"] as? String, "thread/unsubscribe")
+        XCTAssertEqual(obj["id"] as? Int, 3)
+        let params = try! XCTUnwrap(obj["params"] as? [String: Any])
+        XCTAssertEqual(params["threadId"] as? String, "thread-lease")
+    }
+
+    func testLivenessProbeIsAnEmptySideEffectFreeRequest() {
+        let obj = json(CodexAppServerProtocol.livenessProbe(requestID: 4))
+        XCTAssertEqual(obj["method"] as? String, "rubien/liveness")
+        XCTAssertEqual(obj["id"] as? Int, 4)
+        XCTAssertEqual((obj["params"] as? [String: Any])?.count, 0)
     }
 
     func testTurnStartCarriesTextThenLocalImagesAndEffort() {

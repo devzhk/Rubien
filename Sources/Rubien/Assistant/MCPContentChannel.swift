@@ -1,10 +1,10 @@
 import Foundation
 import RubienCore
 
-/// The native MCP library channel the Assistant attaches to a Claude turn: the
-/// already-bundled `rubien-cli` run as an MCP server (`mcp`) over
-/// `--mcp-config`, pointed at the app's live library. This is how the agent reads
-/// the document under discussion (design §D4/§D6, Phase 2b).
+/// The native MCP library channel the Assistant attaches to a provider turn:
+/// the already-bundled `rubien-cli` run as an MCP server (`mcp`), pointed at
+/// the app's live library. This is how the agent reads the document under
+/// discussion (design §D4/§D6, Phase 2b).
 ///
 /// Nothing new is bundled — `rubien-cli` already ships at `Contents/Helpers/` — and
 /// there is no Node/runtime dependency: the native `rubien-cli mcp` server *is* the
@@ -37,8 +37,11 @@ struct MCPContentChannel: Sendable, Equatable {
         configJSON(readOnly: false)
     }
 
-    func configJSON(readOnly: Bool) -> [String: Any] {
-        var environment = [
+    /// Provider-neutral registration for the canonical Rubien MCP server.
+    /// Provider adapters may add transport-specific fields, but command, args,
+    /// and environment come from this one builder.
+    func serverConfiguration(readOnly: Bool) -> [String: Any] {
+        var environment: [String: Any] = [
             "RUBIEN_LIBRARY_ROOT": libraryRoot.path,
             // Enables the app-only structured paper-card capability.
             // Normal native and Node MCP catalogs remain unchanged.
@@ -49,12 +52,16 @@ struct MCPContentChannel: Sendable, Equatable {
                 = RubienAppSchedulingContract.environmentValue
         }
         return [
+            "command": cliURL.path,
+            "args": readOnly ? ["mcp", "--read-only"] : ["mcp"],
+            "env": environment,
+        ]
+    }
+
+    func configJSON(readOnly: Bool) -> [String: Any] {
+        [
             "mcpServers": [
-                Self.serverName: [
-                    "command": cliURL.path,
-                    "args": readOnly ? ["mcp", "--read-only"] : ["mcp"],
-                    "env": environment,
-                ],
+                Self.serverName: serverConfiguration(readOnly: readOnly),
             ],
         ]
     }

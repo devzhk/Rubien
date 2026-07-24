@@ -6,42 +6,68 @@ enum CodexMetadataKind: String, Sendable, Equatable {
     case modelCatalog
 }
 
-/// Process-level settings fixed when `codex app-server` starts. Turns can share one
-/// server concurrently only when their profiles match.
+/// Process-level settings fixed when `codex app-server` starts. New-thread Apps
+/// and Rubien MCP posture deliberately do not live here; they ride thread config
+/// and therefore do not split a process batch. Cwd only remains process-scoped
+/// while installed plugins are enabled because their project discovery has not
+/// yet been proven thread-local.
 struct CodexRuntimeProfile: Sendable, Equatable {
     let webAccess: Bool
-    let loadUserTools: Bool
-    let readOnlyLibrary: Bool
-    /// Canonical cwd used to resolve project-scoped Codex configuration and the
-    /// scheduled-run MCP isolation catalog.
-    let workingDirectory: String?
+    let pluginWorkingDirectory: String?
+    var pluginsEnabled: Bool { pluginWorkingDirectory != nil }
 
-    init(
-        webAccess: Bool,
-        loadUserTools: Bool,
-        readOnlyLibrary: Bool,
-        workingDirectory: String? = nil
-    ) {
+    init(webAccess: Bool) {
         self.webAccess = webAccess
-        self.loadUserTools = loadUserTools
-        self.readOnlyLibrary = readOnlyLibrary
-        self.workingDirectory = workingDirectory
+        self.pluginWorkingDirectory = nil
+    }
+
+    init(webAccess: Bool, pluginWorkingDirectory: String) {
+        precondition(
+            !pluginWorkingDirectory.isEmpty,
+            "plugin-enabled Codex profiles require a workspace"
+        )
+        self.webAccess = webAccess
+        self.pluginWorkingDirectory = URL(
+            fileURLWithPath: pluginWorkingDirectory
+        ).standardizedFileURL.path
     }
 
     static let interactiveDefault = CodexRuntimeProfile(
-        webAccess: true,
-        loadUserTools: false,
-        readOnlyLibrary: false
+        webAccess: true
     )
 
-    static func historyDefault(workingDirectory: String) -> CodexRuntimeProfile {
-        CodexRuntimeProfile(
-            webAccess: true,
-            loadUserTools: false,
-            readOnlyLibrary: false,
-            workingDirectory: workingDirectory
-        )
+    static let metadataDefault = CodexRuntimeProfile(
+        webAccess: true
+    )
+
+    func delta(from other: CodexRuntimeProfile) -> CodexRuntimeProfileDelta {
+        var delta: CodexRuntimeProfileDelta = []
+        if webAccess != other.webAccess {
+            delta.insert(.webAccess)
+        }
+        if pluginsEnabled != other.pluginsEnabled {
+            delta.insert(.pluginToggle)
+        } else if pluginsEnabled,
+                  pluginWorkingDirectory != other.pluginWorkingDirectory {
+            delta.insert(.pluginWorkingDirectory)
+        }
+        return delta
     }
+}
+
+/// Process-level dimensions that force Codex work into a different app-server
+/// batch. Multiple dimensions may differ for one transition.
+struct CodexRuntimeProfileDelta: OptionSet, Sendable {
+    let rawValue: UInt8
+
+    static let webAccess = Self(rawValue: 1 << 0)
+    static let pluginToggle = Self(rawValue: 1 << 1)
+    static let pluginWorkingDirectory = Self(rawValue: 1 << 2)
+}
+
+enum CodexTurnQueueReason: Sendable, Equatable {
+    case capacity
+    case runtimeProfile(CodexRuntimeProfileDelta)
 }
 
 enum CodexWorkPurpose: Sendable, Equatable {
@@ -86,7 +112,7 @@ struct CodexScheduledWork: Sendable, Equatable {
 struct CodexWorkScheduler: Sendable {
     enum Admission: Sendable, Equatable {
         case admitted
-        case queued
+        case queued(CodexTurnQueueReason)
         case metadataUnavailable
         case preemptMetadataAndAdmit
     }
@@ -112,7 +138,7 @@ struct CodexWorkScheduler: Sendable {
         if activeTurns[work.workID] != nil {
             return .admitted
         }
-        if canAdmitImmediately(work) {
+        guard let reason = blockingReason(for: work) else {
             activeTurns[work.workID] = work
             if metadata != nil {
                 metadata = nil
@@ -123,7 +149,7 @@ struct CodexWorkScheduler: Sendable {
         if !turnQueue.contains(where: { $0.workID == work.workID }) {
             turnQueue.append(work)
         }
-        return .queued
+        return .queued(reason)
     }
 
     mutating func beginMetadata(_ work: CodexScheduledWork) -> Admission {
@@ -185,15 +211,53 @@ struct CodexWorkScheduler: Sendable {
         !activeTurns.isEmpty || !reservedTurns.isEmpty || !turnQueue.isEmpty
     }
 
-    private func canAdmitImmediately(_ work: CodexScheduledWork) -> Bool {
-        guard turnQueue.isEmpty,
-              activeTurns.count + reservedTurns.count < maxConcurrentTurns,
-              let profile = work.runtimeProfile else {
-            return false
+    /// Current blocker for every queued turn. A full batch is ordinary capacity.
+    /// Once a slot opens, an incompatible FIFO head reclassifies the remaining
+    /// wait as process-profile serialization until the active batch drains.
+    var queuedReasons: [UUID: CodexTurnQueueReason] {
+        var reasons: [UUID: CodexTurnQueueReason] = [:]
+        reasons.reserveCapacity(turnQueue.count)
+        for work in turnQueue {
+            reasons[work.workID] = blockingReason(for: work) ?? .capacity
         }
-        let existingProfiles = activeTurns.values.compactMap(\.runtimeProfile)
-            + reservedTurns.values.compactMap(\.runtimeProfile)
-        return existingProfiles.allSatisfy { $0 == profile }
+        return reasons
+    }
+
+    /// One authoritative decision for admission and metrics classification.
+    /// A compatible turn behind an incompatible FIFO head is profile-blocked:
+    /// without that pending transition it could join the live batch as soon as
+    /// capacity permits.
+    private func blockingReason(
+        for work: CodexScheduledWork
+    ) -> CodexTurnQueueReason? {
+        guard let requestedProfile = work.runtimeProfile else {
+            return .capacity
+        }
+        if activeTurns.count + reservedTurns.count >= maxConcurrentTurns {
+            return .capacity
+        }
+        let activeProfile = activeTurns.values.first?.runtimeProfile
+            ?? reservedTurns.values.first?.runtimeProfile
+        if let activeProfile {
+            if let headProfile = turnQueue.first?.runtimeProfile {
+                let headDelta = headProfile.delta(from: activeProfile)
+                if !headDelta.isEmpty {
+                    return .runtimeProfile(headDelta)
+                }
+                return .capacity
+            }
+            let requestedDelta = requestedProfile.delta(from: activeProfile)
+            if !requestedDelta.isEmpty {
+                return .runtimeProfile(requestedDelta)
+            }
+        } else if let headProfile = turnQueue.first?.runtimeProfile {
+            let headDelta = requestedProfile.delta(from: headProfile)
+            if !headDelta.isEmpty {
+                return .runtimeProfile(headDelta)
+            }
+            return .capacity
+        }
+        return nil
     }
 
     private mutating func reserveAvailableTurns() -> [CodexScheduledWork] {

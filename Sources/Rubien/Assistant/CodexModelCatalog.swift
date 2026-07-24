@@ -149,7 +149,8 @@ actor CodexModelCatalog {
         // Model discovery needs no apps, plugins, or MCP tools. Resolve the ambient
         // names under feature isolation, then pin every configured server off before
         // starting this metadata-only app-server.
-        guard let disabledMCPServerNames = CodexInvocation.isolatedMCPServerNames(
+        guard let disabledMCPServerNames =
+            CodexInvocation.metadataDisabledMCPServerNames(
             executablePath: executablePath,
             environment: environment,
             workingDirectory: workingDirectory.path
@@ -157,11 +158,8 @@ actor CodexModelCatalog {
             logger.error("codex model/list probe failed: could not isolate ambient MCP servers")
             return .unavailable
         }
-        let arguments = CodexInvocation.arguments(
-            rubienCLIPath: nil,
-            libraryRoot: nil,
+        let arguments = CodexInvocation.metadataArguments(
             webAccess: true,
-            readOnlyLibrary: true,
             disabledMCPServerNames: disabledMCPServerNames)
 
         let process: SpawnedAgentProcess

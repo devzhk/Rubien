@@ -10,8 +10,8 @@ file in the process cwd (the provider sets cwd = the turn's workspace; tests rew
 the file between sends). It:
 
   * answers `--version` (for `isAvailable()`),
-  * records its argv (`fake-codex-argv.json`) so tests can assert the `--disable
-    apps` / `-c mcp_servers.rubien.*` injection,
+  * records its argv (`fake-codex-argv.json`) so tests can assert process-scoped
+    web/plugin posture, while thread params capture Apps and MCP configuration,
   * records what it observed (`fake-codex-observed.json`): thread/turn counts, the
     approval decision it received + the JSON type of the response id (the verbatim-
     id contract), whether an unsupported request got answered, interrupts, its pid,
@@ -21,14 +21,20 @@ the file between sends). It:
     exits non-zero after `turn/start` (crash path).
 
 Config keys (all optional): deltas[], assistantText (supports "{threadStarts}",
-"{threadId}", and "{turnId}"), completionDelayMs,
+"{threadId}", and "{turnId}"), turnStartDelayMs, completionDelayMs,
 usageLast{...}, approval{reason,command,availableDecisions[]},
 mcpApproval{server,tool,mutation}, unknownRequest(bool),
 hang(bool), exitAfterTurnStart(int), models[] / modelListError (model/list).
-`mcpListDelayMs` delays the standalone `mcp list --json` isolation probe.
+`configReadDelayMs` delays the live `config/read` isolation request.
+`mcpListDelayMs` delays the standalone `mcp list --json` metadata probe.
+`rubien/liveness` is answered and counted so watchdog tests can distinguish a
+quiet responsive turn from a process-level wedge.
 History (3b-4): threads[] (thread/list data), searchHits[] (thread/search data,
 each {thread,snippet}), transcript{turns:[…]} (thread/read), and
-threadReadDelayOnceMs (delay the first read across respawns). All record params.
+threadReadDelayOnceMs (delay the first read across respawns). Thread lifecycle:
+threadStartDelayMs, threadResumeDelayMs, unsubscribeDelayMs, unsubscribeStatus,
+stickyResumeCwd, exitDuringUnsubscribe, emitThreadClosedOnUnsubscribe (default
+true), and closeThreadAfterTurn. All record params.
 """
 import json
 import os
@@ -42,6 +48,7 @@ OBSERVED = {
     "pid": os.getpid(),
     "threadStarts": 0,
     "threadResumes": 0,
+    "threadUnsubscribes": 0,
     "turnStarts": 0,
     "interrupts": 0,
 }
@@ -96,6 +103,40 @@ def record_approval(thread_id, key, value):
         by_thread = dict(OBSERVED.get(by_thread_key, {}))
         by_thread[thread_id] = value
         record(**{key: value, by_thread_key: by_thread})
+
+
+def record_unsubscribe(thread_id):
+    with OBSERVED_LOCK:
+        ids = list(OBSERVED.get("threadUnsubscribeIds", []))
+        ids.append(thread_id)
+        record(
+            threadUnsubscribes=OBSERVED.get("threadUnsubscribes", 0) + 1,
+            threadUnsubscribeIds=ids,
+        )
+
+
+def record_interrupt(params):
+    with OBSERVED_LOCK:
+        turn_ids = list(OBSERVED.get("interruptTurnIds", []))
+        turn_ids.append(params.get("turnId"))
+        record(
+            interrupts=OBSERVED.get("interrupts", 0) + 1,
+            interruptTurnIds=turn_ids,
+            lastInterruptParams=params,
+        )
+
+
+def emit_thread_closed(thread_id):
+    with OBSERVED_LOCK:
+        ids = list(OBSERVED.get("threadClosedIds", []))
+        ids.append(thread_id)
+        record(
+            threadClosedNotifications=OBSERVED.get(
+                "threadClosedNotifications", 0
+            ) + 1,
+            threadClosedIds=ids,
+        )
+    notify("thread/closed", {"threadId": thread_id})
 
 
 def load_config(directory=None):
@@ -159,6 +200,7 @@ class Server:
         self.response_waiters = {}
         self.turn_interrupts = {}
         self.thread_workspaces = {}
+        self.pending_unsubscribes = set()
         self.shutdown_event = threading.Event()
 
     def next_server_request(self, method, params):
@@ -201,6 +243,8 @@ class Server:
             thread_workspace = self.thread_workspaces.get(thread_id)
         cfg = load_config(thread_workspace)
         increment_observed("turnStarts", lastTurnParams=params)
+        if cfg.get("turnStartDelayMs"):
+            time.sleep(int(cfg["turnStartDelayMs"]) / 1000.0)
         respond(req_id, {"turn": {"id": turn_id, "status": "inProgress"}})
         base = {"threadId": thread_id, "turnId": turn_id}
         notify("turn/started", {"threadId": thread_id, "turn": {"id": turn_id}})
@@ -369,6 +413,8 @@ class Server:
         usage = cfg.get("usageLast", {"inputTokens": 100, "outputTokens": 5, "cachedInputTokens": 20})
         notify("thread/tokenUsage/updated", dict(base, tokenUsage={"total": {"inputTokens": 999999}, "last": usage}))
         notify("turn/completed", {"threadId": thread_id, "turn": {"id": turn_id, "status": "completed", "error": None}})
+        if cfg.get("closeThreadAfterTurn"):
+            emit_thread_closed(thread_id)
         return True
 
     def serve(self):
@@ -391,6 +437,7 @@ class Server:
                     except queue.Full:
                         pass
             elif method == "initialize":
+                record(initializeStarted=True)
                 cfg = load_config()
                 if cfg.get("grandchild"):
                     spawn_grandchild()
@@ -426,15 +473,66 @@ class Server:
                     "threadStarts",
                     lastThreadStartParams=msg.get("params", {})
                 )
+                cfg = load_config()
+                if cfg.get("threadStartDelayMs"):
+                    time.sleep(int(cfg["threadStartDelayMs"]) / 1000.0)
                 respond(req_id, {"thread": {"id": thread_id, "preview": ""}, "model": "gpt-5.5-fake"})
                 notify("thread/started", {"thread": {"id": thread_id}})
             elif method == "thread/resume":
-                resumed = (msg.get("params") or {}).get("threadId", self.thread_id)
+                params = msg.get("params") or {}
+                resumed = params.get("threadId", self.thread_id)
                 with self.state_lock:
-                    self.thread_workspaces.setdefault(resumed, os.getcwd())
-                increment_observed("threadResumes")
+                    if resumed in self.pending_unsubscribes:
+                        record(resumeDuringUnsubscribe=True)
+                    previous_cwd = self.thread_workspaces.get(resumed)
+                    previous_config = load_config(previous_cwd)
+                    resumed_cwd = params.get("cwd")
+                    if resumed_cwd and not (
+                        previous_cwd
+                        and previous_config.get("stickyResumeCwd")
+                    ):
+                        self.thread_workspaces[resumed] = resumed_cwd
+                    else:
+                        self.thread_workspaces.setdefault(resumed, os.getcwd())
+                increment_observed(
+                    "threadResumes",
+                    lastThreadResumeParams=params,
+                )
+                cfg = load_config(self.thread_workspaces.get(resumed))
+                if cfg.get("threadResumeDelayMs"):
+                    time.sleep(int(cfg["threadResumeDelayMs"]) / 1000.0)
                 respond(req_id, {"thread": {"id": resumed, "preview": ""}, "model": "gpt-5.5-fake"})
                 notify("thread/started", {"thread": {"id": resumed}})
+            elif method == "thread/unsubscribe":
+                thread_id = (msg.get("params") or {}).get("threadId", self.thread_id)
+                with self.state_lock:
+                    self.pending_unsubscribes.add(thread_id)
+                    thread_workspace = self.thread_workspaces.get(thread_id)
+                cfg = load_config(thread_workspace)
+                record_unsubscribe(thread_id)
+
+                def complete_unsubscribe(
+                    thread_id=thread_id, request_id=req_id, config=cfg
+                ):
+                    delay_ms = int(config.get("unsubscribeDelayMs", 0))
+                    if delay_ms:
+                        time.sleep(delay_ms / 1000.0)
+                    if config.get("exitDuringUnsubscribe"):
+                        os._exit(int(config.get("exitDuringUnsubscribeCode", 73)))
+                    with self.state_lock:
+                        self.pending_unsubscribes.discard(thread_id)
+                    respond(
+                        request_id,
+                        {"status": config.get(
+                            "unsubscribeStatus", "unsubscribed"
+                        )},
+                    )
+                    if config.get("emitThreadClosedOnUnsubscribe", True):
+                        emit_thread_closed(thread_id)
+
+                threading.Thread(
+                    target=complete_unsubscribe, daemon=True
+                ).start()
             elif method == "turn/start":
                 threading.Thread(
                     target=self.run_turn,
@@ -449,8 +547,28 @@ class Server:
                     )
                 if interrupt_event is not None:
                     interrupt_event.set()
-                increment_observed("interrupts")
+                record_interrupt(params)
                 respond(req_id, {})
+            elif method == "rubien/liveness":
+                increment_observed("livenessProbes")
+                respond(req_id, {})
+            elif method == "config/read":
+                params = msg.get("params") or {}
+                cfg = load_config(params.get("cwd"))
+                increment_observed(
+                    "configReadRequests",
+                    lastConfigReadParams=params,
+                )
+                if cfg.get("configReadDelayMs"):
+                    time.sleep(int(cfg["configReadDelayMs"]) / 1000.0)
+                servers = {}
+                for row in cfg.get("mcpServers", []):
+                    if not isinstance(row, dict) or not isinstance(row.get("name"), str):
+                        continue
+                    servers[row["name"]] = {
+                        "enabled": row.get("enabled", True),
+                    }
+                respond(req_id, {"config": {"mcp_servers": servers}})
             elif method == "thread/list":
                 # History recents (3b-4). `data[]` of thread summaries; the real server
                 # pre-sorts newest-first. Params recorded so tests assert cwd/sourceKinds.

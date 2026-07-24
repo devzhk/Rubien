@@ -54,6 +54,10 @@ struct RubienSettingsView: View {
     @State private var defaultWebAccess = true
     @State private var defaultAutoApprove = false
     @State private var defaultLoadUserTools = false
+    @State private var codexRuntimeMetrics =
+        CodexRuntimeMetricsStore.shared.snapshot()
+    @State private var codexRuntimeMetricsStatusMessage: String?
+    @State private var showResetCodexRuntimeMetricsConfirmation = false
     @State private var libraryPrompt = AssistantContext.defaultPrompt(for: .library)
     @State private var readerPrompt = AssistantContext.defaultPrompt(for: .reader)
     @State private var isEditingLibraryPrompt = false
@@ -387,6 +391,7 @@ struct RubienSettingsView: View {
             assistantConversationStorageSection
             assistantClaudeCLISection
             assistantCodexCLISection
+            assistantCodexRuntimeMetricsSection
         }
         .formStyle(.grouped)
         .task {
@@ -398,6 +403,7 @@ struct RubienSettingsView: View {
             defaultWebAccess = RubienPreferences.assistantWebAccess
             defaultAutoApprove = RubienPreferences.assistantAutoApprove
             defaultLoadUserTools = RubienPreferences.assistantLoadUserTools
+            refreshCodexRuntimeMetrics()
             libraryPrompt = RubienPreferences.assistantLibraryPromptOverride
                 ?? AssistantContext.defaultPrompt(for: .library)
             readerPrompt = RubienPreferences.assistantReaderPromptOverride
@@ -735,7 +741,7 @@ struct RubienSettingsView: View {
             }
 
             Toggle(isOn: $defaultLoadUserTools) {
-                Text(String(localized: "Use connected apps and MCP tools", bundle: .module))
+                Text(String(localized: "Use connected apps, plugins, and MCP tools", bundle: .module))
             }
 
             Picker(selection: $defaultAutoApprove) {
@@ -754,7 +760,7 @@ struct RubienSettingsView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(String(localized: "Only applies to new conversations.", bundle: .module))
                 Text(String(localized: "Claude: loads your plugins, settings, and MCP servers.", bundle: .module))
-                Text(String(localized: "Codex: enables connected apps; MCP servers are already loaded.", bundle: .module))
+                Text(String(localized: "Codex: enables connected apps and plugins; MCP servers are already loaded.", bundle: .module))
                 Text(String(localized: "Permissions: your agent rules apply, so Rubien may not ask first.", bundle: .module))
             }
         }
@@ -905,6 +911,150 @@ struct RubienSettingsView: View {
             // outside Rubien — the non-obvious fact worth surfacing before first use.
             Text(String(localized: "Codex uses your ~/.codex account and stores conversations there, not in Rubien.", bundle: .module))
         }
+    }
+
+    private var assistantCodexRuntimeMetricsSection: some View {
+        Section {
+            LabeledContent(
+                String(localized: "Observation started", bundle: .module),
+                value: codexRuntimeMetrics.observationStartedAt.formatted(
+                    date: .abbreviated,
+                    time: .shortened
+                )
+            )
+            LabeledContent(
+                String(localized: "Codex turn requests", bundle: .module),
+                value: "\(codexRuntimeMetrics.turnRequests)"
+            )
+            LabeledContent(
+                String(localized: "Process-profile waits", bundle: .module),
+                value: codexRuntimeMetricValue(
+                    incidents: codexRuntimeMetrics.profileQueueIncidents,
+                    milliseconds: codexRuntimeMetrics.profileQueueWaitMilliseconds
+                )
+            )
+            LabeledContent(
+                String(localized: "Capacity waits", bundle: .module),
+                value: codexRuntimeMetricValue(
+                    incidents: codexRuntimeMetrics.capacityQueueIncidents,
+                    milliseconds: codexRuntimeMetrics.capacityQueueWaitMilliseconds
+                )
+            )
+            LabeledContent(
+                String(localized: "Controlled profile respawns", bundle: .module),
+                value: "\(codexRuntimeMetrics.profileRespawns)"
+            )
+            HStack {
+                Button(String(localized: "Refresh", bundle: .module)) {
+                    refreshCodexRuntimeMetrics()
+                }
+                .buttonStyle(SettingsActionButtonStyle())
+                Button(String(localized: "Copy report", bundle: .module)) {
+                    copyCodexRuntimeMetrics()
+                }
+                .buttonStyle(SettingsActionButtonStyle())
+                Button(
+                    String(localized: "Reset…", bundle: .module),
+                    role: .destructive
+                ) {
+                    showResetCodexRuntimeMetricsConfirmation = true
+                }
+                .buttonStyle(SettingsActionButtonStyle())
+            }
+            if let codexRuntimeMetricsStatusMessage {
+                Text(codexRuntimeMetricsStatusMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        } header: {
+            Text(String(localized: "Codex runtime measurement", bundle: .module))
+        } footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(String(
+                    localized: "Process-profile waits are caused by web, plugin, or plugin-workspace differences. Capacity waits are shown separately as a control.",
+                    bundle: .module
+                ))
+                Text(String(
+                    localized: "A queued turn can contribute to both totals when capacity opens before an incompatible process profile can run.",
+                    bundle: .module
+                ))
+                Text(codexRuntimeProfileBreakdown)
+                Text(String(
+                    localized: "This local report stores only aggregate counts and wait durations. It never includes prompts, conversations, or workspace paths and is not synced.",
+                    bundle: .module
+                ))
+            }
+        }
+        .confirmationDialog(
+            String(localized: "Reset Codex runtime measurement?", bundle: .module),
+            isPresented: $showResetCodexRuntimeMetricsConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(
+                String(localized: "Reset measurement", bundle: .module),
+                role: .destructive
+            ) {
+                codexRuntimeMetrics = CodexRuntimeMetricsStore.shared.reset()
+                codexRuntimeMetricsStatusMessage = String(
+                    localized: "Codex runtime measurement reset.",
+                    bundle: .module
+                )
+            }
+            Button(String(localized: "Cancel", bundle: .module), role: .cancel) {}
+        } message: {
+            Text(String(
+                localized: "This clears only the local aggregate runtime report. It does not change Codex settings or conversations.",
+                bundle: .module
+            ))
+        }
+    }
+
+    private func codexRuntimeMetricValue(
+        incidents: Int,
+        milliseconds: Int64
+    ) -> String {
+        "\(incidents) · \(CodexRuntimeMetricsFormatting.duration(milliseconds: milliseconds))"
+    }
+
+    private var codexRuntimeProfileBreakdown: String {
+        let queued = String(
+            format: String(
+                localized: "Queued — web: %d, plugin toggle: %d, plugin workspace: %d.",
+                bundle: .module
+            ),
+            codexRuntimeMetrics.profileQueueWebAccessIncidents,
+            codexRuntimeMetrics.profileQueuePluginToggleIncidents,
+            codexRuntimeMetrics.profileQueuePluginWorkingDirectoryIncidents
+        )
+        let respawned = String(
+            format: String(
+                localized: "Respawned — web: %d, plugin toggle: %d, plugin workspace: %d.",
+                bundle: .module
+            ),
+            codexRuntimeMetrics.profileRespawnWebAccessIncidents,
+            codexRuntimeMetrics.profileRespawnPluginToggleIncidents,
+            codexRuntimeMetrics.profileRespawnPluginWorkingDirectoryIncidents
+        )
+        return "\(queued) \(respawned)"
+    }
+
+    private func refreshCodexRuntimeMetrics() {
+        codexRuntimeMetrics = CodexRuntimeMetricsStore.shared.snapshot()
+        codexRuntimeMetricsStatusMessage = nil
+    }
+
+    private func copyCodexRuntimeMetrics() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(
+            CodexRuntimeMetricsStore.shared.exportJSON(),
+            forType: .string
+        )
+        refreshCodexRuntimeMetrics()
+        codexRuntimeMetricsStatusMessage = String(
+            localized: "Copied Codex runtime report.",
+            bundle: .module
+        )
     }
 
     private var claudeStatusRow: some View {

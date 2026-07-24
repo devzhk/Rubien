@@ -24,7 +24,7 @@ final class CodexWorkSchedulerTests: XCTestCase {
 
         XCTAssertEqual(scheduler.beginMetadata(metadata), .admitted)
         XCTAssertEqual(scheduler.requestTurn(first), .preemptMetadataAndAdmit)
-        XCTAssertEqual(scheduler.requestTurn(second), .queued)
+        XCTAssertEqual(scheduler.requestTurn(second), .queued(.capacity))
         XCTAssertEqual(scheduler.finishTurn(workID: first.workID), [second])
     }
 
@@ -42,12 +42,12 @@ final class CodexWorkSchedulerTests: XCTestCase {
 
         XCTAssertEqual(scheduler.requestTurn(first), .admitted)
         XCTAssertEqual(scheduler.requestTurn(second), .admitted)
-        XCTAssertEqual(scheduler.requestTurn(third), .queued)
+        XCTAssertEqual(scheduler.requestTurn(third), .queued(.capacity))
         XCTAssertEqual(scheduler.finishTurn(workID: first.workID), [third])
         XCTAssertEqual(scheduler.requestTurn(third), .admitted)
     }
 
-    func testIncompatibleRuntimeProfileWaitsForTheWholeActiveBatch() {
+    func testDifferentWebProfileWaitsForTheWholeActiveBatch() {
         var scheduler = CodexWorkScheduler(maxConcurrentTurns: 4)
         let interactive = work(.interactive(
             ownerID: UUID(), conversationID: UUID(), turnID: UUID()
@@ -55,10 +55,8 @@ final class CodexWorkSchedulerTests: XCTestCase {
         let secondInteractive = work(.interactive(
             ownerID: UUID(), conversationID: UUID(), turnID: UUID()
         ))
-        let readOnlyProfile = CodexRuntimeProfile(
-            webAccess: false,
-            loadUserTools: false,
-            readOnlyLibrary: true
+        let webOffProfile = CodexRuntimeProfile(
+            webAccess: false
         )
         let scheduled = CodexScheduledWork(
             workID: UUID(),
@@ -67,12 +65,15 @@ final class CodexWorkSchedulerTests: XCTestCase {
                 conversationID: nil,
                 turnID: UUID()
             ),
-            runtimeProfile: readOnlyProfile
+            runtimeProfile: webOffProfile
         )
 
         XCTAssertEqual(scheduler.requestTurn(interactive), .admitted)
         XCTAssertEqual(scheduler.requestTurn(secondInteractive), .admitted)
-        XCTAssertEqual(scheduler.requestTurn(scheduled), .queued)
+        XCTAssertEqual(
+            scheduler.requestTurn(scheduled),
+            .queued(.runtimeProfile(.webAccess))
+        )
         XCTAssertEqual(scheduler.finishTurn(workID: interactive.workID), [])
         XCTAssertEqual(
             scheduler.finishTurn(workID: secondInteractive.workID),
@@ -80,7 +81,67 @@ final class CodexWorkSchedulerTests: XCTestCase {
         )
     }
 
-    func testDifferentConfigurationWorkspacesDoNotShareAProcessBatch() {
+    func testFullBatchReclassifiesFromCapacityToProfileWhenASlotOpens() {
+        var scheduler = CodexWorkScheduler(maxConcurrentTurns: 2)
+        let first = work(.interactive(
+            ownerID: UUID(), conversationID: UUID(), turnID: UUID()
+        ))
+        let second = work(.interactive(
+            ownerID: UUID(), conversationID: UUID(), turnID: UUID()
+        ))
+        let webOff = CodexScheduledWork(
+            workID: UUID(),
+            purpose: .scheduled(
+                runID: "web-off",
+                conversationID: nil,
+                turnID: UUID()
+            ),
+            runtimeProfile: CodexRuntimeProfile(webAccess: false)
+        )
+
+        XCTAssertEqual(scheduler.requestTurn(first), .admitted)
+        XCTAssertEqual(scheduler.requestTurn(second), .admitted)
+        XCTAssertEqual(scheduler.requestTurn(webOff), .queued(.capacity))
+        XCTAssertEqual(scheduler.queuedReasons[webOff.workID], .capacity)
+
+        XCTAssertEqual(scheduler.finishTurn(workID: first.workID), [])
+        XCTAssertEqual(
+            scheduler.queuedReasons[webOff.workID],
+            .runtimeProfile(.webAccess)
+        )
+        XCTAssertEqual(scheduler.finishTurn(workID: second.workID), [webOff])
+    }
+
+    func testDifferentThreadWorkspacesShareAProcessBatch() {
+        var scheduler = CodexWorkScheduler(maxConcurrentTurns: 4)
+        let first = CodexScheduledWork(
+            workID: UUID(),
+            purpose: .interactive(
+                ownerID: UUID(),
+                conversationID: UUID(),
+                turnID: UUID()
+            ),
+            runtimeProfile: CodexRuntimeProfile(
+                webAccess: true
+            )
+        )
+        let second = CodexScheduledWork(
+            workID: UUID(),
+            purpose: .interactive(
+                ownerID: UUID(),
+                conversationID: UUID(),
+                turnID: UUID()
+            ),
+            runtimeProfile: CodexRuntimeProfile(
+                webAccess: true
+            )
+        )
+
+        XCTAssertEqual(scheduler.requestTurn(first), .admitted)
+        XCTAssertEqual(scheduler.requestTurn(second), .admitted)
+    }
+
+    func testPluginEnabledDifferentWorkspacesDoNotShareAProcessBatch() {
         var scheduler = CodexWorkScheduler(maxConcurrentTurns: 4)
         let first = CodexScheduledWork(
             workID: UUID(),
@@ -91,9 +152,7 @@ final class CodexWorkSchedulerTests: XCTestCase {
             ),
             runtimeProfile: CodexRuntimeProfile(
                 webAccess: true,
-                loadUserTools: false,
-                readOnlyLibrary: false,
-                workingDirectory: "/tmp/first"
+                pluginWorkingDirectory: "/first"
             )
         )
         let second = CodexScheduledWork(
@@ -105,15 +164,45 @@ final class CodexWorkSchedulerTests: XCTestCase {
             ),
             runtimeProfile: CodexRuntimeProfile(
                 webAccess: true,
-                loadUserTools: false,
-                readOnlyLibrary: false,
-                workingDirectory: "/tmp/second"
+                pluginWorkingDirectory: "/second"
             )
         )
 
         XCTAssertEqual(scheduler.requestTurn(first), .admitted)
-        XCTAssertEqual(scheduler.requestTurn(second), .queued)
+        XCTAssertEqual(
+            scheduler.requestTurn(second),
+            .queued(.runtimeProfile(.pluginWorkingDirectory))
+        )
         XCTAssertEqual(scheduler.finishTurn(workID: first.workID), [second])
+    }
+
+    func testReadOnlyThreadPostureSharesTheInteractiveProcessBatch() {
+        var scheduler = CodexWorkScheduler(maxConcurrentTurns: 4)
+        let interactive = CodexScheduledWork(
+            workID: UUID(),
+            purpose: .interactive(
+                ownerID: UUID(),
+                conversationID: UUID(),
+                turnID: UUID()
+            ),
+            runtimeProfile: CodexRuntimeProfile(
+                webAccess: true
+            )
+        )
+        let scheduled = CodexScheduledWork(
+            workID: UUID(),
+            purpose: .scheduled(
+                runID: "scheduled",
+                conversationID: nil,
+                turnID: UUID()
+            ),
+            runtimeProfile: CodexRuntimeProfile(
+                webAccess: true
+            )
+        )
+
+        XCTAssertEqual(scheduler.requestTurn(interactive), .admitted)
+        XCTAssertEqual(scheduler.requestTurn(scheduled), .admitted)
     }
 
     func testCancellingQueuedHeadPreservesTheNextFIFOEntry() {
@@ -129,8 +218,8 @@ final class CodexWorkSchedulerTests: XCTestCase {
         ))
 
         XCTAssertEqual(scheduler.requestTurn(active), .admitted)
-        XCTAssertEqual(scheduler.requestTurn(cancelled), .queued)
-        XCTAssertEqual(scheduler.requestTurn(next), .queued)
+        XCTAssertEqual(scheduler.requestTurn(cancelled), .queued(.capacity))
+        XCTAssertEqual(scheduler.requestTurn(next), .queued(.capacity))
         let cancellation = scheduler.cancel(workID: cancelled.workID)
         XCTAssertTrue(cancellation.didCancel)
         XCTAssertTrue(cancellation.newlyReserved.isEmpty)
@@ -150,8 +239,8 @@ final class CodexWorkSchedulerTests: XCTestCase {
         ))
 
         XCTAssertEqual(scheduler.requestTurn(active), .admitted)
-        XCTAssertEqual(scheduler.requestTurn(reserved), .queued)
-        XCTAssertEqual(scheduler.requestTurn(next), .queued)
+        XCTAssertEqual(scheduler.requestTurn(reserved), .queued(.capacity))
+        XCTAssertEqual(scheduler.requestTurn(next), .queued(.capacity))
         XCTAssertEqual(scheduler.finishTurn(workID: active.workID), [reserved])
         let cancellation = scheduler.cancel(workID: reserved.workID)
         XCTAssertTrue(cancellation.didCancel)
@@ -173,8 +262,7 @@ final class CodexWorkSchedulerTests: XCTestCase {
             ),
             runtimeProfile: CodexRuntimeProfile(
                 webAccess: true,
-                loadUserTools: false,
-                readOnlyLibrary: true
+                pluginWorkingDirectory: "/incompatible"
             )
         )
         let compatible = work(.interactive(
@@ -182,8 +270,15 @@ final class CodexWorkSchedulerTests: XCTestCase {
         ))
 
         XCTAssertEqual(scheduler.requestTurn(active), .admitted)
-        XCTAssertEqual(scheduler.requestTurn(incompatible), .queued)
-        XCTAssertEqual(scheduler.requestTurn(compatible), .queued)
+        XCTAssertEqual(
+            scheduler.requestTurn(incompatible),
+            .queued(.runtimeProfile(.pluginToggle))
+        )
+        XCTAssertEqual(
+            scheduler.requestTurn(compatible),
+            .queued(.runtimeProfile(.pluginToggle)),
+            "a compatible turn behind an incompatible FIFO head is profile-blocked"
+        )
         let cancellation = scheduler.cancel(workID: incompatible.workID)
         XCTAssertTrue(cancellation.didCancel)
         XCTAssertEqual(cancellation.newlyReserved, [compatible])

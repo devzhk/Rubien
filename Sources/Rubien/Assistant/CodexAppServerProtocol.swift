@@ -522,6 +522,24 @@ enum CodexAppServerProtocol {
         notification(method: "initialized", params: [:])
     }
 
+    /// Read the effective user/project config through the already-owned app-server.
+    /// Supplying cwd makes Codex resolve the same project layers the pending thread
+    /// will see. Verified on the supported 0.142.5 floor and 0.145.
+    static func configRead(requestID: Int, cwd: String) -> String {
+        request(id: requestID, method: "config/read", params: [
+            "cwd": cwd,
+            "includeLayers": false,
+        ])
+    }
+
+    /// Side-effect-free transport liveness probe. This is intentionally not a
+    /// registered Codex method: both supported 0.142.5 and 0.145 app-servers
+    /// immediately answer it with a JSON-RPC error, and any response proves the
+    /// local dispatcher is alive without consulting auth, models, or the network.
+    static func livenessProbe(requestID: Int) -> String {
+        request(id: requestID, method: "rubien/liveness", params: [:])
+    }
+
     /// `approvalsReviewer` MUST be sent explicitly (`"user"`) — unset, codex falls
     /// back to the user's `~/.codex` `approvals_reviewer`, and a value of `auto_review`
     /// makes codex's OWN LLM guardian answer approval requests instead of the client,
@@ -530,7 +548,8 @@ enum CodexAppServerProtocol {
     /// (Ask) or auto-accepts (Auto). Valid enum: `user | auto_review | guardian_subagent`.
     static func threadStart(
         requestID: Int, cwd: String, sandbox: String, approvalPolicy: String,
-        approvalsReviewer: String = "user", developerInstructions: String?, model: String?
+        approvalsReviewer: String = "user", developerInstructions: String?, model: String?,
+        config: [String: Any]? = nil
     ) -> String {
         var params: [String: Any] = [
             "cwd": cwd,
@@ -543,6 +562,7 @@ enum CodexAppServerProtocol {
             params["developerInstructions"] = developerInstructions
         }
         if let model, !model.isEmpty { params["model"] = model }
+        if let config { params["config"] = config }
         return request(id: requestID, method: "thread/start", params: params)
     }
 
@@ -569,11 +589,28 @@ enum CodexAppServerProtocol {
     }
 
     /// Re-assert `approvalsReviewer: "user"` on resume too, so a History-resumed
-    /// conversation can't fall back to the `~/.codex` guardian for its mutations (same
-    /// safety invariant as `threadStart`; the param is accepted by `thread/resume`).
-    static func threadResume(requestID: Int, threadId: String, approvalsReviewer: String = "user") -> String {
-        request(id: requestID, method: "thread/resume",
-                params: ["threadId": threadId, "approvalsReviewer": approvalsReviewer])
+    /// conversation can't fall back to the `~/.codex` guardian for its mutations.
+    /// Cwd/config are supplied only for a cold resume; Codex ignores them when the
+    /// same client is already subscribed to the loaded thread.
+    static func threadResume(
+        requestID: Int,
+        threadId: String,
+        cwd: String? = nil,
+        config: [String: Any]? = nil,
+        approvalsReviewer: String = "user"
+    ) -> String {
+        var params: [String: Any] = [
+            "threadId": threadId,
+            "approvalsReviewer": approvalsReviewer,
+        ]
+        if let cwd, !cwd.isEmpty { params["cwd"] = cwd }
+        if let config { params["config"] = config }
+        return request(id: requestID, method: "thread/resume", params: params)
+    }
+
+    static func threadUnsubscribe(requestID: Int, threadId: String) -> String {
+        request(id: requestID, method: "thread/unsubscribe",
+                params: ["threadId": threadId])
     }
 
     static func threadRead(requestID: Int, threadId: String) -> String {

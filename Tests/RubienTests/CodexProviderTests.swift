@@ -249,7 +249,7 @@ final class CodexProviderTests: XCTestCase {
 
     // MARK: Invocation (argv injection)
 
-    func testArgvCarriesDisableAppsAndRubienInjection() async throws {
+    func testLaunchArgvPinsProcessProfileAndThreadConfigCarriesRubienInjection() async throws {
         let workspace = try makeWorkspace()
         try writeConfig(["assistantText": "ok"], into: workspace)
         let channel = MCPContentChannel(
@@ -262,38 +262,62 @@ final class CodexProviderTests: XCTestCase {
 
         let argv = try readSpawnedArgv(in: workspace)
         XCTAssertEqual(argv[1], "app-server")
-        XCTAssertTrue(argv.containsPair("--disable", "apps"), "built-in connectors must be dropped by default")
-        XCTAssertTrue(argv.containsPair(
-            "-c", "mcp_servers.rubien.command=/Applications/Rubien.app/Contents/Helpers/rubien-cli"))
-        XCTAssertTrue(argv.containsPair("-c", #"mcp_servers.rubien.args=["mcp"]"#))
-        XCTAssertTrue(argv.containsPair("-c", "mcp_servers.rubien.default_tools_approval_mode=writes"))
-        XCTAssertTrue(argv.containsPair("-c", "mcp_servers.rubien.tool_timeout_sec=310"))
-        XCTAssertTrue(argv.containsPair(
-            "-c", #"mcp_servers.rubien.env.RUBIEN_APP_PRESENTATION="1""#))
-        XCTAssertTrue(argv.containsPair(
-            "-c", #"mcp_servers.rubien.env.RUBIEN_APP_SCHEDULING="1""#))
-        XCTAssertTrue(argv.containsPair("-c", "mcp_servers.rubien.env.RUBIEN_LIBRARY_ROOT=/tmp/lib"))
-        XCTAssertFalse(argv.contains("-c tools.web_search=false"), "web on by default")
+        XCTAssertTrue(argv.containsPair("--disable", "plugins"), "installed plugins must be dropped by default")
+        XCTAssertFalse(argv.containsPair("--disable", "apps"))
+        XCTAssertFalse(argv.containsPair("--enable", "apps"))
+        XCTAssertTrue(argv.containsPair("-c", "web_search=cached"),
+                      "Rubien web-on must pin Codex's cached mode")
+        XCTAssertFalse(argv.containsPair("-c", "web_search=disabled"))
+
+        let params = try XCTUnwrap(
+            try readObserved(in: workspace)["lastThreadStartParams"] as? [String: Any]
+        )
+        let config = try XCTUnwrap(params["config"] as? [String: Any])
+        let features = try XCTUnwrap(config["features"] as? [String: Any])
+        XCTAssertEqual(features["apps"] as? Bool, false)
+        XCTAssertNil(features["plugins"], "plugins remain process-scoped")
+        let servers = try XCTUnwrap(config["mcp_servers"] as? [String: Any])
+        let rubien = try XCTUnwrap(servers["rubien"] as? [String: Any])
+        XCTAssertEqual(
+            rubien["command"] as? String,
+            "/Applications/Rubien.app/Contents/Helpers/rubien-cli"
+        )
+        XCTAssertEqual(rubien["args"] as? [String], ["mcp"])
+        XCTAssertEqual(rubien["default_tools_approval_mode"] as? String, "writes")
+        XCTAssertEqual(rubien["tool_timeout_sec"] as? Int, 310)
+        let environment = try XCTUnwrap(rubien["env"] as? [String: Any])
+        XCTAssertEqual(environment["RUBIEN_APP_PRESENTATION"] as? String, "1")
+        XCTAssertEqual(environment["RUBIEN_APP_SCHEDULING"] as? String, "1")
+        XCTAssertEqual(environment["RUBIEN_LIBRARY_ROOT"] as? String, "/tmp/lib")
     }
 
-    func testScheduledInvocationUsesReadOnlyRubienCatalog() {
-        let argv = CodexInvocation.arguments(
-            rubienCLIPath: "/Applications/Rubien.app/Contents/Helpers/rubien-cli",
-            libraryRoot: "/tmp/lib",
-            webAccess: true,
+    func testScheduledThreadConfigUsesReadOnlyRubienCatalog() throws {
+        let config = CodexInvocation.threadConfiguration(
+            contentChannel: MCPContentChannel(
+                cliURL: URL(fileURLWithPath:
+                    "/Applications/Rubien.app/Contents/Helpers/rubien-cli"),
+                libraryRoot: URL(fileURLWithPath: "/tmp/lib")
+            ),
+            appsEnabled: false,
             readOnlyLibrary: true,
             disabledMCPServerNames: ["github", "rubien", "sites-design-picker"]
         )
-        XCTAssertTrue(argv.containsPair("--disable", "apps"))
-        XCTAssertTrue(argv.containsPair("--disable", "plugins"))
-        XCTAssertTrue(argv.containsPair("-c", "mcp_servers.github.enabled=false"))
-        XCTAssertTrue(argv.containsPair("-c", "mcp_servers.sites-design-picker.enabled=false"))
-        XCTAssertTrue(argv.containsPair("-c", "mcp_servers.rubien.enabled=true"))
-        XCTAssertTrue(argv.containsPair("-c", #"mcp_servers.rubien.args=["mcp","--read-only"]"#))
-        XCTAssertFalse(argv.contains("mcp_servers.rubien.default_tools_approval_mode=writes"))
-        XCTAssertFalse(argv.contains {
-            $0.contains("mcp_servers.rubien.env.RUBIEN_APP_SCHEDULING")
-        })
+        let features = try XCTUnwrap(config["features"] as? [String: Any])
+        XCTAssertEqual(features["apps"] as? Bool, false)
+        XCTAssertNil(features["plugins"], "plugins remain process-scoped")
+        let servers = try XCTUnwrap(config["mcp_servers"] as? [String: Any])
+        XCTAssertEqual((servers["github"] as? [String: Any])?["enabled"] as? Bool, false)
+        XCTAssertEqual(
+            (servers["sites-design-picker"] as? [String: Any])?["enabled"] as? Bool,
+            false
+        )
+        let rubien = try XCTUnwrap(servers["rubien"] as? [String: Any])
+        XCTAssertEqual(rubien["enabled"] as? Bool, true)
+        XCTAssertEqual(rubien["args"] as? [String], ["mcp", "--read-only"])
+        XCTAssertNil(rubien["default_tools_approval_mode"])
+        let environment = try XCTUnwrap(rubien["env"] as? [String: Any])
+        XCTAssertEqual(environment["RUBIEN_APP_PRESENTATION"] as? String, "1")
+        XCTAssertNil(environment["RUBIEN_APP_SCHEDULING"])
     }
 
     func testConfiguredMCPServerNameParserKeepsOnlyEnabledServers() {
@@ -305,8 +329,8 @@ final class CodexProviderTests: XCTestCase {
         )
     }
 
-    func testScheduledMCPProbeAppliesFeatureIsolationBeforeListingServers() {
-        XCTAssertEqual(CodexInvocation.scheduledMCPListArguments, [
+    func testMetadataMCPProbeAppliesFeatureIsolationBeforeListingServers() {
+        XCTAssertEqual(CodexInvocation.metadataMCPListArguments, [
             "--disable", "apps",
             "--disable", "plugins",
             "mcp", "list", "--json",
@@ -317,6 +341,9 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertNil(CodexInvocation.configuredEnabledMCPServerNames(
             from: #"[{"name":"unsafe.name","enabled":true}]"#
         ))
+        XCTAssertNil(CodexInvocation.configuredEnabledMCPServerNames(
+            from: #"[{"name":"café","enabled":true}]"#
+        ))
         XCTAssertEqual(
             CodexInvocation.configuredEnabledMCPServerNames(
                 from: #"[{"name":"unsafe.name","enabled":false},{"name":"github","enabled":true}]"#
@@ -325,23 +352,63 @@ final class CodexProviderTests: XCTestCase {
         )
     }
 
-    func testUserToolsOptInEnablesCodexAppsAndKeepsRubienInjection() async throws {
-        let workspace = try makeWorkspace()
-        try writeConfig(["assistantText": "ok"], into: workspace)
-        let channel = MCPContentChannel(
-            cliURL: URL(fileURLWithPath: "/Applications/Rubien.app/Contents/Helpers/rubien-cli"),
-            libraryRoot: URL(fileURLWithPath: "/tmp/lib"))
-        let provider = CodexProvider(executableOverride: fakeServerPath, contentChannel: channel)
-        defer { provider.shutdown() }
+    func testConfigReadParserKeepsOnlySafeEnabledMCPServers() {
+        XCTAssertEqual(
+            CodexInvocation.configuredEnabledMCPServerNames(fromConfigRead: [
+                "config": [
+                    "mcp_servers": [
+                        "github": ["enabled": true],
+                        "computer-use": ["enabled": false],
+                        "sites-design-picker": [:],
+                    ],
+                ],
+            ]),
+            ["github", "sites-design-picker"]
+        )
+        XCTAssertNil(
+            CodexInvocation.configuredEnabledMCPServerNames(fromConfigRead: [
+                "config": [
+                    "mcp_servers": [
+                        "café": ["enabled": true],
+                    ],
+                ],
+            ])
+        )
+    }
 
-        _ = try await collectAllEvents(provider.send(turn: turn(
-            workspace: workspace, loadUserTools: true)))
+    func testUserToolsOptInEnablesCodexAppsAndPluginsAndKeepsRubienInjection() {
+        let argv = CodexInvocation.arguments(
+            webAccess: true,
+            pluginsEnabled: true
+        )
+        let config = CodexInvocation.threadConfiguration(
+            contentChannel: MCPContentChannel(
+                cliURL: URL(fileURLWithPath:
+                    "/Applications/Rubien.app/Contents/Helpers/rubien-cli"),
+                libraryRoot: URL(fileURLWithPath: "/tmp/lib")
+            ),
+            appsEnabled: true,
+            readOnlyLibrary: false
+        )
 
-        let argv = try readSpawnedArgv(in: workspace)
         XCTAssertFalse(argv.containsPair("--disable", "apps"),
                        "connected apps must load after the explicit opt-in")
-        XCTAssertTrue(argv.containsPair(
-            "-c", "mcp_servers.rubien.command=/Applications/Rubien.app/Contents/Helpers/rubien-cli"))
+        XCTAssertTrue(argv.containsPair("--enable", "plugins"),
+                      "the opt-in must override user/project config that disables plugins")
+        XCTAssertFalse(argv.containsPair("--enable", "apps"),
+                       "Apps posture must be supplied per thread")
+        XCTAssertEqual(
+            (config["features"] as? [String: Any])?["apps"] as? Bool,
+            true,
+            "the opt-in must override user/project config that disables Apps"
+        )
+        XCTAssertNil((config["features"] as? [String: Any])?["plugins"])
+        let rubien = ((config["mcp_servers"] as? [String: Any])?["rubien"]
+            as? [String: Any])
+        XCTAssertEqual(
+            rubien?["command"] as? String,
+            "/Applications/Rubien.app/Contents/Helpers/rubien-cli"
+        )
     }
 
     func testChangingUserToolsPostureRespawnsCodexServer() async throws {
@@ -352,7 +419,9 @@ final class CodexProviderTests: XCTestCase {
 
         _ = try await collectAllEvents(provider.send(turn: turn(workspace: workspace)))
         let isolatedPID = pid_t(try XCTUnwrap(try readObserved(in: workspace)["pid"] as? Int))
-        XCTAssertTrue(try readSpawnedArgv(in: workspace).containsPair("--disable", "apps"))
+        let isolatedArgv = try readSpawnedArgv(in: workspace)
+        XCTAssertTrue(isolatedArgv.containsPair("--disable", "plugins"))
+        XCTAssertFalse(isolatedArgv.containsPair("--disable", "apps"))
 
         try writeConfig(["assistantText": "full tools"], into: workspace)
         _ = try await collectAllEvents(provider.send(turn: turn(
@@ -360,8 +429,110 @@ final class CodexProviderTests: XCTestCase {
         let optedInPID = pid_t(try XCTUnwrap(try readObserved(in: workspace)["pid"] as? Int))
 
         XCTAssertNotEqual(isolatedPID, optedInPID,
-                          "the Apps feature flag is fixed at spawn, so the server must restart")
-        XCTAssertFalse(try readSpawnedArgv(in: workspace).containsPair("--disable", "apps"))
+                          "the Apps/plugins feature flags are fixed at spawn, so the server must restart")
+        let optedInArgv = try readSpawnedArgv(in: workspace)
+        XCTAssertFalse(optedInArgv.containsPair("--disable", "plugins"))
+        XCTAssertTrue(optedInArgv.containsPair("--enable", "plugins"))
+        XCTAssertFalse(optedInArgv.containsPair("--enable", "apps"))
+        let params = try XCTUnwrap(
+            try readObserved(in: workspace)["lastThreadStartParams"] as? [String: Any]
+        )
+        XCTAssertEqual(
+            ((params["config"] as? [String: Any])?["features"]
+                as? [String: Any])?["apps"] as? Bool,
+            true
+        )
+    }
+
+    func testPluginEnabledRuntimeRespawnsWhenWorkspaceChanges() async throws {
+        let firstWorkspace = try makeWorkspace()
+        let secondWorkspace = try makeWorkspace()
+        try writeConfig(["assistantText": "first"], into: firstWorkspace)
+        try writeConfig(["assistantText": "second"], into: secondWorkspace)
+        let registry = CodexSharedConnectionRegistry()
+        let first = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry
+        )
+        let second = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry
+        )
+        defer {
+            first.shutdown()
+            second.shutdown()
+        }
+
+        _ = try await collectAllEvents(first.send(turn: turn(
+            workspace: firstWorkspace,
+            loadUserTools: true
+        )))
+        let firstPID = try XCTUnwrap(
+            try readObserved(in: firstWorkspace)["pid"] as? Int
+        )
+
+        _ = try await collectAllEvents(second.send(turn: turn(
+            workspace: secondWorkspace,
+            loadUserTools: true
+        )))
+        let secondPID = try XCTUnwrap(
+            try readObserved(in: secondWorkspace)["pid"] as? Int
+        )
+
+        XCTAssertNotEqual(
+            firstPID,
+            secondPID,
+            "plugin discovery remains tied to the app-server launch cwd"
+        )
+        await registry.shutdownAll()
+    }
+
+    func testFinishedConversationResumesAfterWebProfileRespawn() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["assistantText": "web on"], into: workspace)
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+
+        let first = try await collectAllEvents(
+            provider.send(turn: turn(workspace: workspace))
+        )
+        let sessionID = try XCTUnwrap(first.sessionIDs.first)
+        let firstPID = pid_t(try XCTUnwrap(
+            try readObserved(in: workspace)["pid"] as? Int
+        ))
+
+        try writeConfig(["assistantText": "web off resume"], into: workspace)
+        let resumed = try await collectAllEvents(
+            provider.send(turn: turn(
+                workspace: workspace,
+                resume: sessionID,
+                webAccess: false
+            ))
+        )
+
+        XCTAssertTrue(resumed.contains(
+            .assistantMessageCompleted(text: "web off resume")
+        ))
+        let secondPID = pid_t(try XCTUnwrap(
+            try readObserved(in: workspace)["pid"] as? Int
+        ))
+        XCTAssertNotEqual(firstPID, secondPID)
+        XCTAssertEqual(
+            try readObserved(in: workspace)["threadResumes"] as? Int,
+            1
+        )
+        XCTAssertTrue(
+            try readSpawnedArgv(in: workspace).containsPair(
+                "-c", "web_search=disabled"
+            )
+        )
+        let params = try XCTUnwrap(
+            try readObserved(in: workspace)["lastThreadResumeParams"]
+                as? [String: Any]
+        )
+        XCTAssertEqual(params["threadId"] as? String, sessionID)
+        XCTAssertEqual(params["cwd"] as? String, workspace.path)
+        XCTAssertNotNil(params["config"] as? [String: Any])
     }
 
     func testEnvironmentPathResolvesNodeForNpmInstalledCodex() {
@@ -405,7 +576,9 @@ final class CodexProviderTests: XCTestCase {
             provider.send(turn: turn(workspace: workspace, webAccess: false)))
 
         let argv = try readSpawnedArgv(in: workspace)
-        XCTAssertTrue(argv.containsPair("-c", "tools.web_search=false"))
+        XCTAssertTrue(argv.containsPair("-c", "web_search=disabled"))
+        XCTAssertFalse(argv.containsPair("-c", "tools.web_search=false"),
+                       "Codex 0.145 ignores the legacy Boolean web-search setting")
     }
 
     func testTurnStartSendsOrderedLocalImagesAndIgnoresTextAttachments() async throws {
@@ -459,6 +632,703 @@ final class CodexProviderTests: XCTestCase {
         let observed = try readObserved(in: workspace)
         XCTAssertEqual(observed["turnStarts"] as? Int, 2)
         XCTAssertEqual(observed["threadResumes"] as? Int, 0)
+    }
+
+    func testSharedThreadUnsubscribesOnlyAfterItsFinalOwnerCloses() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["assistantText": "shared {threadId}"], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let first = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+        let second = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+
+        _ = try await collectAllEvents(
+            first.send(turn: turn(workspace: workspace)))
+        _ = try await collectAllEvents(
+            second.send(turn: turn(workspace: workspace, resume: "TH-1")))
+
+        await first.shutdownAndWaitForTesting()
+        XCTAssertEqual(
+            try readObserved(in: workspace)["threadUnsubscribes"] as? Int,
+            0,
+            "one wrapper cannot unsubscribe a thread still owned by another"
+        )
+
+        second.shutdown()
+        try await waitForObserved(in: workspace, timeout: 3) {
+            ($0["threadUnsubscribes"] as? Int) == 1
+        }
+        let observed = try readObserved(in: workspace)
+        XCTAssertEqual(observed["threadUnsubscribeIds"] as? [String], ["TH-1"])
+        await registry.shutdownAll()
+    }
+
+    func testOwnerRebindUnsubscribesItsPriorThread() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["assistantText": "thread {threadId}"], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let provider = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+
+        _ = try await collectAllEvents(
+            provider.send(turn: turn(workspace: workspace)))
+        let second = try await collectAllEvents(
+            provider.send(turn: turn(workspace: workspace)))
+
+        XCTAssertEqual(second.sessionIDs, ["TH-2"])
+        try await waitForObserved(in: workspace, timeout: 3) {
+            ($0["threadUnsubscribes"] as? Int) == 1
+        }
+        let observed = try readObserved(in: workspace)
+        XCTAssertEqual(observed["threadStarts"] as? Int, 2)
+        XCTAssertEqual(observed["threadUnsubscribeIds"] as? [String], ["TH-1"])
+
+        provider.shutdown()
+        await registry.shutdownAll()
+    }
+
+    func testResumeWaitsForInFlightThreadUnsubscribe() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "assistantText": "first",
+            "unsubscribeDelayMs": 500,
+        ], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let first = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+
+        _ = try await collectAllEvents(
+            first.send(turn: turn(workspace: workspace)))
+        first.shutdown()
+        try await waitForObserved(in: workspace, timeout: 3) {
+            ($0["threadUnsubscribes"] as? Int) == 1
+        }
+
+        try writeConfig(["assistantText": "resumed"], into: workspace)
+        let second = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+        let events = try await collectAllEvents(
+            second.send(turn: turn(workspace: workspace, resume: "TH-1")))
+
+        XCTAssertTrue(events.contains(.assistantMessageCompleted(text: "resumed")))
+        let observed = try readObserved(in: workspace)
+        XCTAssertEqual(observed["threadResumes"] as? Int, 1)
+        XCTAssertNil(
+            observed["resumeDuringUnsubscribe"],
+            "thread/resume reached the server before unsubscribe resolved"
+        )
+
+        second.shutdown()
+        await registry.shutdownAll()
+    }
+
+    func testCachedThreadProfileChangeRecyclesForColdResume() async throws {
+        let firstWorkspace = try makeWorkspace()
+        let secondWorkspace = try makeWorkspace()
+        try writeConfig([
+            "assistantText": "from first workspace",
+            "stickyResumeCwd": true,
+            "emitThreadClosedOnUnsubscribe": false,
+        ], into: firstWorkspace)
+        try writeConfig([
+            "assistantText": "from second workspace",
+        ], into: secondWorkspace)
+        let registry = CodexSharedConnectionRegistry()
+        let first = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry
+        )
+
+        let initial = try await collectAllEvents(
+            first.send(turn: turn(workspace: firstWorkspace))
+        )
+        let threadID = try XCTUnwrap(initial.sessionIDs.first)
+        let firstPID = try XCTUnwrap(
+            try readObserved(in: firstWorkspace)["pid"] as? Int
+        )
+        await first.shutdownAndWaitForTesting()
+        try await waitForObserved(in: firstWorkspace, timeout: 3) {
+            ($0["threadUnsubscribes"] as? Int) == 1
+        }
+
+        let second = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry
+        )
+        let resumed = try await collectAllEvents(
+            second.send(turn: turn(
+                workspace: secondWorkspace,
+                resume: threadID
+            )),
+            timeout: 8
+        )
+
+        XCTAssertTrue(resumed.contains(
+            .assistantMessageCompleted(text: "from second workspace")
+        ))
+        XCTAssertEqual(resumed.sessionIDs, [threadID])
+        let replacementObserved = try readObserved(in: secondWorkspace)
+        XCTAssertNotEqual(
+            replacementObserved["pid"] as? Int,
+            firstPID,
+            "a cached thread with a changed cwd requires a cold server resume"
+        )
+        XCTAssertEqual(replacementObserved["threadResumes"] as? Int, 1)
+        XCTAssertEqual(replacementObserved["threadStarts"] as? Int, 0)
+
+        second.shutdown()
+        await registry.shutdownAll()
+    }
+
+    func testCachedProfileRecycleDoesNotKillUnrelatedThreadSetup() async throws {
+        let firstWorkspace = try makeWorkspace()
+        let secondWorkspace = try makeWorkspace()
+        let resumeWorkspace = try makeWorkspace()
+        try writeConfig([
+            "assistantText": "first",
+            "stickyResumeCwd": true,
+            "emitThreadClosedOnUnsubscribe": false,
+        ], into: firstWorkspace)
+        try writeConfig(
+            ["assistantText": "unrelated survived"],
+            into: secondWorkspace
+        )
+        try writeConfig(
+            ["assistantText": "resumed"],
+            into: resumeWorkspace
+        )
+        let registry = CodexSharedConnectionRegistry()
+        let first = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry
+        )
+        let unrelated = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry
+        )
+        let resuming = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry
+        )
+
+        let initial = try await collectAllEvents(
+            first.send(turn: turn(workspace: firstWorkspace))
+        )
+        let threadID = try XCTUnwrap(initial.sessionIDs.first)
+        let originalPID = try XCTUnwrap(
+            try readObserved(in: firstWorkspace)["pid"] as? Int
+        )
+        await first.shutdownAndWaitForTesting()
+        try await waitForObserved(in: firstWorkspace, timeout: 3) {
+            ($0["threadUnsubscribes"] as? Int) == 1
+        }
+
+        // The fake server reads setup delay from its startup workspace. Hold an
+        // unrelated conversation between thread/start and turn/start, where it has
+        // a runtime generation but no turn id yet.
+        try writeConfig([
+            "threadStartDelayMs": 1_000,
+            "stickyResumeCwd": true,
+            "emitThreadClosedOnUnsubscribe": false,
+        ], into: firstWorkspace)
+        let unrelatedEvents = Task {
+            try await collectAllEvents(
+                unrelated.send(turn: turn(workspace: secondWorkspace)),
+                timeout: 8
+            )
+        }
+        try await waitForObserved(in: firstWorkspace, timeout: 3) {
+            ($0["threadStarts"] as? Int) == 2
+        }
+
+        let blocked = try await collectAllEvents(
+            resuming.send(turn: turn(
+                workspace: resumeWorkspace,
+                resume: threadID
+            )),
+            timeout: 8
+        )
+        XCTAssertTrue(blocked.contains(.providerNotice(
+            "This conversation is still cached by Codex with a different or unknown workspace or tool profile. Wait for the other Codex conversations to finish, then try again."
+        )))
+        XCTAssertEqual(
+            try readObserved(in: firstWorkspace)["pid"] as? Int,
+            originalPID,
+            "cold resume must not recycle a server under another turn's setup"
+        )
+
+        let completed = try await unrelatedEvents.value
+        XCTAssertTrue(completed.contains(
+            .assistantMessageCompleted(text: "unrelated survived")
+        ))
+
+        unrelated.shutdown()
+        resuming.shutdown()
+        await registry.shutdownAll()
+    }
+
+    func testUnsubscribeTimeoutQuarantinesThreadUntilColdResumeIsSafe() async throws {
+        let firstWorkspace = try makeWorkspace()
+        let secondWorkspace = try makeWorkspace()
+        try writeConfig([
+            "assistantText": "first",
+            "unsubscribeDelayMs": 1_500,
+            "emitThreadClosedOnUnsubscribe": false,
+        ], into: firstWorkspace)
+        try writeConfig(["hang": true], into: secondWorkspace)
+        let registry = CodexSharedConnectionRegistry()
+        let first = CodexProvider(
+            executableOverride: fakeServerPath,
+            requestTimeout: 1,
+            sharedConnectionRegistry: registry
+        )
+        let second = CodexProvider(
+            executableOverride: fakeServerPath,
+            requestTimeout: 1,
+            sharedConnectionRegistry: registry
+        )
+        let third = CodexProvider(
+            executableOverride: fakeServerPath,
+            requestTimeout: 1,
+            sharedConnectionRegistry: registry
+        )
+
+        let initial = try await collectAllEvents(
+            first.send(turn: turn(workspace: firstWorkspace))
+        )
+        let threadID = try XCTUnwrap(initial.sessionIDs.first)
+        let originalPID = try XCTUnwrap(
+            try readObserved(in: firstWorkspace)["pid"] as? Int
+        )
+        let otherTurn = Task {
+            try await collectAllEvents(
+                second.send(turn: turn(workspace: secondWorkspace)),
+                timeout: 10
+            )
+        }
+        try await waitForObserved(in: firstWorkspace, timeout: 5) {
+            ($0["turnStarts"] as? Int) == 2
+        }
+
+        first.shutdown()
+        try await waitForObserved(in: firstWorkspace, timeout: 3) {
+            ($0["threadUnsubscribes"] as? Int) == 1
+        }
+        let blocked = try await collectAllEvents(
+            third.send(turn: turn(
+                workspace: firstWorkspace,
+                resume: threadID
+            )),
+            timeout: 8
+        )
+        XCTAssertTrue(blocked.contains(.providerNotice(
+            "This conversation is still cached by Codex with a different or unknown workspace or tool profile. Wait for the other Codex conversations to finish, then try again."
+        )))
+        XCTAssertEqual(
+            try readObserved(in: firstWorkspace)["threadResumes"] as? Int,
+            0,
+            "an indeterminate unsubscribe must not be treated as a clean resume"
+        )
+
+        second.cancel()
+        _ = try await otherTurn.value
+        try writeConfig(["assistantText": "recovered"], into: firstWorkspace)
+        let recovered = try await collectAllEvents(
+            third.send(turn: turn(
+                workspace: firstWorkspace,
+                resume: threadID
+            )),
+            timeout: 8
+        )
+        XCTAssertTrue(recovered.contains(
+            .assistantMessageCompleted(text: "recovered")
+        ))
+        XCTAssertEqual(recovered.sessionIDs, [threadID])
+        let recoveredObserved = try readObserved(in: firstWorkspace)
+        XCTAssertNotEqual(recoveredObserved["pid"] as? Int, originalPID)
+        XCTAssertEqual(recoveredObserved["threadResumes"] as? Int, 1)
+        XCTAssertNil(recoveredObserved["resumeDuringUnsubscribe"])
+
+        third.shutdown()
+        await registry.shutdownAll()
+    }
+
+    func testResumeWaitingOnUnsubscribeTimeoutOwnsServerUntilColdRecycle() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "assistantText": "first",
+            "emitThreadClosedOnUnsubscribe": false,
+        ], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let first = CodexProvider(
+            executableOverride: fakeServerPath,
+            requestTimeout: 1,
+            sharedConnectionRegistry: registry
+        )
+        let resuming = CodexProvider(
+            executableOverride: fakeServerPath,
+            requestTimeout: 1,
+            sharedConnectionRegistry: registry
+        )
+
+        let initial = try await collectAllEvents(
+            first.send(turn: turn(workspace: workspace))
+        )
+        let threadID = try XCTUnwrap(initial.sessionIDs.first)
+        let originalPID = try XCTUnwrap(
+            try readObserved(in: workspace)["pid"] as? Int
+        )
+        try writeConfig([
+            "assistantText": "recovered",
+            "unsubscribeDelayMs": 1_500,
+            "emitThreadClosedOnUnsubscribe": false,
+        ], into: workspace)
+        first.shutdown()
+        try await waitForObserved(in: workspace, timeout: 3) {
+            ($0["threadUnsubscribes"] as? Int) == 1
+        }
+
+        let events = try await collectAllEvents(
+            resuming.send(turn: turn(
+                workspace: workspace,
+                resume: threadID
+            )),
+            timeout: 8
+        )
+        XCTAssertTrue(events.contains(
+            .assistantMessageCompleted(text: "recovered")
+        ))
+        XCTAssertEqual(events.sessionIDs, [threadID])
+        let recoveredObserved = try readObserved(in: workspace)
+        XCTAssertNotEqual(recoveredObserved["pid"] as? Int, originalPID)
+        XCTAssertEqual(recoveredObserved["threadResumes"] as? Int, 1)
+        XCTAssertNil(recoveredObserved["resumeDuringUnsubscribe"])
+
+        resuming.shutdown()
+        await registry.shutdownAll()
+    }
+
+    func testUnknownUnsubscribeStatusForcesColdResume() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "assistantText": "first",
+            "emitThreadClosedOnUnsubscribe": false,
+        ], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let first = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry
+        )
+        let resuming = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry
+        )
+
+        let initial = try await collectAllEvents(
+            first.send(turn: turn(workspace: workspace))
+        )
+        let threadID = try XCTUnwrap(initial.sessionIDs.first)
+        let originalPID = try XCTUnwrap(
+            try readObserved(in: workspace)["pid"] as? Int
+        )
+        try writeConfig([
+            "unsubscribeStatus": "unexpected",
+            "emitThreadClosedOnUnsubscribe": false,
+        ], into: workspace)
+        await first.shutdownAndWaitForTesting()
+        try await waitForObserved(in: workspace, timeout: 3) {
+            ($0["threadUnsubscribeIds"] as? [String]) == [threadID]
+        }
+
+        try writeConfig(["assistantText": "recovered"], into: workspace)
+        let events = try await collectAllEvents(
+            resuming.send(turn: turn(
+                workspace: workspace,
+                resume: threadID
+            )),
+            timeout: 8
+        )
+        XCTAssertTrue(events.contains(
+            .assistantMessageCompleted(text: "recovered")
+        ))
+        XCTAssertEqual(events.sessionIDs, [threadID])
+        let recoveredObserved = try readObserved(in: workspace)
+        XCTAssertNotEqual(recoveredObserved["pid"] as? Int, originalPID)
+        XCTAssertEqual(recoveredObserved["threadResumes"] as? Int, 1)
+        XCTAssertNil(recoveredObserved["resumeDuringUnsubscribe"])
+
+        resuming.shutdown()
+        await registry.shutdownAll()
+    }
+
+    func testLateThreadStartResponseUnsubscribesUnownedThread() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["hang": true], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let first = CodexProvider(
+            executableOverride: fakeServerPath,
+            requestTimeout: 1,
+            sharedConnectionRegistry: registry
+        )
+        let second = CodexProvider(
+            executableOverride: fakeServerPath,
+            requestTimeout: 1,
+            sharedConnectionRegistry: registry
+        )
+        let holdingTurn = Task {
+            try await collectAllEvents(
+                first.send(turn: turn(workspace: workspace)),
+                timeout: 10
+            )
+        }
+        try await waitForObserved(in: workspace, timeout: 5) {
+            ($0["turnStarts"] as? Int) == 1
+        }
+
+        try writeConfig([
+            "hang": true,
+            "threadStartDelayMs": 1_500,
+        ], into: workspace)
+        let timedOut = try await collectAllEvents(
+            second.send(turn: turn(workspace: workspace)),
+            timeout: 8
+        )
+        XCTAssertTrue(timedOut.contains(.providerNotice(
+            "The assistant did not respond (thread/start timed out)."
+        )))
+        try await waitForObserved(in: workspace, timeout: 4) {
+            ($0["threadUnsubscribeIds"] as? [String]) == ["TH-2"]
+        }
+
+        first.cancel()
+        _ = try await holdingTurn.value
+        second.shutdown()
+        await registry.shutdownAll()
+    }
+
+    func testLateThreadResumeResponseUnsubscribesUnownedThread() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "assistantText": "first",
+            "emitThreadClosedOnUnsubscribe": false,
+        ], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let first = CodexProvider(
+            executableOverride: fakeServerPath,
+            requestTimeout: 1,
+            sharedConnectionRegistry: registry
+        )
+        let holding = CodexProvider(
+            executableOverride: fakeServerPath,
+            requestTimeout: 1,
+            sharedConnectionRegistry: registry
+        )
+        let resuming = CodexProvider(
+            executableOverride: fakeServerPath,
+            requestTimeout: 1,
+            sharedConnectionRegistry: registry
+        )
+
+        let initial = try await collectAllEvents(
+            first.send(turn: turn(workspace: workspace))
+        )
+        let threadID = try XCTUnwrap(initial.sessionIDs.first)
+        await first.shutdownAndWaitForTesting()
+        try await waitForObserved(in: workspace, timeout: 3) {
+            ($0["threadUnsubscribes"] as? Int) == 1
+        }
+
+        try writeConfig(["hang": true], into: workspace)
+        let holdingTurn = Task {
+            try await collectAllEvents(
+                holding.send(turn: turn(workspace: workspace)),
+                timeout: 10
+            )
+        }
+        try await waitForObserved(in: workspace, timeout: 5) {
+            ($0["turnStarts"] as? Int) == 2
+        }
+        try writeConfig([
+            "hang": true,
+            "threadResumeDelayMs": 1_500,
+            "emitThreadClosedOnUnsubscribe": false,
+        ], into: workspace)
+
+        let timedOut = try await collectAllEvents(
+            resuming.send(turn: turn(
+                workspace: workspace,
+                resume: threadID
+            )),
+            timeout: 8
+        )
+        XCTAssertTrue(timedOut.contains(.providerNotice(
+            "The assistant did not respond (thread/resume timed out)."
+        )))
+        try await waitForObserved(in: workspace, timeout: 4) {
+            ($0["threadUnsubscribeIds"] as? [String]) == [
+                threadID, threadID,
+            ]
+        }
+
+        holding.cancel()
+        _ = try await holdingTurn.value
+        resuming.shutdown()
+        await registry.shutdownAll()
+    }
+
+    func testShutdownDuringThreadStartStillReleasesSuccessfulSubscription() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "assistantText": "must not run",
+            "threadStartDelayMs": 350,
+        ], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let provider = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+        let events = Task {
+            try await collectAllEvents(
+                provider.send(turn: turn(workspace: workspace)),
+                timeout: 8
+            )
+        }
+        try await waitForObserved(in: workspace, timeout: 3) {
+            ($0["threadStarts"] as? Int) == 1
+        }
+
+        provider.shutdown()
+        _ = try await events.value
+        try await waitForObserved(in: workspace, timeout: 3) {
+            ($0["threadUnsubscribes"] as? Int) == 1
+        }
+
+        let observed = try readObserved(in: workspace)
+        XCTAssertEqual(observed["turnStarts"] as? Int, 0)
+        XCTAssertEqual(observed["threadUnsubscribeIds"] as? [String], ["TH-1"])
+        await registry.shutdownAll()
+    }
+
+    func testServerExitDuringUnsubscribeBarrierDoesNotWedgeResume() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["assistantText": "first"], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let first = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+
+        _ = try await collectAllEvents(
+            first.send(turn: turn(workspace: workspace)))
+        try writeConfig([
+            "unsubscribeDelayMs": 350,
+            "exitDuringUnsubscribe": true,
+        ], into: workspace)
+        first.shutdown()
+        try await waitForObserved(in: workspace, timeout: 3) {
+            ($0["threadUnsubscribes"] as? Int) == 1
+        }
+
+        let second = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+        let interrupted = try await collectAllEvents(
+            second.send(turn: turn(workspace: workspace, resume: "TH-1")),
+            timeout: 8
+        )
+        XCTAssertFalse(
+            interrupted.contains { event in
+                if case .assistantMessageCompleted = event { return true }
+                return false
+            },
+            "the resume racing the failed unsubscribe must not reach the dead server"
+        )
+
+        try writeConfig(["assistantText": "recovered"], into: workspace)
+        let recovered = try await collectAllEvents(
+            second.send(turn: turn(workspace: workspace, resume: "TH-1")),
+            timeout: 8
+        )
+        XCTAssertTrue(recovered.contains(
+            .assistantMessageCompleted(text: "recovered")))
+
+        second.shutdown()
+        await registry.shutdownAll()
+    }
+
+    func testSharedShutdownDrainsActiveTurnBeforeUnsubscribe() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["hang": true], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let provider = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+        let events = Task {
+            try await collectAllEvents(
+                provider.send(turn: turn(workspace: workspace)),
+                timeout: 8
+            )
+        }
+        try await waitForObserved(in: workspace, timeout: 3) {
+            ($0["turnStarts"] as? Int) == 1
+        }
+
+        provider.shutdown()
+        let result = try await events.value
+        try await waitForObserved(in: workspace, timeout: 3) {
+            ($0["threadUnsubscribes"] as? Int) == 1
+        }
+
+        XCTAssertEqual(result.turnCompletion?.outcome, .interrupted)
+        let observed = try readObserved(in: workspace)
+        XCTAssertEqual(observed["interrupts"] as? Int, 1)
+        XCTAssertEqual(observed["threadUnsubscribeIds"] as? [String], ["TH-1"])
+        await registry.shutdownAll()
+    }
+
+    func testThreadClosedForcesNextFollowUpThroughResume() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "assistantText": "closing",
+            "closeThreadAfterTurn": true,
+        ], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let provider = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+
+        _ = try await collectAllEvents(
+            provider.send(turn: turn(workspace: workspace)))
+        try await waitForObserved(in: workspace, timeout: 3) {
+            ($0["threadClosedNotifications"] as? Int) == 1
+        }
+        try writeConfig(["assistantText": "rehydrated"], into: workspace)
+        let followUp = try await collectAllEvents(
+            provider.send(turn: turn(workspace: workspace, resume: "TH-1")))
+
+        XCTAssertTrue(followUp.contains(
+            .assistantMessageCompleted(text: "rehydrated")))
+        XCTAssertEqual(
+            try readObserved(in: workspace)["threadResumes"] as? Int,
+            1,
+            "thread/closed must invalidate the loaded-thread fast path"
+        )
+        let resumeParams = try XCTUnwrap(
+            try readObserved(in: workspace)["lastThreadResumeParams"] as? [String: Any]
+        )
+        XCTAssertEqual(resumeParams["cwd"] as? String, workspace.path)
+        XCTAssertEqual(
+            ((resumeParams["config"] as? [String: Any])?["features"]
+                as? [String: Any])?["apps"] as? Bool,
+            false
+        )
+
+        provider.shutdown()
+        await registry.shutdownAll()
     }
 
     func testInteractiveProvidersShareOneAppLifetimeServerAcrossWindowReopen() async throws {
@@ -564,6 +1434,51 @@ final class CodexProviderTests: XCTestCase {
         _ = try await readerEvents.value
         home.shutdown()
         reader.shutdown()
+        await registry.shutdownAll()
+    }
+
+    func testDifferentThreadWorkspacesRunConcurrentlyOnOneServer() async throws {
+        let firstWorkspace = try makeWorkspace()
+        let secondWorkspace = try makeWorkspace()
+        try writeConfig(["hang": true], into: firstWorkspace)
+        try writeConfig(["assistantText": "second workspace completed"], into: secondWorkspace)
+        let registry = CodexSharedConnectionRegistry()
+        let first = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+        let second = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry)
+
+        let firstEvents = Task {
+            try await collectAllEvents(
+                first.send(turn: turn(workspace: firstWorkspace)), timeout: 8)
+        }
+        try await waitForObserved(in: firstWorkspace, timeout: 5) {
+            ($0["turnStarts"] as? Int) == 1
+        }
+        let firstPID = try XCTUnwrap(
+            try readObserved(in: firstWorkspace)["pid"] as? Int
+        )
+
+        let secondEvents = try await collectAllEvents(
+            second.send(turn: turn(workspace: secondWorkspace)), timeout: 8)
+        XCTAssertTrue(secondEvents.contains(
+            .assistantMessageCompleted(text: "second workspace completed")
+        ))
+        try await waitForObserved(in: firstWorkspace, timeout: 5) {
+            ($0["turnStarts"] as? Int) == 2
+        }
+        XCTAssertEqual(
+            try readObserved(in: firstWorkspace)["pid"] as? Int,
+            firstPID,
+            "new-thread cwd must not force an app-server respawn"
+        )
+
+        first.cancel()
+        _ = try await firstEvents.value
+        first.shutdown()
+        second.shutdown()
         await registry.shutdownAll()
     }
 
@@ -730,10 +1645,10 @@ final class CodexProviderTests: XCTestCase {
         await registry.shutdownAll()
     }
 
-    func testConcurrentReadOnlyStartsJoinOneServerAfterIsolationProbe() async throws {
+    func testConcurrentReadOnlyStartsShareOneServerWhileReadingThreadCatalogs() async throws {
         let workspace = try makeWorkspace()
         try writeConfig([
-            "mcpListDelayMs": 350,
+            "configReadDelayMs": 350,
             "assistantText": "scheduled {threadId}",
         ], into: workspace)
         let registry = CodexSharedConnectionRegistry()
@@ -764,19 +1679,87 @@ final class CodexProviderTests: XCTestCase {
             $0.turnCompletion?.outcome == .succeeded
         })
         XCTAssertEqual(try readObserved(in: workspace)["turnStarts"] as? Int, 2,
-            "both turns must share the one server installed after the async probe")
+            "both turns must share the one server that answered config/read")
+        XCTAssertEqual(
+            try readObserved(in: workspace)["configReadRequests"] as? Int,
+            2,
+            "each scheduled thread resolves its cwd through the live app-server"
+        )
 
         await registry.shutdownAll()
+    }
+
+    func testScheduledResumeRejectsLiveInteractiveThreadProfile() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["assistantText": "interactive"], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let interactive = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry
+        )
+        let scheduled = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry
+        )
+        defer {
+            interactive.shutdown()
+            scheduled.shutdown()
+        }
+
+        let first = try await collectAllEvents(
+            interactive.send(turn: turn(workspace: workspace))
+        )
+        let threadID = try XCTUnwrap(first.sessionIDs.first)
+        let events = try await collectAllEvents(
+            scheduled.send(turn: turn(
+                workspace: workspace,
+                resume: threadID,
+                executionMode: .scheduled
+            ))
+        )
+
+        XCTAssertTrue(events.contains(.providerNotice(
+            "This conversation is currently loaded with a different workspace or tool profile. Close it before resuming it from a scheduled run."
+        )))
+        XCTAssertEqual(
+            try readObserved(in: workspace)["turnStarts"] as? Int,
+            1,
+            "scheduled work must not continue on a full-access loaded thread"
+        )
+
+        await registry.shutdownAll()
+    }
+
+    func testQueueNoticeExplainsPluginRuntimeBoundaries() {
+        XCTAssertEqual(
+            CodexTurnQueueNotice.text(
+                for: .runtimeProfile([.webAccess, .pluginToggle]),
+                capacityLimit: 4
+            ),
+            "To avoid interrupting active work, Rubien will wait for current Codex conversations to finish before restarting Codex with a different web-search setting and a different plugin configuration. This conversation is queued and will start automatically."
+        )
+        XCTAssertEqual(
+            CodexTurnQueueNotice.text(
+                for: .runtimeProfile(.pluginWorkingDirectory),
+                capacityLimit: 4
+            ),
+            "To avoid interrupting active work, Rubien will wait for current Codex conversations to finish before restarting Codex with plugins loaded from a different workspace. This conversation is queued and will start automatically."
+        )
     }
 
     func testFifthCompatibleConversationQueuesUntilCapacityOpens() async throws {
         let workspace = try makeWorkspace()
         try writeConfig(["deltas": ["holding {threadId}"], "hang": true], into: workspace)
         let registry = CodexSharedConnectionRegistry()
+        let metrics = makeRuntimeMetricsStore()
+        defer {
+            metrics.defaults.removePersistentDomain(forName: metrics.suiteName)
+        }
         let providers = (0..<5).map { _ in
             CodexProvider(
                 executableOverride: fakeServerPath,
-                sharedConnectionRegistry: registry)
+                sharedConnectionRegistry: registry,
+                runtimeMetrics: metrics.store)
         }
         defer { providers.forEach { $0.shutdown() } }
         var tasks: [Task<[AgentEvent], Error>] = []
@@ -802,7 +1785,9 @@ final class CodexProviderTests: XCTestCase {
         providers[0].cancel()
         let fifthEvents = try await fifth.value
         XCTAssertTrue(fifthEvents.contains(
-            .providerNotice("Waiting for an available Codex conversation slot.")))
+            .providerNotice(
+                "Codex is already running 4 conversations, the current limit. This conversation is queued and will start automatically when one finishes."
+            )))
         XCTAssertTrue(fifthEvents.contains(
             .assistantMessageCompleted(text: "fifth completed")))
 
@@ -813,19 +1798,195 @@ final class CodexProviderTests: XCTestCase {
             _ = try await task.value
         }
         XCTAssertEqual(try readObserved(in: workspace)["turnStarts"] as? Int, 5)
+        let snapshot = metrics.store.snapshot()
+        XCTAssertEqual(snapshot.turnRequests, 5)
+        XCTAssertEqual(snapshot.capacityQueueIncidents, 1)
+        XCTAssertGreaterThan(snapshot.capacityQueueWaitMilliseconds, 0)
+        XCTAssertEqual(snapshot.profileQueueIncidents, 0)
 
         await registry.shutdownAll()
     }
 
-    func testScheduledTurnQueuesBehindInteractiveSharedRuntime() async throws {
+    func testRuntimeMetricsCaptureWebProfileWaitAndControlledRespawn() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["deltas": ["holding"], "hang": true], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let metrics = makeRuntimeMetricsStore()
+        defer {
+            metrics.defaults.removePersistentDomain(forName: metrics.suiteName)
+        }
+        let first = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry,
+            runtimeMetrics: metrics.store
+        )
+        let second = CodexProvider(
+            executableOverride: fakeServerPath,
+            sharedConnectionRegistry: registry,
+            runtimeMetrics: metrics.store
+        )
+        defer {
+            first.shutdown()
+            second.shutdown()
+        }
+
+        let firstEvents = Task {
+            try await collectAllEvents(
+                first.send(turn: turn(workspace: workspace)),
+                timeout: 10
+            )
+        }
+        try await waitForObserved(in: workspace, timeout: 5) {
+            ($0["turnStarts"] as? Int) == 1
+        }
+        let firstPID = try XCTUnwrap(
+            try readObserved(in: workspace)["pid"] as? Int
+        )
+
+        let secondEvents = Task {
+            try await collectAllEvents(
+                second.send(turn: turn(
+                    workspace: workspace,
+                    webAccess: false
+                )),
+                timeout: 10
+            )
+        }
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(try readObserved(in: workspace)["turnStarts"] as? Int, 1)
+
+        try writeConfig([
+            "assistantText": "web-off completed",
+            "initDelayMs": 500,
+        ], into: workspace)
+        first.cancel()
+        _ = try await firstEvents.value
+        try await waitForObserved(in: workspace, timeout: 3) {
+            ($0["pid"] as? Int) != firstPID
+                && ($0["initializeStarted"] as? Bool) == true
+                && $0["initialized"] == nil
+        }
+        XCTAssertEqual(
+            metrics.store.snapshot().profileQueueIncidents,
+            0,
+            "profile wait must remain open while the replacement handshake is pending"
+        )
+        let result = try await secondEvents.value
+        XCTAssertTrue(result.contains(
+            .providerNotice(
+                "To avoid interrupting active work, Rubien will wait for current Codex conversations to finish before restarting Codex with a different web-search setting. This conversation is queued and will start automatically."
+            )
+        ))
+        XCTAssertTrue(result.contains(
+            .assistantMessageCompleted(text: "web-off completed")
+        ))
+
+        let snapshot = metrics.store.snapshot()
+        XCTAssertEqual(snapshot.turnRequests, 2)
+        XCTAssertEqual(snapshot.profileQueueIncidents, 1)
+        XCTAssertGreaterThan(
+            snapshot.profileQueueWaitMilliseconds,
+            0,
+            "profile timing must include replacement-server initialization"
+        )
+        XCTAssertEqual(snapshot.profileQueueWebAccessIncidents, 1)
+        XCTAssertEqual(snapshot.capacityQueueIncidents, 0)
+        XCTAssertEqual(snapshot.profileRespawns, 1)
+        XCTAssertEqual(snapshot.profileRespawnWebAccessIncidents, 1)
+        XCTAssertEqual(snapshot.profileRespawnPluginToggleIncidents, 0)
+
+        await registry.shutdownAll()
+    }
+
+    func testRuntimeMetricsSplitFullBatchCapacityFromProfileDrain() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["deltas": ["holding"], "hang": true], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let metrics = makeRuntimeMetricsStore()
+        defer {
+            metrics.defaults.removePersistentDomain(forName: metrics.suiteName)
+        }
+        let providers = (0..<5).map { _ in
+            CodexProvider(
+                executableOverride: fakeServerPath,
+                sharedConnectionRegistry: registry,
+                runtimeMetrics: metrics.store
+            )
+        }
+        defer { providers.forEach { $0.shutdown() } }
+
+        let activeTasks = providers.prefix(4).map { provider in
+            Task {
+                try await collectAllEvents(
+                    provider.send(turn: turn(workspace: workspace)),
+                    timeout: 10
+                )
+            }
+        }
+        try await waitForObserved(in: workspace, timeout: 5) {
+            ($0["turnStarts"] as? Int) == 4
+        }
+
+        let profileTask = Task {
+            try await collectAllEvents(
+                providers[4].send(turn: turn(
+                    workspace: workspace,
+                    webAccess: false
+                )),
+                timeout: 10
+            )
+        }
+        try await Task.sleep(for: .milliseconds(150))
+
+        providers[0].cancel()
+        _ = try await activeTasks[0].value
+        try await Task.sleep(for: .milliseconds(150))
+
+        try writeConfig(["assistantText": "profile batch completed"], into: workspace)
+        for provider in providers.dropFirst().prefix(3) {
+            provider.cancel()
+        }
+        for task in activeTasks.dropFirst() {
+            _ = try await task.value
+        }
+        let result = try await profileTask.value
+        XCTAssertTrue(result.contains(.providerNotice(
+            "Codex is already running 4 conversations, the current limit. This conversation is queued and will start automatically when one finishes."
+        )))
+        XCTAssertTrue(result.contains(.providerNotice(
+            "To avoid interrupting active work, Rubien will wait for current Codex conversations to finish before restarting Codex with a different web-search setting. This conversation is queued and will start automatically."
+        )))
+        XCTAssertTrue(result.contains(
+            .assistantMessageCompleted(text: "profile batch completed")
+        ))
+
+        let snapshot = metrics.store.snapshot()
+        XCTAssertEqual(snapshot.turnRequests, 5)
+        XCTAssertEqual(snapshot.capacityQueueIncidents, 1)
+        XCTAssertGreaterThan(snapshot.capacityQueueWaitMilliseconds, 0)
+        XCTAssertEqual(snapshot.profileQueueIncidents, 1)
+        XCTAssertGreaterThan(snapshot.profileQueueWaitMilliseconds, 0)
+        XCTAssertEqual(snapshot.profileQueueWebAccessIncidents, 1)
+        XCTAssertEqual(snapshot.profileRespawns, 1)
+        XCTAssertEqual(snapshot.profileRespawnWebAccessIncidents, 1)
+
+        await registry.shutdownAll()
+    }
+
+    func testScheduledTurnRunsAlongsideDefaultInteractiveRuntime() async throws {
         let workspace = try makeWorkspace()
         try writeConfig(["hang": true], into: workspace)
         let registry = CodexSharedConnectionRegistry()
+        let channel = MCPContentChannel(
+            cliURL: URL(fileURLWithPath: "/Applications/Rubien.app/Contents/Helpers/rubien-cli"),
+            libraryRoot: workspace)
         let home = CodexProvider(
             executableOverride: fakeServerPath,
+            contentChannel: channel,
             sharedConnectionRegistry: registry)
         let scheduler = CodexProvider(
             executableOverride: fakeServerPath,
+            contentChannel: channel,
             sharedConnectionRegistry: registry)
 
         let homeEvents = Task {
@@ -838,26 +1999,46 @@ final class CodexProviderTests: XCTestCase {
         let interactivePID = try XCTUnwrap(
             try readObserved(in: workspace)["pid"] as? Int)
 
-        try writeConfig(["assistantText": "scheduled completed"], into: workspace)
-        let scheduledEvents = Task {
-            try await collectAllEvents(
-                scheduler.send(turn: turn(
-                    workspace: workspace,
-                    executionMode: .scheduled)),
-                timeout: 10)
-        }
-        try await Task.sleep(for: .milliseconds(250))
+        try writeConfig([
+            "assistantText": "scheduled completed",
+            "mcpServers": [
+                ["name": "github", "enabled": true],
+                ["name": "rubien", "enabled": true],
+            ],
+        ], into: workspace)
+        let events = try await collectAllEvents(
+            scheduler.send(turn: turn(
+                workspace: workspace,
+                executionMode: .scheduled)),
+            timeout: 10)
         XCTAssertEqual(try readObserved(in: workspace)["pid"] as? Int, interactivePID)
-        XCTAssertEqual(try readObserved(in: workspace)["turnStarts"] as? Int, 1,
-            "scheduled work must wait rather than spawn beside an interactive server")
+        XCTAssertEqual(try readObserved(in: workspace)["turnStarts"] as? Int, 2,
+            "thread-scoped read-only posture should share the interactive server")
+        XCTAssertTrue(events.contains(.assistantMessageCompleted(text: "scheduled completed")))
+        XCTAssertEqual(events.turnCompletion?.outcome, .succeeded)
+        XCTAssertFalse(events.contains {
+            if case .providerNotice = $0 { return true }
+            return false
+        })
 
         home.cancel()
         _ = try await homeEvents.value
-        let events = try await scheduledEvents.value
-        XCTAssertTrue(events.contains(.assistantMessageCompleted(text: "scheduled completed")))
-        XCTAssertEqual(events.turnCompletion?.outcome, .succeeded)
-        XCTAssertNotEqual(try readObserved(in: workspace)["pid"] as? Int, interactivePID,
-            "the read-only scheduled posture should start only after the old server reaps")
+        let params = try XCTUnwrap(
+            try readObserved(in: workspace)["lastThreadStartParams"] as? [String: Any]
+        )
+        let config = try XCTUnwrap(params["config"] as? [String: Any])
+        XCTAssertEqual(
+            (config["features"] as? [String: Any])?["apps"] as? Bool,
+            false
+        )
+        let rubien = ((config["mcp_servers"] as? [String: Any])?["rubien"]
+            as? [String: Any])
+        XCTAssertEqual(rubien?["args"] as? [String], ["mcp", "--read-only"])
+        XCTAssertEqual(
+            (((config["mcp_servers"] as? [String: Any])?["github"]
+                as? [String: Any])?["enabled"] as? Bool),
+            false
+        )
 
         home.shutdown()
         scheduler.shutdown()
@@ -1265,7 +2446,14 @@ final class CodexProviderTests: XCTestCase {
             "initDelayMs": 500,
             "assistantText": "newest turn",
         ], into: workspace)
-        let provider = CodexProvider(executableOverride: fakeServerPath)
+        let metrics = makeRuntimeMetricsStore()
+        defer {
+            metrics.defaults.removePersistentDomain(forName: metrics.suiteName)
+        }
+        let provider = CodexProvider(
+            executableOverride: fakeServerPath,
+            runtimeMetrics: metrics.store
+        )
         defer { provider.shutdown() }
 
         let firstStream = provider.send(
@@ -1305,6 +2493,11 @@ final class CodexProviderTests: XCTestCase {
         XCTAssertTrue(thirdResult.contains(
             .assistantMessageCompleted(text: "newest turn")))
         XCTAssertEqual(try readObserved(in: workspace)["turnStarts"] as? Int, 1)
+        XCTAssertEqual(
+            metrics.store.snapshot().turnRequests,
+            3,
+            "accepted successors remain in the denominator when superseded"
+        )
     }
 
     func testHistoryDeadlineBoundsJoiningAnInteractiveInitialize() async throws {
@@ -1477,6 +2670,204 @@ final class CodexProviderTests: XCTestCase {
         let pid = pid_t(try XCTUnwrap((try readObserved(in: workspace))["pid"] as? Int))
         try await assertEventuallyDead(pid, timeout: 8)
         XCTAssertTrue(events.contains { if case .providerNotice = $0 { return true }; return false })
+    }
+
+    func testSIGSTOPWedgeFailsTurnAndNextTurnRespawns() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["hang": true], into: workspace)
+        let provider = CodexProvider(
+            executableOverride: fakeServerPath,
+            requestTimeout: 1,
+            turnSilenceTimeout: 0.15,
+            livenessProbeTimeout: 0.15
+        )
+        defer { provider.shutdown() }
+
+        let stalledTurn = Task {
+            try await collectAllEvents(
+                provider.send(turn: turn(workspace: workspace)),
+                timeout: 6
+            )
+        }
+        try await waitForObserved(in: workspace, timeout: 3) {
+            ($0["livenessProbes"] as? Int ?? 0) >= 1
+        }
+        let firstPID = pid_t(try XCTUnwrap(
+            try readObserved(in: workspace)["pid"] as? Int
+        ))
+        XCTAssertTrue(isAlive(firstPID),
+                      "a quiet turn must survive a successful liveness probe")
+        XCTAssertEqual(kill(firstPID, SIGSTOP), 0)
+        defer {
+            if isAlive(firstPID) {
+                _ = kill(firstPID, SIGCONT)
+            }
+        }
+
+        let failedEvents = try await stalledTurn.value
+        XCTAssertTrue(failedEvents.contains {
+            if case .providerNotice(let text) = $0 {
+                return text.contains("stopped responding")
+            }
+            return false
+        })
+        try await assertEventuallyDead(firstPID, timeout: 3)
+
+        try writeConfig(["assistantText": "recovered"], into: workspace)
+        let recoveredEvents = try await collectAllEvents(
+            provider.send(turn: turn(workspace: workspace, resume: "TH-1")),
+            timeout: 6
+        )
+        XCTAssertTrue(recoveredEvents.contains(
+            .assistantMessageCompleted(text: "recovered")
+        ))
+        let secondPID = pid_t(try XCTUnwrap(
+            try readObserved(in: workspace)["pid"] as? Int
+        ))
+        XCTAssertNotEqual(secondPID, firstPID,
+                          "Retry must run on a freshly spawned app-server")
+    }
+
+    func testSlowTurnStartDoesNotRecycleHealthyConcurrentConversation() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["hang": true], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let first = CodexProvider(
+            executableOverride: fakeServerPath,
+            requestTimeout: 1,
+            livenessProbeTimeout: 0.2,
+            sharedConnectionRegistry: registry
+        )
+        let second = CodexProvider(
+            executableOverride: fakeServerPath,
+            requestTimeout: 1,
+            livenessProbeTimeout: 0.2,
+            sharedConnectionRegistry: registry
+        )
+        defer {
+            first.shutdown()
+            second.shutdown()
+        }
+
+        let firstEvents = Task {
+            try await collectAllEvents(
+                first.send(turn: turn(workspace: workspace)),
+                timeout: 6
+            )
+        }
+        try await waitForObserved(in: workspace, timeout: 3) {
+            ($0["turnStarts"] as? Int) == 1
+        }
+        let firstPID = try XCTUnwrap(
+            try readObserved(in: workspace)["pid"] as? Int
+        )
+
+        try writeConfig([
+            "turnStartDelayMs": 3_000,
+            "hang": true,
+        ], into: workspace)
+        let secondResult = try await collectAllEvents(
+            second.send(turn: turn(workspace: workspace)),
+            timeout: 3
+        )
+
+        XCTAssertTrue(secondResult.contains {
+            if case .providerNotice(let text) = $0 {
+                return text.contains("turn/start timed out")
+            }
+            return false
+        })
+        XCTAssertEqual(
+            try readObserved(in: workspace)["pid"] as? Int,
+            firstPID,
+            "a responsive dispatcher must not be recycled for one slow request"
+        )
+        XCTAssertTrue(isAlive(pid_t(firstPID)))
+        try await waitForObserved(in: workspace, timeout: 5) {
+            ($0["interruptTurnIds"] as? [String])?.contains("TU-2") == true
+        }
+
+        first.cancel()
+        let firstResult = try await firstEvents.value
+        XCTAssertEqual(firstResult.turnCompletion?.outcome, .interrupted)
+        await registry.shutdownAll()
+    }
+
+    func testSharedSIGSTOPWedgeFailsEveryTurnAndRespawnsOnce() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["hang": true], into: workspace)
+        let registry = CodexSharedConnectionRegistry()
+        let first = CodexProvider(
+            executableOverride: fakeServerPath,
+            requestTimeout: 1,
+            turnSilenceTimeout: 0.15,
+            livenessProbeTimeout: 0.15,
+            sharedConnectionRegistry: registry
+        )
+        let second = CodexProvider(
+            executableOverride: fakeServerPath,
+            requestTimeout: 1,
+            turnSilenceTimeout: 0.15,
+            livenessProbeTimeout: 0.15,
+            sharedConnectionRegistry: registry
+        )
+        defer {
+            first.shutdown()
+            second.shutdown()
+        }
+
+        let firstEvents = Task {
+            try await collectAllEvents(
+                first.send(turn: turn(workspace: workspace)),
+                timeout: 6
+            )
+        }
+        let secondEvents = Task {
+            try await collectAllEvents(
+                second.send(turn: turn(workspace: workspace)),
+                timeout: 6
+            )
+        }
+        try await waitForObserved(in: workspace, timeout: 3) {
+            ($0["turnStarts"] as? Int) == 2
+                && ($0["livenessProbes"] as? Int ?? 0) >= 1
+        }
+        let firstPID = pid_t(try XCTUnwrap(
+            try readObserved(in: workspace)["pid"] as? Int
+        ))
+        XCTAssertEqual(kill(firstPID, SIGSTOP), 0)
+        defer {
+            if isAlive(firstPID) {
+                _ = kill(firstPID, SIGCONT)
+            }
+        }
+
+        let firstResult = try await firstEvents.value
+        let secondResult = try await secondEvents.value
+        for events in [firstResult, secondResult] {
+            XCTAssertEqual(events.filter {
+                if case .providerNotice(let text) = $0 {
+                    return text.contains("stopped responding")
+                }
+                return false
+            }.count, 1)
+        }
+        try await assertEventuallyDead(firstPID, timeout: 3)
+
+        let resumeID = try XCTUnwrap(firstResult.sessionIDs.first)
+        try writeConfig(["assistantText": "shared recovery"], into: workspace)
+        let recovered = try await collectAllEvents(
+            first.send(turn: turn(workspace: workspace, resume: resumeID)),
+            timeout: 6
+        )
+        XCTAssertTrue(recovered.contains(
+            .assistantMessageCompleted(text: "shared recovery")
+        ))
+        let secondPID = pid_t(try XCTUnwrap(
+            try readObserved(in: workspace)["pid"] as? Int
+        ))
+        XCTAssertNotEqual(secondPID, firstPID)
+        await registry.shutdownAll()
     }
 
     // MARK: Shutdown kills the server tree
@@ -2450,6 +3841,24 @@ final class CodexProviderTests: XCTestCase {
             workspaceURL: workspace, resumeSessionID: resume, prompt: prompt,
             attachments: attachments, webAccess: webAccess,
             loadUserTools: loadUserTools, executionMode: executionMode)
+    }
+
+    private func makeRuntimeMetricsStore() -> (
+        store: CodexRuntimeMetricsStore,
+        defaults: UserDefaults,
+        suiteName: String
+    ) {
+        let suiteName = "CodexProviderMetricsTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        return (
+            CodexRuntimeMetricsStore(
+                defaults: defaults,
+                storageKey: "metrics"
+            ),
+            defaults,
+            suiteName
+        )
     }
 
     private func readSpawnedArgv(in workspace: URL) throws -> [String] {
