@@ -30,6 +30,17 @@ public enum PaperURLResolver {
         case networkUnavailable
     }
 
+    /// Returns the canonical landing URL for a supported paper URL, including
+    /// PDF variants. Callers can compare these URLs before associating
+    /// page-controlled download metadata with the active article.
+    public static func canonicalLandingURL(for url: URL) -> URL? {
+        guard let canonical = canonicalize(url),
+              let host = KnownPaperHost.classify(canonical) else {
+            return nil
+        }
+        return rewritePDFURLToLanding(canonical, host: host)
+    }
+
     public static func resolve(
         _ url: URL,
         session: URLSession = .shared,

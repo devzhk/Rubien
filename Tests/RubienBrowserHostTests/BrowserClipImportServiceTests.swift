@@ -90,8 +90,9 @@ final class BrowserClipImportServiceTests: XCTestCase {
         )
         let service = BrowserClipImportService(
             database: database,
-            metadataResolver: { input, fallback in
+            metadataResolver: { input, seed, fallback in
                 XCTAssertEqual(input, "https://arxiv.org/abs/2501.01234")
+                XCTAssertNil(seed)
                 XCTAssertEqual(fallback?.decodedWebContent?.body, "<article>Captured full text</article>")
                 return self.verifiedOutcome(
                     fetched,
@@ -148,7 +149,7 @@ final class BrowserClipImportServiceTests: XCTestCase {
         )
         let service = BrowserClipImportService(
             database: database,
-            metadataResolver: { input, _ in
+            metadataResolver: { input, _, _ in
                 XCTAssertEqual(input, pageURL)
                 return self.verifiedOutcome(fetched)
             }
@@ -167,6 +168,152 @@ final class BrowserClipImportServiceTests: XCTestCase {
         XCTAssertEqual(try database.referenceCount(), 0)
     }
 
+    func testNaturePageFallsBackToCapturedDOIAndOffersSameOriginAuthenticatedPDF() async throws {
+        let database = try makeDatabase()
+        let articleURL = "https://www.nature.com/articles/s41586-026-10751-w"
+        let pdfURL = "\(articleURL).pdf"
+        let doi = "10.1038/s41586-026-10751-w"
+        let resolutionInputs = LockedValue<[String]>([])
+        let fetched = Reference(
+            title: "Planetary-mass exosatellite detected around the substellar companion of a star",
+            authors: [AuthorName(given: "Kevin", family: "Hoy")],
+            year: 2026,
+            journal: "Nature",
+            doi: doi,
+            url: articleURL,
+            referenceType: .journalArticle
+        )
+        let service = BrowserClipImportService(
+            database: database,
+            metadataResolver: { input, seed, fallback in
+                var inputs = resolutionInputs.value
+                inputs.append(input)
+                resolutionInputs.value = inputs
+                if input == articleURL {
+                    XCTAssertNil(seed)
+                    return MetadataResolutionPipeline.IdentifierResolutionOutcome(
+                        result: .rejected(RejectedEnvelope(
+                            seed: nil,
+                            fallbackReference: fallback,
+                            currentReference: fallback,
+                            reason: .insufficientEvidence,
+                            message: "The publisher page could not be resolved."
+                        ))
+                    )
+                }
+                XCTAssertEqual(input, doi)
+                XCTAssertEqual(seed?.doi, doi)
+                XCTAssertEqual(seed?.title, fetched.title)
+                XCTAssertEqual(seed?.firstAuthor, "Kevin Hoy")
+                XCTAssertEqual(seed?.year, 2026)
+                return self.verifiedOutcome(fetched)
+            }
+        )
+
+        let prepared = try await service.prepareClip(request(page: BrowserClipPage(
+            url: articleURL,
+            title: fetched.title,
+            citation: BrowserCitationMetadata(
+                title: fetched.title,
+                authors: ["Kevin Hoy"],
+                publicationDate: "2026-07-22",
+                journalTitle: "Nature",
+                doi: doi,
+                pdfURL: pdfURL
+            )
+        )))
+
+        XCTAssertEqual(resolutionInputs.value, [articleURL, doi])
+        XCTAssertEqual(prepared.preview.kind, .paper)
+        XCTAssertFalse(prepared.preview.willQueueForReview)
+        XCTAssertTrue(prepared.preview.willDownloadPDF)
+        XCTAssertEqual(prepared.preview.pdfDownloadURL, pdfURL)
+        XCTAssertEqual(try database.referenceCount(), 0)
+    }
+
+    func testCapturedDOIFallbackRejectsResolvedMetadataThatDoesNotMatchPage() async throws {
+        let database = try makeDatabase()
+        let articleURL = "https://www.nature.com/articles/s41586-026-10751-w"
+        let capturedDOI = "10.1038/s41586-026-10751-w"
+        let unrelated = Reference(
+            title: "An unrelated Nature paper",
+            authors: [AuthorName(given: "Someone", family: "Else")],
+            year: 2025,
+            journal: "Nature",
+            doi: capturedDOI,
+            url: "https://www.nature.com/articles/unrelated",
+            referenceType: .journalArticle
+        )
+        let service = BrowserClipImportService(
+            database: database,
+            metadataResolver: { input, _, fallback in
+                if input == articleURL {
+                    return MetadataResolutionPipeline.IdentifierResolutionOutcome(
+                        result: .rejected(RejectedEnvelope(
+                            seed: nil,
+                            fallbackReference: fallback,
+                            currentReference: fallback,
+                            reason: .insufficientEvidence,
+                            message: "The publisher page could not be resolved."
+                        ))
+                    )
+                }
+                XCTAssertEqual(input, capturedDOI)
+                return self.verifiedOutcome(unrelated)
+            }
+        )
+
+        let prepared = try await service.prepareClip(request(page: BrowserClipPage(
+            url: articleURL,
+            title: "Planetary-mass exosatellite detected around the substellar companion of a star",
+            citation: BrowserCitationMetadata(
+                title: "Planetary-mass exosatellite detected around the substellar companion of a star",
+                authors: ["Kevin Hoy"],
+                publicationDate: "2026-07-22",
+                journalTitle: "Nature",
+                doi: capturedDOI,
+                pdfURL: "\(articleURL).pdf"
+            )
+        )))
+
+        XCTAssertTrue(prepared.preview.willQueueForReview)
+        XCTAssertNil(prepared.preview.pdfDownloadURL)
+        XCTAssertEqual(try database.referenceCount(), 0)
+    }
+
+    func testCapturedPublisherPDFRequiresSameOriginRecognizedPDFRoute() async throws {
+        let database = try makeDatabase()
+        let articleURL = "https://www.nature.com/articles/s41586-026-10751-w"
+        let fetched = Reference(
+            title: "Resolved Nature Paper",
+            authors: [AuthorName(given: "Kevin", family: "Hoy")],
+            doi: "10.1038/s41586-026-10751-w",
+            url: articleURL,
+            referenceType: .journalArticle
+        )
+        let service = BrowserClipImportService(
+            database: database,
+            metadataResolver: { _, _, _ in self.verifiedOutcome(fetched) }
+        )
+
+        for untrustedURL in [
+            "https://attacker.example/private.pdf",
+            articleURL,
+            "https://www.nature.com/private.pdf",
+            "https://www.nature.com/articles/s41586-026-99999-x.pdf",
+        ] {
+            let prepared = try await service.prepareClip(request(page: BrowserClipPage(
+                url: articleURL,
+                citation: BrowserCitationMetadata(
+                    doi: fetched.doi,
+                    pdfURL: untrustedURL
+                )
+            )))
+
+            XCTAssertNil(prepared.preview.pdfDownloadURL, untrustedURL)
+        }
+    }
+
     func testSciencePaperConfirmationAttachesChromeDownloadedPDFInsteadOfCapturedPage() async throws {
         let database = try makeDatabase()
         let articleURL = "https://www.science.org/doi/10.1126/scirobotics.adz7397"
@@ -183,7 +330,7 @@ final class BrowserClipImportServiceTests: XCTestCase {
         )
         let service = BrowserClipImportService(
             database: database,
-            metadataResolver: { input, fallback in
+            metadataResolver: { input, _, fallback in
                 XCTAssertEqual(input, articleURL)
                 XCTAssertNotNil(fallback?.webContent)
                 return self.verifiedOutcome(fetched, preferredPDFURL: pdfURL)
@@ -267,7 +414,7 @@ final class BrowserClipImportServiceTests: XCTestCase {
 
         let service = BrowserClipImportService(
             database: database,
-            metadataResolver: { _, _ in
+            metadataResolver: { _, _, _ in
                 self.verifiedOutcome(
                     existing,
                     preferredPDFURL: "https://www.science.org/doi/pdf/10.1126/scirobotics.adz7397?download=true"
@@ -308,7 +455,7 @@ final class BrowserClipImportServiceTests: XCTestCase {
         )
         let service = BrowserClipImportService(
             database: database,
-            metadataResolver: { _, _ in
+            metadataResolver: { _, _, _ in
                 self.verifiedOutcome(
                     fetched,
                     preferredPDFURL: "https://www.science.org/doi/pdf/10.1126/sciimmunol.adv1149?download=true"
@@ -355,7 +502,7 @@ final class BrowserClipImportServiceTests: XCTestCase {
         )
         let service = BrowserClipImportService(
             database: database,
-            metadataResolver: { _, _ in
+            metadataResolver: { _, _, _ in
                 self.verifiedOutcome(
                     fetched,
                     preferredPDFURL: "https://www.science.org/doi/pdf/10.1126/sciimmunol.adv1149?download=true"
@@ -392,7 +539,7 @@ final class BrowserClipImportServiceTests: XCTestCase {
         )
         let service = BrowserClipImportService(
             database: database,
-            metadataResolver: { _, _ in self.verifiedOutcome(fetched) },
+            metadataResolver: { _, _, _ in self.verifiedOutcome(fetched) },
             pdfDownloader: { _, _ in
                 XCTFail("The staged authenticated PDF should be preferred")
                 return "unexpected.pdf"
@@ -431,7 +578,7 @@ final class BrowserClipImportServiceTests: XCTestCase {
         let paperURL = "https://aclanthology.org/2024.acl-long.2.pdf"
         let service = BrowserClipImportService(
             database: database,
-            metadataResolver: { _, fallback in
+            metadataResolver: { _, _, fallback in
                 MetadataResolutionPipeline.IdentifierResolutionOutcome(
                     result: .candidate(CandidateEnvelope(
                         seed: nil,
@@ -491,7 +638,7 @@ final class BrowserClipImportServiceTests: XCTestCase {
         let database = try makeDatabase()
         let service = BrowserClipImportService(
             database: database,
-            metadataResolver: { _, fallback in
+            metadataResolver: { _, _, fallback in
                 MetadataResolutionPipeline.IdentifierResolutionOutcome(
                     result: .candidate(CandidateEnvelope(
                         seed: nil,

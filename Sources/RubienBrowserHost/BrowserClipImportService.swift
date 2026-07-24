@@ -158,6 +158,7 @@ struct PreparedBrowserImport: Sendable {
 struct BrowserClipImportService {
     typealias MetadataResolveOperation = (
         String,
+        MetadataResolutionSeed?,
         Reference?
     ) async -> MetadataResolutionPipeline.IdentifierResolutionOutcome
     typealias FilePreparer = (
@@ -183,9 +184,10 @@ struct BrowserClipImportService {
         pdfDeleter: PDFDeleter? = nil
     ) {
         self.database = database
-        self.metadataResolver = metadataResolver ?? { input, fallback in
+        self.metadataResolver = metadataResolver ?? { input, seed, fallback in
             await MetadataResolutionPipeline.resolveIdentifierInput(
                 input,
+                seed: seed,
                 fallback: fallback
             )
         }
@@ -360,7 +362,25 @@ struct BrowserClipImportService {
             asPaper: true
         )
 
-        let resolution = await metadataResolver(input, capturedFallback)
+        let initialResolution = await metadataResolver(input, nil, capturedFallback)
+        let resolution: MetadataResolutionPipeline.IdentifierResolutionOutcome
+        if !isVerified(initialResolution.result),
+           let capturedDOI = capturedFallback.doi {
+            let capturedSeed = MetadataResolutionSeed.fromReference(capturedFallback)
+            let doiResolution = await metadataResolver(
+                capturedDOI,
+                capturedSeed,
+                capturedFallback
+            )
+            resolution = capturedPaperIdentityMatches(
+                doiResolution.result,
+                captured: capturedFallback
+            )
+                ? doiResolution
+                : initialResolution
+        } else {
+            resolution = initialResolution
+        }
         let enrichedResult = enrichCapturedFallback(
             in: resolution.result,
             capturedFallback: capturedFallback
@@ -368,9 +388,63 @@ struct BrowserClipImportService {
         return .metadata(
             input: input,
             result: enrichedResult,
-            preferredPDFURL: resolution.preferredPDFURL,
+            preferredPDFURL: resolution.preferredPDFURL
+                ?? trustedCapturedPublisherPDFURL(in: page, pageURL: pageURL),
             browserPDFSource: browserPDFSource
         )
+    }
+
+    private func isVerified(_ result: MetadataResolutionResult) -> Bool {
+        if case .verified = result { return true }
+        return false
+    }
+
+    private func capturedPaperIdentityMatches(
+        _ result: MetadataResolutionResult,
+        captured: Reference
+    ) -> Bool {
+        guard case .verified(let envelope) = result,
+              let capturedDOI = cleanedDOI(captured.doi)?.lowercased(),
+              let resolvedDOI = cleanedDOI(envelope.reference.doi)?.lowercased(),
+              capturedDOI == resolvedDOI,
+              MetadataResolution.titleSimilarity(
+                captured.title,
+                envelope.reference.title
+              ) >= 0.92 else {
+            return false
+        }
+
+        let yearMatches = captured.year != nil
+            && captured.year == envelope.reference.year
+        let capturedAuthor = captured.authors.first.map {
+            MetadataResolution.normalizedComparableText($0.displayName)
+        }
+        let resolvedAuthor = envelope.reference.authors.first.map {
+            MetadataResolution.normalizedComparableText($0.displayName)
+        }
+        let firstAuthorMatches = capturedAuthor?.isEmpty == false
+            && capturedAuthor == resolvedAuthor
+        return yearMatches || firstAuthorMatches
+    }
+
+    /// Captured citation metadata is page-controlled, so Chrome may use its
+    /// authenticated session only for an HTTPS, same-origin URL that Rubien's
+    /// paper router maps back to the active article.
+    private func trustedCapturedPublisherPDFURL(
+        in page: BrowserClipPage,
+        pageURL: URL
+    ) -> String? {
+        guard let rawPDFURL = page.citation?.pdfURL,
+              let pdfURL = httpURL(rawPDFURL),
+              pdfURL.scheme?.lowercased() == "https",
+              sameOrigin(pdfURL, pageURL),
+              pdfURL.pathExtension.lowercased() == "pdf",
+              let pageLandingURL = PaperURLResolver.canonicalLandingURL(for: pageURL),
+              let pdfLandingURL = PaperURLResolver.canonicalLandingURL(for: pdfURL),
+              pageLandingURL == pdfLandingURL else {
+            return nil
+        }
+        return pdfURL.absoluteString
     }
 
     private func commitMetadata(
