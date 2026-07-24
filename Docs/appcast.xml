@@ -576,5 +576,21 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.7.0</title>
+            <description sparkle:format="plain-text"><![CDATA[• Assistant conversations are now saved, searchable, and resumable across app restarts, including continuing a finished scheduled job with its correct transcript.
+• Run multiple Assistant conversations at once; Codex now applies web-search and tool settings safely between turns and handles stalls, shutdowns, and restarts more reliably.
+• Chrome imports can now attach authenticated Nature PDFs while verifying that the article page, DOI, and PDF belong to the same paper.]]></description>
+            <pubDate>Fri, 24 Jul 2026 21:06:11 +0000</pubDate>
+            <sparkle:version>38</sparkle:version>
+            <sparkle:shortVersionString>0.7.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien/releases/download/v0.7.0/Rubien-0.7.0.dmg"
+                sparkle:edSignature="ps7CAtRFSOJnULrK4WXcY9y/3eCTgWQ1PoFwkxO77q0pnLKZAI3tlDlPRnD1RnN95Q0Exidc6nyXOUpkkCKGDA=="
+                length="17563976"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
