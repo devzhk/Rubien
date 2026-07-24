@@ -785,6 +785,158 @@ final class ChatSessionControllerTests: XCTestCase {
         XCTAssertEqual(older.map(\.body), ["Message 0"])
     }
 
+    func testFreshScheduledContinuationImmediatelyRestoresParentTranscript() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let workspace = URL(fileURLWithPath: "/tmp/ws")
+        let job = try database.createScheduledJob(.init(
+            name: "Morning papers",
+            prompt: "Find papers",
+            recurrence: .init(weekdayMask: 127, localMinuteOfDay: 480),
+            provider: .codex
+        ))
+        let claim = try database.claimManualScheduledJob(id: job.id)
+        let parent = try database.createAssistantConversation(.init(
+            provider: .codex,
+            workspaceIdentityHash: AssistantSessionIdentity.workspaceHash(workspace),
+            contextKind: .library,
+            scheduledJobRunId: claim.run.id
+        ))
+        let scheduledTurn = AssistantTurn(conversationId: parent.id, ordinal: 1)
+        try database.beginAssistantTurn(
+            scheduledTurn,
+            userEntry: .init(
+                id: "scheduled-entry-000",
+                turnId: scheduledTurn.id,
+                sequence: 0,
+                kind: .user,
+                body: "Find papers"
+            )
+        )
+        for sequence in 1...200 {
+            try database.upsertAssistantTranscriptEntry(.init(
+                id: String(format: "scheduled-entry-%03d", sequence),
+                turnId: scheduledTurn.id,
+                sequence: sequence,
+                kind: .assistant,
+                body: "Scheduled result \(sequence)"
+            ))
+        }
+        XCTAssertTrue(try database.recordScheduledAssistantSessionBinding(
+            runID: claim.run.id,
+            keyHash: "scheduled-continuation-alias",
+            provider: .codex,
+            providerSessionID: "codex-thread",
+            conversationID: parent.id,
+            turnOrdinal: 1,
+            identityEventOrdinal: 201
+        ))
+        XCTAssertTrue(try database.finishScheduledAssistantCapture(
+            runID: claim.run.id,
+            turnID: scheduledTurn.id,
+            runStatus: .succeeded,
+            turnStatus: .succeeded
+        ))
+        XCTAssertTrue(try database.finishScheduledAssistantIdentity(runID: claim.run.id))
+        let child = try database.createScheduledAssistantContinuation(runID: claim.run.id)
+        XCTAssertTrue(
+            try XCTUnwrap(
+                database.fetchAssistantConversationDetail(id: child.id)
+            ).entries.isEmpty
+        )
+
+        let provider = MockAgentProvider(kind: .codex)
+        let sink = SpyTranscriptSink()
+        let controller = ChatSessionController(
+            provider: provider,
+            transcript: sink,
+            conversationContext: .library,
+            workspaceURL: workspace,
+            gate: AssistantTurnGate(),
+            initialAvailability: .installed(version: "test", path: "/fake/codex"),
+            conversationDatabase: database
+        )
+
+        controller.resume(AgentSessionSummary(
+            id: child.id,
+            preview: job.name,
+            date: child.lastActivityAt
+        ))
+        await waitUntil { !controller.isResuming }
+
+        XCTAssertEqual(controller.liveSessionID, "codex-thread")
+        XCTAssertTrue(controller.hasMessages)
+        XCTAssertTrue(controller.canLoadOlderTranscript)
+        guard case .loadTranscript(let restored)? = sink.calls.last else {
+            return XCTFail("expected the scheduled parent transcript to load")
+        }
+        XCTAssertEqual(restored.first?.body, "Scheduled result 1")
+        XCTAssertEqual(restored.dropLast().last?.body, "Scheduled result 200")
+        XCTAssertEqual(restored.count, 201)
+        XCTAssertEqual(restored.last?.role, .notice)
+        XCTAssertEqual(
+            restored.last?.body,
+            "Scheduled task result ends here · Follow-up conversation below"
+        )
+
+        controller.loadOlderTranscript()
+        await waitUntil { !controller.isLoadingOlderTranscript }
+
+        XCTAssertFalse(controller.canLoadOlderTranscript)
+        guard case .prependTranscript(let older)? = sink.calls.last else {
+            return XCTFail("expected the oldest scheduled row to remain pageable")
+        }
+        XCTAssertEqual(older.map(\.body), ["Find papers"])
+
+        await runTurn(
+            controller,
+            provider: provider,
+            send: "Which result should I read first?",
+            events: [.turnCompleted(usage: nil)]
+        )
+        XCTAssertEqual(provider.lastRequest?.resumeSessionID, "codex-thread")
+
+        let reopenedSink = SpyTranscriptSink()
+        let reopenedController = ChatSessionController(
+            provider: MockAgentProvider(kind: .codex),
+            transcript: reopenedSink,
+            conversationContext: .library,
+            workspaceURL: workspace,
+            gate: AssistantTurnGate(),
+            initialAvailability: .installed(version: "test", path: "/fake/codex"),
+            conversationDatabase: database
+        )
+        reopenedController.resume(AgentSessionSummary(
+            id: child.id,
+            preview: job.name,
+            date: child.lastActivityAt
+        ))
+        await waitUntil { !reopenedController.isResuming }
+
+        XCTAssertTrue(reopenedController.canLoadOlderTranscript)
+        guard case .loadTranscript(let reopened)? = reopenedSink.calls.last else {
+            return XCTFail("expected the complete scheduled continuation to reload")
+        }
+        guard reopened.count > 200 else {
+            return XCTFail("expected scheduled parent, boundary, and child rows")
+        }
+        XCTAssertEqual(reopened.first?.body, "Scheduled result 1")
+        XCTAssertEqual(reopened[200].role, .notice)
+        XCTAssertEqual(
+            reopened[200].body,
+            "Scheduled task result ends here · Follow-up conversation below"
+        )
+        XCTAssertEqual(reopened.last?.body, "Which result should I read first?")
+
+        reopenedController.loadOlderTranscript()
+        await waitUntil { !reopenedController.isLoadingOlderTranscript }
+
+        XCTAssertFalse(reopenedController.canLoadOlderTranscript)
+        guard case .prependTranscript(let reopenedOlder)? = reopenedSink.calls.last else {
+            return XCTFail("expected the scheduled parent's oldest row")
+        }
+        XCTAssertEqual(reopenedOlder.map(\.body), ["Find papers"])
+    }
+
     func testScheduledResultOpenedFromHistoryRemainsReadOnly() async throws {
         let database = try AppDatabase(DatabaseQueue())
         let workspace = URL(fileURLWithPath: "/tmp/ws")

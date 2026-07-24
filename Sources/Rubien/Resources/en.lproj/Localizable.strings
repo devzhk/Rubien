@@ -188,13 +188,13 @@
 "scheduled.action.openResult" = "Open Result";
 "scheduled.action.backToAssistant" = "Back to Assistant";
 "scheduled.action.cancelRun" = "Cancel Run";
-"scheduled.action.continue" = "Continue";
+"scheduled.action.continue" = "Continue Conversation";
 "scheduled.action.retryImport" = "Retry Import";
 "scheduled.result.importingTranscript" = "Importing this older scheduled result into Rubien…";
 "scheduled.result.alreadyLocal" = "This provider conversation is already in Local History.";
 "scheduled.result.localTranscriptDeleted" = "The local transcript was deleted. Use Provider History to import it again explicitly.";
 "scheduled.result.continuationDeleted" = "The continuation was deleted locally.";
-"assistant.history.scheduledContinuation" = "Scheduled result — continuing below";
+"assistant.history.scheduledContinuation" = "Scheduled task result ends here · Follow-up conversation below";
 "assistant.history.loadEarlier" = "Load earlier messages";
 "Clear Assistant Conversations…" = "Clear Assistant Conversations…";
 "Clear Assistant Conversations?" = "Clear Assistant Conversations?";

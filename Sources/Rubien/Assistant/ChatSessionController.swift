@@ -2227,7 +2227,38 @@ final class ChatSessionController: ObservableObject {
                     )
                     return
                 }
-                let messages = await self.projectStoredTranscriptPage(detail)
+                var parentDetail: AssistantConversationDetail?
+                if detail.olderCursor == nil,
+                   let parentConversationID = detail.conversation
+                    .continuedFromConversationId,
+                   let storedParent = await Task.detached(
+                    priority: .userInitiated,
+                    operation: {
+                        try? database.fetchAssistantConversationDetail(
+                            id: parentConversationID
+                        )
+                    }
+                   ).value,
+                   !storedParent.entries.isEmpty {
+                    parentDetail = storedParent
+                }
+                guard requestGeneration == self.resumeRequestGeneration else { return }
+                var messages: [ChatRenderMessage]
+                let paginationDetail: AssistantConversationDetail
+                if let parentDetail {
+                    var parentMessages = await self.projectStoredTranscriptPage(
+                        parentDetail
+                    )
+                    self.appendScheduledContinuationBoundary(to: &parentMessages)
+                    let childMessages = await self.projectStoredTranscriptPage(
+                        detail
+                    )
+                    messages = parentMessages + childMessages
+                    paginationDetail = parentDetail
+                } else {
+                    messages = await self.projectStoredTranscriptPage(detail)
+                    paginationDetail = detail
+                }
                 guard requestGeneration == self.resumeRequestGeneration else { return }
                 let context = Self.conversationContext(for: detail.conversation)
                 if let targetKind = AgentProviderKind(
@@ -2247,10 +2278,11 @@ final class ChatSessionController: ObservableObject {
                     messages: messages
                 )
                 self.localTranscriptPagination = LocalTranscriptPagination(
-                    conversationID: detail.conversation.id,
-                    cursor: detail.olderCursor,
-                    parentConversationID: detail.conversation
-                        .continuedFromConversationId
+                    conversationID: paginationDetail.conversation.id,
+                    cursor: paginationDetail.olderCursor,
+                    parentConversationID: parentDetail != nil
+                        ? nil
+                        : detail.conversation.continuedFromConversationId
                 )
                 self.updateOlderTranscriptAvailability()
             }
@@ -2372,13 +2404,7 @@ final class ChatSessionController: ObservableObject {
 
             var messages = await self.projectStoredTranscriptPage(detail)
             if isEnteringParent, !messages.isEmpty {
-                messages.append(ChatRenderMessage(
-                    role: .notice,
-                    body: String(
-                        localized: "assistant.history.scheduledContinuation"
-                    ),
-                    seq: messages.count
-                ))
+                self.appendScheduledContinuationBoundary(to: &messages)
             }
             guard !Task.isCancelled,
                   requestGeneration == self.resumeRequestGeneration
@@ -2402,6 +2428,19 @@ final class ChatSessionController: ObservableObject {
         canLoadOlderTranscript = localTranscriptPagination.map {
             $0.cursor != nil || $0.parentConversationID != nil
         } ?? false
+    }
+
+    private func appendScheduledContinuationBoundary(
+        to messages: inout [ChatRenderMessage]
+    ) {
+        messages.append(ChatRenderMessage(
+            role: .notice,
+            body: String(
+                localized: "assistant.history.scheduledContinuation",
+                bundle: .module
+            ),
+            seq: messages.count
+        ))
     }
 
     private func projectStoredTranscriptPage(
