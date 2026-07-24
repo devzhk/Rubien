@@ -14,6 +14,7 @@ permissions:
 env:
   CANONICAL_RELEASES_REPO: ${{ github.repository }}
   LEGACY_RELEASES_REPO: devzhk/Rubien-releases
+  RELEASE_TAG: ${{ inputs.tag }}
 
 jobs:
   build:
@@ -23,6 +24,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag }}
+
+      - name: Validate release tag
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release tag: $RELEASE_TAG" >&2
+            exit 64
+          fi
 
       - name: Build static-stdlib rubien-cli + stage resource bundle
         run: |
@@ -53,7 +61,7 @@ jobs:
             export RUBIEN_CLI=/path/to/extracted/rubien-cli
             claude mcp add rubien -- npx -y rubien-mcp-server
           EOF
-          tar -C stage -czf "rubien-cli-${{ inputs.tag }}-linux-x86_64.tar.gz" .
+          tar -C stage -czf "rubien-cli-${RELEASE_TAG}-linux-x86_64.tar.gz" .
 
       - name: Smoke test from the TARBALL in a clean container
         # Mirrors D1's spike so the recurring RELEASE GATE is as strong as the
@@ -61,7 +69,7 @@ jobs:
         # `cite` exercises the citeproc resource bundle. (One arXiv network call
         # runs in the gate; if it ever flakes, that single line can be relaxed.)
         run: |
-          docker run --rm -v "$PWD/rubien-cli-${{ inputs.tag }}-linux-x86_64.tar.gz":/t.tgz ubuntu:22.04 bash -c '
+          docker run --rm -v "$PWD/rubien-cli-${RELEASE_TAG}-linux-x86_64.tar.gz":/t.tgz ubuntu:22.04 bash -c '
             set -e
             apt-get update
             apt-get install -y --no-install-recommends libsqlite3-0 libcurl4 libxml2 libpoppler-glib8 libcairo2 libgdk-pixbuf-2.0-0 libglib2.0-0 ca-certificates
@@ -83,63 +91,88 @@ jobs:
           printf '%s' "$RUBIEN_CLI_SIGNING_KEY" > /tmp/cli-signing.pem
           # Ed25519 is PureEdDSA: sign the raw tarball bytes -> 64-byte detached sig.
           openssl pkeyutl -sign -inkey /tmp/cli-signing.pem -rawin \
-            -in "rubien-cli-${{ inputs.tag }}-linux-x86_64.tar.gz" \
-            -out "rubien-cli-${{ inputs.tag }}-linux-x86_64.tar.gz.sig"
+            -in "rubien-cli-${RELEASE_TAG}-linux-x86_64.tar.gz" \
+            -out "rubien-cli-${RELEASE_TAG}-linux-x86_64.tar.gz.sig"
           rm -f /tmp/cli-signing.pem
-          test "$(wc -c < "rubien-cli-${{ inputs.tag }}-linux-x86_64.tar.gz.sig")" -eq 64
+          test "$(wc -c < "rubien-cli-${RELEASE_TAG}-linux-x86_64.tar.gz.sig")" -eq 64
 
       - name: Upload to the canonical release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${{ inputs.tag }}" \
-            "rubien-cli-${{ inputs.tag }}-linux-x86_64.tar.gz" \
-            "rubien-cli-${{ inputs.tag }}-linux-x86_64.tar.gz.sig" \
+          gh release upload "$RELEASE_TAG" \
+            "rubien-cli-${RELEASE_TAG}-linux-x86_64.tar.gz" \
+            "rubien-cli-${RELEASE_TAG}-linux-x86_64.tar.gz.sig" \
             --repo "$CANONICAL_RELEASES_REPO" --clobber
 
-      - name: Download canonical 0.6.3 assets for the compatibility mirror
-        if: ${{ inputs.tag == 'v0.6.3' }}
+      - name: Download canonical app assets for the legacy mirror
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          VERSION="$RELEASE_TAG"
+          VERSION="${VERSION#v}"
+          DMG="Rubien-${VERSION}.dmg"
+          EXTENSION="Rubien-Browser-Extension-${VERSION}.zip"
           mkdir -p "$RUNNER_TEMP/legacy-mirror"
-          gh release download "${{ inputs.tag }}" \
+          gh release download "$RELEASE_TAG" \
             --repo "$CANONICAL_RELEASES_REPO" \
-            --pattern "Rubien-0.6.3.dmg" \
-            --pattern "Rubien-Browser-Extension-0.6.3.zip" \
+            --pattern "$DMG" \
+            --pattern "$EXTENSION" \
             --dir "$RUNNER_TEMP/legacy-mirror"
-          gh release view "${{ inputs.tag }}" \
+          gh release view "$RELEASE_TAG" \
             --repo "$CANONICAL_RELEASES_REPO" \
             --json name --jq .name > "$RUNNER_TEMP/legacy-release-title.txt"
-          gh release view "${{ inputs.tag }}" \
+          gh release view "$RELEASE_TAG" \
             --repo "$CANONICAL_RELEASES_REPO" \
             --json body --jq .body > "$RUNNER_TEMP/legacy-release-notes.md"
-          test -s "$RUNNER_TEMP/legacy-mirror/Rubien-0.6.3.dmg"
-          test -s "$RUNNER_TEMP/legacy-mirror/Rubien-Browser-Extension-0.6.3.zip"
+          gh release view \
+            --repo "$CANONICAL_RELEASES_REPO" \
+            --json tagName --jq .tagName > "$RUNNER_TEMP/canonical-latest-tag.txt"
+          test -s "$RUNNER_TEMP/legacy-mirror/$DMG"
+          test -s "$RUNNER_TEMP/legacy-mirror/$EXTENSION"
           test -s "$RUNNER_TEMP/legacy-release-title.txt"
           test -s "$RUNNER_TEMP/legacy-release-notes.md"
+          test -s "$RUNNER_TEMP/canonical-latest-tag.txt"
 
-      - name: Publish the full 0.6.3 compatibility mirror
-        if: ${{ inputs.tag == 'v0.6.3' }}
+      - name: Publish the full legacy mirror
         env:
           GH_TOKEN: ${{ secrets.RELEASES_UPLOAD_TOKEN }}
         run: |
+          VERSION="$RELEASE_TAG"
+          VERSION="${VERSION#v}"
+          DMG="Rubien-${VERSION}.dmg"
+          EXTENSION="Rubien-Browser-Extension-${VERSION}.zip"
           RELEASE_TITLE="$(cat "$RUNNER_TEMP/legacy-release-title.txt")"
-          if ! gh release view "${{ inputs.tag }}" --repo "$LEGACY_RELEASES_REPO" >/dev/null 2>&1; then
-            gh release create "${{ inputs.tag }}" \
+          CANONICAL_LATEST_TAG="$(cat "$RUNNER_TEMP/canonical-latest-tag.txt")"
+          LATEST_FLAG=false
+          if [[ "$RELEASE_TAG" == "$CANONICAL_LATEST_TAG" ]]; then
+            LATEST_FLAG=true
+          elif ! gh release view "$CANONICAL_LATEST_TAG" \
+            --repo "$LEGACY_RELEASES_REPO" >/dev/null 2>&1
+          then
+            echo "Mirror canonical latest ($CANONICAL_LATEST_TAG) before repairing $RELEASE_TAG" >&2
+            exit 1
+          fi
+          if ! gh release view "$RELEASE_TAG" --repo "$LEGACY_RELEASES_REPO" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
               --repo "$LEGACY_RELEASES_REPO" \
               --title "$RELEASE_TITLE" \
               --notes-file "$RUNNER_TEMP/legacy-release-notes.md" \
               --draft
           fi
-          gh release upload "${{ inputs.tag }}" \
-            "$RUNNER_TEMP/legacy-mirror/Rubien-0.6.3.dmg" \
-            "$RUNNER_TEMP/legacy-mirror/Rubien-Browser-Extension-0.6.3.zip" \
-            "rubien-cli-${{ inputs.tag }}-linux-x86_64.tar.gz" \
-            "rubien-cli-${{ inputs.tag }}-linux-x86_64.tar.gz.sig" \
+          gh release upload "$RELEASE_TAG" \
+            "$RUNNER_TEMP/legacy-mirror/$DMG" \
+            "$RUNNER_TEMP/legacy-mirror/$EXTENSION" \
+            "rubien-cli-${RELEASE_TAG}-linux-x86_64.tar.gz" \
+            "rubien-cli-${RELEASE_TAG}-linux-x86_64.tar.gz.sig" \
             --repo "$LEGACY_RELEASES_REPO" --clobber
-          gh release edit "${{ inputs.tag }}" \
+          gh release edit "$RELEASE_TAG" \
             --repo "$LEGACY_RELEASES_REPO" \
             --title "$RELEASE_TITLE" \
             --notes-file "$RUNNER_TEMP/legacy-release-notes.md" \
-            --draft=false --prerelease=false --latest
+            --draft=false --prerelease=false \
+            --latest="$LATEST_FLAG"
+          if [[ "$RELEASE_TAG" != "$CANONICAL_LATEST_TAG" ]]; then
+            gh release edit "$CANONICAL_LATEST_TAG" \
+              --repo "$LEGACY_RELEASES_REPO" --latest
+          fi
