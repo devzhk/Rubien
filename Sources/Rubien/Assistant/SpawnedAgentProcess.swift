@@ -496,6 +496,32 @@ private func withCStringArray<Result>(
 
 // MARK: - Bounded stderr ring buffer (thread-safe, shared)
 
+/// Drains a process pipe with the throwing `FileHandle` API. Provider shutdown
+/// deliberately closes output handles to unblock inherited pipes; that close can
+/// race a background read. `availableData` turns the resulting EBADF into an
+/// uncaught Objective-C exception, while `read(upToCount:)` lets us treat it as
+/// the intended early EOF.
+enum AgentProcessOutputDrain {
+    private static let chunkByteCount = 64 * 1024
+
+    static func drain(
+        _ handle: FileHandle,
+        onChunk: (Data) -> Void = { _ in }
+    ) {
+        while true {
+            do {
+                guard let chunk = try handle.read(upToCount: chunkByteCount),
+                      !chunk.isEmpty else {
+                    return
+                }
+                onChunk(chunk)
+            } catch {
+                return
+            }
+        }
+    }
+}
+
 /// Keeps only the tail of a child's stderr for the error-notice path; appended from
 /// the stderr drain thread, read at finalize. Lock-guarded so it is safely
 /// `Sendable` across those two domains. Signals `finish()` at EOF so the failure

@@ -177,7 +177,7 @@ actor CodexModelCatalog {
         // Drain stderr so a chatty binary can't fill the pipe and block itself.
         let stderrHandle = process.stderrHandle
         DispatchQueue.global(qos: .utility).async {
-            while !stderrHandle.availableData.isEmpty {}
+            AgentProcessOutputDrain.drain(stderrHandle)
         }
         // Watchdog: a wedged probe is killed, which EOFs the read loop below.
         let watchdog = Task {

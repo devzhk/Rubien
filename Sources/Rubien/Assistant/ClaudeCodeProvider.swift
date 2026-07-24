@@ -694,12 +694,9 @@ actor ClaudeTurnEngine {
         let ring = turn.stderr
         let handle = process.stderrHandle
         DispatchQueue.global(qos: .utility).async {
-            while true {
-                let chunk = handle.availableData
-                if chunk.isEmpty { break }
-                ring.append(chunk)
-            }
-            ring.finish()   // A5: signal EOF so the failure path can read the final bytes
+            AgentProcessOutputDrain.drain(handle, onChunk: ring.append)
+            // A5: signal EOF so the failure path can read the final bytes.
+            ring.finish()
         }
     }
 

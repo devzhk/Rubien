@@ -2531,11 +2531,7 @@ private actor CodexRuntimeBroker {
         let ring = srv.stderr
         let handle = process.stderrHandle
         DispatchQueue.global(qos: .utility).async {
-            while true {
-                let chunk = handle.availableData
-                if chunk.isEmpty { break }
-                ring.append(chunk)
-            }
+            AgentProcessOutputDrain.drain(handle, onChunk: ring.append)
             ring.finish()
         }
     }
