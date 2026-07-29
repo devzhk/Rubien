@@ -198,7 +198,7 @@ struct EditableStringCell: View, Equatable {
 
 // MARK: - Editable Number Cell
 
-struct EditableNumberCell: View, Equatable {
+struct EditableNumberCell: View {
     let value: Int?
     let isEditing: Bool
     let onBeginEdit: () -> Void
@@ -207,13 +207,6 @@ struct EditableNumberCell: View, Equatable {
     var placeholder: String = "—"
     var onTab: ((_ backwards: Bool) -> Void)? = nil
     var wrap: Bool = false
-
-    static func == (lhs: EditableNumberCell, rhs: EditableNumberCell) -> Bool {
-        lhs.value == rhs.value
-            && lhs.isEditing == rhs.isEditing
-            && lhs.placeholder == rhs.placeholder
-            && lhs.wrap == rhs.wrap
-    }
 
     @State private var editText = ""
     @State private var didCancel = false
@@ -263,7 +256,7 @@ struct EditableNumberCell: View, Equatable {
 
 // MARK: - Editable URL Cell
 
-struct EditableURLCell: View, Equatable {
+struct EditableURLCell: View {
     let value: String
     let isEditing: Bool
     let onBeginEdit: () -> Void
@@ -271,12 +264,6 @@ struct EditableURLCell: View, Equatable {
     let onCancel: () -> Void
     var onTab: ((_ backwards: Bool) -> Void)? = nil
     var wrap: Bool = false
-
-    static func == (lhs: EditableURLCell, rhs: EditableURLCell) -> Bool {
-        lhs.value == rhs.value
-            && lhs.isEditing == rhs.isEditing
-            && lhs.wrap == rhs.wrap
-    }
 
     @State private var editText = ""
     @State private var didCancel = false
@@ -324,17 +311,13 @@ struct EditableURLCell: View, Equatable {
 
 // MARK: - Editable Single-Select Cell
 
-struct EditableSingleSelectCell: View, Equatable {
+struct EditableSingleSelectCell: View {
     let value: String
     let options: [SelectOption]
     let onSelect: (String) -> Void
     var onCreateOption: ((String) -> Void)? = nil
     var onDeleteOption: ((String) -> Void)? = nil
     var deleteUnlessInUse: ((String) -> Int?)? = nil
-
-    static func == (lhs: EditableSingleSelectCell, rhs: EditableSingleSelectCell) -> Bool {
-        lhs.value == rhs.value && lhs.options == rhs.options
-    }
 
     @State private var showPicker = false
 
@@ -383,17 +366,13 @@ struct EditableSingleSelectCell: View, Equatable {
 
 // MARK: - Editable Multi-Select Cell
 
-struct EditableMultiSelectCell: View, Equatable {
+struct EditableMultiSelectCell: View {
     let selectedValues: [String]
     let options: [SelectOption]
     let onUpdate: ([String]) -> Void
     var onCreateOption: ((String) -> Void)? = nil
     var onDeleteOption: ((String) -> Void)? = nil
     var deleteUnlessInUse: ((String) -> Int?)? = nil
-
-    static func == (lhs: EditableMultiSelectCell, rhs: EditableMultiSelectCell) -> Bool {
-        lhs.selectedValues == rhs.selectedValues && lhs.options == rhs.options
-    }
 
     @State private var showPicker = false
 
@@ -444,13 +423,9 @@ struct EditableMultiSelectCell: View, Equatable {
 
 // MARK: - Editable Checkbox Cell
 
-struct EditableCheckboxCell: View, Equatable {
+struct EditableCheckboxCell: View {
     let isChecked: Bool
     let onToggle: (Bool) -> Void
-
-    static func == (lhs: EditableCheckboxCell, rhs: EditableCheckboxCell) -> Bool {
-        lhs.isChecked == rhs.isChecked
-    }
 
     var body: some View {
         Toggle("", isOn: Binding(
@@ -465,13 +440,9 @@ struct EditableCheckboxCell: View, Equatable {
 
 // MARK: - Editable Date Cell
 
-struct EditableDateCell: View, Equatable {
+struct EditableDateCell: View {
     let value: Date?
     let onCommit: (Date?) -> Void
-
-    static func == (lhs: EditableDateCell, rhs: EditableDateCell) -> Bool {
-        lhs.value == rhs.value
-    }
 
     @State private var showPicker = false
     @State private var editDate = Date()
@@ -550,6 +521,9 @@ struct EditableDefaultPropertyCell: View, Equatable {
     }
 
     var body: some View {
+        // The dispatcher itself is equatable and includes mutation-target identity.
+        // Do not add nested `.equatable()` wrappers here: Table can reuse a
+        // visually identical leaf for another row and retain its old callbacks.
         switch fieldKey {
         case "referenceType":
             EditableSingleSelectCell(
@@ -563,7 +537,6 @@ struct EditableDefaultPropertyCell: View, Equatable {
                     }
                 }
             )
-            .equatable()
         case "year":
             EditableNumberCell(
                 value: reference.year,
@@ -578,7 +551,6 @@ struct EditableDefaultPropertyCell: View, Equatable {
                 onTab: onTab,
                 wrap: wrap
             )
-            .equatable()
         case "doi":
             EditableURLCell(
                 value: reference.doi ?? "",
@@ -593,7 +565,6 @@ struct EditableDefaultPropertyCell: View, Equatable {
                 onTab: onTab,
                 wrap: wrap
             )
-            .equatable()
         case "url":
             EditableURLCell(
                 value: reference.url ?? "",
@@ -608,7 +579,6 @@ struct EditableDefaultPropertyCell: View, Equatable {
                 onTab: onTab,
                 wrap: wrap
             )
-            .equatable()
         case "editors":
             EditableStringCell(
                 value: reference.parsedEditors.displayString,
@@ -623,7 +593,6 @@ struct EditableDefaultPropertyCell: View, Equatable {
                 onTab: onTab,
                 wrap: wrap
             )
-            .equatable()
         case "translators":
             EditableStringCell(
                 value: reference.parsedTranslators.displayString,
@@ -638,7 +607,6 @@ struct EditableDefaultPropertyCell: View, Equatable {
                 onTab: onTab,
                 wrap: wrap
             )
-            .equatable()
         default:
             defaultStringCell
         }
@@ -708,7 +676,6 @@ struct EditableDefaultPropertyCell: View, Equatable {
             onTab: onTab,
             wrap: wrap
         )
-        .equatable()
     }
 }
 
@@ -743,6 +710,9 @@ struct EditableCustomPropertyCell: View, Equatable {
     }
 
     var body: some View {
+        // The dispatcher itself is equatable and includes mutation-target identity.
+        // Do not add nested `.equatable()` wrappers here: Table can reuse a
+        // visually identical leaf for another row and retain its old callbacks.
         switch property.type {
         case .string:
             EditableStringCell(
@@ -756,7 +726,6 @@ struct EditableCustomPropertyCell: View, Equatable {
                 onTab: onTab,
                 wrap: wrap
             )
-            .equatable()
         case .url:
             EditableURLCell(
                 value: currentValue,
@@ -769,7 +738,6 @@ struct EditableCustomPropertyCell: View, Equatable {
                 onTab: onTab,
                 wrap: wrap
             )
-            .equatable()
         case .number:
             EditableNumberCell(
                 value: Int(currentValue),
@@ -782,7 +750,6 @@ struct EditableCustomPropertyCell: View, Equatable {
                 onTab: onTab,
                 wrap: wrap
             )
-            .equatable()
         case .singleSelect:
             EditableSingleSelectCell(
                 value: currentValue,
@@ -800,7 +767,6 @@ struct EditableCustomPropertyCell: View, Equatable {
                     deleteUnlessInUse(propId, optionValue)
                 }
             )
-            .equatable()
         case .multiSelect:
             let selected = PropertyValue.decodeMultiSelect(currentValue)
             EditableMultiSelectCell(
@@ -820,7 +786,6 @@ struct EditableCustomPropertyCell: View, Equatable {
                     deleteUnlessInUse(propId, optionValue)
                 }
             )
-            .equatable()
         case .checkbox:
             EditableCheckboxCell(
                 isChecked: currentValue == "true",
@@ -828,7 +793,6 @@ struct EditableCustomPropertyCell: View, Equatable {
                     commitCustom(referenceId, propId, checked ? "true" : "false")
                 }
             )
-            .equatable()
         case .date:
             let dateValue = cachedISO8601DateFormatter.date(from: currentValue)
             EditableDateCell(
@@ -838,7 +802,6 @@ struct EditableCustomPropertyCell: View, Equatable {
                     commitCustom(referenceId, propId, str)
                 }
             )
-            .equatable()
         }
     }
 
