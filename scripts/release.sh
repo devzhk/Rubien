@@ -102,7 +102,14 @@ fi
 "$PROJECT_DIR/scripts/generate-cli-version.sh"
 echo "▸ Releasing Rubien $VERSION (build $BUILD_NUMBER) → $APPCAST_TARGET appcast"
 
-# 3. Build
+# 3. Production CloudKit schema gate. The standalone preflight in the release
+#    runbook runs this before approval; release.sh repeats it so direct
+#    invocations cannot publish a binary against an incomplete live schema.
+if [ "$APPCAST_TARGET" = "production" ]; then
+    "$SCRIPT_DIR/validate-cloudkit-schema.sh"
+fi
+
+# 4. Build
 "$SCRIPT_DIR/build-app.sh" release dmg
 
 DMG_NAME="Rubien-Release.dmg"
@@ -118,20 +125,20 @@ if [ ! -f "$BROWSER_EXTENSION_PATH" ]; then
 fi
 check_dmg_size_growth "$DMG_PATH" "Pre-notarization"
 
-# 4. Notarize
+# 5. Notarize
 echo "▸ Submitting $DMG_NAME to notarytool (this can take 5–15 min)…"
 xcrun notarytool submit "$DMG_PATH" \
     --keychain-profile "$NOTARY_PROFILE" \
     --wait \
     --output-format json | tee "$PROJECT_DIR/build/notarytool-result.json"
 
-# 5. Staple
+# 6. Staple
 echo "▸ Stapling notarization ticket…"
 xcrun stapler staple "$DMG_PATH"
 xcrun stapler validate "$DMG_PATH"
 check_dmg_size_growth "$DMG_PATH" "Stapled"
 
-# 6. Per-component signature integrity (catches any --deep slip, missing
+# 7. Per-component signature integrity (catches any --deep slip, missing
 #    Sparkle component, or post-hoc tamper). Each line emits 'valid on disk'
 #    + 'satisfies its Designated Requirement' or release.sh fails.
 APP="$PROJECT_DIR/build/Rubien.app"
@@ -147,18 +154,18 @@ do
     codesign --verify --strict --verbose=2 "$path"
 done
 
-# 7. Belt-and-suspenders deep verification of the assembled app bundle
+# 8. Belt-and-suspenders deep verification of the assembled app bundle
 codesign --verify --deep --strict --verbose=2 "$APP"
 
-# 8. Gatekeeper sanity check happens inside step 11 (mount DMG, spctl the
+# 9. Gatekeeper sanity check happens inside step 12 (mount DMG, spctl the
 #    .app). DMGs themselves are not code-signed by Apple's notarization
 #    flow — they get a stapled ticket but no code signature — so any spctl
 #    check directly on the .dmg file rejects with "no usable signature".
-#    The stapler validate at step 5 already proved the ticket is attached;
-#    step 11 below validates what Gatekeeper actually sees when the user
+#    The stapler validate at step 6 already proved the ticket is attached;
+#    step 12 below validates what Gatekeeper actually sees when the user
 #    opens the .app from the mounted volume.
 
-# 9. EdDSA-sign the DMG
+# 10. EdDSA-sign the DMG
 echo "▸ Computing Sparkle EdDSA signature…"
 # -perm -111 requires every execute bit (u+g+o) set — matches the SPM
 # artifact bundle's installed permissions. Earlier the script used the
@@ -179,7 +186,7 @@ if [ -z "$ED_SIGNATURE" ] || [ -z "$DMG_SIZE_BYTES" ]; then
     exit 1
 fi
 
-# 10. Verify the EdDSA signature round-trips against the keychain key
+# 11. Verify the EdDSA signature round-trips against the keychain key
 #     that produced it. Sparkle 2.9+ `sign_update --verify` only takes
 #     <file> <signature> (no public-key arg); it derives the public key
 #     from the keychain's stored private key.
@@ -197,7 +204,7 @@ if ! "$SIGN_UPDATE" --verify "$DMG_PATH" "$ED_SIGNATURE" >/dev/null; then
     exit 1
 fi
 
-# 11. Verify the bundled app inside the DMG passes Gatekeeper from inside
+# 12. Verify the bundled app inside the DMG passes Gatekeeper from inside
 #     the mounted image (catches problems that disappear once the user
 #     drags-to-Applications). Read-only mount via hdiutil. We run both
 #     codesign --verify (structural integrity) and spctl --assess (the
@@ -212,11 +219,11 @@ spctl --assess --verbose=2 "$MOUNT_POINT/Rubien.app"
 hdiutil detach "$MOUNT_POINT" -force >/dev/null
 trap - EXIT
 
-# 12. Rename DMG to versioned name and prepare URL
+# 13. Rename DMG to versioned name and prepare URL
 VERSIONED_DMG="Rubien-${VERSION}.dmg"
 mv "$DMG_PATH" "$PROJECT_DIR/build/$VERSIONED_DMG"
 DMG_PATH="$PROJECT_DIR/build/$VERSIONED_DMG"
-# Production publishes this DMG to $RELEASES_REPO (step 16 below). For
+# Production publishes this DMG to $RELEASES_REPO (step 17 below). For
 # APPCAST_TARGET=staging no asset is uploaded (the gh release is production-
 # gated), so for staging this is a placeholder URL — same as before the
 # public-repo move, when it pointed at an equally-absent private-repo asset.
@@ -249,16 +256,16 @@ fi
 
 export RELEASE_NOTES_TEXT="${RELEASE_NOTES_TEXT:-Rubien ${VERSION} (Beta). See GitHub release notes for details.}"
 
-# 13. Update appcast
+# 14. Update appcast
 rubien_appcast_prepend_item
 
-# 14. Commit the appcast locally. Production publication deliberately pushes
+# 15. Commit the appcast locally. Production publication deliberately pushes
 #     the tag and stages the GitHub release before pushing main, so Sparkle's
 #     live feed can never point at an asset that does not exist yet.
 git add "$APPCAST_PATH" Sources/RubienCLI/GeneratedVersion.swift
 git commit -m "Release v${VERSION} (build ${BUILD_NUMBER}): update ${APPCAST_TARGET} appcast"
 
-# 15. Tag the source commit and publish the tag. The tag carries the appcast
+# 16. Tag the source commit and publish the tag. The tag carries the appcast
 #     commit to GitHub before its main-branch/Pages publication.
 if [ "$APPCAST_TARGET" = "production" ]; then
     git tag -a "v${VERSION}" -m "Rubien ${VERSION} (build ${BUILD_NUMBER})"
@@ -271,7 +278,7 @@ if [ "$APPCAST_TARGET" = "production" ]; then
     fi
 fi
 
-# 16. Upload into a draft first, then publish it. The live appcast is still on
+# 17. Upload into a draft first, then publish it. The live appcast is still on
 #     the previous version throughout this step, so upload/publication failures
 #     cannot expose a 404 update enclosure.
 if [ "$APPCAST_TARGET" = "production" ]; then
@@ -294,7 +301,7 @@ if [ "$APPCAST_TARGET" = "production" ]; then
     fi
 fi
 
-# 17. Publish the appcast only after the canonical release assets are live.
+# 18. Publish the appcast only after the canonical release assets are live.
 if [ "$APPCAST_TARGET" = "production" ]; then
     if ! git push origin main; then
         echo "✗ Canonical release is live, but the appcast push failed." >&2
@@ -304,7 +311,7 @@ if [ "$APPCAST_TARGET" = "production" ]; then
     fi
 fi
 
-# 18. Dispatch the Linux rubien-cli build (async, best-effort). The Mac release
+# 19. Dispatch the Linux rubien-cli build (async, best-effort). The Mac release
 #     above is already LIVE; a Linux build/upload failure does NOT affect Mac.
 #     Pass the canonical repo explicitly so GH_REPO cannot redirect the call.
 if [ "$APPCAST_TARGET" = "production" ]; then

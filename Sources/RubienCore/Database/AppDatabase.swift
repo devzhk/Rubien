@@ -52,7 +52,7 @@ public struct ReferenceMentionCandidate: Sendable, Equatable {
 public final class AppDatabase: Sendable {
     /// Bumped whenever a new migration is registered. Surfaced in
     /// `rubien-cli sync status` JSON for diagnostics.
-    public static let currentSchemaVersion = "v10"
+    public static let currentSchemaVersion = "v11"
 
     public let dbWriter: any DatabaseWriter
 
@@ -619,6 +619,13 @@ public final class AppDatabase: Sendable {
             try Self.applyV10Body(db)
         }
 
+        // v11 (2026-07): repair schema drift created by pre-release development
+        // builds. Released v7 databases already have the quarantine column and
+        // index, so every repair is conditional and safe on the healthy path.
+        migrator.registerMigration("v11") { db in
+            try Self.applyV11Body(db)
+        }
+
         return migrator
     }
 
@@ -906,6 +913,102 @@ public final class AppDatabase: Sendable {
                     recordedAt = \(sqlNowISO8601)
                 WHERE conversationId = OLD.id;
             END
+            """)
+    }
+
+    fileprivate static func applyV11Body(_ db: Database) throws {
+        let quarantineColumns = try db.columns(in: "activityQuarantine")
+        let hadReferenceId = quarantineColumns.contains { $0.name == "referenceId" }
+
+        if !hadReferenceId {
+            try db.execute(sql: """
+                ALTER TABLE activityQuarantine
+                ADD COLUMN referenceId INTEGER
+                """)
+
+            // Pre-release databases could quarantine reading activity before the
+            // referenceId column existed. Recover it from the Codable payload so
+            // those rows become replayable after their parent reference arrives.
+            let quarantinedRows = try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT recordName, recordData
+                    FROM activityQuarantine
+                    WHERE entityType = 'readingActivity'
+                    """
+            )
+            let decoder = JSONDecoder()
+            for row in quarantinedRows {
+                let recordName: String = row["recordName"]
+                let recordData: Data = row["recordData"]
+                guard let activity = try? decoder.decode(
+                    ReadingActivity.self,
+                    from: recordData
+                ) else {
+                    continue
+                }
+                try db.execute(
+                    sql: """
+                        UPDATE activityQuarantine
+                        SET referenceId = ?
+                        WHERE recordName = ?
+                        """,
+                    arguments: [activity.referenceId, recordName]
+                )
+            }
+        }
+
+        try db.execute(sql: """
+            DROP INDEX IF EXISTS activityQuarantine_entityType_receivedAt
+            """)
+        try db.execute(sql: """
+            CREATE INDEX IF NOT EXISTS
+                activityQuarantine_entityType_referenceId_receivedAt
+            ON activityQuarantine(entityType, referenceId, receivedAt)
+            """)
+
+        // Reconcile known pre-release v8 index variants without touching rows.
+        // These indexes are local-only query accelerators, not synced schema.
+        for staleIndex in [
+            "scheduledJobRun_jobId_startedAt",
+            "scheduledJobRun_status",
+            "scheduledJobRun_scheduledFor",
+            "scheduledJobRun_jobId_scheduledFor",
+        ] {
+            try db.execute(sql: "DROP INDEX IF EXISTS \(staleIndex)")
+        }
+        try db.execute(sql: """
+            CREATE INDEX IF NOT EXISTS scheduledJobRun_status_scheduledFor
+            ON scheduledJobRun(status, scheduledFor)
+            """)
+        try db.execute(sql: """
+            CREATE INDEX IF NOT EXISTS scheduledJobRun_active_jobId
+            ON scheduledJobRun(jobId)
+            WHERE status NOT IN ('succeeded', 'failed', 'cancelled')
+            """)
+        try db.execute(sql: """
+            CREATE INDEX IF NOT EXISTS scheduledJobRun_activityAt
+            ON scheduledJobRun(
+                COALESCE(finishedAt, startedAt, scheduledFor) DESC,
+                id DESC
+            )
+            """)
+        try db.execute(sql: """
+            CREATE INDEX IF NOT EXISTS scheduledJobRun_jobId_activityAt
+            ON scheduledJobRun(
+                jobId,
+                COALESCE(finishedAt, startedAt, scheduledFor) DESC,
+                id DESC
+            )
+            """)
+        try db.execute(sql: """
+            CREATE INDEX IF NOT EXISTS scheduledJobRun_unread
+            ON scheduledJobRun(isUnread)
+            WHERE isUnread = 1
+            """)
+        try db.execute(sql: """
+            CREATE INDEX IF NOT EXISTS scheduledJobRun_assistantTranscriptState
+            ON scheduledJobRun(assistantTranscriptState)
             """)
     }
 

@@ -63,19 +63,46 @@ release-build user syncs against an empty Production container (no `Library` zon
 record types), so a fresh install shows an empty library and 0 KB PDF cache.
 
 1. CloudKit Dashboard → `iCloud.com.rubien.app` → **Development** → **Schema → Record Types**.
-   Confirm the full set from `SyncConstants.RecordType` is present (`CDReference`,
-   `CDReferencePDF`, `CDTag`, `CDReferenceTag`, `CDPDFAnnotation`, `CDWebAnnotation`,
-   `CDMetadataIntake`, `CDMetadataEvidence`, `CDPropertyDefinition`, `CDPropertyValue`,
-   `CDDatabaseView`).
-2. **Deploy Schema Changes…** → review the diff → **Deploy to Production**. This copies
-   record types + indexes only — **never data**.
-3. Production schema is effectively append-only (you can add types/fields later, not remove
+   Confirm the exact 14-type set from `SyncConstants.RecordType` is present:
+   `CDReference`, `CDReferencePDF`, `CDTag`, `CDReferenceTag`, `CDPDFAnnotation`,
+   `CDWebAnnotation`, `CDMetadataIntake`, `CDMetadataEvidence`, `CDPropertyDefinition`,
+   `CDPropertyValue`, `CDDatabaseView`, `CDReadingActivity`, `CDAssistantActivity`, and
+   `CDActivityEpoch`.
+2. Import the checked-in `CloudKit/RubienSchema.ckdb` into Development and review the
+   additive diff. `CloudKitSchemaFileTests` keeps that file aligned with every key written by
+   the `populate(record:)` mappings under `Sources/RubienSync/`. Development infers an
+   optional field only after a record is saved with a non-`nil` value; a sparse sample library
+   can therefore make a record type look complete while silently omitting fields. Do not rely
+   on representative sample data to materialize the schema.
+3. For the July 2026 repair specifically, verify these additions are visible in Development:
+
+   | Record type | Required addition | CloudKit type |
+   |---|---|---|
+   | `CDReference` | `notes`, `favicon`, `editorsJSON`, `translatorsJSON`, `eventPlace`, `genre`, `institution`, `number`, `pmid`, `pmcid`, `issn`, `issue`, `volume`, `accessedDate`, `numberOfPages` | String |
+   | `CDReference` | `issuedMonth`, `issuedDay` | Int(64) |
+   | `CDMetadataEvidence` | `sourceURL` | String |
+   | `CDMetadataEvidence` | `referenceId` | Int(64) |
+   | `CDMetadataIntake` | `originalInput` | String |
+   | `CDDatabaseView` | `groupByJSON` | String |
+   | `CDReadingActivity` | record type and all fields from `ReadingActivity.RecordField` | mixed |
+   | `CDAssistantActivity` | record type and all fields from `AssistantActivity.RecordField` | mixed |
+   | `CDActivityEpoch` | record type and all fields from `ActivityEpoch.RecordField` | mixed |
+
+4. **Deploy Schema Changes…** → review the diff → **Deploy to Production**. This copies
+   schema—record types, fields, and indexes—only. It **never copies data**.
+5. Switch the Dashboard to **Production** and repeat the type-and-field audit. Do not treat a
+   successful deploy dialog as verification. Run `./scripts/validate-cloudkit-schema.sh`;
+   it must validate and export both environments without reporting a missing requirement.
+6. Production schema is effectively append-only (you can add types/fields later, not remove
    them), so deploy from a Development schema you're willing to ship.
 
-**Seeding Production with an existing library.** Schema deploy moves no records. To populate
-Production, a Production (release) build must push the data: quit the app, delete
-`sync-engine-state.bin` from the library folder (see §7) so the engine re-pushes a full
-baseline, then launch the release build with sync on. Other release devices then pull it.
+**Seeding Production with an existing library.** Schema deploy moves no records. There is
+currently no supported full-rebaseline operation for a library whose baseline has already
+completed. Deleting only `sync-engine-state.bin` resets CloudKit change tokens, but it does
+not clear `syncSession.baselineState` or mark clean local rows dirty. Seed an empty Production
+environment from a fresh, isolated library/import path whose first baseline has not completed,
+or add a purpose-built atomic rebaseline operation. Do not delete a Production zone expecting
+an existing library to upload itself again automatically.
 
 **Don't mix flavors on one machine.** Dev and release builds share one `sync-engine-state.bin`
 per library; alternating them makes the two environments fight over the same state tokens.
@@ -123,17 +150,35 @@ From the CLI: `swift run rubien-cli sync status` gives JSON.
 - `dirtyByEntityType` not draining → engine isn't pushing; check Console for CKError codes
 - `tombstoneCount.unconfirmed > 0` after pushes drain → deletes aren't being ack'd by the server (likely transient; retry on next app foreground)
 
-### 7. Reset (destructive, only if stuck)
+### 7. Replay CloudKit history on a receiving device
 
-To force a full re-sync:
+Use this only after the Production schema is verified and the installed build contains every
+required database migration. The cloud/source library must be authoritative, and the receiving
+device must not contain unique local data. Resetting the sidecar makes that device fetch
+CloudKit history from the beginning; it does **not** mark clean local rows dirty or force a
+full upload.
 
-```bash
-# Stop the app first
-rm "$HOME/Library/Application Support/Rubien/sync-engine-state.bin"
-# Launch the app; next startup reconciliation will push every row dirty
-```
+1. While Rubien is running, resolve the actual live database instead of guessing:
 
-To wipe the iCloud copy (can't be undone): use the CloudKit Dashboard "Delete Zone" action in the Library zone. The next app launch with sync enabled will re-upload everything as a fresh baseline.
+   ```bash
+   lsof -p "$(pgrep -f 'Rubien.app/Contents/MacOS/Rubien')" | grep library.sqlite
+   ```
+
+2. Record the directory containing that exact `library.sqlite`, then quit Rubien completely.
+3. Copy the **entire resolved library root** to a sibling backup while the app is stopped.
+   Preserve `library.sqlite`, any `-wal`/`-shm` files, PDFs, metadata artifacts, and the
+   sync sidecar together. A sidecar-only backup is not a database rollback.
+4. In the original library root, move `sync-engine-state.bin` aside if it exists.
+5. Launch the updated app. It migrates the local database before replaying CloudKit history.
+
+On the receiving device, confirm the reference count reaches the source count and that
+`dirtyByEntityType` drains. Keep the full backup until both checks pass. To roll back, quit
+Rubien, move the current library root aside, and restore the full quit-time backup as one unit.
+Do not restore only the sidecar, and do not reset the source device during this recovery.
+
+Do not use CloudKit Dashboard's **Delete Zone** action as routine recovery. It permanently
+removes the cloud copy, and an already-baselined local library is not automatically marked for
+full re-upload.
 
 ### 8. Schema migrations (v1 → v2 → vN)
 
@@ -143,6 +188,11 @@ To wipe the iCloud copy (can't be undone): use the CloudKit Dashboard "Delete Zo
 - **v2** (B8) — added per-device `pdfCache` + `pdfUploadQueue` tables, dropped the `reference.pdfPath` column. Backfills existing pdfPaths into both tables with `contentHash='pending'` (the push path re-hashes on first send).
 - **v3** (Type prune + Status case fixup, 2026-05) — collapsed `ReferenceType` from 21 cases to 6 (`Journal Article`, `Conference Paper`, `Book`, `Thesis`, `Web Page`, `Other`), bulk-remapping the 15 dropped values per a fixed table (e.g. `Magazine Article` → `Journal Article`, `Blog Post` → `Web Page`, `Software` → `Other`). Also normalized `reference.readingStatus` from lowercase enum raw values to capitalized labels (`unread` → `Unread`, etc.) so they match the seeded Status PropertyDefinition. Refreshed Type PropertyDefinition's `optionsJSON` to advertise the 6-option set (v6 later appends a seventh, `Markdown` — see below). **No schema change** — `referenceType` and `readingStatus` stay TEXT columns. Migration body wraps in `applyingRemote=1` so the dirty triggers don't queue every migrated row for a redundant CloudKit push.
 - **v6** (Markdown type option, 2026-07) — appended a seventh `ReferenceType` case, `Markdown` (for imported Markdown notes; chip color `#5AC8FA`), to the Type PropertyDefinition's `optionsJSON` via the shared `TypeOptionsReconciler` — a fail-safe structural JSON append that preserves existing options, colors, and unknown fields, leaves malformed `optionsJSON` untouched, and (like v3) wraps in `applyingRemote=1` so it queues no CloudKit push. Because `optionsJSON` syncs verbatim, an old six-option peer's push would otherwise re-drop `Markdown`, so RubienSync's remote-apply path re-heals any missing enum-backed Type option on every incoming Type PropertyDefinition — without dirtying the record — so no peer can remove it. **No schema change** — `referenceType` stays a TEXT column and no CKRecord field was added.
+- **v7** (activity sync, 2026-07) — added mergeable reading counters, Assistant activity, reset epochs, pending-clear state, and activity quarantine. The three synced entities require `CDReadingActivity`, `CDAssistantActivity`, and `CDActivityEpoch` in Production.
+- **v8** (scheduled jobs, 2026-07) — added local-only scheduled Assistant definitions and run history. No CloudKit schema change.
+- **v9** (hidden run history, 2026-07) — added the local-only `scheduledJobRun.hiddenAt` marker. No CloudKit schema change.
+- **v10** (Assistant transcripts, 2026-07) — added Rubien-owned local transcript tables and scheduled-run transcript state. No CloudKit schema change.
+- **v11** (pre-release schema repair, 2026-07) — conditionally restores `activityQuarantine.referenceId`, backfills it from quarantined `ReadingActivity` payloads, replaces the stale quarantine index, and reconciles non-unique scheduled-run indexes found in development libraries created before the released v7/v8 migrations. Healthy released databases already have the column; v11 checks `db.columns(in:)` first and is an idempotent no-op for their data. No CloudKit schema change.
 
 **Forward-only.** Migrations are one-way. A v1 binary opening a v2 DB errors with `no such column: pdfPath` (the failure mode that hit the dev when the worktree migrated the live library before the matching binary shipped). Always upgrade the binary first, then let it migrate the DB on launch.
 
@@ -151,12 +201,13 @@ To wipe the iCloud copy (can't be undone): use the CloudKit Dashboard "Delete Zo
 - v2 device + v3 cloud: the v3 migration only normalizes column values that the CKRecord schema already carries as String; nothing was added or removed. A still-on-v2 peer pulling a v3-migrated reference whose `referenceType` is now (say) `Other` instead of `Software` decodes the unknown value via the existing forward-compat fallback to `.other`.
 - **`readingStatus` lowercase escape.** Same shape but with a sharper edge: v2's `ReadingStatus(rawValue:)` returns nil for the new capitalized values `"Unread"` / `"Reading"` / `"Skimmed"` / `"Read"`, falls back to `.unread`, and on next mutation writes back `"unread"` (lowercase). v3 decode is now free-form and **passes whatever it pulls through unchanged** — there is no second normalization pass, so the v3 device will then read and store the lowercase string verbatim. Once that has happened, the only thing that fixes it is another local edit that round-trips through a v3 mutation, or a manual run of the v3 migration body via `runV3MigrationForTesting` (which is a one-shot helper, not the production migrator). Practical implication for multi-device users: upgrade all peers in the same session before mutating Status from a v2 device. Single-user / single-Mac libraries are unaffected.
 - pre-v6 device + v6 cloud: `Markdown` is a new `referenceType` rawValue; an older peer pulling a Markdown reference decodes the unknown value via the existing forward-compat fallback to `.other`, and the new Type option itself can't be lost — every up-to-date peer re-heals it on apply (see v6 above).
+- malformed pre-release v7 device + v11 build: upgrade the binary before resetting sync-engine state. v11 repairs the local quarantine query that otherwise rolls back any fetched batch containing an applied Reference. Released v7 databases already have the correct column and index.
 
-**Procedure for v3+.**
+**Procedure for every new migration.**
 
-1. Add a new `migrator.registerMigration("v3") { db in ... }` block in `AppDatabase.swift`. Never edit v2 (or v1).
-2. Bump `AppDatabase.currentSchemaVersion = "v3"`.
-3. Update the `XCTAssertEqual(json?["schemaVersion"] as? String, "vN")` assertion in `Tests/RubienCLITests/SyncStatusCommandTests.swift`.
+1. Add a new `migrator.registerMigration("vN") { db in ... }` block in `AppDatabase.swift`. Never edit an earlier migration.
+2. Bump `AppDatabase.currentSchemaVersion = "vN"`.
+3. Keep the schema-version contract in `Tests/RubienCLITests/SyncStatusCommandTests.swift` green.
 4. Add a one-paragraph entry to this section summarizing what changed and any forward/backward-compat implications.
 5. If the change adds a column to a synced table or alters a CloudKit record shape, also follow the rules in `CLAUDE.md`'s Sync section (CKRecord field names match DB columns; never remove fields; `SyncSchemaInvariantTests` must stay green).
 

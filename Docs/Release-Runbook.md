@@ -56,14 +56,22 @@ the legacy 0.6.3 release or any of its four assets.
    - **Alternative — leave `Docs/` capitalized and use Source: GitHub Actions.** Add a workflow that copies `Docs/appcast.xml`, `Docs/staging-appcast.xml`, and `Docs/index.md` into an artifact and uploads via `actions/deploy-pages`. More moving parts but doesn't touch the existing capital-D convention.
 
    Pick once, before the first release. Mixing the two later is painful.
+7. **CloudKit management token for `cktool`.** Generate a management token in
+   CloudKit Dashboard for team `9TXK4V3SS8`, then save it through the secure
+   prompt into the login Keychain:
+   ```bash
+   xcrun cktool save-token --type management --method keychain
+   ```
+   Do not pass the token as a command-line argument or commit it. Replace an
+   expired token before the next release.
 
 ## Per-release procedure
 
-Host prerequisites: `gh` authenticated, the Developer ID identity available, the EdDSA private key in Keychain, and the `RubienNotary` notarytool profile in the login Keychain (from One-time setup §4 — it persists across releases; you do **not** re-run `store-credentials` each time). Steps 1–3 establish the repository prerequisites: release-preparation changes committed and pushed to `origin/main`, the CI gate satisfied, and a clean synchronized `main`.
+Host prerequisites: `gh` authenticated, the Developer ID identity available, the EdDSA private key in Keychain, the `RubienNotary` notarytool profile in the login Keychain (from One-time setup §4 — it persists across releases; you do **not** re-run `store-credentials` each time), and a current CloudKit management token saved for `cktool` (One-time setup §7). Steps 1–4 establish the release prerequisites: release-preparation changes committed and pushed to `origin/main`, the CI gate satisfied, a clean synchronized `main`, and both live CloudKit environments validated against the checked-in schema.
 
-The order is strict: **prepare and commit → push and satisfy the CI gate → smoke-test release-candidate browser assets → obtain explicit approval and sign/publish with host access → verify published Mac and Linux artifacts → publish any coupled npm package**. Normally the green run must match `HEAD` exactly. The only exception is a descendant containing Markdown-only documentation changes after an already-green release-preparation SHA; the commands below prove that no release input changed. Do not start signing while release-preparation commits exist only locally.
+The order is strict: **prepare and commit → push and satisfy the CI gate → validate CloudKit Development and Production → smoke-test release-candidate browser assets → obtain explicit approval and sign/publish with host access → verify published Mac and Linux artifacts → publish any coupled npm package**. Normally the green run must match `HEAD` exactly. The only exception is a descendant containing Markdown-only documentation changes after an already-green release-preparation SHA; the commands below prove that no release input changed. Do not start signing while release-preparation commits exist only locally.
 
-> **An agent may run the signed release pipeline only after the user explicitly approves the release command.** Before requesting approval, show the exact version/build and release notes and confirm the release-preparation SHA passed the CI gate. The approval authorizes the consequential effects of `release.sh`: signed build and notarization, an appcast commit and push, a source tag, a public GitHub release, and Linux-release workflow dispatch. For 0.6.3 it also authorizes the full compatibility-mirror release in `devzhk/Rubien-releases`. Run it with elevated/unsandboxed host access so it can read the Developer ID and Sparkle EdDSA keys, use the `RubienNotary` login-Keychain profile, write `build/`, access the network, and update Git/GitHub. A failed credential check inside the ordinary sandbox does **not** prove a credential is missing; repeat the read-only preflight with approved host access. Once explicit approval is recorded, no separate interactive-host handoff is required.
+> **An agent may run the signed release pipeline only after the user explicitly approves the release command.** Before requesting approval, show the exact version/build and release notes, confirm the release-preparation SHA passed the CI gate, and confirm the CloudKit validation passed. The approval authorizes the consequential effects of `release.sh`: signed build and notarization, an appcast commit and push, a source tag, a public GitHub release, and Linux-release workflow dispatch. For 0.6.3 it also authorizes the full compatibility-mirror release in `devzhk/Rubien-releases`. Run it with elevated/unsandboxed host access so it can read the Developer ID and Sparkle EdDSA keys, use the `RubienNotary` and CloudKit management tokens in the login Keychain, write `build/`, access the network, and update Git/GitHub. A failed credential check inside the ordinary sandbox does **not** prove a credential is missing; repeat the read-only preflight with approved host access. Once explicit approval is recorded, no separate interactive-host handoff is required.
 
 ```bash
 # 1. Start from a clean, current main
@@ -104,22 +112,28 @@ test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
 test -z "$(git status --porcelain)"
 git status --short --branch
 
-# 4. Build an unsigned release candidate and complete the browser-extension
+# 4. Validate the checked-in schema against both live CloudKit environments.
+# This is read-only. It fails if a required type, field signature, index
+# attribute, or permission has not reached Development or Production.
+./scripts/validate-cloudkit-schema.sh
+
+# 5. Build an unsigned release candidate and complete the browser-extension
 # pre-publication smoke gate below. This has no signing or publication effects.
 CODESIGN_ENABLED=0 ./scripts/build-app.sh release dmg
 
-# 5. Set the Developer ID identity in your shell
+# 6. Set the Developer ID identity in your shell
 # If an agent is driving the release, show the exact version/build, notes, and
 # external effects above and obtain explicit user approval before continuing.
 export CODESIGN_IDENTITY="Developer ID Application: <Your Name> (9TXK4V3SS8)"
 
-# 6. Pass this release's notes inline and run release.sh
+# 7. Pass this release's notes inline and run release.sh
 # Replace the example bullets; do not reuse an exported value from an older release.
+# release.sh repeats the CloudKit gate so direct invocations cannot bypass it.
 RELEASE_NOTES_TEXT=$'• This release change\n• Another release change' ./scripts/release.sh
 
-# 7. Wait for notarization (5-15 minutes). The script blocks.
+# 8. Wait for notarization (5-15 minutes). The script blocks.
 
-# 8. Confirm the Mac + browser-extension publication
+# 9. Confirm the Mac + browser-extension publication
 # - https://github.com/devzhk/Rubien/releases/latest shows both the new DMG
 #   and Rubien-Browser-Extension-X.Y.Z.zip
 # - https://devzhk.github.io/Rubien/appcast.xml has the new <item>
@@ -128,7 +142,7 @@ RELEASE_NOTES_TEXT=$'• This release change\n• Another release change' ./scri
 #   the same DMG, Chrome extension ZIP, Linux archive, signature, title, and notes
 # - Within ~24 hours, existing installs see the "Update ready" indicator
 
-# 9. Watch the Linux CLI run printed by release.sh, then inspect all assets
+# 10. Watch the Linux CLI run printed by release.sh, then inspect all assets
 LINUX_RUN_ID="paste the run ID printed by release.sh here"
 gh run watch "$LINUX_RUN_ID" --exit-status
 gh release view "v$(tr -d '[:space:]' < VERSION)" \
@@ -218,7 +232,7 @@ and statically verify the candidate artifacts, then provide their exact paths
 and this checklist to the user.
 
 Before requesting approval to run the signed release, use the release-candidate
-app and ZIP produced by step 4, not a development build or files loaded directly
+app and ZIP produced by step 5, not a development build or files loaded directly
 from the source tree. Use `build/Rubien.app` in place; do not replace the
 currently installed app solely for this gate. Then:
 
@@ -243,7 +257,7 @@ the signed/notarized checks in `release.sh`.
 
 ## Environment and signing invariants
 
-- **Pass `RELEASE_NOTES_TEXT` fresh on every invocation.** `release.sh` reads it from the environment and uses it for both the GitHub release and appcast description. A value left exported from an earlier release silently republishes the old notes. Prefer the inline assignment in step 6; otherwise `unset RELEASE_NOTES_TEXT` before composing the new value.
+- **Pass `RELEASE_NOTES_TEXT` fresh on every invocation.** `release.sh` reads it from the environment and uses it for both the GitHub release and appcast description. A value left exported from an earlier release silently republishes the old notes. Prefer the inline assignment in step 7; otherwise `unset RELEASE_NOTES_TEXT` before composing the new value.
 - **Use ANSI-C syntax for multi-line notes, not a pasted heredoc.** Pass `RELEASE_NOTES_TEXT=$'• line one\n• line two' ./scripts/release.sh`. A pasted `RELEASE_NOTES_TEXT="$(cat <<'NOTES' … NOTES)"` can hang at `dquote cmdsubst heredoc>` when terminal indentation prevents the terminator from landing at column zero.
 - **Export the exact Developer ID identity before running.** Missing or incorrect `CODESIGN_IDENTITY` (`Developer ID Application: … (9TXK4V3SS8)`) can ad-hoc-sign the payload (`Signature=adhoc`) and make notarization fail only after the expensive build.
 - **Sparkle is controlled by the default-enabled `Sparkle` package trait.** DMG builds include it; a future Mac App Store flavor opts out with `swift build --disable-default-traits`. Keep every `import Sparkle` inside `#if canImport(Sparkle)` so both the trait-disabled flavor and Linux compile without the product.
@@ -440,6 +454,7 @@ Avoid losing both anchors simultaneously by storing them in independent failure 
 - `Docs/staging-appcast.xml` — staging feed for end-to-end tests.
 - `Docs/index.md` — GitHub Pages landing page.
 - `scripts/release.sh` — orchestrator. Reads (does not bump) `VERSION` + `BUILD.txt`, calls `build-app.sh`, notarizes, signs the appcast item, commits + pushes the appcast, tags the source, and calls `gh release create --repo "$RELEASES_REPO"` to upload the DMG and browser-extension ZIP to `devzhk/Rubien`. The dispatched Linux workflow creates the one-time full 0.6.3 compatibility mirror in the legacy repository.
+- `scripts/validate-cloudkit-schema.sh` — read-only authenticated release gate. Uses `cktool` to validate `CloudKit/RubienSchema.ckdb` for Development, exports both live schemas, and fails when any checked-in type, field signature, index attribute, or grant is missing. CloudKit does not expose `validate-schema` for Production, so the authenticated Production export is the verification source. Live append-only extras are allowed.
 - `scripts/build-app.sh` — assembles + signs the `.app` bundle and the DMG, then packages a ready-to-unzip Chrome extension ZIP. Also usable standalone for dev builds.
   - The `embed_sparkle_framework` step inside this script manually copies `Sparkle.framework` into the bundle's `Contents/Frameworks/`. SwiftPM-via-`xcodebuild` does not auto-embed framework dependencies into the assembled bundle, so the script handles it explicitly before code-signing runs.
 - `scripts/lib/codesign.sh` — ordered Sparkle component signing. The order matters: `Installer.xpc → Downloader.xpc → Autoupdate → Updater.app → Sparkle.framework`. Never use `--deep`. `Downloader.xpc` needs `--preserve-metadata=entitlements`.

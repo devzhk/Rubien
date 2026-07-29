@@ -119,6 +119,91 @@ final class ActivityRecordTests: XCTestCase {
         }
     }
 
+    func testV11RegisteredMigrationBackfillsHistoricalQuarantineAndReplaysIt() throws {
+        let queue = try DatabaseQueue()
+        _ = try AppDatabase(queue)
+
+        let referenceId: Int64 = 42
+        let activity = ReadingActivity(
+            installationId: "remote-mac",
+            referenceId: referenceId,
+            localDay: try day(),
+            epochRevision: 0,
+            generation: "reading-v7-initial",
+            activeSeconds: 120,
+            lastActiveAt: Date(timeIntervalSince1970: 400),
+            dateModified: Date(timeIntervalSince1970: 401)
+        )
+        let recordName = SyncEntityType.readingActivity.qualifiedRecordName(
+            entityId: activity.entityId
+        )
+        let recordData = try JSONEncoder().encode(activity)
+
+        try queue.write { db in
+            try db.execute(
+                sql: "DROP INDEX activityQuarantine_entityType_referenceId_receivedAt"
+            )
+            try db.execute(
+                sql: "ALTER TABLE activityQuarantine DROP COLUMN referenceId"
+            )
+            try db.execute(sql: """
+                CREATE INDEX activityQuarantine_entityType_receivedAt
+                ON activityQuarantine(entityType, receivedAt)
+                """)
+            try db.execute(
+                sql: """
+                    INSERT INTO activityQuarantine (
+                        recordName, entityType, reason, epochRevision,
+                        generation, recordData, receivedAt
+                    ) VALUES (?, 'readingActivity', 'reference', 0, ?, ?, ?)
+                    """,
+                arguments: [
+                    recordName,
+                    activity.generation,
+                    recordData,
+                    Date(timeIntervalSince1970: 402),
+                ]
+            )
+            try db.execute(
+                sql: "DELETE FROM grdb_migrations WHERE identifier = 'v11'"
+            )
+        }
+
+        let database = try AppDatabase(queue)
+        try database.dbWriter.write { db in
+            let quarantinedReferenceId = try Int64.fetchOne(
+                db,
+                sql: "SELECT referenceId FROM activityQuarantine"
+            )
+            XCTAssertEqual(quarantinedReferenceId, referenceId)
+
+            var reference = Reference(title: "Late parent")
+            reference.id = referenceId
+            try reference.insert(db)
+            try SyncEntityType.replayQuarantinedActivity(
+                referenceIds: [referenceId],
+                db: db
+            )
+
+            let activeSeconds = try Int.fetchOne(
+                db,
+                sql: "SELECT activeSeconds FROM readingActivity"
+            )
+            XCTAssertEqual(activeSeconds, 120)
+            let quarantineCount = try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM activityQuarantine"
+            )
+            XCTAssertEqual(quarantineCount, 0)
+            XCTAssertTrue(
+                try String.fetchAll(
+                    db,
+                    sql: "SELECT identifier FROM grdb_migrations"
+                ).contains("v11")
+            )
+        }
+    }
+
     func testReadingCounterConflictMergesByMaximum() throws {
         let database = try AppDatabase(DatabaseQueue())
         var reference = Reference(title: "Merge activity")
