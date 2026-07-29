@@ -592,5 +592,21 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.7.1</title>
+            <description sparkle:format="plain-text"><![CDATA[• Fix table multi-select options not responding when selected.
+• Repair CloudKit schema and migration drift affecting new-device sync.
+• Prevent the reader chat composer from appearing clipped.]]></description>
+            <pubDate>Wed, 29 Jul 2026 18:51:36 +0000</pubDate>
+            <sparkle:version>39</sparkle:version>
+            <sparkle:shortVersionString>0.7.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien/releases/download/v0.7.1/Rubien-0.7.1.dmg"
+                sparkle:edSignature="I2ah8yWFoTCUQ6L7pVGs3TsiksLkARhl5ZkvsNmEBDoNY5Lgs/89v/t8s6p/jujkt8xGO6Zco980Y/BHpO5yBA=="
+                length="17591862"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
