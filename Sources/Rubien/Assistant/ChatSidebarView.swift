@@ -888,7 +888,10 @@ struct ChatSurfaceView: View {
             composerBox
             statusLine
         }
-        .padding(10)
+        .padding(.horizontal, configuration.isHome
+            ? 10
+            : AssistantSidebarMetrics.composerHorizontalInset)
+        .padding(.vertical, 10)
         // The AppKit-backed editor has no useful intrinsic height of its own.
         // Size from the SwiftUI text sizer in `composerEditor` in both placements
         // so the reader composer stays as compact as Agent Home.
@@ -1920,6 +1923,10 @@ struct ChatSurfaceView: View {
 // MARK: - Floating card (Phase 3a)
 
 enum AssistantSidebarMetrics {
+    /// Keeps the reader composer's 11-point glow inside the clipped panel edge.
+    /// Agent Home is not clipped to the floating-card shape and retains its
+    /// existing 10-point inset.
+    static let composerHorizontalInset: CGFloat = 12
     /// The composer's 13-point single-line control row is the limiting intrinsic
     /// width. This floor keeps the default Agent / provider / model / effort
     /// labels and send control from crowding or forcing the panel wider than its
