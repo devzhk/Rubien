@@ -608,5 +608,21 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.7.2</title>
+            <description sparkle:format="plain-text"><![CDATA[• Fix iCloud sync on new devices stopping before the complete library downloads.
+• Recover safely from interrupted CloudKit replays and reconcile stale linked records without losing library data.
+• Preserve mathematical operators, equation labels, spacing, and structured subscripts in web articles.]]></description>
+            <pubDate>Thu, 30 Jul 2026 22:53:27 +0000</pubDate>
+            <sparkle:version>40</sparkle:version>
+            <sparkle:shortVersionString>0.7.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien/releases/download/v0.7.2/Rubien-0.7.2.dmg"
+                sparkle:edSignature="Bqsm3MeZqpxmnnEA+50YIVnj0f1qDDx1JjK4YVPWSQTO4XIZcV2JeZzy8XGu8tVv9oB0NANPMNLa7XuhIZwcCA=="
+                length="17645401"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
