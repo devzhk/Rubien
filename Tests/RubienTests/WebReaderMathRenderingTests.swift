@@ -114,6 +114,57 @@ final class WebReaderMathRenderingTests: XCTestCase {
         )
     }
 
+    func testLatexPreprocessorRepairsLossyMathMLConversionWithEquationLabel() throws {
+        let context = try XCTUnwrap(JSContext())
+        let script = #"""
+        \#(WebReaderMathRendering.latexPreprocessorFunctionJavaScript)
+        const mathEl = {
+          querySelectorAll: function (_) {
+            return [{ firstElementChild: { textContent: '(4)' } }];
+          }
+        };
+        rubienPrepareLatexForRendering(
+          '(\\text{4}) \\underset{x , y}{min} a x^{- p} + b y^{- q} \\text{s}.\\text{t}. x + y = 1',
+          mathEl
+        );
+        """#
+
+        let value = context.evaluateScript(script)
+
+        XCTAssertNil(context.exception)
+        let repaired = try XCTUnwrap(value?.toString())
+        XCTAssertTrue(repaired.contains(#"\underset{x , y}{\min}"#))
+        XCTAssertTrue(repaired.contains(#"\qquad\text{s.t.}\qquad"#))
+        XCTAssertTrue(repaired.hasSuffix(#"\tag{4}"#))
+        XCTAssertFalse(repaired.hasPrefix(#"(\text{4})"#))
+        XCTAssertFalse(repaired.contains(#"{min}"#))
+        XCTAssertFalse(repaired.contains(#"\text{s}.\text{t}."#))
+    }
+
+    func testLatexPreprocessorRestoresMathMLLabelInsideEquationEnvironment() throws {
+        let context = try XCTUnwrap(JSContext())
+        let script = #"""
+        \#(WebReaderMathRendering.latexPreprocessorFunctionJavaScript)
+        const mathEl = {
+          querySelectorAll: function (_) {
+            return [{ firstElementChild: { textContent: '(4)' } }];
+          }
+        };
+        rubienPrepareLatexForRendering(
+          '\\begin{equation}\\min_{x,y} f(x)\\end{equation}',
+          mathEl
+        );
+        """#
+
+        let value = context.evaluateScript(script)
+
+        XCTAssertNil(context.exception)
+        XCTAssertEqual(
+            value?.toString(),
+            #"\begin{equation}\min_{x,y} f(x)\tag{4}\end{equation}"#
+        )
+    }
+
     func testDataLatexRerenderOnlyReplacesSuccessfulKatexOutput() throws {
         let context = try XCTUnwrap(JSContext())
         let script = """

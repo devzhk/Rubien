@@ -22,6 +22,7 @@
 // confirmed necessary by a smoke test against a math-heavy Notion post.
 
 import Defuddle from 'defuddle/full';
+import { rubienPreserveMathJaxV2Latex } from './mathjax-v2.js';
 
 const SOURCE = 'defuddle';
 // Matches the timeout the previous obsidian-clipper bundle enforced.
@@ -598,6 +599,7 @@ window.RubienDefuddleExtract = function RubienDefuddleExtract() {
       let notionExtract = null; // { content, title } | null
       try {
         const clone = document.cloneNode(true);
+        rubienPreserveMathJaxV2Latex(clone);
         notionExtract = extractNotionPage(clone);
         if (notionExtract != null) {
           debugPost('rubien_defuddle_notion_extracted',

@@ -165,17 +165,54 @@ enum WebReaderMathRendering {
 
     /// KaTeX does not implement LaTeX cross-reference state, so `\label` has
     /// no reader-visible meaning and otherwise renders as a red unsupported
-    /// command. Keep all other source intact for KaTeX.
+    /// command. The remaining rewrites repair a narrow signature emitted by
+    /// Defuddle's historical MathML-to-LaTeX fallback. When the preserved
+    /// MathML contains an equation label, restore it as a KaTeX `\tag`.
     static let latexPreprocessorFunctionJavaScript = #"""
-    function rubienPrepareLatexForRendering(latex) {
-      return String(latex || '').replace(/\\label\s*\{[^{}]*\}/g, '');
+    function rubienPrepareLatexForRendering(latex, mathEl) {
+      let prepared = String(latex || '').replace(/\\label\s*\{[^{}]*\}/g, '');
+
+      prepared = prepared.replace(
+        /\\underset\s*\{([^{}]*)\}\s*\{\s*(min|max|lim|limsup|liminf|sup|inf|det|gcd|Pr)\s*\}/g,
+        function (_, subscript, operator) {
+          return '\\underset{' + subscript + '}{\\' + operator + '}';
+        }
+      );
+      prepared = prepared.replace(
+        /\\text\s*\{s\}\s*\.\s*\\text\s*\{t\}\s*\./g,
+        '\\qquad\\text{s.t.}\\qquad'
+      );
+
+      if (!mathEl || typeof mathEl.querySelectorAll !== 'function') return prepared;
+      const labeledRows = mathEl.querySelectorAll('mlabeledtr');
+      if (!labeledRows || labeledRows.length !== 1) return prepared;
+      const labelCell = labeledRows[0].firstElementChild;
+      const labelMatch = labelCell && String(labelCell.textContent || '').trim()
+        .match(/^\(\s*([A-Za-z0-9.-]+)\s*\)$/);
+      if (!labelMatch || /\\tag\s*\{/.test(prepared)) return prepared;
+
+      const label = labelMatch[1];
+      const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const convertedPrefix = new RegExp(
+        '^\\s*\\(\\s*(?:\\\\text\\s*\\{\\s*)?' +
+        escapedLabel +
+        '(?:\\s*\\})?\\s*\\)\\s*'
+      );
+      prepared = prepared.replace(convertedPrefix, '');
+
+      const tag = '\\tag{' + label + '}';
+      const environmentEnd = /\\end\{(equation\*?|align\*?|alignat\*?|gather\*?)\}\s*$/;
+      if (environmentEnd.test(prepared)) {
+        return prepared.replace(environmentEnd, tag + '\\end{$1}');
+      }
+      return prepared + tag;
     }
     """#
 
     /// Kept as a standalone snippet so the invalid-LaTeX fallback can be
     /// exercised without loading a WKWebView in unit tests.
     static let dataLatexRenderAttemptJavaScript = """
-    const preparedLatex = rubienPrepareLatexForRendering(latex);
+    const preparedLatex = rubienPrepareLatexForRendering(latex, mathEl);
     try {
       katex.render(preparedLatex, span, { displayMode: displayMode, throwOnError: true });
       mathEl.replaceWith(span);

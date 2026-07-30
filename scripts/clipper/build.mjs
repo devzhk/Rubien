@@ -9,7 +9,7 @@
 //      Sources/Rubien/Resources/ClipperDefuddle.js together.
 
 import { build } from 'esbuild';
-import { copyFile, mkdir } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
@@ -35,6 +35,18 @@ await build({
   },
   logLevel: 'info',
 });
+
+// Some bundled dependency string literals contain source lines with trailing
+// spaces. Normalize generated output so `git diff --check` remains useful and
+// repeated builds stay byte-for-byte stable.
+const bundledSource = await readFile(outfile, 'utf8');
+const normalizedSource = bundledSource
+  .split('\n')
+  .map((line) => line.trimEnd())
+  .join('\n');
+if (normalizedSource !== bundledSource) {
+  await writeFile(outfile, normalizedSource);
+}
 
 await mkdir(dirname(browserOutfile), { recursive: true });
 await copyFile(outfile, browserOutfile);
