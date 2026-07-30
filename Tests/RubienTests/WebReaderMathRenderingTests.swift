@@ -35,6 +35,13 @@ final class WebReaderMathRenderingTests: XCTestCase {
         XCTAssertTrue(javaScript.contains(#"left: '\\('"#))
     }
 
+    func testAutoRenderConfigurationDoesNotDescendIntoNativeMathML() {
+        XCTAssertTrue(WebReaderMathRendering.autoRenderIgnoredTags.contains("math"))
+        XCTAssertTrue(
+            WebReaderMathRendering.autoRenderIgnoredTagEntriesJavaScript.contains("'math'")
+        )
+    }
+
     func testAutoRenderConfigurationDecodesToSingleBackslashRuntimeDelimiters() throws {
         let context = try XCTUnwrap(JSContext())
         let expression = "JSON.stringify([\(WebReaderMathRendering.autoRenderDelimiterEntriesJavaScript)])"
@@ -195,6 +202,42 @@ final class WebReaderMathRenderingTests: XCTestCase {
         XCTAssertNil(context.exception)
         let json = try XCTUnwrap(value?.toString())
         XCTAssertEqual(try JSONDecoder().decode([Bool].self, from: Data(json.utf8)), [true, false])
+    }
+
+    func testDataLatexRerenderKeepsSemanticMathMLUnlessColorStylingNeedsKatex() throws {
+        let context = try XCTUnwrap(JSContext())
+        let script = """
+        \(WebReaderMathRendering.latexPreprocessorFunctionJavaScript)
+        function attemptRender(latex, children) {
+          const mathEl = {
+            children: children,
+            replaced: false,
+            replaceWith: function (_) { this.replaced = true; }
+          };
+          const span = {};
+          const displayMode = true;
+          let katexCalls = 0;
+          const katex = {
+            render: function () { katexCalls++; }
+          };
+          \(WebReaderMathRendering.dataLatexRenderAttemptJavaScript)
+          return [mathEl.replaced ? 1 : 0, katexCalls];
+        }
+        JSON.stringify([
+          attemptRender('F_{arch} sim N^{-gamma}', [{ localName: 'mtable' }]),
+          attemptRender('\\\\textcolor{red}{x}', [{ localName: 'mrow' }]),
+          attemptRender('x + y', [])
+        ]);
+        """
+
+        let value = context.evaluateScript(script)
+
+        XCTAssertNil(context.exception)
+        let json = try XCTUnwrap(value?.toString())
+        XCTAssertEqual(
+            try JSONDecoder().decode([[Int]].self, from: Data(json.utf8)),
+            [[0, 0], [1, 1], [1, 1]]
+        )
     }
 
     private struct Delimiter: Codable, Equatable {

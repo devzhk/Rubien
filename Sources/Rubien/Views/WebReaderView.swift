@@ -96,6 +96,9 @@ enum WebReaderMathRendering {
         "equation", "equation*", "align", "align*", "alignat", "alignat*",
         "gather", "gather*", "CD",
     ]
+    static let autoRenderIgnoredTags = [
+        "script", "noscript", "style", "textarea", "pre", "code", "math",
+    ]
 
     static let autoRenderDelimiterEntriesJavaScript: String = {
         var entries = [
@@ -111,6 +114,10 @@ enum WebReaderMathRendering {
         ])
         return entries.joined(separator: ",\n                      ")
     }()
+
+    static let autoRenderIgnoredTagEntriesJavaScript = autoRenderIgnoredTags
+        .map { "'\($0)'" }
+        .joined(separator: ", ")
 
     /// Legacy clips can contain a source `<br>` in the middle of a display
     /// environment (usually where the TeX used `\\`). KaTeX auto-render scans
@@ -169,6 +176,28 @@ enum WebReaderMathRendering {
     /// Defuddle's historical MathML-to-LaTeX fallback. When the preserved
     /// MathML contains an equation label, restore it as a KaTeX `\tag`.
     static let latexPreprocessorFunctionJavaScript = #"""
+    function rubienShouldRenderLatexWithKatex(latex, mathEl) {
+      if (!mathEl) return true;
+      const children = mathEl.children;
+      if (!children || typeof children.length !== 'number') return true;
+
+      let hasRenderableMathML = false;
+      for (let i = 0; i < children.length; i++) {
+        const name = String(children[i].localName || children[i].tagName || '')
+          .toLowerCase();
+        if (name && name !== 'annotation') {
+          hasRenderableMathML = true;
+          break;
+        }
+      }
+      if (!hasRenderableMathML) return true;
+
+      // Defuddle/Temml can discard LaTeX-only color styling while producing
+      // otherwise-correct MathML. Re-render only those styled expressions;
+      // native MathML is the semantic source of truth for everything else.
+      return /\\(?:textcolor|color|colorbox|fcolorbox)\b/.test(String(latex || ''));
+    }
+
     function rubienPrepareLatexForRendering(latex, mathEl) {
       let prepared = String(latex || '').replace(/\\label\s*\{[^{}]*\}/g, '');
 
@@ -212,11 +241,13 @@ enum WebReaderMathRendering {
     /// Kept as a standalone snippet so the invalid-LaTeX fallback can be
     /// exercised without loading a WKWebView in unit tests.
     static let dataLatexRenderAttemptJavaScript = """
-    const preparedLatex = rubienPrepareLatexForRendering(latex, mathEl);
-    try {
-      katex.render(preparedLatex, span, { displayMode: displayMode, throwOnError: true });
-      mathEl.replaceWith(span);
-    } catch (_) { /* leave <math> intact; browser falls back */ }
+    if (rubienShouldRenderLatexWithKatex(latex, mathEl)) {
+      const preparedLatex = rubienPrepareLatexForRendering(latex, mathEl);
+      try {
+        katex.render(preparedLatex, span, { displayMode: displayMode, throwOnError: true });
+        mathEl.replaceWith(span);
+      } catch (_) { /* leave <math> intact; browser falls back */ }
+    }
     """
 }
 
@@ -1457,14 +1488,13 @@ final class WebReaderViewModel: ObservableObject {
                 if (mathRendered) return;
                 if (typeof renderMathInElement !== 'function') return;
                 try {
-                  // Pass 1: re-render <math data-latex="..."> elements via katex.render().
-                  // Defuddle/full converts page LaTeX into MathML at extraction time,
-                  // but temml drops LaTeX styling commands (\\textcolor, \\color, etc.)
-                  // during the conversion. KaTeX's own renderer handles them, so we
-                  // re-render from the preserved data-latex attribute. Per-element
-                  // try/catch plus throwOnError: a single bad preserved expression
-                  // falls back to native MathML rendering of the surviving <math>
-                  // instead of replacing it with KaTeX's visible error markup.
+                  // Pass 1: keep valid MathML as the semantic source of truth. The
+                  // historical MathML-to-LaTeX fallback is lossy for operators,
+                  // accents, spacing, and labels, so blindly re-rendering data-latex
+                  // can degrade correct MathML. Re-render only source that has no
+                  // usable MathML or contains LaTeX-only color styling that Temml
+                  // drops. Per-element try/catch plus throwOnError leaves native
+                  // MathML intact if a styled expression is invalid.
                   //
                   // Annotation safety: skip any <math> that contains a wrapped
                   // annotation span (data-annotation-id). wrapRange (above) does
@@ -1501,7 +1531,7 @@ final class WebReaderViewModel: ObservableObject {
                     ],
                     throwOnError: false,
                     preProcess: rubienPrepareLatexForRendering,
-                    ignoredTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'],
+                    ignoredTags: [\(WebReaderMathRendering.autoRenderIgnoredTagEntriesJavaScript)],
                     ignoredClasses: ['katex']
                   });
                   mathRendered = true;
