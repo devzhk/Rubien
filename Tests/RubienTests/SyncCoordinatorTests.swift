@@ -7,6 +7,46 @@ import CloudKit
 @testable import RubienCore
 @testable import RubienSync
 
+private actor AsyncBoolProbe {
+    private var value = false
+
+    func record(_ newValue: Bool) {
+        value = newValue
+    }
+
+    func snapshot() -> Bool {
+        value
+    }
+}
+
+private actor LibraryFactoryGate {
+    private var entered = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        entered = true
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func hasEntered() -> Bool {
+        entered
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
+private actor SequencedAccountStatusProbe {
+    private var callCount = 0
+
+    func next() -> CKAccountStatus {
+        callCount += 1
+        return callCount == 1 ? .available : .noAccount
+    }
+}
+
 @available(macOS 14.0, *)
 @MainActor
 final class SyncCoordinatorTests: XCTestCase {
@@ -206,7 +246,15 @@ final class SyncCoordinatorTests: XCTestCase {
     /// calling `start()`. This avoids `CKSyncEngine` init which requires
     /// CloudKit entitlements and crashes in an unentitled XCTest process.
     private func stubLibraryFactory() -> @Sendable (AppDatabase) async -> SyncedLibrary {
-        return { db in SyncedLibrary(appDatabase: db) }
+        return { db in
+            SyncedLibrary(
+                appDatabase: db,
+                stateFileURL: FileManager.default.temporaryDirectory
+                    .appendingPathComponent(
+                        "rubien-coordinator-test-\(UUID().uuidString).state"
+                    )
+            )
+        }
     }
 
     func testStartSyncSetsUnavailableWhenProbeFails() async {
@@ -250,6 +298,31 @@ final class SyncCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.status, .disabled)
     }
 
+    func testTransactionObserverIsInstalledBeforeLibraryStart() async {
+        let probe = AsyncBoolProbe()
+        let coordinator = SyncCoordinator(
+            appDatabase: db,
+            defaults: defaults,
+            probes: allPassProbes(),
+            makeLibrary: stubLibraryFactory(),
+            startLibrary: { library in
+                let observerInstalled = await library.hasTransactionObserver
+                let startupPrepared =
+                    await library.isEngineStartupPreparedForTest
+                let isReady = observerInstalled && startupPrepared
+                await probe.record(isReady)
+            },
+            isAppActive: { false },
+            lockURL: tmpLockURL
+        )
+
+        await coordinator.performStartSyncForTest()
+
+        let observerWasInstalled = await probe.snapshot()
+        XCTAssertTrue(observerWasInstalled)
+        await coordinator.performStopSyncForTest()
+    }
+
     func testRapidToggleDoesNotLeakStaleLibrary() async {
         let coordinator = SyncCoordinator(
             appDatabase: db,
@@ -271,6 +344,53 @@ final class SyncCoordinatorTests: XCTestCase {
         _ = await (first, second)
 
         XCTAssertNotNil(coordinator.librarySnapshotForTest)
+    }
+
+    func testNewerFailedStartReleasesInheritedLockWithoutOlderCleanup() async throws {
+        let factoryGate = LibraryFactoryGate()
+        let accountProbe = SequencedAccountStatusProbe()
+        let coordinator = SyncCoordinator(
+            appDatabase: db,
+            defaults: defaults,
+            probes: .init(
+                bundleHasEntitlement: { true },
+                ubiquityIdentityToken: { "token" as NSCoding },
+                tryCKContainerInit: { _ in nil },
+                accountStatus: { _ in await accountProbe.next() }
+            ),
+            makeLibrary: { db in
+                await factoryGate.wait()
+                return SyncedLibrary(
+                    appDatabase: db,
+                    stateFileURL: FileManager.default.temporaryDirectory
+                        .appendingPathComponent(
+                            "rubien-stale-start-\(UUID().uuidString).state"
+                        )
+                )
+            },
+            startLibrary: { _ in },
+            isAppActive: { false },
+            lockURL: tmpLockURL
+        )
+
+        async let olderStart: Void = coordinator.performStartSyncForTest()
+        while !(await factoryGate.hasEntered()) {
+            await Task.yield()
+        }
+
+        await coordinator.performStartSyncForTest()
+        await factoryGate.release()
+        _ = await olderStart
+
+        XCTAssertEqual(coordinator.status, .signedOut)
+        XCTAssertNil(coordinator.librarySnapshotForTest)
+
+        let contender = try SyncFileLock(fileURL: tmpLockURL)
+        XCTAssertTrue(
+            try contender.tryLockExclusive(),
+            "the newer failed generation must release the inherited startup lock"
+        )
+        try contender.unlock()
     }
 
     func testStartIfEnabledLaunchesSyncWhenUserDefaultsPersisted() async {

@@ -158,6 +158,42 @@ device must not contain unique local data. Resetting the sidecar makes that devi
 CloudKit history from the beginning; it does **not** mark clean local rows dirty or force a
 full upload.
 
+Do not run a full-history replay on v0.7.1 or earlier. During a cross-batch FK apply failure,
+those builds can persist CKSyncEngine's advanced cursor even though the corresponding SQLite
+transaction rolled back, permanently skipping the failed portion of history on that device.
+Updated builds stage engine state until every fetched batch commits. If an apply fails, they
+discard the advanced cursor and recreate the engine from the last durable sidecar on the next
+launch, foreground, or idle fetch. A log sequence containing
+`transient FK orphans tolerated` followed by `FK violations after remote apply ... rolling back`
+is the signature of this older-build failure.
+
+Updated builds also split a mixed fetched event into an orphan-tolerant modification transaction
+and an FK-enforced deletion transaction. CloudKit can deliver a child modification before its
+parent even when that event also contains unrelated deletions; the split allows that temporary
+orphan to commit without disabling local `ON DELETE CASCADE` behavior.
+
+During a known full-history replay (the engine started with no durable sidecar), updated builds
+reconcile any child whose parent still never arrived at the successful end-of-zone boundary.
+Synced children are deleted locally and queued as CloudKit tombstones so later devices do not
+inherit the same stale records; orphaned PDF cache files are unlinked only after the cleanup
+transaction commits. Optional metadata-intake links are cleared rather than deleting their
+intake history. Ordinary incremental fetches never infer server absence from a locally missing
+parent: their change delta is not a complete CloudKit snapshot. An unknown FK shape during a
+full replay fails reconciliation and keeps the fetch cursor non-durable instead of silently
+accepting a persistently inconsistent library. A durable database marker is written before
+CKSyncEngine can start and is cleared only after both terminal cleanup and the end-of-fetch
+cursor are durable. If the marker survives a crash, startup discards any ambiguous sidecar and
+replays from nil again.
+
+One v0.7.1 upgrade path had a second failure mode: transient sync orphans in a v10 database
+caused GRDB's whole-database FK check to reject the pending v11 repair migration. Startup then
+silently substituted an in-memory database while CKSyncEngine continued writing its cursor
+sidecar beside the unopened persistent library. Updated builds apply that exact v10 → v11 repair
+with FK enforcement left on (preserving existing orphans while preventing new ones) and never
+fall back to an implicit in-memory library. A running packaged app should therefore always hold
+an open `library.sqlite` file; no matching handle in the first diagnostic below is a startup
+failure, not evidence that SQLite is idle.
+
 1. While Rubien is running, resolve the actual live database instead of guessing:
 
    ```bash

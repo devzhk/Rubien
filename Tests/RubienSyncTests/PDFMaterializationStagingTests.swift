@@ -37,6 +37,20 @@ final class PDFMaterializationStagingTests: XCTestCase {
         super.tearDown()
     }
 
+    private func referenceDeletion(
+        id: Int64
+    ) -> SyncedLibrary.FetchedDeletionInput {
+        SyncedLibrary.FetchedDeletionInput(
+            recordID: CKRecord.ID(
+                recordName: SyncEntityType.reference.qualifiedRecordName(
+                    entityId: String(id)
+                ),
+                zoneID: SyncConstants.libraryZoneID
+            ),
+            recordType: SyncConstants.RecordType.reference
+        )
+    }
+
     // MARK: - Prepare step
 
     func testPrepareStagesAssetWithoutTouchingDatabase() throws {
@@ -231,6 +245,218 @@ final class PDFMaterializationStagingTests: XCTestCase {
         }
     }
 
+    func testTransientAssetCopyFailureMakesFetchedBatchNonDurable() async throws {
+        let missingSource = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString)-missing.pdf")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: missingSource.path))
+
+        try await db.dbWriter.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO reference(id, title, dateAdded, dateModified)
+                    VALUES(93, 'r', ?, ?)
+                    """,
+                arguments: [Date(), Date()]
+            )
+        }
+
+        let payload = ReferencePDFRecord(
+            referenceId: 93,
+            assetURL: missingSource,
+            assetVersion: 1,
+            contentHash: "missing",
+            originalFilename: "missing.pdf",
+            dateModified: Date()
+        )
+        let record = ReferencePDFRecord.makeRecord(
+            recordName: "referencePDF:93",
+            payload: payload
+        )
+        let library = SyncedLibrary(
+            appDatabase: db,
+            stateFileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("\(UUID().uuidString).engine-state"),
+            pdfAssetSyncEnabledProvider: { true }
+        )
+
+        let applied = await library.applyFetchedRecordsForTest(
+            modifications: [record],
+            deletions: []
+        )
+
+        XCTAssertFalse(
+            applied,
+            "transient staging failure must block cursor persistence and retry"
+        )
+        let cacheCount = try await db.dbWriter.read {
+            try Int.fetchOne(
+                $0,
+                sql: "SELECT COUNT(*) FROM pdfCache WHERE referenceId = 93"
+            ) ?? -1
+        }
+        XCTAssertEqual(cacheCount, 0)
+    }
+
+    func testPermanentlyMissingAssetIsSkippedWithoutReplayLoop() async throws {
+        try await db.dbWriter.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO reference(id, title, dateAdded, dateModified)
+                    VALUES(94, 'r', ?, ?)
+                    """,
+                arguments: [Date(), Date()]
+            )
+        }
+
+        let payload = ReferencePDFRecord(
+            referenceId: 94,
+            assetURL: nil,
+            assetVersion: 1,
+            contentHash: "missing",
+            originalFilename: "missing.pdf",
+            dateModified: Date()
+        )
+        let record = ReferencePDFRecord.makeRecord(
+            recordName: "referencePDF:94",
+            payload: payload
+        )
+        let library = SyncedLibrary(
+            appDatabase: db,
+            stateFileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("\(UUID().uuidString).engine-state"),
+            pdfAssetSyncEnabledProvider: { true }
+        )
+
+        let applied = await library.applyFetchedRecordsForTest(
+            modifications: [record],
+            deletions: []
+        )
+
+        XCTAssertTrue(
+            applied,
+            "a permanently malformed asset-less record must not replay forever"
+        )
+    }
+
+    func testCommittedReferenceDeletionUnlinksPDFPostCommit() async throws {
+        let filename = "\(UUID().uuidString)-committed-delete.pdf"
+        let fileURL = AppDatabase.pdfStorageURL.appendingPathComponent(filename)
+        try Data("%PDF-committed".utf8).write(to: fileURL)
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        try await db.dbWriter.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO reference(id, title, dateAdded, dateModified)
+                    VALUES(96, 'r', ?, ?)
+                    """,
+                arguments: [Date(), Date()]
+            )
+            try db.execute(
+                sql: """
+                    INSERT INTO pdfCache(
+                        referenceId, localFilename, contentHash,
+                        assetVersion, materializedAt
+                    ) VALUES(96, ?, 'h', 1, ?)
+                    """,
+                arguments: [filename, Date()]
+            )
+        }
+
+        let library = SyncedLibrary(
+            appDatabase: db,
+            stateFileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("\(UUID().uuidString).engine-state"),
+            pdfAssetSyncEnabledProvider: { true }
+        )
+        let applied = await library.applyFetchedRecordsForTest(
+            modifications: [],
+            deletions: [referenceDeletion(id: 96)]
+        )
+
+        XCTAssertTrue(applied)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+        let counts = try await db.dbWriter.read { db in
+            (
+                try Int.fetchOne(
+                    db,
+                    sql: "SELECT COUNT(*) FROM reference WHERE id = 96"
+                ) ?? -1,
+                try Int.fetchOne(
+                    db,
+                    sql: "SELECT COUNT(*) FROM pdfCache WHERE referenceId = 96"
+                ) ?? -1
+            )
+        }
+        XCTAssertEqual(counts.0, 0)
+        XCTAssertEqual(counts.1, 0)
+    }
+
+    func testRolledBackReferenceDeletionKeepsPDFAndDatabaseRows() async throws {
+        let filename = "\(UUID().uuidString)-rolled-back-delete.pdf"
+        let fileURL = AppDatabase.pdfStorageURL.appendingPathComponent(filename)
+        try Data("%PDF-rollback".utf8).write(to: fileURL)
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        try await db.dbWriter.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO reference(id, title, dateAdded, dateModified)
+                    VALUES(97, 'r', ?, ?)
+                    """,
+                arguments: [Date(), Date()]
+            )
+            try db.execute(
+                sql: """
+                    INSERT INTO pdfCache(
+                        referenceId, localFilename, contentHash,
+                        assetVersion, materializedAt
+                    ) VALUES(97, ?, 'h', 1, ?)
+                    """,
+                arguments: [filename, Date()]
+            )
+            try db.execute(sql: """
+                CREATE TRIGGER test_abort_reference_tombstone
+                BEFORE INSERT ON tombstone
+                WHEN NEW.entityType = 'reference' AND NEW.entityId = '97'
+                BEGIN
+                    SELECT RAISE(ABORT, 'forced deletion rollback');
+                END
+                """)
+        }
+
+        let library = SyncedLibrary(
+            appDatabase: db,
+            stateFileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("\(UUID().uuidString).engine-state"),
+            pdfAssetSyncEnabledProvider: { true }
+        )
+        let applied = await library.applyFetchedRecordsForTest(
+            modifications: [],
+            deletions: [referenceDeletion(id: 97)]
+        )
+
+        XCTAssertFalse(applied)
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: fileURL.path),
+            "a rolled-back transaction must not delete the still-referenced PDF"
+        )
+        let counts = try await db.dbWriter.read { db in
+            (
+                try Int.fetchOne(
+                    db,
+                    sql: "SELECT COUNT(*) FROM reference WHERE id = 97"
+                ) ?? -1,
+                try Int.fetchOne(
+                    db,
+                    sql: "SELECT COUNT(*) FROM pdfCache WHERE referenceId = 97"
+                ) ?? -1
+            )
+        }
+        XCTAssertEqual(counts.0, 1)
+        XCTAssertEqual(counts.1, 1)
+    }
+
     /// Contention probe: while a synthetic writer holds the queue for 500ms,
     /// the apply pipeline must still stage its CKAsset file onto disk
     /// promptly — the copy runs in `prepareReferencePDFMaterialization`,
@@ -305,7 +531,7 @@ final class PDFMaterializationStagingTests: XCTestCase {
 
         await fulfillment(of: [writerDone], timeout: 2.0)
         try await blocker.value
-        await applyTask.value
+        _ = await applyTask.value
     }
 }
 #endif

@@ -407,18 +407,18 @@ final class SyncEntityDispatchTests: XCTestCase {
     /// device:
     /// - parent reference tombstone is marked server-confirmed (so it
     ///   isn't re-pushed on the next cycle — Codex review finding);
-    /// - on-disk PDF file is unlinked;
+    /// - on-disk PDF filename is returned for post-commit unlinking;
     /// - pdfCache row dropped via FK cascade;
     /// - any orphan syncState/tombstone for the sibling referencePDF
     ///   is cleared (no spurious push back to the cloud).
-    func testApplyRemoteDeleteReferenceWrapperCleansUpOrphanReferencePDFState() throws {
+    func testApplyRemoteDeleteReferenceReturnsPDFForPostCommitCleanup() throws {
         let pdfsDir = AppDatabase.pdfStorageURL
         try FileManager.default.createDirectory(at: pdfsDir, withIntermediateDirectories: true)
         let filename = "remote-delete-\(UUID().uuidString)_x.pdf"
         let fileURL = pdfsDir.appendingPathComponent(filename)
         try Data("%PDF-bytes-to-be-unlinked".utf8).write(to: fileURL)
 
-        try db.dbWriter.write { db in
+        let returnedFilename: String? = try db.dbWriter.write { db in
             try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(55, 'r', ?, ?)", arguments: [Date(), Date()])
             try db.execute(sql: """
                 INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt)
@@ -437,7 +437,10 @@ final class SyncEntityDispatchTests: XCTestCase {
             """)
 
             try self.store.setApplyingRemote(db)
-            try SyncEntityType.reference.applyRemoteDelete(entityId: "55", db: db)
+            let returnedFilename = try SyncEntityType.reference.applyRemoteDelete(
+                entityId: "55",
+                db: db
+            )
             try self.store.removeState(db, entityType: .reference, entityId: "55")
             try self.store.upsertTombstone(
                 db,
@@ -469,25 +472,27 @@ final class SyncEntityDispatchTests: XCTestCase {
             let confirmed = try Int.fetchOne(db,
                 sql: "SELECT confirmedByServer FROM tombstone WHERE entityType='reference' AND entityId='55'") ?? -1
             XCTAssertEqual(confirmed, 1, "pull-side tombstone must be confirmedByServer=1")
+            return returnedFilename
         }
 
-        XCTAssertFalse(
+        XCTAssertEqual(returnedFilename, filename)
+        XCTAssertTrue(
             FileManager.default.fileExists(atPath: fileURL.path),
-            "on-disk PDF must be unlinked even though FK cascade only drops the DB row"
+            "low-level delete must leave file I/O to its post-commit caller"
         )
+        try? FileManager.default.removeItem(at: fileURL)
     }
 
-    func testApplyRemoteReferencePDFDeleteRemovesCacheRowAndFile() throws {
-        // Create a real file in PDFs/ so we can verify the apply-delete path
-        // also nukes the on-disk file (not just the cache row).
+    func testApplyRemoteReferencePDFDeleteReturnsFileForPostCommitCleanup() throws {
+        // Create a real file in PDFs/ so we can verify the low-level delete
+        // returns it without unlinking before the transaction commits.
         let pdfsDir = AppDatabase.pdfStorageURL
         try FileManager.default.createDirectory(at: pdfsDir, withIntermediateDirectories: true)
         let filename = "delete-test-\(UUID().uuidString)_x.pdf"
         let fileURL = pdfsDir.appendingPathComponent(filename)
         try Data("%PDF-to-be-deleted".utf8).write(to: fileURL)
-        // No defer cleanup — the test itself verifies the file is gone.
 
-        try db.dbWriter.write { db in
+        let returnedFilename: String? = try db.dbWriter.write { db in
             try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(11, 'r', ?, ?)", arguments: [Date(), Date()])
             try db.execute(sql: """
                 INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt)
@@ -495,7 +500,10 @@ final class SyncEntityDispatchTests: XCTestCase {
             """, arguments: [filename, Date()])
 
             try self.store.setApplyingRemote(db)
-            try SyncEntityType.referencePDF.applyRemoteDelete(entityId: "11", db: db)
+            let returnedFilename = try SyncEntityType.referencePDF.applyRemoteDelete(
+                entityId: "11",
+                db: db
+            )
             try self.store.clearApplyingRemote(db)
 
             XCTAssertEqual(
@@ -503,11 +511,14 @@ final class SyncEntityDispatchTests: XCTestCase {
                 0,
                 "cache row dropped"
             )
+            return returnedFilename
         }
-        XCTAssertFalse(
+        XCTAssertEqual(returnedFilename, filename)
+        XCTAssertTrue(
             FileManager.default.fileExists(atPath: fileURL.path),
-            "apply-delete must also remove the on-disk file, not just the cache row"
+            "low-level delete must not unlink before its transaction commits"
         )
+        try? FileManager.default.removeItem(at: fileURL)
     }
 
     func testBuildPushRecordReferencePDFEmitsRecordWithAssetWhenCachedOnDisk() throws {

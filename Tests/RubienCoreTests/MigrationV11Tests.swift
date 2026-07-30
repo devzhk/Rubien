@@ -59,6 +59,39 @@ final class MigrationV11Tests: XCTestCase {
         }
     }
 
+    func testPendingV11CanRepairDatabaseWithPreexistingSyncOrphans() throws {
+        let queue = try DatabaseQueue()
+        _ = try AppDatabase(queue)
+
+        try queue.writeWithoutTransaction { db in
+            try db.execute(sql: "PRAGMA foreign_keys = OFF")
+            do {
+                try db.execute(sql: """
+                    INSERT INTO referenceTag (
+                        referenceId, tagId, dateModified
+                    ) VALUES (9001, 9002, ?)
+                    """, arguments: [Date(timeIntervalSince1970: 1)])
+                try db.execute(
+                    sql: "DELETE FROM grdb_migrations WHERE identifier = 'v11'"
+                )
+            } catch {
+                try? db.execute(sql: "PRAGMA foreign_keys = ON")
+                throw error
+            }
+            try db.execute(sql: "PRAGMA foreign_keys = ON")
+        }
+
+        let violationsBefore = try foreignKeyViolationCount(on: queue)
+        XCTAssertGreaterThan(violationsBefore, 0)
+
+        XCTAssertNoThrow(try AppDatabase(queue))
+
+        try queue.read { db in
+            XCTAssertTrue(try appliedMigrations(db).contains("v11"))
+        }
+        XCTAssertEqual(try foreignKeyViolationCount(on: queue), violationsBefore)
+    }
+
     func testMalformedDevelopmentSchemaIsRepairedWithoutLosingRows() throws {
         let queue = try DatabaseQueue()
         _ = try AppDatabase(queue)
@@ -116,6 +149,23 @@ final class MigrationV11Tests: XCTestCase {
             )
         }
 
+        try queue.writeWithoutTransaction { db in
+            try db.execute(sql: "PRAGMA foreign_keys = OFF")
+            do {
+                try db.execute(sql: """
+                    INSERT INTO referenceTag (
+                        referenceId, tagId, dateModified
+                    ) VALUES (9101, 9102, ?)
+                    """, arguments: [Date(timeIntervalSince1970: 103)])
+            } catch {
+                try? db.execute(sql: "PRAGMA foreign_keys = ON")
+                throw error
+            }
+            try db.execute(sql: "PRAGMA foreign_keys = ON")
+        }
+        let violationsBefore = try foreignKeyViolationCount(on: queue)
+        XCTAssertGreaterThan(violationsBefore, 0)
+
         _ = try AppDatabase(queue)
 
         try queue.read { db in
@@ -162,6 +212,7 @@ final class MigrationV11Tests: XCTestCase {
             )
             try assertScheduledFixturePreserved(db)
         }
+        XCTAssertEqual(try foreignKeyViolationCount(on: queue), violationsBefore)
     }
 
     private func insertScheduledRun(on queue: DatabaseQueue) throws {
@@ -213,6 +264,15 @@ final class MigrationV11Tests: XCTestCase {
             db,
             sql: "SELECT identifier FROM grdb_migrations"
         ))
+    }
+
+    private func foreignKeyViolationCount(on queue: DatabaseQueue) throws -> Int {
+        try queue.read { db in
+            try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM pragma_foreign_key_check"
+            ) ?? 0
+        }
     }
 
     private func assertScheduledFixturePreserved(

@@ -353,5 +353,49 @@ final class ActivityRecordTests: XCTestCase {
             ))
         }
     }
+
+    func testActivityDeletionRequeuesPreviouslyConfirmedTombstone() throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let stateStore = SyncStateStore()
+        let entityId = "generation/mac/42/2026-07-15"
+        let recordName = SyncEntityType.readingActivity.qualifiedRecordName(
+            entityId: entityId
+        )
+
+        try database.dbWriter.write { db in
+            try stateStore.upsertTombstone(
+                db,
+                entityType: .readingActivity,
+                entityId: entityId,
+                confirmedByServer: true
+            )
+
+            try SyncEntityType.queueActivityDeletion(
+                type: .readingActivity,
+                entityId: entityId,
+                recordName: recordName,
+                stateStore: stateStore,
+                db: db
+            )
+
+            XCTAssertEqual(
+                try Int.fetchOne(
+                    db,
+                    sql: """
+                        SELECT confirmedByServer FROM tombstone
+                        WHERE entityType = 'readingActivity'
+                          AND entityId = ?
+                        """,
+                    arguments: [entityId]
+                ),
+                0
+            )
+            XCTAssertTrue(
+                try stateStore.tombstones(db).contains {
+                    $0.0 == .readingActivity && $0.1 == entityId
+                }
+            )
+        }
+    }
 }
 #endif

@@ -49,5 +49,12 @@ final class SyncEngineStateStoreTests: XCTestCase {
             "reset on a non-existent file must not throw — it's the 'already clean' state"
         )
     }
+
+    func testResetPropagatesErrorsOtherThanMissingFile() {
+        let store = SyncEngineStateStore(
+            fileURL: URL(fileURLWithPath: "/dev/null/child")
+        )
+        XCTAssertThrowsError(try store.reset())
+    }
 }
 #endif

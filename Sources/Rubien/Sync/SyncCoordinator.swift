@@ -236,6 +236,7 @@ public final class SyncCoordinator: ObservableObject {
     private var statusTask: Task<Void, Never>?
     private var syncLock: SyncFileLock?
     private var lifecycleGeneration: Int = 0
+    private var syncResourceGeneration: Int?
 
     /// Subscription must capture `newLibrary` directly (not `self.library`)
     /// so kicks fired during `performStartSync` can't hit a nil library.
@@ -270,8 +271,14 @@ public final class SyncCoordinator: ObservableObject {
     /// Internal async workhorse — exposed as `performStartSyncForTest`
     /// so tests can await completion deterministically.
     func performStartSync() async {
+        // Starting an already-live library is idempotent. More importantly,
+        // it must not transfer ownership of that library's lock to a retry
+        // generation that could fail preflight and tear the live lock down.
+        guard library == nil else { return }
+
         lifecycleGeneration += 1
         let generation = lifecycleGeneration
+        syncResourceGeneration = generation
 
         let probeResult = await runPreflightProbes(containerIdentifier: SyncConstants.containerIdentifier)
         // Stale-completion guard after each await suspension.
@@ -279,6 +286,7 @@ public final class SyncCoordinator: ObservableObject {
 
         if probeResult != .idle {
             status = probeResult
+            releaseSyncResources(ifOwnedBy: generation)
             return
         }
 
@@ -297,32 +305,53 @@ public final class SyncCoordinator: ObservableObject {
                 let lock = try SyncFileLock(fileURL: self.lockURL)
                 guard try lock.tryLockExclusive() else {
                     status = .unavailable(reason: "Another Rubien process is syncing")
+                    releaseSyncResources(ifOwnedBy: generation)
                     return
                 }
                 self.syncLock = lock
             } catch {
                 status = .unavailable(reason: "Sync lock unavailable: \(error)")
+                releaseSyncResources(ifOwnedBy: generation)
                 return
             }
         }
 
         let newLibrary = await makeLibrary(appDatabase)
+        guard generation == lifecycleGeneration else { return }
+        let startupPrepared = await newLibrary.prepareForStart()
+        // A newer stop/start generation owns all shared coordinator state,
+        // including `syncLock`; stale work must not unlock or nil it.
+        guard generation == lifecycleGeneration else { return }
+        guard startupPrepared else {
+            status = .unavailable(
+                reason: "Sync state could not be prepared safely"
+            )
+            releaseSyncResources(ifOwnedBy: generation)
+            return
+        }
 
-        // Install the broadcaster subscription before `start()` so kicks
-        // posted during the initial drain don't fall on the floor.
+        // Preparation makes the full-replay marker durable before either
+        // callback can force lazy CKSyncEngine construction.
+        // Install the broadcaster before `start()` so kicks posted during
+        // the initial drain don't fall on the floor.
         pdfQueueKickCancellable = PDFUploadQueueBroadcaster.shared.events
             .sink { [weak newLibrary] _ in
                 Task { await newLibrary?.drainPDFUploadQueue() }
             }
 
-        await startLibrary(newLibrary)
+        // Install before CKSyncEngine construction. With automatic sync, a
+        // full-history fetch can finish during `start()`; its reconciliation
+        // may create tombstones that must be enqueued immediately rather than
+        // waiting for the next app launch.
         await newLibrary.installTransactionObserver()
+        guard generation == lifecycleGeneration else {
+            await newLibrary.removeTransactionObserver()
+            return
+        }
+        await startLibrary(newLibrary)
 
         guard generation == lifecycleGeneration else {
             await newLibrary.removeTransactionObserver()
-            try? syncLock?.unlock()
-            syncLock = nil
-            pdfQueueKickCancellable = nil
             return
         }
 
@@ -362,7 +391,16 @@ public final class SyncCoordinator: ObservableObject {
         library = nil
         try? syncLock?.unlock()
         syncLock = nil
+        syncResourceGeneration = nil
         status = .disabled
+    }
+
+    private func releaseSyncResources(ifOwnedBy generation: Int) {
+        guard syncResourceGeneration == generation else { return }
+        pdfQueueKickCancellable = nil
+        try? syncLock?.unlock()
+        syncLock = nil
+        syncResourceGeneration = nil
     }
 
     // MARK: - Status stream consumer

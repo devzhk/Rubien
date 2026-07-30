@@ -51,7 +51,11 @@ public struct SyncEngineStateStore: Sendable {
 
     /// Delete the sidecar file. Used by a future `rubien-cli sync reset`.
     public func reset() throws {
-        try? FileManager.default.removeItem(at: fileURL)
+        do {
+            try FileManager.default.removeItem(at: fileURL)
+        } catch let error as CocoaError where error.code == .fileNoSuchFile {
+            // Already reset.
+        }
     }
 }
 #endif

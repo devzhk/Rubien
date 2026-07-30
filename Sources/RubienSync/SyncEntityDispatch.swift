@@ -15,6 +15,19 @@ import RubienCore
 ///   and resolve both halves.
 extension SyncEntityType {
 
+    struct FetchOrphanReconciliationOutcome: Sendable, Equatable {
+        var reconciledRowCount = 0
+        var pdfFilenamesToDelete: [String] = []
+    }
+
+    private struct UnresolvedFetchOrphansError: LocalizedError {
+        let count: Int
+
+        var errorDescription: String? {
+            "fetch reconciliation left \(count) unresolved foreign-key violation(s)"
+        }
+    }
+
     /// Output of `prepareReferencePDFMaterialization`. Carries the bytes
     /// already on disk and the canonical `entityId` (`Int64`) parsed from
     /// `CKRecord.ID.recordName`. The wire payload's own `referenceId` is
@@ -703,7 +716,18 @@ extension SyncEntityType {
 
     /// Apply a pulled deletion. Calls `DELETE` by key; FK cascades handle
     /// children. Safe if the row is already gone (no-op).
-    public func applyRemoteDelete(entityId: String, db: Database) throws {
+    ///
+    /// Returns an on-disk PDF filename that became unreferenced by the delete.
+    /// The caller must unlink it only after the surrounding SQLite transaction
+    /// commits; deleting it here would make a later rollback restore the DB row
+    /// without restoring the file.
+    @discardableResult
+    public func applyRemoteDelete(
+        entityId: String,
+        db: Database
+    ) throws -> String? {
+        var filenameToUnlinkAfterCommit: String?
+
         switch self {
         case .reference:
             if let id = Int64(entityId) {
@@ -759,10 +783,7 @@ extension SyncEntityType {
                     sql: "SELECT localFilename FROM pdfCache WHERE referenceId = ?",
                     arguments: [id])
                 _ = try Reference.deleteOne(db, key: id)
-                if let pdfFilename {
-                    let url = AppDatabase.pdfStorageURL.appendingPathComponent(pdfFilename)
-                    try? FileManager.default.removeItem(at: url)
-                }
+                filenameToUnlinkAfterCommit = pdfFilename
                 try db.execute(sql: """
                     DELETE FROM syncState WHERE entityType='referencePDF' AND entityId=?
                     """, arguments: [String(id)])
@@ -773,7 +794,9 @@ extension SyncEntityType {
         case .tag:
             if let id = Int64(entityId) { _ = try Tag.deleteOne(db, key: id) }
         case .referenceTag:
-            guard let (refId, tagId) = Self.splitPivotID(entityId) else { return }
+            guard let (refId, tagId) = Self.splitPivotID(entityId) else {
+                return nil
+            }
             try db.execute(
                 sql: "DELETE FROM referenceTag WHERE referenceId = ? AND tagId = ?",
                 arguments: [refId, tagId]
@@ -799,7 +822,7 @@ extension SyncEntityType {
                     sql: "SELECT isDefault FROM propertyDefinition WHERE id = ? LIMIT 1",
                     arguments: [id]
                 ) ?? false
-                guard !isLocalDefault else { return }
+                guard !isLocalDefault else { return nil }
                 _ = try PropertyDefinition.deleteOne(db, key: id)
             }
         case .propertyValue:
@@ -832,17 +855,16 @@ extension SyncEntityType {
             break
         case .referencePDF:
             if let id = Int64(entityId) {
-                // Capture filename before delete so we can also nuke the file.
+                // Capture filename before delete for post-commit cleanup.
                 let filename = try String.fetchOne(db,
                     sql: "SELECT localFilename FROM pdfCache WHERE referenceId = ?",
                     arguments: [id])
                 try db.execute(sql: "DELETE FROM pdfCache WHERE referenceId = ?", arguments: [id])
-                if let filename {
-                    let url = AppDatabase.pdfStorageURL.appendingPathComponent(filename)
-                    try? FileManager.default.removeItem(at: url)
-                }
+                filenameToUnlinkAfterCommit = filename
             }
         }
+
+        return filenameToUnlinkAfterCommit
     }
 
     // MARK: - Helpers
@@ -1051,6 +1073,15 @@ extension SyncEntityType {
             arguments: [recordName]
         )
         try stateStore.removeState(db, entityType: type, entityId: entityId)
+        // The record was just observed on the server. If an older confirmed
+        // tombstone remains locally, remove it before inserting this new
+        // unconfirmed deletion; `upsertTombstone` deliberately never
+        // downgrades confirmed rows on its own.
+        try stateStore.removeTombstone(
+            db,
+            entityType: type,
+            entityId: entityId
+        )
         try stateStore.upsertTombstone(
             db,
             entityType: type,
@@ -1059,7 +1090,202 @@ extension SyncEntityType {
         )
     }
 
+    /// Resolve FK violations that remain at the successful end of a known
+    /// full-history zone fetch. Never call this for an incremental fetch:
+    /// its delta is not a complete server snapshot, so a locally missing
+    /// parent may still predate the saved cursor. Full-history pull batches
+    /// deliberately tolerate children whose parents may arrive later, but
+    /// their successful end-of-zone boundary proves there is no later batch.
+    /// Any child still orphaned is stale server debris.
+    ///
+    /// Synced child rows are deleted with normal triggers enabled so an
+    /// unconfirmed tombstone removes the stale CKRecord from the server.
+    /// `metadataIntake.linkedReferenceId` is nullable (`ON DELETE SET NULL`),
+    /// so preserve that row and push a repaired nil link instead. `pdfCache`
+    /// and `pdfUploadQueue` are local-only; the former represents a
+    /// `CDReferencePDF` sibling and therefore receives an explicit
+    /// `referencePDF` tombstone.
+    ///
+    /// The caller owns the transaction and removes returned PDF filenames
+    /// only after commit. If a future table introduces an unhandled FK shape,
+    /// throw rather than make the CKSyncEngine cursor durable over a database
+    /// that still violates its schema.
+    static func reconcileTerminalOrphansAfterFetch(
+        stateStore: SyncStateStore,
+        db: Database
+    ) throws -> FetchOrphanReconciliationOutcome {
+        let violations = try Row.fetchAll(
+            db,
+            sql: "PRAGMA foreign_key_check"
+        )
+        guard !violations.isEmpty else {
+            return FetchOrphanReconciliationOutcome()
+        }
+
+        var rowIDsByTable: [String: Set<Int64>] = [:]
+        for violation in violations {
+            let table: String = violation["table"]
+            guard let rowID: Int64 = violation["rowid"] else { continue }
+            rowIDsByTable[table, default: []].insert(rowID)
+        }
+
+        var outcome = FetchOrphanReconciliationOutcome()
+
+        // Preserve metadata intake history: its optional reference link is
+        // explicitly ON DELETE SET NULL in the schema.
+        for rowID in rowIDsByTable["metadataIntake", default: []].sorted() {
+            try db.execute(
+                sql: """
+                    UPDATE metadataIntake
+                    SET linkedReferenceId = NULL
+                    WHERE rowid = ? AND linkedReferenceId IS NOT NULL
+                    """,
+                arguments: [rowID]
+            )
+            outcome.reconciledRowCount += db.changesCount
+        }
+
+        // Every table here syncs directly and has a normal delete trigger.
+        // Remove any old confirmed tombstone first: the record was just
+        // observed on the server, so this deletion must be queued again.
+        let syncedDeleteTables: [(table: String, type: SyncEntityType)] = [
+            ("referenceTag", .referenceTag),
+            ("pdfAnnotation", .pdfAnnotation),
+            ("webAnnotation", .webAnnotation),
+            ("metadataEvidence", .metadataEvidence),
+            ("propertyValue", .propertyValue),
+            ("readingActivity", .readingActivity),
+        ]
+        for entry in syncedDeleteTables {
+            for rowID in rowIDsByTable[entry.table, default: []].sorted() {
+                guard let entityId = try orphanEntityID(
+                    table: entry.table,
+                    rowID: rowID,
+                    db: db
+                ) else { continue }
+                try stateStore.removeTombstone(
+                    db,
+                    entityType: entry.type,
+                    entityId: entityId
+                )
+                try db.execute(
+                    sql: "DELETE FROM \(entry.table) WHERE rowid = ?",
+                    arguments: [rowID]
+                )
+                outcome.reconciledRowCount += db.changesCount
+            }
+        }
+
+        // A pulled CDReferencePDF materializes into local-only pdfCache.
+        // Queue the sibling server record's deletion explicitly, then return
+        // the filename for post-commit unlink.
+        for rowID in rowIDsByTable["pdfCache", default: []].sorted() {
+            guard let row = try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT referenceId, localFilename
+                    FROM pdfCache
+                    WHERE rowid = ?
+                    """,
+                arguments: [rowID]
+            ) else { continue }
+            let referenceID: Int64 = row["referenceId"]
+            let filename: String = row["localFilename"]
+            let entityId = String(referenceID)
+            try stateStore.removeState(
+                db,
+                entityType: .referencePDF,
+                entityId: entityId
+            )
+            try stateStore.removeTombstone(
+                db,
+                entityType: .referencePDF,
+                entityId: entityId
+            )
+            try stateStore.upsertTombstone(
+                db,
+                entityType: .referencePDF,
+                entityId: entityId,
+                confirmedByServer: false
+            )
+            try db.execute(
+                sql: "DELETE FROM pdfCache WHERE rowid = ?",
+                arguments: [rowID]
+            )
+            outcome.reconciledRowCount += db.changesCount
+            outcome.pdfFilenamesToDelete.append(filename)
+        }
+
+        // A queue row has never become a server PDF record by itself.
+        for rowID in rowIDsByTable["pdfUploadQueue", default: []].sorted() {
+            try db.execute(
+                sql: "DELETE FROM pdfUploadQueue WHERE rowid = ?",
+                arguments: [rowID]
+            )
+            outcome.reconciledRowCount += db.changesCount
+        }
+
+        let remaining = try Int.fetchOne(
+            db,
+            sql: "SELECT COUNT(*) FROM pragma_foreign_key_check"
+        ) ?? 0
+        guard remaining == 0 else {
+            throw UnresolvedFetchOrphansError(count: remaining)
+        }
+
+        return outcome
+    }
+
+    private static func orphanEntityID(
+        table: String,
+        rowID: Int64,
+        db: Database
+    ) throws -> String? {
+        switch table {
+        case "referenceTag":
+            guard let row = try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT referenceId, tagId
+                    FROM referenceTag
+                    WHERE rowid = ?
+                    """,
+                arguments: [rowID]
+            ) else { return nil }
+            let referenceID: Int64 = row["referenceId"]
+            let tagID: Int64 = row["tagId"]
+            return ReferenceTag.recordName(
+                referenceId: referenceID,
+                tagId: tagID
+            )
+
+        case "readingActivity":
+            guard let row = try Row.fetchOne(
+                db,
+                sql: """
+                    SELECT generation, installationId, referenceId, localDay
+                    FROM readingActivity
+                    WHERE rowid = ?
+                    """,
+                arguments: [rowID]
+            ) else { return nil }
+            let generation: String = row["generation"]
+            let installationID: String = row["installationId"]
+            let referenceID: Int64 = row["referenceId"]
+            let localDay: String = row["localDay"]
+            return "\(generation)/\(installationID)/\(referenceID)/\(localDay)"
+
+        default:
+            return try String.fetchOne(
+                db,
+                sql: "SELECT CAST(id AS TEXT) FROM \(table) WHERE rowid = ?",
+                arguments: [rowID]
+            )
+        }
+    }
+
     static func reconcileActivityQuarantineAfterFetch(
+        deleteMissingReferenceFacts: Bool,
         stateStore: SyncStateStore,
         db: Database
     ) throws {
@@ -1098,15 +1324,19 @@ extension SyncEntityType {
                     continue
                 }
                 if try Reference.fetchOne(db, id: activity.referenceId) == nil {
-                    // didFetchRecordZoneChanges is the end-of-zone boundary:
-                    // a parent still absent now is permanent for this fetch.
-                    try queueActivityDeletion(
-                        type: type,
-                        entityId: entityId,
-                        recordName: recordName,
-                        stateStore: stateStore,
-                        db: db
-                    )
+                    // An incremental delta is not a complete server snapshot:
+                    // the unchanged parent may predate this device's cursor.
+                    // Only a completed full-history replay proves the remote
+                    // activity is permanently orphaned.
+                    if deleteMissingReferenceFacts {
+                        try queueActivityDeletion(
+                            type: type,
+                            entityId: entityId,
+                            recordName: recordName,
+                            stateStore: stateStore,
+                            db: db
+                        )
+                    }
                     continue
                 }
                 kind = .reading

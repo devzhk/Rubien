@@ -28,6 +28,142 @@ final class SyncedLibraryStartupTests: XCTestCase {
         super.tearDown()
     }
 
+    // MARK: - Engine startup safety
+
+    func testUnknownMarkerStateForcesFullReplayEvenWithDurableSidecar() {
+        XCTAssertTrue(
+            SyncedLibrary.requiresFullHistoryReplay(
+                durableStateAvailable: true,
+                persistedMarker: nil
+            )
+        )
+        XCTAssertFalse(
+            SyncedLibrary.requiresFullHistoryReplay(
+                durableStateAvailable: true,
+                persistedMarker: false
+            )
+        )
+    }
+
+    func testStartupPreparationPersistsMarkerAndRemovesAmbiguousSidecar() async throws {
+        try Data("ambiguous-bootstrap-state".utf8).write(to: stateFile)
+        let library = SyncedLibrary(
+            appDatabase: db,
+            stateFileURL: stateFile
+        )
+
+        let prepared = await library.prepareForStart()
+        let startupPrepared = await library.isEngineStartupPreparedForTest
+        let hasEngine = await library.hasEngineForTest
+
+        XCTAssertTrue(prepared)
+        XCTAssertTrue(startupPrepared)
+        XCTAssertFalse(hasEngine)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stateFile.path))
+        let markerCount = try await db.dbWriter.read { db in
+            try Int.fetchOne(
+                db,
+                sql: """
+                    SELECT COUNT(*) FROM syncSession
+                    WHERE key = 'fullHistoryReplayPending'
+                    """
+            ) ?? -1
+        }
+        XCTAssertEqual(markerCount, 1)
+    }
+
+    func testEngineForcingCallbackBeforePreparationDoesNotConstructEngine() async throws {
+        let library = SyncedLibrary(
+            appDatabase: db,
+            stateFileURL: stateFile
+        )
+        try await db.dbWriter.write { db in
+            try db.execute(
+                sql: """
+                    UPDATE syncState SET isDirty = 1
+                    WHERE entityType = 'propertyDefinition'
+                    """
+            )
+        }
+
+        await library.ingestPendingChanges()
+        let startupPrepared = await library.isEngineStartupPreparedForTest
+        let hasEngine = await library.hasEngineForTest
+
+        XCTAssertFalse(startupPrepared)
+        XCTAssertFalse(hasEngine)
+    }
+
+    func testStartupPreparationFailureDoesNotConstructEngine() async throws {
+        let library = SyncedLibrary(
+            appDatabase: db,
+            stateFileURL: stateFile
+        )
+        try await db.dbWriter.write { db in
+            try db.execute(sql: "DROP TABLE syncSession")
+        }
+
+        let prepared = await library.prepareForStart()
+        XCTAssertFalse(prepared)
+        await library.start()
+        let hasEngine = await library.hasEngineForTest
+        XCTAssertFalse(hasEngine)
+    }
+
+    func testFailedAccountSidecarResetBlocksStartupUntilRetrySucceeds() async throws {
+        let parent = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "rubien-account-reset-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        let protectedStateFile = parent.appendingPathComponent("state.bin")
+        try FileManager.default.createDirectory(
+            at: parent,
+            withIntermediateDirectories: true
+        )
+        try Data("old-account-state".utf8).write(to: protectedStateFile)
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: parent.path
+            )
+            try? FileManager.default.removeItem(at: parent)
+        }
+
+        let library = SyncedLibrary(
+            appDatabase: db,
+            stateFileURL: protectedStateFile
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o500],
+            ofItemAtPath: parent.path
+        )
+
+        let reset = await library.resetForAccountChange()
+        let pendingAfterFailure = await library.accountResetPendingForTest
+        let replayPendingAfterFailure =
+            await library.fullHistoryReplayPendingForTest
+        let firstPreparation = await library.prepareForStart()
+        let hasEngineAfterFailure = await library.hasEngineForTest
+        XCTAssertFalse(reset)
+        XCTAssertTrue(pendingAfterFailure)
+        XCTAssertTrue(replayPendingAfterFailure)
+        XCTAssertFalse(firstPreparation)
+        XCTAssertFalse(hasEngineAfterFailure)
+
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o700],
+            ofItemAtPath: parent.path
+        )
+        let retriedPreparation = await library.prepareForStart()
+        let pendingAfterRetry = await library.accountResetPendingForTest
+        XCTAssertTrue(retriedPreparation)
+        XCTAssertFalse(pendingAfterRetry)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: protectedStateFile.path)
+        )
+    }
+
     // MARK: - Baseline one-shot
 
     func testBaselineMarksAllSeedRowsDirtyOnFirstRun() async throws {

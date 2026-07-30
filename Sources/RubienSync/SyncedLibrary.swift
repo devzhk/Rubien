@@ -18,6 +18,9 @@ private let log = Logger(subsystem: "Rubien", category: "SyncedLibrary")
 @available(macOS 14.0, iOS 17.0, *)
 public actor SyncedLibrary: CKSyncEngineDelegate {
 
+    private static let fullHistoryReplaySessionKey =
+        "fullHistoryReplayPending"
+
     // MARK: - Collaborators
 
     private let appDatabase: AppDatabase
@@ -64,6 +67,26 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     /// initialized before the CKSyncEngine starts issuing async callbacks.
     private var _engine: CKSyncEngine?
 
+    /// Stage engine state for the duration of a fetch so the sidecar never
+    /// advances beyond records that committed to SQLite.
+    private var statePersistenceGate:
+        FetchStatePersistenceGate<CKSyncEngine.State.Serialization>
+
+    /// Engine construction is forbidden until any full-replay marker is
+    /// durable and an ambiguous sidecar has been removed. Coordinator
+    /// subscriptions may call into this actor before `start()`, so every
+    /// engine-forcing entry point checks this gate.
+    private var isEngineStartupPrepared = false
+    private var isStartupPreparationInProgress = false
+    private var engineStartupGeneration: UInt64 = 0
+    private var accountResetPending = false
+
+    /// Terminal cleanup commits before CKSyncEngine emits the final durable
+    /// serialization for that fetch. Keep the DB replay marker until that
+    /// serialization has reached disk; otherwise a crash could retain only a
+    /// bootstrap sidecar and misclassify the next launch as incremental.
+    private var fullHistoryReconciliationAwaitingDurableState = false
+
     // MARK: - Status stream
 
     /// Observable state changes the coordinator republishes to SwiftUI.
@@ -97,10 +120,43 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         self.statusContinuation = continuation
         self.appDatabase = appDatabase
         self.stateStore = SyncStateStore()
-        self.engineStateStore = SyncEngineStateStore(fileURL: stateFileURL)
+        let engineStateStore = SyncEngineStateStore(fileURL: stateFileURL)
+        self.engineStateStore = engineStateStore
+        let persistedFullReplayPending: Bool?
+        do {
+            persistedFullReplayPending = try appDatabase.dbWriter.read { db in
+                try Bool.fetchOne(
+                    db,
+                    sql: """
+                        SELECT EXISTS(
+                            SELECT 1 FROM syncSession WHERE key = ?
+                        )
+                        """,
+                    arguments: [Self.fullHistoryReplaySessionKey]
+                ) ?? false
+            }
+        } catch {
+            // Unknown marker state must fail closed. `prepareForStart()` will
+            // have to persist a fresh marker successfully before any engine
+            // can be constructed.
+            persistedFullReplayPending = nil
+        }
+        self.statePersistenceGate = FetchStatePersistenceGate(
+            fullHistoryReplayPending: Self.requiresFullHistoryReplay(
+                durableStateAvailable: engineStateStore.load() != nil,
+                persistedMarker: persistedFullReplayPending
+            )
+        )
         self.containerProvider = containerProvider
         self.pdfContentHasher = pdfContentHasher
         self.pdfAssetSyncEnabledProvider = pdfAssetSyncEnabledProvider
+    }
+
+    static func requiresFullHistoryReplay(
+        durableStateAvailable: Bool,
+        persistedMarker: Bool?
+    ) -> Bool {
+        !durableStateAvailable || persistedMarker != false
     }
 
     private var container: CKContainer {
@@ -111,6 +167,100 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     }
 
     // MARK: - Engine lifecycle
+
+    /// Establish the crash-safety preconditions for constructing
+    /// CKSyncEngine. A persisted replay marker makes any existing sidecar
+    /// ambiguous: it might contain only bootstrap pending-change state, or it
+    /// might have been written just before a crash prevented marker cleanup.
+    /// Reset it and replay from nil in either case.
+    @discardableResult
+    public func prepareForStart() async -> Bool {
+        if isEngineStartupPrepared { return true }
+        guard !isStartupPreparationInProgress else { return false }
+
+        isStartupPreparationInProgress = true
+        defer { isStartupPreparationInProgress = false }
+        let preparationGeneration = engineStartupGeneration
+
+        if accountResetPending {
+            guard await completePendingAccountReset(),
+                  preparationGeneration == engineStartupGeneration
+            else { return false }
+            isEngineStartupPrepared = true
+            return true
+        }
+
+        guard statePersistenceGate.fullHistoryReplayPending else {
+            isEngineStartupPrepared = true
+            return true
+        }
+
+        let key = Self.fullHistoryReplaySessionKey
+        do {
+            try await appDatabase.dbWriter.write { db in
+                try db.execute(
+                    sql: """
+                        INSERT INTO syncSession(key, value) VALUES(?, '1')
+                        ON CONFLICT(key) DO UPDATE SET value = '1'
+                        """,
+                    arguments: [key]
+                )
+            }
+            guard preparationGeneration == engineStartupGeneration,
+                  !accountResetPending
+            else { return false }
+            try engineStateStore.reset()
+            isEngineStartupPrepared = true
+            return true
+        } catch {
+            log.error(
+                "sync startup preparation failed: \(error.localizedDescription, privacy: .public)"
+            )
+            return false
+        }
+    }
+
+    private func invalidateEngineStartup(retireEngine: Bool) {
+        isEngineStartupPrepared = false
+        engineStartupGeneration &+= 1
+        if retireEngine {
+            _engine = nil
+        }
+    }
+
+    /// Finish the all-or-nothing local half of an account reset. The database
+    /// transaction (including its replay marker) commits before the sidecar is
+    /// removed. If either phase fails, `accountResetPending` keeps every
+    /// engine-forcing entry point blocked and the next preparation retries the
+    /// entire idempotent sequence.
+    private func completePendingAccountReset() async -> Bool {
+        guard accountResetPending else { return true }
+        let replayKey = Self.fullHistoryReplaySessionKey
+        do {
+            try await appDatabase.dbWriter.write { db in
+                try db.execute(
+                    sql: "UPDATE syncState SET systemFields = NULL, isDirty = 1"
+                )
+                try db.execute(sql: "DELETE FROM tombstone")
+                try db.execute(
+                    sql: """
+                        INSERT INTO syncSession(key, value) VALUES(?, '1')
+                        ON CONFLICT(key) DO UPDATE SET value = '1'
+                        """,
+                    arguments: [replayKey]
+                )
+            }
+            statePersistenceGate.markDurableStateReset()
+            try engineStateStore.reset()
+            accountResetPending = false
+            return true
+        } catch {
+            log.error(
+                "account-change reset failed: \(error.localizedDescription, privacy: .public)"
+            )
+            return false
+        }
+    }
 
     /// Start the engine (creates it if needed). Idempotent; safe to call on
     /// every app launch. Runs (in order): baseline-if-pending → tombstone
@@ -128,6 +278,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             await resolvePendingPDFContentHashes()
         }
 
+        guard await prepareForStart() else { return }
         _ = engine
         await performInitialBaselineIfNeeded()
         await compactStaleTombstones()
@@ -174,8 +325,17 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     /// `pdfAssetSyncEnabledProvider()` so it stays a no-op until Phase E
     /// flips the flag on by default.
     public func drainPDFUploadQueue() async {
+        guard isEngineStartupPrepared else { return }
+        let generation = engineStartupGeneration
         let drained = await drainPDFUploadQueueIntoSyncState()
         guard !drained.isEmpty else { return }
+        guard isEngineStartupPrepared,
+              generation == engineStartupGeneration
+        else {
+            // The DB-side dirty rows remain durable for the replacement
+            // engine's next `ingestPendingChanges()` pass.
+            return
+        }
 
         // Hand the drained IDs to the engine. Idempotent: CKSyncEngine
         // dedups pendingRecordZoneChanges by recordID, so re-adding an
@@ -444,6 +604,22 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         transactionObserver != nil
     }
 
+    var isEngineStartupPreparedForTest: Bool {
+        isEngineStartupPrepared
+    }
+
+    var hasEngineForTest: Bool {
+        _engine != nil
+    }
+
+    var fullHistoryReplayPendingForTest: Bool {
+        statePersistenceGate.fullHistoryReplayPending
+    }
+
+    var accountResetPendingForTest: Bool {
+        accountResetPending
+    }
+
     /// Call from the app after any write transaction that might have left
     /// rows dirty. Forwards freshly-dirty entity IDs and tombstones into the
     /// engine's pending queue. Idempotent: CKSyncEngine dedups by recordID
@@ -453,6 +629,8 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     /// hook that dispatches into the actor — safe because it fires
     /// post-commit (no mid-transaction mutation).
     public func ingestPendingChanges() async {
+        guard isEngineStartupPrepared else { return }
+        let generation = engineStartupGeneration
         do {
             let dirty: [(SyncEntityType, String)]
             let deleted: [(SyncEntityType, String)]
@@ -471,6 +649,9 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             }
 
             if !pending.isEmpty {
+                guard isEngineStartupPrepared,
+                      generation == engineStartupGeneration
+                else { return }
                 engine.state.add(pendingRecordZoneChanges: pending)
             }
         } catch {
@@ -479,19 +660,41 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     }
 
     /// Drive an explicit incremental fetch. The single funnel for every
-    /// fetch trigger (launch, foreground, idle timer) and the two reactive
-    /// error-recovery paths, so the overlap guard is the one concurrency
-    /// policy. Returns `true` on success or a no-op skip (another fetch is
-    /// already in flight); `false` on error, which the idle timer uses to back
-    /// off. Only called once the library is live, so `engine` already exists.
+    /// external fetch trigger (launch, foreground, idle timer), so the overlap
+    /// guard is the one concurrency policy. Returns `true` on success or a
+    /// no-op skip (another fetch is already in flight); `false` on error, which
+    /// the idle timer uses to back off. Never call this as a consequence of a
+    /// CKSyncEngine delegate event; CloudKit forbids re-entering the engine
+    /// from its callback. Only called once the library is live, so `engine`
+    /// already exists.
     @discardableResult
     public func fetchRemoteChanges() async -> Bool {
         guard !isExplicitFetchRunning else { return true }
         isExplicitFetchRunning = true
         defer { isExplicitFetchRunning = false }
+
+        // The failed engine has already advanced in memory. Recreate it from
+        // the last durable sidecar only from a normal external fetch trigger
+        // (launch/foreground/idle), never from inside handleEvent.
+        if statePersistenceGate.requiresEngineRecovery {
+            guard !isFetchInFlight, !isSendInFlight else { return false }
+            log.notice("recreating sync engine from last durable state after failed remote apply")
+            invalidateEngineStartup(retireEngine: true)
+            statePersistenceGate.resetAfterEngineRecovery()
+            guard await prepareForStart() else { return false }
+            _ = engine
+            await ingestPendingChanges()
+        } else {
+            guard await prepareForStart() else { return false }
+        }
+
+        guard isEngineStartupPrepared else { return false }
+        let fetchGeneration = engineStartupGeneration
+        let fetchEngine = engine
         do {
-            try await engine.fetchChanges()
-            return true
+            try await fetchEngine.fetchChanges()
+            return fetchGeneration == engineStartupGeneration
+                && !statePersistenceGate.requiresEngineRecovery
         } catch {
             log.error("fetchRemoteChanges failed: \(error.localizedDescription, privacy: .public)")
             return false
@@ -499,6 +702,10 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     }
 
     private var engine: CKSyncEngine {
+        precondition(
+            isEngineStartupPrepared,
+            "CKSyncEngine must not be constructed before startup preparation"
+        )
         if let engine = _engine { return engine }
 
         let state = engineStateStore.load()
@@ -625,30 +832,93 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         _ event: CKSyncEngine.Event,
         syncEngine: CKSyncEngine
     ) async {
+        // Recovery replaces an engine whose in-memory cursor advanced past a
+        // failed apply. Ignore any callback the retired instance had already
+        // queued, especially a late stateUpdate carrying that unsafe cursor.
+        guard syncEngine === _engine else {
+            log.debug("ignoring callback from retired sync engine")
+            return
+        }
+
         switch event {
         case .stateUpdate(let event):
-            await persistStateSerialization(event.stateSerialization)
+            if let durableState = statePersistenceGate.receiveStateUpdate(
+                event.stateSerialization
+            ) {
+                if !(await persistStateSerialization(durableState)) {
+                    statePersistenceGate.markFetchedChangesApplyFailed()
+                    invalidateEngineStartup(retireEngine: false)
+                }
+            }
 
         case .accountChange(let event):
             await handleAccountChange(event)
 
         case .fetchedRecordZoneChanges(let event):
-            await applyFetchedZoneChanges(event)
+            let applied = await applyFetchedZoneChanges(event)
+            if !applied {
+                fullHistoryReconciliationAwaitingDurableState = false
+                statePersistenceGate.markFetchedChangesApplyFailed()
+                invalidateEngineStartup(retireEngine: false)
+            }
 
         case .sentRecordZoneChanges(let event):
-            await handleSentZoneChanges(event)
+            await handleSentZoneChanges(event, syncEngine: syncEngine)
 
         case .willFetchChanges:
+            fullHistoryReconciliationAwaitingDurableState = false
+            statePersistenceGate.beginFetch()
             noteFetch(inFlight: true)
         case .willSendChanges:
             noteSend(inFlight: true)
         case .didFetchChanges:
+            let durableState = statePersistenceGate.finishFetch()
+            if let durableState {
+                if await persistStateSerialization(durableState) {
+                    if fullHistoryReconciliationAwaitingDurableState {
+                        _ = await finalizeFullHistoryReplayAfterDurableState()
+                    }
+                } else {
+                    statePersistenceGate.markFetchedChangesApplyFailed()
+                    invalidateEngineStartup(retireEngine: false)
+                }
+            } else if fullHistoryReconciliationAwaitingDurableState {
+                // Do not let this advanced in-memory engine continue from a
+                // cleanup boundary for which no durable cursor was emitted.
+                statePersistenceGate.markFetchedChangesApplyFailed()
+                invalidateEngineStartup(retireEngine: false)
+            }
             noteFetch(inFlight: false)
         case .didSendChanges:
             noteSend(inFlight: false)
 
-        case .didFetchRecordZoneChanges:
-            await reconcileActivityQuarantineAfterFetch()
+        case .didFetchRecordZoneChanges(let event):
+            // A failed batch means later parents may not have committed. Do
+            // not classify its surviving children as terminal orphans; the
+            // engine will be recreated from the last durable cursor instead.
+            guard event.zoneID == SyncConstants.libraryZoneID else { break }
+            if let error = event.error {
+                log.error(
+                    "record-zone fetch ended with error: \(error.localizedDescription, privacy: .public)"
+                )
+                fullHistoryReconciliationAwaitingDurableState = false
+                statePersistenceGate.markFetchedChangesApplyFailed()
+                invalidateEngineStartup(retireEngine: false)
+                break
+            }
+            guard statePersistenceGate.canFinalizeFetchedZone else { break }
+            let includeTerminalOrphans =
+                statePersistenceGate.shouldReconcileTerminalOrphans
+            let reconciled = await reconcileFetchedZoneAfterFetch(
+                includeTerminalOrphans: includeTerminalOrphans
+            )
+            if !reconciled {
+                fullHistoryReconciliationAwaitingDurableState = false
+                statePersistenceGate.markFetchedChangesApplyFailed()
+                invalidateEngineStartup(retireEngine: false)
+            } else if includeTerminalOrphans {
+                fullHistoryReconciliationAwaitingDurableState = true
+            }
 
         case .fetchedDatabaseChanges,
              .sentDatabaseChanges,
@@ -663,16 +933,84 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         }
     }
 
-    private func reconcileActivityQuarantineAfterFetch() async {
+    private func reconcileFetchedZoneAfterFetch(
+        includeTerminalOrphans: Bool
+    ) async -> Bool {
         do {
-            try await appDatabase.dbWriter.write { [stateStore] db in
+            let outcome = try await appDatabase.dbWriter.write {
+                [stateStore] db in
                 try SyncEntityType.reconcileActivityQuarantineAfterFetch(
+                    deleteMissingReferenceFacts: includeTerminalOrphans,
                     stateStore: stateStore,
                     db: db
                 )
+                guard includeTerminalOrphans else {
+                    return SyncEntityType.FetchOrphanReconciliationOutcome()
+                }
+                let outcome = try SyncEntityType.reconcileTerminalOrphansAfterFetch(
+                    stateStore: stateStore,
+                    db: db
+                )
+                return outcome
             }
+            for filename in outcome.pdfFilenamesToDelete {
+                let url = AppDatabase.pdfStorageURL
+                    .appendingPathComponent(filename)
+                try? FileManager.default.removeItem(at: url)
+            }
+            if outcome.reconciledRowCount > 0 {
+                log.notice(
+                    "reconciled \(outcome.reconciledRowCount, privacy: .public) terminal FK orphan rows after zone fetch"
+                )
+            }
+            return true
         } catch {
-            log.error("activity quarantine reconciliation failed: \(error.localizedDescription, privacy: .public)")
+            log.error("post-fetch reconciliation failed: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+    }
+
+    /// Test seam for end-of-zone DB reconciliation without constructing a
+    /// CKSyncEngine in an unentitled XCTest process.
+    func reconcileFetchedZoneForTest(
+        includeTerminalOrphans: Bool = true
+    ) async -> Bool {
+        await reconcileFetchedZoneAfterFetch(
+            includeTerminalOrphans: includeTerminalOrphans
+        )
+    }
+
+    func finalizeFullHistoryReplayForTest() async -> Bool {
+        await finalizeFullHistoryReplayAfterDurableState()
+    }
+
+    /// Clear the replay marker only after the corresponding end-of-fetch
+    /// CKSyncEngine serialization is safely on disk. Sidecar first, marker
+    /// second is intentionally conservative: if the process crashes between
+    /// them, the surviving marker makes the next startup discard that
+    /// ambiguous sidecar and replay from nil again.
+    private func finalizeFullHistoryReplayAfterDurableState() async -> Bool {
+        let key = Self.fullHistoryReplaySessionKey
+        do {
+            try await appDatabase.dbWriter.write { db in
+                try db.execute(
+                    sql: "DELETE FROM syncSession WHERE key = ?",
+                    arguments: [key]
+                )
+            }
+            statePersistenceGate.markFullHistoryReplayCompleted()
+            fullHistoryReconciliationAwaitingDurableState = false
+            return true
+        } catch {
+            log.error(
+                "failed to finalize full-history replay: \(error.localizedDescription, privacy: .public)"
+            )
+            // The sidecar may already carry the advanced cursor while the DB
+            // marker remains. Retire it; startup preparation will discard the
+            // ambiguous sidecar before the next external fetch.
+            statePersistenceGate.markFetchedChangesApplyFailed()
+            invalidateEngineStartup(retireEngine: false)
+            return false
         }
     }
 
@@ -680,6 +1018,8 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         _ context: CKSyncEngine.SendChangesContext,
         syncEngine: CKSyncEngine
     ) async -> CKSyncEngine.RecordZoneChangeBatch? {
+        guard syncEngine === _engine else { return nil }
+
         let pending = syncEngine.state
             .pendingRecordZoneChanges
             .filter { context.options.scope.contains($0) }
@@ -735,12 +1075,31 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
 
     private func persistStateSerialization(
         _ serialization: CKSyncEngine.State.Serialization
-    ) async {
+    ) async -> Bool {
         do {
             try engineStateStore.save(serialization)
+            return true
         } catch {
             log.error("failed to persist engine state: \(error.localizedDescription, privacy: .public)")
+            return false
         }
+    }
+
+    @discardableResult
+    func resetForAccountChange() async -> Bool {
+        accountResetPending = true
+        invalidateEngineStartup(retireEngine: true)
+        fullHistoryReconciliationAwaitingDurableState = false
+        isFetchInFlight = false
+        isSendInFlight = false
+
+        // A concurrent startup preparation will observe the generation
+        // change and return without enabling its engine. It leaves this
+        // durable retry for the next external startup/fetch trigger.
+        guard !isStartupPreparationInProgress else { return false }
+        isStartupPreparationInProgress = true
+        defer { isStartupPreparationInProgress = false }
+        return await completePendingAccountReset()
     }
 
     private func handleAccountChange(_ event: CKSyncEngine.Event.AccountChange) async {
@@ -751,16 +1110,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         // freezes the engine.
         switch event.changeType {
         case .signOut, .switchAccounts:
-            do {
-                try await appDatabase.dbWriter.write { db in
-                    try db.execute(sql: "UPDATE syncState SET systemFields = NULL, isDirty = 1")
-                    try db.execute(sql: "DELETE FROM tombstone")
-                }
-                try engineStateStore.reset()
-                _engine = nil
-            } catch {
-                log.error("account-change reset failed: \(error.localizedDescription, privacy: .public)")
-            }
+            _ = await resetForAccountChange()
 
         case .signIn:
             // Engine will emit .stateUpdate events as it discovers the new
@@ -774,12 +1124,15 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
 
     private func applyFetchedZoneChanges(
         _ event: CKSyncEngine.Event.FetchedRecordZoneChanges
-    ) async {
+    ) async -> Bool {
         let mods = event.modifications.map(\.record)
         let dels: [FetchedDeletionInput] = event.deletions.map {
             FetchedDeletionInput(recordID: $0.recordID, recordType: $0.recordType)
         }
-        await applyFetchedRecordsInternal(modifications: mods, deletions: dels)
+        return await applyFetchedRecordsInternal(
+            modifications: mods,
+            deletions: dels
+        )
     }
 
     /// Outcome of applying one fetched-changes batch. The write closure is
@@ -788,7 +1141,64 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     /// cleanup. Type-scope so the `static` `applyRemoteRows` can name it.
     private struct BatchOutcome: Sendable {
         var displacedFilenames: [String]
+        var deletedFilenames: [String]
         var appliedPDFRecordIDs: Set<CKRecord.ID>
+
+        static var empty: Self {
+            Self(
+                displacedFilenames: [],
+                deletedFilenames: [],
+                appliedPDFRecordIDs: []
+            )
+        }
+
+        mutating func merge(_ other: Self) {
+            displacedFilenames.append(contentsOf: other.displacedFilenames)
+            deletedFilenames.append(contentsOf: other.deletedFilenames)
+            appliedPDFRecordIDs.formUnion(other.appliedPDFRecordIDs)
+        }
+    }
+
+    /// A fetched event can span two committed SQLite transactions:
+    /// modifications first (FK-off, allowing cross-batch orphans), then
+    /// deletions (FK-on, preserving cascades). If the second phase fails, its
+    /// caller still needs the first phase's outcome for correct staged-PDF
+    /// cleanup. The CKSyncEngine state gate keeps the event's cursor
+    /// non-durable until both phases succeed, so replay remains idempotent.
+    private struct BatchExecutionResult: Sendable {
+        var committedOutcome: BatchOutcome
+        var errorDescription: String?
+
+        var succeeded: Bool { errorDescription == nil }
+    }
+
+    /// Stable identity for one row returned by `PRAGMA foreign_key_check`.
+    /// SQLite reports the child table/row, parent table, and FK slot. That is
+    /// enough to distinguish violations that pre-date a fetched batch from
+    /// violations introduced by the batch itself.
+    private struct ForeignKeyViolation: Hashable, Sendable {
+        let childTable: String
+        let childRowID: Int64?
+        let parentTable: String
+        let foreignKeyIndex: Int64
+
+        init(row: Row) {
+            childTable = row["table"]
+            childRowID = row["rowid"]
+            parentTable = row["parent"]
+            foreignKeyIndex = row["fkid"]
+        }
+    }
+
+    private enum ForeignKeyViolationPolicy: Sendable {
+        /// Modification transactions deliberately run with FK enforcement
+        /// disabled; every violation may be a child whose parent arrives in a
+        /// later CloudKit event.
+        case tolerateAll
+        /// Deletion transactions keep FK enforcement enabled for cascades.
+        /// They may preserve or resolve an orphan committed by an earlier
+        /// transaction, but must not introduce a new violation of their own.
+        case tolerateExisting(Set<ForeignKeyViolation>)
     }
 
     /// Shared implementation used by `applyFetchedZoneChanges` and tests.
@@ -798,10 +1208,11 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     /// non-PDF apply paths. Old filenames returned by `applyPreparedReferencePDF`
     /// and staged files for skipped-or-rolled-back records are unlinked
     /// post-transaction so PDFs/ never accumulates orphans.
+    @discardableResult
     private func applyFetchedRecordsInternal(
         modifications: [CKRecord],
         deletions: [FetchedDeletionInput]
-    ) async {
+    ) async -> Bool {
         // FK-dependency-ordered modifications. PDFs are FK-children of
         // Reference and have rank Int.max in practice — they sort last.
         let sortedMods = modifications.sorted { lhs, rhs in
@@ -817,6 +1228,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         // malformed name simply returns nil with no staged file. Frozen into
         // a `let` for safe capture by the @Sendable write closure below.
         var preparedBuilder: [CKRecord.ID: SyncEntityType.PreparedReferencePDFMaterialization] = [:]
+        var pdfStagingFailed = false
         for record in sortedMods where record.recordType == SyncConstants.RecordType.referencePDF {
             do {
                 if let prepared = try SyncEntityType.prepareReferencePDFMaterialization(record: record) {
@@ -824,118 +1236,148 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                 }
             } catch {
                 log.error("prepareReferencePDFMaterialization failed for \(record.recordID.recordName, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                pdfStagingFailed = true
             }
         }
         let preparedPDFs = preparedBuilder
 
-        // Phase 2 — write transaction. The closure RETURNS its outcome
-        // rather than mutating captured `var` locals — GRDB 7's async
-        // `write`/`writeWithoutTransaction` closures are `@Sendable`, so
-        // mutating outer state across the boundary is a Swift-6
-        // strict-concurrency compile error. The apply body lives in the
-        // `static` `applyRemoteRows` so the FK-on (with-deletions) and the
-        // FK-off (delete-free) call paths share one implementation.
-        var rollbackTriggered = false
-        var outcome = BatchOutcome(displacedFilenames: [], appliedPDFRecordIDs: [])
-
+        // Phase 2 — serialize two explicit transactions on the same writer
+        // connection. CKSyncEngine groups modifications and deletions into one
+        // event, but does not guarantee that a modification's FK parent appears
+        // in that event (or an earlier one).
+        //
+        // Modifications therefore commit with FK enforcement disabled. Then FK
+        // enforcement is restored IN-BAND and deletions commit separately with
+        // cascades enabled. Keeping modifications before deletions preserves the
+        // previous event ordering: a deletion wins when the same event modifies
+        // one of its local descendants. No other write can interleave while the
+        // `writeWithoutTransaction` closure owns the serialized writer.
+        //
+        // The closure RETURNS all committed work even if the deletion phase
+        // fails. GRDB 7's async write closure is `@Sendable`, so mutating outer
+        // state across this boundary would violate Swift-6 strict concurrency.
+        let execution: BatchExecutionResult
         do {
-            if deletions.isEmpty {
-                // Delete-free batch (every initial-pull batch, most incremental
-                // "added rows" batches): tolerate transient cross-batch FK
-                // orphans — a child can commit before its parent and becomes
-                // valid once the parent arrives in a later batch. `foreign_keys`
-                // can't be toggled inside a transaction, so flip it on the
-                // serialized writer connection around an explicit transaction
-                // and restore it IN-BAND (before the closure returns) so no
-                // other write ever sees FK=OFF.
-                outcome = try await appDatabase.dbWriter.writeWithoutTransaction { [stateStore] db -> BatchOutcome in
+            execution = try await appDatabase.dbWriter.writeWithoutTransaction {
+                [stateStore] db -> BatchExecutionResult in
+                var committed = BatchOutcome.empty
+
+                if !sortedMods.isEmpty {
                     try db.execute(sql: "PRAGMA foreign_keys = OFF")
-                    var local = BatchOutcome(displacedFilenames: [], appliedPDFRecordIDs: [])
+                    var modificationOutcome = BatchOutcome.empty
                     do {
                         try db.inTransaction {
-                            local = try Self.applyRemoteRows(
+                            modificationOutcome = try Self.applyRemoteRows(
                                 sortedMods: sortedMods,
                                 deletions: [],
                                 preparedPDFs: preparedPDFs,
                                 stateStore: stateStore,
-                                tolerateOrphans: true,
+                                violationPolicy: .tolerateAll,
                                 db: db
                             )
                             return .commit
                         }
                     } catch {
-                        Self.restoreForeignKeysOrAbort(db)   // restore, THEN surface the apply failure
-                        throw error
+                        Self.restoreForeignKeysOrAbort(db)
+                        return BatchExecutionResult(
+                            committedOutcome: committed,
+                            errorDescription: "modification phase: \(error.localizedDescription)"
+                        )
                     }
-                    Self.restoreForeignKeysOrAbort(db)        // success: restore before returning
-                    return local
+                    Self.restoreForeignKeysOrAbort(db)
+                    committed.merge(modificationOutcome)
                 }
-            } else {
-                // Batch carries deletions → keep FK ON so ON DELETE CASCADE
-                // drops children locally (unchanged from before this fix;
-                // strict foreign_key_check rolls back genuine violations).
-                outcome = try await appDatabase.dbWriter.write { [stateStore] db -> BatchOutcome in
-                    try db.execute(sql: "PRAGMA defer_foreign_keys = ON")
-                    return try Self.applyRemoteRows(
-                        sortedMods: sortedMods,
-                        deletions: deletions,
-                        preparedPDFs: preparedPDFs,
-                        stateStore: stateStore,
-                        tolerateOrphans: false,
-                        db: db
-                    )
+
+                if !deletions.isEmpty {
+                    var deletionOutcome = BatchOutcome.empty
+                    do {
+                        let existingViolations = try Self.foreignKeyViolations(db)
+                        try db.inTransaction {
+                            try db.execute(sql: "PRAGMA defer_foreign_keys = ON")
+                            deletionOutcome = try Self.applyRemoteRows(
+                                sortedMods: [],
+                                deletions: deletions,
+                                preparedPDFs: [:],
+                                stateStore: stateStore,
+                                violationPolicy: .tolerateExisting(existingViolations),
+                                db: db
+                            )
+                            return .commit
+                        }
+                    } catch {
+                        return BatchExecutionResult(
+                            committedOutcome: committed,
+                            errorDescription: "deletion phase: \(error.localizedDescription)"
+                        )
+                    }
+                    committed.merge(deletionOutcome)
                 }
+
+                return BatchExecutionResult(
+                    committedOutcome: committed,
+                    errorDescription: nil
+                )
             }
         } catch {
-            log.error("applyFetchedZoneChanges failed: \(error.localizedDescription, privacy: .public)")
-            rollbackTriggered = true
+            execution = BatchExecutionResult(
+                committedOutcome: .empty,
+                errorDescription: error.localizedDescription
+            )
+        }
+
+        if let errorDescription = execution.errorDescription {
+            log.error("applyFetchedZoneChanges failed: \(errorDescription, privacy: .public)")
         }
 
         // Phase 3 — post-commit file I/O. Off the writer queue. Three buckets:
         //
-        //   a) Commit succeeded → unlink prior files we displaced.
-        //   b) Commit succeeded but some prepared rows were skipped inside
-        //      the transaction (prepared but no apply call — defensive,
+        //   a) A modification committed → unlink prior files it displaced.
+        //   b) Some prepared rows were skipped or their modification
+        //      transaction rolled back (prepared but no apply call — defensive,
         //      should not occur given the pre-stage validates Int64(entityId)).
         //      → unlink the staged file we never used.
-        //   c) Commit failed → unlink every freshly-staged file so PDFs/
-        //      doesn't reference rows that don't exist.
-        if rollbackTriggered {
-            for prepared in preparedPDFs.values {
-                try? FileManager.default.removeItem(at: prepared.stagedURL)
-            }
-        } else {
-            for filename in outcome.displacedFilenames {
-                let url = AppDatabase.pdfStorageURL.appendingPathComponent(filename)
-                try? FileManager.default.removeItem(at: url)
-            }
-            for (recordID, prepared) in preparedPDFs where !outcome.appliedPDFRecordIDs.contains(recordID) {
-                try? FileManager.default.removeItem(at: prepared.stagedURL)
-            }
+        //
+        // A later deletion-phase failure does not change which PDF
+        // modifications committed, so cleanup keys off the committed outcome
+        // instead of treating the whole event as all-or-nothing.
+        for filename in execution.committedOutcome.displacedFilenames {
+            let url = AppDatabase.pdfStorageURL.appendingPathComponent(filename)
+            try? FileManager.default.removeItem(at: url)
         }
+        for filename in execution.committedOutcome.deletedFilenames {
+            let url = AppDatabase.pdfStorageURL.appendingPathComponent(filename)
+            try? FileManager.default.removeItem(at: url)
+        }
+        for (recordID, prepared) in preparedPDFs
+            where !execution.committedOutcome.appliedPDFRecordIDs.contains(recordID)
+        {
+            try? FileManager.default.removeItem(at: prepared.stagedURL)
+        }
+
+        // A copy failure is transient (for example, CKAsset materialization or
+        // filesystem availability). Other records may commit idempotently, but
+        // the fetch cursor must remain non-durable so the PDF is retried.
+        return execution.succeeded && !pdfStagingFailed
     }
 
     /// Apply one fetched-changes batch's modifications + deletions inside the
     /// caller-opened transaction. Extracted as a `static` (captures no `self`;
-    /// the file-scope `log` is usable here) so both the FK-on `write` path
-    /// (batches with deletions → `ON DELETE CASCADE` must fire) and the FK-off
-    /// `writeWithoutTransaction` path (delete-free batches → tolerate transient
-    /// cross-batch orphans) share one implementation.
+    /// the file-scope `log` is usable here) so both the FK-off modification
+    /// phase and FK-on deletion phase share one implementation.
     ///
-    /// `tolerateOrphans`: when true, a non-empty `PRAGMA foreign_key_check`
-    /// (a child whose parent is in a not-yet-applied batch) is logged and
-    /// allowed to commit — it resolves when the parent arrives in a later
-    /// batch. When false, it throws `CancellationError` to roll the batch back
-    /// (today's strict behavior, kept for any batch carrying deletions).
+    /// `violationPolicy` distinguishes modification transactions (all
+    /// violations can be transient cross-batch orphans) from deletion
+    /// transactions (keep FK enforcement enabled for cascades, but do not roll
+    /// back merely because an earlier transaction committed an orphan).
     private static func applyRemoteRows(
         sortedMods: [CKRecord],
         deletions: [FetchedDeletionInput],
         preparedPDFs: [CKRecord.ID: SyncEntityType.PreparedReferencePDFMaterialization],
         stateStore: SyncStateStore,
-        tolerateOrphans: Bool,
+        violationPolicy: ForeignKeyViolationPolicy,
         db: Database
     ) throws -> BatchOutcome {
-        var local = BatchOutcome(displacedFilenames: [], appliedPDFRecordIDs: [])
+        var local = BatchOutcome.empty
         var appliedReferenceIDs = Set<Int64>()
         var changedEpochKinds = Set<ActivityKind>()
         try stateStore.setApplyingRemote(db)
@@ -952,10 +1394,10 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
 
             if type == .referencePDF {
                 guard let prepared = preparedPDFs[record.recordID] else {
-                    // Prepare returned nil (malformed name, no asset,
-                    // or copyItem failed). Skip apply so we don't
+                    // Prepare returned nil (malformed name or no asset).
+                    // Copy failures are tracked before the transaction and
+                    // make the whole fetched event non-durable. Skip apply so we don't
                     // write a pdfCache row pointing at a missing file.
-                    // Dirty flag untouched; a later refetch retries.
                     continue
                 }
                 if let prior = try SyncEntityType.applyPreparedReferencePDF(prepared, db: db) {
@@ -1004,7 +1446,12 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                 log.error("skipping malformed delete recordName \(deletion.recordID.recordName, privacy: .public)")
                 continue
             }
-            try type.applyRemoteDelete(entityId: entityId, db: db)
+            if let filename = try type.applyRemoteDelete(
+                entityId: entityId,
+                db: db
+            ) {
+                local.deletedFilenames.append(filename)
+            }
             try stateStore.removeState(db, entityType: type, entityId: entityId)
             try stateStore.upsertTombstone(
                 db,
@@ -1016,22 +1463,39 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         }
 
         // Surface FK state explicitly so it lands in the log rather than as an
-        // opaque commit failure. Delete-free batches tolerate transient
-        // cross-batch orphans (they resolve when the parent arrives); batches
-        // with deletions keep the strict rollback so ON DELETE CASCADE
-        // integrity is never silently bypassed.
-        let violations = try Row.fetchAll(db, sql: "PRAGMA foreign_key_check")
-        if !violations.isEmpty {
-            if tolerateOrphans {
+        // opaque commit failure. Modification transactions tolerate transient
+        // cross-batch orphans (they resolve when the parent arrives); deletion
+        // transactions reject only violations introduced while cascades were
+        // active.
+        let violations = try foreignKeyViolations(db)
+        switch violationPolicy {
+        case .tolerateAll:
+            if !violations.isEmpty {
                 log.info("remote apply: \(violations.count, privacy: .public) transient FK orphans tolerated (resolve when parents arrive)")
-            } else {
-                log.error("FK violations after remote apply: \(violations.count, privacy: .public) rows — rolling back")
+            }
+
+        case .tolerateExisting(let existingViolations):
+            let introducedViolations = violations.subtracting(existingViolations)
+            if !introducedViolations.isEmpty {
+                log.error("remote apply introduced \(introducedViolations.count, privacy: .public) FK violations — rolling back")
                 throw CancellationError()  // trigger rollback
+            }
+            if !violations.isEmpty {
+                log.info("remote apply: \(violations.count, privacy: .public) pre-existing transient FK orphans preserved while deletion batch committed")
             }
         }
 
         try stateStore.clearApplyingRemote(db)
         return local
+    }
+
+    private static func foreignKeyViolations(
+        _ db: Database
+    ) throws -> Set<ForeignKeyViolation> {
+        Set(
+            try Row.fetchAll(db, sql: "PRAGMA foreign_key_check")
+                .map(ForeignKeyViolation.init)
+        )
     }
 
     /// Restore FK enforcement on the writer connection IN-BAND. The serialized
@@ -1064,15 +1528,20 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     /// tests can verify the end-to-end actor behavior without standing up a
     /// CKContainer (which would raise CKException in an unentitled XCTest
     /// process).
+    @discardableResult
     func applyFetchedRecordsForTest(
         modifications: [CKRecord],
         deletions: [FetchedDeletionInput]
-    ) async {
-        await applyFetchedRecordsInternal(modifications: modifications, deletions: deletions)
+    ) async -> Bool {
+        await applyFetchedRecordsInternal(
+            modifications: modifications,
+            deletions: deletions
+        )
     }
 
     private func handleSentZoneChanges(
-        _ event: CKSyncEngine.Event.SentRecordZoneChanges
+        _ event: CKSyncEngine.Event.SentRecordZoneChanges,
+        syncEngine: CKSyncEngine
     ) async {
         // Successful saves: archive system fields so the next push can
         // rehydrate with a valid change tag.
@@ -1160,7 +1629,10 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                 // Library zone was deleted (or never created for this
                 // account). Recreate it — the engine retries the save
                 // once we acknowledge the zone creation.
-                engine.state.add(pendingDatabaseChanges: [
+                guard isEngineStartupPrepared,
+                      syncEngine === _engine
+                else { continue }
+                syncEngine.state.add(pendingDatabaseChanges: [
                     .saveZone(CKRecordZone(zoneID: SyncConstants.libraryZoneID))
                 ])
 
@@ -1179,11 +1651,9 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                     try await appDatabase.dbWriter.write { [stateStore] db in
                         try stateStore.clearSystemFields(db, entityType: type, entityId: entityId)
                     }
-                    // Schedule outside the delegate callback (Apple's docs:
-                    // don't call fetchChanges synchronously from handleEvent).
-                    // Route through fetchRemoteChanges so every fetch shares
-                    // one overlap-guard policy.
-                    Task { await self.fetchRemoteChanges() }
+                    // The normal launch / foreground / idle fetch will observe
+                    // any server tombstone. Never re-enter CKSyncEngine from
+                    // this delegate callback.
                 } catch {
                     log.error("unknownItem recovery failed: \(error.localizedDescription, privacy: .public)")
                 }
@@ -1234,8 +1704,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         error: CKError
     ) async {
         guard let serverRecord = error.serverRecord else {
-            log.error("serverRecordChanged without serverRecord — re-fetch to recover")
-            Task { await self.fetchRemoteChanges() }
+            log.error("serverRecordChanged without serverRecord — awaiting next external fetch")
             return
         }
 

@@ -58,7 +58,65 @@ public final class AppDatabase: Sendable {
 
     public init(_ dbWriter: any DatabaseWriter) throws {
         self.dbWriter = dbWriter
+        try Self.recoverPendingV11BlockedBySyncOrphans(on: dbWriter)
         try migrator.migrate(dbWriter)
+    }
+
+    /// Rubien 0.7.0 could leave foreign-key orphans while CloudKit parents were
+    /// still in a later fetch batch. Those rows are valid transient sync state,
+    /// but GRDB's default deferred check validates the *entire* database before
+    /// committing a migration. As a result, the v11 schema-only repair could be
+    /// rejected by orphans that the migration neither created nor changed.
+    ///
+    /// v11 has already shipped, so its registered migration must stay
+    /// immutable. Upgrade only the exact v10 → v11 recovery case through a
+    /// second migrator that keeps foreign keys enabled. SQLite then prevents
+    /// v11 from introducing new violations while tolerating the rows that were
+    /// already orphaned. The normal migrator remains authoritative for fresh
+    /// databases and every other upgrade path.
+    private static func recoverPendingV11BlockedBySyncOrphans(
+        on dbWriter: any DatabaseWriter
+    ) throws {
+        let recovery = try dbWriter.read { db -> (needed: Bool, orphanCount: Int) in
+            guard try db.tableExists("grdb_migrations") else {
+                return (false, 0)
+            }
+
+            let applied = try Set(String.fetchAll(
+                db,
+                sql: "SELECT identifier FROM grdb_migrations"
+            ))
+            guard applied.contains("v10"), !applied.contains("v11") else {
+                return (false, 0)
+            }
+
+            let orphanCount = try Int.fetchOne(
+                db,
+                sql: "SELECT COUNT(*) FROM pragma_foreign_key_check"
+            ) ?? 0
+            return (orphanCount > 0, orphanCount)
+        }
+
+        guard recovery.needed else { return }
+
+        var recoveryMigrator = DatabaseMigrator()
+        recoveryMigrator.registerMigration(
+            "v11",
+            foreignKeyChecks: .immediate
+        ) { db in
+            try Self.applyV11Body(db)
+        }
+        try recoveryMigrator.migrate(dbWriter)
+
+        #if canImport(os)
+        appDatabaseLog.notice(
+            "Applied v11 while preserving \(recovery.orphanCount, privacy: .public) pre-existing sync FK violations"
+        )
+        #else
+        appDatabaseLog.notice(
+            "Applied v11 while preserving \(recovery.orphanCount) pre-existing sync FK violations"
+        )
+        #endif
     }
 
     private var migrator: DatabaseMigrator {
@@ -1565,12 +1623,23 @@ extension AppDatabase {
 
             return try AppDatabase(dbPool)
         } catch {
-            appDatabaseLog.error("Primary database setup failed at \(dirURL.path): \(error.localizedDescription)")
-            do {
-                return try AppDatabase(DatabaseQueue(path: ":memory:"))
-            } catch {
-                preconditionFailure("Unable to initialize in-memory database fallback: \(error)")
-            }
+            // Never replace a user's persistent library with an implicit
+            // in-memory database. Besides making the UI look deceptively
+            // healthy, sync would persist an advanced CKSyncEngine sidecar
+            // beside the unopened on-disk database and permanently skip the
+            // downloaded records on the next launch.
+            #if canImport(os)
+            appDatabaseLog.fault(
+                "Primary database setup failed at \(dirURL.path, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+            #else
+            appDatabaseLog.error(
+                "Primary database setup failed at \(dirURL.path): \(error.localizedDescription)"
+            )
+            #endif
+            preconditionFailure(
+                "Rubien cannot safely continue without its persistent library: \(error)"
+            )
         }
     }
 
