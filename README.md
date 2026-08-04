@@ -35,7 +35,7 @@ Your AI agent is available from Home or beside any open document. Rubien exposes
 
 ### Import with validation
 
-For papers and books, Rubien validates publication metadata and imports from trusted publishers. For web sources such as blog posts and news articles, Rubien converts the content into clean Markdown.
+For papers and books, Rubien validates publication metadata and imports from trusted publishers. For web sources such as blog posts and news articles, Rubien keeps a readable article clip and gives the assistant a compact Markdown representation.
 
 Rubien supports various import options:
 
@@ -47,6 +47,7 @@ Rubien supports various import options:
 ### Other modern features
 
 - Native PDF/web readers with highlights, underlines, and anchored notes.
+- Export selected references, the current view, or the entire library as BibTeX, RIS, or Rubien JSON; export readable web clips as Markdown.
 - Track your reading activity and habits: reading streaks, an activity heatmap, and recent reads on Home.
 - Organize your way: customizable columns in a database-style table, plus saved views with their own filters, sorts, and grouping.
 

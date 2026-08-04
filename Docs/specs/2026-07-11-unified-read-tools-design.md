@@ -1,7 +1,7 @@
 # Unified Read Tools (`rubien_read_text` / `rubien_read_annotations`) — Design Spec
 
 **Date:** 2026-07-11
-**Status:** Draft for review
+**Status:** Implemented; web representation amended on 2026-08-03
 **Context:** Feature 1 of a two-feature arc. Feature 2 (unified body-text grep, `rubien_grep_text`) builds on the routing and conventions established here; its earlier PDF-only draft is `Docs/specs/2026-06-26-pdf-grep-design.md`, to be revised separately.
 
 > **Web-format amendment (2026-08-03):** [Agent-facing web Markdown](../plans/2026-08-03-agent-web-markdown.md) supersedes this draft's web-body format details. Web reads now return Markdown by default, accept explicit `format: "html"`, and report both `contentFormat` and `sourceFormat`. The [CLI reference](../CLI-Reference.md#read) is the current contract.

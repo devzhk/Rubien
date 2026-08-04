@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-27
 
-**Status:** Reviewed v3 — ready for implementation
+**Status:** Implemented and merged on 2026-08-04 (`ffeeb24`, merge `ada5b75`)
 
 **Review:** Claude design review adjudicated and incorporated on 2026-07-28.
 Repository-level correctness, efficiency, and simplicity reviews were

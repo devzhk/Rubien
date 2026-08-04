@@ -1,5 +1,7 @@
 # Agent-facing web Markdown
 
+**Status:** Implemented in `874e945` on 2026-08-04
+
 ## Outcome
 
 Keep extracted HTML as the canonical web-reader body while giving the CLI and

@@ -23,6 +23,14 @@ The storage root can contain:
 - `MetadataArtifacts/` — cached metadata resolver responses
 - `sync-engine-state.bin` — CloudKit sync-engine state
 
+Extracted web pages keep their canonical readable body in the reference row:
+live clips normally retain cleaned HTML for reader fidelity, while imported
+Markdown remains Markdown. `library.sqlite` also contains a local-only
+`webContentMarkdownCache` that lazily stores compact Markdown projections for
+agent and CLI reads. This cache is not synced and can be regenerated from the
+canonical body, so deleting or rebuilding a cache row does not lose library
+content.
+
 Window layout and other Mac app preferences are stored separately in `~/Library/Preferences/com.rubien.app.plist`. Sandboxed apps may place that preferences file under `~/Library/Containers/com.rubien.app/Data/Library/Preferences/`.
 
 ## Backups

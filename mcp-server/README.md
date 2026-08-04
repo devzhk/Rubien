@@ -160,7 +160,24 @@ library; supplying both is rejected. MCP never accepts an output path. Captured
 output retains the server-wide 32 MiB limit; BibTeX/RIS use the existing
 `{format,text}` result envelope.
 
-Reading tools operate on any reference without your knowing whether it holds a PDF or a clipped web page. `rubien_read_text` returns the readable body text — the attached PDF or the clipped web page — routed automatically: omit `source` and `pages`/`sections` imply the PDF, `start` implies the web body, else PDF wins when both exist. Every response reports `source` (what was read) and `available` (which sources are readable now). PDF results are page-keyed (`pages[]` items with `text` + `sectionPath`, selected by a `pages` range or `sections` title-substrings); web results are one paginated body window (`content` + `contentLength`, `start`/`maxChars`; `contentFormat` markdown or HTML). `rubien_read_annotations` merges the user's highlights/underlines/anchored notes across both kinds into one array, each item tagged `source`; web items carry a W3C TextQuoteSelector triple (`prefixText`/`anchorText`/`suffixText`) that locates them inside the `rubien_read_text` body. `rubien_grep_text` is the lookup half of the same workflow: it finds *where* a reference's body mentions a phrase or regex — PDF hits grouped by page (`sectionPath` breadcrumbs), web hits as exact character offsets — so you can then pull just those spots with `rubien_read_text` (`pages` for PDF, `start` for web). All three are library-only — none hit the network.
+Reading tools operate on any reference without your knowing whether it holds a
+PDF or a clipped web page. `rubien_read_text` returns the readable body text,
+routed automatically: `pages`/`sections` imply the PDF, `start`/`format` imply
+the web body, and otherwise PDF wins when both exist. Every response reports
+`source` (what was read) and `available` (which sources are readable now). PDF
+results are page-keyed (`pages[]` items with `text` + `sectionPath`). Web reads
+return compact Markdown by default; pass `format: "html"` to request the
+canonical extracted HTML fragment when available. Web responses distinguish
+the returned `contentFormat` from the canonical `sourceFormat` and paginate
+with `start`/`maxChars`.
+
+`rubien_read_annotations` merges the user's highlights, underlines, and
+anchored notes across both kinds into one array, each item tagged `source`.
+`rubien_grep_text` locates a phrase or regex in the same representation used by
+`rubien_read_text`: PDF hits are grouped by page, while web hits carry exact
+character offsets. Use the same `format` for a web grep and its follow-up read
+so those offsets stay aligned. All three tools are library-only and never hit
+the network.
 
 PDF tools: `rubien_get_pdf_info` (page count, `hasTextLayer`, outline sections — call it before selecting `rubien_read_text` by `sections`), `rubien_render_pdf_page` (render a page to an image, for tables/figures/equations), `rubien_download_pdf` (fetch an open-access PDF and attach it to an existing reference).
 

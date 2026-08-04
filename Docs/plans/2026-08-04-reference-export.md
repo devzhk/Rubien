@@ -1,5 +1,7 @@
 # Reference Export Implementation Plan
 
+**Status:** Complete — merged into `main` as `ada5b75` on 2026-08-04
+
 **Branch:** `codex/reference-export`
 
 **Worktree:** `.claude/worktrees/reference-export`
