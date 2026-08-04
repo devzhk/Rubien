@@ -207,7 +207,7 @@ describe.skipIf(!existsSync(distIndex))("e2e stdio degraded mode (version gate)"
         });
         expect(degraded.result.isError).toBe(true);
         const degradedText = (degraded.result.content as Array<{ text: string }>)[0].text;
-        expect(degradedText).toContain("needs build >= 28");
+        expect(degradedText).toContain("needs build >= 41");
         expect(degradedText).toMatch(/Update Rubien\.app/);
 
         // "Update Rubien.app" mid-session → the very next call recovers,

@@ -60,10 +60,10 @@ describe.skipIf(!existsSync(distIndex))("startup version guard", () => {
     const r = await runServer(
       { RUBIEN_CLI: join(fixtures, "stub-cli-old.sh") },
       [],
-      { waitStderr: /needs build >= 28/ },
+      { waitStderr: /needs build >= 41/ },
     );
     expect(r.started).toBe(true);
-    expect(r.stderr).toContain("needs build >= 28");
+    expect(r.stderr).toContain("needs build >= 41");
   }, 15_000);
 
   it("stdio: starts against a CLI with no version subcommand, logging the predates message", async () => {
@@ -121,7 +121,7 @@ describe.skipIf(!existsSync(distIndex))("startup version guard", () => {
     );
     expect(r.started).toBe(false);
     expect(r.exitCode).not.toBe(0);
-    expect(r.stderr).toContain("needs build >= 28");
+    expect(r.stderr).toContain("needs build >= 41");
   }, 15_000);
 
   it("--help exits 0 with NO cli present (guard must not run before --help)", async () => {

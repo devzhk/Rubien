@@ -17,14 +17,14 @@ describe("evaluateCliProbe", () => {
     expect(r).toEqual({ ok: true, info });
   });
 
-  it("rejects build 18 because it predates reading activity (build 28 floor)", () => {
+  it("rejects build 40 because it predates the 0.3.4 CLI features", () => {
     const r = evaluateCliProbe(
-      { kind: "ok", info: { version: "0.2.3", build: 18 }, envOverride: false },
+      { kind: "ok", info: { version: "0.7.2", build: 40 }, envOverride: false },
       MIN_CLI_BUILD,
     );
     expectFailure(r);
-    expect(r.message).toContain("build 18");
-    expect(r.message).toContain(">= 28");
+    expect(r.message).toContain("build 40");
+    expect(r.message).toContain(">= 41");
     expect(r.message).toMatch(/Update Rubien\.app|download a newer rubien-cli/i);
     expect(r.message).toContain("github.com/devzhk/Rubien/releases");
     expect(r.message).not.toContain("Rubien-releases");
