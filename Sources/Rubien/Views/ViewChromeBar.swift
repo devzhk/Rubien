@@ -19,6 +19,10 @@ struct ViewChromeBar: View {
     let isDirty: Bool
     let onSave: () -> Void
     let onDiscard: () -> Void
+    let canExportCurrentView: Bool
+    let canExportEntireLibrary: Bool
+    let onExportCurrentView: (ReferenceExportFormat) -> Void
+    let onExportEntireLibrary: (ReferenceExportFormat) -> Void
 
     @EnvironmentObject private var syncCoordinator: SyncCoordinator
 
@@ -76,6 +80,7 @@ struct ViewChromeBar: View {
             )
             sortButton
             groupButton
+            exportMenu
             displayButton
                 .padding(.trailing, 12)
         }
@@ -145,6 +150,40 @@ struct ViewChromeBar: View {
             )
             .activatePopoverHover()
         }
+    }
+
+    private var exportMenu: some View {
+        Menu {
+            Section("Export Current View") {
+                exportFormatButtons(action: onExportCurrentView)
+            }
+            .disabled(!canExportCurrentView)
+
+            Section("Export Entire Library") {
+                exportFormatButtons(action: onExportEntireLibrary)
+            }
+            .disabled(!canExportEntireLibrary)
+        } label: {
+            ChromeBarPill(iconName: "square.and.arrow.up", label: "Export")
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .disabled(!canExportCurrentView && !canExportEntireLibrary)
+        .help(exportHelp)
+    }
+
+    @ViewBuilder
+    private func exportFormatButtons(
+        action: @escaping (ReferenceExportFormat) -> Void
+    ) -> some View {
+        ReferenceExportFormatButtons(action: action)
+    }
+
+    private var exportHelp: String {
+        if canExportCurrentView { return "Export the current view or the entire library" }
+        if canExportEntireLibrary { return "The current view is empty; export the entire library" }
+        return "There are no references to export"
     }
 
     private var displayButtonLabel: String {

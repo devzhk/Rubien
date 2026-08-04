@@ -302,6 +302,86 @@ final class RubienCLITests: XCTestCase {
         XCTAssertEqual(result.exitCode, 0)
     }
 
+    func testExportExplicitIDsPreserveOrderAndRejectMissingIDs() throws {
+        try skipIfBinaryMissing()
+        let firstAdd = try runCLI(["add", "--title", "Export First"])
+        let secondAdd = try runCLI(["add", "--title", "Export Second"])
+        let firstID = try XCTUnwrap(parseId(from: Data(firstAdd.stdout.utf8)))
+        let secondID = try XCTUnwrap(parseId(from: Data(secondAdd.stdout.utf8)))
+
+        let result = try runCLI([
+            "export", String(secondID), String(firstID), String(secondID),
+            "--format", "json",
+        ])
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        let rows = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [[String: Any]]
+        )
+        XCTAssertEqual(
+            rows.compactMap { ($0["id"] as? NSNumber)?.int64Value },
+            [secondID, firstID]
+        )
+
+        let missing = try runCLI(["export", String(secondID), "999999", "888888"])
+        XCTAssertNotEqual(missing.exitCode, 0)
+        let envelope = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(missing.stderr.utf8)) as? [String: Any]
+        )
+        XCTAssertEqual(envelope["error"] as? String, "unresolved-reference-ids")
+        XCTAssertEqual(envelope["ids"] as? [String], ["999999", "888888"])
+    }
+
+    func testExportFileOutputIsSafeAndReturnsReceipt() throws {
+        try skipIfBinaryMissing()
+        let destination = testLibraryRoot.appendingPathComponent("references.bib")
+        let first = try runCLI([
+            "export", "--format", "bibtex", "--output", destination.path,
+        ])
+        XCTAssertEqual(first.exitCode, 0, first.stderr)
+        let receipt = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(first.stdout.utf8)) as? [String: Any]
+        )
+        XCTAssertEqual(receipt["format"] as? String, "bibtex")
+        XCTAssertEqual(receipt["path"] as? String, destination.path)
+        let original = try Data(contentsOf: destination)
+
+        let refused = try runCLI([
+            "export", "--format", "ris", "--output", destination.path,
+        ])
+        XCTAssertNotEqual(refused.exitCode, 0)
+        XCTAssertEqual(try Data(contentsOf: destination), original)
+
+        let replaced = try runCLI([
+            "export", "--format", "ris", "--output", destination.path, "--force",
+        ])
+        XCTAssertEqual(replaced.exitCode, 0, replaced.stderr)
+
+        let longDestination = testLibraryRoot.appendingPathComponent(
+            String(repeating: "x", count: 240) + ".ris"
+        )
+        let longName = try runCLI([
+            "export", "--format", "ris", "--output", longDestination.path,
+        ])
+        XCTAssertEqual(longName.exitCode, 0, longName.stderr)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: longDestination.path))
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: testLibraryRoot.path)
+            .filter { $0.hasPrefix(".rubien-export-") }
+        XCTAssertTrue(leftovers.isEmpty, "temporary export files should be cleaned up")
+    }
+
+    func testExportRejectsUnknownFormatAndConflictingScope() throws {
+        try skipIfBinaryMissing()
+        let unknown = try runCLI(["export", "--format", "bibttex"])
+        XCTAssertNotEqual(unknown.exitCode, 0)
+
+        let conflict = try runCLI(["export", "1", "--view", "2"])
+        XCTAssertNotEqual(conflict.exitCode, 0)
+        let envelope = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(conflict.stderr.utf8)) as? [String: String]
+        )
+        XCTAssertEqual(envelope["error"], "provide at most one of ids / view")
+    }
+
     // MARK: - Subcommand Help
 
     func testSearchHelp() throws {

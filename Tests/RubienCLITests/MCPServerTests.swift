@@ -212,6 +212,13 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(required("rubien_read_text"), ["id"])
         XCTAssertEqual(required("rubien_list_references"), [])
 
+        let exportSchema = try XCTUnwrap(byName["rubien_export"]?["inputSchema"] as? [String: Any])
+        let exportProperties = try XCTUnwrap(exportSchema["properties"] as? [String: Any])
+        let exportIDs = try XCTUnwrap(exportProperties["ids"] as? [String: Any])
+        XCTAssertEqual(exportIDs["type"] as? String, "array")
+        XCTAssertEqual(exportIDs["minItems"] as? Int, 1)
+        XCTAssertEqual((exportProperties["view"] as? [String: Any])?["type"] as? String, "integer")
+
         let listSchema = try XCTUnwrap(byName["rubien_list_references"]?["inputSchema"] as? [String: Any])
         let listProperties = try XCTUnwrap(listSchema["properties"] as? [String: Any])
         XCTAssertEqual((listProperties["view"] as? [String: Any])?["type"] as? String, "integer")
@@ -623,6 +630,30 @@ final class MCPServerTests: XCTestCase {
             XCTAssertEqual(envelope["format"] as? String, format)
             XCTAssertNotNil(envelope["text"] as? String)
         }
+    }
+
+    func testExportAcceptsIDsAndRejectsIDsWithView() throws {
+        try skipIfBinaryMissing()
+        let firstID = try seedTitle("MCP Export First")
+        let secondID = try seedTitle("MCP Export Second")
+        let responses = try runMCP([
+            toolCall(id: 1, name: "rubien_export", arguments: [
+                "format": "json", "ids": [secondID, firstID],
+            ]),
+            toolCall(id: 2, name: "rubien_export", arguments: [
+                "ids": [firstID], "view": 1,
+            ]),
+        ])
+
+        let rows = try XCTUnwrap(try successfulToolJSON(responses, id: 1) as? [[String: Any]])
+        XCTAssertEqual(
+            rows.compactMap { ($0["id"] as? NSNumber)?.intValue },
+            [secondID, firstID]
+        )
+        let conflict = try XCTUnwrap(response(responses, id: 2)?["result"] as? [String: Any])
+        XCTAssertEqual(conflict["isError"] as? Bool, true)
+        let text = try XCTUnwrap((conflict["content"] as? [[String: Any]])?.first?["text"] as? String)
+        XCTAssertEqual(text, "provide at most one of ids / view")
     }
 
     func testReadOnlyModeDoesNotExposeOrExecuteWrites() throws {

@@ -7,9 +7,10 @@ import Foundation
 /// Linux-covered); the CLI supplies the concrete DTO types.
 ///
 /// Generic over the reference DTO (`Ref`) and PDF-download DTO (`PDF`) because
-/// both are CLI-private (`ReferenceDTO` / `PDFDownloadStatusDTO`) — RubienCore
-/// owns the *shape*, the CLI maps `Reference` outcomes to full DTOs post-commit
-/// (§5.3 type boundary: `ItemOutcome` never references `ReferenceDTO`).
+/// callers may choose their wire projection and `PDFDownloadStatusDTO` remains
+/// CLI-owned. The CLI maps `Reference` outcomes to RubienCore's public
+/// `ReferenceDTO` post-commit (§5.3 type boundary: `ItemOutcome` stays a domain
+/// value and never embeds a wire DTO).
 public struct CreateReferenceEnvelope<Ref: Encodable & Sendable, PDF: Encodable & Sendable>: Encodable, Sendable {
     public var items: [CreateReferenceItem<Ref, PDF>]
     public var summary: ImportSummary
