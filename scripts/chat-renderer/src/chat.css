@@ -91,6 +91,10 @@ body {
   margin: 0;
   padding: 0;
   height: 100%;
+  /* #transcript owns vertical scrolling. Keep wheel momentum from chaining to
+     WKWebView's page viewport and exposing its second scrollbar/rubber-band. */
+  overflow: hidden;
+  overscroll-behavior: none;
   /* No page background: the WKWebView is non-drawing and the native side
      (FloatingChatPanel's Liquid Glass card) paints the surface behind the
      transcript. Bubbles/chips keep their own opaque fills for legibility. */
@@ -107,6 +111,7 @@ body {
   height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
+  overscroll-behavior-y: none;
   scrollbar-color: var(--chat-scroll-thumb) transparent;
   padding: 14px 12px 22px;
   display: flex;

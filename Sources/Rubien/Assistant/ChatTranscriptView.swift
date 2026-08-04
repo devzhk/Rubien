@@ -47,6 +47,14 @@ struct ChatTranscriptView: NSViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground")
         webView.allowsMagnification = false
+        // The DOM transcript is the sole vertical scroll surface. If the
+        // enclosing WKWebView scroll view also rubber-bands, trackpad momentum
+        // at the transcript boundary reveals blank space and activates a second
+        // scrollbar alongside the themed DOM scrollbar.
+        DispatchQueue.main.async { [weak webView] in
+            guard let webView else { return }
+            Self.disableOuterScrolling(in: webView)
+        }
         // The transcript web view must never navigate away from its local
         // document; these delegates enforce that (see the Coordinator).
         webView.navigationDelegate = coord
@@ -56,6 +64,18 @@ struct ChatTranscriptView: NSViewRepresentable {
         Self.loadTranscriptHTML(webView)
 
         return webView
+    }
+
+    private static func disableOuterScrolling(in view: NSView) {
+        for subview in view.subviews {
+            if let scrollView = subview as? NSScrollView {
+                scrollView.hasVerticalScroller = false
+                scrollView.hasHorizontalScroller = false
+                scrollView.verticalScrollElasticity = .none
+                scrollView.horizontalScrollElasticity = .none
+            }
+            disableOuterScrolling(in: subview)
+        }
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
@@ -183,6 +203,10 @@ struct ChatTranscriptView: NSViewRepresentable {
         // load remote content in the transcript web view, defeating the CSP and
         // the "links routed to Swift" invariant (threat-model §3). WebKit delivers
         // these on the main thread, so hop to the main actor for the classifier.
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            ChatTranscriptView.disableOuterScrolling(in: webView)
+        }
 
         func webView(
             _ webView: WKWebView,

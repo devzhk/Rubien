@@ -92,6 +92,14 @@ test('transcript uses the native scrollbar with a muted color', async () => {
   assert.match(css, /--chat-scroll-thumb:\s*rgba\(/)
 })
 
+test('transcript is the only elastic vertical scroll surface', async () => {
+  const { doc } = await boot()
+  const css = [...doc.querySelectorAll('style')].map((style) => style.textContent).join('\n')
+
+  assert.match(css, /html,body\{[^}]*overflow:hidden[^}]*overscroll-behavior:none/)
+  assert.match(css, /#transcript\{[^}]*overflow-y:auto[^}]*overscroll-behavior-y:none/)
+})
+
 test('user message renders markdown + KaTeX immediately', async () => {
   const { R, T } = await boot()
   R.addUserMessage('# H\n\nInline $E=mc^2$ and $$\\int_0^1 x^2\\,dx = \\tfrac13$$\n\n- a\n- b\n\n**bold**')
