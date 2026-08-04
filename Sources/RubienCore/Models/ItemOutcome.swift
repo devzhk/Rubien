@@ -3,7 +3,7 @@ import Foundation
 /// Per-item result of an import route, threaded through the batch/PDF/Zotero
 /// pipelines so a unified `create_reference` envelope can report one entry per
 /// parsed input (spec §5.3). This is the RubienCore-side domain value: it
-/// carries a `Reference` (never the CLI-private `ReferenceDTO`) that the CLI
+/// carries a `Reference` (never the wire-oriented `ReferenceDTO`) that the CLI
 /// maps to a full DTO after commit. Item cardinality is per parsed input, not
 /// per distinct reference — an intra-batch duplicate yields two items pointing
 /// at the same `Reference`, the later one `.existing`.

@@ -72,6 +72,9 @@ struct RubienApp: App {
         .windowToolbarStyle(.unified(showsTitle: false))
         .defaultSize(width: Self.defaultWindowSize.width, height: Self.defaultWindowSize.height)
         .handlesExternalEvents(matching: ["*"])
+        .commands {
+            ReferenceExportMenuCommands()
+        }
         #if canImport(Sparkle)
         .commands {
             UpdateMenuCommands()

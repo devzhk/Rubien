@@ -210,143 +210,6 @@ func liveStatusOptionValues() throws -> [String] {
     return ReadingStatus.builtIn
 }
 
-// MARK: - BibTeX Helpers
-
-/// Escape special BibTeX characters in a field value.
-private func escapeBibTeX(_ value: String) -> String {
-    var s = value
-    s = s.replacingOccurrences(of: "\\", with: "\\textbackslash{}")
-    s = s.replacingOccurrences(of: "{", with: "\\{")
-    s = s.replacingOccurrences(of: "}", with: "\\}")
-    s = s.replacingOccurrences(of: "&", with: "\\&")
-    s = s.replacingOccurrences(of: "%", with: "\\%")
-    s = s.replacingOccurrences(of: "#", with: "\\#")
-    s = s.replacingOccurrences(of: "_", with: "\\_")
-    s = s.replacingOccurrences(of: "~", with: "\\textasciitilde{}")
-    s = s.replacingOccurrences(of: "^", with: "\\textasciicircum{}")
-    return s
-}
-
-/// Generate a unique BibTeX citation key, appending a/b/c suffix for duplicates.
-private func uniqueBibTeXKeys(for refs: [Reference]) -> [String] {
-    var counts: [String: Int] = [:]
-    var keys: [String] = []
-    for ref in refs {
-        let base = "\(ref.authors.first?.family ?? "unknown")\(ref.year ?? 0)"
-        let count = counts[base, default: 0]
-        counts[base] = count + 1
-        if count == 0 {
-            keys.append(base)
-        } else {
-            // a=1, b=2, ...
-            let suffix = String(UnicodeScalar(UInt8(96 + count)))
-            keys.append("\(base)\(suffix)")
-        }
-    }
-    // If any base key had duplicates, retroactively suffix the first occurrence
-    var baseSeen: [String: Int] = [:]
-    for (i, ref) in refs.enumerated() {
-        let base = "\(ref.authors.first?.family ?? "unknown")\(ref.year ?? 0)"
-        if (counts[base] ?? 0) > 1 {
-            if baseSeen[base] == nil {
-                keys[i] = "\(base)a"
-                baseSeen[base] = 1
-            }
-        }
-    }
-    return keys
-}
-
-// MARK: - Reference JSON DTO
-
-struct CustomPropertyValueDTO: Encodable {
-    let propertyId: Int64
-    let name: String
-    let type: String
-    let value: String
-}
-
-struct ReferenceDTO: Encodable {
-    let id: Int64?
-    let title: String
-    let authors: String
-    let year: Int?
-    let journal: String?
-    let volume: String?
-    let issue: String?
-    let pages: String?
-    let doi: String?
-    let url: String?
-    let siteName: String?
-    let abstract: String?
-    let referenceType: String
-    let dateAdded: Date
-    let dateModified: Date
-    let pdfPath: String?
-    let notes: String?
-    let isbn: String?
-    let issn: String?
-    let publisher: String?
-    let language: String?
-    let edition: String?
-    let readingStatus: String
-    /// Most-recent reader-open timestamp. Omitted from JSON when nil (the
-    /// reference has never been opened in a reader post-v4), per Swift's
-    /// synthesized Encodable behavior for plain Optionals.
-    let lastReadAt: Date?
-    /// Distinct reading-session count (10-minute debounce on the write side).
-    /// Always present in JSON; defaults to 0 for never-opened references.
-    let readCount: Int
-    let customProperties: [CustomPropertyValueDTO]
-
-    init(from ref: Reference,
-         defs: [PropertyDefinition] = [],
-         valuesByRef: [Int64: [Int64: String]] = [:],
-         pdfFilenamesByRef: [Int64: String] = [:]) {
-        self.id = ref.id
-        self.title = ref.title
-        self.authors = ref.authors.displayString
-        self.year = ref.year
-        self.journal = ref.journal
-        self.volume = ref.volume
-        self.issue = ref.issue
-        self.pages = ref.pages
-        self.doi = ref.doi
-        self.url = ref.url
-        self.siteName = ref.siteName
-        self.abstract = ref.abstract
-        self.referenceType = ref.referenceType.rawValue
-        self.dateAdded = ref.dateAdded
-        self.dateModified = ref.dateModified
-        // Post-B8: PDF lookup is per-device cache. The caller fetches all
-        // filenames once and threads them in via pdfFilenamesByRef so the JSON
-        // output's "pdfPath" key still exposes the on-disk filename without
-        // an N+1 single-row pdfCache query per DTO.
-        self.pdfPath = ref.id.flatMap { pdfFilenamesByRef[$0] }
-        self.notes = ref.notes
-        self.isbn = ref.isbn
-        self.issn = ref.issn
-        self.publisher = ref.publisher
-        self.language = ref.language
-        self.edition = ref.edition
-        self.readingStatus = ref.readingStatus
-        self.lastReadAt = ref.lastReadAt
-        self.readCount = ref.readCount
-
-        let refValues = ref.id.flatMap { valuesByRef[$0] } ?? [:]
-        let customDefs = defs.filter { !$0.isDefault }
-        self.customProperties = customDefs.compactMap { def -> CustomPropertyValueDTO? in
-            guard let propId = def.id, let value = refValues[propId] else { return nil }
-            return CustomPropertyValueDTO(
-                propertyId: propId,
-                name: def.name,
-                type: def.type.rawValue,
-                value: value
-            )
-        }
-    }
-}
-
 /// JSON shape for a single select option exposed by the CLI / MCP.
 ///
 /// `value` is the canonical identity (option string for custom selects;
@@ -595,47 +458,6 @@ func referenceDTO(for ref: Reference) throws -> ReferenceDTO {
     )
 }
 
-/// Execute a saved view's query (scope + filters + sorts + groupBy) and return
-/// the matching references, honoring `limit` (0 = all) and `offset`. Backs
-/// `list --view <id>` (a reference array), routing through the same query
-/// engine as an inline `list`.
-func querySavedView(_ view: DatabaseView, limit: Int, offset rawOffset: Int = 0) throws -> [Reference] {
-    // Clamp a negative offset to 0 so the fast path's `limit + offset` can't go
-    // nonpositive (which would fetch-all) — both paths then treat it as no offset.
-    let offset = max(0, rawOffset)
-    let db = AppDatabase.shared
-    let scope: ReferenceScope
-    switch view.parsedScope {
-    case .all: scope = .all
-    case .tag(let id): scope = .tag(id)
-    }
-    // Fast path: no filters/sorts/groupBy → push (limit+offset) to SQL, then drop
-    // the leading `offset` — a bare `limit` fetch followed by `dropFirst(offset)`
-    // would return the first page and then empty it (e.g. --limit 20 --offset 20).
-    if view.parsedFilters.isEmpty && view.parsedSorts.isEmpty && view.parsedGroupBy == nil {
-        let fetchLimit: Int
-        if limit > 0 {
-            let (sum, overflow) = limit.addingReportingOverflow(offset)
-            fetchLimit = overflow ? 0 : sum   // 0 == fetch all (overflow is absurd input)
-        } else {
-            fetchLimit = 0
-        }
-        let rows = try db.fetchReferences(scope: scope, filter: ReferenceFilter(), limit: fetchLimit)
-        return offset > 0 ? Array(rows.dropFirst(offset)) : rows
-    }
-    let refs = try db.fetchReferences(scope: scope, filter: ReferenceFilter(), limit: 0)
-    let context = PipelineContext(
-        tagMap: try db.fetchReferenceTagMappings(),
-        propertyValueMap: try db.fetchAllPropertyValues(),
-        propertyDefs: try db.fetchAllPropertyDefinitions(),
-        pdfAttachedRefIds: try db.pdfAttachedReferenceIDs()
-    )
-    let filtered = FilterEngine.apply(refs, filters: view.parsedFilters, context: context)
-    let sorted = SortEngine.apply(filtered, sorts: view.parsedSorts, context: context)
-    let paged = offset > 0 ? Array(sorted.dropFirst(offset)) : sorted
-    return limit > 0 ? Array(paged.prefix(limit)) : paged
-}
-
 // MARK: - Subcommands
 
 struct Search: ParsableCommand {
@@ -743,13 +565,17 @@ struct List: ParsableCommand {
                 printJSONError("--view is mutually exclusive with inline filters/sorts (tag, author, year-from/to, journal, type, has-pdf, keyword, reading-status, sort-by, asc)")
                 throw ExitCode.failure
             }
-            guard let savedView = try AppDatabase.shared.fetchDatabaseView(id: viewId) else {
+            let refs: [Reference]
+            do {
+                refs = try AppDatabase.shared.fetchReferences(
+                    savedViewID: viewId,
+                    limit: limit,
+                    offset: offset
+                )
+            } catch ReferenceExportError.savedViewNotFound {
                 printJSONError("View \(viewId) not found")
                 throw ExitCode.failure
             }
-            // Pagination is offset-aware inside the query (fetch limit+offset, drop
-            // offset) so `--limit N --offset N` returns the next page, not nothing.
-            let refs = try querySavedView(savedView, limit: limit, offset: offset)
             printJSON(try mapReferenceDTOs(refs))
             return
         }
@@ -2138,83 +1964,187 @@ struct Styles: ParsableCommand {
     }
 }
 
+extension ReferenceExportFormat: ExpressibleByArgument {}
+
+private struct ExportUnresolvedReferenceIDsEnvelope: Encodable {
+    let error = "unresolved-reference-ids"
+    let ids: [String]
+}
+
+private struct ExportViewNotFoundEnvelope: Encodable {
+    let error = "view-not-found"
+    let id: String
+}
+
+private struct ExportReceipt: Encodable {
+    let format: String
+    let path: String
+    let referenceCount: Int
+}
+
+private func exportPOSIXError(_ operation: String, path: String, code: Int32 = errno) -> NSError {
+    NSError(
+        domain: NSPOSIXErrorDomain,
+        code: Int(code),
+        userInfo: [NSLocalizedDescriptionKey: "\(operation) '\(path)' failed: \(String(cString: strerror(code)))"]
+    )
+}
+
+private func writeExportBytes(_ data: Data, to descriptor: Int32, path: String) throws {
+    try data.withUnsafeBytes { rawBuffer in
+        guard let baseAddress = rawBuffer.baseAddress else { return }
+        var offset = 0
+        while offset < rawBuffer.count {
+            let written: Int
+            #if canImport(Glibc)
+            written = Glibc.write(descriptor, baseAddress.advanced(by: offset), rawBuffer.count - offset)
+            #else
+            written = Darwin.write(descriptor, baseAddress.advanced(by: offset), rawBuffer.count - offset)
+            #endif
+            if written < 0 {
+                if errno == EINTR { continue }
+                throw exportPOSIXError("Write", path: path)
+            }
+            if written == 0 {
+                throw exportPOSIXError("Write", path: path, code: EIO)
+            }
+            offset += written
+        }
+    }
+}
+
+/// Publish a complete sibling temporary file without a check-then-overwrite race.
+private func writeExportArtifact(_ data: Data, to destination: URL, force: Bool) throws {
+    let parent = destination.deletingLastPathComponent()
+    var isDirectory: ObjCBool = false
+    guard FileManager.default.fileExists(atPath: parent.path, isDirectory: &isDirectory),
+          isDirectory.boolValue else {
+        throw ValidationError("Output directory does not exist: \(parent.path)")
+    }
+
+    let temporary = parent.appendingPathComponent(
+        ".rubien-export-\(UUID().uuidString).tmp"
+    )
+    var descriptor = temporary.path.withCString {
+        open($0, O_WRONLY | O_CREAT | O_EXCL, mode_t(S_IRUSR | S_IWUSR))
+    }
+    guard descriptor >= 0 else {
+        throw exportPOSIXError("Create temporary file", path: temporary.path)
+    }
+
+    defer {
+        if descriptor >= 0 { _ = close(descriptor) }
+        _ = temporary.path.withCString { unlink($0) }
+    }
+
+    try writeExportBytes(data, to: descriptor, path: temporary.path)
+    guard fsync(descriptor) == 0 else {
+        throw exportPOSIXError("Flush", path: temporary.path)
+    }
+    guard close(descriptor) == 0 else {
+        descriptor = -1
+        throw exportPOSIXError("Close", path: temporary.path)
+    }
+    descriptor = -1
+
+    let result: Int32
+    if force {
+        result = temporary.path.withCString { source in
+            destination.path.withCString { target in rename(source, target) }
+        }
+    } else {
+        result = temporary.path.withCString { source in
+            destination.path.withCString { target in link(source, target) }
+        }
+    }
+    guard result == 0 else {
+        let code = errno
+        if !force && code == EEXIST {
+            throw ValidationError("Output already exists; pass --force to replace it: \(destination.path)")
+        }
+        throw exportPOSIXError("Publish", path: destination.path, code: code)
+    }
+
+}
+
 struct Export: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Export references as BibTeX, RIS, or JSON")
 
+    @Argument(help: "Reference IDs to export, in output order")
+    var ids: [Int64] = []
+
     @Option(name: .shortAndLong, help: "Output format: json, bibtex, ris")
-    var format: String = "json"
+    var format: ReferenceExportFormat = .json
+
+    @Option(name: .long, help: "Export references matching a saved view")
+    var view: Int64?
+
+    @Option(name: .shortAndLong, help: "Write atomically to this path instead of stdout")
+    var output: String?
+
+    @Flag(name: .long, help: "Replace an existing --output file")
+    var force = false
 
     func run() throws {
-        let refs = try AppDatabase.shared.fetchAllReferences()
+        guard ids.isEmpty || view == nil else {
+            printJSONError("provide at most one of ids / view")
+            throw ExitCode.failure
+        }
+        guard output != nil || !force else {
+            printJSONError("--force requires --output")
+            throw ExitCode.failure
+        }
 
-        switch format {
-        case "bibtex":
-            let keys = uniqueBibTeXKeys(for: refs)
-            var output = ""
-            output.reserveCapacity(refs.count * 300)
-            for (i, ref) in refs.enumerated() {
-                let entryType: String
-                switch ref.referenceType {
-                case .journalArticle:  entryType = "article"
-                case .conferencePaper: entryType = "inproceedings"
-                case .book:            entryType = "book"
-                case .thesis:          entryType = "phdthesis"
-                case .webpage, .other, .markdown: entryType = "misc"
-                }
-                output += "@\(entryType){\(keys[i]),\n"
-                output += "  title = {\(escapeBibTeX(ref.title))},\n"
-                let authStr = ref.authors.map { "\($0.family), \($0.given)" }.joined(separator: " and ")
-                if !authStr.isEmpty { output += "  author = {\(escapeBibTeX(authStr))},\n" }
-                if let y = ref.year { output += "  year = {\(y)},\n" }
-                if let j = ref.journal { output += "  journal = {\(escapeBibTeX(j))},\n" }
-                if let v = ref.volume { output += "  volume = {\(v)},\n" }
-                if let n = ref.issue { output += "  number = {\(n)},\n" }
-                if let p = ref.pages { output += "  pages = {\(p)},\n" }
-                if let d = ref.doi { output += "  doi = {\(d)},\n" }
-                if let u = ref.url { output += "  url = {\(u)},\n" }
-                if let isbn = ref.isbn { output += "  isbn = {\(isbn)},\n" }
-                if let issn = ref.issn { output += "  issn = {\(issn)},\n" }
-                if let pub = ref.publisher { output += "  publisher = {\(escapeBibTeX(pub))},\n" }
-                output += "}\n\n"
-            }
-            print(output, terminator: "")
-        case "ris":
-            var output = ""
-            output.reserveCapacity(refs.count * 300)
-            for ref in refs {
-                let risType: String
-                switch ref.referenceType {
-                case .journalArticle:  risType = "JOUR"
-                case .book:            risType = "BOOK"
-                case .conferencePaper: risType = "CONF"
-                case .thesis:          risType = "THES"
-                case .webpage:         risType = "ELEC"
-                case .other, .markdown: risType = "GEN"
-                }
-                output += "TY  - \(risType)\n"
-                output += "TI  - \(ref.title)\n"
-                for author in ref.authors {
-                    output += "AU  - \(author.family), \(author.given)\n"
-                }
-                if let y = ref.year { output += "PY  - \(y)\n" }
-                if let j = ref.journal { output += "JO  - \(j)\n" }
-                if let v = ref.volume { output += "VL  - \(v)\n" }
-                if let n = ref.issue { output += "IS  - \(n)\n" }
-                if let p = ref.pages {
-                    let parts = p.split(separator: "-", maxSplits: 1)
-                    output += "SP  - \(parts.first ?? Substring(p))\n"
-                    if parts.count > 1 { output += "EP  - \(parts[1])\n" }
-                }
-                if let d = ref.doi { output += "DO  - \(d)\n" }
-                if let u = ref.url { output += "UR  - \(u)\n" }
-                if let isbn = ref.isbn { output += "SN  - \(isbn)\n" }
-                if let pub = ref.publisher { output += "PB  - \(pub)\n" }
-                if let ab = ref.abstract { output += "AB  - \(ab)\n" }
-                output += "ER  - \n\n"
-            }
-            print(output, terminator: "")
-        default:
-            printJSON(try mapReferenceDTOs(refs))
+        let scope: ReferenceExportScope
+        if !ids.isEmpty {
+            scope = .ids(ids)
+        } else if let view {
+            scope = .savedView(view)
+        } else {
+            scope = .all
+        }
+
+        let artifact: ReferenceExportArtifact
+        do {
+            artifact = try ReferenceExportService(database: .shared).export(
+                ReferenceExportRequest(format: format, scope: scope)
+            )
+        } catch ReferenceExportError.unresolvedReferenceIDs(let missing) {
+            printJSONErrorEnvelope(ExportUnresolvedReferenceIDsEnvelope(ids: missing.map(String.init)))
+            throw ExitCode.failure
+        } catch ReferenceExportError.savedViewNotFound(let id) {
+            printJSONErrorEnvelope(ExportViewNotFoundEnvelope(id: String(id)))
+            throw ExitCode.failure
+        } catch ReferenceExportError.emptySelection {
+            printJSONError("At least one reference ID is required")
+            throw ExitCode.failure
+        }
+
+        guard let output else {
+            FileHandle.standardOutput.write(artifact.data)
+            return
+        }
+
+        let base = URL(
+            fileURLWithPath: FileManager.default.currentDirectoryPath,
+            isDirectory: true
+        )
+        let destination = URL(fileURLWithPath: output, relativeTo: base)
+            .standardizedFileURL
+            .absoluteURL
+        do {
+            try writeExportArtifact(artifact.data, to: destination, force: force)
+            let receipt = ExportReceipt(
+                format: artifact.format.rawValue,
+                path: destination.path,
+                referenceCount: artifact.referenceCount
+            )
+            var receiptData = try jsonEncoder.encode(receipt)
+            receiptData.append(0x0A)
+            FileHandle.standardOutput.write(receiptData)
+        } catch {
+            printJSONError(error.localizedDescription)
+            throw ExitCode.failure
         }
     }
 }

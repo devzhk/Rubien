@@ -1,7 +1,8 @@
 import { z } from "zod";
 
 // -----------------------------------------------------------------------------
-// Zod schemas mirroring the DTO structs in Sources/RubienCLI/RubienCLI.swift.
+// Zod schemas mirroring the public DTO structs in
+// Sources/RubienCore/Export/ReferenceDTO.swift (plus CLI-owned DTOs below).
 //
 // Convention (load-bearing — a drift here silently breaks tool parsing):
 //   - Swift `let x: T?` (regular Optional) → `.optional()` in zod.

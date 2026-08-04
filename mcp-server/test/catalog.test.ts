@@ -90,6 +90,46 @@ describe("0.3.2 catalog", () => {
   });
 });
 
+describe("rubien_export argv routing", () => {
+  it("forwards ordered IDs and the requested format", async () => {
+    const client = await connectedClient();
+    await client.callTool({
+      name: "rubien_export",
+      arguments: { ids: [42, 57], format: "bibtex" },
+    });
+    expect(vi.mocked(runCliAsTool)).toHaveBeenLastCalledWith(
+      ["export", "42", "57", "--format", "bibtex"],
+      { textMode: true },
+    );
+  });
+
+  it("forwards a saved view", async () => {
+    const client = await connectedClient();
+    await client.callTool({
+      name: "rubien_export",
+      arguments: { view: 7, format: "ris" },
+    });
+    expect(vi.mocked(runCliAsTool)).toHaveBeenLastCalledWith(
+      ["export", "--view", "7", "--format", "ris"],
+      { textMode: true },
+    );
+  });
+
+  it("rejects IDs with a view before launching the CLI", async () => {
+    const client = await connectedClient();
+    vi.mocked(runCliAsTool).mockClear();
+    const result = await client.callTool({
+      name: "rubien_export",
+      arguments: { ids: [42], view: 7 },
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content).toEqual([
+      { type: "text", text: "provide at most one of ids / view" },
+    ]);
+    expect(runCliAsTool).not.toHaveBeenCalled();
+  });
+});
+
 describe("rubien_create_reference argv routing", () => {
   it("forwards a source locator with the route-independent 300s timeout", async () => {
     const client = await connectedClient();

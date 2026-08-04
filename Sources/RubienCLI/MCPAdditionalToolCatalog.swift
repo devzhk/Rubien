@@ -91,11 +91,19 @@ enum MCPAdditionalToolCatalog {
         description: "Export the library (or a subset) as JSON, BibTeX, or RIS.",
         inputSchema: objectSchema(properties: [
             "format": ["type": "string", "enum": ["json", "bibtex", "ris"], "description": "Default is json"],
+            "ids": ["type": "array", "items": ["type": "integer"], "minItems": 1, "description": "Reference IDs in output order"],
+            "view": ["type": "integer", "description": "Saved view ID"],
         ]),
         wrapsTextExport: true,
         isImage: false,
         buildArgv: { args in
-            var argv = ["export"]
+            let ids = try mcpIntArray(args, "ids")
+            let view = try mcpInt(args, "view")
+            if ids != nil, view != nil {
+                throw MCPToolError.invalidArguments("provide at most one of ids / view")
+            }
+            var argv = ["export"] + (ids ?? []).map(String.init)
+            mcpAppendInt(&argv, "--view", view)
             mcpAppendString(&argv, "--format", try mcpString(args, "format"))
             return argv
         }

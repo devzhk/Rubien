@@ -3,6 +3,7 @@ import SwiftUI
 import Combine
 import AppKit
 import WebKit
+import UniformTypeIdentifiers
 import RubienCore
 import RubienPDFKit
 
@@ -933,6 +934,7 @@ struct ContentView: View {
     @State private var hostingWindowBox = HostingWindowBox()
     @State private var selectedId: Int64?
     @State private var tableScrollRequest = 0
+    @State private var exportConfiguration: ReferenceExportConfigurationContext?
     @State private var columnConfigs: [ColumnConfig] = {
         guard let data = UserDefaults.standard.data(forKey: RubienPreferences.columnConfigsKey),
               let decoded = try? JSONDecoder().decode([ColumnConfig].self, from: data) else {
@@ -974,6 +976,39 @@ struct ContentView: View {
     private var selectedReference: Reference? {
         guard let selectedId else { return nil }
         return viewModel.filteredReferences.first { $0.id == selectedId }
+    }
+
+    private func beginReferenceExport(_ intent: ReferenceExportIntent) {
+        let panel = NSSavePanel()
+        panel.title = String(localized: "Export References", bundle: .module)
+        panel.prompt = String(localized: "Export", bundle: .module)
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.nameFieldStringValue = "\(intent.suggestedBasename).\(intent.request.format.filenameExtension)"
+        panel.allowedContentTypes = [
+            UTType(filenameExtension: intent.request.format.filenameExtension) ?? .data
+        ]
+
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        let database = viewModel.db
+        Task {
+            do {
+                let referenceCount = try await Task.detached(priority: .userInitiated) {
+                    let artifact = try ReferenceExportService(database: database)
+                        .export(intent.request)
+                    try artifact.data.write(to: destination, options: .atomic)
+                    return artifact.referenceCount
+                }.value
+                viewModel.flashAddConfirmation(
+                    String(
+                        format: String(localized: "Exported %d references", bundle: .module),
+                        referenceCount
+                    )
+                )
+            } catch {
+                viewModel.errorMessage = "Export failed: \(error.localizedDescription)"
+            }
+        }
     }
 
     private var homeHasAttention: Bool {
@@ -1186,6 +1221,86 @@ struct ContentView: View {
         .neutralGlassCard(cornerRadius: 14)
     }
 
+    private var libraryTableSurface: some View {
+        ReferenceTableView(
+            references: viewModel.filteredReferences,
+            tagMap: viewModel.referenceTagMap,
+            allTags: viewModel.tags,
+            selectedId: selectedId,
+            onSelect: { selectedId = $0 },
+            onDelete: { deleteReferences($0) },
+            onRefreshMetadata: { refs in refreshMetadata(for: refs) },
+            onUpdateReference: { updated in
+                var ref = updated
+                viewModel.saveReference(&ref)
+            },
+            onUpdateTags: { refId, tagIds in
+                viewModel.setTags(forReference: refId, tagIds: tagIds)
+            },
+            onCreateTag: { name in viewModel.createTag(name: name) },
+            onDeleteTag: { tagId in viewModel.deleteTag(id: tagId) },
+            deleteTagUnlessInUse: { tagId in viewModel.probeDeleteTag(id: tagId) },
+            onCreateOption: { propId, optionValue in
+                guard var prop = viewModel.propertyDefs.first(where: { $0.id == propId }) else {
+                    return
+                }
+                let color = ColorPalette.nextUnused(excluding: Set(prop.options.map(\.color)))
+                var options = prop.options
+                options.append(SelectOption(value: optionValue, color: color))
+                prop.options = options
+                try? viewModel.db.savePropertyDefinition(&prop)
+            },
+            onDeleteOption: { propId, optionValue in
+                try? viewModel.db.deletePropertyOption(
+                    propertyId: propId,
+                    value: optionValue,
+                    clearInUse: true
+                )
+            },
+            deleteUnlessInUse: { propId, optionValue in
+                viewModel.db.probeDeletePropertyOption(
+                    propertyId: propId,
+                    value: optionValue
+                )
+            },
+            isRefreshingMetadata: viewModel.isImporting,
+            onDoubleClick: { refId in openReader(for: refId) },
+            onExport: beginReferenceExport,
+            onConfigureExport: { exportConfiguration = $0 },
+            canExportEntireLibrary: !viewModel.allReferenceTitles.isEmpty,
+            columnConfigs: $columnConfigs,
+            sorts: $viewModel.tableSorts,
+            filters: $viewModel.viewFilters,
+            propertyDefs: Binding(
+                get: { viewModel.propertyDefs },
+                set: { viewModel.propertyDefs = $0 }
+            ),
+            db: viewModel.db,
+            customPropertyValueMap: viewModel.customPropertyValueMap,
+            groupBy: $viewModel.viewGroupBy,
+            viewColumnWraps: $viewModel.viewColumnWraps,
+            viewName: viewModel.currentViewName,
+            isDirty: viewModel.isCurrentViewDirty,
+            onSaveView: { viewModel.saveDraftForCurrentView() },
+            onDiscardView: { viewModel.discardDraftForCurrentView() },
+            scrollRequest: tableScrollRequest,
+            isActive: mainDestination == .library,
+            pdfAttachmentRevision: pdfDownloadCoordinator.operations.revision
+        )
+        .overlay(alignment: .trailing) {
+            if showInspector {
+                FloatingPanel(width: $inspectorWidth, range: 280...640) {
+                    detailPanel
+                }
+                .padding(.vertical, 8)
+                .padding(.trailing, 6)
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.22), value: showInspector)
+        .retainedDetailSurface(isActive: mainDestination == .library)
+    }
+
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             SidebarView(
@@ -1239,81 +1354,7 @@ struct ContentView: View {
                 .retainedDetailSurface(isActive: mainDestination == .home)
 
                 if hasPresentedLibrary || mainDestination == .library {
-                    ReferenceTableView(
-                references: viewModel.filteredReferences,
-                tagMap: viewModel.referenceTagMap,
-                allTags: viewModel.tags,
-                selectedId: selectedId,
-                onSelect: { selectedId = $0 },
-                onDelete: { deleteReferences($0) },
-                onRefreshMetadata: { refs in refreshMetadata(for: refs) },
-                onUpdateReference: { updated in
-                    var ref = updated
-                    viewModel.saveReference(&ref)
-                },
-                onUpdateTags: { refId, tagIds in viewModel.setTags(forReference: refId, tagIds: tagIds) },
-                onCreateTag: { name in viewModel.createTag(name: name) },
-                onDeleteTag: { tagId in viewModel.deleteTag(id: tagId) },
-                deleteTagUnlessInUse: { tagId in viewModel.probeDeleteTag(id: tagId) },
-                onCreateOption: { propId, optionValue in
-                    guard var prop = viewModel.propertyDefs.first(where: { $0.id == propId }) else { return }
-                    let color = ColorPalette.nextUnused(excluding: Set(prop.options.map(\.color)))
-                    var options = prop.options
-                    options.append(SelectOption(value: optionValue, color: color))
-                    prop.options = options
-                    try? viewModel.db.savePropertyDefinition(&prop)
-                },
-                // Confirmed clear: drop the option and clear it from every
-                // reference that holds it (the picker only reaches this after
-                // the user confirms an in-use delete, or for an unused option).
-                onDeleteOption: { propId, optionValue in
-                    try? viewModel.db.deletePropertyOption(propertyId: propId, value: optionValue, clearInUse: true)
-                },
-                // Fail-closed strict probe (see AppDatabase.probeDeletePropertyOption):
-                // deletes an unused option outright (→ nil), reports the in-use
-                // count so the picker can confirm (→ count), never clears on an
-                // unexpected error.
-                deleteUnlessInUse: { propId, optionValue in
-                    viewModel.db.probeDeletePropertyOption(propertyId: propId, value: optionValue)
-                },
-                isRefreshingMetadata: viewModel.isImporting,
-                onDoubleClick: { refId in
-                    openReader(for: refId)
-                },
-                columnConfigs: $columnConfigs,
-                sorts: $viewModel.tableSorts,
-                filters: $viewModel.viewFilters,
-                propertyDefs: Binding(
-                    get: { viewModel.propertyDefs },
-                    set: { viewModel.propertyDefs = $0 }
-                ),
-                db: viewModel.db,
-                customPropertyValueMap: viewModel.customPropertyValueMap,
-                groupBy: $viewModel.viewGroupBy,
-                viewColumnWraps: $viewModel.viewColumnWraps,
-                viewName: viewModel.currentViewName,
-                isDirty: viewModel.isCurrentViewDirty,
-                onSaveView: { viewModel.saveDraftForCurrentView() },
-                onDiscardView: { viewModel.discardDraftForCurrentView() },
-                scrollRequest: tableScrollRequest,
-                isActive: mainDestination == .library,
-                pdfAttachmentRevision: pdfDownloadCoordinator.operations.revision
-            )
-            // The detail floats over the table (table stays full-width and shows
-            // through the translucent glass), below the toolbar, shown only while
-            // toggled on. Drag its leading edge to resize the width.
-            .overlay(alignment: .trailing) {
-                if showInspector {
-                    FloatingPanel(width: $inspectorWidth, range: 280...640) {
-                        detailPanel
-                    }
-                    .padding(.vertical, 8)
-                    .padding(.trailing, 6)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
-                }
-            }
-            .animation(.easeInOut(duration: 0.22), value: showInspector)
-            .retainedDetailSurface(isActive: mainDestination == .library)
+                    libraryTableSurface
                 }
             }
         }
@@ -1390,6 +1431,16 @@ struct ContentView: View {
                 }
             }
         })
+        .sheet(item: $exportConfiguration) { context in
+            ReferenceExportConfigurationSheet(
+                context: context,
+                onCancel: { exportConfiguration = nil },
+                onContinue: { intent in
+                    exportConfiguration = nil
+                    beginReferenceExport(intent)
+                }
+            )
+        }
         .sheet(isPresented: $showAddReference) {
             AddReferenceView(
                 onSave: { ref, pdfFilename in

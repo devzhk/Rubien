@@ -154,6 +154,12 @@ claude mcp add rubien -- node $(pwd)/dist/index.js        # Claude Code
 
 Per-reference property values (cells) are edited through `rubien_update_reference`'s `properties` payload — `{"Status": "Reading", "Tags": {"add": ["12"]}, "7": ["ml", "nlp"], "Themes": null}` — atomically alongside metadata fields. The option tools (`create_option` / `update_option` / `delete_option`) manage the *choices themselves* (including Tag rows for the built-in Tags property).
 
+`rubien_export` accepts `format: "json" | "bibtex" | "ris"` and either
+`ids: [42, 57]` (preserving that order) or `view: 7`. Omit both for the whole
+library; supplying both is rejected. MCP never accepts an output path. Captured
+output retains the server-wide 32 MiB limit; BibTeX/RIS use the existing
+`{format,text}` result envelope.
+
 Reading tools operate on any reference without your knowing whether it holds a PDF or a clipped web page. `rubien_read_text` returns the readable body text — the attached PDF or the clipped web page — routed automatically: omit `source` and `pages`/`sections` imply the PDF, `start` implies the web body, else PDF wins when both exist. Every response reports `source` (what was read) and `available` (which sources are readable now). PDF results are page-keyed (`pages[]` items with `text` + `sectionPath`, selected by a `pages` range or `sections` title-substrings); web results are one paginated body window (`content` + `contentLength`, `start`/`maxChars`; `contentFormat` markdown or HTML). `rubien_read_annotations` merges the user's highlights/underlines/anchored notes across both kinds into one array, each item tagged `source`; web items carry a W3C TextQuoteSelector triple (`prefixText`/`anchorText`/`suffixText`) that locates them inside the `rubien_read_text` body. `rubien_grep_text` is the lookup half of the same workflow: it finds *where* a reference's body mentions a phrase or regex — PDF hits grouped by page (`sectionPath` breadcrumbs), web hits as exact character offsets — so you can then pull just those spots with `rubien_read_text` (`pages` for PDF, `start` for web). All three are library-only — none hit the network.
 
 PDF tools: `rubien_get_pdf_info` (page count, `hasTextLayer`, outline sections — call it before selecting `rubien_read_text` by `sections`), `rubien_render_pdf_page` (render a page to an image, for tables/figures/equations), `rubien_download_pdf` (fetch an open-access PDF and attach it to an existing reference).

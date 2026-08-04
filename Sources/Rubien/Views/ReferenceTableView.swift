@@ -63,6 +63,7 @@ struct ReferenceTableView: View {
         let sourceIsEmpty: Bool
         let processed: [Reference]
         let buckets: [GroupBucket]?
+        let exportIDs: [Int64]
     }
 
     /// Reference cache rather than observable state: updating it during a
@@ -88,6 +89,9 @@ struct ReferenceTableView: View {
     let deleteUnlessInUse: (Int64, String) -> Int?
     var isRefreshingMetadata = false
     var onDoubleClick: ((Int64) -> Void)? = nil
+    let onExport: (ReferenceExportIntent) -> Void
+    let onConfigureExport: (ReferenceExportConfigurationContext) -> Void
+    let canExportEntireLibrary: Bool
 
     @Binding var columnConfigs: [ColumnConfig]
     @Binding var sorts: [ViewSort]
@@ -127,6 +131,7 @@ struct ReferenceTableView: View {
             snapshot = makePipelineSnapshot(input: input)
             pipelineSnapshotCache.snapshot = snapshot
         }
+        let exportIDs = snapshot.exportIDs
         return VStack(spacing: 0) {
             ViewChromeBar(
                 viewName: viewName,
@@ -140,7 +145,23 @@ struct ReferenceTableView: View {
                 currentBuckets: snapshot.buckets ?? [],
                 isDirty: isDirty,
                 onSave: onSaveView,
-                onDiscard: onDiscardView
+                onDiscard: onDiscardView,
+                canExportCurrentView: !exportIDs.isEmpty,
+                canExportEntireLibrary: canExportEntireLibrary,
+                onExportCurrentView: { format in
+                    export(
+                        scope: .currentView,
+                        format: format,
+                        exportIDs: exportIDs
+                    )
+                },
+                onExportEntireLibrary: { format in
+                    export(
+                        scope: .entireLibrary,
+                        format: format,
+                        exportIDs: exportIDs
+                    )
+                }
             )
             subtitleRow
             if snapshot.sourceIsEmpty {
@@ -148,16 +169,20 @@ struct ReferenceTableView: View {
             } else if snapshot.processed.isEmpty {
                 filteredEmptyState
             } else {
-                tableContentView(processed: snapshot.processed, buckets: snapshot.buckets)
+                tableContentView(
+                    processed: snapshot.processed,
+                    buckets: snapshot.buckets,
+                    exportIDs: exportIDs
+                )
                 if !selection.isEmpty {
-                    batchToolbar
+                    batchToolbar(exportIDs: exportIDs)
                 }
             }
         }
         .onKeyPress(.init("a"), phases: .down) { event in
             guard isActive else { return .ignored }
             if event.modifiers.contains(.command) {
-                selection = Set(references.map(\.id))
+                selection = Set(exportIDs.map(Optional.some))
                 return .handled
             }
             return .ignored
@@ -189,6 +214,14 @@ struct ReferenceTableView: View {
         .onChange(of: scrollRequest) { _, _ in
             syncSelectionFromSelectedId()
         }
+        .focusedSceneValue(
+            \.referenceExportConfigurationAction,
+            isActive && (!exportIDs.isEmpty || canExportEntireLibrary)
+                ? ReferenceExportConfigurationAction {
+                    onConfigureExport(exportConfigurationContext(exportIDs: exportIDs))
+                }
+                : nil
+        )
     }
 
     // MARK: - Table
@@ -207,7 +240,11 @@ struct ReferenceTableView: View {
         .contains { viewColumnWraps.contains($0.id) }
     }
 
-    private func tableContentView(processed: [Reference], buckets: [GroupBucket]?) -> some View {
+    private func tableContentView(
+        processed: [Reference],
+        buckets: [GroupBucket]?,
+        exportIDs: [Int64]
+    ) -> some View {
         ReferenceTableContent(
             references: processed,
             buckets: buckets,
@@ -245,7 +282,7 @@ struct ReferenceTableView: View {
         .background(ReferenceTableRowHover())
         .contextMenu(forSelectionType: Reference.ID.self) { ids in
             if let id = ids.first, let ref = references.first(where: { $0.id == id }) {
-                contextMenuContent(for: ref)
+                contextMenuContent(for: ref, exportIDs: exportIDs)
             }
         }
         .onChange(of: selection) { _, newValue in
@@ -368,7 +405,8 @@ struct ReferenceTableView: View {
             input: input,
             sourceIsEmpty: references.isEmpty,
             processed: processed,
-            buckets: buckets
+            buckets: buckets,
+            exportIDs: orderedReferenceExportIDs(processed: processed, buckets: buckets)
         )
     }
 
@@ -405,12 +443,13 @@ struct ReferenceTableView: View {
     // MARK: - Context Menu
 
     @ViewBuilder
-    private func contextMenuContent(for ref: Reference) -> some View {
+    private func contextMenuContent(for ref: Reference, exportIDs: [Int64]) -> some View {
         if selection.count > 1 && selection.contains(ref.id) {
             Button(String(format: String(localized: "Refresh metadata for %d selected", bundle: .module), selection.count)) {
                 batchRefreshMetadata()
             }
             .disabled(isRefreshingMetadata)
+            exportSelectedMenu(exportIDs: exportIDs)
             Divider()
             Button(String(format: String(localized: "Delete %d selected", bundle: .module), selection.count), role: .destructive) {
                 showDeleteConfirm = true
@@ -431,7 +470,7 @@ struct ReferenceTableView: View {
 
     // MARK: - Batch Toolbar
 
-    private var batchToolbar: some View {
+    private func batchToolbar(exportIDs: [Int64]) -> some View {
         HStack(spacing: 10) {
             Text(String(format: String(localized: "%d selected", bundle: .module), selection.count))
                 .font(.system(size: 12, weight: .medium))
@@ -451,6 +490,16 @@ struct ReferenceTableView: View {
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
             .disabled(isRefreshingMetadata)
+            Divider().frame(height: 16)
+            Menu {
+                exportFormatButtons(scope: .selected, exportIDs: exportIDs)
+            } label: {
+                Label("Export Selected", systemImage: "square.and.arrow.up")
+                    .font(.system(size: 12))
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .disabled(selectedExportIDs(in: exportIDs).isEmpty)
             Divider().frame(height: 16)
             Button { selection.removeAll() } label: {
                 Image(systemName: "xmark")
@@ -530,6 +579,49 @@ struct ReferenceTableView: View {
         let toRefresh = references.filter { selection.contains($0.id) }
         guard !toRefresh.isEmpty else { return }
         onRefreshMetadata(toRefresh)
+    }
+
+    private func selectedExportIDs(in exportIDs: [Int64]) -> [Int64] {
+        exportIDs.filter { selection.contains(Optional($0)) }
+    }
+
+    private func exportConfigurationContext(
+        exportIDs: [Int64]
+    ) -> ReferenceExportConfigurationContext {
+        ReferenceExportConfigurationContext(
+            selectedIDs: selectedExportIDs(in: exportIDs),
+            currentViewIDs: exportIDs,
+            viewName: viewName,
+            hasEntireLibraryRows: canExportEntireLibrary
+        )
+    }
+
+    private func export(
+        scope: ReferenceExportUIScope,
+        format: ReferenceExportFormat,
+        exportIDs: [Int64]
+    ) {
+        let context = exportConfigurationContext(exportIDs: exportIDs)
+        if let intent = context.intent(scope: scope, format: format) {
+            onExport(intent)
+        }
+    }
+
+    @ViewBuilder
+    private func exportSelectedMenu(exportIDs: [Int64]) -> some View {
+        Menu("Export Selected") {
+            exportFormatButtons(scope: .selected, exportIDs: exportIDs)
+        }
+    }
+
+    @ViewBuilder
+    private func exportFormatButtons(
+        scope: ReferenceExportUIScope,
+        exportIDs: [Int64]
+    ) -> some View {
+        ReferenceExportFormatButtons { format in
+            export(scope: scope, format: format, exportIDs: exportIDs)
+        }
     }
 }
 

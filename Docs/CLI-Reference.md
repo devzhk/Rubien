@@ -327,14 +327,24 @@ Export references as JSON, BibTeX, or RIS.
 
 ```bash
 rubien-cli export --format bibtex
-rubien-cli export --format ris
+rubien-cli export 42 57 --format bibtex
+rubien-cli export --view 7 --format ris
+rubien-cli export 42 57 --format bibtex --output papers.bib
 ```
 
-| Option | Type | Default | Description |
+| Argument / option | Type | Default | Description |
 |---|---|---|---|
-| `-f, --format` | String | `json` | `json`, `bibtex`, `ris` |
+| `ids` | Int64 array | none | Reference IDs in output order; duplicates keep their first occurrence |
+| `-f, --format` | Enum | `json` | `json`, `bibtex`, `ris`; unknown values fail |
+| `--view` | Int64 | none | Export all rows matching a saved view; mutually exclusive with `ids` |
+| `-o, --output` | Path | none | Atomically write a file and print a JSON receipt instead of raw bytes |
+| `--force` | Flag | false | Replace an existing `--output` file; invalid without `--output` |
 
 **Output:** JSON array (default), or plain-text BibTeX/RIS to stdout.
+With `--output`, stdout is `{format,path,referenceCount}`. Missing explicit IDs
+fail as a complete selection with an `unresolved-reference-ids` envelope; a
+missing saved view fails with `view-not-found`. The parent directory must exist,
+and an existing file is never replaced without `--force`.
 
 ---
 
@@ -1195,7 +1205,9 @@ The two potentially long intake calls, `rubien_create_reference` and
 `rubien_download_pdf`, have a five-minute child timeout; other calls retain the
 60-second default. Advertised JSON-schema types, enums, bounds, required fields,
 and unknown-field rules are enforced before the child launches. Captured stdout
-and stderr are each capped at 32 MiB. `rubien_render_pdf_page` returns an MCP
+and stderr are each capped at 32 MiB. `rubien_export` accepts either ordered
+`ids` or a saved `view` (never both), plus `format`; omitting both scopes keeps
+whole-library behavior. `rubien_render_pdf_page` returns an MCP
 `image` content block plus text metadata; BibTeX/RIS exports use the npm-compatible
 `{format,text}` envelope.
 
