@@ -34,7 +34,6 @@ final class MigrationV11Tests: XCTestCase {
                     """
             )
         }
-        XCTAssertEqual(lastApplied, "v11")
         XCTAssertEqual(AppDatabase.currentSchemaVersion, lastApplied)
     }
 

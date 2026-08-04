@@ -52,7 +52,7 @@ public struct ReferenceMentionCandidate: Sendable, Equatable {
 public final class AppDatabase: Sendable {
     /// Bumped whenever a new migration is registered. Surfaced in
     /// `rubien-cli sync status` JSON for diagnostics.
-    public static let currentSchemaVersion = "v11"
+    public static let currentSchemaVersion = "v12"
 
     public let dbWriter: any DatabaseWriter
 
