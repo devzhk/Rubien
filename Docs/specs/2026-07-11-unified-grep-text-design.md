@@ -4,6 +4,8 @@
 **Status:** Draft for review
 **Context:** Feature 2 of the two-feature arc. Feature 1 (unified read tools, merged at `880ddc6`) established the routing conventions this reuses: the four-state PDF availability probe, `source`/`available`, PDF-wins + param-implied source selection. This spec **supersedes** `Docs/specs/2026-06-26-pdf-grep-design.md` (PDF-only draft, never implemented); its PDF matcher design is absorbed here. Nothing named `rubien_pdf_search` / `pdf search` ever ships.
 
+> **Web-format amendment (2026-08-03):** [Agent-facing web Markdown](../plans/2026-08-03-agent-web-markdown.md) supersedes this draft's raw-web-body details. Web grep now searches Markdown by default, accepts explicit `format: "html"`, reports both `contentFormat` and `sourceFormat`, and shares offsets with reads in the same format. The [CLI reference](../CLI-Reference.md#grep) is the current contract.
+
 ## 1. Motivation
 
 `rubien_search` finds *references* (metadata FTS across the library). `rubien_read_text` retrieves a *body*. Neither answers "**where** does reference 42's body say X" — today an agent must page the whole document through `read_text` and scan it. Grep is the lookup half of the read workflow: pattern in → anchored snippets out → `read_text` drills into the anchor. PDF hits anchor to **page numbers** (feed `read text --pages`); web hits anchor to **exact character offsets** (feed `read text --start`).

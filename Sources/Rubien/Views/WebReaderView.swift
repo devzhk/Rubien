@@ -4,6 +4,7 @@ import WebKit
 import Combine
 import AppKit
 import OSLog
+import UniformTypeIdentifiers
 import RubienCore
 
 /// Online-reading pipeline log. In Console.app filter subsystem `Rubien`, category `OnlineReadable`.
@@ -318,8 +319,8 @@ final class WebReaderViewModel: ObservableObject {
     @Published var annotationToolbarLayout: SelectionToolbarLayout?
     @Published var renderedHTML = ""
     @Published var isRendering = false
-    @Published var fontSize: Double = 18
-    @Published var contentWidth: CGFloat = 860
+    let fontSize: Double = 18
+    let contentWidth: CGFloat = 860
     @Published var displayMode: WebReaderDisplayMode = .clip
     @Published var isExtracting = false
     @Published var extractionUserMessage: String?
@@ -335,15 +336,11 @@ final class WebReaderViewModel: ObservableObject {
     /// 在线阅读整段流程（加载原文 + 注入脚本 + 抽取 + 组 HTML）防挂起超时。
     private var extractionSafetyTask: Task<Void, Never>?
     private var currentArticleBodyHTML: String?
-    /// Debounce task for appearance changes (font size / content width).
-    private var appearanceDebounceTask: Task<Void, Never>?
-
     var jumpToAnnotationInView: ((WebAnnotationRecord) -> Void)?
     var jumpToSummaryInWeb: (() -> Void)?
     /// 停止正在进行的原文加载 / Readability 流程（切回「剪藏正文」时调用）。
     var resetExtractionNavigation: (() -> Void)?
     var clearSelectionInView: (() -> Void)?
-    var updateAppearanceInView: ((Double, CGFloat) -> Void)?
     var refreshAnnotationsInView: (([WebAnnotationRecord]) -> Void)?
 
     init(reference: Reference, db: AppDatabase = .shared) {
@@ -398,6 +395,21 @@ final class WebReaderViewModel: ObservableObject {
 
     var hasSelection: Bool {
         !(pendingSelection?.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+    }
+
+    var canExportMarkdown: Bool {
+        reference.id != nil && reference.webContent?.isEmpty == false
+    }
+
+    func prepareMarkdownExport() async throws -> Data {
+        let reference = reference
+        let database = db
+        return try await Task.detached(priority: .userInitiated) {
+            try WebReaderMarkdownExportWorker.prepare(
+                reference: reference,
+                database: database
+            )
+        }.value
     }
 
     func stageSelection(_ selection: WebSelectionSnapshot?, viewportSize: CGSize) {
@@ -652,26 +664,6 @@ final class WebReaderViewModel: ObservableObject {
         }
     }
 
-    func increaseFontSize() {
-        fontSize = min(fontSize + 1, 26)
-        notifyAppearanceChanged()
-    }
-
-    func decreaseFontSize() {
-        fontSize = max(fontSize - 1, 13)
-        notifyAppearanceChanged()
-    }
-
-    func narrowContent() {
-        contentWidth = max(contentWidth - 60, 620)
-        notifyAppearanceChanged()
-    }
-
-    func widenContent() {
-        contentWidth = min(contentWidth + 60, 1200)
-        notifyAppearanceChanged()
-    }
-
     /// 与 PDF 选区工具栏相同的尺寸与上下优先策略（坐标为 SwiftUI 自上而下、视口与 WKWebView 对齐）。
     static func toolbarLayout(viewportSelectionRect: CGRect?, viewportSize: CGSize) -> SelectionToolbarLayout? {
         let barW: CGFloat = 180
@@ -752,19 +744,6 @@ final class WebReaderViewModel: ObservableObject {
             suffixText: selection.suffixText.nilIfBlank
         )
         try? db.saveWebAnnotation(&annotation)
-    }
-
-    private func notifyAppearanceChanged() {
-        // Debounce: wait 80 ms so rapid button taps are coalesced into one JS call.
-        appearanceDebounceTask?.cancel()
-        let fs = fontSize
-        let cw = contentWidth
-        appearanceDebounceTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            try? await Task.sleep(nanoseconds: 80_000_000) // 80 ms
-            guard !Task.isCancelled else { return }
-            self.updateAppearanceInView?(fs, cw)
-        }
     }
 
     private func renderContent() {
@@ -1751,11 +1730,6 @@ final class WebReaderViewModel: ObservableObject {
                   void el.offsetWidth;
                   el.classList.add('rubien-summary-flash');
                   window.setTimeout(() => el.classList.remove('rubien-summary-flash'), 1300);
-                },
-                updateAppearance(fontSize, maxWidth) {
-                  document.documentElement.style.setProperty('--reader-font-size', `${fontSize}px`);
-                  document.documentElement.style.setProperty('--reader-max-width', `${maxWidth}px`);
-                  requestAnimationFrame(() => emitSelectionState());
                 }
               };
             })();
@@ -1840,6 +1814,8 @@ struct WebReaderView: View {
     /// resets it on any external dismissal path (JS-driven selection clear, annotation
     /// activation, highlight/underline buttons) without going through onDismiss.
     @State private var noteMarkdownForSelection: String = ""
+    @State private var isExportingMarkdown = false
+    @State private var markdownExportError: String?
     private let onClose: (() -> Void)?
 
     // Assistant chat (Phase 2c, floating card since Phase 3a): one renderer +
@@ -2005,8 +1981,20 @@ struct WebReaderView: View {
                     .help(String(localized: "Re-extract from the source URL", bundle: .module))
                 }
 
-                fontControls
-                widthControls
+                Button {
+                    exportMarkdown()
+                } label: {
+                    if isExportingMarkdown {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Label(
+                            String(localized: "Export Markdown…", bundle: .module),
+                            systemImage: "square.and.arrow.up"
+                        )
+                    }
+                }
+                .disabled(isExportingMarkdown || !viewModel.canExportMarkdown)
+                .help(String(localized: "Export the clipped article as Markdown", bundle: .module))
             }
 
             ToolbarItemGroup(placement: .primaryAction) {
@@ -2044,6 +2032,46 @@ struct WebReaderView: View {
             Button(String(localized: "common.ok", bundle: .module), role: .cancel) {}
         } message: {
             Text(viewModel.extractionUserMessage ?? "")
+        }
+        .alert(String(localized: "Export Markdown", bundle: .module), isPresented: Binding(
+            get: { markdownExportError != nil },
+            set: { if !$0 { markdownExportError = nil } }
+        )) {
+            Button(String(localized: "common.ok", bundle: .module), role: .cancel) {}
+        } message: {
+            Text(markdownExportError ?? "")
+        }
+    }
+
+    private func exportMarkdown() {
+        guard !isExportingMarkdown else { return }
+        isExportingMarkdown = true
+
+        Task { @MainActor in
+            defer { isExportingMarkdown = false }
+            do {
+                let panel = NSSavePanel()
+                panel.title = String(localized: "Export Markdown", bundle: .module)
+                panel.prompt = String(localized: "Export", bundle: .module)
+                panel.nameFieldStringValue = WebReaderMarkdownExportWorker.suggestedFilename(
+                    for: viewModel.reference.title
+                )
+                panel.canCreateDirectories = true
+                panel.isExtensionHidden = false
+                panel.allowedContentTypes = [
+                    UTType(filenameExtension: "md") ?? .plainText
+                ]
+
+                guard panel.runModal() == .OK, let destination = panel.url else {
+                    return
+                }
+                let data = try await viewModel.prepareMarkdownExport()
+                try await Task.detached(priority: .userInitiated) {
+                    try data.write(to: destination, options: .atomic)
+                }.value
+            } catch {
+                markdownExportError = error.localizedDescription
+            }
         }
     }
 
@@ -2148,44 +2176,6 @@ struct WebReaderView: View {
             }
             .transition(.opacity)
         }
-    }
-
-    private var fontControls: some View {
-        HStack(spacing: 3) {
-            Button { viewModel.decreaseFontSize() } label: {
-                Image(systemName: "textformat.size.smaller")
-                    .font(.system(size: 13, weight: .medium))
-            }
-            .buttonStyle(.plain)
-
-            Button { viewModel.increaseFontSize() } label: {
-                Image(systemName: "textformat.size.larger")
-                    .font(.system(size: 13, weight: .medium))
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(.horizontal, 4)
-        .padding(.vertical, 3)
-        .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 8))
-    }
-
-    private var widthControls: some View {
-        HStack(spacing: 3) {
-            Button { viewModel.narrowContent() } label: {
-                Image(systemName: "arrow.left.and.line.vertical.and.arrow.right")
-                    .font(.system(size: 13, weight: .medium))
-            }
-            .buttonStyle(.plain)
-
-            Button { viewModel.widenContent() } label: {
-                Image(systemName: "arrow.left.and.line.vertical.and.arrow.right.circle")
-                    .font(.system(size: 13, weight: .medium))
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(.horizontal, 4)
-        .padding(.vertical, 3)
-        .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -2313,7 +2303,6 @@ private struct WebReaderContentView: NSViewRepresentable {
             context.coordinator.invalidateAnnotationsPushCache()
             nsView.loadHTMLString(viewModel.renderedHTML, baseURL: URL(string: referenceBaseURL))
         } else {
-            context.coordinator.pushAppearance()
             context.coordinator.pushAnnotations()
         }
     }
@@ -2419,9 +2408,6 @@ private struct WebReaderContentView: NSViewRepresentable {
                 guard let id = annotation.id else { return }
                 self?.evaluate("window.RubienReader && window.RubienReader.scrollToAnnotation(\(id));")
             }
-            viewModel.updateAppearanceInView = { [weak self] fontSize, contentWidth in
-                self?.pushAppearance(fontSize: fontSize, contentWidth: contentWidth)
-            }
             viewModel.refreshAnnotationsInView = { [weak self] annotations in
                 self?.pushAnnotations(annotations: annotations)
             }
@@ -2446,7 +2432,6 @@ private struct WebReaderContentView: NSViewRepresentable {
                 extractionManager.runOnlineArticleExtraction(from: webView)
                 return
             }
-            pushAppearance()
             pushAnnotations()
             WebReaderContentView.applyElegantScrollers(to: webView)
         }
@@ -2614,16 +2599,6 @@ private struct WebReaderContentView: NSViewRepresentable {
             default:
                 break
             }
-        }
-
-        func pushAppearance() {
-            pushAppearance(fontSize: parent.viewModel.fontSize, contentWidth: parent.viewModel.contentWidth)
-        }
-
-        func pushAppearance(fontSize: Double, contentWidth: CGFloat) {
-            // Original mode shows a raw web page that has no window.RubienReader.
-            guard parent.viewModel.displayMode == .clip else { return }
-            evaluate("window.RubienReader && window.RubienReader.updateAppearance(\(fontSize), \(Int(contentWidth)));")
         }
 
         func pushAnnotations() {

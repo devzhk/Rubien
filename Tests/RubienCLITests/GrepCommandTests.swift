@@ -177,9 +177,23 @@ final class GrepCommandTests: XCTestCase {
         let grep = try runCLI(["grep", "\(id)", "needle"])
         XCTAssertEqual(grep.exitCode, 0, grep.stderr)
         let json = try stdoutJSON(grep)
+        XCTAssertEqual(json["contentFormat"] as? String, "markdown")
+        XCTAssertEqual(json["sourceFormat"] as? String, "html")
         let start = try XCTUnwrap((json["matches"] as? [[String: Any]])?.first?["start"] as? NSNumber).intValue
         let read = try runCLI(["read", "text", "\(id)", "--start", "\(start)", "--max-chars", "6"])
         XCTAssertEqual((try stdoutJSON(read))["content"] as? String, "needle")
+
+        let htmlGrep = try runCLI(["grep", "\(id)", "needle", "--format", "html"])
+        XCTAssertEqual(htmlGrep.exitCode, 0, htmlGrep.stderr)
+        let htmlJSON = try stdoutJSON(htmlGrep)
+        XCTAssertEqual(htmlJSON["contentFormat"] as? String, "html")
+        XCTAssertEqual(htmlJSON["sourceFormat"] as? String, "html")
+        let htmlStart = try XCTUnwrap((htmlJSON["matches"] as? [[String: Any]])?.first?["start"] as? NSNumber).intValue
+        let htmlRead = try runCLI([
+            "read", "text", "\(id)", "--format", "html",
+            "--start", "\(htmlStart)", "--max-chars", "6",
+        ])
+        XCTAssertEqual((try stdoutJSON(htmlRead))["content"] as? String, "needle")
     }
 
     func testGrepWebRegexAndCaseInsensitivity() throws {

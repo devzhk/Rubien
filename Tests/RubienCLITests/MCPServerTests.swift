@@ -215,6 +215,13 @@ final class MCPServerTests: XCTestCase {
         let listSchema = try XCTUnwrap(byName["rubien_list_references"]?["inputSchema"] as? [String: Any])
         let listProperties = try XCTUnwrap(listSchema["properties"] as? [String: Any])
         XCTAssertEqual((listProperties["view"] as? [String: Any])?["type"] as? String, "integer")
+
+        for name in ["rubien_read_text", "rubien_grep_text"] {
+            let schema = try XCTUnwrap(byName[name]?["inputSchema"] as? [String: Any])
+            let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+            let format = try XCTUnwrap(properties["format"] as? [String: Any])
+            XCTAssertEqual(format["enum"] as? [String], ["markdown", "html"])
+        }
     }
 
     func testAppPresentationModeAddsOnlyPrivateDocumentCardTool() throws {
@@ -816,6 +823,29 @@ final class MCPServerTests: XCTestCase {
         XCTAssertTrue(text.lowercased().contains("mutually exclusive"), "got: \(text)")
     }
 
+    func testReadTextPagesAndFormatAreMutuallyExclusive() throws {
+        try skipIfBinaryMissing()
+        let responses = try runMCP([
+            toolCall(id: 1, name: "rubien_read_text", arguments: ["id": 1, "pages": "1", "format": "html"]),
+        ])
+        let result = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
+        XCTAssertEqual(result["isError"] as? Bool, true)
+        let text = try XCTUnwrap((result["content"] as? [[String: Any]])?.first?["text"] as? String)
+        XCTAssertTrue(text.lowercased().contains("mutually exclusive"), "got: \(text)")
+    }
+
+    func testReadTextFormatImpliesWebAndIsForwarded() throws {
+        try skipIfBinaryMissing()
+        let id = try seedTitle("Format forwarding")
+        let responses = try runMCP([
+            toolCall(id: 1, name: "rubien_read_text", arguments: ["id": id, "format": "html"]),
+        ])
+        let result = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
+        XCTAssertEqual(result["isError"] as? Bool, true)
+        let text = ((result["content"] as? [[String: Any]])?.first?["text"] as? String ?? "").lowercased()
+        XCTAssertTrue(text.contains("web"), text)
+    }
+
     // MARK: - Text tools
 
     func testGetMatchesDirectCLIOutput() throws {
@@ -991,6 +1021,22 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(result["isError"] as? Bool, true)
         let text = ((result["content"] as? [[String: Any]])?.first?["text"] as? String ?? "").lowercased()
         XCTAssertTrue(text.contains("web"), "error must show the web-implied routing: \(text)")
+    }
+
+    func testGrepTextFormatImpliesWebAndIsForwarded() throws {
+        try skipIfBinaryMissing()
+        let id = try seedTitle("Grep format forwarding")
+        let responses = try runMCP([
+            toolCall(
+                id: 1,
+                name: "rubien_grep_text",
+                arguments: ["id": id, "query": "x", "format": "html"]
+            ),
+        ])
+        let result = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
+        XCTAssertEqual(result["isError"] as? Bool, true)
+        let text = ((result["content"] as? [[String: Any]])?.first?["text"] as? String ?? "").lowercased()
+        XCTAssertTrue(text.contains("web"), text)
     }
 
     func testGrepTextMixedScopesRejected() throws {

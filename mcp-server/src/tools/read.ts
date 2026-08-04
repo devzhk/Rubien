@@ -8,11 +8,13 @@ export function registerReadTools(server: McpServer): void {
     {
       title: "Read the body text of any reference",
       description:
-        "Return the readable body text of any reference — its attached PDF or its clipped web page — without needing to know which it has. Source selection when `source` is omitted: `pages`/`sections` imply pdf, `start` implies web, otherwise PDF wins when both exist. Every response carries `source` (what was read) and `available` (which sources are readable now, e.g. [\"pdf\",\"web\"]). PDF responses are page-keyed: each `pages[]` item carries `text` and `sectionPath`, selected via `pages` ('1-3' or '1-3,8-10') or `sections` (title substrings, case-insensitive; errors `no-outline` when the PDF has no outline — fall back to `pages`). Web responses are one flat windowed body: `content` + `contentLength`, paginated via `start`/`maxChars`; `contentFormat` is \"markdown\" or \"html\" (treat html as a fragment). To find WHERE the body mentions something before reading, use `rubien_grep_text`. Library-only — never fetches from the network. Use `rubien_read_annotations` for the user's highlights/notes, and `rubien_get_pdf_info` first when you plan to select by `sections`.",
+        "Return the readable body text of any reference — its attached PDF or its clipped web page — without needing to know which it has. Source selection when `source` is omitted: `pages`/`sections` imply pdf, `start`/`format` imply web, otherwise PDF wins when both exist. Every response carries `source` (what was read) and `available` (which sources are readable now, e.g. [\"pdf\",\"web\"]). PDF responses are page-keyed. Web responses are one flat windowed body: Markdown is returned by default, while `format: \"html\"` explicitly requests the extracted HTML fragment. `contentFormat` describes the returned representation and `sourceFormat` the canonical stored one. Use `rubien_grep_text` with the same format before windowed reads. Library-only — never fetches from the network.",
       inputSchema: {
         id: z.number().int().describe("Reference ID"),
         source: z.enum(["pdf", "web"]).optional()
-          .describe("Force a source. Default: pages/sections imply pdf, start implies web, else PDF wins."),
+          .describe("Force a source. Default: pages/sections imply pdf, start/format imply web, else PDF wins."),
+        format: z.enum(["markdown", "html"]).optional()
+          .describe("Web representation. Markdown is the default; html returns the extracted HTML fragment. Implies web."),
         pages: z.string().optional()
           .describe("PDF page range, e.g. '1-3' or '1-3,8-10' or '12-'. Implies pdf. Mutually exclusive with `sections`."),
         sections: z.array(z.string().min(1)).optional()
@@ -32,9 +34,9 @@ export function registerReadTools(server: McpServer): void {
         };
       }
       const pdfParams = Boolean(args.pages) || Boolean(args.sections && args.sections.length > 0);
-      if (pdfParams && args.start !== undefined) {
+      if (pdfParams && (args.start !== undefined || args.format !== undefined)) {
         return {
-          content: [{ type: "text" as const, text: JSON.stringify({ error: "pages/sections-and-start-mutually-exclusive" }) }],
+          content: [{ type: "text" as const, text: JSON.stringify({ error: "pages/sections-and-start/format-mutually-exclusive" }) }],
           isError: true,
         };
       }
@@ -46,6 +48,7 @@ export function registerReadTools(server: McpServer): void {
           "--start": args.start,
           "--max-chars": args.maxChars,
           "--source": args.source,
+          "--format": args.format,
         }),
       );
       return runCliAsTool(cliArgs);
@@ -76,13 +79,15 @@ export function registerReadTools(server: McpServer): void {
     {
       title: "Find where a reference's body says something",
       description:
-        "Find WHERE a phrase or regex occurs inside one reference's body text — its attached PDF or its clipped web page — without retrieving the body. Returns anchored locations, not text: PDF hits are page-grouped (`pages[]` with `page`, `sectionPath` breadcrumbs, `matchCount`, snippets) — drill in with `rubien_read_text` + `pages`; web hits carry exact character offsets (`matches[].start`, same coordinates as `rubien_read_text`'s `start`) — drill in with `rubien_read_text` + `start`. Matching is case-insensitive (`regex: true` treats the query as a regular expression; `(?-i:…)` restores case). Source selection mirrors `rubien_read_text`: explicit `source` wins; `pages`/`maxPages`/`snippetsPerPage` imply pdf and `maxMatches` implies web; otherwise PDF wins when both exist. Every response carries `source` and `available`. A scanned PDF returns success with `hasTextLayer: false` and no hits — fall back to `rubien_render_pdf_page`. To find which REFERENCES match, use `rubien_search_references` (library metadata) instead. Library-only — never fetches from the network.",
+        "Find WHERE a phrase or regex occurs inside one reference's body text. Web matching uses Markdown by default; `format: \"html\"` explicitly searches extracted HTML. Web offsets feed `rubien_read_text` when called with the same format. Source selection mirrors `rubien_read_text`: explicit `source` wins; PDF-scoped parameters imply pdf and `maxMatches`/`format` imply web; otherwise PDF wins when both exist. Library-only — never fetches from the network.",
       inputSchema: {
         id: z.number().int().describe("Reference ID"),
         query: z.string().min(1).describe("Literal phrase (default) or regex (`regex: true`). Case-insensitive."),
         regex: z.boolean().optional().describe("Treat `query` as a regular expression."),
         source: z.enum(["pdf", "web"]).optional()
-          .describe("Force a source. Default: pdf-scoped params imply pdf, maxMatches implies web, else PDF wins."),
+          .describe("Force a source. Default: pdf-scoped params imply pdf, maxMatches/format imply web, else PDF wins."),
+        format: z.enum(["markdown", "html"]).optional()
+          .describe("Web representation. Markdown is the default; html searches extracted HTML. Implies web."),
         contextChars: z.number().int().positive().max(2_000).optional()
           .describe("Snippet window width (default 160)."),
         pages: z.string().optional()
@@ -99,9 +104,9 @@ export function registerReadTools(server: McpServer): void {
     async (args) => {
       const pdfParams =
         Boolean(args.pages) || args.maxPages !== undefined || args.snippetsPerPage !== undefined;
-      if (pdfParams && args.maxMatches !== undefined) {
+      if (pdfParams && (args.maxMatches !== undefined || args.format !== undefined)) {
         return {
-          content: [{ type: "text" as const, text: JSON.stringify({ error: "pdf-scoped-and-maxMatches-mutually-exclusive" }) }],
+          content: [{ type: "text" as const, text: JSON.stringify({ error: "pdf-scoped-and-maxMatches/format-mutually-exclusive" }) }],
           isError: true,
         };
       }
@@ -115,6 +120,7 @@ export function registerReadTools(server: McpServer): void {
           "--max-pages": args.maxPages,
           "--snippets-per-page": args.snippetsPerPage,
           "--max-matches": args.maxMatches,
+          "--format": args.format,
         }),
       );
       return runCliAsTool(cliArgs);

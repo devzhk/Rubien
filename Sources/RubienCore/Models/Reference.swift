@@ -672,6 +672,7 @@ extension Reference {
     }
 
     private static let htmlWebContentPrefix = "<!-- rubien:web-content:html -->"
+    private static let markdownWebContentPrefix = "<!-- rubien:web-content:markdown -->"
 
     public static func encodeWebContent(_ body: String?, format: WebContentFormat) -> String? {
         guard let raw = body?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -681,7 +682,7 @@ extension Reference {
 
         switch format {
         case .markdown:
-            return raw
+            return markdownWebContentPrefix + "\n" + raw
         case .html:
             return htmlWebContentPrefix + "\n" + raw
         }
@@ -701,6 +702,17 @@ extension Reference {
             return DecodedWebContent(body: body, format: .html)
         }
 
+        if trimmed.hasPrefix(markdownWebContentPrefix) {
+            let body = trimmed
+                .dropFirst(markdownWebContentPrefix.count)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !body.isEmpty else { return nil }
+            return DecodedWebContent(body: body, format: .markdown)
+        }
+
+        // Legacy rows predate explicit format markers. Keep the heuristic for
+        // those rows only; newly imported Markdown is always unambiguous even
+        // when it begins with a valid raw-HTML block.
         if looksLikeHTMLWebContent(trimmed) {
             return DecodedWebContent(body: trimmed, format: .html)
         }
@@ -709,7 +721,17 @@ extension Reference {
     }
 
     public var decodedWebContent: DecodedWebContent? {
-        Self.decodeWebContent(webContent)
+        if referenceType == .markdown,
+           let trimmed = webContent?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !trimmed.isEmpty,
+           !trimmed.hasPrefix(Self.htmlWebContentPrefix),
+           !trimmed.hasPrefix(Self.markdownWebContentPrefix) {
+            // Markdown imports released before explicit format envelopes were
+            // stored as plain bodies. Their reference type is authoritative:
+            // a valid raw-HTML block at the start is still Markdown source.
+            return DecodedWebContent(body: trimmed, format: .markdown)
+        }
+        return Self.decodeWebContent(webContent)
     }
 
     public var canEnterFeedback: Bool {

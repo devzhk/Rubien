@@ -31,6 +31,27 @@ final class MarkdownImportMergeTests: XCTestCase {
                        "longest content wins")
     }
 
+    func testFormatEnvelopeDoesNotMakeShorterMarkdownWinMerge() throws {
+        let db = try makeDB()
+        let existingBody = "This existing body is longer."
+        var existing = Reference(
+            title: "Existing",
+            url: "https://example.com/envelope-length",
+            webContent: existingBody, // legacy unmarked Markdown
+            referenceType: .webpage
+        )
+        _ = try db.saveReference(&existing)
+
+        let incoming = MarkdownImporter.parse(
+            "---\nsource: https://example.com/envelope-length\n---\nShort",
+            filename: "shorter"
+        )
+        _ = try db.batchImportReferences([incoming], mergePolicy: .markdownFillOnly)
+
+        let merged = try XCTUnwrap(try db.fetchReferences(ids: [try XCTUnwrap(existing.id)]).first)
+        XCTAssertEqual(merged.decodedWebContent?.body, existingBody)
+    }
+
     func testFillOnlyFieldsPopulateWhenEmpty() throws {
         let db = try makeDB()
         var bare = Reference(title: "Bare", url: "https://example.com/p2", referenceType: .webpage)

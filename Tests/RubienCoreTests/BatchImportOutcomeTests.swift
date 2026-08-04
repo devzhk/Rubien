@@ -87,6 +87,23 @@ final class BatchImportOutcomeTests: XCTestCase {
         XCTAssertEqual(try db.referenceCount(), 1)
     }
 
+    func testStandardMergeComparesDecodedWebBodyLengths() throws {
+        let db = try makeDatabase()
+        let existingBody = "This legacy unmarked body is longer."
+        var seeded = Reference(title: "Seeded", webContent: existingBody, pmid: "998")
+        try db.saveReference(&seeded)
+
+        let incoming = Reference(
+            title: "Re-import",
+            webContent: Reference.encodeWebContent("Short", format: .markdown),
+            pmid: "998"
+        )
+        _ = try db.batchImportReferencesDetailed([(input: "markdown", reference: incoming)])
+
+        let merged = try XCTUnwrap(try db.fetchReferences(ids: [try XCTUnwrap(seeded.id)]).first)
+        XCTAssertEqual(merged.decodedWebContent?.body, existingBody)
+    }
+
     func testBatchTransactionFailureThrowsAndRollsBack() throws {
         let db = try makeDatabase()
         // Force the write transaction to fail: no `reference` table to insert into.

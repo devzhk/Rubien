@@ -2,10 +2,82 @@
 import SwiftUI
 import os
 import PDFKit
+import CryptoKit
 import RubienCore
 import RubienPDFKit
 
 private let detailLog = Logger(subsystem: "Rubien", category: "reference-detail")
+
+/// Materializes database-backed reader content as a derived local file so
+/// Finder can reveal it. Imports and clips deliberately do not retain their
+/// source path, so this copy is regenerated from the current stored content.
+enum ReferenceDetailContentRevealWorker {
+    enum MaterializationError: Error, Equatable {
+        case missingReferenceID
+        case missingContent
+    }
+
+    static func materialize(reference: Reference, storageRoot: URL) throws -> URL {
+        guard let referenceID = reference.id else {
+            throw MaterializationError.missingReferenceID
+        }
+        guard let content = reference.decodedWebContent else {
+            throw MaterializationError.missingContent
+        }
+
+        let data = Data(content.body.utf8)
+        let digest = SHA256.hash(data: data)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        let baseName = "Reference-\(referenceID)-\(digest)"
+        let filenameExtension = content.format == .markdown ? "md" : "html"
+        let fileManager = FileManager.default
+        let referenceRoot = storageRoot.appendingPathComponent(
+            "Reference-\(referenceID)",
+            isDirectory: true
+        )
+
+        try fileManager.createDirectory(
+            at: referenceRoot,
+            withIntermediateDirectories: true
+        )
+
+        let candidates = try fileManager.contentsOfDirectory(
+            at: referenceRoot,
+            includingPropertiesForKeys: nil
+        ).filter {
+            $0.pathExtension.lowercased() == filenameExtension
+                && $0.deletingPathExtension().lastPathComponent.hasPrefix(baseName)
+        }
+        if let matchingCopy = candidates.first(where: {
+            guard let existingData = try? Data(contentsOf: $0) else { return false }
+            return existingData == data
+        }) {
+            try? fileManager.setAttributes(
+                [.posixPermissions: 0o444],
+                ofItemAtPath: matchingCopy.path
+            )
+            return matchingCopy.standardizedFileURL
+        }
+
+        let canonical = referenceRoot.appendingPathComponent(
+            "\(baseName).\(filenameExtension)",
+            isDirectory: false
+        )
+        let destination = fileManager.fileExists(atPath: canonical.path)
+            ? referenceRoot.appendingPathComponent(
+                "\(baseName)-\(UUID().uuidString).\(filenameExtension)",
+                isDirectory: false
+            )
+            : canonical
+        try data.write(to: destination, options: .atomic)
+        try? fileManager.setAttributes(
+            [.posixPermissions: 0o444],
+            ofItemAtPath: destination.path
+        )
+        return destination.standardizedFileURL
+    }
+}
 
 /// Runs manual PDF file I/O and the potentially-contended SQLite write away
 /// from the main actor. The injected operations keep the threading and cleanup
@@ -219,6 +291,8 @@ struct ReferenceDetailView: View {
     @State private var cachedHasPDFInCache = false
     @State private var pdfDownloadState: PDFDownloadState = .idle
     @State private var pdfAttachmentState: PDFAttachmentState = .idle
+    @State private var contentRevealError: String?
+    @State private var contentRevealRequestID: UUID?
     @Binding private var pdfOperations: ReferenceDetailPDFOperationRegistry
     @State private var showOverwriteConfirmation = false
     @Binding var propertyDefs: [PropertyDefinition]
@@ -301,6 +375,8 @@ struct ReferenceDetailView: View {
             editingField = nil
             guard oldRef.id != newRef.id else { return }
             pdfAttachmentState = .idle
+            contentRevealError = nil
+            contentRevealRequestID = nil
             cachedHasPDFInCache = false
             pdfDownloadState = .idle
             referenceTags = []
@@ -423,6 +499,35 @@ struct ReferenceDetailView: View {
                 propertyRow(for: prop)
                 if prop.id != visibleDefs.last?.id {
                     Divider().padding(.leading, 100)
+                }
+            }
+
+            if editedRef.id != nil,
+               let storedContent = editedRef.decodedWebContent {
+                let formatLabel = storedContent.format == .markdown ? "Markdown" : "HTML"
+                Divider().padding(.leading, 100)
+                PropertyRowLayout(label: formatLabel) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 8) {
+                            Label("Stored", systemImage: "doc.plaintext.fill")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                            Button {
+                                revealStoredContent()
+                            } label: {
+                                Image(systemName: "folder")
+                                    .font(.system(size: 11, weight: .medium))
+                            }
+                            .buttonStyle(ToolbarHoverButtonStyle(hoverOpacity: 0.10, pressedOpacity: 0.16))
+                            .help("Reveal \(formatLabel) Copy in Finder")
+                        }
+                        if let contentRevealError {
+                            Text(contentRevealError)
+                                .font(.caption2)
+                                .foregroundStyle(.red)
+                                .lineLimit(2)
+                        }
+                    }
                 }
             }
 
@@ -1465,6 +1570,42 @@ struct ReferenceDetailView: View {
             guard let url = try? await cache.pathFor(referenceId: id) else { return }
             await MainActor.run {
                 NSWorkspace.shared.activateFileViewerSelecting([url])
+            }
+        }
+    }
+
+    private func revealStoredContent() {
+        let reference = editedRef
+        guard let referenceID = reference.id else { return }
+        let requestID = UUID()
+        let storageRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Rubien", isDirectory: true)
+            .appendingPathComponent("Content Reveal", isDirectory: true)
+        contentRevealError = nil
+        contentRevealRequestID = requestID
+
+        Task { @MainActor in
+            let result = await Task.detached(priority: .userInitiated) {
+                Result {
+                    try ReferenceDetailContentRevealWorker.materialize(
+                        reference: reference,
+                        storageRoot: storageRoot
+                    )
+                }
+            }.value
+            guard editedRef.id == referenceID,
+                  contentRevealRequestID == requestID else { return }
+            switch result {
+            case .success(let url):
+                contentRevealRequestID = nil
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            case .failure(let error):
+                contentRevealRequestID = nil
+                detailLog.error("Stored-content reveal failed: \(error.localizedDescription, privacy: .public)")
+                contentRevealError = String(
+                    localized: "Could not create a content copy: \(error.localizedDescription)",
+                    bundle: .module
+                )
             }
         }
     }

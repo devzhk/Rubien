@@ -39,6 +39,11 @@ fields. This feature adds the import path.
   filtered.)
 - **Attaching or moving the source file.** Content is copied into the
   library database; the `.md` file on disk stays untouched and unreferenced.
+  “Reveal Markdown Copy in Finder” materializes the current stored body as a
+  read-only derived file in an OS-managed temporary directory; it does not
+  recover or relink the original source, and edits to that copy do not flow
+  back into Rubien. HTML-backed web clips expose the same action as an `.html`
+  copy, labeled with their actual stored format.
 - **Frontmatter `tags` mapping.** Ignored by user decision. Folder imports
   can stamp a property via `--property`/`--value` (Zotero parity).
 - **Recursive folder import.** Top-level `*.md` only, so pointing at a vault

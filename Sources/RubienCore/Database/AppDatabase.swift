@@ -684,6 +684,13 @@ public final class AppDatabase: Sendable {
             try Self.applyV11Body(db)
         }
 
+        // v12 (2026-08): local derived Markdown for agent/search reads of
+        // canonical HTML web clips. The hash + converter version make rows
+        // disposable and self-invalidating; no CloudKit dirty triggers.
+        migrator.registerMigration("v12") { db in
+            try Self.applyV12Body(db)
+        }
+
         return migrator
     }
 
@@ -1068,6 +1075,17 @@ public final class AppDatabase: Sendable {
             CREATE INDEX IF NOT EXISTS scheduledJobRun_assistantTranscriptState
             ON scheduledJobRun(assistantTranscriptState)
             """)
+    }
+
+    fileprivate static func applyV12Body(_ db: Database) throws {
+        try db.create(table: "webContentMarkdownCache") { t in
+            t.column("referenceId", .integer)
+                .primaryKey()
+                .references("reference", onDelete: .cascade)
+            t.column("sourceHash", .text).notNull()
+            t.column("converterVersion", .integer).notNull()
+            t.column("markdown", .text).notNull()
+        }
     }
 
     fileprivate static func applyV7Body(_ db: Database) throws {
@@ -3426,6 +3444,22 @@ extension AppDatabase {
         }
     }
 
+    /// Longest decoded body wins, while the selected encoded value is returned
+    /// byte-for-byte so format envelopes and annotation offsets stay intact.
+    private func preferredLongestWebContent(_ incoming: String?, over existing: String?) -> String? {
+        let lhs = incoming?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rhs = existing?.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch (lhs?.isEmpty == false ? lhs : nil, rhs?.isEmpty == false ? rhs : nil) {
+        case let (l?, r?):
+            let incomingLength = Reference.decodeWebContent(l)?.body.count ?? l.count
+            let existingLength = Reference.decodeWebContent(r)?.body.count ?? r.count
+            return incomingLength >= existingLength ? incoming : existing
+        case (.some, nil): return incoming
+        case (nil, .some): return existing
+        default: return nil
+        }
+    }
+
     private func mergedReference(existing: Reference, incoming: Reference) -> Reference {
         func preferred(_ incoming: String?, over existing: String?) -> String? {
             let candidate = incoming?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3456,7 +3490,7 @@ extension AppDatabase {
         merged.url = preferred(incoming.url, over: existing.url)
         merged.abstract = preferredLongest(incoming.abstract, over: existing.abstract)
         merged.notes = preferredLongest(incoming.notes, over: existing.notes)
-        merged.webContent = preferredLongest(incoming.webContent, over: existing.webContent)
+        merged.webContent = preferredLongestWebContent(incoming.webContent, over: existing.webContent)
         merged.siteName = preferred(incoming.siteName, over: existing.siteName)
         merged.favicon = preferred(incoming.favicon, over: existing.favicon)
         if existing.referenceType == .other || existing.referenceType == .webpage {
@@ -3505,20 +3539,6 @@ extension AppDatabase {
             let c = incoming?.trimmingCharacters(in: .whitespacesAndNewlines)
             return (c?.isEmpty == false) ? incoming : existing
         }
-        // NOTE: returns the UNTRIMMED original (not the trimmed value), unlike the
-        // same-named local in `mergedReference`. webContent is an encoded envelope;
-        // trimming it would shift character offsets and break annotation anchors.
-        func longerPreservingOriginal(_ incoming: String?, over existing: String?) -> String? {
-            let lhs = incoming?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let rhs = existing?.trimmingCharacters(in: .whitespacesAndNewlines)
-            switch (lhs?.isEmpty == false ? lhs : nil, rhs?.isEmpty == false ? rhs : nil) {
-            case let (l?, r?): return l.count >= r.count ? incoming : existing
-            case (.some, nil): return incoming
-            case (nil, .some): return existing
-            default: return nil
-            }
-        }
-
         var merged = existing
         merged.title = existing.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? incoming.title : existing.title
@@ -3534,7 +3554,7 @@ extension AppDatabase {
         }
         merged.accessedDate = fillIfEmpty(incoming.accessedDate, existing: existing.accessedDate)
         merged.siteName = fillIfEmpty(incoming.siteName, existing: existing.siteName)
-        merged.webContent = longerPreservingOriginal(incoming.webContent, over: existing.webContent)
+        merged.webContent = preferredLongestWebContent(incoming.webContent, over: existing.webContent)
         merged.dateModified = Date()
         return merged
     }

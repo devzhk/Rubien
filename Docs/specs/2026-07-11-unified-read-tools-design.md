@@ -4,6 +4,8 @@
 **Status:** Draft for review
 **Context:** Feature 1 of a two-feature arc. Feature 2 (unified body-text grep, `rubien_grep_text`) builds on the routing and conventions established here; its earlier PDF-only draft is `Docs/specs/2026-06-26-pdf-grep-design.md`, to be revised separately.
 
+> **Web-format amendment (2026-08-03):** [Agent-facing web Markdown](../plans/2026-08-03-agent-web-markdown.md) supersedes this draft's web-body format details. Web reads now return Markdown by default, accept explicit `format: "html"`, and report both `contentFormat` and `sourceFormat`. The [CLI reference](../CLI-Reference.md#read) is the current contract.
+
 ## 1. Motivation
 
 The MCP surface forks every document read by storage kind: `rubien_pdf_text` vs `rubien_web_get` for body text, `rubien_annotations_list` vs `rubien_web_annotations` for annotations. An agent that just wants "the text of reference 42" must first detect the kind (call `rubien_get`, inspect `pdfPath` / `siteName`) or guess and burn a turn on a "has no web content" error. In practice the agent does not care where the bytes live.

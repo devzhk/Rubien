@@ -119,9 +119,41 @@ final class ReadCommandTests: XCTestCase {
         XCTAssertEqual(json["available"] as? [String], ["web"])
         XCTAssertEqual(json["content"] as? String, "Hello from the clipped web page body.")
         XCTAssertEqual(json["contentFormat"] as? String, "markdown")
+        XCTAssertEqual(json["sourceFormat"] as? String, "markdown")
         XCTAssertEqual((json["contentLength"] as? NSNumber)?.intValue, 37)
         XCTAssertEqual((json["start"] as? NSNumber)?.intValue, 0)
         XCTAssertEqual(json["truncated"] as? Bool, false)
+    }
+
+    func testHTMLClipDefaultsToMarkdownAndSupportsExplicitHTML() throws {
+        try skipIfBinaryMissing()
+        let id = try addReference()
+        let html = "<!-- rubien:web-content:html -->\n<h2>Heading</h2><p>Read <strong>this</strong>.</p>"
+        try seedWebContent(refId: id, body: html)
+
+        let defaultResult = try runCLI(["read", "text", "\(id)"])
+        XCTAssertEqual(defaultResult.exitCode, 0, defaultResult.stderr)
+        let defaultJSON = try stdoutJSON(defaultResult)
+        XCTAssertEqual(defaultJSON["contentFormat"] as? String, "markdown")
+        XCTAssertEqual(defaultJSON["sourceFormat"] as? String, "html")
+        XCTAssertEqual(defaultJSON["content"] as? String, "## Heading\n\nRead **this**.")
+
+        let htmlResult = try runCLI(["read", "text", "\(id)", "--format", "html"])
+        XCTAssertEqual(htmlResult.exitCode, 0, htmlResult.stderr)
+        let htmlJSON = try stdoutJSON(htmlResult)
+        XCTAssertEqual(htmlJSON["contentFormat"] as? String, "html")
+        XCTAssertEqual(htmlJSON["sourceFormat"] as? String, "html")
+        XCTAssertEqual(htmlJSON["content"] as? String, "<h2>Heading</h2><p>Read <strong>this</strong>.</p>")
+    }
+
+    func testExplicitHTMLRejectsMarkdownOnlyReference() throws {
+        try skipIfBinaryMissing()
+        let id = try addReference()
+        try seedWebContent(refId: id, body: "# Imported note")
+
+        let result = try runCLI(["read", "text", "\(id)", "--format", "html"])
+        XCTAssertNotEqual(result.exitCode, 0)
+        XCTAssertTrue(stderrError(result).contains("HTML is unavailable"), stderrError(result))
     }
 
     func testReadTextWebWindowingAndPastEnd() throws {
@@ -297,7 +329,7 @@ final class ReadCommandTests: XCTestCase {
         let r = try runCLI(["read", "text", "--help"])
         XCTAssertEqual(r.exitCode, 0)
         let out = r.stdout + r.stderr
-        for flag in ["--pages", "--section", "--start", "--source", "--max-chars"] {
+        for flag in ["--pages", "--section", "--start", "--source", "--format", "--max-chars"] {
             XCTAssertTrue(out.contains(flag), "read text --help must document \(flag); got:\n\(out)")
         }
     }

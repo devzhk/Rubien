@@ -17,9 +17,30 @@ final class ReferenceWebContentTests: XCTestCase {
         let stored = Reference.encodeWebContent("# Title\n\nBody text", format: .markdown)
         let decoded = Reference.decodeWebContent(stored)
 
-        XCTAssertEqual(stored, "# Title\n\nBody text")
+        XCTAssertTrue(stored?.hasPrefix("<!-- rubien:web-content:markdown -->") == true)
         XCTAssertEqual(decoded?.format, .markdown)
         XCTAssertEqual(decoded?.body, "# Title\n\nBody text")
+    }
+
+    func testRawHTMLBlockInsideMarkdownRemainsMarkdown() {
+        let body = "<details><summary>Methods</summary>Body</details>"
+        let stored = Reference.encodeWebContent(body, format: .markdown)
+        let decoded = Reference.decodeWebContent(stored)
+
+        XCTAssertEqual(decoded?.format, .markdown)
+        XCTAssertEqual(decoded?.body, body)
+    }
+
+    func testLegacyMarkdownReferenceOverridesHTMLHeuristic() {
+        let body = "<details><summary>Methods</summary>Legacy body</details>"
+        let reference = Reference(
+            title: "Legacy note",
+            webContent: body,
+            referenceType: .markdown
+        )
+
+        XCTAssertEqual(reference.decodedWebContent?.format, .markdown)
+        XCTAssertEqual(reference.decodedWebContent?.body, body)
     }
 }
 #endif

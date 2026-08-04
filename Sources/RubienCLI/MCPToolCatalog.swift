@@ -187,12 +187,13 @@ enum MCPToolCatalog {
 
     private static let readTextTool = MCPTool(
         name: "rubien_read_text",
-        description: "Return the readable body text of any reference — its attached PDF or its clipped web page — without needing to know which it has. Source selection when `source` is omitted: `pages`/`sections` imply pdf, `start` implies web, otherwise PDF wins when both exist. Every response carries `source` (what was read) and `available` (which sources are readable now, e.g. [\"pdf\",\"web\"]). PDF responses are page-keyed: each `pages[]` item carries `text` and `sectionPath`, selected via `pages` ('1-3' or '1-3,8-10') or `sections` (title substrings, case-insensitive; errors `no-outline` when the PDF has no outline — fall back to `pages`). Web responses are one flat windowed body: `content` + `contentLength`, paginated via `start`/`maxChars`; `contentFormat` is \"markdown\" or \"html\" (treat html as a fragment). To find WHERE the body mentions something before reading, use `rubien_grep_text`. Library-only — never fetches from the network. Use `rubien_read_annotations` for the user's highlights/notes, and `rubien_get_pdf_info` first when you plan to select by `sections`.",
+        description: "Return the readable body text of any reference — its attached PDF or its clipped web page — without needing to know which it has. Source selection when `source` is omitted: `pages`/`sections` imply pdf, `start`/`format` imply web, otherwise PDF wins when both exist. Every response carries `source` (what was read) and `available` (which sources are readable now, e.g. [\"pdf\",\"web\"]). PDF responses are page-keyed: each `pages[]` item carries `text` and `sectionPath`, selected via `pages` ('1-3' or '1-3,8-10') or `sections` (title substrings, case-insensitive; errors `no-outline` when the PDF has no outline — fall back to `pages`). Web responses are one flat windowed body: `content` + `contentLength`, paginated via `start`/`maxChars`; Markdown is returned by default, while `format: \"html\"` explicitly requests the extracted HTML fragment. `contentFormat` describes the returned representation and `sourceFormat` the canonical stored one. To find WHERE the body mentions something before reading, use `rubien_grep_text` with the same format. Library-only — never fetches from the network. Use `rubien_read_annotations` for the user's highlights/notes, and `rubien_get_pdf_info` first when you plan to select by `sections`.",
         inputSchema: [
             "type": "object",
             "properties": [
                 "id": ["type": "integer", "description": "Reference ID"],
-                "source": ["type": "string", "enum": ["pdf", "web"], "description": "Force a source. Default: pages/sections imply pdf, start implies web, else PDF wins."],
+                "source": ["type": "string", "enum": ["pdf", "web"], "description": "Force a source. Default: pages/sections imply pdf, start/format imply web, else PDF wins."],
+                "format": ["type": "string", "enum": ["markdown", "html"], "description": "Web representation. Markdown is the default; html returns the extracted HTML fragment. Implies web."],
                 "pages": ["type": "string", "description": "PDF page range, e.g. '1-3' or '1-3,8-10' or '12-'. Implies pdf. Mutually exclusive with `sections`."],
                 "sections": [
                     "type": "array",
@@ -216,12 +217,13 @@ enum MCPToolCatalog {
             let pages = (try mcpString(args, "pages")).flatMap { $0.isEmpty ? nil : $0 }
             let sections = try mcpStringArray(args, "sections")
             let start = try mcpInt(args, "start")
+            let format = try mcpString(args, "format")
             if pages != nil, let sections, !sections.isEmpty {
                 throw MCPToolError.invalidArguments("`pages` and `sections` are mutually exclusive")
             }
             let pdfParams = pages != nil || !(sections ?? []).isEmpty
-            if pdfParams, start != nil {
-                throw MCPToolError.invalidArguments("`pages`/`sections` and `start` are mutually exclusive")
+            if pdfParams, start != nil || format != nil {
+                throw MCPToolError.invalidArguments("`pages`/`sections` and `start`/`format` are mutually exclusive")
             }
             var argv = ["read", "text", String(id)]
             mcpAppendString(&argv, "--pages", pages)
@@ -231,6 +233,7 @@ enum MCPToolCatalog {
             mcpAppendInt(&argv, "--start", start)
             mcpAppendInt(&argv, "--max-chars", try mcpInt(args, "maxChars"))
             mcpAppendString(&argv, "--source", try mcpString(args, "source"))
+            mcpAppendString(&argv, "--format", format)
             return argv
         }
     )
@@ -261,14 +264,15 @@ enum MCPToolCatalog {
 
     private static let grepTextTool = MCPTool(
         name: "rubien_grep_text",
-        description: "Find WHERE a phrase or regex occurs inside one reference's body text — its attached PDF or its clipped web page — without retrieving the body. Returns anchored locations, not text: PDF hits are page-grouped (`pages[]` with `page`, `sectionPath` breadcrumbs, `matchCount`, snippets) — drill in with `rubien_read_text` + `pages`; web hits carry exact character offsets (`matches[].start`, same coordinates as `rubien_read_text`'s `start`) — drill in with `rubien_read_text` + `start`. Matching is case-insensitive (`regex: true` treats the query as a regular expression; `(?-i:…)` restores case). Source selection mirrors `rubien_read_text`: explicit `source` wins; `pages`/`maxPages`/`snippetsPerPage` imply pdf and `maxMatches` implies web; otherwise PDF wins when both exist. Every response carries `source` and `available`. A scanned PDF returns success with `hasTextLayer: false` and no hits — fall back to `rubien_render_pdf_page`. To find which REFERENCES match, use `rubien_search_references` (library metadata) instead. Library-only — never fetches from the network.",
+        description: "Find WHERE a phrase or regex occurs inside one reference's body text — its attached PDF or its clipped web page — without retrieving the body. Returns anchored locations, not text: PDF hits are page-grouped (`pages[]` with `page`, `sectionPath` breadcrumbs, `matchCount`, snippets) — drill in with `rubien_read_text` + `pages`; web hits carry exact character offsets (`matches[].start`, same coordinates as `rubien_read_text`'s `start`) — drill in with `rubien_read_text` + `start` using the same `format`. Web matching uses Markdown by default; `format: \"html\"` explicitly searches extracted HTML. Matching is case-insensitive (`regex: true` treats the query as a regular expression; `(?-i:…)` restores case). Source selection mirrors `rubien_read_text`: explicit `source` wins; `pages`/`maxPages`/`snippetsPerPage` imply pdf and `maxMatches`/`format` imply web; otherwise PDF wins when both exist. Every response carries `source` and `available`. A scanned PDF returns success with `hasTextLayer: false` and no hits — fall back to `rubien_render_pdf_page`. To find which REFERENCES match, use `rubien_search_references` (library metadata) instead. Library-only — never fetches from the network.",
         inputSchema: [
             "type": "object",
             "properties": [
                 "id": ["type": "integer", "description": "Reference ID"],
                 "query": ["type": "string", "minLength": 1, "description": "Literal phrase (default) or regex (`regex: true`). Case-insensitive."],
                 "regex": ["type": "boolean", "description": "Treat `query` as a regular expression."],
-                "source": ["type": "string", "enum": ["pdf", "web"], "description": "Force a source. Default: pdf-scoped params imply pdf, maxMatches implies web, else PDF wins."],
+                "source": ["type": "string", "enum": ["pdf", "web"], "description": "Force a source. Default: pdf-scoped params imply pdf, maxMatches/format imply web, else PDF wins."],
+                "format": ["type": "string", "enum": ["markdown", "html"], "description": "Web representation. Markdown is the default; html searches extracted HTML. Implies web."],
                 "contextChars": ["type": "integer", "exclusiveMinimum": 0, "maximum": 2000, "description": "Snippet window width (default 160)."],
                 "pages": ["type": "string", "description": "PDF page range scope, e.g. '1-3,8-10'. Implies pdf."],
                 "maxPages": ["type": "integer", "exclusiveMinimum": 0, "maximum": 200, "description": "Cap returned PDF page-hits (default 30). Implies pdf."],
@@ -292,10 +296,11 @@ enum MCPToolCatalog {
             let maxPages = try mcpInt(args, "maxPages")
             let snippetsPerPage = try mcpInt(args, "snippetsPerPage")
             let maxMatches = try mcpInt(args, "maxMatches")
+            let format = try mcpString(args, "format")
             // Mirror the CLI's pre-spawn scoping check (PDF-family vs web-family).
             let pdfParams = pages != nil || maxPages != nil || snippetsPerPage != nil
-            if pdfParams, maxMatches != nil {
-                throw MCPToolError.invalidArguments("`pages`/`maxPages`/`snippetsPerPage` and `maxMatches` are mutually exclusive")
+            if pdfParams, maxMatches != nil || format != nil {
+                throw MCPToolError.invalidArguments("`pages`/`maxPages`/`snippetsPerPage` and `maxMatches`/`format` are mutually exclusive")
             }
             var argv = ["grep", String(id), query]
             if try mcpBool(args, "regex") == true { argv.append("--regex") }
@@ -305,6 +310,7 @@ enum MCPToolCatalog {
             mcpAppendInt(&argv, "--max-pages", maxPages)
             mcpAppendInt(&argv, "--snippets-per-page", snippetsPerPage)
             mcpAppendInt(&argv, "--max-matches", maxMatches)
+            mcpAppendString(&argv, "--format", format)
             return argv
         }
     )

@@ -2486,6 +2486,17 @@ enum ReadSource: String, ExpressibleByArgument, CaseIterable {
     case pdf, web
 }
 
+enum WebTextFormat: String, ExpressibleByArgument, CaseIterable {
+    case markdown, html
+
+    var coreFormat: Reference.WebContentFormat {
+        switch self {
+        case .markdown: return .markdown
+        case .html: return .html
+        }
+    }
+}
+
 struct Read: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "read",
@@ -2512,6 +2523,7 @@ struct ReadTextWebOutput: Encodable {
     let url: String?
     let siteName: String?
     let contentFormat: String
+    let sourceFormat: String
     let content: String
     let contentLength: Int
     let start: Int
@@ -2549,6 +2561,10 @@ struct ReadText: ParsableCommand {
             help: "Force a source: pdf or web (default: pages/sections imply pdf, start implies web, else PDF wins)")
     var source: ReadSource?
 
+    @Option(name: .customLong("format"),
+            help: "Web representation: markdown (default) or html. Implies a web source.")
+    var format: WebTextFormat?
+
     func run() throws {
         guard maxChars > 0, maxChars <= 500_000 else {
             printJSONError("--max-chars must be between 1 and 500000")
@@ -2559,13 +2575,13 @@ struct ReadText: ParsableCommand {
             throw ExitCode.failure
         }
         let pdfParamsGiven = pages != nil || !sections.isEmpty
-        let webParamsGiven = start != nil
+        let webParamsGiven = start != nil || format != nil
         if pages != nil && !sections.isEmpty {
             printJSONError("--pages and --section are mutually exclusive")
             throw ExitCode.failure
         }
         if pdfParamsGiven && webParamsGiven {
-            printJSONError("--pages/--section and --start are mutually exclusive (PDF vs web addressing)")
+            printJSONError("--pages/--section and --start/--format are mutually exclusive (PDF vs web addressing)")
             throw ExitCode.failure
         }
 
@@ -2584,7 +2600,8 @@ struct ReadText: ParsableCommand {
                 throw ExitCode.failure
             }
             if source == .pdf && webParamsGiven {
-                printJSONError("--start requires a web source (requested source: pdf); available: \(availJSON)")
+                let flag = start != nil ? "--start" : "--format"
+                printJSONError("\(flag) requires a web source (requested source: pdf); available: \(availJSON)")
                 throw ExitCode.failure
             }
         }
@@ -2636,7 +2653,18 @@ struct ReadText: ParsableCommand {
                 printJSONError("source \"web\" is not readable (reference \(id) has no web content); available: \(availJSON)")
                 throw ExitCode.failure
             }
-            let body = decoded.body
+            let represented: Reference.DecodedWebContent
+            do {
+                represented = try AppDatabase.shared.webContentRepresentation(
+                    referenceId: id,
+                    source: decoded,
+                    format: (format ?? .markdown).coreFormat
+                )
+            } catch {
+                printJSONError(error.localizedDescription)
+                throw ExitCode.failure
+            }
+            let body = represented.body
             let total = body.count
             let offset = start ?? 0
             let slice: String
@@ -2657,7 +2685,8 @@ struct ReadText: ParsableCommand {
             printJSON(ReadTextWebOutput(
                 id: id, source: "web", available: avail.available,
                 url: ref.url, siteName: ref.siteName,
-                contentFormat: decoded.format.rawValue,
+                contentFormat: represented.format.rawValue,
+                sourceFormat: decoded.format.rawValue,
                 content: slice, contentLength: total, start: offset,
                 returnedChars: returned, truncated: truncated,
                 annotationCount: annotationCount
@@ -2762,6 +2791,8 @@ struct GrepWebOutput: Encodable {
     let available: [String]
     let query: String
     let isRegex: Bool
+    let contentFormat: String
+    let sourceFormat: String
     let contentLength: Int
     let totalMatches: Int
     let totalEntries: Int
@@ -2787,6 +2818,10 @@ struct Grep: ParsableCommand {
     @Option(name: .customLong("source"),
             help: "Force a source: pdf or web (default: pdf-scoped flags imply pdf, --max-matches implies web, else PDF wins)")
     var source: ReadSource?
+
+    @Option(name: .customLong("format"),
+            help: "Web representation: markdown (default) or html. Implies a web source.")
+    var format: WebTextFormat?
 
     @Option(name: .customLong("context-chars"),
             help: "Snippet window width (default 160)")
@@ -2834,9 +2869,9 @@ struct Grep: ParsableCommand {
         }
 
         let pdfParamsGiven = pages != nil || maxPages != nil || snippetsPerPage != nil
-        let webParamsGiven = maxMatches != nil
+        let webParamsGiven = maxMatches != nil || format != nil
         if pdfParamsGiven && webParamsGiven {
-            printJSONError("--pages/--max-pages/--snippets-per-page and --max-matches are mutually exclusive (PDF vs web scoping)")
+            printJSONError("--pages/--max-pages/--snippets-per-page and --max-matches/--format are mutually exclusive (PDF vs web scoping)")
             throw ExitCode.failure
         }
 
@@ -2853,7 +2888,8 @@ struct Grep: ParsableCommand {
                 throw ExitCode.failure
             }
             if source == .pdf && webParamsGiven {
-                printJSONError("--max-matches requires a web source (requested source: pdf); available: \(availJSON)")
+                let flag = maxMatches != nil ? "--max-matches" : "--format"
+                printJSONError("\(flag) requires a web source (requested source: pdf); available: \(availJSON)")
                 throw ExitCode.failure
             }
         }
@@ -2905,7 +2941,18 @@ struct Grep: ParsableCommand {
                 printJSONError("source \"web\" is not readable (reference \(id) has no web content); available: \(availJSON)")
                 throw ExitCode.failure
             }
-            let body = decoded.body
+            let represented: Reference.DecodedWebContent
+            do {
+                represented = try AppDatabase.shared.webContentRepresentation(
+                    referenceId: id,
+                    source: decoded,
+                    format: (format ?? .markdown).coreFormat
+                )
+            } catch {
+                printJSONError(error.localizedDescription)
+                throw ExitCode.failure
+            }
+            let body = represented.body
             let compiled: BodyTextQuery
             do { compiled = try BodyTextQuery.compile(query, isRegex: isRegex) }
             catch {
@@ -2920,6 +2967,8 @@ struct Grep: ParsableCommand {
             printJSON(GrepWebOutput(
                 id: id, source: "web", available: avail.available,
                 query: query, isRegex: isRegex,
+                contentFormat: represented.format.rawValue,
+                sourceFormat: decoded.format.rawValue,
                 contentLength: body.count,
                 totalMatches: ranges.count,
                 totalEntries: clusters.count,

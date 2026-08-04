@@ -488,11 +488,12 @@ PDF or a clipped web page. `read` routes by what the reference has:
 ```
 rubien-cli read text <id> [--pages <range>] [--section <title>]...
                           [--start <offset>] [--max-chars <n>] [--source pdf|web]
+                          [--format markdown|html]
 rubien-cli read annotations <id> [--source pdf|web]
 ```
 
 Source selection for `read text`, in order: an explicit `--source` wins;
-otherwise `--pages`/`--section` imply `pdf` and `--start` implies `web`;
+otherwise `--pages`/`--section` imply `pdf` and `--start`/`--format` imply `web`;
 otherwise PDF wins when the reference has both. Every response reports
 `source` (what was read) and `available` (what could be read now, ordered
 `["pdf","web"]`). A PDF that is attached in the library but not materialized
@@ -516,7 +517,8 @@ character-boundary truncation; `start` past end returns `content: ""`):
 
 ```json
 { "id": 7, "source": "web", "available": ["web"],
-  "url": "https://…", "siteName": "…", "contentFormat": "markdown",
+  "url": "https://…", "siteName": "…",
+  "contentFormat": "markdown", "sourceFormat": "html",
   "content": "…", "contentLength": 84213, "start": 0,
   "returnedChars": 50000, "truncated": true, "annotationCount": 3 }
 ```
@@ -528,8 +530,9 @@ so you can tell which titles resolved.
 Errors: unknown reference; neither source readable (message names the PDF
 state: not attached / not materialized on this device / file missing on
 disk); a requested or param-implied source that is unavailable; mixed
-addressing (`--pages`/`--section` with `--start`); `--section` on a PDF
-without an outline (`no-outline` — fall back to `--pages`).
+addressing (`--pages`/`--section` with `--start`/`--format`); requesting HTML
+for a Markdown-only import; `--section` on a PDF without an outline
+(`no-outline` — fall back to `--pages`).
 
 ### read annotations
 
@@ -552,11 +555,11 @@ retrieves.
 ```
 rubien-cli grep <id> "<query>" [--regex] [--source pdf|web] [--context-chars N]
     [--pages <range>] [--max-pages N] [--snippets-per-page N]   # PDF-scoped
-    [--max-matches N]                                            # web-scoped
+    [--max-matches N] [--format markdown|html]                  # web-scoped
 ```
 
 Source selection mirrors `read`: explicit `--source` wins; PDF-scoped flags
-imply `pdf` and `--max-matches` implies `web`; otherwise PDF wins when the
+imply `pdf` and `--max-matches`/`--format` imply `web`; otherwise PDF wins when the
 reference has both. Matching is case-insensitive (`--regex` for regular
 expressions; `(?-i:…)` restores case sensitivity). Matches are
 non-overlapping, leftmost-first; zero-width regex matches are discarded.
@@ -577,12 +580,15 @@ PDF-source response — hits anchor to **pages** (follow up with
 A scanned PDF (no text layer) returns success with `hasTextLayer: false` and
 no hits — fall back to `pdf page-image`.
 
-Web-source response — hits anchor to **exact character offsets** into the raw
-body, in the same coordinates `read text --start` consumes:
+Web-source response — hits anchor to **exact character offsets** into the
+chosen representation, in the same coordinates `read text --start` consumes.
+Markdown is the default; pass the same `--format html` to both commands when
+searching and reading extracted HTML:
 
 ```json
 { "id": 7, "source": "web", "available": ["web"],
   "query": "theorem", "isRegex": false,
+  "contentFormat": "markdown", "sourceFormat": "html",
   "contentLength": 84213, "totalMatches": 3, "totalEntries": 2, "truncated": false,
   "matches": [ { "start": 18342, "matchCount": 2,
                  "snippet": "… we now state the theorem …" } ] }
@@ -593,7 +599,8 @@ Nearby matches merge into one entry (`matchCount` counts the cluster;
 `totalEntries` counts clusters before the cap.
 
 Errors: unknown reference; neither source readable; a requested or implied
-source that is unavailable; PDF-scoped flags mixed with `--max-matches`;
+source that is unavailable; PDF-scoped flags mixed with `--max-matches` or
+`--format`;
 empty query; `invalid-regex`; PDF extraction failures pass through the
 `pdf`-family error envelope (`encrypted`, `invalid-page-range: …`).
 
@@ -637,6 +644,13 @@ No options.
   "version": "0.1.7"
 }
 ```
+
+Web content is returned as compact Markdown by default. HTML-backed clips are
+projected and cached locally; imported Markdown passes through unchanged.
+`--format html` explicitly returns the extracted HTML fragment when HTML is the
+canonical source. It does not return the original page DOM. `contentFormat`
+describes the returned representation; `sourceFormat` describes the canonical
+stored representation.
 
 ---
 
