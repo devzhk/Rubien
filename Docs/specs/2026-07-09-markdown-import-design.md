@@ -1,17 +1,23 @@
 # Markdown Import — Design
 
 **Date:** 2026-07-09
-**Status:** Approved (brainstormed with user; codex-reviewed, findings folded in)
+**Status:** Implemented; CLI/MCP intake later consolidated into `add --source`
+and `rubien_create_reference`
 **Scope:** RubienCore, Rubien (app), RubienCLI, mcp-server, Docs
+
+> **Web-format amendment (2026-08-03):** Extracted web pages retain canonical
+> HTML for reader fidelity. Agent and CLI reads project that body to compact
+> Markdown by default and cache the projection locally; imported Markdown stays
+> canonical Markdown. See [Agent-facing web Markdown](../plans/2026-08-03-agent-web-markdown.md)
+> and the current [CLI read contract](../CLI-Reference.md#read).
 
 ## Motivation
 
-Rubien stores clipped web pages as markdown (`reference.webContent`,
-`WebContentFormat.markdown`) and renders them in the web reader with full
-annotation support — but the only ways in are live extraction (in-app URL
-import, browser clipper). Users with existing markdown files — Obsidian Web
-Clipper output, plain notes — have no import path. Every importer accepts only
-`.bib` / `.ris` / PDF / Zotero folders.
+Rubien renders clipped web pages in the web reader with full annotation
+support, but at the time of this design the only ways in were live extraction
+(in-app URL import and browser clipper). Users with existing Markdown files —
+Obsidian Web Clipper output or plain notes — had no import path. Importers
+accepted only `.bib` / `.ris` / PDF / Zotero folders.
 
 The gap is small: a markdown file's body *is* the native `webContent`
 representation, and Obsidian clipper frontmatter maps 1:1 onto Reference
@@ -42,8 +48,9 @@ fields. This feature adds the import path.
   “Reveal Markdown Copy in Finder” materializes the current stored body as a
   read-only derived file in an OS-managed temporary directory; it does not
   recover or relink the original source, and edits to that copy do not flow
-  back into Rubien. HTML-backed web clips expose the same action as an `.html`
-  copy, labeled with their actual stored format.
+  back into Rubien. The reference detail view materializes HTML-backed clips as
+  an `.html` copy labeled with their stored format; the web reader separately
+  offers **Export Markdown…** as a derived, portable representation.
 - **Frontmatter `tags` mapping.** Ignored by user decision. Folder imports
   can stamp a property via `--property`/`--value` (Zotero parity).
 - **Recursive folder import.** Top-level `*.md` only, so pointing at a vault

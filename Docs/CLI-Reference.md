@@ -533,6 +533,13 @@ character-boundary truncation; `start` past end returns `content: ""`):
   "returnedChars": 50000, "truncated": true, "annotationCount": 3 }
 ```
 
+Web content is returned as compact Markdown by default. HTML-backed clips are
+projected and cached locally; imported Markdown passes through unchanged.
+`--format html` explicitly returns the extracted HTML fragment when HTML is the
+canonical source. It does not return the original page DOM. `contentFormat`
+describes the returned representation; `sourceFormat` describes the canonical
+stored representation.
+
 When `--section` is used, `selection` echoes `mode: "section"` plus
 `requested` (the substrings you passed), `matchedSections`, and `unmatched`
 so you can tell which titles resolved.
@@ -654,13 +661,6 @@ No options.
   "version": "0.1.7"
 }
 ```
-
-Web content is returned as compact Markdown by default. HTML-backed clips are
-projected and cached locally; imported Markdown passes through unchanged.
-`--format html` explicitly returns the extracted HTML fragment when HTML is the
-canonical source. It does not return the original page DOM. `contentFormat`
-describes the returned representation; `sourceFormat` describes the canonical
-stored representation.
 
 ---
 
