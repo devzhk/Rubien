@@ -624,5 +624,21 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.7.3</title>
+            <description sparkle:format="plain-text"><![CDATA[• Export selected references, the current view, or the entire library as BibTeX, RIS, or Rubien JSON from the app, CLI, and MCP.
+• Web clips now give agents clean Markdown by default, with explicit HTML access and Markdown export from the web reader.
+• Fixed duplicate scrollbars in Assistant transcripts.]]></description>
+            <pubDate>Wed, 05 Aug 2026 00:49:17 +0000</pubDate>
+            <sparkle:version>41</sparkle:version>
+            <sparkle:shortVersionString>0.7.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien/releases/download/v0.7.3/Rubien-0.7.3.dmg"
+                sparkle:edSignature="AaYUUWFVllSti8DgtJdvcn2iDaOrqMKs1rtAX+IFSC7dNHHBQ3nZIziK7lammgCDjHct7hcgrmcZGIFjOPJaBg=="
+                length="17865524"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
