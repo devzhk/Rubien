@@ -223,6 +223,8 @@ actor ClaudeTurnEngine {
     private static let interruptSoftKillDelay: Double = 0.5
     private static let interruptHardKillDelay: Double = 2.0
     private static let noResultExitGrace: Double = 2.0
+    private static let terminalResultSoftKillDelay: Double = 10.0
+    private static let terminalResultHardKillDelay: Double = 15.0
 
     init(leaseCoordinator: ClaudeSessionLeaseCoordinator) {
         self.leaseCoordinator = leaseCoordinator
@@ -504,7 +506,8 @@ actor ClaudeTurnEngine {
             turn.pendingApprovals[pending.requestID] = pending
         }
 
-        for event in turn.parser.parse(line: line) {
+        let parsedLine = turn.parser.parseEnriched(line: line)
+        for event in parsedLine.events {
             if case .sessionStarted(let sessionID) = event {
                 turn.latestSessionID = sessionID
                 // Publish a fresh/rotated alias before exposing it to the UI. A
@@ -519,6 +522,20 @@ actor ClaudeTurnEngine {
             }
             if !turn.cancelled { turn.continuation.yield(event) }
             if case .turnCompleted = event { onResult(turn) }
+        }
+
+        // Claude 2.1.232 can finish and persist the assistant message while
+        // withholding the top-level result during post-turn work. The UI then
+        // spins indefinitely even though the answer is already complete. A Rubien
+        // Claude process owns exactly one turn, so EOF after `end_turn` is safe and
+        // makes the runtime settle; retain a bounded signal fallback for a runtime
+        // that still refuses to publish/exit.
+        if !turn.cancelled, !turn.sawResult, parsedLine.isTopLevelEndTurn {
+            turn.process.closeStdin()
+            scheduleTermination(
+                turn,
+                softAfter: Self.terminalResultSoftKillDelay,
+                hardAfter: Self.terminalResultHardKillDelay)
         }
     }
 
@@ -823,6 +840,13 @@ enum ClaudeCLIInvocation {
             "--include-partial-messages",
             "--permission-prompt-tool", "stdio",
         ]
+        let nativeReadAllowlist = AssistantToolApprovalPolicy.claudeAllowedToolNames(
+            includeRubienTools: mcpConfig?.isEmpty == false,
+            includeWebTools: request.webAccess
+        )
+        if !nativeReadAllowlist.isEmpty {
+            args += ["--allowedTools", nativeReadAllowlist.joined(separator: ",")]
+        }
         if request.executionMode == .scheduled {
             // No approval bypass: scheduled runs keep Claude's normal permission
             // boundary and the runner deterministically denies any prompt.

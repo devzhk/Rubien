@@ -55,6 +55,18 @@ final class ClaudeStreamParserTests: XCTestCase {
         XCTAssertEqual(deltas.count, 2)  // only the two text deltas
     }
 
+    func testTerminalMessageDetectionOnlyAcceptsTopLevelEndTurn() {
+        let topLevel = #"{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"end_turn"}},"parent_tool_use_id":null}"#
+        let toolIteration = #"{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"tool_use"}},"parent_tool_use_id":null}"#
+        let nested = #"{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"end_turn"}},"parent_tool_use_id":"toolu_parent"}"#
+
+        var parser = ClaudeStreamParser()
+        XCTAssertTrue(parser.parseEnriched(line: topLevel).isTopLevelEndTurn)
+        XCTAssertFalse(parser.parseEnriched(line: toolIteration).isTopLevelEndTurn)
+        XCTAssertFalse(parser.parseEnriched(line: nested).isTopLevelEndTurn)
+        XCTAssertFalse(parser.parseEnriched(line: "garbage").isTopLevelEndTurn)
+    }
+
     // MARK: Tool use + completion + denial
 
     func testToolUseStreamMapsChipsCompletionsAndDenials() throws {

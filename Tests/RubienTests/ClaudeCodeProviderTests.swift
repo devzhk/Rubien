@@ -369,6 +369,26 @@ final class ClaudeCodeProviderTests: XCTestCase {
         XCTAssertTrue(events.containsTurnCompleted)
     }
 
+    func testTerminalMessageClosesStdinWhenResultWaitsForEOF() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig([
+            "assistantText": "Summary is ready",
+            "terminalMessageDelta": true,
+            "resultWaitsForEOF": true,
+        ], into: workspace)
+        let provider = ClaudeCodeProvider(executableOverride: fakeCLIPath)
+
+        let events = try await collectAllEvents(
+            provider.send(turn: turn(workspace: workspace)),
+            timeout: 5
+        )
+
+        XCTAssertTrue(events.contains(
+            .assistantMessageCompleted(text: "Summary is ready")
+        ))
+        XCTAssertTrue(events.containsTurnCompleted)
+    }
+
     // MARK: Cancellation → process-group kill
 
     func testCancelKillsWholeProcessGroupWithNoOrphan() async throws {
@@ -1133,6 +1153,13 @@ final class ClaudeCodeProviderTests: XCTestCase {
         XCTAssertTrue(args.containsPair("--output-format", "stream-json"))
         XCTAssertTrue(args.contains("--include-partial-messages"))
         XCTAssertTrue(args.containsPair("--permission-prompt-tool", "stdio"))
+        XCTAssertTrue(args.contains("--allowedTools"))
+        let allowedIndex = try! XCTUnwrap(args.firstIndex(of: "--allowedTools"))
+        let allowedTools = Set(args[allowedIndex + 1].split(separator: ",").map(String.init))
+        XCTAssertTrue(allowedTools.contains("Read"))
+        XCTAssertTrue(allowedTools.contains("ToolSearch"))
+        XCTAssertFalse(allowedTools.contains("WebFetch"))
+        XCTAssertFalse(allowedTools.contains("mcp__rubien__rubien_read_text"))
         XCTAssertTrue(args.containsPair("--setting-sources", ""))
         XCTAssertTrue(args.containsPair("--resume", "sess-42"))
         XCTAssertTrue(args.containsPair("--append-system-prompt", "You are discussing reference ID 7."))
@@ -1153,6 +1180,9 @@ final class ClaudeCodeProviderTests: XCTestCase {
         XCTAssertFalse(args.contains("--model"))
         XCTAssertFalse(args.contains("--effort"))
         XCTAssertFalse(args.contains("--disallowedTools"))  // web access on
+        let allowedIndex = try! XCTUnwrap(args.firstIndex(of: "--allowedTools"))
+        let allowedTools = Set(args[allowedIndex + 1].split(separator: ",").map(String.init))
+        XCTAssertTrue(allowedTools.contains("WebFetch"))
     }
 
     func testScheduledArgumentsPinDefaultPermissionMode() {

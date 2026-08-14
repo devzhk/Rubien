@@ -21,6 +21,7 @@ floodStderr(int bytes), partialLine(bool), grandchild(bool),
 escapedOutputHolder(bool), hang(bool), exitCode(int), emitResult(bool),
 delayExitMs(int), cooperativeInterrupt(bool), delayInterruptResultMs(int).
 stdinBackpressure(bool), detachedResultDelayMs(int).
+terminalMessageDelta(bool), resultWaitsForEOF(bool).
 """
 import sys
 import os
@@ -90,11 +91,14 @@ def main():
     delay_interrupt_result_ms = int(cfg.get("delayInterruptResultMs", 0))
     stdin_backpressure = cfg.get("stdinBackpressure", False)
     detached_result_delay_ms = int(cfg.get("detachedResultDelayMs", 0))
+    terminal_message_delta = cfg.get("terminalMessageDelta", False)
+    result_waits_for_eof = cfg.get("resultWaitsForEOF", False)
     stderr_message = cfg.get("stderrMessage")
 
     user_received = threading.Event()
     approval_resolved = threading.Event()
     interrupt_received = threading.Event()
+    stdin_eof = threading.Event()
     approval_behavior = {"value": None}
 
     def read_stdin():
@@ -136,6 +140,7 @@ def main():
                     },
                 })
                 interrupt_received.set()
+        stdin_eof.set()
 
     if stdin_backpressure:
         # Never read stdin: a large prompt fills the pipe and exercises the
@@ -169,6 +174,19 @@ def main():
         # A truncated line the tolerant parser must drop (never throw).
         sys.stdout.write('{"type":"assistant","message":{"content":[{"type":"tex\n')
         sys.stdout.flush()
+
+    if terminal_message_delta:
+        emit({
+            "type": "stream_event",
+            "event": {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"output_tokens": 7},
+            },
+            "session_id": session_init,
+        })
+    if result_waits_for_eof:
+        stdin_eof.wait(timeout=30)
 
     emit({
         "type": "assistant",

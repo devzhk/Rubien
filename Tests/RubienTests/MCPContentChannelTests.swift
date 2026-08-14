@@ -69,6 +69,19 @@ final class MCPContentChannelTests: XCTestCase {
         XCTAssertTrue(args.contains("--strict-mcp-config"))
         // Coexists with the mandatory config-isolation flag.
         XCTAssertTrue(args.contains("--setting-sources"))
+        let allowedIndex = try? XCTUnwrap(args.firstIndex(of: "--allowedTools"))
+        XCTAssertNotNil(allowedIndex)
+        if let allowedIndex {
+            let allowed = Set(
+                args[allowedIndex + 1].split(separator: ",").map(String.init)
+            )
+            XCTAssertTrue(allowed.contains("mcp__rubien__rubien_get_reference"))
+            XCTAssertTrue(allowed.contains("mcp__rubien__rubien_read_text"))
+            XCTAssertTrue(allowed.contains(
+                "mcp__rubien__rubien_present_document_cards"
+            ))
+            XCTAssertFalse(allowed.contains("mcp__rubien__rubien_update_reference"))
+        }
     }
 
     func testArgumentsOmitMCPFlagsWhenConfigNilOrEmpty() {

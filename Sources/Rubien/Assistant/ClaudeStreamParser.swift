@@ -21,6 +21,11 @@ struct ClaudeImageInput: Sendable, Equatable {
 
 struct ClaudeStreamParser {
 
+    struct ParsedLine {
+        let events: [AgentEvent]
+        let isTopLevelEndTurn: Bool
+    }
+
     /// tool_use_id → tool name, so a `tool_result` (which carries only the id) can
     /// emit `toolUseCompleted(name:)`. Bounded implicitly by a turn's tool count.
     private var toolNamesByUseID: [String: String] = [:]
@@ -32,34 +37,64 @@ struct ClaudeStreamParser {
     /// Map one raw stdout line to zero or more events. Never throws; a line that is
     /// blank, non-JSON, truncated, or an unknown `type` yields `[]`.
     mutating func parse(line rawLine: String) -> [AgentEvent] {
+        parseEnriched(line: rawLine).events
+    }
+
+    /// Decode once for both public events and provider lifecycle metadata.
+    mutating func parseEnriched(line rawLine: String) -> ParsedLine {
         let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
         // Fast reject: NDJSON objects start with '{'. Warnings ("Warning: no stdin
         // data received…"), blank lines, and other stray stdout text are dropped.
-        guard line.first == "{" else { return [] }
+        guard line.first == "{" else {
+            return ParsedLine(events: [], isTopLevelEndTurn: false)
+        }
         guard let data = line.data(using: .utf8),
               let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        else { return [] }
+        else { return ParsedLine(events: [], isTopLevelEndTurn: false) }
 
+        let events: [AgentEvent]
         switch object["type"] as? String {
         case "system":
-            return parseSystem(object)
+            events = parseSystem(object)
         case "stream_event":
-            return parseStreamEvent(object)
+            events = parseStreamEvent(object)
         case "assistant":
-            return parseAssistant(object)
+            events = parseAssistant(object)
         case "user":
-            return parseUser(object)
+            events = parseUser(object)
         case "result":
-            return parseResult(object)
+            events = parseResult(object)
         case "control_request":
-            return parseControlRequest(object)
+            events = parseControlRequest(object)
         case "rate_limit_event":
-            return parseRateLimit(object)
+            events = parseRateLimit(object)
         default:
             // Unknown top-level type (control_response acks to our own requests,
             // system/thinking_tokens, future types, …) → ignored.
-            return []
+            events = []
         }
+        return ParsedLine(
+            events: events,
+            isTopLevelEndTurn: Self.isTopLevelEndTurn(object)
+        )
+    }
+
+    /// A terminal assistant message precedes Claude's top-level `result`. Rubien
+    /// launches one CLI process per turn, so once this `end_turn` arrives there can
+    /// be no legitimate later stdin traffic. Closing stdin at this boundary nudges
+    /// runtimes that have finished the answer but are waiting on post-turn work to
+    /// publish their result and exit.
+    private static func isTopLevelEndTurn(_ object: [String: Any]) -> Bool {
+        guard object["type"] as? String == "stream_event",
+              let event = object["event"] as? [String: Any],
+              event["type"] as? String == "message_delta",
+              let delta = event["delta"] as? [String: Any]
+        else { return false }
+        if let parentToolUseID = object["parent_tool_use_id"],
+           !(parentToolUseID is NSNull) {
+            return false
+        }
+        return delta["stop_reason"] as? String == "end_turn"
     }
 
     // MARK: - Per-type handlers

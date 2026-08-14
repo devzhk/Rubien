@@ -9,6 +9,31 @@ enum AssistantToolApprovalPolicy {
         "ToolSearch", "Read", "Glob", "Grep", "LS", "NotebookRead", "WebFetch", "WebSearch",
     ]
 
+    /// Mirror the provider-boundary policy into Claude's native permission
+    /// allowlist. This does not broaden access: these exact tools were already
+    /// answered with `behavior: allow` as soon as Claude asked. Supplying them at
+    /// launch removes an avoidable stdin approval round-trip for document reads.
+    static func claudeAllowedToolNames(
+        includeRubienTools: Bool,
+        includeWebTools: Bool
+    ) -> [String] {
+        var names = silentReadBuiltins
+        if !includeWebTools {
+            names.remove("WebFetch")
+            names.remove("WebSearch")
+        }
+        if includeRubienTools {
+            names.formUnion(RubienMCPToolPolicy.readToolNames.map {
+                ReferenceAttribution.claudeToolPrefix + $0
+            })
+            names.insert(
+                ReferenceAttribution.claudeToolPrefix
+                    + ChatPaperPresentation.toolName
+            )
+        }
+        return names.sorted()
+    }
+
     static func isSilentReadTool(_ toolName: String) -> Bool {
         if let rubienName = bareRubienToolName(toolName) {
             return rubienName == ChatPaperPresentation.toolName
