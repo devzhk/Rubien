@@ -101,19 +101,28 @@ final class StatsCommandTests: XCTestCase {
             let readingGeneration: String = readingEpoch["generation"]
             let assistantRevision: Int = assistantEpoch["revision"]
             let assistantGeneration: String = assistantEpoch["generation"]
+            let referenceSyncId = try XCTUnwrap(String.fetchOne(
+                db,
+                sql: "SELECT syncId FROM reference WHERE id = ?",
+                arguments: [referenceId]
+            ))
 
             for (index, row) in readingRows.enumerated() {
                 let timestamp = Date(timeIntervalSince1970: 1_735_689_600 + Double(index))
+                let installationId = "stats-test-\(index)"
+                let syncId = "\(readingGeneration)/\(installationId)/\(referenceSyncId)/\(row.day)"
                 try db.execute(
                     sql: """
                         INSERT INTO readingActivity
-                            (installationId, referenceId, localDay, epochRevision, generation,
-                             activeSeconds, lastActiveAt, dateModified)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            (syncId, installationId, referenceId, referenceSyncId,
+                             localDay, epochRevision, generation, activeSeconds,
+                             lastActiveAt, dateModified)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                     arguments: [
-                        "stats-test-\(index)", referenceId, row.day, readingRevision,
-                        readingGeneration, row.seconds, timestamp, timestamp,
+                        syncId, installationId, referenceId, referenceSyncId,
+                        row.day, readingRevision, readingGeneration, row.seconds,
+                        timestamp, timestamp,
                     ]
                 )
             }

@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-14
 
-**Status:** Proposed — implementation has not started
+**Status:** Implemented on `codex/sync-uuid-identities`; pending merge
 
 **Review:** Iterative Claude Code design reviews validated and incorporated on
 2026-08-14. They tightened cross-platform migration ownership, PropertyValue
@@ -61,7 +61,7 @@ The current code already anticipated part of the migration:
 - record-name parsing preserves an arbitrary string after the first `:`;
 - CloudKit foreign keys are plain values rather than `CKRecord.Reference`s;
   and
-- the sync runbook identifies this as the A-pks follow-up.
+- the pre-v13 sync runbook identified this as the A-pks follow-up.
 
 The missing piece is a durable global identity and a rollout that does not
 reinterpret or destroy existing records.
@@ -221,6 +221,19 @@ All added columns on synced tables are added to the corresponding CloudKit
 mapping and `allFieldNames`; none are local-only exceptions to
 `SyncSchemaInvariantTests`.
 
+Three local-only Reference dependents (`pdfCache`, `pdfUploadQueue`, and
+`webContentMarkdownCache`) move any migrated v12 orphan into dedicated
+`syncLegacy*Orphan` tables keyed by the missing decimal Reference identity.
+Replay restores a row to its live table only after resolving the intended
+parent; terminal full-history cleanup deletes anything still unresolved. This
+physical quarantine prevents a newly allocated UUID Reference that happens to
+reuse the old integer row ID from exposing or uploading local PDF or
+representation state. An authoritative Reference or Reference-PDF deletion
+consumes the matching quarantine rows before a later parent can restore them.
+If a current live PDF and a legacy quarantined PDF meet, the live row wins,
+the stale upload queue is discarded, and any losing file is unlinked only
+after the database transaction commits.
+
 `activityQuarantine` is local-only but also needs an additive identity repair:
 
 - add nullable `referenceSyncId TEXT` and make it authoritative for matching a
@@ -233,6 +246,13 @@ mapping and `allFieldNames`; none are local-only exceptions to
   `referenceSyncId`, rather than JSON-encoding a `ReadingActivity` whose
   `referenceId` is necessarily local. Assistant-activity quarantine retains
   its reference-free payload case.
+
+v13 also adds a local-only `syncIdentityAlias(entityType, losingId,
+winningId, createdAt)` table. Deterministic reconciliation records durable
+loser-to-winner redirects there so a child or portable saved view fetched in a
+later batch can still resolve a parent identity that has already been retired.
+Aliases are dependency-resolution metadata only; a remote deletion for a
+losing identity must never be redirected onto the winning row.
 
 For an existing quarantine row, backfill `referenceSyncId` from the matching
 Reference when one exists. If the parent is absent, recover the old integer
@@ -330,6 +350,18 @@ This distinction is what protects the reported incident. The unsent LinkedIn
 row at local ID 1796 gets a UUID. Pulling legacy `reference:1796` then finds no
 row with `syncId == "1796"` and inserts KnapFormer at a free local integer ID;
 both survive.
+
+A v12 pull transaction can crash after committing a child whose parent is due
+in a later CloudKit batch. v13 therefore runs with immediate FK checking so it
+does not reject a pre-existing violation at migration commit. It preserves an
+unresolved numeric FK as its decimal legacy shadow identity and preserves the
+legacy child identity when a derived UUID cannot yet be computed. Parent apply
+repairs both numeric and shadow FKs once the complete parent set becomes
+resolvable. Repair scans for local/shadow identity mismatches as well as
+`PRAGMA foreign_key_check` violations, because an unrelated UUID parent can
+make the integer FK look valid before the intended decimal parent arrives. A
+real v12-orphan fixture must migrate successfully and become FK clean after
+those parents arrive.
 
 Backfill and sync-state key rewriting run with remote-apply dirty triggers
 suppressed. The migration then drops the v1/v7 identity triggers and installs
@@ -494,6 +526,15 @@ Remote apply never executes `row.id = Int64(entityId)`. It follows this path:
    integer ID; and
 5. resolve every parent string ID to its local integer FK before inserting a
    child.
+
+Parent lookup follows durable reconciliation aliases. If alias resolution
+changes a compound entity's canonical endpoint identity, apply materializes
+the canonical child, dirties it for push, and retires the observed losing
+record by its exact server name. Reference PDFs follow the same rule using the
+canonical owning-Reference identity, so a late PDF cannot be acknowledged
+without being materialized. A quarantined record is not acknowledged in
+`syncState` until replay actually applies it; advancing a fetch cursor alone
+must not clear a pending local edit.
 
 The record name, not a numeric payload field, is authoritative for the row's
 identity. Payload `syncId` is a consistency check. Parent fields remain plain
@@ -668,6 +709,14 @@ Reconciliation must re-key child numeric FKs and shadow sync IDs in one
 transaction. It must never silently relabel children by overwriting whichever
 row happens to occupy the incoming numeric ID.
 
+Tag and PropertyDefinition reconciliation also persists the losing-to-winning
+identity alias before cleanup. The alias covers children and portable views
+that arrive after the parent collision, including an already-known identity
+that is remotely renamed into another row's unique role. Any parent identity
+adoption conservatively dirties all DatabaseViews so their next push replaces
+embedded losing identities with the canonical projection. v13 likewise marks
+all migrated views dirty once so a clean legacy view publishes portable fields.
+
 ## 9. Mutation and API changes
 
 A Foundation-only `SyncIdentifier` helper in `RubienCore` owns UUID allocation,
@@ -832,6 +881,13 @@ compatibility error.
   seeded UUID identities meet, and when a UUID meets a canonical decimal legacy
   identity; verify every peer chooses the same winner and retires the loser
   safely.
+- Apply a rename for an already-materialized Tag or PropertyDefinition into a
+  role owned by another row; verify it merges without a unique-constraint
+  retry loop, persists an alias, and resolves a child/view delivered later.
+- Deliver a ReferenceTag, PropertyValue, ReadingActivity, and Reference PDF
+  after a parent alias exists; verify each canonical child is materialized and
+  dirtied while the exact observed loser is retired. Quarantine any compound
+  identity already owned by a different endpoint pair.
 - Store an activity quarantine entry whose reference is not yet local, replay
   it after that global reference arrives, and remove it by global identity on
   fetched deletion.
@@ -898,10 +954,7 @@ The feature is complete when:
 
 ## 12. Proposed implementation slices
 
-Implementation should begin only after this design is reviewed and accepted.
-Before slice 1, refresh this worktree onto the intended integration base and
-ensure its checked-in `AGENTS.md` includes the verification guidance from
-`326411c`; this worktree's current base predates that commit.
+Implementation followed these reviewed slices on the intended `main` base.
 
 Use one coherent, buildable commit per slice:
 

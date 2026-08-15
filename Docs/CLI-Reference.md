@@ -67,6 +67,7 @@ Linux needs system deps first — see [Linux CLI](../README.md#linux-cli). For d
 | `pdf download` | Fetch the open-access PDF for a reference and attach it (skip-if-attached; `--force` to replace) |
 | `mcp` | Run a Model Context Protocol server over stdio, exposing the full 28-tool library catalog by default or its 15 read-only tools with `--read-only` (the in-app Assistant channel; a Node-free replacement for `rubien-mcp-server`). Mac **and** Linux. |
 | `sync status` | Inspect iCloud sync state (JSON only). **Mac-only** — Linux builds omit this subcommand entirely. |
+| `sync acknowledge-writer-upgrade` | Release v12-readable held changes after every writable Mac is upgraded or offline. **Mac-only** and requires exact confirmation text. |
 
 ---
 
@@ -1248,8 +1249,24 @@ $ rubien-cli sync status
   "enabled" : true,
   "entitlementPresent" : true,
   "iCloudAccountAvailable" : true,
+  "identity" : {
+    "blockedDeleteCount" : 0,
+    "blockedSaveCount" : 2,
+    "fullHistoryReplayPending" : false,
+    "identityCountsByEntityType" : {
+      "reference" : { "compoundOrNatural" : 0, "legacy" : 41, "uuid" : 6 }
+    },
+    "identitySchemaVersion" : 13,
+    "ineligibleLegacyTombstoneCount" : 0,
+    "invalidRemoteRecordCount" : 0,
+    "quarantinedRecordCount" : 0,
+    "unresolvedGlobalForeignKeyCount" : 0,
+    "writerUpgradeAcknowledgedAt" : null,
+    "writerUpgradeAcknowledgedSchemaVersion" : null,
+    "writerUpgradeRequired" : true
+  },
   "pdfBackfillRemaining" : 0,
-  "schemaVersion" : "v1",
+  "schemaVersion" : "v13",
   "syncEngineState" : {
     "sidecarExists" : true,
     "sidecarLastModified" : "2026-04-22T14:32:11Z",
@@ -1269,9 +1286,23 @@ $ rubien-cli sync status
 - `baselineState` — `"pending"` or `"complete"`
 - `dirtyByEntityType` — per-table count of rows with `isDirty=1`
 - `tombstoneCount` — `.confirmed` (server ack'd) vs `.unconfirmed` (pending delete)
-- `pdfBackfillRemaining` — count of `pdfUploadQueue` rows pending push (B8). Drains automatically when sync is enabled and the flag is on; non-zero means PDFs imported on this device haven't been pushed to CloudKit yet
+- `pdfBackfillRemaining` — count of dirty `referencePDF` sync-state rows. Unlike the staging queue, it remains non-zero until the upload is confirmed by CloudKit.
+- `identity` — v13 identity diagnostics: per-entity UUID/legacy/compound counts, unresolved global relationships, quarantined legacy deletes, replay state, and the selective writer-upgrade gate. `blockedSaveCount` and `blockedDeleteCount` are held locally while safe UUID-addressed traffic continues.
 - `syncEngineState` — sidecar-file metadata
 - `schemaVersion` — DB migration version
+
+---
+
+## sync acknowledge-writer-upgrade
+
+**Mac-only.** Releases changes whose legacy-addressable record names could be silently misapplied by Rubien v12. Run it only after every Mac that can write the library is upgraded to v13 or will remain offline. Quit Rubien first so the CLI can acquire the single-writer sync lock.
+
+```bash
+rubien-cli sync acknowledge-writer-upgrade \
+  --confirm ALL-WRITERS-UPGRADED
+```
+
+The acknowledgement is local to this library. It records an audit timestamp and schema version, clears only the writer-upgrade gate, and leaves the mandatory full-history replay state unchanged. Reopening an older writable Rubien afterward is unsafe.
 
 ---
 
@@ -1282,6 +1313,7 @@ All commands that return references use this structure:
 ```json
 {
   "id": 42,
+  "syncId": "6f29e739-25d1-4a7f-a043-b878bf6ec868",
   "title": "Attention Is All You Need",
   "authors": "Ashish Vaswani, Noam Shazeer, ...",
   "year": 2017,
@@ -1314,6 +1346,8 @@ All commands that return references use this structure:
 ```
 
 `customProperties` is always present (may be an empty array). Each entry corresponds to a **non-default** property definition that has a value set on this reference; built-in fields like `year` and `doi` live at the top level. For `multiSelect`, `value` is a JSON-encoded `[String]` literal — decode it client-side.
+
+`id` remains the device-local numeric selector accepted by CLI commands. `syncId` is the additive, stable cross-device identity used by CloudKit; it may be a lowercase UUID for a new row or a canonical decimal string retained by a proven legacy record.
 
 `pdfPath` is the **local filename** of the attached PDF (relative to the library's PDF storage directory), resolved per-device through `pdfCache`. Compose it with the library's PDF directory (printed by `rubien-cli sync status` or visible in Settings) to get an absolute path. The field is `null` when this device has no materialized PDF for the reference — it may still arrive via sync.
 

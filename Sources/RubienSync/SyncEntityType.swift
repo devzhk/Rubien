@@ -1,5 +1,6 @@
 #if canImport(CloudKit)
 import Foundation
+import RubienCore
 
 /// One case per synced entity. The rawValue matches the SQLite table name
 /// (and therefore `syncState.entityType` / `tombstone.entityType`) so the
@@ -57,13 +58,14 @@ public enum SyncEntityType: String, CaseIterable, Sendable {
     public var fkDependencyRank: Int {
         switch self {
         // Tier 0: no local FK deps
-        case .propertyDefinition, .databaseView, .activityEpoch:  return 0
+        case .propertyDefinition, .activityEpoch:                return 0
         // Tier 1: FK to a tier-0 or no local FK
         case .reference, .tag, .assistantActivity:                return 1
         // Tier 2: FK to reference and/or tag
         case .referenceTag, .pdfAnnotation, .webAnnotation,
              .readingActivity:                                    return 2
         case .propertyValue:                                      return 2  // FK → reference + propertyDefinition
+        case .databaseView:                                       return 2  // embedded IDs → tag + propertyDefinition
         case .metadataIntake:                                     return 2  // FK → reference (nullable)
         case .referencePDF:                                       return 2  // FK → reference (1:1 sibling)
         // Tier 3: FK to tier-2 / tier-1 (evidence FKs both intake + reference, nullable)
@@ -77,6 +79,57 @@ public enum SyncEntityType: String, CaseIterable, Sendable {
     /// skips nil cases rather than crashing.
     public static func forRecordType(_ recordType: String) -> SyncEntityType? {
         SyncEntityType.allCases.first { $0.recordType == recordType }
+    }
+
+    /// Whether v12 would accept this wire identity and reinterpret one or
+    /// more of its decimal components as local SQLite row IDs. While the
+    /// writer-upgrade gate is active, these identities must remain durable
+    /// in SQLite rather than entering CKSyncEngine's send queue.
+    public func isUnsafeForV12(entityId: String) -> Bool {
+        switch self {
+        case .reference, .tag, .pdfAnnotation, .webAnnotation,
+             .metadataIntake, .metadataEvidence, .propertyDefinition,
+             .propertyValue, .databaseView, .referencePDF:
+            return SyncIdentifier.isCanonicalDecimal(entityId)
+
+        case .referenceTag:
+            let parts = entityId.split(
+                separator: Character(SyncConstants.pivotSeparator),
+                omittingEmptySubsequences: false
+            )
+            guard parts.count == 2 else { return true }
+            return parts.allSatisfy {
+                SyncIdentifier.isCanonicalDecimal(String($0))
+            }
+
+        case .readingActivity:
+            let parts = entityId.split(
+                separator: "/",
+                omittingEmptySubsequences: false
+            )
+            guard parts.count == 4,
+                  !parts[0].isEmpty,
+                  !parts[1].isEmpty,
+                  LocalDay(rawValue: String(parts[3])) != nil
+            else { return true }
+            return SyncIdentifier.isCanonicalDecimal(String(parts[2]))
+
+        case .assistantActivity, .activityEpoch:
+            return false
+        }
+    }
+}
+
+extension SyncEntityType {
+    /// Parent records whose arrival can unblock a quarantined wire record or
+    /// repair a transient v12 numeric-FK orphan.
+    var suppliesGlobalDependencies: Bool {
+        switch self {
+        case .reference, .tag, .propertyDefinition, .metadataIntake:
+            true
+        default:
+            false
+        }
     }
 }
 #endif

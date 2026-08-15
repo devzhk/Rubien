@@ -3,6 +3,7 @@ import XCTest
 import Foundation
 import GRDB
 @testable import RubienCore
+import RubienSync
 
 final class SyncStatusCommandTests: XCTestCase {
 
@@ -32,7 +33,7 @@ final class SyncStatusCommandTests: XCTestCase {
             "enabled", "containerIdentifier", "entitlementPresent",
             "iCloudAccountAvailable", "appLockHeld", "baselineState",
             "dirtyByEntityType", "tombstoneCount", "syncEngineState",
-            "schemaVersion"
+            "schemaVersion", "identity"
         ] {
             XCTAssertNotNil(json?[key], "missing field '\(key)' in JSON output")
         }
@@ -40,6 +41,11 @@ final class SyncStatusCommandTests: XCTestCase {
         // schemaVersion must reflect the current AppDatabase migration tag.
         XCTAssertEqual(json?["schemaVersion"] as? String, AppDatabase.currentSchemaVersion,
                        "schemaVersion should match AppDatabase.currentSchemaVersion")
+        let identity = json?["identity"] as? [String: Any]
+        XCTAssertEqual(
+            identity?["identitySchemaVersion"] as? Int,
+            SyncIdentityDiagnostics.identitySchemaVersion
+        )
     }
 
     /// Regression test for the B8 review finding: `pdfBackfillRemaining`
@@ -104,6 +110,111 @@ final class SyncStatusCommandTests: XCTestCase {
         // entity-type loop. Both should agree.
         let dirty = json["dirtyByEntityType"] as? [String: Int]
         XCTAssertEqual(dirty?["referencePDF"], 1)
+    }
+
+    func testAcknowledgeWriterUpgradeRequiresExactConfirmationAndPersistsAudit() throws {
+        let tmpRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rubien-cli-ack-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpRoot) }
+
+        let dbPath = tmpRoot.appendingPathComponent("library.sqlite").path
+        do {
+            let pool = try DatabasePool(path: dbPath)
+            _ = try AppDatabase(pool)
+        }
+
+        func run(_ confirmation: String) throws -> (Int32, Data, Data) {
+            let process = Process()
+            process.executableURL = cliURL
+            process.arguments = [
+                "sync", "acknowledge-writer-upgrade",
+                "--confirm", confirmation,
+            ]
+            var environment = ProcessInfo.processInfo.environment
+            environment["RUBIEN_LIBRARY_ROOT"] = tmpRoot.path
+            process.environment = environment
+            let stdout = Pipe()
+            let stderr = Pipe()
+            process.standardOutput = stdout
+            process.standardError = stderr
+            try process.run()
+            process.waitUntilExit()
+            return (
+                process.terminationStatus,
+                stdout.fileHandleForReading.readDataToEndOfFile(),
+                stderr.fileHandleForReading.readDataToEndOfFile()
+            )
+        }
+
+        let refused = try run("yes")
+        XCTAssertNotEqual(refused.0, 0)
+
+        let accepted = try run("ALL-WRITERS-UPGRADED")
+        XCTAssertEqual(accepted.0, 0, String(data: accepted.2, encoding: .utf8) ?? "")
+        let receipt = try JSONSerialization.jsonObject(with: accepted.1) as? [String: Any]
+        XCTAssertEqual(receipt?["acknowledged"] as? Bool, true)
+
+        let pool = try DatabasePool(path: dbPath)
+        try pool.read { db in
+            XCTAssertFalse(try SyncStateStore().writerUpgradeRequired(db))
+            XCTAssertNotNil(try String.fetchOne(
+                db,
+                sql: "SELECT value FROM syncSession WHERE key='writerUpgradeAcknowledgedAt'"
+            ))
+            XCTAssertEqual(
+                try String.fetchOne(
+                    db,
+                    sql: "SELECT value FROM syncSession WHERE key='writerUpgradeAcknowledgedSchemaVersion'"
+                ),
+                AppDatabase.currentSchemaVersion
+            )
+        }
+    }
+
+    func testAcknowledgeWriterUpgradeRefusesPreV13Library() throws {
+        let tmpRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rubien-cli-ack-v12-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmpRoot) }
+
+        let dbPath = tmpRoot.appendingPathComponent("library.sqlite").path
+        do {
+            let queue = try DatabaseQueue(path: dbPath)
+            try AppDatabase.makeV12DatabaseForTesting(on: queue)
+        }
+
+        let process = Process()
+        process.executableURL = cliURL
+        process.arguments = [
+            "sync", "acknowledge-writer-upgrade",
+            "--confirm", "ALL-WRITERS-UPGRADED",
+        ]
+        var environment = ProcessInfo.processInfo.environment
+        environment["RUBIEN_LIBRARY_ROOT"] = tmpRoot.path
+        process.environment = environment
+        process.standardOutput = Pipe()
+        let stderr = Pipe()
+        process.standardError = stderr
+        try process.run()
+        process.waitUntilExit()
+
+        XCTAssertNotEqual(process.terminationStatus, 0)
+        XCTAssertTrue(
+            String(
+                data: stderr.fileHandleForReading.readDataToEndOfFile(),
+                encoding: .utf8
+            )?.contains("has not completed its v13 identity migration") == true
+        )
+        let verificationPool = try DatabasePool(path: dbPath)
+        XCTAssertFalse(try verificationPool.read { db in
+            try Bool.fetchOne(db, sql: """
+                SELECT EXISTS(
+                    SELECT 1 FROM syncSession
+                    WHERE key = 'writerUpgradeAcknowledgedAt'
+                )
+                """) ?? true
+        })
     }
 }
 #endif

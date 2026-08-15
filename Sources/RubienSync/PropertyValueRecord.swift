@@ -12,23 +12,45 @@ import RubienCore
 extension PropertyValue {
 
     public enum RecordField {
+        public static let syncId       = SyncRecordIdentity.syncIdField
         public static let referenceId  = "referenceId"
+        public static let referenceSyncId = "referenceSyncId"
         public static let propertyId   = "propertyId"
+        public static let propertySyncId = "propertySyncId"
         public static let value        = "value"
         public static let dateModified = "dateModified"
     }
 
     /// Schema-invariant test (Phase E) reads this. Keep in lockstep with `RecordField`.
     public static let allFieldNames: [String] = [
+        RecordField.syncId,
         RecordField.referenceId,
+        RecordField.referenceSyncId,
         RecordField.propertyId,
+        RecordField.propertySyncId,
         RecordField.value,
         RecordField.dateModified,
     ]
 
     public func populate(record: CKRecord) {
-        record[RecordField.referenceId]  = referenceId
-        record[RecordField.propertyId]   = propertyId
+        let wireReferenceSyncId = referenceSyncId.isEmpty
+            ? String(referenceId)
+            : referenceSyncId
+        let wirePropertySyncId = propertySyncId.isEmpty
+            ? String(propertyId)
+            : propertySyncId
+        let wireSyncId = syncId.isEmpty
+            ? "\(wireReferenceSyncId)/\(wirePropertySyncId)"
+            : syncId
+        SyncRecordIdentity.write(wireSyncId, to: record)
+        record[RecordField.referenceSyncId] = wireReferenceSyncId
+        record[RecordField.propertySyncId] = wirePropertySyncId
+        record[RecordField.referenceId] = SyncRecordIdentity.legacyInteger(
+            for: wireReferenceSyncId
+        )
+        record[RecordField.propertyId] = SyncRecordIdentity.legacyInteger(
+            for: wirePropertySyncId
+        )
         record[RecordField.value]        = value
         record[RecordField.dateModified] = dateModified
     }
@@ -51,15 +73,27 @@ extension PropertyValue {
     /// forward compat with peers that wrote the record before this field was
     /// added.
     public init?(record: CKRecord) {
-        guard
-            let referenceId = record[RecordField.referenceId] as? Int64,
-            let propertyId  = record[RecordField.propertyId]  as? Int64
+        guard let referenceSyncId = SyncRecordIdentity.decodedForeignKey(
+            from: record,
+            globalField: RecordField.referenceSyncId,
+            legacyField: RecordField.referenceId
+        ), let propertySyncId = SyncRecordIdentity.decodedForeignKey(
+            from: record,
+            globalField: RecordField.propertySyncId,
+            legacyField: RecordField.propertyId
+        )
         else {
             return nil
         }
         self.init(
-            referenceId: referenceId,
-            propertyId: propertyId,
+            syncId: SyncRecordIdentity.decodedSyncId(
+                from: record,
+                expectedType: .propertyValue
+            ),
+            referenceId: (record[RecordField.referenceId] as? Int64) ?? 0,
+            referenceSyncId: referenceSyncId,
+            propertyId: (record[RecordField.propertyId] as? Int64) ?? 0,
+            propertySyncId: propertySyncId,
             value: record[RecordField.value] as? String,
             dateModified: (record[RecordField.dateModified] as? Date) ?? Date()
         )

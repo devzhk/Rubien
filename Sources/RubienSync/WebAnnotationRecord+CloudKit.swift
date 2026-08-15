@@ -7,12 +7,15 @@ import RubienCore
 ///
 /// Web annotations anchor to the extracted page text via
 /// (anchorText, prefixText?, suffixText?) rather than to pixel bounds; they
-/// port between devices without re-layout concerns. `referenceId` is a plain
-/// Int64 (post A-pks: String UUID), not a `CKRecord.Reference`.
+/// port between devices without re-layout concerns. The relationship uses a
+/// plain global `referenceSyncId`, not a `CKRecord.Reference`; `referenceId`
+/// remains only as a legacy fallback.
 extension WebAnnotationRecord {
 
     public enum RecordField {
+        public static let syncId       = SyncRecordIdentity.syncIdField
         public static let referenceId  = "referenceId"
+        public static let referenceSyncId = "referenceSyncId"
         public static let type         = "type"
         public static let selectedText = "selectedText"
         public static let noteText     = "noteText"
@@ -26,7 +29,9 @@ extension WebAnnotationRecord {
 
     /// Schema-invariant test (Phase E) reads this. Keep in lockstep with `RecordField`.
     public static let allFieldNames: [String] = [
+        RecordField.syncId,
         RecordField.referenceId,
+        RecordField.referenceSyncId,
         RecordField.type,
         RecordField.selectedText,
         RecordField.noteText,
@@ -39,7 +44,14 @@ extension WebAnnotationRecord {
     ]
 
     public func populate(record: CKRecord) {
-        record[RecordField.referenceId]  = referenceId
+        let wireReferenceSyncId = referenceSyncId.isEmpty
+            ? String(referenceId)
+            : referenceSyncId
+        SyncRecordIdentity.write(syncId, to: record)
+        record[RecordField.referenceSyncId] = wireReferenceSyncId
+        record[RecordField.referenceId] = SyncRecordIdentity.legacyInteger(
+            for: wireReferenceSyncId
+        )
         record[RecordField.type]         = type.rawValue
         // Older peers still read selectedText; write it as a mirror of anchorText
         // so they keep rendering until they upgrade.
@@ -72,7 +84,11 @@ extension WebAnnotationRecord {
     /// fall back to `.highlight`. Missing `dateModified` falls back to
     /// `Date()` for forward compat with peers that predate the field.
     public init?(record: CKRecord) {
-        guard let referenceId = record[RecordField.referenceId] as? Int64 else {
+        guard let referenceSyncId = SyncRecordIdentity.decodedForeignKey(
+            from: record,
+            globalField: RecordField.referenceSyncId,
+            legacyField: RecordField.referenceId
+        ) else {
             return nil
         }
         let anchor = (record[RecordField.anchorText] as? String)
@@ -83,7 +99,12 @@ extension WebAnnotationRecord {
             .flatMap(AnnotationType.init(rawValue:)) ?? .highlight
 
         self.init(
-            referenceId: referenceId,
+            syncId: SyncRecordIdentity.decodedSyncId(
+                from: record,
+                expectedType: .webAnnotation
+            ),
+            referenceId: (record[RecordField.referenceId] as? Int64) ?? 0,
+            referenceSyncId: referenceSyncId,
             type: type,
             noteText: record[RecordField.noteText] as? String,
             color: (record[RecordField.color] as? String) ?? "#FFDE59",

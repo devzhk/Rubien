@@ -13,6 +13,7 @@ import RubienCore
 extension MetadataIntake {
 
     public enum RecordField {
+        public static let syncId                = SyncRecordIdentity.syncIdField
         public static let sourceKind            = "sourceKind"
         public static let verificationStatus    = "verificationStatus"
         public static let title                 = "title"
@@ -25,6 +26,7 @@ extension MetadataIntake {
         public static let candidatesJSON        = "candidatesJSON"
         public static let statusMessage         = "statusMessage"
         public static let linkedReferenceId     = "linkedReferenceId"
+        public static let linkedReferenceSyncId = "linkedReferenceSyncId"
         public static let evidenceBundleHash    = "evidenceBundleHash"
         public static let createdAt             = "createdAt"
         public static let updatedAt             = "updatedAt"
@@ -34,6 +36,7 @@ extension MetadataIntake {
     /// `linkedReferenceId` is intentionally absent from `Reference`'s schema
     /// — intake rows live in their own table.
     public static let allFieldNames: [String] = [
+        RecordField.syncId,
         RecordField.sourceKind,
         RecordField.verificationStatus,
         RecordField.title,
@@ -46,12 +49,16 @@ extension MetadataIntake {
         RecordField.candidatesJSON,
         RecordField.statusMessage,
         RecordField.linkedReferenceId,
+        RecordField.linkedReferenceSyncId,
         RecordField.evidenceBundleHash,
         RecordField.createdAt,
         RecordField.updatedAt,
     ]
 
     public func populate(record: CKRecord) {
+        let wireReferenceSyncId = linkedReferenceSyncId
+            ?? linkedReferenceId.map(String.init)
+        SyncRecordIdentity.write(syncId, to: record)
         record[RecordField.sourceKind]            = sourceKind.rawValue
         record[RecordField.verificationStatus]    = verificationStatus.rawValue
         record[RecordField.title]                 = title
@@ -63,7 +70,10 @@ extension MetadataIntake {
         record[RecordField.currentReferenceJSON]  = currentReferenceJSON
         record[RecordField.candidatesJSON]        = candidatesJSON
         record[RecordField.statusMessage]         = statusMessage
-        record[RecordField.linkedReferenceId]     = linkedReferenceId
+        record[RecordField.linkedReferenceSyncId] = wireReferenceSyncId
+        record[RecordField.linkedReferenceId] = wireReferenceSyncId.flatMap(
+            SyncRecordIdentity.legacyInteger(for:)
+        )
         record[RecordField.evidenceBundleHash]    = evidenceBundleHash
         record[RecordField.createdAt]             = createdAt
         record[RecordField.updatedAt]             = updatedAt
@@ -93,6 +103,10 @@ extension MetadataIntake {
             .flatMap(VerificationStatus.init(rawValue:)) ?? .legacy
 
         self.init(
+            syncId: SyncRecordIdentity.decodedSyncId(
+                from: record,
+                expectedType: .metadataIntake
+            ),
             sourceKind: sourceKind,
             verificationStatus: verificationStatus,
             title: (record[RecordField.title] as? String) ?? "",
@@ -105,6 +119,11 @@ extension MetadataIntake {
             candidatesJSON: record[RecordField.candidatesJSON] as? String,
             statusMessage: record[RecordField.statusMessage] as? String,
             linkedReferenceId: record[RecordField.linkedReferenceId] as? Int64,
+            linkedReferenceSyncId: SyncRecordIdentity.decodedForeignKey(
+                from: record,
+                globalField: RecordField.linkedReferenceSyncId,
+                legacyField: RecordField.linkedReferenceId
+            ),
             evidenceBundleHash: record[RecordField.evidenceBundleHash] as? String,
             createdAt: (record[RecordField.createdAt] as? Date) ?? Date(),
             updatedAt: (record[RecordField.updatedAt] as? Date) ?? Date()

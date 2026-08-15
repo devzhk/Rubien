@@ -45,8 +45,8 @@ final class PDFUploadDrainerTests: XCTestCase {
         // Seed a queued row.
         try await db.dbWriter.write { db in
             try db.execute(sql: """
-                INSERT INTO reference(id, title, dateAdded, dateModified)
-                VALUES(1, 'r', ?, ?)
+                INSERT INTO reference(id, syncId, title, dateAdded, dateModified)
+                VALUES(1, '1', 'r', ?, ?)
             """, arguments: [Date(), Date()])
             try db.execute(sql: """
                 INSERT INTO pdfUploadQueue(referenceId, localFilename, queuedAt)
@@ -85,9 +85,9 @@ final class PDFUploadDrainerTests: XCTestCase {
         try await db.dbWriter.write { db in
             for i: Int64 in [1, 2] {
                 try db.execute(sql: """
-                    INSERT INTO reference(id, title, dateAdded, dateModified)
-                    VALUES(?, 'r', ?, ?)
-                """, arguments: [i, Date(), Date()])
+                    INSERT INTO reference(id, syncId, title, dateAdded, dateModified)
+                    VALUES(?, ?, 'r', ?, ?)
+                """, arguments: [i, String(i), Date(), Date()])
                 try db.execute(sql: """
                     INSERT INTO pdfUploadQueue(referenceId, localFilename, queuedAt)
                     VALUES(?, ?, ?)
@@ -110,7 +110,7 @@ final class PDFUploadDrainerTests: XCTestCase {
         // Use the DB-only helper so we don't trigger CKSyncEngine init in
         // an unentitled XCTest process.
         let drained = await library.drainPDFUploadQueueIntoSyncState()
-        XCTAssertEqual(drained.sorted(), [1, 2], "drainer returns the IDs it processed")
+        XCTAssertEqual(drained.sorted(), ["1", "2"], "drainer returns the sync IDs it processed")
 
         // Queue must be empty — drainer eagerly removes after marking the
         // syncState row dirty. The dirty row is the durable "needs push"
@@ -160,8 +160,8 @@ final class PDFUploadDrainerTests: XCTestCase {
     func testDrainTwiceForSameRowDoesNotDoublePush() async throws {
         try await db.dbWriter.write { db in
             try db.execute(sql: """
-                INSERT INTO reference(id, title, dateAdded, dateModified)
-                VALUES(1, 'r', ?, ?)
+                INSERT INTO reference(id, syncId, title, dateAdded, dateModified)
+                VALUES(1, '1', 'r', ?, ?)
             """, arguments: [Date(), Date()])
             try db.execute(sql: """
                 INSERT INTO pdfUploadQueue(referenceId, localFilename, queuedAt)
@@ -180,7 +180,7 @@ final class PDFUploadDrainerTests: XCTestCase {
             pdfAssetSyncEnabledProvider: { true }
         )
         let firstPass = await library.drainPDFUploadQueueIntoSyncState()
-        XCTAssertEqual(firstPass, [1])
+        XCTAssertEqual(firstPass, ["1"])
         let secondPass = await library.drainPDFUploadQueueIntoSyncState()
         XCTAssertEqual(secondPass, [], "second drain on the now-empty queue must return nothing")
 

@@ -63,6 +63,10 @@ final class MigrationV13Tests: XCTestCase {
                 let names = Set(try db.columns(in: table).map(\.name))
                 XCTAssertTrue(expected.isSubset(of: names), "\(table) missing \(expected.subtracting(names))")
             }
+            XCTAssertTrue(try db.tableExists("syncIdentityAlias"))
+            XCTAssertTrue(try db.tableExists("syncLegacyPDFCacheOrphan"))
+            XCTAssertTrue(try db.tableExists("syncLegacyPDFUploadQueueOrphan"))
+            XCTAssertTrue(try db.tableExists("syncLegacyWebContentCacheOrphan"))
 
             XCTAssertEqual(
                 try String.fetchOne(db, sql: "SELECT value FROM syncSession WHERE key='fullHistoryReplayPending'"),
@@ -72,6 +76,44 @@ final class MigrationV13Tests: XCTestCase {
                 try String.fetchOne(db, sql: "SELECT value FROM syncSession WHERE key='writerUpgradeRequired'"),
                 "1"
             )
+        }
+    }
+
+    func testUpgradePreservesTransientForeignKeyOrphanForReplayRepair() throws {
+        let queue = try makeV12Queue()
+        try queue.writeWithoutTransaction { db in
+            try db.execute(sql: "PRAGMA foreign_keys = OFF")
+            do {
+                try db.execute(sql: """
+                    INSERT INTO referenceTag(referenceId, tagId, dateModified)
+                    VALUES(9001, 9002, ?)
+                    """, arguments: [Date(timeIntervalSince1970: 1)])
+            } catch {
+                try? db.execute(sql: "PRAGMA foreign_keys = ON")
+                throw error
+            }
+            try db.execute(sql: "PRAGMA foreign_keys = ON")
+        }
+
+        XCTAssertNoThrow(try AppDatabase(queue))
+
+        try queue.read { db in
+            let row = try XCTUnwrap(Row.fetchOne(db, sql: """
+                SELECT syncId, referenceSyncId, tagSyncId
+                FROM referenceTag
+                WHERE referenceId = 9001 AND tagId = 9002
+                """))
+            XCTAssertEqual(row["syncId"] as String?, "9001/9002")
+            XCTAssertEqual(row["referenceSyncId"] as String?, "9001")
+            XCTAssertEqual(row["tagSyncId"] as String?, "9002")
+            XCTAssertEqual(
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM pragma_foreign_key_check"),
+                2
+            )
+            XCTAssertTrue(try String.fetchAll(
+                db,
+                sql: "SELECT identifier FROM grdb_migrations"
+            ).contains("v13"))
         }
     }
 

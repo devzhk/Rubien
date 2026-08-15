@@ -8,12 +8,16 @@ import RubienCore
 /// actor's delegate methods stay thin — all "how do I decode a Reference
 /// CKRecord into a DB row" knowledge is here.
 ///
-/// Pre-A-pks conventions:
-/// - For entities with an autoincrement Int64 PK, `entityId` is the
-///   stringified rowID, so `Int64(entityId)` resolves to the local key.
-/// - For the `referenceTag` pivot, `entityId` is `"refId/tagId"`; we split
-///   and resolve both halves.
+/// v13 convention: `entityId` is the stable opaque sync identity, never a
+/// device-local SQLite row ID. Integer primary and foreign keys are resolved
+/// through each table's unique `syncId` index.
 extension SyncEntityType {
+
+    enum RemoteDependencyStatus: Equatable {
+        case ready
+        case unresolved
+        case invalid
+    }
 
     struct FetchOrphanReconciliationOutcome: Sendable, Equatable {
         var reconciledRowCount = 0
@@ -28,15 +32,201 @@ extension SyncEntityType {
         }
     }
 
+    func remoteDependencyStatus(
+        for record: CKRecord,
+        entityId: String,
+        db: Database
+    ) throws -> RemoteDependencyStatus {
+        guard SyncRecordIdentity.validatedSyncId(
+            in: record,
+            expectedType: self
+        ) == entityId else { return .invalid }
+
+        func exists(_ type: SyncEntityType, _ syncId: String) throws -> Bool {
+            try Self.resolvedParentIdentity(
+                type: type,
+                syncId: syncId,
+                db: db
+            ) != nil
+        }
+
+        switch self {
+        case .referenceTag:
+            guard let row = ReferenceTag(record: record) else { return .invalid }
+            guard let reference = try Self.resolvedParentIdentity(
+                type: .reference,
+                syncId: row.referenceSyncId,
+                db: db
+            ), let tag = try Self.resolvedParentIdentity(
+                type: .tag,
+                syncId: row.tagSyncId,
+                db: db
+            ) else { return .unresolved }
+            if let identityOwner = try Row.fetchOne(db, sql: """
+                SELECT referenceId, tagId FROM referenceTag
+                WHERE syncId = ? LIMIT 1
+                """, arguments: [entityId]) {
+                let ownerReferenceId: Int64 = identityOwner["referenceId"]
+                let ownerTagId: Int64 = identityOwner["tagId"]
+                guard ownerReferenceId == reference.id,
+                      ownerTagId == tag.id else { return .invalid }
+            }
+            return .ready
+        case .pdfAnnotation:
+            guard let row = PDFAnnotationRecord(record: record) else { return .invalid }
+            return try exists(.reference, row.referenceSyncId) ? .ready : .unresolved
+        case .webAnnotation:
+            guard let row = WebAnnotationRecord(record: record) else { return .invalid }
+            return try exists(.reference, row.referenceSyncId) ? .ready : .unresolved
+        case .metadataIntake:
+            let row = MetadataIntake(record: record)
+            guard let parent = row.linkedReferenceSyncId else { return .ready }
+            return try exists(.reference, parent) ? .ready : .unresolved
+        case .metadataEvidence:
+            guard let row = MetadataEvidence(record: record) else { return .invalid }
+            if let parent = row.intakeSyncId,
+               try !exists(.metadataIntake, parent) { return .unresolved }
+            if let parent = row.referenceSyncId,
+               try !exists(.reference, parent) { return .unresolved }
+            return .ready
+        case .propertyValue:
+            guard let row = PropertyValue(record: record) else { return .invalid }
+            guard let reference = try Self.resolvedParentIdentity(
+                type: .reference,
+                syncId: row.referenceSyncId,
+                db: db
+            ), let property = try Self.resolvedParentIdentity(
+                type: .propertyDefinition,
+                syncId: row.propertySyncId,
+                db: db
+            ) else { return .unresolved }
+            let observedDerivedIdentity =
+                "\(row.referenceSyncId)/\(row.propertySyncId)"
+            let canonicalDerivedIdentity =
+                "\(reference.syncId)/\(property.syncId)"
+            let incomingIdentity = entityId == observedDerivedIdentity
+                ? canonicalDerivedIdentity
+                : entityId
+            for identity in Set([entityId, incomingIdentity]) {
+                guard let identityOwner = try Row.fetchOne(db, sql: """
+                    SELECT referenceId, propertyId FROM propertyValue
+                    WHERE syncId = ? LIMIT 1
+                    """, arguments: [identity]) else { continue }
+                let ownerReferenceId: Int64 = identityOwner["referenceId"]
+                let ownerPropertyId: Int64 = identityOwner["propertyId"]
+                guard ownerReferenceId == reference.id,
+                      ownerPropertyId == property.id else { return .invalid }
+            }
+            return .ready
+        case .readingActivity:
+            guard let row = ReadingActivity(record: record) else { return .invalid }
+            // Epoch mismatches use the specialized activity quarantine; only
+            // parent absence belongs in the generic wire-record quarantine.
+            return try exists(.reference, row.referenceSyncId) ? .ready : .unresolved
+        case .referencePDF:
+            guard let row = ReferencePDFRecord(record: record) else { return .invalid }
+            return try exists(.reference, row.referenceSyncId) ? .ready : .unresolved
+        case .databaseView:
+            var row = DatabaseView(record: record)
+            switch DatabaseViewPortableCodec.resolve(
+                record: record,
+                into: &row,
+                db: db
+            ) {
+            case .ready: return .ready
+            case .unresolved: return .unresolved
+            case .invalid: return .invalid
+            }
+        case .reference, .tag, .propertyDefinition,
+             .assistantActivity, .activityEpoch:
+            return .ready
+        }
+    }
+
+    /// Persist a full wire record until its global dependencies arrive.
+    /// Returns the previously-owned staged filename when a newer PDF version
+    /// replaces it, so the caller can unlink that file only after commit.
+    @discardableResult
+    static func quarantineRemoteRecord(
+        _ record: CKRecord,
+        stagedFilename: String? = nil,
+        db: Database
+    ) throws -> String? {
+        let priorStagedFilename: String? = if stagedFilename != nil {
+            try String.fetchOne(
+                db,
+                sql: "SELECT stagedFilename FROM syncOrphan WHERE recordName = ?",
+                arguments: [record.recordID.recordName]
+            )
+        } else {
+            nil
+        }
+        let data = try SyncRecordIdentity.archive(record)
+        try db.execute(
+            sql: """
+                INSERT INTO syncOrphan
+                    (recordName, recordType, recordData, stagedFilename, receivedAt)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(recordName) DO UPDATE SET
+                    recordType = excluded.recordType,
+                    recordData = excluded.recordData,
+                    stagedFilename = COALESCE(
+                        excluded.stagedFilename,
+                        syncOrphan.stagedFilename
+                    ),
+                    receivedAt = excluded.receivedAt
+                """,
+            arguments: [
+                record.recordID.recordName, record.recordType, data,
+                stagedFilename, Date(),
+            ]
+        )
+        guard let priorStagedFilename,
+              priorStagedFilename != stagedFilename else { return nil }
+        return priorStagedFilename
+    }
+
     /// Output of `prepareReferencePDFMaterialization`. Carries the bytes
-    /// already on disk and the canonical `entityId` (`Int64`) parsed from
-    /// `CKRecord.ID.recordName`. The wire payload's own `referenceId` is
-    /// kept for scalar columns only — `entityId` is the DB key.
+    /// already on disk and the canonical global identity parsed from
+    /// `CKRecord.ID.recordName`. The wire payload's legacy `referenceId` is
+    /// kept only for backward-compatible decoding.
     struct PreparedReferencePDFMaterialization: Sendable {
-        let entityId: Int64
+        struct ReuseHint: Sendable, Equatable {
+            let localFilename: String
+            let contentHash: String
+            let assetVersion: Int
+        }
+
+        let referenceSyncId: String
         let payload: ReferencePDFRecord
         let stagedURL: URL
         let stagedFilename: String
+        let reuseHint: ReuseHint?
+
+        func withReuseHint(_ hint: ReuseHint?) -> Self {
+            .init(
+                referenceSyncId: referenceSyncId,
+                payload: payload,
+                stagedURL: stagedURL,
+                stagedFilename: stagedFilename,
+                reuseHint: hint
+            )
+        }
+
+        func withReferenceSyncId(_ syncId: String) -> Self {
+            .init(
+                referenceSyncId: syncId,
+                payload: payload,
+                stagedURL: stagedURL,
+                stagedFilename: stagedFilename,
+                reuseHint: reuseHint
+            )
+        }
+    }
+
+    struct PreparedReferencePDFApplyOutcome: Sendable, Equatable {
+        let displacedFilename: String?
+        let reusedExistingFile: Bool
     }
 
     /// Stage the CKAsset bytes onto disk under `PDFs/<UUID>_<originalFilename>`
@@ -46,15 +236,18 @@ extension SyncEntityType {
     ///
     /// Returns nil for:
     /// - records without an asset (`payload.assetURL == nil`)
-    /// - records whose `recordName` doesn't parse as `referencePDF:<Int64>`
+    /// - records whose `recordName` and `syncId` don't agree on a valid global
+    ///   reference-PDF identity
     ///
     /// On `copyItem` failure the partial staged file is removed before
     /// rethrowing so the PDFs/ dir doesn't accumulate orphans.
     static func prepareReferencePDFMaterialization(
         record: CKRecord
     ) throws -> PreparedReferencePDFMaterialization? {
-        guard let (_, entityIdStr) = SyncEntityType.parseRecordName(record.recordID.recordName),
-              let entityId = Int64(entityIdStr) else {
+        guard let referenceSyncId = SyncRecordIdentity.validatedSyncId(
+            in: record,
+            expectedType: .referencePDF
+        ) else {
             return nil
         }
         guard let payload = ReferencePDFRecord(record: record),
@@ -74,10 +267,34 @@ extension SyncEntityType {
             throw error
         }
         return PreparedReferencePDFMaterialization(
-            entityId: entityId,
+            referenceSyncId: referenceSyncId,
             payload: payload,
             stagedURL: stagedURL,
-            stagedFilename: stagedFilename
+            stagedFilename: stagedFilename,
+            reuseHint: nil
+        )
+    }
+
+    static func referencePDFReuseHint(
+        for prepared: PreparedReferencePDFMaterialization,
+        db: Database
+    ) throws -> PreparedReferencePDFMaterialization.ReuseHint? {
+        let canonicalReferenceSyncId = try SyncIdentityAliasStore.resolve(
+            entityType: .reference,
+            identity: prepared.referenceSyncId,
+            db: db
+        )
+        guard let row = try Row.fetchOne(db, sql: """
+            SELECT pc.localFilename, pc.contentHash, pc.assetVersion
+            FROM pdfCache pc
+            JOIN reference r ON r.id = pc.referenceId
+            WHERE r.syncId = ? AND pc.materializedAt IS NOT NULL
+            LIMIT 1
+            """, arguments: [canonicalReferenceSyncId]) else { return nil }
+        return .init(
+            localFilename: row["localFilename"],
+            contentHash: row["contentHash"],
+            assetVersion: row["assetVersion"]
         )
     }
 
@@ -95,7 +312,11 @@ extension SyncEntityType {
         _ prepared: PreparedReferencePDFMaterialization,
         db: Database
     ) throws -> String? {
-        let id = prepared.entityId
+        guard let id = try Int64.fetchOne(
+            db,
+            sql: "SELECT id FROM reference WHERE syncId = ? LIMIT 1",
+            arguments: [prepared.referenceSyncId]
+        ) else { return nil }
         let previousFilename = try String.fetchOne(
             db,
             sql: "SELECT localFilename FROM pdfCache WHERE referenceId = ?",
@@ -121,6 +342,78 @@ extension SyncEntityType {
             return previousFilename
         }
         return nil
+    }
+
+    /// Transaction-only full-replay fast path. The Phase-1 hint is accepted
+    /// only when the current row still matches every fingerprint component;
+    /// otherwise the already-staged asset follows the normal upsert path.
+    static func applyPreparedReferencePDFPreservingUnchanged(
+        _ prepared: PreparedReferencePDFMaterialization,
+        db: Database
+    ) throws -> PreparedReferencePDFApplyOutcome {
+        if let hint = prepared.reuseHint,
+           hint.contentHash == prepared.payload.contentHash,
+           hint.assetVersion == prepared.payload.assetVersion,
+           let current = try Row.fetchOne(db, sql: """
+                SELECT pc.localFilename, pc.contentHash, pc.assetVersion
+                FROM pdfCache pc
+                JOIN reference r ON r.id = pc.referenceId
+                WHERE r.syncId = ? AND pc.materializedAt IS NOT NULL
+                LIMIT 1
+                """, arguments: [prepared.referenceSyncId]),
+           (current["localFilename"] as String) == hint.localFilename,
+           (current["contentHash"] as String) == hint.contentHash,
+           (current["assetVersion"] as Int) == hint.assetVersion
+        {
+            return .init(
+                displacedFilename: nil,
+                reusedExistingFile: true
+            )
+        }
+        return .init(
+            displacedFilename: try applyPreparedReferencePDF(prepared, db: db),
+            reusedExistingFile: false
+        )
+    }
+
+    /// Resolve a retired owning-Reference identity before materializing an
+    /// incoming PDF. The caller applies the returned value first, then calls
+    /// `retireAliasedReferencePDFIdentity` in the same transaction.
+    static func canonicalizedReferencePDFMaterialization(
+        _ prepared: PreparedReferencePDFMaterialization,
+        db: Database
+    ) throws -> PreparedReferencePDFMaterialization? {
+        guard let parent = try resolvedParentIdentity(
+            type: .reference,
+            syncId: prepared.referenceSyncId,
+            db: db
+        ) else { return nil }
+        return prepared.withReferenceSyncId(parent.syncId)
+    }
+
+    /// A PDF whose observed record name names a retired parent must be
+    /// recreated under the canonical parent identity and the exact observed
+    /// record must be deleted. Never attach the loser's system fields to the
+    /// winner: they belong to different CKRecord.ID values.
+    static func retireAliasedReferencePDFIdentity(
+        observedEntityId: String,
+        canonicalEntityId: String,
+        stateStore: SyncStateStore,
+        db: Database
+    ) throws {
+        guard observedEntityId != canonicalEntityId else { return }
+        try markDirty(
+            type: .referencePDF,
+            entityId: canonicalEntityId,
+            db: db
+        )
+        try retireLosingIdentity(
+            type: .referencePDF,
+            entityId: observedEntityId,
+            serverObserved: true,
+            stateStore: stateStore,
+            db: db
+        )
     }
 
     /// Compose the `"<type>:<entityId>"` CKRecord.recordName for a local row.
@@ -155,8 +448,9 @@ extension SyncEntityType {
     ) throws -> CKRecord? {
         switch self {
         case .reference:
-            guard let id = Int64(entityId),
-                  let row = try Reference.fetchOne(db, key: id) else { return nil }
+            guard let row = try Reference
+                .filter(Column("syncId") == entityId)
+                .fetchOne(db) else { return nil }
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
@@ -166,8 +460,9 @@ extension SyncEntityType {
             return record
 
         case .tag:
-            guard let id = Int64(entityId),
-                  let row = try Tag.fetchOne(db, key: id) else { return nil }
+            guard let row = try Tag
+                .filter(Column("syncId") == entityId)
+                .fetchOne(db) else { return nil }
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
@@ -177,10 +472,9 @@ extension SyncEntityType {
             return record
 
         case .referenceTag:
-            guard let (refId, tagId) = Self.splitPivotID(entityId),
-                  let row = try ReferenceTag
-                    .filter(Column("referenceId") == refId && Column("tagId") == tagId)
-                    .fetchOne(db)
+            guard let row = try ReferenceTag
+                .filter(Column("syncId") == entityId)
+                .fetchOne(db)
             else { return nil }
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
@@ -191,8 +485,9 @@ extension SyncEntityType {
             return record
 
         case .pdfAnnotation:
-            guard let id = Int64(entityId),
-                  let row = try PDFAnnotationRecord.fetchOne(db, key: id) else { return nil }
+            guard let row = try PDFAnnotationRecord
+                .filter(Column("syncId") == entityId)
+                .fetchOne(db) else { return nil }
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
@@ -202,8 +497,9 @@ extension SyncEntityType {
             return record
 
         case .webAnnotation:
-            guard let id = Int64(entityId),
-                  let row = try WebAnnotationRecord.fetchOne(db, key: id) else { return nil }
+            guard let row = try WebAnnotationRecord
+                .filter(Column("syncId") == entityId)
+                .fetchOne(db) else { return nil }
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
@@ -213,8 +509,9 @@ extension SyncEntityType {
             return record
 
         case .metadataIntake:
-            guard let id = Int64(entityId),
-                  let row = try MetadataIntake.fetchOne(db, key: id) else { return nil }
+            guard let row = try MetadataIntake
+                .filter(Column("syncId") == entityId)
+                .fetchOne(db) else { return nil }
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
@@ -224,8 +521,9 @@ extension SyncEntityType {
             return record
 
         case .metadataEvidence:
-            guard let id = Int64(entityId),
-                  let row = try MetadataEvidence.fetchOne(db, key: id) else { return nil }
+            guard let row = try MetadataEvidence
+                .filter(Column("syncId") == entityId)
+                .fetchOne(db) else { return nil }
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
@@ -235,8 +533,9 @@ extension SyncEntityType {
             return record
 
         case .propertyDefinition:
-            guard let id = Int64(entityId),
-                  let row = try PropertyDefinition.fetchOne(db, key: id) else { return nil }
+            guard let row = try PropertyDefinition
+                .filter(Column("syncId") == entityId)
+                .fetchOne(db) else { return nil }
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
@@ -246,8 +545,9 @@ extension SyncEntityType {
             return record
 
         case .propertyValue:
-            guard let id = Int64(entityId),
-                  let row = try PropertyValue.fetchOne(db, key: id) else { return nil }
+            guard let row = try PropertyValue
+                .filter(Column("syncId") == entityId)
+                .fetchOne(db) else { return nil }
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
@@ -257,27 +557,23 @@ extension SyncEntityType {
             return record
 
         case .databaseView:
-            guard let id = Int64(entityId),
-                  let row = try DatabaseView.fetchOne(db, key: id) else { return nil }
+            guard let row = try DatabaseView
+                .filter(Column("syncId") == entityId)
+                .fetchOne(db) else { return nil }
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
                 recordType: recordType,
                 recordName: qualifiedRecordName(entityId: entityId)
             )
-            row.populate(record: record)
+            try row.populateForSync(record: record, db: db)
             return record
 
         case .readingActivity:
-            guard let key = Self.splitReadingActivityID(entityId),
-                  let row = try ReadingActivity.fetchOne(
-                    db,
-                    sql: """
-                        SELECT * FROM readingActivity
-                        WHERE generation = ? AND installationId = ?
-                          AND referenceId = ? AND localDay = ?
-                        """,
-                    arguments: [key.generation, key.installationId, key.referenceId, key.localDay]
-                  )
+            guard let row = try ReadingActivity.fetchOne(
+                db,
+                sql: "SELECT * FROM readingActivity WHERE syncId = ? LIMIT 1",
+                arguments: [entityId]
+            )
             else { return nil }
             let record = Self.rehydrateOrNew(
                 systemFields: systemFields,
@@ -310,11 +606,17 @@ extension SyncEntityType {
             return record
 
         case .referencePDF:
-            guard let id = Int64(entityId) else { return nil }
             let row: Row? = try Row.fetchOne(db,
-                sql: "SELECT * FROM pdfCache WHERE referenceId = ? AND materializedAt IS NOT NULL",
-                arguments: [id])
+                sql: """
+                    SELECT pc.*, r.syncId AS referenceSyncId
+                    FROM pdfCache pc
+                    JOIN reference r ON r.id = pc.referenceId
+                    WHERE r.syncId = ? AND pc.materializedAt IS NOT NULL
+                    """,
+                arguments: [entityId])
             guard let row else { return nil }
+            let id: Int64 = row["referenceId"]
+            let referenceSyncId: String = row["referenceSyncId"]
             let filename: String = row["localFilename"]
             let assetURL = AppDatabase.pdfStorageURL.appendingPathComponent(filename)
             guard FileManager.default.fileExists(atPath: assetURL.path) else { return nil }
@@ -346,6 +648,7 @@ extension SyncEntityType {
             }
             let payload = ReferencePDFRecord(
                 referenceId: id,
+                referenceSyncId: referenceSyncId,
                 assetURL: assetURL,
                 assetVersion: row["assetVersion"],
                 contentHash: contentHash,
@@ -386,201 +689,669 @@ extension SyncEntityType {
         db: Database,
         stateStore: SyncStateStore = SyncStateStore()
     ) throws -> Bool {
-        // `entityId` is the caller-stripped local id (no "<type>:" prefix).
-        // Don't read `record.recordID.recordName` directly — it carries the
-        // prefixed form so `Int64(...)` would fail for every row.
+        guard SyncRecordIdentity.validatedSyncId(
+            in: record,
+            expectedType: self
+        ) == entityId else {
+            return false
+        }
+
         switch self {
         case .reference:
-            guard let id = Int64(entityId) else { return false }
             var row = Reference(record: record)
-            row.id = id
+            row.syncId = entityId
+            row.id = try Self.localID(
+                tableName: rawValue,
+                syncId: entityId,
+                db: db
+            )
             // Reference no longer carries a PDF filename (B8). Per-device PDF
             // state lives in the local-only `pdfCache` table — never written
             // to a CKRecord, never touched by this apply path. The pdfCache
             // row for `id` (if any) survives unchanged because we only write
             // to `reference` here.
-            try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
+            if row.id == nil { try row.insert(db) } else { try row.update(db) }
 
         case .tag:
-            guard let id = Int64(entityId) else { return false }
             var row = Tag(record: record)
-            row.id = id
+            let materializationIdentity = try SyncIdentityAliasStore.resolve(
+                entityType: .tag,
+                identity: entityId,
+                db: db
+            )
+            row.syncId = materializationIdentity
+            row.id = try Self.localID(
+                tableName: rawValue,
+                syncId: materializationIdentity,
+                db: db
+            )
+            if entityId != materializationIdentity, row.id == nil {
+                // The alias is durable even if its canonical row was later
+                // deleted locally. This fetched loser still exists on the
+                // server, so retire its exact record name again without
+                // resurrecting a physical row or dirtying the absent winner.
+                try Self.retireLosingIdentity(
+                    type: .tag,
+                    entityId: entityId,
+                    serverObserved: true,
+                    stateStore: stateStore,
+                    db: db
+                )
+                return true
+            }
             // Defense-in-depth: a missing/blank name decodes to "" (TagRecord) —
             // a malformed/forward-incompat record. Skip persistence (return false
             // → the caller skips markPulled, so we don't stamp server state on a
             // row we didn't apply) rather than upsert a "" that would itself trip
             // UNIQUE(name) and wedge a later batch.
             guard !row.name.isEmpty else { return false }
-            // Reconcile a name collision the way `.propertyDefinition` does below,
-            // but ADOPT THE INCOMING rowID. A local tag with the same name at a
-            // different rowID (a peer's delete+recreate not yet applied here, or an
-            // offline dual-create) makes the plain upsert throw UNIQUE(name) and
-            // roll back the WHOLE fetched batch — silently wedging all sync on the
-            // device. Unlike built-in PropertyDefinitions (which keep-local because
-            // they carry no child rows), tags have `referenceTag` pivot children
-            // and no stable secondary key, and the incoming fetch carries pivots
-            // keyed to the INCOMING tagId — so we converge on the incoming rowID
-            // and re-key the local pivots across.
-            if let loserId = try Int64.fetchOne(
+            if let local = try Row.fetchOne(
                 db,
-                sql: "SELECT id FROM tag WHERE name = ? AND id <> ? LIMIT 1",
-                arguments: [row.name, id]
+                sql: """
+                    SELECT id, syncId FROM tag
+                    WHERE name = ? AND syncId <> ? LIMIT 1
+                    """,
+                arguments: [row.name, materializationIdentity]
             ) {
-                // Capture the loser's pivots (with their own dateModified, carried
-                // through verbatim) before deleting them: in the delete-free apply
-                // batch FK enforcement is OFF, so ON DELETE CASCADE does NOT fire —
-                // this explicit cleanup is load-bearing.
-                let pivots = try Row.fetchAll(
-                    db,
-                    sql: "SELECT referenceId, dateModified FROM referenceTag WHERE tagId = ?",
-                    arguments: [loserId]
+                let localId: Int64 = local["id"]
+                let localSyncId: String = local["syncId"]
+                let winner = SyncIdentifier.preferred(
+                    localSyncId,
+                    materializationIdentity
                 )
-                try db.execute(sql: "DELETE FROM referenceTag WHERE tagId = ?", arguments: [loserId])
-                try db.execute(sql: "DELETE FROM tag WHERE id = ?", arguments: [loserId])  // frees the name
-                // Triggers are suppressed under applyingRemote, so clear the loser's
-                // stale bookkeeping by hand (tag + its pivots), else an orphan
-                // syncState/tombstone keeps referencing the gone rowID.
-                try db.execute(sql: "DELETE FROM syncState WHERE entityType = 'tag' AND entityId = ?", arguments: [String(loserId)])
-                try db.execute(sql: "DELETE FROM tombstone WHERE entityType = 'tag' AND entityId = ?", arguments: [String(loserId)])
-                try db.execute(sql: "DELETE FROM syncState WHERE entityType = 'referenceTag' AND entityId LIKE ?", arguments: ["%\(SyncConstants.pivotSeparator)\(loserId)"])
-                try db.execute(sql: "DELETE FROM tombstone WHERE entityType = 'referenceTag' AND entityId LIKE ?", arguments: ["%\(SyncConstants.pivotSeparator)\(loserId)"])
-                // Land the incoming tag at its rowID. UPDATE if that rowID is
-                // already occupied by an unrelated tag (Option A: overwrite it —
-                // the same outcome the plain-rowID upsert already produces on any
-                // rowID collision; the occupant's own pivots survive and silently
-                // re-label, the deferred A-pks bystander cost), else INSERT.
-                try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
-                // Re-key the loser's pivots onto the incoming rowID, preserving each
-                // pivot's own dateModified. INSERT OR IGNORE in case a reference
-                // already carries it (UNIQUE PK). These re-keyed rows are LOCAL
-                // truth the device must push, but the dirty-tracking trigger is
-                // suppressed under applyingRemote — so dirty each one by hand, else
-                // the association never propagates and is lost on other devices.
-                for pivot in pivots {
-                    let refId: Int64 = pivot["referenceId"]
-                    let pivotDate: DatabaseValue = pivot["dateModified"]
-                    try db.execute(
-                        sql: "INSERT OR IGNORE INTO referenceTag (referenceId, tagId, dateModified) VALUES (?, ?, ?)",
-                        arguments: [refId, id, pivotDate]
+                let identityLocalId = row.id
+                let winnerLocalId = winner == materializationIdentity
+                    ? (identityLocalId ?? localId)
+                    : localId
+                let losingId = winner == materializationIdentity
+                    ? localSyncId : materializationIdentity
+
+                if let identityLocalId, identityLocalId != localId {
+                    let losingLocalId = winnerLocalId == identityLocalId
+                        ? localId : identityLocalId
+                    try Self.mergeTagRows(
+                        winnerId: winnerLocalId,
+                        loserId: losingLocalId,
+                        winnerSyncId: winner,
+                        stateStore: stateStore,
+                        db: db
                     )
-                    try db.execute(
-                        sql: """
-                            INSERT INTO syncState (entityType, entityId, isDirty) VALUES ('referenceTag', ?, 1)
-                                ON CONFLICT(entityType, entityId) DO UPDATE SET isDirty = 1
-                            """,
-                        arguments: [ReferenceTag.recordName(referenceId: refId, tagId: id)]
+                } else if winner != localSyncId {
+                    // The incoming identity has no row yet, so the role owner
+                    // can adopt it in place.
+                    row.id = localId
+                    row.syncId = materializationIdentity
+                    try row.update(db)
+                    try Self.rekeyTagPivots(
+                        tagId: localId,
+                        from: localSyncId,
+                        to: materializationIdentity,
+                        stateStore: stateStore,
+                        db: db
                     )
                 }
+
+                row.id = winnerLocalId
+                row.syncId = winner
+                try row.update(db)
+                if winner == localSyncId {
+                    try Self.markDirty(
+                        type: .tag,
+                        entityId: winner,
+                        db: db
+                    )
+                }
+                try Self.recordParentAlias(
+                    type: .tag,
+                    losingId: losingId,
+                    winningId: winner,
+                    db: db
+                )
+                try Self.retireLosingIdentity(
+                    type: .tag,
+                    entityId: losingId,
+                    serverObserved: losingId == entityId,
+                    stateStore: stateStore,
+                    db: db
+                )
+                try Self.finishObservedParentAlias(
+                    type: .tag,
+                    observedId: entityId,
+                    winnerId: winner,
+                    stateStore: stateStore,
+                    db: db
+                )
                 return true
             }
-            try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
+            if row.id == nil { try row.insert(db) } else { try row.update(db) }
+            try Self.finishObservedParentAlias(
+                type: .tag,
+                observedId: entityId,
+                winnerId: materializationIdentity,
+                stateStore: stateStore,
+                db: db
+            )
 
         case .referenceTag:
-            guard let pivot = ReferenceTag(record: record) else { return false }
-            // Pivot's only "fields" are its composite PK + dateModified, the
-            // latter being schema-only. Insert-if-absent is enough — update
-            // would be a no-op.
-            let exists = try Bool.fetchOne(db, sql: """
-                SELECT 1 FROM referenceTag WHERE referenceId = ? AND tagId = ? LIMIT 1
-                """, arguments: [pivot.referenceId, pivot.tagId]) ?? false
-            if !exists {
+            guard var pivot = ReferenceTag(record: record),
+                  let reference = try Self.resolvedParentIdentity(
+                    type: .reference,
+                    syncId: pivot.referenceSyncId,
+                    db: db
+                  ),
+                  let tag = try Self.resolvedParentIdentity(
+                    type: .tag,
+                    syncId: pivot.tagSyncId,
+                    db: db
+                  ) else { return false }
+            let canonicalIdentity = "\(reference.syncId)/\(tag.syncId)"
+            pivot.syncId = canonicalIdentity
+            pivot.referenceId = reference.id
+            pivot.referenceSyncId = reference.syncId
+            pivot.tagId = tag.id
+            pivot.tagSyncId = tag.syncId
+
+            // An identity already attached to a different endpoint pair is
+            // malformed. Do not update the requested pair and then tombstone
+            // an identity that still names another live local row.
+            if let identityOwner = try Row.fetchOne(db, sql: """
+                SELECT referenceId, tagId FROM referenceTag
+                WHERE syncId = ? LIMIT 1
+                """, arguments: [entityId]) {
+                let ownerReferenceId: Int64 = identityOwner["referenceId"]
+                let ownerTagId: Int64 = identityOwner["tagId"]
+                guard ownerReferenceId == reference.id,
+                      ownerTagId == tag.id else { return false }
+            }
+
+            if let existing = try Row.fetchOne(db, sql: """
+                SELECT syncId FROM referenceTag
+                WHERE referenceId = ? AND tagId = ? LIMIT 1
+                """, arguments: [pivot.referenceId, pivot.tagId]) {
+                let existingIdentity: String = existing["syncId"]
+                if existingIdentity != canonicalIdentity {
+                    try Self.retireLosingIdentity(
+                        type: .referenceTag,
+                        entityId: existingIdentity,
+                        stateStore: stateStore,
+                        db: db
+                    )
+                    try db.execute(sql: """
+                        UPDATE referenceTag
+                        SET syncId = ?, referenceSyncId = ?, tagSyncId = ?
+                        WHERE referenceId = ? AND tagId = ?
+                        """, arguments: [
+                            canonicalIdentity, reference.syncId, tag.syncId,
+                            reference.id, tag.id,
+                        ])
+                }
+            } else {
                 try pivot.insert(db)
+            }
+            if entityId != canonicalIdentity {
+                try Self.markDirty(
+                    type: .referenceTag,
+                    entityId: canonicalIdentity,
+                    db: db
+                )
+                try Self.retireLosingIdentity(
+                    type: .referenceTag,
+                    entityId: entityId,
+                    serverObserved: true,
+                    stateStore: stateStore,
+                    db: db
+                )
             }
 
         case .pdfAnnotation:
-            guard let id = Int64(entityId), var row = PDFAnnotationRecord(record: record) else { return false }
-            row.id = id
-            try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
+            guard var row = PDFAnnotationRecord(record: record),
+                  let reference = try Self.resolvedParentIdentity(
+                    type: .reference,
+                    syncId: row.referenceSyncId,
+                    db: db
+                  ) else { return false }
+            row.syncId = entityId
+            row.referenceId = reference.id
+            row.referenceSyncId = reference.syncId
+            row.id = try Self.localID(tableName: rawValue, syncId: entityId, db: db)
+            if row.id == nil { try row.insert(db) } else { try row.update(db) }
 
         case .webAnnotation:
-            guard let id = Int64(entityId), var row = WebAnnotationRecord(record: record) else { return false }
-            row.id = id
-            try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
+            guard var row = WebAnnotationRecord(record: record),
+                  let reference = try Self.resolvedParentIdentity(
+                    type: .reference,
+                    syncId: row.referenceSyncId,
+                    db: db
+                  ) else { return false }
+            row.syncId = entityId
+            row.referenceId = reference.id
+            row.referenceSyncId = reference.syncId
+            row.id = try Self.localID(tableName: rawValue, syncId: entityId, db: db)
+            if row.id == nil { try row.insert(db) } else { try row.update(db) }
 
         case .metadataIntake:
-            guard let id = Int64(entityId) else { return false }
             var row = MetadataIntake(record: record)
-            row.id = id
-            try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
+            row.syncId = entityId
+            if let parentSyncId = row.linkedReferenceSyncId {
+                guard let parent = try Self.resolvedParentIdentity(
+                    type: .reference,
+                    syncId: parentSyncId,
+                    db: db
+                ) else { return false }
+                row.linkedReferenceId = parent.id
+                row.linkedReferenceSyncId = parent.syncId
+            } else {
+                row.linkedReferenceId = nil
+            }
+            row.id = try Self.localID(tableName: rawValue, syncId: entityId, db: db)
+            if row.id == nil { try row.insert(db) } else { try row.update(db) }
 
         case .metadataEvidence:
-            guard let id = Int64(entityId), var row = MetadataEvidence(record: record) else { return false }
-            row.id = id
-            try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
+            guard var row = MetadataEvidence(record: record) else { return false }
+            row.syncId = entityId
+            if let intakeSyncId = row.intakeSyncId {
+                guard let intake = try Self.resolvedParentIdentity(
+                    type: .metadataIntake,
+                    syncId: intakeSyncId,
+                    db: db
+                ) else { return false }
+                row.intakeId = intake.id
+                row.intakeSyncId = intake.syncId
+            } else {
+                row.intakeId = nil
+            }
+            if let referenceSyncId = row.referenceSyncId {
+                guard let reference = try Self.resolvedParentIdentity(
+                    type: .reference,
+                    syncId: referenceSyncId,
+                    db: db
+                ) else { return false }
+                row.referenceId = reference.id
+                row.referenceSyncId = reference.syncId
+            } else {
+                row.referenceId = nil
+            }
+            row.id = try Self.localID(tableName: rawValue, syncId: entityId, db: db)
+            if row.id == nil { try row.insert(db) } else { try row.update(db) }
 
         case .propertyDefinition:
-            guard let id = Int64(entityId) else { return false }
             var row = PropertyDefinition(record: record)
-            // Built-in PropertyDefinitions (defaultFieldKey != nil) are seeded
-            // independently on every device, so their rowIDs diverge ("Last
-            // Read" is id 29 on a fresh library, 339 on an older one). Syncing
-            // them by rowID makes this INSERT collide on UNIQUE(name) and the
-            // whole fetched batch rolls back. Reconcile by the stable
-            // defaultFieldKey instead: update the local seeded row in place,
-            // keeping its rowID. Safe because the only divergent built-ins
-            // (Last Read/Read Count, date/number) carry no propertyValues; the
-            // rest (ids 1-28) have matching rowIDs across devices. Custom defs
-            // (nil defaultFieldKey, e.g. Method/Modality) keep the rowID upsert
-            // below. Targeted stand-in until the A-pks migration gives seeded
-            // rows deterministic UUIDs (see PropertyDefinitionRecord.swift).
-            if let fieldKey = row.defaultFieldKey,
-               let localId = try Int64.fetchOne(
-                   db,
-                   sql: "SELECT id FROM propertyDefinition WHERE defaultFieldKey = ? LIMIT 1",
-                   arguments: [fieldKey]
-               ) {
-                row.id = localId
-                // A defaultFieldKey-bearing row IS a built-in. `isDefault` is a
-                // synced/mutable field, so never write the peer's value verbatim:
-                // a stray isDefault=0 would make the built-in deletable and break
-                // the next reconcile. Force it true.
-                row.isDefault = true
-                // Type built-in: never let a peer's options list drop enum-backed
-                // options (an old peer pushes six options → "Markdown" would vanish
-                // and the v6 migration never reruns). Heal structurally (unknown JSON
-                // fields preserved); the applyingRemote guard already active during
-                // pulls keeps this from dirtying the record — every device heals
-                // itself, no push-back churn.
-                if fieldKey == "referenceType" {
-                    if let healed = TypeOptionsReconciler.appendingMissingTypeOptions(toOptionsJSON: row.optionsJSON) {
-                        row.optionsJSON = healed
-                    } else if let localOptions = try String.fetchOne(
-                        db,
-                        sql: "SELECT optionsJSON FROM propertyDefinition WHERE id = ? LIMIT 1",
-                        arguments: [localId]
-                    ) {
-                        // Incoming optionsJSON is malformed (reconciler contract: nil = leave the
-                        // stored value untouched). Never overwrite the valid local option list
-                        // with a peer's garbage — keep local.
-                        row.optionsJSON = localOptions
-                    }
-                }
-                try row.update(db)
+            let materializationIdentity = try SyncIdentityAliasStore.resolve(
+                entityType: .propertyDefinition,
+                identity: entityId,
+                db: db
+            )
+            row.syncId = materializationIdentity
+            row.id = try Self.localID(
+                tableName: rawValue,
+                syncId: materializationIdentity,
+                db: db
+            )
+            if entityId != materializationIdentity, row.id == nil {
+                try Self.retireLosingIdentity(
+                    type: .propertyDefinition,
+                    entityId: entityId,
+                    serverObserved: true,
+                    stateStore: stateStore,
+                    db: db
+                )
+                return true
+            }
+            let roleCollision: Row?
+            if let fieldKey = row.defaultFieldKey {
+                roleCollision = try Row.fetchOne(db, sql: """
+                    SELECT id, syncId, isDefault, defaultFieldKey
+                    FROM propertyDefinition
+                    WHERE defaultFieldKey = ? AND syncId <> ? LIMIT 1
+                    """, arguments: [fieldKey, materializationIdentity])
             } else {
-                row.id = id
-                try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
+                // Custom definitions still need an explicit UNIQUE(name)
+                // resolution so one duplicate cannot roll back every future
+                // fetch. A built-in occupying the name is protected below.
+                roleCollision = try Row.fetchOne(db, sql: """
+                    SELECT id, syncId, isDefault, defaultFieldKey
+                    FROM propertyDefinition
+                    WHERE name = ? AND syncId <> ? LIMIT 1
+                    """, arguments: [row.name, materializationIdentity])
             }
 
+            if let local = roleCollision {
+                let localId: Int64 = local["id"]
+                let localSyncId: String = local["syncId"]
+                let localFieldKey: String? = local["defaultFieldKey"]
+                let incomingIsBuiltin = row.defaultFieldKey != nil
+                let localIsBuiltin = localFieldKey != nil
+
+                if localIsBuiltin && !incomingIsBuiltin {
+                    // A malformed/custom peer row cannot steal a protected
+                    // built-in's unique name.
+                    if entityId != materializationIdentity {
+                        try Self.finishObservedParentAlias(
+                            type: .propertyDefinition,
+                            observedId: entityId,
+                            winnerId: materializationIdentity,
+                            stateStore: stateStore,
+                            db: db
+                        )
+                        return true
+                    }
+                    if let identityLocalId = row.id {
+                        try db.execute(
+                            sql: "DELETE FROM propertyDefinition WHERE id = ?",
+                            arguments: [identityLocalId]
+                        )
+                    }
+                    try Self.retireLosingIdentity(
+                        type: .propertyDefinition,
+                        entityId: entityId,
+                        serverObserved: true,
+                        stateStore: stateStore,
+                        db: db
+                    )
+                    return true
+                }
+
+                let winner = SyncIdentifier.preferred(
+                    localSyncId,
+                    materializationIdentity
+                )
+                let identityLocalId = row.id
+                let winnerLocalId = winner == materializationIdentity
+                    ? (identityLocalId ?? localId)
+                    : localId
+                let losingId = winner == materializationIdentity
+                    ? localSyncId : materializationIdentity
+
+                if let identityLocalId, identityLocalId != localId {
+                    let losingLocalId = winnerLocalId == identityLocalId
+                        ? localId : identityLocalId
+                    try Self.mergePropertyDefinitionRows(
+                        winnerId: winnerLocalId,
+                        loserId: losingLocalId,
+                        winnerSyncId: winner,
+                        loserSyncId: losingId,
+                        stateStore: stateStore,
+                        db: db
+                    )
+                } else if winner != localSyncId {
+                    row.id = localId
+                    row.syncId = materializationIdentity
+                    try row.update(db)
+                    try Self.rekeyPropertyValues(
+                        propertyId: localId,
+                        from: localSyncId,
+                        to: materializationIdentity,
+                        stateStore: stateStore,
+                        db: db
+                    )
+                }
+
+                row.id = winnerLocalId
+                try Self.preparePropertyDefinitionForApply(
+                    &row,
+                    localId: winnerLocalId,
+                    db: db
+                )
+                row.syncId = winner
+                try row.update(db)
+                if winner == localSyncId {
+                    try Self.markDirty(
+                        type: .propertyDefinition,
+                        entityId: winner,
+                        db: db
+                    )
+                }
+                try Self.recordParentAlias(
+                    type: .propertyDefinition,
+                    losingId: losingId,
+                    winningId: winner,
+                    db: db
+                )
+                try Self.retireLosingIdentity(
+                    type: .propertyDefinition,
+                    entityId: losingId,
+                    serverObserved: losingId == entityId,
+                    stateStore: stateStore,
+                    db: db
+                )
+                try Self.finishObservedParentAlias(
+                    type: .propertyDefinition,
+                    observedId: entityId,
+                    winnerId: winner,
+                    stateStore: stateStore,
+                    db: db
+                )
+                return true
+            }
+
+            if let localId = row.id {
+                try Self.preparePropertyDefinitionForApply(
+                    &row,
+                    localId: localId,
+                    db: db
+                )
+                try row.update(db)
+            } else {
+                try Self.preparePropertyDefinitionForApply(
+                    &row,
+                    localId: nil,
+                    db: db
+                )
+                try row.insert(db)
+            }
+            try Self.finishObservedParentAlias(
+                type: .propertyDefinition,
+                observedId: entityId,
+                winnerId: materializationIdentity,
+                stateStore: stateStore,
+                db: db
+            )
+
         case .propertyValue:
-            guard let id = Int64(entityId), var row = PropertyValue(record: record) else { return false }
-            row.id = id
-            try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
+            guard var row = PropertyValue(record: record),
+                  let reference = try Self.resolvedParentIdentity(
+                    type: .reference,
+                    syncId: row.referenceSyncId,
+                    db: db
+                  ),
+                  let property = try Self.resolvedParentIdentity(
+                    type: .propertyDefinition,
+                    syncId: row.propertySyncId,
+                    db: db
+                  ) else { return false }
+            let observedDerivedIdentity =
+                "\(row.referenceSyncId)/\(row.propertySyncId)"
+            let canonicalDerivedIdentity =
+                "\(reference.syncId)/\(property.syncId)"
+            let incomingIdentity = entityId == observedDerivedIdentity
+                ? canonicalDerivedIdentity
+                : entityId
+            row.syncId = incomingIdentity
+            row.referenceId = reference.id
+            row.referenceSyncId = reference.syncId
+            row.propertyId = property.id
+            row.propertySyncId = property.syncId
+            let observedIdentityLocalId = try Self.localID(
+                tableName: rawValue,
+                syncId: entityId,
+                db: db
+            )
+            let incomingIdentityLocalId = try Self.localID(
+                tableName: rawValue,
+                syncId: incomingIdentity,
+                db: db
+            )
+            for identity in Set([entityId, incomingIdentity]) {
+                guard let identityOwner = try Row.fetchOne(db, sql: """
+                    SELECT referenceId, propertyId FROM propertyValue
+                    WHERE syncId = ? LIMIT 1
+                    """, arguments: [identity]) else { continue }
+                let ownerReferenceId: Int64 = identityOwner["referenceId"]
+                let ownerPropertyId: Int64 = identityOwner["propertyId"]
+                guard ownerReferenceId == reference.id,
+                      ownerPropertyId == property.id else { return false }
+            }
+            let pairOwner = try Row.fetchOne(db, sql: """
+                SELECT id, syncId FROM propertyValue
+                WHERE referenceId = ? AND propertyId = ? LIMIT 1
+                """, arguments: [reference.id, property.id])
+
+            if let pairOwner {
+                let pairId: Int64 = pairOwner["id"]
+                let localSyncId: String = pairOwner["syncId"]
+                guard observedIdentityLocalId == nil
+                        || observedIdentityLocalId == pairId,
+                      incomingIdentityLocalId == nil
+                        || incomingIdentityLocalId == pairId else {
+                    // One global identity naming two endpoint pairs is invalid;
+                    // do not delete either local row to guess at intent.
+                    return false
+                }
+                row.id = pairId
+                if localSyncId == incomingIdentity {
+                    try row.update(db)
+                } else {
+                    let winner = Self.preferredPropertyValueIdentity(
+                        localSyncId,
+                        incomingIdentity,
+                        derivedIdentity: canonicalDerivedIdentity
+                    )
+                    if winner == localSyncId {
+                        row.syncId = localSyncId
+                        try row.update(db)
+                        try Self.markDirty(
+                            type: .propertyValue,
+                            entityId: localSyncId,
+                            db: db
+                        )
+                        try Self.retireLosingIdentity(
+                            type: .propertyValue,
+                            entityId: incomingIdentity,
+                            serverObserved: incomingIdentity == entityId,
+                            stateStore: stateStore,
+                            db: db
+                        )
+                    } else {
+                        try Self.retireLosingIdentity(
+                            type: .propertyValue,
+                            entityId: localSyncId,
+                            serverObserved: localSyncId == entityId,
+                            stateStore: stateStore,
+                            db: db
+                        )
+                        row.syncId = incomingIdentity
+                        try row.update(db)
+                    }
+                }
+            } else if let incomingIdentityLocalId {
+                row.id = incomingIdentityLocalId
+                try row.update(db)
+            } else {
+                try row.insert(db)
+            }
+            if entityId != incomingIdentity {
+                let canonicalChildIdentity = try String.fetchOne(db, sql: """
+                    SELECT syncId FROM propertyValue
+                    WHERE referenceId = ? AND propertyId = ? LIMIT 1
+                    """, arguments: [reference.id, property.id])
+                    ?? incomingIdentity
+                try Self.markDirty(
+                    type: .propertyValue,
+                    entityId: canonicalChildIdentity,
+                    db: db
+                )
+                try Self.retireLosingIdentity(
+                    type: .propertyValue,
+                    entityId: entityId,
+                    serverObserved: true,
+                    stateStore: stateStore,
+                    db: db
+                )
+            }
 
         case .databaseView:
-            guard let id = Int64(entityId) else { return false }
             var row = DatabaseView(record: record)
-            row.id = id
-            try Self.upsert(row, id: id, tableName: self.rawValue, db: db) { try row.update(db) } insert: { try row.insert(db) }
+            guard DatabaseViewPortableCodec.resolve(
+                record: record,
+                into: &row,
+                db: db
+            ) == .ready else { return false }
+            row.syncId = entityId
+            row.id = try Self.localID(
+                tableName: rawValue,
+                syncId: entityId,
+                db: db
+            )
+            let existingIdentityWasDefault: Bool
+            if let id = row.id {
+                existingIdentityWasDefault = try Bool.fetchOne(
+                    db,
+                    sql: "SELECT isDefault FROM databaseView WHERE id = ?",
+                    arguments: [id]
+                ) ?? false
+            } else {
+                existingIdentityWasDefault = false
+            }
+            if row.isDefault || existingIdentityWasDefault,
+               let local = try Row.fetchOne(db, sql: """
+                    SELECT id, syncId FROM databaseView
+                    WHERE isDefault = 1 AND syncId <> ? LIMIT 1
+                    """, arguments: [entityId])
+            {
+                let localId: Int64 = local["id"]
+                let localSyncId: String = local["syncId"]
+                let winner = SyncIdentifier.preferred(localSyncId, entityId)
+                row.id = localId
+                row.isDefault = true
+                if winner == localSyncId {
+                    row.syncId = localSyncId
+                    try row.update(db)
+                    try Self.markDirty(
+                        type: .databaseView,
+                        entityId: localSyncId,
+                        db: db
+                    )
+                    try Self.retireLosingIdentity(
+                        type: .databaseView,
+                        entityId: entityId,
+                        serverObserved: true,
+                        stateStore: stateStore,
+                        db: db
+                    )
+                } else {
+                    row.syncId = entityId
+                    try row.update(db)
+                    try Self.retireLosingIdentity(
+                        type: .databaseView,
+                        entityId: localSyncId,
+                        stateStore: stateStore,
+                        db: db
+                    )
+                }
+            } else if row.id == nil {
+                try row.insert(db)
+            } else {
+                if existingIdentityWasDefault { row.isDefault = true }
+                try row.update(db)
+            }
 
         case .readingActivity:
-            guard let row = ReadingActivity(record: record),
+            guard var row = ReadingActivity(record: record),
                   row.entityId == entityId
             else { return false }
-            if try Reference.fetchOne(db, id: row.referenceId) == nil,
+            let observedReferenceSyncId = row.referenceSyncId
+            if let reference = try Self.resolvedParentIdentity(
+                type: .reference,
+                syncId: row.referenceSyncId,
+                db: db
+            ) {
+                row.referenceId = reference.id
+                row.referenceSyncId = reference.syncId
+            } else if
                try stateStore.hasTombstone(
                     db,
                     entityType: .reference,
-                    entityId: String(row.referenceId)
+                    entityId: row.referenceSyncId
                )
             {
                 try Self.queueActivityDeletion(
@@ -591,6 +1362,36 @@ extension SyncEntityType {
                     db: db
                 )
                 return false
+            } else {
+                try Self.quarantine(
+                    row,
+                    recordName: record.recordID.recordName,
+                    db: db
+                )
+                return true
+            }
+            let observedDerivedIdentity =
+                "\(row.generation)/\(row.installationId)/\(observedReferenceSyncId)/\(row.localDay.rawValue)"
+            let canonicalDerivedIdentity =
+                "\(row.generation)/\(row.installationId)/\(row.referenceSyncId)/\(row.localDay.rawValue)"
+            let incomingIdentity = entityId == observedDerivedIdentity
+                ? canonicalDerivedIdentity
+                : entityId
+            row.syncId = incomingIdentity
+
+            for identity in Set([entityId, incomingIdentity]) {
+                guard let owner = try Row.fetchOne(db, sql: """
+                    SELECT generation, installationId, referenceId, localDay
+                    FROM readingActivity WHERE syncId = ? LIMIT 1
+                    """, arguments: [identity]) else { continue }
+                let ownerGeneration: String = owner["generation"]
+                let ownerInstallationId: String = owner["installationId"]
+                let ownerReferenceId: Int64 = owner["referenceId"]
+                let ownerLocalDay: String = owner["localDay"]
+                guard ownerGeneration == row.generation,
+                      ownerInstallationId == row.installationId,
+                      ownerReferenceId == row.referenceId,
+                      ownerLocalDay == row.localDay.rawValue else { return false }
             }
             guard try Self.activityFactCanApply(
                 kind: .reading,
@@ -608,17 +1409,50 @@ extension SyncEntityType {
                     SELECT activeSeconds FROM readingActivity
                     WHERE generation = ? AND installationId = ?
                       AND referenceId = ? AND localDay = ?
-                    """,
+                """,
                 arguments: [row.generation, row.installationId, row.referenceId, row.localDay]
             )
+            let priorIdentity = try String.fetchOne(db, sql: """
+                SELECT syncId FROM readingActivity
+                WHERE generation = ? AND installationId = ?
+                  AND referenceId = ? AND localDay = ?
+                """, arguments: [
+                    row.generation, row.installationId,
+                    row.referenceId, row.localDay,
+                ])
             try Self.upsertReadingActivity(row, db: db)
-            if let localSeconds, localSeconds > row.activeSeconds {
-                try stateStore.adoptSystemFieldsKeepingDirty(
-                    db,
-                    entityType: .readingActivity,
-                    entityId: entityId,
-                    record: record
+            if let priorIdentity, priorIdentity != incomingIdentity {
+                try Self.retireLosingIdentity(
+                    type: .readingActivity,
+                    entityId: priorIdentity,
+                    serverObserved: priorIdentity == entityId,
+                    stateStore: stateStore,
+                    db: db
                 )
+            }
+            if entityId != incomingIdentity {
+                try Self.markDirty(
+                    type: .readingActivity,
+                    entityId: incomingIdentity,
+                    db: db
+                )
+                try Self.retireLosingIdentity(
+                    type: .readingActivity,
+                    entityId: entityId,
+                    serverObserved: true,
+                    stateStore: stateStore,
+                    db: db
+                )
+            }
+            if let localSeconds, localSeconds > row.activeSeconds {
+                if entityId == incomingIdentity {
+                    try stateStore.adoptSystemFieldsKeepingDirty(
+                        db,
+                        entityType: .readingActivity,
+                        entityId: incomingIdentity,
+                        record: record
+                    )
+                }
                 return false
             }
 
@@ -705,7 +1539,19 @@ extension SyncEntityType {
             guard let prepared = try Self.prepareReferencePDFMaterialization(record: record) else {
                 return false
             }
-            let previousFilename = try Self.applyPreparedReferencePDF(prepared, db: db)
+            guard let canonicalPrepared = try Self
+                .canonicalizedReferencePDFMaterialization(prepared, db: db)
+            else { return false }
+            let previousFilename = try Self.applyPreparedReferencePDF(
+                canonicalPrepared,
+                db: db
+            )
+            try Self.retireAliasedReferencePDFIdentity(
+                observedEntityId: entityId,
+                canonicalEntityId: canonicalPrepared.referenceSyncId,
+                stateStore: stateStore,
+                db: db
+            )
             if let previousFilename {
                 let oldURL = AppDatabase.pdfStorageURL.appendingPathComponent(previousFilename)
                 try? FileManager.default.removeItem(at: oldURL)
@@ -717,20 +1563,43 @@ extension SyncEntityType {
     /// Apply a pulled deletion. Calls `DELETE` by key; FK cascades handle
     /// children. Safe if the row is already gone (no-op).
     ///
-    /// Returns an on-disk PDF filename that became unreferenced by the delete.
-    /// The caller must unlink it only after the surrounding SQLite transaction
-    /// commits; deleting it here would make a later rollback restore the DB row
-    /// without restoring the file.
+    /// Returns on-disk PDF filenames that became unreferenced by the delete.
+    /// The caller must unlink them only after the surrounding SQLite transaction
+    /// commits; deleting them here would make a later rollback restore DB rows
+    /// without restoring the files.
     @discardableResult
     public func applyRemoteDelete(
         entityId: String,
         db: Database
-    ) throws -> String? {
-        var filenameToUnlinkAfterCommit: String?
+    ) throws -> [String] {
+        let recordName = qualifiedRecordName(entityId: entityId)
+        var filenamesToUnlinkAfterCommit = Set<String>()
+        if let stagedFilename = try String.fetchOne(
+            db,
+            sql: "SELECT stagedFilename FROM syncOrphan WHERE recordName = ?",
+            arguments: [recordName]
+        ) {
+            filenamesToUnlinkAfterCommit.insert(stagedFilename)
+        }
+        try db.execute(
+            sql: "DELETE FROM syncOrphan WHERE recordName = ?",
+            arguments: [recordName]
+        )
 
         switch self {
         case .reference:
-            if let id = Int64(entityId) {
+            filenamesToUnlinkAfterCommit.formUnion(
+                try Self.consumeLegacyReferenceQuarantine(
+                    referenceSyncId: entityId,
+                    includeWebContent: true,
+                    db: db
+                )
+            )
+            if let id = try Self.localID(
+                tableName: "reference",
+                syncId: entityId,
+                db: db
+            ) {
                 let stateStore = SyncStateStore()
                 let materializedActivityIDs = try ReadingActivity.fetchAll(
                     db,
@@ -741,9 +1610,9 @@ extension SyncEntityType {
                     db,
                     sql: """
                         SELECT recordName FROM activityQuarantine
-                        WHERE entityType = 'readingActivity' AND referenceId = ?
+                        WHERE entityType = 'readingActivity' AND referenceSyncId = ?
                         """,
-                    arguments: [id]
+                    arguments: [entityId]
                 )
                 var childEntityIDs = Set(materializedActivityIDs)
                 for recordName in quarantinedRecordNames {
@@ -769,9 +1638,9 @@ extension SyncEntityType {
                 try db.execute(
                     sql: """
                         DELETE FROM activityQuarantine
-                        WHERE entityType = 'readingActivity' AND referenceId = ?
+                        WHERE entityType = 'readingActivity' AND referenceSyncId = ?
                         """,
-                    arguments: [id]
+                    arguments: [entityId]
                 )
                 // Capture the PDF filename before delete; FK cascade will drop
                 // the pdfCache row, but the on-disk file in PDFs/ has no FK so
@@ -782,68 +1651,72 @@ extension SyncEntityType {
                 let pdfFilename = try String.fetchOne(db,
                     sql: "SELECT localFilename FROM pdfCache WHERE referenceId = ?",
                     arguments: [id])
+                let queuedFilename = try String.fetchOne(db,
+                    sql: "SELECT localFilename FROM pdfUploadQueue WHERE referenceId = ?",
+                    arguments: [id])
                 _ = try Reference.deleteOne(db, key: id)
-                filenameToUnlinkAfterCommit = pdfFilename
+                if let pdfFilename {
+                    filenamesToUnlinkAfterCommit.insert(pdfFilename)
+                }
+                if let queuedFilename {
+                    filenamesToUnlinkAfterCommit.insert(queuedFilename)
+                }
                 try db.execute(sql: """
                     DELETE FROM syncState WHERE entityType='referencePDF' AND entityId=?
-                    """, arguments: [String(id)])
+                    """, arguments: [entityId])
                 try db.execute(sql: """
                     DELETE FROM tombstone WHERE entityType='referencePDF' AND entityId=?
-                    """, arguments: [String(id)])
+                    """, arguments: [entityId])
             }
         case .tag:
-            if let id = Int64(entityId) { _ = try Tag.deleteOne(db, key: id) }
-        case .referenceTag:
-            guard let (refId, tagId) = Self.splitPivotID(entityId) else {
-                return nil
+            if let id = try Self.localID(tableName: "tag", syncId: entityId, db: db) {
+                _ = try Tag.deleteOne(db, key: id)
             }
+        case .referenceTag:
             try db.execute(
-                sql: "DELETE FROM referenceTag WHERE referenceId = ? AND tagId = ?",
-                arguments: [refId, tagId]
+                sql: "DELETE FROM referenceTag WHERE syncId = ?",
+                arguments: [entityId]
             )
         case .pdfAnnotation:
-            if let id = Int64(entityId) { _ = try PDFAnnotationRecord.deleteOne(db, key: id) }
+            try Self.deleteBySyncId(tableName: rawValue, syncId: entityId, db: db)
         case .webAnnotation:
-            if let id = Int64(entityId) { _ = try WebAnnotationRecord.deleteOne(db, key: id) }
+            try Self.deleteBySyncId(tableName: rawValue, syncId: entityId, db: db)
         case .metadataIntake:
-            if let id = Int64(entityId) { _ = try MetadataIntake.deleteOne(db, key: id) }
+            try Self.deleteBySyncId(tableName: rawValue, syncId: entityId, db: db)
         case .metadataEvidence:
-            if let id = Int64(entityId) { _ = try MetadataEvidence.deleteOne(db, key: id) }
+            try Self.deleteBySyncId(tableName: rawValue, syncId: entityId, db: db)
         case .propertyDefinition:
-            if let id = Int64(entityId) {
-                // Never honor a remote delete against a local built-in. Built-ins
-                // are seeded + delete-protected on every device
-                // (deletePropertyDefinition guards isDefault), and reconcile keeps
-                // them at divergent local rowIDs, so a delete keyed on a peer's
-                // built-in rowID must not drop whatever sits at that id locally.
-                // Custom props (isDefault=0) delete normally.
+            if let id = try Self.localID(
+                tableName: "propertyDefinition",
+                syncId: entityId,
+                db: db
+            ) {
+                // Never honor a remote delete against a local built-in.
+                // Built-ins are seeded and delete-protected on every device;
+                // reconciliation may preserve a different local surrogate ID,
+                // but deletion resolves solely through the shared sync ID.
+                // Custom properties (isDefault=0) delete normally.
                 let isLocalDefault = try Bool.fetchOne(
                     db,
                     sql: "SELECT isDefault FROM propertyDefinition WHERE id = ? LIMIT 1",
                     arguments: [id]
                 ) ?? false
-                guard !isLocalDefault else { return nil }
+                guard !isLocalDefault else { return [] }
                 _ = try PropertyDefinition.deleteOne(db, key: id)
             }
         case .propertyValue:
-            if let id = Int64(entityId) { _ = try PropertyValue.deleteOne(db, key: id) }
+            try Self.deleteBySyncId(tableName: rawValue, syncId: entityId, db: db)
         case .databaseView:
-            if let id = Int64(entityId) { _ = try DatabaseView.deleteOne(db, key: id) }
+            try Self.deleteBySyncId(tableName: rawValue, syncId: entityId, db: db)
         case .readingActivity:
-            if let key = Self.splitReadingActivityID(entityId) {
-                try db.execute(
-                    sql: """
-                        DELETE FROM readingActivity
-                        WHERE generation = ? AND installationId = ?
-                          AND referenceId = ? AND localDay = ?
-                        """,
-                    arguments: [key.generation, key.installationId, key.referenceId, key.localDay]
-                )
-                try db.execute(
-                    sql: "DELETE FROM activityQuarantine WHERE recordName = ?",
-                    arguments: [qualifiedRecordName(entityId: entityId)]
-                )
-            }
+            try db.execute(
+                sql: "DELETE FROM readingActivity WHERE syncId = ?",
+                arguments: [entityId]
+            )
+            try db.execute(
+                sql: "DELETE FROM activityQuarantine WHERE recordName = ?",
+                arguments: [qualifiedRecordName(entityId: entityId)]
+            )
         case .assistantActivity:
             _ = try AssistantActivity.deleteOne(db, key: entityId)
             try db.execute(
@@ -854,41 +1727,964 @@ extension SyncEntityType {
             // Epoch rows are durable reset fences and are never removed.
             break
         case .referencePDF:
-            if let id = Int64(entityId) {
-                // Capture filename before delete for post-commit cleanup.
-                let filename = try String.fetchOne(db,
+            filenamesToUnlinkAfterCommit.formUnion(
+                try Self.consumeLegacyReferenceQuarantine(
+                    referenceSyncId: entityId,
+                    includeWebContent: false,
+                    db: db
+                )
+            )
+            if let id = try Self.localID(
+                tableName: "reference",
+                syncId: entityId,
+                db: db
+            ) {
+                // A server PDF deletion also supersedes a pending local upload;
+                // otherwise the drainer would immediately dirty and recreate
+                // the deleted sibling record.
+                let cacheFilename = try String.fetchOne(db,
                     sql: "SELECT localFilename FROM pdfCache WHERE referenceId = ?",
                     arguments: [id])
+                let queuedFilename = try String.fetchOne(db,
+                    sql: "SELECT localFilename FROM pdfUploadQueue WHERE referenceId = ?",
+                    arguments: [id])
                 try db.execute(sql: "DELETE FROM pdfCache WHERE referenceId = ?", arguments: [id])
-                filenameToUnlinkAfterCommit = filename
+                try db.execute(
+                    sql: "DELETE FROM pdfUploadQueue WHERE referenceId = ?",
+                    arguments: [id]
+                )
+                if let cacheFilename {
+                    filenamesToUnlinkAfterCommit.insert(cacheFilename)
+                }
+                if let queuedFilename {
+                    filenamesToUnlinkAfterCommit.insert(queuedFilename)
+                }
             }
         }
 
-        return filenameToUnlinkAfterCommit
+        return try Self.unreferencedPDFFilenames(
+            filenamesToUnlinkAfterCommit,
+            db: db
+        )
     }
 
     // MARK: - Helpers
 
-    private static func splitPivotID(_ entityId: String) -> (Int64, Int64)? {
-        let parts = entityId.split(separator: Character(SyncConstants.pivotSeparator))
-        guard parts.count == 2,
-              let refId = Int64(parts[0]),
-              let tagId = Int64(parts[1])
-        else { return nil }
-        return (refId, tagId)
+    private struct ResolvedParentIdentity {
+        let id: Int64
+        let syncId: String
     }
 
-    private static func splitReadingActivityID(
-        _ entityId: String
-    ) -> (generation: String, installationId: String, referenceId: Int64, localDay: LocalDay)? {
-        let parts = entityId.split(separator: "/", omittingEmptySubsequences: false)
-        guard parts.count == 4,
-              !parts[0].isEmpty,
-              !parts[1].isEmpty,
-              let referenceId = Int64(parts[2]),
-              let localDay = LocalDay(rawValue: String(parts[3]))
-        else { return nil }
-        return (String(parts[0]), String(parts[1]), referenceId, localDay)
+    private static func resolvedParentIdentity(
+        type: SyncEntityType,
+        syncId: String,
+        db: Database
+    ) throws -> ResolvedParentIdentity? {
+        let canonical = try SyncIdentityAliasStore.resolve(
+            entityType: type,
+            identity: syncId,
+            db: db
+        )
+        guard let id = try localID(
+            tableName: type.rawValue,
+            syncId: canonical,
+            db: db
+        ) else { return nil }
+        return .init(id: id, syncId: canonical)
+    }
+
+    private static func recordParentAlias(
+        type: SyncEntityType,
+        losingId: String,
+        winningId: String,
+        db: Database
+    ) throws {
+        try SyncIdentityAliasStore.record(
+            entityType: type,
+            losingId: losingId,
+            winningId: winningId,
+            db: db
+        )
+        if type == .tag || type == .propertyDefinition {
+            // A view may embed either identity in several JSON fields. Its
+            // portable projection is generated only on push, so conservatively
+            // republish all views after a parent identity changes.
+            try db.execute(sql: """
+                INSERT INTO syncState(entityType, entityId, isDirty, pushInFlight)
+                SELECT 'databaseView', syncId, 1, 0 FROM databaseView WHERE 1
+                ON CONFLICT(entityType, entityId) DO UPDATE SET
+                    isDirty = 1,
+                    pushInFlight = 0
+            """)
+        }
+    }
+
+    /// Finish applying a server update whose record name is already a retired
+    /// parent identity. The scalar data was materialized on `winnerId`; push
+    /// that canonical row and delete only the exact observed loser.
+    private static func finishObservedParentAlias(
+        type: SyncEntityType,
+        observedId: String,
+        winnerId: String,
+        stateStore: SyncStateStore,
+        db: Database
+    ) throws {
+        guard observedId != winnerId else { return }
+        try markDirty(type: type, entityId: winnerId, db: db)
+        try recordParentAlias(
+            type: type,
+            losingId: observedId,
+            winningId: winnerId,
+            db: db
+        )
+        try retireLosingIdentity(
+            type: type,
+            entityId: observedId,
+            serverObserved: true,
+            stateStore: stateStore,
+            db: db
+        )
+    }
+
+    /// Return rows whose local integer FK is missing or names a parent whose
+    /// global identity disagrees with the durable shadow identity. The latter
+    /// case matters when a new UUID parent happens to reuse the row ID of a
+    /// missing v12 decimal parent: SQLite considers that FK valid even though
+    /// it points at the wrong logical record.
+    private static func legacyForeignKeyCandidateRowIDs(
+        db: Database
+    ) throws -> [String: Set<Int64>] {
+        let violations = try Row.fetchAll(db, sql: "PRAGMA foreign_key_check")
+        var result: [String: Set<Int64>] = [:]
+        for violation in violations {
+            let table: String = violation["table"]
+            guard let rowID: Int64 = violation["rowid"] else { continue }
+            result[table, default: []].insert(rowID)
+        }
+
+        let mismatchQueries: [(table: String, sql: String)] = [
+            ("referenceTag", """
+                SELECT rt.rowid
+                FROM referenceTag rt
+                LEFT JOIN reference r ON r.id = rt.referenceId
+                LEFT JOIN tag t ON t.id = rt.tagId
+                WHERE (rt.referenceSyncId IS NOT NULL AND
+                       (r.id IS NULL OR r.syncId <> rt.referenceSyncId))
+                   OR (rt.tagSyncId IS NOT NULL AND
+                       (t.id IS NULL OR t.syncId <> rt.tagSyncId))
+                """),
+            ("pdfAnnotation", """
+                SELECT c.rowid FROM pdfAnnotation c
+                LEFT JOIN reference r ON r.id = c.referenceId
+                WHERE c.referenceSyncId IS NOT NULL
+                  AND (r.id IS NULL OR r.syncId <> c.referenceSyncId)
+                """),
+            ("webAnnotation", """
+                SELECT c.rowid FROM webAnnotation c
+                LEFT JOIN reference r ON r.id = c.referenceId
+                WHERE c.referenceSyncId IS NOT NULL
+                  AND (r.id IS NULL OR r.syncId <> c.referenceSyncId)
+                """),
+            ("readingActivity", """
+                SELECT c.rowid FROM readingActivity c
+                LEFT JOIN reference r ON r.id = c.referenceId
+                WHERE c.referenceSyncId IS NOT NULL
+                  AND (r.id IS NULL OR r.syncId <> c.referenceSyncId)
+                """),
+            ("propertyValue", """
+                SELECT pv.rowid
+                FROM propertyValue pv
+                LEFT JOIN reference r ON r.id = pv.referenceId
+                LEFT JOIN propertyDefinition p ON p.id = pv.propertyId
+                WHERE (pv.referenceSyncId IS NOT NULL AND
+                       (r.id IS NULL OR r.syncId <> pv.referenceSyncId))
+                   OR (pv.propertySyncId IS NOT NULL AND
+                       (p.id IS NULL OR p.syncId <> pv.propertySyncId))
+                """),
+            ("metadataIntake", """
+                SELECT mi.rowid FROM metadataIntake mi
+                LEFT JOIN reference r ON r.id = mi.linkedReferenceId
+                WHERE mi.linkedReferenceSyncId IS NOT NULL
+                  AND (r.id IS NULL OR r.syncId <> mi.linkedReferenceSyncId)
+                """),
+            ("metadataEvidence", """
+                SELECT me.rowid
+                FROM metadataEvidence me
+                LEFT JOIN metadataIntake mi ON mi.id = me.intakeId
+                LEFT JOIN reference r ON r.id = me.referenceId
+                WHERE (me.intakeSyncId IS NOT NULL AND
+                       (mi.id IS NULL OR mi.syncId <> me.intakeSyncId))
+                   OR (me.referenceSyncId IS NOT NULL AND
+                       (r.id IS NULL OR r.syncId <> me.referenceSyncId))
+                """),
+            ("syncLegacyPDFCacheOrphan", """
+                SELECT rowid FROM syncLegacyPDFCacheOrphan
+                """),
+            ("syncLegacyPDFUploadQueueOrphan", """
+                SELECT rowid FROM syncLegacyPDFUploadQueueOrphan
+                """),
+            ("syncLegacyWebContentCacheOrphan", """
+                SELECT rowid FROM syncLegacyWebContentCacheOrphan
+                """),
+        ]
+        for query in mismatchQueries {
+            let rowIDs = try Int64.fetchAll(db, sql: query.sql)
+            result[query.table, default: []].formUnion(rowIDs)
+        }
+        return result
+    }
+
+    /// v12 fetches intentionally allowed a child batch to commit before its
+    /// parent. v13 preserves those rare rows with decimal shadow identities;
+    /// whenever any parent arrives, repair every candidate whose complete
+    /// parent set is now resolvable.
+    @discardableResult
+    static func repairResolvableLegacyForeignKeyOrphans(
+        db: Database
+    ) throws -> [String] {
+        let rowIDs = try legacyForeignKeyCandidateRowIDs(db: db)
+        var displacedPDFCandidates = Set<String>()
+        var restoredLegacyPDFIdentities = Set<String>()
+
+        for rowID in rowIDs["referenceTag", default: []] {
+            guard let row = try Row.fetchOne(
+                db,
+                sql: "SELECT * FROM referenceTag WHERE rowid = ?",
+                arguments: [rowID]
+            ),
+            let reference = try resolvedParentIdentity(
+                type: .reference,
+                syncId: row["referenceSyncId"],
+                db: db
+            ),
+            let tag = try resolvedParentIdentity(
+                type: .tag,
+                syncId: row["tagSyncId"],
+                db: db
+            ) else { continue }
+            try db.execute(sql: """
+                UPDATE referenceTag
+                SET referenceId = ?, referenceSyncId = ?,
+                    tagId = ?, tagSyncId = ?
+                WHERE rowid = ?
+                """, arguments: [
+                    reference.id, reference.syncId, tag.id, tag.syncId, rowID,
+                ])
+        }
+
+        for table in ["pdfAnnotation", "webAnnotation", "readingActivity"] {
+            for rowID in rowIDs[table, default: []] {
+                guard let shadow = try String.fetchOne(
+                    db,
+                    sql: "SELECT referenceSyncId FROM \(table) WHERE rowid = ?",
+                    arguments: [rowID]
+                ), let reference = try resolvedParentIdentity(
+                    type: .reference,
+                    syncId: shadow,
+                    db: db
+                ) else { continue }
+                try db.execute(sql: """
+                    UPDATE \(table)
+                    SET referenceId = ?, referenceSyncId = ?
+                    WHERE rowid = ?
+                    """, arguments: [reference.id, reference.syncId, rowID])
+            }
+        }
+
+        for rowID in rowIDs["propertyValue", default: []] {
+            guard let row = try Row.fetchOne(
+                db,
+                sql: "SELECT * FROM propertyValue WHERE rowid = ?",
+                arguments: [rowID]
+            ),
+            let reference = try resolvedParentIdentity(
+                type: .reference,
+                syncId: row["referenceSyncId"],
+                db: db
+            ),
+            let property = try resolvedParentIdentity(
+                type: .propertyDefinition,
+                syncId: row["propertySyncId"],
+                db: db
+            ) else { continue }
+            try db.execute(sql: """
+                UPDATE propertyValue
+                SET referenceId = ?, referenceSyncId = ?,
+                    propertyId = ?, propertySyncId = ?
+                WHERE rowid = ?
+                """, arguments: [
+                    reference.id, reference.syncId,
+                    property.id, property.syncId, rowID,
+                ])
+        }
+
+        for rowID in rowIDs["metadataIntake", default: []] {
+            guard let shadow = try String.fetchOne(
+                db,
+                sql: "SELECT linkedReferenceSyncId FROM metadataIntake WHERE rowid = ?",
+                arguments: [rowID]
+            ), let reference = try resolvedParentIdentity(
+                type: .reference,
+                syncId: shadow,
+                db: db
+            ) else { continue }
+            try db.execute(sql: """
+                UPDATE metadataIntake
+                SET linkedReferenceId = ?, linkedReferenceSyncId = ?
+                WHERE rowid = ?
+                """, arguments: [reference.id, reference.syncId, rowID])
+        }
+
+        for rowID in rowIDs["metadataEvidence", default: []] {
+            guard let row = try Row.fetchOne(
+                db,
+                sql: "SELECT * FROM metadataEvidence WHERE rowid = ?",
+                arguments: [rowID]
+            ) else { continue }
+            let intakeSyncId: String? = row["intakeSyncId"]
+            let referenceSyncId: String? = row["referenceSyncId"]
+            let intake: ResolvedParentIdentity? = if let intakeSyncId {
+                try resolvedParentIdentity(
+                    type: .metadataIntake,
+                    syncId: intakeSyncId,
+                    db: db
+                )
+            } else {
+                nil
+            }
+            let reference: ResolvedParentIdentity? = if let referenceSyncId {
+                try resolvedParentIdentity(
+                    type: .reference,
+                    syncId: referenceSyncId,
+                    db: db
+                )
+            } else {
+                nil
+            }
+            guard (intakeSyncId == nil || intake != nil),
+                  (referenceSyncId == nil || reference != nil) else { continue }
+            try db.execute(sql: """
+                UPDATE metadataEvidence
+                SET intakeId = ?, intakeSyncId = ?,
+                    referenceId = ?, referenceSyncId = ?
+                WHERE rowid = ?
+                """, arguments: [
+                    intake?.id, intake?.syncId,
+                    reference?.id, reference?.syncId, rowID,
+                ])
+        }
+
+        for rowID in rowIDs["syncLegacyPDFCacheOrphan", default: []] {
+            guard let row = try Row.fetchOne(
+                db,
+                sql: "SELECT * FROM syncLegacyPDFCacheOrphan WHERE rowid = ?",
+                arguments: [rowID]
+            ), let reference = try resolvedParentIdentity(
+                type: .reference,
+                syncId: row["legacyReferenceSyncId"],
+                db: db
+            ) else { continue }
+            let legacyReferenceSyncId: String = row["legacyReferenceSyncId"]
+            let legacyFilename: String = row["localFilename"]
+            let liveFilename = try String.fetchOne(
+                db,
+                sql: "SELECT localFilename FROM pdfCache WHERE referenceId = ?",
+                arguments: [reference.id]
+            )
+            if let liveFilename {
+                if liveFilename != legacyFilename {
+                    displacedPDFCandidates.insert(legacyFilename)
+                }
+            } else {
+                try db.execute(sql: """
+                    INSERT INTO pdfCache(
+                        referenceId, localFilename, contentHash,
+                        assetVersion, materializedAt, lastOpenedAt
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """, arguments: [
+                        reference.id,
+                        legacyFilename,
+                        row["contentHash"] as String,
+                        row["assetVersion"] as Int64,
+                        row["materializedAt"] as Date?,
+                        row["lastOpenedAt"] as Date,
+                    ])
+                restoredLegacyPDFIdentities.insert(legacyReferenceSyncId)
+            }
+            try db.execute(
+                sql: "DELETE FROM syncLegacyPDFCacheOrphan WHERE rowid = ?",
+                arguments: [rowID]
+            )
+        }
+
+        for rowID in rowIDs["syncLegacyPDFUploadQueueOrphan", default: []] {
+            guard let row = try Row.fetchOne(
+                db,
+                sql: "SELECT * FROM syncLegacyPDFUploadQueueOrphan WHERE rowid = ?",
+                arguments: [rowID]
+            ), let reference = try resolvedParentIdentity(
+                type: .reference,
+                syncId: row["legacyReferenceSyncId"],
+                db: db
+            ) else { continue }
+            let legacyReferenceSyncId: String = row["legacyReferenceSyncId"]
+            let legacyFilename: String = row["localFilename"]
+            if restoredLegacyPDFIdentities.contains(legacyReferenceSyncId) {
+                let liveFilename = try String.fetchOne(
+                    db,
+                    sql: "SELECT localFilename FROM pdfUploadQueue WHERE referenceId = ?",
+                    arguments: [reference.id]
+                )
+                if let liveFilename {
+                    if liveFilename != legacyFilename {
+                        displacedPDFCandidates.insert(legacyFilename)
+                    }
+                } else {
+                    try db.execute(sql: """
+                        INSERT INTO pdfUploadQueue(
+                            referenceId, localFilename, queuedAt
+                        ) VALUES (?, ?, ?)
+                        """, arguments: [
+                        reference.id,
+                        legacyFilename,
+                        row["queuedAt"] as Date,
+                    ])
+                }
+            } else {
+                // A live cache row already won (for example, a server PDF in
+                // this same batch), or there was no matching legacy cache to
+                // upload. Never revive the stale queue under the new parent.
+                displacedPDFCandidates.insert(legacyFilename)
+            }
+            try db.execute(
+                sql: "DELETE FROM syncLegacyPDFUploadQueueOrphan WHERE rowid = ?",
+                arguments: [rowID]
+            )
+        }
+
+        for rowID in rowIDs["syncLegacyWebContentCacheOrphan", default: []] {
+            guard let row = try Row.fetchOne(
+                db,
+                sql: "SELECT * FROM syncLegacyWebContentCacheOrphan WHERE rowid = ?",
+                arguments: [rowID]
+            ), let reference = try resolvedParentIdentity(
+                type: .reference,
+                syncId: row["legacyReferenceSyncId"],
+                db: db
+            ) else { continue }
+            try db.execute(sql: """
+                INSERT OR IGNORE INTO webContentMarkdownCache(
+                    referenceId, sourceHash, converterVersion, markdown
+                ) VALUES (?, ?, ?, ?)
+                """, arguments: [
+                    reference.id,
+                    row["sourceHash"] as String,
+                    row["converterVersion"] as Int,
+                    row["markdown"] as String,
+                ])
+            try db.execute(
+                sql: "DELETE FROM syncLegacyWebContentCacheOrphan WHERE rowid = ?",
+                arguments: [rowID]
+            )
+        }
+
+        let quarantined = try Row.fetchAll(db, sql: """
+            SELECT recordName, referenceSyncId FROM activityQuarantine
+            WHERE referenceSyncId IS NOT NULL
+            """)
+        for row in quarantined {
+            let recordName: String = row["recordName"]
+            let shadow: String = row["referenceSyncId"]
+            guard let reference = try resolvedParentIdentity(
+                type: .reference,
+                syncId: shadow,
+                db: db
+            ) else { continue }
+            try db.execute(sql: """
+                UPDATE activityQuarantine
+                SET referenceId = ?, referenceSyncId = ?
+                WHERE recordName = ?
+                """, arguments: [reference.id, reference.syncId, recordName])
+        }
+
+        return try unreferencedPDFFilenames(displacedPDFCandidates, db: db)
+    }
+
+    /// Consume v12 local-only rows tied to an authoritative server deletion.
+    /// Alias resolution matters when reconciliation retired the decimal parent
+    /// identity before the delete arrived.
+    private static func consumeLegacyReferenceQuarantine(
+        referenceSyncId: String,
+        includeWebContent: Bool,
+        db: Database
+    ) throws -> Set<String> {
+        let canonicalTarget = try SyncIdentityAliasStore.resolve(
+            entityType: .reference,
+            identity: referenceSyncId,
+            db: db
+        )
+        var filenames = Set<String>()
+        for table in [
+            "syncLegacyPDFCacheOrphan",
+            "syncLegacyPDFUploadQueueOrphan",
+        ] {
+            let rows = try Row.fetchAll(
+                db,
+                sql: "SELECT legacyReferenceSyncId, localFilename FROM \(table)"
+            )
+            for row in rows {
+                let legacyReferenceSyncId: String = row["legacyReferenceSyncId"]
+                let canonicalLegacy = try SyncIdentityAliasStore.resolve(
+                    entityType: .reference,
+                    identity: legacyReferenceSyncId,
+                    db: db
+                )
+                guard canonicalLegacy == canonicalTarget else { continue }
+                filenames.insert(row["localFilename"] as String)
+                try db.execute(
+                    sql: "DELETE FROM \(table) WHERE legacyReferenceSyncId = ?",
+                    arguments: [legacyReferenceSyncId]
+                )
+            }
+        }
+
+        if includeWebContent {
+            let identities = try String.fetchAll(
+                db,
+                sql: "SELECT legacyReferenceSyncId FROM syncLegacyWebContentCacheOrphan"
+            )
+            for legacyReferenceSyncId in identities {
+                let canonicalLegacy = try SyncIdentityAliasStore.resolve(
+                    entityType: .reference,
+                    identity: legacyReferenceSyncId,
+                    db: db
+                )
+                guard canonicalLegacy == canonicalTarget else { continue }
+                try db.execute(
+                    sql: """
+                        DELETE FROM syncLegacyWebContentCacheOrphan
+                        WHERE legacyReferenceSyncId = ?
+                        """,
+                    arguments: [legacyReferenceSyncId]
+                )
+            }
+        }
+        return filenames
+    }
+
+    /// A losing quarantine row can name the same file as the winning live
+    /// cache (or another still-quarantined row). Only return filenames that no
+    /// durable row owns after the transaction's database changes.
+    private static func unreferencedPDFFilenames(
+        _ candidates: Set<String>,
+        db: Database
+    ) throws -> [String] {
+        try candidates.filter { filename in
+            let isReferenced = try Bool.fetchOne(db, sql: """
+                SELECT EXISTS(
+                    SELECT 1 FROM pdfCache WHERE localFilename = ?
+                    UNION ALL
+                    SELECT 1 FROM pdfUploadQueue WHERE localFilename = ?
+                    UNION ALL
+                    SELECT 1 FROM syncOrphan WHERE stagedFilename = ?
+                    UNION ALL
+                    SELECT 1 FROM syncLegacyPDFCacheOrphan WHERE localFilename = ?
+                    UNION ALL
+                    SELECT 1 FROM syncLegacyPDFUploadQueueOrphan WHERE localFilename = ?
+                )
+                """, arguments: [
+                    filename, filename, filename, filename, filename,
+                ]) ?? false
+            return !isReferenced
+        }.sorted()
+    }
+
+    private static func localID(
+        tableName: String,
+        syncId: String,
+        db: Database
+    ) throws -> Int64? {
+        try Int64.fetchOne(
+            db,
+            sql: "SELECT id FROM \(tableName) WHERE syncId = ? LIMIT 1",
+            arguments: [syncId]
+        )
+    }
+
+    private static func markDirty(
+        type: SyncEntityType,
+        entityId: String,
+        db: Database
+    ) throws {
+        try db.execute(sql: """
+            INSERT INTO syncState(entityType, entityId, isDirty, pushInFlight)
+            VALUES (?, ?, 1, 0)
+            ON CONFLICT(entityType, entityId) DO UPDATE SET
+                isDirty = 1,
+                pushInFlight = 0
+            """, arguments: [type.rawValue, entityId])
+    }
+
+    /// Retire a reconciliation loser without ever guessing that a local-only
+    /// identity existed in CloudKit. Archived system fields (or an already
+    /// eligible tombstone) prove server observation; the currently fetched
+    /// contender supplies the same proof explicitly.
+    private static func retireLosingIdentity(
+        type: SyncEntityType,
+        entityId: String,
+        serverObserved: Bool = false,
+        stateStore: SyncStateStore,
+        db: Database
+    ) throws {
+        let archivedOnServer = try Bool.fetchOne(db, sql: """
+            SELECT EXISTS(
+                SELECT 1 FROM syncState
+                WHERE entityType = ? AND entityId = ?
+                  AND systemFields IS NOT NULL
+            )
+            """, arguments: [type.rawValue, entityId]) ?? false
+        let alreadyEligible = try Bool.fetchOne(db, sql: """
+            SELECT EXISTS(
+                SELECT 1 FROM tombstone
+                WHERE entityType = ? AND entityId = ?
+                  AND isPushEligible = 1
+            )
+            """, arguments: [type.rawValue, entityId]) ?? false
+        let canDeleteFromServer = serverObserved || archivedOnServer || alreadyEligible
+
+        try stateStore.removeState(
+            db,
+            entityType: type,
+            entityId: entityId
+        )
+        if canDeleteFromServer {
+            // A record observed in the current fetch exists now. A confirmed
+            // tombstone only proves that an earlier incarnation was deleted,
+            // so discard it before queuing this exact identity again.
+            if serverObserved {
+                try stateStore.removeTombstone(
+                    db,
+                    entityType: type,
+                    entityId: entityId
+                )
+            }
+            try stateStore.upsertTombstone(
+                db,
+                entityType: type,
+                entityId: entityId,
+                isPushEligible: true
+            )
+        } else {
+            try db.execute(sql: """
+                DELETE FROM tombstone
+                WHERE entityType = ? AND entityId = ?
+                  AND confirmedByServer = 0
+                """, arguments: [type.rawValue, entityId])
+        }
+    }
+
+    private static func rekeyTagPivots(
+        tagId: Int64,
+        from oldTagSyncId: String,
+        to newTagSyncId: String,
+        stateStore: SyncStateStore,
+        db: Database
+    ) throws {
+        let pivots = try Row.fetchAll(db, sql: """
+            SELECT syncId, referenceSyncId
+            FROM referenceTag WHERE tagId = ? AND tagSyncId = ?
+            """, arguments: [tagId, oldTagSyncId])
+        for pivot in pivots {
+            let oldSyncId: String = pivot["syncId"]
+            let referenceSyncId: String = pivot["referenceSyncId"]
+            let newSyncId = "\(referenceSyncId)/\(newTagSyncId)"
+            if oldSyncId != newSyncId {
+                try Self.retireLosingIdentity(
+                    type: .referenceTag,
+                    entityId: oldSyncId,
+                    stateStore: stateStore,
+                    db: db
+                )
+            }
+            try db.execute(sql: """
+                UPDATE referenceTag
+                SET syncId = ?, tagSyncId = ?
+                WHERE tagId = ? AND syncId = ?
+                """, arguments: [newSyncId, newTagSyncId, tagId, oldSyncId])
+            try Self.markDirty(
+                type: .referenceTag,
+                entityId: newSyncId,
+                db: db
+            )
+        }
+    }
+
+    /// Merge two already-materialized tag rows after a remote rename creates a
+    /// unique-name collision. Pivots move before the loser row is deleted so
+    /// its FK cascade cannot discard associations.
+    private static func mergeTagRows(
+        winnerId: Int64,
+        loserId: Int64,
+        winnerSyncId: String,
+        stateStore: SyncStateStore,
+        db: Database
+    ) throws {
+        let pivots = try Row.fetchAll(db, sql: """
+            SELECT syncId, referenceId, referenceSyncId
+            FROM referenceTag WHERE tagId = ?
+            """, arguments: [loserId])
+        for pivot in pivots {
+            let oldIdentity: String = pivot["syncId"]
+            let referenceId: Int64 = pivot["referenceId"]
+            let referenceSyncId: String = pivot["referenceSyncId"]
+            let newIdentity = "\(referenceSyncId)/\(winnerSyncId)"
+            if let existingIdentity = try String.fetchOne(db, sql: """
+                SELECT syncId FROM referenceTag
+                WHERE referenceId = ? AND tagId = ? LIMIT 1
+                """, arguments: [referenceId, winnerId]) {
+                try Self.retireLosingIdentity(
+                    type: .referenceTag,
+                    entityId: oldIdentity,
+                    stateStore: stateStore,
+                    db: db
+                )
+                try db.execute(sql: """
+                    DELETE FROM referenceTag
+                    WHERE referenceId = ? AND tagId = ?
+                    """, arguments: [referenceId, loserId])
+                if existingIdentity != newIdentity {
+                    try Self.retireLosingIdentity(
+                        type: .referenceTag,
+                        entityId: existingIdentity,
+                        stateStore: stateStore,
+                        db: db
+                    )
+                    try db.execute(sql: """
+                        UPDATE referenceTag
+                        SET syncId = ?, tagSyncId = ?
+                        WHERE referenceId = ? AND tagId = ?
+                        """, arguments: [
+                            newIdentity, winnerSyncId, referenceId, winnerId,
+                        ])
+                }
+            } else {
+                if oldIdentity != newIdentity {
+                    try Self.retireLosingIdentity(
+                        type: .referenceTag,
+                        entityId: oldIdentity,
+                        stateStore: stateStore,
+                        db: db
+                    )
+                }
+                try db.execute(sql: """
+                    UPDATE referenceTag
+                    SET syncId = ?, tagId = ?, tagSyncId = ?
+                    WHERE referenceId = ? AND tagId = ?
+                    """, arguments: [
+                        newIdentity, winnerId, winnerSyncId,
+                        referenceId, loserId,
+                    ])
+            }
+            try Self.markDirty(
+                type: .referenceTag,
+                entityId: newIdentity,
+                db: db
+            )
+        }
+        try db.execute(sql: "DELETE FROM tag WHERE id = ?", arguments: [loserId])
+    }
+
+    private static func preparePropertyDefinitionForApply(
+        _ row: inout PropertyDefinition,
+        localId: Int64?,
+        db: Database
+    ) throws {
+        guard let fieldKey = row.defaultFieldKey else { return }
+        // A defaultFieldKey-bearing definition is a built-in regardless of a
+        // peer's mutable isDefault payload.
+        row.isDefault = true
+        guard fieldKey == "referenceType" else { return }
+        if let healed = TypeOptionsReconciler
+            .appendingMissingTypeOptions(toOptionsJSON: row.optionsJSON)
+        {
+            row.optionsJSON = healed
+        } else if let localId,
+                  let localOptions = try String.fetchOne(
+                    db,
+                    sql: "SELECT optionsJSON FROM propertyDefinition WHERE id = ?",
+                    arguments: [localId]
+                  )
+        {
+            row.optionsJSON = localOptions
+        }
+    }
+
+    private static func rekeyPropertyValues(
+        propertyId: Int64,
+        from oldPropertySyncId: String,
+        to newPropertySyncId: String,
+        stateStore: SyncStateStore,
+        db: Database
+    ) throws {
+        let values = try Row.fetchAll(db, sql: """
+            SELECT id, syncId, referenceSyncId
+            FROM propertyValue
+            WHERE propertyId = ? AND propertySyncId = ?
+            """, arguments: [propertyId, oldPropertySyncId])
+        for value in values {
+            let id: Int64 = value["id"]
+            let oldSyncId: String = value["syncId"]
+            let referenceSyncId: String = value["referenceSyncId"]
+            let oldDerived = "\(referenceSyncId)/\(oldPropertySyncId)"
+            let newSyncId = oldSyncId == oldDerived
+                ? "\(referenceSyncId)/\(newPropertySyncId)"
+                : oldSyncId
+
+            if oldSyncId != newSyncId {
+                try Self.retireLosingIdentity(
+                    type: .propertyValue,
+                    entityId: oldSyncId,
+                    stateStore: stateStore,
+                    db: db
+                )
+            }
+            try db.execute(sql: """
+                UPDATE propertyValue
+                SET syncId = ?, propertySyncId = ?
+                WHERE id = ?
+                """, arguments: [newSyncId, newPropertySyncId, id])
+            try Self.markDirty(
+                type: .propertyValue,
+                entityId: newSyncId,
+                db: db
+            )
+        }
+    }
+
+    /// Move values off a duplicate definition before deleting it. Endpoint
+    /// collisions use the same permanent PropertyValue identity order as the
+    /// ordinary pull path, so every peer keeps the same row.
+    private static func mergePropertyDefinitionRows(
+        winnerId: Int64,
+        loserId: Int64,
+        winnerSyncId: String,
+        loserSyncId: String,
+        stateStore: SyncStateStore,
+        db: Database
+    ) throws {
+        let values = try Row.fetchAll(db, sql: """
+            SELECT id, syncId, referenceId, referenceSyncId, value, dateModified
+            FROM propertyValue WHERE propertyId = ?
+            """, arguments: [loserId])
+        for value in values {
+            let loserValueId: Int64 = value["id"]
+            let oldIdentity: String = value["syncId"]
+            let referenceId: Int64 = value["referenceId"]
+            let referenceSyncId: String = value["referenceSyncId"]
+            let derivedIdentity = "\(referenceSyncId)/\(winnerSyncId)"
+            if let existing = try Row.fetchOne(db, sql: """
+                SELECT id, syncId FROM propertyValue
+                WHERE referenceId = ? AND propertyId = ? LIMIT 1
+                """, arguments: [referenceId, winnerId]) {
+                let existingId: Int64 = existing["id"]
+                let existingIdentity: String = existing["syncId"]
+                let preferred = Self.preferredPropertyValueIdentity(
+                    existingIdentity,
+                    oldIdentity,
+                    derivedIdentity: derivedIdentity
+                )
+                try db.execute(
+                    sql: "DELETE FROM propertyValue WHERE id = ?",
+                    arguments: [loserValueId]
+                )
+                if preferred == oldIdentity {
+                    if existingIdentity != preferred {
+                        try Self.retireLosingIdentity(
+                            type: .propertyValue,
+                            entityId: existingIdentity,
+                            stateStore: stateStore,
+                            db: db
+                        )
+                    }
+                    let scalar: String? = value["value"]
+                    let modified: Date = value["dateModified"]
+                    try db.execute(sql: """
+                        UPDATE propertyValue
+                        SET syncId = ?, propertySyncId = ?,
+                            value = ?, dateModified = ?
+                        WHERE id = ?
+                        """, arguments: [
+                            preferred, winnerSyncId, scalar, modified, existingId,
+                        ])
+                } else {
+                    try Self.retireLosingIdentity(
+                        type: .propertyValue,
+                        entityId: oldIdentity,
+                        stateStore: stateStore,
+                        db: db
+                    )
+                }
+                try Self.markDirty(
+                    type: .propertyValue,
+                    entityId: preferred,
+                    db: db
+                )
+            } else {
+                let oldDerived = "\(referenceSyncId)/\(loserSyncId)"
+                let newIdentity = oldIdentity == oldDerived
+                    ? derivedIdentity : oldIdentity
+                if newIdentity != oldIdentity {
+                    try Self.retireLosingIdentity(
+                        type: .propertyValue,
+                        entityId: oldIdentity,
+                        stateStore: stateStore,
+                        db: db
+                    )
+                }
+                try db.execute(sql: """
+                    UPDATE propertyValue
+                    SET syncId = ?, propertyId = ?, propertySyncId = ?
+                    WHERE id = ?
+                    """, arguments: [
+                        newIdentity, winnerId, winnerSyncId, loserValueId,
+                    ])
+                try Self.markDirty(
+                    type: .propertyValue,
+                    entityId: newIdentity,
+                    db: db
+                )
+            }
+        }
+        try db.execute(
+            sql: "DELETE FROM propertyDefinition WHERE id = ?",
+            arguments: [loserId]
+        )
+    }
+
+    private static func preferredPropertyValueIdentity(
+        _ lhs: String,
+        _ rhs: String,
+        derivedIdentity: String
+    ) -> String {
+        let lhsDecimal = SyncIdentifier.isCanonicalDecimal(lhs)
+        let rhsDecimal = SyncIdentifier.isCanonicalDecimal(rhs)
+        if lhsDecimal || rhsDecimal {
+            return SyncIdentifier.preferred(lhs, rhs)
+        }
+        if lhs == derivedIdentity { return lhs }
+        if rhs == derivedIdentity { return rhs }
+        return min(lhs, rhs)
+    }
+
+    private static func deleteBySyncId(
+        tableName: String,
+        syncId: String,
+        db: Database
+    ) throws {
+        try db.execute(
+            sql: "DELETE FROM \(tableName) WHERE syncId = ?",
+            arguments: [syncId]
+        )
     }
 
     private static func activityFactCanApply(
@@ -919,16 +2715,11 @@ extension SyncEntityType {
         let generation: String
         switch self {
         case .readingActivity:
-            guard let key = Self.splitReadingActivityID(entityId),
-                  let row = try ReadingActivity.fetchOne(
-                    db,
-                    sql: """
-                        SELECT * FROM readingActivity
-                        WHERE generation = ? AND installationId = ?
-                          AND referenceId = ? AND localDay = ?
-                        """,
-                    arguments: [key.generation, key.installationId, key.referenceId, key.localDay]
-                  )
+            guard let row = try ReadingActivity.fetchOne(
+                db,
+                sql: "SELECT * FROM readingActivity WHERE syncId = ? LIMIT 1",
+                arguments: [entityId]
+            )
             else { return false }
             kind = .reading
             revision = row.epochRevision
@@ -984,17 +2775,18 @@ extension SyncEntityType {
                     """,
                 arguments: [oldRevision, oldGeneration]
             )
-            try db.execute(
-                sql: """
-                    UPDATE readingActivity
-                    SET epochRevision = ?, generation = ?, dateModified = ?
-                    WHERE epochRevision = ? AND generation = ?
-                    """,
-                arguments: [nextRevision, nextGeneration, now, oldRevision, oldGeneration]
-            )
             for row in rows {
                 let oldID = row.entityId
-                let newID = "\(nextGeneration)/\(row.installationId)/\(row.referenceId)/\(row.localDay.rawValue)"
+                let newID = "\(nextGeneration)/\(row.installationId)/\(row.referenceSyncId)/\(row.localDay.rawValue)"
+                try db.execute(
+                    sql: """
+                        UPDATE readingActivity
+                        SET syncId = ?, epochRevision = ?, generation = ?,
+                            dateModified = ?
+                        WHERE syncId = ?
+                        """,
+                    arguments: [newID, nextRevision, nextGeneration, now, oldID]
+                )
                 try stateStore.removeState(db, entityType: .readingActivity, entityId: oldID)
                 try stateStore.removeTombstone(db, entityType: .readingActivity, entityId: oldID)
                 try db.execute(
@@ -1038,7 +2830,7 @@ extension SyncEntityType {
             }
         }
 
-        var rebasedEpoch = ActivityEpoch(
+        let rebasedEpoch = ActivityEpoch(
             kind: pending.kind,
             revision: nextRevision,
             generation: nextGeneration,
@@ -1114,20 +2906,7 @@ extension SyncEntityType {
         stateStore: SyncStateStore,
         db: Database
     ) throws -> FetchOrphanReconciliationOutcome {
-        let violations = try Row.fetchAll(
-            db,
-            sql: "PRAGMA foreign_key_check"
-        )
-        guard !violations.isEmpty else {
-            return FetchOrphanReconciliationOutcome()
-        }
-
-        var rowIDsByTable: [String: Set<Int64>] = [:]
-        for violation in violations {
-            let table: String = violation["table"]
-            guard let rowID: Int64 = violation["rowid"] else { continue }
-            rowIDsByTable[table, default: []].insert(rowID)
-        }
+        let rowIDsByTable = try legacyForeignKeyCandidateRowIDs(db: db)
 
         var outcome = FetchOrphanReconciliationOutcome()
 
@@ -1137,8 +2916,8 @@ extension SyncEntityType {
             try db.execute(
                 sql: """
                     UPDATE metadataIntake
-                    SET linkedReferenceId = NULL
-                    WHERE rowid = ? AND linkedReferenceId IS NOT NULL
+                    SET linkedReferenceId = NULL, linkedReferenceSyncId = NULL
+                    WHERE rowid = ?
                     """,
                 arguments: [rowID]
             )
@@ -1183,15 +2962,23 @@ extension SyncEntityType {
             guard let row = try Row.fetchOne(
                 db,
                 sql: """
-                    SELECT referenceId, localFilename
-                    FROM pdfCache
-                    WHERE rowid = ?
+                    SELECT pc.referenceId, pc.localFilename, r.syncId
+                    FROM pdfCache pc
+                    LEFT JOIN reference r ON r.id = pc.referenceId
+                    WHERE pc.rowid = ?
                     """,
                 arguments: [rowID]
             ) else { continue }
-            let referenceID: Int64 = row["referenceId"]
             let filename: String = row["localFilename"]
-            let entityId = String(referenceID)
+            guard let entityId: String = row["syncId"] else {
+                try db.execute(
+                    sql: "DELETE FROM pdfCache WHERE rowid = ?",
+                    arguments: [rowID]
+                )
+                outcome.reconciledRowCount += db.changesCount
+                outcome.pdfFilenamesToDelete.append(filename)
+                continue
+            }
             try stateStore.removeState(
                 db,
                 entityType: .referencePDF,
@@ -1216,6 +3003,41 @@ extension SyncEntityType {
             outcome.pdfFilenamesToDelete.append(filename)
         }
 
+        // Migrated v12 cache orphans are physically outside the live cache,
+        // so their decimal identity cannot be captured by an unrelated local
+        // row while replay is pending.
+        for rowID in rowIDsByTable["syncLegacyPDFCacheOrphan", default: []].sorted() {
+            guard let row = try Row.fetchOne(
+                db,
+                sql: "SELECT * FROM syncLegacyPDFCacheOrphan WHERE rowid = ?",
+                arguments: [rowID]
+            ) else { continue }
+            let entityId: String = row["legacyReferenceSyncId"]
+            let filename: String = row["localFilename"]
+            try stateStore.removeState(
+                db,
+                entityType: .referencePDF,
+                entityId: entityId
+            )
+            try stateStore.removeTombstone(
+                db,
+                entityType: .referencePDF,
+                entityId: entityId
+            )
+            try stateStore.upsertTombstone(
+                db,
+                entityType: .referencePDF,
+                entityId: entityId,
+                confirmedByServer: false
+            )
+            try db.execute(
+                sql: "DELETE FROM syncLegacyPDFCacheOrphan WHERE rowid = ?",
+                arguments: [rowID]
+            )
+            outcome.reconciledRowCount += db.changesCount
+            outcome.pdfFilenamesToDelete.append(filename)
+        }
+
         // A queue row has never become a server PDF record by itself.
         for rowID in rowIDsByTable["pdfUploadQueue", default: []].sorted() {
             try db.execute(
@@ -1224,11 +3046,73 @@ extension SyncEntityType {
             )
             outcome.reconciledRowCount += db.changesCount
         }
+        for rowID in rowIDsByTable["syncLegacyPDFUploadQueueOrphan", default: []].sorted() {
+            try db.execute(
+                sql: "DELETE FROM syncLegacyPDFUploadQueueOrphan WHERE rowid = ?",
+                arguments: [rowID]
+            )
+            outcome.reconciledRowCount += db.changesCount
+        }
 
-        let remaining = try Int.fetchOne(
+        // This representation cache is local-only and can be regenerated.
+        for rowID in rowIDsByTable["webContentMarkdownCache", default: []].sorted() {
+            try db.execute(
+                sql: "DELETE FROM webContentMarkdownCache WHERE rowid = ?",
+                arguments: [rowID]
+            )
+            outcome.reconciledRowCount += db.changesCount
+        }
+        for rowID in rowIDsByTable["syncLegacyWebContentCacheOrphan", default: []].sorted() {
+            try db.execute(
+                sql: "DELETE FROM syncLegacyWebContentCacheOrphan WHERE rowid = ?",
+                arguments: [rowID]
+            )
+            outcome.reconciledRowCount += db.changesCount
+        }
+
+        // Global-FK children cannot be represented as transient SQLite FK
+        // violations before their UUID parent exists, so v13 retains their
+        // complete wire records in syncOrphan. At the successful end of a
+        // full-history fetch, an unresolved parent is proven absent from the
+        // zone and the stale child can be retired safely.
+        let wireOrphans = try Row.fetchAll(
             db,
-            sql: "SELECT COUNT(*) FROM pragma_foreign_key_check"
-        ) ?? 0
+            sql: "SELECT * FROM syncOrphan ORDER BY receivedAt, recordName"
+        )
+        for orphan in wireOrphans {
+            let data: Data = orphan["recordData"]
+            guard let record = try SyncRecordIdentity.unarchive(data),
+                  let type = SyncEntityType.forRecordType(record.recordType),
+                  let parsed = SyncEntityType.parseRecordName(
+                    record.recordID.recordName
+                  ), parsed.0 == type,
+                  try type.remoteDependencyStatus(
+                    for: record,
+                    entityId: parsed.1,
+                    db: db
+                  ) == .unresolved
+            else { continue }
+            try stateStore.removeState(db, entityType: type, entityId: parsed.1)
+            try stateStore.removeTombstone(db, entityType: type, entityId: parsed.1)
+            try stateStore.upsertTombstone(
+                db,
+                entityType: type,
+                entityId: parsed.1,
+                confirmedByServer: false,
+                isPushEligible: true
+            )
+            if let filename: String = orphan["stagedFilename"] {
+                outcome.pdfFilenamesToDelete.append(filename)
+            }
+            try db.execute(
+                sql: "DELETE FROM syncOrphan WHERE recordName = ?",
+                arguments: [record.recordID.recordName]
+            )
+            outcome.reconciledRowCount += 1
+        }
+
+        let remaining = try legacyForeignKeyCandidateRowIDs(db: db)
+            .values.reduce(0) { $0 + $1.count }
         guard remaining == 0 else {
             throw UnresolvedFetchOrphansError(count: remaining)
         }
@@ -1243,42 +3127,23 @@ extension SyncEntityType {
     ) throws -> String? {
         switch table {
         case "referenceTag":
-            guard let row = try Row.fetchOne(
+            return try String.fetchOne(
                 db,
-                sql: """
-                    SELECT referenceId, tagId
-                    FROM referenceTag
-                    WHERE rowid = ?
-                    """,
+                sql: "SELECT syncId FROM referenceTag WHERE rowid = ?",
                 arguments: [rowID]
-            ) else { return nil }
-            let referenceID: Int64 = row["referenceId"]
-            let tagID: Int64 = row["tagId"]
-            return ReferenceTag.recordName(
-                referenceId: referenceID,
-                tagId: tagID
             )
 
         case "readingActivity":
-            guard let row = try Row.fetchOne(
+            return try String.fetchOne(
                 db,
-                sql: """
-                    SELECT generation, installationId, referenceId, localDay
-                    FROM readingActivity
-                    WHERE rowid = ?
-                    """,
+                sql: "SELECT syncId FROM readingActivity WHERE rowid = ?",
                 arguments: [rowID]
-            ) else { return nil }
-            let generation: String = row["generation"]
-            let installationID: String = row["installationId"]
-            let referenceID: Int64 = row["referenceId"]
-            let localDay: String = row["localDay"]
-            return "\(generation)/\(installationID)/\(referenceID)/\(localDay)"
+            )
 
         default:
             return try String.fetchOne(
                 db,
-                sql: "SELECT CAST(id AS TEXT) FROM \(table) WHERE rowid = ?",
+                sql: "SELECT syncId FROM \(table) WHERE rowid = ?",
                 arguments: [rowID]
             )
         }
@@ -1313,7 +3178,12 @@ extension SyncEntityType {
             let revision: Int
             let generation: String
             if type == .readingActivity {
-                guard let activity = try? decoder.decode(ReadingActivity.self, from: data) else {
+                let referenceSyncId: String? = row["referenceSyncId"]
+                guard let activity = try decodeQuarantinedReadingActivity(
+                    data: data,
+                    fallbackReferenceSyncId: referenceSyncId,
+                    db: db
+                ) else {
                     try queueActivityDeletion(
                         type: type,
                         entityId: entityId,
@@ -1323,7 +3193,11 @@ extension SyncEntityType {
                     )
                     continue
                 }
-                if try Reference.fetchOne(db, id: activity.referenceId) == nil {
+                if try localID(
+                    tableName: "reference",
+                    syncId: activity.referenceSyncId,
+                    db: db
+                ) == nil {
                     // An incremental delta is not a complete server snapshot:
                     // the unchanged parent may predate this device's cursor.
                     // Only a completed full-history replay proves the remote
@@ -1387,23 +3261,128 @@ extension SyncEntityType {
         }
     }
 
+    /// Retry full CKRecord payloads that arrived before one of their global
+    /// FK parents. Returns displaced PDF filenames for post-commit unlink.
+    /// The bounded fixed-point loop also handles an orphan parent and child
+    /// becoming resolvable in the same fetched event.
+    static func replayQuarantinedRemoteRecords(
+        stateStore: SyncStateStore,
+        db: Database
+    ) throws -> [String] {
+        var displacedFilenames: [String] = []
+        var madeProgress = true
+
+        while madeProgress {
+            madeProgress = false
+            var legacyOrphanRepairNeeded = false
+            let rows = try Row.fetchAll(
+                db,
+                sql: "SELECT * FROM syncOrphan ORDER BY receivedAt, recordName"
+            )
+            for row in rows {
+                let data: Data = row["recordData"]
+                guard let record = try SyncRecordIdentity.unarchive(data),
+                      let type = SyncEntityType.forRecordType(record.recordType),
+                      let parsed = SyncEntityType.parseRecordName(
+                        record.recordID.recordName
+                      ), parsed.0 == type
+                else { continue }
+                let entityId = parsed.1
+                guard try type.remoteDependencyStatus(
+                    for: record,
+                    entityId: entityId,
+                    db: db
+                ) == .ready else { continue }
+
+                let applied: Bool
+                if type == .referencePDF {
+                    guard let payload = ReferencePDFRecord(record: record),
+                          let stagedFilename: String = row["stagedFilename"]
+                    else { continue }
+                    let prepared = PreparedReferencePDFMaterialization(
+                        referenceSyncId: entityId,
+                        payload: payload,
+                        stagedURL: AppDatabase.pdfStorageURL
+                            .appendingPathComponent(stagedFilename),
+                        stagedFilename: stagedFilename,
+                        reuseHint: nil
+                    )
+                    guard let canonicalPrepared = try
+                        canonicalizedReferencePDFMaterialization(prepared, db: db)
+                    else { continue }
+                    if let prior = try applyPreparedReferencePDF(
+                        canonicalPrepared,
+                        db: db
+                    ) {
+                        displacedFilenames.append(prior)
+                    }
+                    try retireAliasedReferencePDFIdentity(
+                        observedEntityId: entityId,
+                        canonicalEntityId: canonicalPrepared.referenceSyncId,
+                        stateStore: stateStore,
+                        db: db
+                    )
+                    applied = true
+                } else {
+                    applied = try type.applyRemoteRecord(
+                        record,
+                        entityId: entityId,
+                        db: db,
+                        stateStore: stateStore
+                    )
+                }
+                guard applied else { continue }
+                legacyOrphanRepairNeeded = legacyOrphanRepairNeeded
+                    || type.suppliesGlobalDependencies
+
+                if try !stateStore.hasPushEligibleTombstone(
+                    db,
+                    entityType: type,
+                    entityId: entityId
+                ) {
+                    try stateStore.markPulled(
+                        db,
+                        entityType: type,
+                        entityId: entityId,
+                        record: record
+                    )
+                }
+                try db.execute(
+                    sql: "DELETE FROM syncOrphan WHERE recordName = ?",
+                    arguments: [record.recordID.recordName]
+                )
+                madeProgress = true
+            }
+            if legacyOrphanRepairNeeded {
+                displacedFilenames += try Self
+                    .repairResolvableLegacyForeignKeyOrphans(db: db)
+            }
+        }
+        return displacedFilenames
+    }
+
     private static func upsertReadingActivity(_ row: ReadingActivity, db: Database) throws {
         try db.execute(
             sql: """
                 INSERT INTO readingActivity
-                    (installationId, referenceId, localDay, epochRevision, generation,
-                     activeSeconds, lastActiveAt, dateModified)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (syncId, installationId, referenceId, referenceSyncId,
+                     localDay, epochRevision, generation, activeSeconds,
+                     lastActiveAt, dateModified)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(generation, installationId, referenceId, localDay)
                 DO UPDATE SET
+                    syncId = excluded.syncId,
+                    referenceSyncId = excluded.referenceSyncId,
                     epochRevision = MAX(readingActivity.epochRevision, excluded.epochRevision),
                     activeSeconds = MAX(readingActivity.activeSeconds, excluded.activeSeconds),
                     lastActiveAt = MAX(readingActivity.lastActiveAt, excluded.lastActiveAt),
                     dateModified = MAX(readingActivity.dateModified, excluded.dateModified)
                 """,
             arguments: [
-                row.installationId, row.referenceId, row.localDay, row.epochRevision,
-                row.generation, row.activeSeconds, row.lastActiveAt, row.dateModified,
+                row.syncId, row.installationId, row.referenceId,
+                row.referenceSyncId, row.localDay, row.epochRevision,
+                row.generation, row.activeSeconds, row.lastActiveAt,
+                row.dateModified,
             ]
         )
     }
@@ -1433,12 +3412,95 @@ extension SyncEntityType {
         )
     }
 
+    private struct ReadingActivityQuarantinePayload: Codable {
+        let version: Int
+        let syncId: String
+        let installationId: String
+        let referenceSyncId: String
+        let localDay: LocalDay
+        let epochRevision: Int
+        let generation: String
+        let activeSeconds: Int64
+        let lastActiveAt: Date
+        let dateModified: Date
+
+        init(_ row: ReadingActivity) {
+            version = 1
+            syncId = row.syncId
+            installationId = row.installationId
+            referenceSyncId = row.referenceSyncId
+            localDay = row.localDay
+            epochRevision = row.epochRevision
+            generation = row.generation
+            activeSeconds = row.activeSeconds
+            lastActiveAt = row.lastActiveAt
+            dateModified = row.dateModified
+        }
+
+        func materialized(referenceId: Int64) -> ReadingActivity {
+            ReadingActivity(
+                syncId: syncId,
+                installationId: installationId,
+                referenceId: referenceId,
+                referenceSyncId: referenceSyncId,
+                localDay: localDay,
+                epochRevision: epochRevision,
+                generation: generation,
+                activeSeconds: activeSeconds,
+                lastActiveAt: lastActiveAt,
+                dateModified: dateModified
+            )
+        }
+    }
+
+    private static func decodeQuarantinedReadingActivity(
+        data: Data,
+        fallbackReferenceSyncId: String?,
+        db: Database
+    ) throws -> ReadingActivity? {
+        let decoder = JSONDecoder()
+        if let payload = try? decoder.decode(
+            ReadingActivityQuarantinePayload.self,
+            from: data
+        ), let referenceId = try localID(
+            tableName: "reference",
+            syncId: payload.referenceSyncId,
+            db: db
+        ) {
+            return payload.materialized(referenceId: referenceId)
+        }
+
+        // v12/v13 migration compatibility: old quarantine rows encoded the
+        // local model directly. Resolve their migrated global identity before
+        // replay and never trust the serialized local referenceId as a wire
+        // address.
+        guard var legacy = try? decoder.decode(ReadingActivity.self, from: data),
+              let referenceSyncId = fallbackReferenceSyncId ?? (
+                legacy.referenceSyncId.isEmpty ? nil : legacy.referenceSyncId
+              ),
+              let referenceId = try localID(
+                tableName: "reference",
+                syncId: referenceSyncId,
+                db: db
+              ) else { return nil }
+        legacy.referenceId = referenceId
+        legacy.referenceSyncId = referenceSyncId
+        if legacy.syncId.isEmpty {
+            legacy.syncId = "\(legacy.generation)/\(legacy.installationId)/\(referenceSyncId)/\(legacy.localDay.rawValue)"
+        }
+        return legacy
+    }
+
     private static func quarantine(
         _ row: ReadingActivity,
         recordName: String,
         db: Database
     ) throws {
-        let reason = try Reference.fetchOne(db, id: row.referenceId) == nil ? "reference" : "epoch"
+        let reason = try localID(
+            tableName: "reference",
+            syncId: row.referenceSyncId,
+            db: db
+        ) == nil ? "reference" : "epoch"
         try storeQuarantine(
             recordName: recordName,
             entityType: SyncEntityType.readingActivity.rawValue,
@@ -1446,7 +3508,8 @@ extension SyncEntityType {
             epochRevision: row.epochRevision,
             generation: row.generation,
             referenceId: row.referenceId,
-            data: try JSONEncoder().encode(row),
+            referenceSyncId: row.referenceSyncId,
+            data: try JSONEncoder().encode(ReadingActivityQuarantinePayload(row)),
             db: db
         )
     }
@@ -1463,6 +3526,7 @@ extension SyncEntityType {
             epochRevision: row.epochRevision,
             generation: row.generation,
             referenceId: nil,
+            referenceSyncId: nil,
             data: try JSONEncoder().encode(row),
             db: db
         )
@@ -1475,6 +3539,7 @@ extension SyncEntityType {
         epochRevision: Int,
         generation: String,
         referenceId: Int64?,
+        referenceSyncId: String?,
         data: Data,
         db: Database
     ) throws {
@@ -1483,26 +3548,27 @@ extension SyncEntityType {
             sql: """
                 INSERT INTO activityQuarantine
                     (recordName, entityType, reason, epochRevision, generation,
-                     referenceId, recordData, receivedAt)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     referenceId, referenceSyncId, recordData, receivedAt)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(recordName) DO UPDATE SET
                     entityType = excluded.entityType,
                     reason = excluded.reason,
                     epochRevision = excluded.epochRevision,
                     generation = excluded.generation,
                     referenceId = excluded.referenceId,
+                    referenceSyncId = excluded.referenceSyncId,
                     recordData = excluded.recordData,
                     receivedAt = excluded.receivedAt
                 """,
             arguments: [
                 recordName, entityType, reason, epochRevision, generation,
-                referenceId, data, Date(),
+                referenceId, referenceSyncId, data, Date(),
             ]
         )
     }
 
     static func replayQuarantinedActivity(
-        referenceIds: Set<Int64> = [],
+        referenceSyncIds: Set<String> = [],
         epochKinds: Set<ActivityKind> = [],
         all: Bool = false,
         db: Database
@@ -1514,16 +3580,20 @@ extension SyncEntityType {
                 sql: "SELECT * FROM activityQuarantine ORDER BY receivedAt"
             )
         } else {
-            if !referenceIds.isEmpty {
-                let ids = referenceIds.sorted().map(String.init).joined(separator: ",")
+            if !referenceSyncIds.isEmpty {
+                let placeholders = Array(
+                    repeating: "?",
+                    count: referenceSyncIds.count
+                ).joined(separator: ",")
                 rows += try Row.fetchAll(
                     db,
                     sql: """
                         SELECT * FROM activityQuarantine
                         WHERE entityType = 'readingActivity'
-                          AND referenceId IN (\(ids))
+                          AND referenceSyncId IN (\(placeholders))
                         ORDER BY receivedAt
-                        """
+                        """,
+                    arguments: StatementArguments(referenceSyncIds.sorted())
                 )
             }
             if epochKinds.contains(.reading) {
@@ -1558,8 +3628,12 @@ extension SyncEntityType {
             let didApply: Bool
             switch SyncEntityType(rawValue: entityType) {
             case .readingActivity:
-                guard let activity = try? decoder.decode(ReadingActivity.self, from: data)
-                else { continue }
+                let referenceSyncId: String? = quarantined["referenceSyncId"]
+                guard let activity = try decodeQuarantinedReadingActivity(
+                    data: data,
+                    fallbackReferenceSyncId: referenceSyncId,
+                    db: db
+                ) else { continue }
                 guard try activityFactCanApply(
                         kind: .reading,
                         epochRevision: activity.epochRevision,
@@ -1567,7 +3641,11 @@ extension SyncEntityType {
                         referenceId: activity.referenceId,
                         db: db
                       ) else {
-                    if try Reference.fetchOne(db, id: activity.referenceId) != nil {
+                    if try localID(
+                        tableName: "reference",
+                        syncId: activity.referenceSyncId,
+                        db: db
+                    ) != nil {
                         try db.execute(
                             sql: """
                                 UPDATE activityQuarantine SET reason = 'epoch'

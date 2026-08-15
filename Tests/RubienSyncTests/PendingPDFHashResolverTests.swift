@@ -39,7 +39,13 @@ final class PendingPDFHashResolverTests: XCTestCase {
         let url = AppDatabase.pdfStorageURL.appendingPathComponent(filename)
         try Data(contents.utf8).write(to: url)
         try db.dbWriter.write { db in
-            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(?, 'r', ?, ?)", arguments: [referenceId, Date(), Date()])
+            try db.execute(
+                sql: """
+                    INSERT INTO reference(id, syncId, title, dateAdded, dateModified)
+                    VALUES(?, ?, 'r', ?, ?)
+                    """,
+                arguments: [referenceId, String(referenceId), Date(), Date()]
+            )
             try db.execute(sql: """
                 INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
                 VALUES(?, ?, ?, 1, ?, ?)
@@ -162,7 +168,7 @@ final class PendingPDFHashResolverTests: XCTestCase {
             pdfAssetSyncEnabledProvider: { true }
         )
         let drained = await library.drainPDFUploadQueueIntoSyncState()
-        XCTAssertEqual(drained, [1])
+        XCTAssertEqual(drained, ["1"])
 
         try await db.dbWriter.read { db in
             // The drainer must have resolved the hash *before* the dirty

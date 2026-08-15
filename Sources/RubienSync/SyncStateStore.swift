@@ -5,8 +5,8 @@ import CloudKit
 import RubienCore
 
 /// Thin DB helpers for the sync-bookkeeping tables. Keeps raw SQL out of the
-/// `SyncedLibrary` actor and collects the schema knowledge in one place so a
-/// future A-pks migration only has to update this file's queries.
+/// `SyncedLibrary` actor and collects the sync-state schema knowledge in one
+/// place. Entity IDs are the stable global identities introduced by v13.
 ///
 /// All methods that mutate must run inside a caller-owned transaction —
 /// typically the same transaction that applies the remote record, so a crash
@@ -21,6 +21,7 @@ public struct SyncStateStore: Sendable {
         static let tombstoneTable = "tombstone"
 
         static let applyingRemoteKey = "applyingRemote"
+        static let writerUpgradeRequiredKey = "writerUpgradeRequired"
     }
 
     public init() {}
@@ -42,6 +43,34 @@ public struct SyncStateStore: Sendable {
             sql: "DELETE FROM \(SQL.sessionTable) WHERE key = ?",
             arguments: [SQL.applyingRemoteKey]
         )
+    }
+
+    public func writerUpgradeRequired(_ db: Database) throws -> Bool {
+        try Bool.fetchOne(db, sql: """
+            SELECT EXISTS(
+                SELECT 1 FROM \(SQL.sessionTable)
+                WHERE key = ? AND value = '1'
+            )
+            """, arguments: [SQL.writerUpgradeRequiredKey]) ?? true
+    }
+
+    public func acknowledgeWriterUpgrade(_ db: Database) throws {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        try db.execute(
+            sql: "DELETE FROM \(SQL.sessionTable) WHERE key = ?",
+            arguments: [SQL.writerUpgradeRequiredKey]
+        )
+        try db.execute(sql: """
+            INSERT INTO \(SQL.sessionTable)(key, value)
+                VALUES('writerUpgradeAcknowledgedAt', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """, arguments: [formatter.string(from: Date())])
+        try db.execute(sql: """
+            INSERT INTO \(SQL.sessionTable)(key, value)
+                VALUES('writerUpgradeAcknowledgedSchemaVersion', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """, arguments: [AppDatabase.currentSchemaVersion])
     }
 
     // MARK: - syncState rows
@@ -228,7 +257,7 @@ public struct SyncStateStore: Sendable {
     public func tombstones(_ db: Database) throws -> [(SyncEntityType, String)] {
         let rows = try Row.fetchAll(db, sql: """
             SELECT entityType, entityId FROM \(SQL.tombstoneTable)
-            WHERE confirmedByServer = 0
+            WHERE confirmedByServer = 0 AND isPushEligible = 1
             """)
         return rows.compactMap { row in
             guard
@@ -242,6 +271,17 @@ public struct SyncStateStore: Sendable {
         }
     }
 
+    public func tombstoneIsPushEligible(
+        _ db: Database,
+        entityType: SyncEntityType,
+        entityId: String
+    ) throws -> Bool {
+        try Bool.fetchOne(db, sql: """
+            SELECT isPushEligible FROM \(SQL.tombstoneTable)
+            WHERE entityType = ? AND entityId = ? AND confirmedByServer = 0
+            """, arguments: [entityType.rawValue, entityId]) ?? false
+    }
+
     /// Insert (or refresh) a tombstone. The delete trigger does this for
     /// local deletes (unconfirmed); the pull handler does this for remote
     /// deletes with `confirmedByServer=true` (the server already decided).
@@ -252,23 +292,30 @@ public struct SyncStateStore: Sendable {
         entityType: SyncEntityType,
         entityId: String,
         deletedAt: Date = Date(),
-        confirmedByServer: Bool = false
+        confirmedByServer: Bool = false,
+        isPushEligible: Bool = true
     ) throws {
         try db.execute(sql: """
-            INSERT INTO \(SQL.tombstoneTable)(entityType, entityId, deletedAt, confirmedByServer)
-                VALUES(?, ?, ?, ?)
+            INSERT INTO \(SQL.tombstoneTable)
+                (entityType, entityId, deletedAt, confirmedByServer, isPushEligible)
+                VALUES(?, ?, ?, ?, ?)
                 ON CONFLICT(entityType, entityId)
                     DO UPDATE SET
                         deletedAt = excluded.deletedAt,
                         confirmedByServer = CASE
                             WHEN \(SQL.tombstoneTable).confirmedByServer = 1 THEN 1
                             ELSE excluded.confirmedByServer
-                        END
+                        END,
+                        isPushEligible = MAX(
+                            \(SQL.tombstoneTable).isPushEligible,
+                            excluded.isPushEligible
+                        )
             """, arguments: [
                 entityType.rawValue,
                 entityId,
                 deletedAt,
-                confirmedByServer ? 1 : 0
+                confirmedByServer ? 1 : 0,
+                isPushEligible ? 1 : 0,
             ])
     }
 
@@ -295,6 +342,24 @@ public struct SyncStateStore: Sendable {
             SELECT EXISTS(
                 SELECT 1 FROM \(SQL.tombstoneTable)
                 WHERE entityType = ? AND entityId = ?
+            )
+            """, arguments: [entityType.rawValue, entityId]) ?? false
+    }
+
+    /// A fetched reconciliation loser is represented by an exact eligible
+    /// tombstone, not by live sync state. Callers use this after applying a
+    /// record so `markPulled` does not recreate bookkeeping that the
+    /// deterministic reconciler just retired.
+    public func hasPushEligibleTombstone(
+        _ db: Database,
+        entityType: SyncEntityType,
+        entityId: String
+    ) throws -> Bool {
+        try Bool.fetchOne(db, sql: """
+            SELECT EXISTS(
+                SELECT 1 FROM \(SQL.tombstoneTable)
+                WHERE entityType = ? AND entityId = ?
+                  AND isPushEligible = 1
             )
             """, arguments: [entityType.rawValue, entityId]) ?? false
     }

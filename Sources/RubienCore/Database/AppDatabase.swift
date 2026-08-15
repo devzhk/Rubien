@@ -467,8 +467,9 @@ public final class AppDatabase: Sendable {
 
             // MARK: - Sync bookkeeping
             // Tombstones track deletions so we can propagate them to CloudKit later.
-            // entityType is the table name; entityId is the row's PK as TEXT (Int64
-            // stringified until A-pks migrates to UUIDs).
+            // entityType is the table name; entityId was originally the row's
+            // local PK as text. The later v13 migration rewrites this column
+            // to a stable global identity where server evidence permits.
             // `confirmedByServer` distinguishes tombstones the server has
             // acknowledged (safe to GC on the 30-day window) from pending
             // local deletes that still need to round-trip. Dropping an
@@ -632,12 +633,10 @@ public final class AppDatabase: Sendable {
         // column-visibility customization, and detail view. Seeded as hidden
         // — the user opts in rather than getting two new columns by default.
         //
-        // Known fragility (pre-existing, not unique to v5): if a user already
-        // has a custom "Last Read" PropertyDefinition at a different local
-        // id, a peer's pull of this v5 row would collide on UNIQUE(name).
-        // The same shape exists for every v1 seed today. Resolution waits on
-        // the planned A-pks migration that gives seeded rows deterministic
-        // UUIDs (see PropertyDefinitionRecord.swift).
+        // Known fragility at the time v5 shipped: a custom "Last Read"
+        // definition at a different local id could collide on UNIQUE(name).
+        // The later v13 global-identity reconciler resolves seeded definitions
+        // by defaultFieldKey while preserving the local surrogate row.
         migrator.registerMigration("v5") { db in
             try Self.applyV5Body(db)
         }
@@ -702,7 +701,12 @@ public final class AppDatabase: Sendable {
         // identities used by CloudKit. Existing server-backed record names are
         // preserved; every unconfirmed independent row receives a UUID.
         if includesV13Migration {
-            migrator.registerMigration("v13") { db in
+            // A completed pull batch can deliberately leave an FK orphan when
+            // the parent is due in a later CloudKit batch. Immediate checks do
+            // not reject such pre-existing violations at migration commit;
+            // v13 preserves them with legacy shadow identities so replay can
+            // repair them when the parent arrives.
+            migrator.registerMigration("v13", foreignKeyChecks: .immediate) { db in
                 try Self.applyV13Body(db)
             }
         }
@@ -1143,6 +1147,63 @@ public final class AppDatabase: Sendable {
         try db.execute(sql: "ALTER TABLE readingActivity ADD COLUMN referenceSyncId TEXT")
         try db.execute(sql: "ALTER TABLE activityQuarantine ADD COLUMN referenceSyncId TEXT")
         try db.execute(sql: "ALTER TABLE tombstone ADD COLUMN isPushEligible INTEGER NOT NULL DEFAULT 0")
+        try db.execute(sql: """
+            CREATE TABLE syncOrphan (
+                recordName TEXT NOT NULL PRIMARY KEY,
+                recordType TEXT NOT NULL,
+                recordData BLOB NOT NULL,
+                stagedFilename TEXT,
+                receivedAt DATETIME NOT NULL
+            )
+            """)
+        try db.create(
+            index: "syncOrphan_recordType_receivedAt",
+            on: "syncOrphan",
+            columns: ["recordType", "receivedAt"]
+        )
+        try db.execute(sql: """
+            CREATE TABLE syncIdentityAlias (
+                entityType TEXT NOT NULL,
+                losingId TEXT NOT NULL,
+                winningId TEXT NOT NULL,
+                createdAt DATETIME NOT NULL,
+                PRIMARY KEY (entityType, losingId),
+                CHECK (length(trim(entityType)) > 0),
+                CHECK (length(trim(losingId)) > 0),
+                CHECK (length(trim(winningId)) > 0),
+                CHECK (losingId <> winningId)
+            )
+            """)
+        // Quarantine rare local-only rows whose Reference was missing in a
+        // v12 database. They cannot stay in the live cache tables: a new UUID
+        // Reference may reuse the same integer ID before full replay, making
+        // ordinary PDF/UI consumers expose or upload the orphan under the
+        // wrong global identity.
+        try db.execute(sql: """
+            CREATE TABLE syncLegacyPDFCacheOrphan (
+                legacyReferenceSyncId TEXT NOT NULL PRIMARY KEY,
+                localFilename TEXT NOT NULL,
+                contentHash TEXT NOT NULL,
+                assetVersion INTEGER NOT NULL,
+                materializedAt DATETIME,
+                lastOpenedAt DATETIME NOT NULL
+            )
+            """)
+        try db.execute(sql: """
+            CREATE TABLE syncLegacyPDFUploadQueueOrphan (
+                legacyReferenceSyncId TEXT NOT NULL PRIMARY KEY,
+                localFilename TEXT NOT NULL,
+                queuedAt DATETIME NOT NULL
+            )
+            """)
+        try db.execute(sql: """
+            CREATE TABLE syncLegacyWebContentCacheOrphan (
+                legacyReferenceSyncId TEXT NOT NULL PRIMARY KEY,
+                sourceHash TEXT NOT NULL,
+                converterVersion INTEGER NOT NULL,
+                markdown TEXT NOT NULL
+            )
+            """)
 
         try db.execute(sql: """
             INSERT INTO syncSession(key, value) VALUES('applyingRemote', '1')
@@ -1184,6 +1245,52 @@ public final class AppDatabase: Sendable {
         let propertyIDs = try v13IdentityMap(db, table: "propertyDefinition")
         let intakeIDs = try v13IdentityMap(db, table: "metadataIntake")
 
+        try db.execute(sql: """
+            INSERT INTO syncLegacyPDFCacheOrphan(
+                legacyReferenceSyncId, localFilename, contentHash,
+                assetVersion, materializedAt, lastOpenedAt
+            )
+            SELECT CAST(pc.referenceId AS TEXT), pc.localFilename,
+                   pc.contentHash, pc.assetVersion,
+                   pc.materializedAt, pc.lastOpenedAt
+            FROM pdfCache pc
+            WHERE NOT EXISTS (
+                SELECT 1 FROM reference r WHERE r.id = pc.referenceId
+            );
+            DELETE FROM pdfCache
+            WHERE NOT EXISTS (
+                SELECT 1 FROM reference r WHERE r.id = pdfCache.referenceId
+            );
+
+            INSERT INTO syncLegacyPDFUploadQueueOrphan(
+                legacyReferenceSyncId, localFilename, queuedAt
+            )
+            SELECT CAST(q.referenceId AS TEXT), q.localFilename, q.queuedAt
+            FROM pdfUploadQueue q
+            WHERE NOT EXISTS (
+                SELECT 1 FROM reference r WHERE r.id = q.referenceId
+            );
+            DELETE FROM pdfUploadQueue
+            WHERE NOT EXISTS (
+                SELECT 1 FROM reference r WHERE r.id = pdfUploadQueue.referenceId
+            );
+
+            INSERT INTO syncLegacyWebContentCacheOrphan(
+                legacyReferenceSyncId, sourceHash, converterVersion, markdown
+            )
+            SELECT CAST(c.referenceId AS TEXT), c.sourceHash,
+                   c.converterVersion, c.markdown
+            FROM webContentMarkdownCache c
+            WHERE NOT EXISTS (
+                SELECT 1 FROM reference r WHERE r.id = c.referenceId
+            );
+            DELETE FROM webContentMarkdownCache
+            WHERE NOT EXISTS (
+                SELECT 1 FROM reference r
+                WHERE r.id = webContentMarkdownCache.referenceId
+            )
+            """)
+
         let referenceTagRows = try Row.fetchAll(db, sql: """
             SELECT referenceId, tagId FROM referenceTag
             ORDER BY referenceId, tagId
@@ -1191,16 +1298,14 @@ public final class AppDatabase: Sendable {
         for row in referenceTagRows {
             let referenceId: Int64 = row["referenceId"]
             let tagId: Int64 = row["tagId"]
-            guard let referenceSyncId = referenceIDs[referenceId],
-                  let tagSyncId = tagIDs[tagId] else {
-                throw SyncIdentityMigrationError.invalidIdentityData(
-                    "referenceTag \(referenceId)/\(tagId) has an unresolved parent"
-                )
-            }
+            let referenceSyncId = referenceIDs[referenceId] ?? String(referenceId)
+            let tagSyncId = tagIDs[tagId] ?? String(tagId)
             let oldId = "\(referenceId)/\(tagId)"
             let key = V13EntityKey(entityType: "referenceTag", entityId: oldId)
             let proven = provenLegacyKeys.contains(key)
-            let newId = proven
+            let hasUnresolvedParent = referenceIDs[referenceId] == nil
+                || tagIDs[tagId] == nil
+            let newId = proven || hasUnresolvedParent
                 ? oldId
                 : "\(referenceSyncId)/\(tagSyncId)"
             try db.execute(sql: """
@@ -1226,16 +1331,14 @@ public final class AppDatabase: Sendable {
             let id: Int64 = row["id"]
             let referenceId: Int64 = row["referenceId"]
             let propertyId: Int64 = row["propertyId"]
-            guard let referenceSyncId = referenceIDs[referenceId],
-                  let propertySyncId = propertyIDs[propertyId] else {
-                throw SyncIdentityMigrationError.invalidIdentityData(
-                    "propertyValue \(id) has an unresolved parent"
-                )
-            }
+            let referenceSyncId = referenceIDs[referenceId] ?? String(referenceId)
+            let propertySyncId = propertyIDs[propertyId] ?? String(propertyId)
             let oldId = String(id)
             let key = V13EntityKey(entityType: "propertyValue", entityId: oldId)
             let proven = provenLegacyKeys.contains(key)
-            let newId = proven
+            let hasUnresolvedParent = referenceIDs[referenceId] == nil
+                || propertyIDs[propertyId] == nil
+            let newId = proven || hasUnresolvedParent
                 ? oldId
                 : "\(referenceSyncId)/\(propertySyncId)"
             try db.execute(sql: """
@@ -1264,15 +1367,11 @@ public final class AppDatabase: Sendable {
             let installationId: String = row["installationId"]
             let referenceId: Int64 = row["referenceId"]
             let localDay: String = row["localDay"]
-            guard let referenceSyncId = referenceIDs[referenceId] else {
-                throw SyncIdentityMigrationError.invalidIdentityData(
-                    "readingActivity has an unresolved Reference \(referenceId)"
-                )
-            }
+            let referenceSyncId = referenceIDs[referenceId] ?? String(referenceId)
             let oldId = "\(generation)/\(installationId)/\(referenceId)/\(localDay)"
             let key = V13EntityKey(entityType: "readingActivity", entityId: oldId)
             let proven = provenLegacyKeys.contains(key)
-            let newId = proven
+            let newId = proven || referenceIDs[referenceId] == nil
                 ? oldId
                 : "\(generation)/\(installationId)/\(referenceSyncId)/\(localDay)"
             try db.execute(sql: """
@@ -1316,6 +1415,14 @@ public final class AppDatabase: Sendable {
             try v13MigrateState(mapping, db: db)
         }
         try db.execute(sql: "UPDATE syncState SET pushInFlight = 0")
+        // Portable saved-view fields are generated only when the view pushes.
+        // Every migrated view must therefore publish once after identities are
+        // assigned, even when its own legacy record name was proven clean.
+        try db.execute(sql: """
+            UPDATE syncState
+            SET isDirty = 1, pushInFlight = 0
+            WHERE entityType = 'databaseView'
+            """)
         try db.execute(sql: """
             UPDATE tombstone
             SET isPushEligible = CASE WHEN confirmedByServer = 1 THEN 1 ELSE 0 END
@@ -1468,11 +1575,8 @@ public final class AppDatabase: Sendable {
             for row in rows {
                 let id: Int64 = row["id"]
                 let referenceId: Int64 = row["referenceId"]
-                guard let referenceSyncId = referenceIDs[referenceId] else {
-                    throw SyncIdentityMigrationError.invalidIdentityData(
-                        "\(table) \(id) has an unresolved Reference \(referenceId)"
-                    )
-                }
+                let referenceSyncId = referenceIDs[referenceId]
+                    ?? String(referenceId)
                 try db.execute(
                     sql: "UPDATE \(table) SET referenceSyncId = ? WHERE id = ?",
                     arguments: [referenceSyncId, id]
@@ -1486,11 +1590,8 @@ public final class AppDatabase: Sendable {
         for row in intakeRows {
             let id: Int64 = row["id"]
             let referenceId: Int64? = row["linkedReferenceId"]
-            let referenceSyncId = referenceId.flatMap { referenceIDs[$0] }
-            if referenceId != nil, referenceSyncId == nil {
-                throw SyncIdentityMigrationError.invalidIdentityData(
-                    "metadataIntake \(id) has an unresolved linked Reference"
-                )
+            let referenceSyncId = referenceId.map {
+                referenceIDs[$0] ?? String($0)
             }
             try db.execute(
                 sql: "UPDATE metadataIntake SET linkedReferenceSyncId = ? WHERE id = ?",
@@ -1505,17 +1606,9 @@ public final class AppDatabase: Sendable {
             let id: Int64 = row["id"]
             let intakeId: Int64? = row["intakeId"]
             let referenceId: Int64? = row["referenceId"]
-            let intakeSyncId = intakeId.flatMap { intakeIDs[$0] }
-            let referenceSyncId = referenceId.flatMap { referenceIDs[$0] }
-            if intakeId != nil, intakeSyncId == nil {
-                throw SyncIdentityMigrationError.invalidIdentityData(
-                    "metadataEvidence \(id) has an unresolved intake"
-                )
-            }
-            if referenceId != nil, referenceSyncId == nil {
-                throw SyncIdentityMigrationError.invalidIdentityData(
-                    "metadataEvidence \(id) has an unresolved Reference"
-                )
+            let intakeSyncId = intakeId.map { intakeIDs[$0] ?? String($0) }
+            let referenceSyncId = referenceId.map {
+                referenceIDs[$0] ?? String($0)
             }
             try db.execute(sql: """
                 UPDATE metadataEvidence
@@ -2281,6 +2374,15 @@ extension AppDatabase {
         _ intake: inout MetadataIntake,
         db: Database
     ) throws {
+        // Retry persistence reconstructs the intake payload around an existing
+        // local row ID. Preserve that row's global identity and creation time;
+        // the v13 identity trigger correctly rejects replacing syncId with the
+        // fresh UUID supplied by MetadataIntake's initializer.
+        if let id = intake.id,
+           let stored = try MetadataIntake.fetchOne(db, id: id) {
+            intake.syncId = stored.syncId
+            intake.createdAt = stored.createdAt
+        }
         intake.linkedReferenceSyncId = try intake.linkedReferenceId.map {
             try requiredSyncId(table: "reference", id: $0, db: db)
         }

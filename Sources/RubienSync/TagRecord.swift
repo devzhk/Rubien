@@ -10,6 +10,7 @@ import RubienCore
 extension Tag {
 
     public enum RecordField {
+        public static let syncId       = SyncRecordIdentity.syncIdField
         public static let name         = "name"
         public static let color        = "color"
         public static let dateModified = "dateModified"
@@ -17,12 +18,14 @@ extension Tag {
 
     /// Schema-invariant test (Phase E) reads this. Keep in lockstep with `RecordField`.
     public static let allFieldNames: [String] = [
+        RecordField.syncId,
         RecordField.name,
         RecordField.color,
         RecordField.dateModified,
     ]
 
     public func populate(record: CKRecord) {
+        SyncRecordIdentity.write(syncId, to: record)
         record[RecordField.name]         = name
         record[RecordField.color]        = color
         record[RecordField.dateModified] = dateModified
@@ -44,6 +47,7 @@ extension Tag {
     /// peers that wrote the record before this field was added.
     public init(record: CKRecord) {
         self.init(
+            syncId: SyncRecordIdentity.decodedSyncId(from: record, expectedType: .tag),
             name: (record[RecordField.name] as? String) ?? "",
             color: (record[RecordField.color] as? String) ?? "#007AFF",
             dateModified: (record[RecordField.dateModified] as? Date) ?? Date()

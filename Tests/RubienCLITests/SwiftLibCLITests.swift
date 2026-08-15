@@ -555,6 +555,7 @@ final class RubienCLITests: XCTestCase {
         let getResult = try runCLI(["get", "\(refId)"])
         XCTAssertEqual(getResult.exitCode, 0)
         let getJson = try JSONSerialization.jsonObject(with: Data(getResult.stdout.utf8)) as? [String: Any]
+        XCTAssertNotNil(getJson?["syncId"] as? String)
         XCTAssertFalse(getJson?.keys.contains("siteName") ?? true,
                        "siteName key should be omitted when nil; got dict with key present")
     }

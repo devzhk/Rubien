@@ -9,7 +9,7 @@ struct SyncCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "sync",
         abstract: "Inspect iCloud sync state.",
-        subcommands: [StatusCommand.self]
+        subcommands: [StatusCommand.self, AcknowledgeWriterUpgradeCommand.self]
     )
 }
 
@@ -29,6 +29,7 @@ struct StatusCommand: ParsableCommand {
         let unconfirmed: Int
         let baselineState: String
         let pdfBackfillRemaining: Int
+        let identityDiagnostics: [String: Any]
 
         if let pool = try? makePool() {
             dirtyByType = (try? pool.read { db in
@@ -65,12 +66,19 @@ struct StatusCommand: ParsableCommand {
                 try Int.fetchOne(db,
                     sql: "SELECT COUNT(*) FROM syncState WHERE entityType='referencePDF' AND isDirty=1") ?? 0
             }) ?? 0
+            identityDiagnostics = (try? pool.read { db in
+                let diagnostics = try SyncIdentityDiagnostics.read(from: db)
+                let data = try JSONEncoder().encode(diagnostics)
+                return try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                    ?? [:]
+            }) ?? Self.identityFallback
         } else {
             dirtyByType = [:]
             confirmed = 0
             unconfirmed = 0
             baselineState = "pending"
             pdfBackfillRemaining = 0
+            identityDiagnostics = Self.identityFallback
         }
 
         let sidecarPath = AppDatabase.syncEngineStateURL
@@ -119,10 +127,94 @@ struct StatusCommand: ParsableCommand {
             "dirtyByEntityType": dirtyByType,
             "tombstoneCount": ["confirmed": confirmed, "unconfirmed": unconfirmed],
             "pdfBackfillRemaining": pdfBackfillRemaining,
+            "identity": identityDiagnostics,
             "syncEngineState": syncEngineState,
             "schemaVersion": AppDatabase.currentSchemaVersion
         ]
 
+        let data = try JSONSerialization.data(
+            withJSONObject: output,
+            options: [.prettyPrinted, .sortedKeys]
+        )
+        FileHandle.standardOutput.write(data)
+        FileHandle.standardOutput.write(Data("\n".utf8))
+    }
+
+    private func makePool() throws -> DatabasePool {
+        let url = AppDatabase.syncEngineStateURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("library.sqlite")
+        return try DatabasePool(path: url.path)
+    }
+
+    /// Conservative output for a missing or pre-v13 library. Keeping the
+    /// target schema visible while reporting the gate as required lets an
+    /// upgrade diagnostic remain machine-readable before migration runs.
+    private static var identityFallback: [String: Any] {
+        [
+            "identitySchemaVersion": SyncIdentityDiagnostics.identitySchemaVersion,
+            "identityCountsByEntityType": [:],
+            "quarantinedRecordCount": 0,
+            "unresolvedGlobalForeignKeyCount": 0,
+            "invalidRemoteRecordCount": 0,
+            "ineligibleLegacyTombstoneCount": 0,
+            "fullHistoryReplayPending": true,
+            "writerUpgradeRequired": true,
+            "blockedSaveCount": 0,
+            "blockedDeleteCount": 0,
+            "writerUpgradeAcknowledgedAt": NSNull(),
+            "writerUpgradeAcknowledgedSchemaVersion": NSNull(),
+        ]
+    }
+}
+
+struct AcknowledgeWriterUpgradeCommand: ParsableCommand {
+    static let confirmationText = "ALL-WRITERS-UPGRADED"
+    static let configuration = CommandConfiguration(
+        commandName: "acknowledge-writer-upgrade",
+        abstract: "Release v12-readable outbound sync work after every writable Mac is upgraded or offline."
+    )
+
+    @Option(
+        name: .long,
+        help: "Must be exactly \"ALL-WRITERS-UPGRADED\"."
+    )
+    var confirm: String
+
+    func run() throws {
+        guard confirm == Self.confirmationText else {
+            throw ValidationError(
+                "Refusing to release legacy-addressable writes. Pass --confirm \(Self.confirmationText) only after every writable Mac has v13 or is offline."
+            )
+        }
+
+        let lock = try SyncFileLock(fileURL: SyncFileLock.defaultURL)
+        guard try lock.tryLockExclusive() else {
+            throw ValidationError(
+                "Rubien is currently syncing. Quit the app, run this acknowledgement, then reopen it so released work is enqueued safely."
+            )
+        }
+        defer { try? lock.unlock() }
+
+        let pool = try makePool()
+        try pool.write { db in
+            let hasV13 = try Bool.fetchOne(db, sql: """
+                SELECT EXISTS(
+                    SELECT 1 FROM grdb_migrations WHERE identifier = 'v13'
+                )
+                """) ?? false
+            guard hasV13 else {
+                throw ValidationError(
+                    "The library has not completed its v13 identity migration. Open it with the matching Rubien app before acknowledging the writer upgrade."
+                )
+            }
+            try SyncStateStore().acknowledgeWriterUpgrade(db)
+        }
+        let output: [String: Any] = [
+            "acknowledged": true,
+            "identitySchemaVersion": SyncIdentityDiagnostics.identitySchemaVersion,
+            "schemaVersion": AppDatabase.currentSchemaVersion,
+        ]
         let data = try JSONSerialization.data(
             withJSONObject: output,
             options: [.prettyPrinted, .sortedKeys]

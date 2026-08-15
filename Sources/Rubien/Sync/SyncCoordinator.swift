@@ -30,6 +30,7 @@ public final class SyncCoordinator: ObservableObject {
 
     @Published public private(set) var status: SyncStatus = .disabled
     @Published public private(set) var userEnabled: Bool
+    @Published public private(set) var identityDiagnostics: SyncIdentityDiagnostics?
 
     /// Transient, non-persistent. True between toggle flip and
     /// confirm-sheet dismissal. Binding uses this for flicker-free
@@ -143,6 +144,9 @@ public final class SyncCoordinator: ObservableObject {
         // otherwise crash on the force-unwrap.
         self.isAppActive = isAppActive ?? { NSApp?.isActive ?? false }
         self.userEnabled = defaults.bool(forKey: DefaultsKey.enabled)
+        self.identityDiagnostics = try? appDatabase.dbWriter.read { db in
+            try SyncIdentityDiagnostics.read(from: db)
+        }
     }
 
     // MARK: - Toggle binding
@@ -416,6 +420,7 @@ public final class SyncCoordinator: ObservableObject {
                 await MainActor.run {
                     guard currentGeneration == self.lifecycleGeneration else { return }
                     self.status = mappedStatus
+                    self.refreshIdentityDiagnostics()
                 }
             }
         }
@@ -466,6 +471,31 @@ public final class SyncCoordinator: ObservableObject {
     /// `*ForTest` method.
     public func retryStartSync() async {
         await performStartSync()
+    }
+
+    // MARK: - Identity-upgrade safety
+
+    /// Refresh the separately surfaced v13 identity-migration state. This is
+    /// intentionally not folded into `SyncStatus`: safe UUID-addressed work
+    /// continues syncing while only v12-readable writes remain gated.
+    public func refreshIdentityDiagnostics() {
+        identityDiagnostics = try? appDatabase.dbWriter.read { db in
+            try SyncIdentityDiagnostics.read(from: db)
+        }
+    }
+
+    /// Release the mixed-version writer gate after an explicit fleet-level
+    /// acknowledgement. When sync is live, route through the actor so the
+    /// newly eligible durable queue entries are handed to CKSyncEngine now.
+    public func acknowledgeWriterUpgrade() async throws {
+        if let library {
+            try await library.acknowledgeWriterUpgrade()
+        } else {
+            try await appDatabase.dbWriter.write { db in
+                try SyncStateStore().acknowledgeWriterUpgrade(db)
+            }
+        }
+        refreshIdentityDiagnostics()
     }
 
     // MARK: - PDF upload-queue kick

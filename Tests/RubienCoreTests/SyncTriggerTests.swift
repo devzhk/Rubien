@@ -48,6 +48,23 @@ final class SyncTriggerTests: XCTestCase {
         } > 0
     }
 
+    private func tombstoneEligibility(
+        db: AppDatabase,
+        entityType: String,
+        entityId: String
+    ) throws -> Int? {
+        try db.dbWriter.read { db in
+            try Int.fetchOne(
+                db,
+                sql: """
+                    SELECT isPushEligible FROM tombstone
+                    WHERE entityType = ? AND entityId = ?
+                    """,
+                arguments: [entityType, entityId]
+            )
+        }
+    }
+
     // MARK: - Insert / update / delete trigger basics
 
     func testInsertOnTagMarksDirty() throws {
@@ -123,6 +140,103 @@ final class SyncTriggerTests: XCTestCase {
         let state = try syncStateRow(db: db, entityType: "tag", entityId: tagSyncId)
         XCTAssertNil(state, "syncState row should be removed on delete")
         XCTAssertTrue(try tombstoneExists(db: db, entityType: "tag", entityId: tagSyncId))
+        XCTAssertEqual(
+            try tombstoneEligibility(db: db, entityType: "tag", entityId: tagSyncId),
+            1,
+            "a locally-created global identity is safe to delete remotely"
+        )
+    }
+
+    func testIdentityValidationRejectsMissingAndMutatedSyncId() throws {
+        let db = try makeDatabase()
+        let originalSyncId = SyncIdentifier.random()
+        let tagID: Int64 = try db.dbWriter.write { db in
+            XCTAssertThrowsError(
+                try db.execute(
+                    sql: "INSERT INTO tag(syncId, name, color) VALUES('', 'Missing', '#FF0000')"
+                )
+            )
+            try db.execute(
+                sql: "INSERT INTO tag(syncId, name, color) VALUES(?, 'Stable', '#FF0000')",
+                arguments: [originalSyncId]
+            )
+            return db.lastInsertedRowID
+        }
+
+        try db.dbWriter.write { db in
+            XCTAssertThrowsError(
+                try db.execute(
+                    sql: "UPDATE tag SET syncId = ? WHERE id = ?",
+                    arguments: [SyncIdentifier.random(), tagID]
+                )
+            )
+        }
+        XCTAssertEqual(
+            try db.dbWriter.read { db in
+                try String.fetchOne(db, sql: "SELECT syncId FROM tag WHERE id = ?", arguments: [tagID])
+            },
+            originalSyncId
+        )
+    }
+
+    func testGlobalForeignKeyValidationRejectsMismatchedShadowIdentity() throws {
+        let db = try makeDatabase()
+        let referenceSyncId = SyncIdentifier.random()
+        let tagSyncId = SyncIdentifier.random()
+        try db.dbWriter.write { db in
+            let now = Date()
+            try db.execute(sql: """
+                INSERT INTO reference(syncId, title, authors, authorsNormalized, dateAdded, dateModified, verificationStatus, readingStatus, referenceType)
+                VALUES(?, 'Reference', '', '', ?, ?, 'verifiedManual', 'unread', 'Journal Article')
+                """, arguments: [referenceSyncId, now, now])
+            let referenceID = db.lastInsertedRowID
+            try db.execute(
+                sql: "INSERT INTO tag(syncId, name, color) VALUES(?, 'Tag', '#FF0000')",
+                arguments: [tagSyncId]
+            )
+            let tagID = db.lastInsertedRowID
+
+            XCTAssertThrowsError(
+                try db.execute(sql: """
+                    INSERT INTO referenceTag(
+                        syncId, referenceId, tagId,
+                        referenceSyncId, tagSyncId
+                    ) VALUES(?, ?, ?, ?, ?)
+                    """, arguments: [
+                        "\(referenceSyncId)/\(tagSyncId)",
+                        referenceID,
+                        tagID,
+                        SyncIdentifier.random(),
+                        tagSyncId,
+                    ])
+            )
+        }
+    }
+
+    func testNumericDeleteEligibilityRequiresServerProof() throws {
+        let db = try makeDatabase()
+        try db.dbWriter.write { db in
+            try db.execute(
+                sql: "INSERT INTO tag(id, syncId, name, color) VALUES(701, '701', 'Unproven', '#FF0000')"
+            )
+            try db.execute(
+                sql: "INSERT INTO tag(id, syncId, name, color) VALUES(702, '702', 'Proven', '#00FF00')"
+            )
+            try db.execute(sql: """
+                UPDATE syncState SET systemFields = X'010203'
+                WHERE entityType = 'tag' AND entityId = '702'
+                """)
+            try db.execute(sql: "DELETE FROM tag WHERE id IN (701, 702)")
+        }
+
+        XCTAssertEqual(
+            try tombstoneEligibility(db: db, entityType: "tag", entityId: "701"),
+            0
+        )
+        XCTAssertEqual(
+            try tombstoneEligibility(db: db, entityType: "tag", entityId: "702"),
+            1
+        )
     }
 
     // MARK: - applyingRemote suppression

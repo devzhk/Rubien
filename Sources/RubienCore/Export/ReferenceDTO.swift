@@ -18,6 +18,7 @@ public struct CustomPropertyValueDTO: Encodable, Sendable {
 /// Rubien's stable automation-oriented reference JSON shape.
 public struct ReferenceDTO: Encodable, Sendable {
     public let id: Int64?
+    public let syncId: String
     public let title: String
     public let authors: String
     public let year: Int?
@@ -51,6 +52,7 @@ public struct ReferenceDTO: Encodable, Sendable {
         pdfFilenamesByRef: [Int64: String] = [:]
     ) {
         id = ref.id
+        syncId = ref.syncId
         title = ref.title
         authors = ref.authors.displayString
         year = ref.year

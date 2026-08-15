@@ -88,6 +88,19 @@ record types), so a fresh install shows an empty library and 0 KB PDF cache.
    | `CDAssistantActivity` | record type and all fields from `AssistantActivity.RecordField` | mixed |
    | `CDActivityEpoch` | record type and all fields from `ActivityEpoch.RecordField` | mixed |
 
+   For the v13 global-identity rollout, also verify this additive field set.
+   The legacy integer fields remain in place; do not rename or remove them.
+
+   | Record types | Required String additions |
+   |---|---|
+   | all 14 synced record types | `syncId` |
+   | `CDReferenceTag` | `referenceSyncId`, `tagSyncId` |
+   | `CDPDFAnnotation`, `CDWebAnnotation`, `CDReferencePDF`, `CDReadingActivity` | `referenceSyncId` |
+   | `CDMetadataIntake` | `linkedReferenceSyncId` |
+   | `CDMetadataEvidence` | `intakeSyncId`, `referenceSyncId` |
+   | `CDPropertyValue` | `referenceSyncId`, `propertySyncId` |
+   | `CDDatabaseView` | `scopeSyncJSON`, `filtersSyncJSON`, `sortsSyncJSON`, `groupBySyncJSON`, `columnWrapsSyncJSON` |
+
 4. **Deploy Schema Changes…** → review the diff → **Deploy to Production**. This copies
    schema—record types, fields, and indexes—only. It **never copies data**.
 5. Switch the Dashboard to **Production** and repeat the type-and-field audit. Do not treat a
@@ -149,6 +162,47 @@ From the CLI: `swift run rubien-cli sync status` gives JSON.
 - `enabled: false` → user hasn't flipped the toggle on
 - `dirtyByEntityType` not draining → engine isn't pushing; check Console for CKError codes
 - `tombstoneCount.unconfirmed > 0` after pushes drain → deletes aren't being ack'd by the server (likely transient; retry on next app foreground)
+- `identity.fullHistoryReplayPending: true` → v13's mandatory replay has not yet reached a durable successful boundary; do not remove the backup
+- `identity.quarantinedRecordCount > 0` → one or more complete wire records are retained locally; use the two classified counts below to distinguish missing dependencies from malformed records
+- `identity.unresolvedGlobalForeignKeyCount > 0` → child wire records are waiting for global parents; an incremental fetch may resolve them later
+- `identity.invalidRemoteRecordCount > 0` → malformed or identity-conflicting wire records are quarantined and will not be fixed by waiting for a parent; preserve the library and report the count
+- `identity.writerUpgradeRequired: true` → UUID-addressed traffic may continue, but `blockedSaveCount` / `blockedDeleteCount` identify v12-readable work held locally until the fleet acknowledgement
+- `identity.ineligibleLegacyTombstoneCount > 0` → ambiguous pre-v13 deletes are intentionally quarantined and must not be made eligible by hand
+
+### 6.1 v13 multi-Mac rollout and writer acknowledgement
+
+v13 is a forward-only local migration. Before opening a production library
+with v13, quit Rubien and copy the entire resolved library root as described in
+§7: SQLite plus WAL/SHM, PDFs, metadata artifacts, and
+`sync-engine-state.bin`. Deploy the additive CloudKit fields in §2.5 before
+installing the binary.
+
+Upgrade every Mac that can write this iCloud library in the same maintenance
+window, or keep an older Mac offline. Each v13 library forces a full CloudKit
+history replay. While `identity.writerUpgradeRequired` is true, pulls, local
+editing, and UUID-addressed saves/deletes continue; only record names that a
+v12 writer could silently misapply remain queued locally. Replay completion
+does not clear this gate, and CloudKit traffic cannot prove that an old writer
+is gone.
+
+After every writable Mac is on v13 or permanently offline, acknowledge on each
+v13 library in Settings → iCloud Sync, or while Rubien is quit:
+
+```bash
+rubien-cli sync acknowledge-writer-upgrade \
+  --confirm ALL-WRITERS-UPGRADED
+```
+
+Reopening a v12 writer after acknowledgement is unsafe. Never point an older
+binary at the migrated v13 database. To roll back, quit Rubien, move the entire
+current root aside, and restore the complete pre-v13 root as one unit.
+
+The v13 preflight classifies archived CloudKit system fields before changing
+the schema. If unreadable archives exceed the bounded cohort threshold
+(`min(10, max(1, floor(N × 1%)))`), migration aborts without modifying the v12
+library. Preserve the aggregate error counts and backup,
+continue on v12 if necessary, and report the failure. Do not clear system
+fields, delete the zone, or invent a partial database/sidecar restore.
 
 ### 7. Replay CloudKit history on a receiving device
 
@@ -167,20 +221,21 @@ launch, foreground, or idle fetch. A log sequence containing
 `transient FK orphans tolerated` followed by `FK violations after remote apply ... rolling back`
 is the signature of this older-build failure.
 
-Updated builds also split a mixed fetched event into an orphan-tolerant modification transaction
-and an FK-enforced deletion transaction. CloudKit can deliver a child modification before its
-parent even when that event also contains unrelated deletions; the split allows that temporary
-orphan to commit without disabling local `ON DELETE CASCADE` behavior.
+v13 classifies every global relationship before assigning local foreign keys.
+When CloudKit delivers a child before its parent, the complete CKRecord is
+stored in `syncOrphan`; no guessed row ID and no FK-invalid child enters the
+synced table. A bounded fixed-point replay runs after each fetched batch, while
+deletions retain normal SQLite cascade behavior. Compatibility cleanup for
+pre-v13 FK-invalid rows remains in place for already-affected libraries.
 
 During a known full-history replay (the engine started with no durable sidecar), updated builds
-reconcile any child whose parent still never arrived at the successful end-of-zone boundary.
-Synced children are deleted locally and queued as CloudKit tombstones so later devices do not
-inherit the same stale records; orphaned PDF cache files are unlinked only after the cleanup
-transaction commits. Optional metadata-intake links are cleared rather than deleting their
-intake history. Ordinary incremental fetches never infer server absence from a locally missing
-parent: their change delta is not a complete CloudKit snapshot. An unknown FK shape during a
-full replay fails reconciliation and keeps the fetch cursor non-durable instead of silently
-accepting a persistently inconsistent library. A durable database marker is written before
+reconcile any quarantined child whose parent still never arrived at the successful end-of-zone
+boundary. The exact global child identity is queued as a CloudKit tombstone so later devices do
+not inherit stale records; staged orphan PDF files are unlinked only after the cleanup
+transaction commits. Ordinary incremental fetches never infer server absence from a locally
+missing parent: their change delta is not a complete CloudKit snapshot. An unknown legacy FK
+shape during a full replay fails reconciliation and keeps the fetch cursor non-durable instead
+of silently accepting a persistently inconsistent library. A durable database marker is written before
 CKSyncEngine can start and is cleared only after both terminal cleanup and the end-of-fetch
 cursor are durable. If the marker survives a crash, startup discards any ambiguous sidecar and
 replays from nil again.
@@ -229,6 +284,8 @@ full re-upload.
 - **v9** (hidden run history, 2026-07) — added the local-only `scheduledJobRun.hiddenAt` marker. No CloudKit schema change.
 - **v10** (Assistant transcripts, 2026-07) — added Rubien-owned local transcript tables and scheduled-run transcript state. No CloudKit schema change.
 - **v11** (pre-release schema repair, 2026-07) — conditionally restores `activityQuarantine.referenceId`, backfills it from quarantined `ReadingActivity` payloads, replaces the stale quarantine index, and reconciles non-unique scheduled-run indexes found in development libraries created before the released v7/v8 migrations. Healthy released databases already have the column; v11 checks `db.columns(in:)` first and is an idempotent no-op for their data. No CloudKit schema change.
+- **v12** (derived web Markdown cache, 2026-08) — added local-only `webContentMarkdownCache`, keyed to Reference with cascade deletion. Cached Markdown is derived from canonical HTML and invalidated by source hash/converter version. No CloudKit schema change.
+- **v13** (global sync identities, 2026-08) — separates stable CloudKit `syncId` values from local integer row IDs, adds shadow global FKs and validation triggers, portable saved-view wire JSON, exact tombstone eligibility, wire-record orphan quarantine, mandatory full-history replay, and the selective v12-writer interlock. Existing proven numeric CloudKit identities remain permanent legacy names; unconfirmed local rows receive UUIDs. This is forward-only and requires the backup/all-writers rollout in §6.1 plus the additive Production schema fields in §2.5.
 
 **Forward-only.** Migrations are one-way. A v1 binary opening a v2 DB errors with `no such column: pdfPath` (the failure mode that hit the dev when the worktree migrated the live library before the matching binary shipped). Always upgrade the binary first, then let it migrate the DB on launch.
 
@@ -238,6 +295,7 @@ full re-upload.
 - **`readingStatus` lowercase escape.** Same shape but with a sharper edge: v2's `ReadingStatus(rawValue:)` returns nil for the new capitalized values `"Unread"` / `"Reading"` / `"Skimmed"` / `"Read"`, falls back to `.unread`, and on next mutation writes back `"unread"` (lowercase). v3 decode is now free-form and **passes whatever it pulls through unchanged** — there is no second normalization pass, so the v3 device will then read and store the lowercase string verbatim. Once that has happened, the only thing that fixes it is another local edit that round-trips through a v3 mutation, or a manual run of the v3 migration body via `runV3MigrationForTesting` (which is a one-shot helper, not the production migrator). Practical implication for multi-device users: upgrade all peers in the same session before mutating Status from a v2 device. Single-user / single-Mac libraries are unaffected.
 - pre-v6 device + v6 cloud: `Markdown` is a new `referenceType` rawValue; an older peer pulling a Markdown reference decodes the unknown value via the existing forward-compat fallback to `.other`, and the new Type option itself can't be lost — every up-to-date peer re-heals it on apply (see v6 above).
 - malformed pre-release v7 device + v11 build: upgrade the binary before resetting sync-engine state. v11 repairs the local quarantine query that otherwise rolls back any fetched batch containing an applied Reference. Released v7 databases already have the correct column and index.
+- v12 writer + v13 cloud: a v12 reader can silently attach a v13 edit to the wrong local integer row even when it emits no detectable write. Upgrade or take every v12 writer offline before acknowledging v13's writer gate. The gate is deliberately explicit and per library; it is never inferred from CloudKit.
 
 **Procedure for every new migration.**
 
@@ -250,7 +308,6 @@ full re-upload.
 ## Known follow-ups
 
 - **Push-driven live fetch (Layer B).** Today incremental remote changes arrive only on launch / foreground / a ~90s idle poll (`SyncConstants.idleFetchInterval`). True push-driven sync needs the `aps-environment` entitlement (dev/release split like `icloud-container-environment`), Push enabled on the `com.rubien.app` App ID, and on-device verification that a Developer-ID DMG build actually receives CloudKit silent pushes. Planned with the iOS port. See `Docs/specs/2026-06-01-sync-incremental-fetch-design.md`.
-- A-pks migration (UUID primary keys) — currently using stringified Int64 rowIDs; two devices inserting independently offline can collide on rowID. Sync one device first before inserting on the second until A-pks ships.
 - Field-level LWW merge — current policy is server-wins on conflict; planned refinement uses `dateModified` for finer-grained merges.
-- `rubien-cli sync push / pull / reset` subcommands — deferred; only `sync status` ships in v1.
+- `rubien-cli sync push / pull / reset` subcommands — deferred; `sync status` and the narrowly scoped `sync acknowledge-writer-upgrade` ship today.
 - xcconfig-driven entitlement injection for `scripts/build-app.sh` — use Xcode GUI signing for first testing.

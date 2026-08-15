@@ -5,20 +5,22 @@ import RubienCore
 
 /// `ReferenceTag` (the reference↔tag pivot) ↔ `CKRecord` mapping.
 ///
-/// Unlike other synced entities, the pivot has a composite primary key
-/// (`referenceId`, `tagId`) and no surrogate rowID. The CloudKit record name
-/// is `"<referenceId>/<tagId>"` — same synthetic format produced by the
-/// dirty-tracking triggers, so the two layers agree on identity without a
-/// translation step.
+/// Unlike other synced entities, the pivot has a composite local primary key
+/// (`referenceId`, `tagId`) and no surrogate rowID. Its CloudKit record name is
+/// `"<referenceSyncId>/<tagSyncId>"`, derived from stable endpoint identities;
+/// the dirty-tracking triggers emit the same value from the shadow FK columns.
 ///
-/// FKs are stored as plain values (Int64 today, String UUID post-A-pks), not
-/// `CKRecord.Reference` — we manage cascading deletes via SQLite FKs locally
-/// and don't want CloudKit's referential-integrity semantics fighting ours.
+/// FKs are stored as plain values rather than `CKRecord.Reference`: SQLite
+/// keeps integer FKs for local joins and cascades, while the wire format uses
+/// the matching global shadow identities.
 extension ReferenceTag {
 
     public enum RecordField {
+        public static let syncId      = SyncRecordIdentity.syncIdField
         public static let referenceId  = "referenceId"
         public static let tagId        = "tagId"
+        public static let referenceSyncId = "referenceSyncId"
+        public static let tagSyncId       = "tagSyncId"
         public static let dateModified = "dateModified"
     }
 
@@ -28,8 +30,11 @@ extension ReferenceTag {
     /// is sufficient. `dateModified` is shipped to keep the schema-invariant
     /// allow-list empty even though the apply path is insert-if-absent.
     public static let allFieldNames: [String] = [
+        RecordField.syncId,
         RecordField.referenceId,
         RecordField.tagId,
+        RecordField.referenceSyncId,
+        RecordField.tagSyncId,
         RecordField.dateModified,
     ]
 
@@ -42,12 +47,26 @@ extension ReferenceTag {
     }
 
     public var recordName: String {
-        Self.recordName(referenceId: referenceId, tagId: tagId)
+        syncId.isEmpty
+            ? Self.recordName(referenceId: referenceId, tagId: tagId)
+            : syncId
     }
 
     public func populate(record: CKRecord) {
-        record[RecordField.referenceId]  = referenceId
-        record[RecordField.tagId]        = tagId
+        let wireReferenceSyncId = referenceSyncId.isEmpty
+            ? String(referenceId)
+            : referenceSyncId
+        let wireTagSyncId = tagSyncId.isEmpty ? String(tagId) : tagSyncId
+        let wireSyncId = syncId.isEmpty
+            ? "\(wireReferenceSyncId)/\(wireTagSyncId)"
+            : syncId
+        SyncRecordIdentity.write(wireSyncId, to: record)
+        record[RecordField.referenceSyncId] = wireReferenceSyncId
+        record[RecordField.tagSyncId] = wireTagSyncId
+        record[RecordField.referenceId] = SyncRecordIdentity.legacyInteger(
+            for: wireReferenceSyncId
+        )
+        record[RecordField.tagId] = SyncRecordIdentity.legacyInteger(for: wireTagSyncId)
         record[RecordField.dateModified] = dateModified
     }
 
@@ -71,15 +90,27 @@ extension ReferenceTag {
     /// falls back to `Date()` for forward compat with peers that wrote the
     /// record before this field was added.
     public init?(record: CKRecord) {
-        guard
-            let referenceId = record[RecordField.referenceId] as? Int64,
-            let tagId = record[RecordField.tagId] as? Int64
+        guard let referenceSyncId = SyncRecordIdentity.decodedForeignKey(
+            from: record,
+            globalField: RecordField.referenceSyncId,
+            legacyField: RecordField.referenceId
+        ), let tagSyncId = SyncRecordIdentity.decodedForeignKey(
+            from: record,
+            globalField: RecordField.tagSyncId,
+            legacyField: RecordField.tagId
+        )
         else {
             return nil
         }
         self.init(
-            referenceId: referenceId,
-            tagId: tagId,
+            syncId: SyncRecordIdentity.decodedSyncId(
+                from: record,
+                expectedType: .referenceTag
+            ),
+            referenceId: (record[RecordField.referenceId] as? Int64) ?? 0,
+            tagId: (record[RecordField.tagId] as? Int64) ?? 0,
+            referenceSyncId: referenceSyncId,
+            tagSyncId: tagSyncId,
             dateModified: (record[RecordField.dateModified] as? Date) ?? Date()
         )
     }

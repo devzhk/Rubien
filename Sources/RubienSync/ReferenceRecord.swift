@@ -7,9 +7,9 @@ import RubienCore
 /// `CKRecord` (the CloudKit payload).
 ///
 /// The record's stable identity is `CKRecord.ID.recordName` — the caller
-/// supplies that externally. This decouples mapping from whether the local PK
-/// is an Int64 (pre-A-pks) or a UUID string (post-A-pks). The Swift `id`
-/// property is never written to or read from the CKRecord: it's a local rowID.
+/// supplies that externally as the row's stable `syncId`. The Swift `id`
+/// property is never written to or read from the CKRecord: it remains a local
+/// integer surrogate.
 ///
 /// Per Apple's CKSyncEngine guidance (WWDC 2023 + Selig 2026), we `populate`
 /// into an existing `CKRecord` rather than creating a fresh one — so when we
@@ -20,6 +20,7 @@ extension Reference {
     // MARK: - CKRecord field keys
 
     public enum RecordField {
+        public static let syncId                = SyncRecordIdentity.syncIdField
         public static let title                 = "title"
         public static let authorsJSON           = "authorsJSON"
         public static let year                  = "year"
@@ -84,6 +85,7 @@ extension Reference {
     /// `authorsNormalized` is a computed Swift property recomputed on every
     /// encode and never written to CloudKit (it's in `neverInRecord`).
     public static let allFieldNames: [String] = [
+        RecordField.syncId,
         RecordField.title,
         "authors",            // wire: authorsJSON; column: authors
         RecordField.year,
@@ -140,6 +142,7 @@ extension Reference {
     /// (that lives in `record.recordID.recordName`, set by the caller) and
     /// does not write `pdfPath` (attachments live on sibling `CDReferencePDF`).
     public func populate(record: CKRecord) {
+        SyncRecordIdentity.write(syncId, to: record)
         record[RecordField.title]                 = title
         record[RecordField.authorsJSON]           = Self.encodeAuthorsJSON(authors)
         record[RecordField.year]                  = year.map { Int64($0) }
@@ -211,6 +214,8 @@ extension Reference {
     /// writes a case this version doesn't know about.
     public init(record: CKRecord) {
         self.init(title: (record[RecordField.title] as? String) ?? "")
+
+        self.syncId = SyncRecordIdentity.decodedSyncId(from: record, expectedType: .reference)
 
         self.authors = Self.decodeAuthorsJSON(record[RecordField.authorsJSON] as? String)
 

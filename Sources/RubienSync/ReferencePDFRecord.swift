@@ -12,6 +12,7 @@ import RubienCore
 /// onto/off of CKRecord-shaped payloads.
 public struct ReferencePDFRecord: Sendable {
     public let referenceId: Int64
+    public let referenceSyncId: String
     public let assetURL: URL?
     public let assetVersion: Int64
     public let contentHash: String
@@ -20,6 +21,7 @@ public struct ReferencePDFRecord: Sendable {
 
     public init(
         referenceId: Int64,
+        referenceSyncId: String = "",
         assetURL: URL?,
         assetVersion: Int64,
         contentHash: String,
@@ -27,6 +29,9 @@ public struct ReferencePDFRecord: Sendable {
         dateModified: Date
     ) {
         self.referenceId = referenceId
+        self.referenceSyncId = referenceSyncId.isEmpty
+            ? String(referenceId)
+            : referenceSyncId
         self.assetURL = assetURL
         self.assetVersion = assetVersion
         self.contentHash = contentHash
@@ -38,7 +43,9 @@ public struct ReferencePDFRecord: Sendable {
 extension ReferencePDFRecord {
 
     public enum RecordField {
+        public static let syncId          = SyncRecordIdentity.syncIdField
         public static let referenceId      = "referenceId"
+        public static let referenceSyncId  = "referenceSyncId"
         public static let asset            = "asset"
         public static let assetVersion     = "assetVersion"
         public static let contentHash      = "contentHash"
@@ -48,7 +55,9 @@ extension ReferencePDFRecord {
 
     /// Schema-invariant test (Phase E) reads this. Keep in lockstep with `RecordField`.
     public static let allFieldNames: [String] = [
+        RecordField.syncId,
         RecordField.referenceId,
+        RecordField.referenceSyncId,
         RecordField.asset,
         RecordField.assetVersion,
         RecordField.contentHash,
@@ -57,7 +66,11 @@ extension ReferencePDFRecord {
     ]
 
     public func populate(record: CKRecord) {
-        record[RecordField.referenceId]      = referenceId
+        SyncRecordIdentity.write(referenceSyncId, to: record)
+        record[RecordField.referenceSyncId] = referenceSyncId
+        record[RecordField.referenceId] = SyncRecordIdentity.legacyInteger(
+            for: referenceSyncId
+        )
         if let assetURL { record[RecordField.asset] = CKAsset(fileURL: assetURL) }
         record[RecordField.assetVersion]     = assetVersion
         record[RecordField.contentHash]      = contentHash
@@ -74,10 +87,15 @@ extension ReferencePDFRecord {
 
     /// Failable: a record without `referenceId` is meaningless (no FK target).
     public init?(record: CKRecord) {
-        guard let referenceId = record[RecordField.referenceId] as? Int64 else {
+        guard let referenceSyncId = SyncRecordIdentity.decodedForeignKey(
+            from: record,
+            globalField: RecordField.referenceSyncId,
+            legacyField: RecordField.referenceId
+        ) else {
             return nil
         }
-        self.referenceId = referenceId
+        self.referenceId = (record[RecordField.referenceId] as? Int64) ?? 0
+        self.referenceSyncId = referenceSyncId
         self.assetURL = (record[RecordField.asset] as? CKAsset)?.fileURL
         self.assetVersion = (record[RecordField.assetVersion] as? Int64) ?? 1
         self.contentHash = (record[RecordField.contentHash] as? String) ?? ""

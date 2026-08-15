@@ -453,12 +453,21 @@ final class ReadCommandTests: XCTestCase {
     private func seedPdfAnnotation(refId: Int64, page: Int, selected: String, created: Date) throws {
         let db = try openTestDB()
         try db.write { db in
+            let referenceSyncId = try XCTUnwrap(String.fetchOne(
+                db,
+                sql: "SELECT syncId FROM reference WHERE id = ?",
+                arguments: [refId]
+            ))
             try db.execute(sql: """
-                INSERT INTO pdfAnnotation(referenceId, type, selectedText, noteText, color,
+                INSERT INTO pdfAnnotation(syncId, referenceId, referenceSyncId,
+                    type, selectedText, noteText, color,
                     pageIndex, boundsX, boundsY, boundsWidth, boundsHeight, rectsData,
                     dateCreated, dateModified)
-                VALUES (?, 'highlight', ?, NULL, '#FFEB3B', ?, 0, 0, 10, 10, '[]', ?, ?)
-                """, arguments: [refId, selected, page, created, created])
+                VALUES (?, ?, ?, 'highlight', ?, NULL, '#FFEB3B', ?, 0, 0, 10, 10, '[]', ?, ?)
+                """, arguments: [
+                    UUID().uuidString.lowercased(), refId, referenceSyncId,
+                    selected, page, created, created,
+                ])
         }
     }
 
@@ -467,11 +476,20 @@ final class ReadCommandTests: XCTestCase {
     private func seedWebAnnotation(refId: Int64, anchor: String, created: Date) throws {
         let db = try openTestDB()
         try db.write { db in
+            let referenceSyncId = try XCTUnwrap(String.fetchOne(
+                db,
+                sql: "SELECT syncId FROM reference WHERE id = ?",
+                arguments: [refId]
+            ))
             try db.execute(sql: """
-                INSERT INTO webAnnotation(referenceId, type, selectedText, noteText, color,
+                INSERT INTO webAnnotation(syncId, referenceId, referenceSyncId,
+                    type, selectedText, noteText, color,
                     anchorText, prefixText, suffixText, dateCreated, dateModified)
-                VALUES (?, 'highlight', ?, NULL, '#FFEB3B', ?, 'before ', ' after', ?, ?)
-                """, arguments: [refId, anchor, anchor, created, created])
+                VALUES (?, ?, ?, 'highlight', ?, NULL, '#FFEB3B', ?, 'before ', ' after', ?, ?)
+                """, arguments: [
+                    UUID().uuidString.lowercased(), refId, referenceSyncId,
+                    anchor, anchor, created, created,
+                ])
         }
     }
 

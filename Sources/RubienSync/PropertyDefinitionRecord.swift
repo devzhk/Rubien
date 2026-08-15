@@ -5,12 +5,12 @@ import RubienCore
 
 /// `PropertyDefinition` ↔ `CKRecord` mapping.
 ///
-/// Local seeds (Type, Status, Tags, …) all land here too. Post A-pks, seeded
-/// rows get deterministic UUIDv5s keyed on `defaultFieldKey`, so both devices
-/// agree on recordName without needing special-case handling.
+/// Local seeds (Type, Status, Tags, …) all land here too. Their independently
+/// allocated identities reconcile deterministically by `defaultFieldKey`.
 extension PropertyDefinition {
 
     public enum RecordField {
+        public static let syncId           = SyncRecordIdentity.syncIdField
         public static let name             = "name"
         public static let type             = "type"
         public static let optionsJSON      = "optionsJSON"
@@ -23,6 +23,7 @@ extension PropertyDefinition {
 
     /// Schema-invariant test (Phase E) reads this. Keep in lockstep with `RecordField`.
     public static let allFieldNames: [String] = [
+        RecordField.syncId,
         RecordField.name,
         RecordField.type,
         RecordField.optionsJSON,
@@ -34,6 +35,7 @@ extension PropertyDefinition {
     ]
 
     public func populate(record: CKRecord) {
+        SyncRecordIdentity.write(syncId, to: record)
         record[RecordField.name]            = name
         record[RecordField.type]            = type.rawValue
         record[RecordField.optionsJSON]     = optionsJSON
@@ -69,6 +71,10 @@ extension PropertyDefinition {
             .flatMap(PropertyType.init(rawValue:)) ?? .string
 
         self.init(
+            syncId: SyncRecordIdentity.decodedSyncId(
+                from: record,
+                expectedType: .propertyDefinition
+            ),
             name: (record[RecordField.name] as? String) ?? "",
             type: type,
             options: [],

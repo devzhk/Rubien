@@ -21,8 +21,8 @@ final class LibraryViewModelThrottleTests: XCTestCase {
         let db = try AppDatabase(DatabaseQueue())
         try await db.dbWriter.write { db in
             try db.execute(
-                sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(?, ?, ?, ?)",
-                arguments: [1, "seed", Date(), Date()]
+                sql: "INSERT INTO reference(id, syncId, title, dateAdded, dateModified) VALUES(?, ?, ?, ?, ?)",
+                arguments: [1, UUID().uuidString.lowercased(), "seed", Date(), Date()]
             )
         }
 
@@ -68,8 +68,8 @@ final class LibraryViewModelThrottleTests: XCTestCase {
         let db = try AppDatabase(DatabaseQueue())
         try await db.dbWriter.write { db in
             try db.execute(
-                sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(?, ?, ?, ?)",
-                arguments: [1, "seed", Date(), Date()]
+                sql: "INSERT INTO reference(id, syncId, title, dateAdded, dateModified) VALUES(?, ?, ?, ?, ?)",
+                arguments: [1, UUID().uuidString.lowercased(), "seed", Date(), Date()]
             )
         }
 
@@ -156,8 +156,10 @@ final class LibraryViewModelThrottleTests: XCTestCase {
         // Seed an initial row so the view-model primes the observer with a
         // non-empty fetch.
         try await db.dbWriter.write { db in
-            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(?, ?, ?, ?)",
-                           arguments: [1, "seed", Date(), Date()])
+            try db.execute(
+                sql: "INSERT INTO reference(id, syncId, title, dateAdded, dateModified) VALUES(?, ?, ?, ?, ?)",
+                arguments: [1, UUID().uuidString.lowercased(), "seed", Date(), Date()]
+            )
         }
 
         let vm = LibraryViewModel(db: db)
@@ -190,8 +192,10 @@ final class LibraryViewModelThrottleTests: XCTestCase {
         // Burst: 20 sequential single-row commits.
         for i in 2...21 {
             try await db.dbWriter.write { db in
-                try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(?, ?, ?, ?)",
-                               arguments: [i, "row\(i)", Date(), Date()])
+                try db.execute(
+                    sql: "INSERT INTO reference(id, syncId, title, dateAdded, dateModified) VALUES(?, ?, ?, ?, ?)",
+                    arguments: [i, UUID().uuidString.lowercased(), "row\(i)", Date(), Date()]
+                )
             }
         }
 

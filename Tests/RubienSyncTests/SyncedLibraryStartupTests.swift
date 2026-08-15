@@ -228,6 +228,71 @@ final class SyncedLibraryStartupTests: XCTestCase {
         )
     }
 
+    func testBaselineUsesGlobalAndDerivedIdentities() async throws {
+        var reference = Reference(syncId: "reference-global", title: "Paper")
+        var tag = Tag(syncId: "tag-global", name: "Topic")
+        try db.saveReference(&reference)
+        try db.saveTag(&tag)
+        let referenceId = try XCTUnwrap(reference.id)
+        let tagId = try XCTUnwrap(tag.id)
+        let referenceSyncId = reference.syncId
+        let tagSyncId = tag.syncId
+        try db.setTags(forReference: referenceId, tagIds: [tagId])
+        let context = try db.activityCaptureContext(for: .reading)
+        let localDay = try XCTUnwrap(LocalDay(rawValue: "2026-08-14"))
+        let activity = try db.saveReadingActivityCounter(
+            installationId: "baseline-mac",
+            referenceId: referenceId,
+            localDay: localDay,
+            cumulativeActiveSeconds: 10,
+            lastActiveAt: Date(),
+            context: context
+        )
+        guard case .saved(let savedActivity) = activity else {
+            return XCTFail("expected reading activity to save")
+        }
+        try await db.dbWriter.write { db in
+            try db.execute(sql: """
+                INSERT INTO pdfCache(
+                    referenceId, localFilename, contentHash,
+                    assetVersion, materializedAt, lastOpenedAt
+                ) VALUES (?, 'baseline.pdf', 'hash', 1, ?, ?)
+                """, arguments: [referenceId, Date(), Date()])
+            try db.execute(sql: "DELETE FROM syncState")
+            try db.execute(sql: "DELETE FROM syncSession")
+        }
+        let library = SyncedLibrary(
+            appDatabase: db,
+            stateFileURL: stateFile
+        )
+
+        await library.performInitialBaselineIfNeeded()
+
+        let pivotIdentity = "\(referenceSyncId)/\(tagSyncId)"
+        try await db.dbWriter.read { db in
+            for (type, identity) in [
+                ("reference", referenceSyncId),
+                ("tag", tagSyncId),
+                ("referenceTag", pivotIdentity),
+                ("readingActivity", savedActivity.syncId),
+                ("referencePDF", referenceSyncId),
+            ] {
+                XCTAssertEqual(try Int.fetchOne(db, sql: """
+                    SELECT isDirty FROM syncState
+                    WHERE entityType = ? AND entityId = ?
+                    """, arguments: [type, identity]), 1)
+            }
+            XCTAssertEqual(try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM syncState
+                WHERE (entityType = 'reference' AND entityId = ?)
+                   OR (entityType = 'tag' AND entityId = ?)
+                   OR (entityType = 'referencePDF' AND entityId = ?)
+                """, arguments: [
+                    String(referenceId), String(tagId), String(referenceId),
+                ]), 0)
+        }
+    }
+
     // MARK: - Tombstone compaction
 
     func testCompactStaleTombstonesDropsOldConfirmedRows() async throws {

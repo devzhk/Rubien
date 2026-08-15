@@ -102,6 +102,125 @@ final class PDFMaterializationStagingTests: XCTestCase {
 
     // MARK: - Apply step
 
+    func testFullReplayReusesUnchangedLivePDF() throws {
+        var reference = Reference(syncId: "pdf-parent", title: "Paper")
+        try db.saveReference(&reference)
+        let referenceId = try XCTUnwrap(reference.id)
+        let liveFilename = "\(UUID().uuidString)-live.pdf"
+        let liveURL = AppDatabase.pdfStorageURL.appendingPathComponent(liveFilename)
+        try Data("%PDF-live".utf8).write(to: liveURL)
+
+        try db.dbWriter.write { db in
+            try db.execute(sql: """
+                INSERT INTO pdfCache(
+                    referenceId, localFilename, contentHash,
+                    assetVersion, materializedAt, lastOpenedAt
+                ) VALUES (?, ?, 'same-hash', 4, ?, ?)
+                """, arguments: [referenceId, liveFilename, Date(), Date()])
+        }
+
+        let source = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).pdf")
+        try Data("%PDF-redelivered".utf8).write(to: source)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let payload = ReferencePDFRecord(
+            referenceId: referenceId,
+            referenceSyncId: reference.syncId,
+            assetURL: source,
+            assetVersion: 4,
+            contentHash: "same-hash",
+            originalFilename: "incoming.pdf",
+            dateModified: Date()
+        )
+        let record = ReferencePDFRecord.makeRecord(
+            recordName: "referencePDF:\(reference.syncId)",
+            payload: payload
+        )
+        var prepared = try XCTUnwrap(
+            try SyncEntityType.prepareReferencePDFMaterialization(record: record)
+        )
+
+        let outcome = try db.dbWriter.write { db in
+            let hint = try XCTUnwrap(
+                SyncEntityType.referencePDFReuseHint(for: prepared, db: db)
+            )
+            prepared = prepared.withReuseHint(hint)
+            return try SyncEntityType
+                .applyPreparedReferencePDFPreservingUnchanged(prepared, db: db)
+        }
+
+        XCTAssertTrue(outcome.reusedExistingFile)
+        XCTAssertNil(outcome.displacedFilename)
+        XCTAssertEqual(try db.dbWriter.read { db in
+            try String.fetchOne(
+                db,
+                sql: "SELECT localFilename FROM pdfCache WHERE referenceId = ?",
+                arguments: [referenceId]
+            )
+        }, liveFilename)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: liveURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: prepared.stagedURL.path))
+        try? FileManager.default.removeItem(at: prepared.stagedURL)
+    }
+
+    func testFullReplayHintRaceFallsBackToStagedAsset() throws {
+        var reference = Reference(syncId: "pdf-race-parent", title: "Paper")
+        try db.saveReference(&reference)
+        let referenceId = try XCTUnwrap(reference.id)
+        let priorFilename = "\(UUID().uuidString)-prior.pdf"
+        let priorURL = AppDatabase.pdfStorageURL.appendingPathComponent(priorFilename)
+        try Data("%PDF-prior".utf8).write(to: priorURL)
+        try db.dbWriter.write { db in
+            try db.execute(sql: """
+                INSERT INTO pdfCache(
+                    referenceId, localFilename, contentHash,
+                    assetVersion, materializedAt, lastOpenedAt
+                ) VALUES (?, ?, 'same-hash', 4, ?, ?)
+                """, arguments: [referenceId, priorFilename, Date(), Date()])
+        }
+
+        let source = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).pdf")
+        try Data("%PDF-incoming".utf8).write(to: source)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let record = ReferencePDFRecord.makeRecord(
+            recordName: "referencePDF:\(reference.syncId)",
+            payload: .init(
+                referenceId: referenceId,
+                referenceSyncId: reference.syncId,
+                assetURL: source,
+                assetVersion: 4,
+                contentHash: "same-hash",
+                originalFilename: "incoming.pdf",
+                dateModified: Date()
+            )
+        )
+        var prepared = try XCTUnwrap(
+            try SyncEntityType.prepareReferencePDFMaterialization(record: record)
+        )
+        let outcome = try db.dbWriter.write { db in
+            prepared = prepared.withReuseHint(try XCTUnwrap(
+                SyncEntityType.referencePDFReuseHint(for: prepared, db: db)
+            ))
+            try db.execute(
+                sql: "UPDATE pdfCache SET assetVersion = 5 WHERE referenceId = ?",
+                arguments: [referenceId]
+            )
+            return try SyncEntityType
+                .applyPreparedReferencePDFPreservingUnchanged(prepared, db: db)
+        }
+
+        XCTAssertFalse(outcome.reusedExistingFile)
+        XCTAssertEqual(outcome.displacedFilename, priorFilename)
+        XCTAssertEqual(try db.dbWriter.read { db in
+            try String.fetchOne(
+                db,
+                sql: "SELECT localFilename FROM pdfCache WHERE referenceId = ?",
+                arguments: [referenceId]
+            )
+        }, prepared.stagedFilename)
+    }
+
     func testPrepareUsesRecordNameAsCanonicalEntityIdNotPayloadReferenceId() throws {
         // Even if the wire payload's referenceId differs from the recordName-
         // derived entityId, prepare must extract entityId from recordName
@@ -112,6 +231,7 @@ final class PDFMaterializationStagingTests: XCTestCase {
 
         let payload = ReferencePDFRecord(
             referenceId: 999,  // deliberately wrong
+            referenceSyncId: "81",
             assetURL: src,
             assetVersion: 1,
             contentHash: "h",
@@ -122,10 +242,14 @@ final class PDFMaterializationStagingTests: XCTestCase {
         let prepared = try XCTUnwrap(
             try SyncEntityType.prepareReferencePDFMaterialization(record: record)
         )
-        XCTAssertEqual(prepared.entityId, 81, "prepare must use recordName-derived entityId, not payload.referenceId")
+        XCTAssertEqual(
+            prepared.referenceSyncId,
+            "81",
+            "prepare must use the recordName-derived sync ID, not the payload's local row ID"
+        )
 
         try db.dbWriter.write { db in
-            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(81, 'r', ?, ?)", arguments: [Date(), Date()])
+            try db.execute(sql: "INSERT INTO reference(id, syncId, title, dateAdded, dateModified) VALUES(81, '81', 'r', ?, ?)", arguments: [Date(), Date()])
             try self.store.setApplyingRemote(db)
             _ = try SyncEntityType.applyPreparedReferencePDF(prepared, db: db)
             try self.store.clearApplyingRemote(db)
@@ -166,7 +290,7 @@ final class PDFMaterializationStagingTests: XCTestCase {
         )
 
         let priorFromSecondApply: String? = try db.dbWriter.write { db in
-            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(82, 'r', ?, ?)", arguments: [Date(), Date()])
+            try db.execute(sql: "INSERT INTO reference(id, syncId, title, dateAdded, dateModified) VALUES(82, '82', 'r', ?, ?)", arguments: [Date(), Date()])
             try self.store.setApplyingRemote(db)
             _ = try SyncEntityType.applyPreparedReferencePDF(prep1, db: db)
             let prior = try SyncEntityType.applyPreparedReferencePDF(prep2, db: db)
@@ -187,10 +311,8 @@ final class PDFMaterializationStagingTests: XCTestCase {
     }
 
     func testPrepareReturnsNilForUnparseableRecordName() throws {
-        // A non-Int64 entityId in the recordName must short-circuit prepare
-        // so no file is ever staged on disk. Strictly stronger than the
-        // pre-refactor contract, where apply could be reached with a bad
-        // entityId and would silently no-op (leaving a staged orphan).
+        // A record-name/payload identity mismatch must short-circuit prepare
+        // so no file is ever staged on disk.
         let src = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).pdf")
         try Data("%PDF".utf8).write(to: src)
         defer { try? FileManager.default.removeItem(at: src) }
@@ -201,7 +323,7 @@ final class PDFMaterializationStagingTests: XCTestCase {
         )
         let record = ReferencePDFRecord.makeRecord(recordName: "referencePDF:not-an-int", payload: payload)
         let prepared = try SyncEntityType.prepareReferencePDFMaterialization(record: record)
-        XCTAssertNil(prepared, "unparseable recordName → prepare returns nil, no staged file")
+        XCTAssertNil(prepared, "identity mismatch → prepare returns nil, no staged file")
     }
 
     // MARK: - End-to-end through SyncedLibrary.applyFetchedRecordsInternal
@@ -218,8 +340,8 @@ final class PDFMaterializationStagingTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: srcB) }
 
         try await db.dbWriter.write { db in
-            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(91, 'a', ?, ?)", arguments: [Date(), Date()])
-            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(92, 'b', ?, ?)", arguments: [Date(), Date()])
+            try db.execute(sql: "INSERT INTO reference(id, syncId, title, dateAdded, dateModified) VALUES(91, '91', 'a', ?, ?)", arguments: [Date(), Date()])
+            try db.execute(sql: "INSERT INTO reference(id, syncId, title, dateAdded, dateModified) VALUES(92, '92', 'b', ?, ?)", arguments: [Date(), Date()])
         }
 
         let pA = ReferencePDFRecord(
@@ -245,6 +367,80 @@ final class PDFMaterializationStagingTests: XCTestCase {
         }
     }
 
+    func testNewerQuarantinedPDFReplacesAndUnlinksPriorStagedAsset() async throws {
+        let firstSource = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString)-first.pdf")
+        let secondSource = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString)-second.pdf")
+        try Data("%PDF-first".utf8).write(to: firstSource)
+        try Data("%PDF-second".utf8).write(to: secondSource)
+        defer {
+            try? FileManager.default.removeItem(at: firstSource)
+            try? FileManager.default.removeItem(at: secondSource)
+        }
+
+        let parentSyncId = "missing-pdf-parent"
+        func record(source: URL, version: Int64, hash: String) -> CKRecord {
+            ReferencePDFRecord.makeRecord(
+                recordName: "referencePDF:\(parentSyncId)",
+                payload: .init(
+                    referenceId: 0,
+                    referenceSyncId: parentSyncId,
+                    assetURL: source,
+                    assetVersion: version,
+                    contentHash: hash,
+                    originalFilename: "paper.pdf",
+                    dateModified: Date()
+                )
+            )
+        }
+
+        let library = SyncedLibrary(
+            appDatabase: db,
+            stateFileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("\(UUID().uuidString).engine-state"),
+            pdfAssetSyncEnabledProvider: { true }
+        )
+        let firstApplied = await library.applyFetchedRecordsForTest(
+            modifications: [record(source: firstSource, version: 1, hash: "first")],
+            deletions: []
+        )
+        XCTAssertTrue(firstApplied)
+        let firstStaged = try await db.dbWriter.read {
+            try XCTUnwrap(String.fetchOne(
+                $0,
+                sql: "SELECT stagedFilename FROM syncOrphan WHERE recordName = ?",
+                arguments: ["referencePDF:\(parentSyncId)"]
+            ))
+        }
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: AppDatabase.pdfStorageURL
+                .appendingPathComponent(firstStaged).path
+        ))
+
+        let secondApplied = await library.applyFetchedRecordsForTest(
+            modifications: [record(source: secondSource, version: 2, hash: "second")],
+            deletions: []
+        )
+        XCTAssertTrue(secondApplied)
+        let secondStaged = try await db.dbWriter.read {
+            try XCTUnwrap(String.fetchOne(
+                $0,
+                sql: "SELECT stagedFilename FROM syncOrphan WHERE recordName = ?",
+                arguments: ["referencePDF:\(parentSyncId)"]
+            ))
+        }
+        XCTAssertNotEqual(firstStaged, secondStaged)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: AppDatabase.pdfStorageURL
+                .appendingPathComponent(firstStaged).path
+        ))
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: AppDatabase.pdfStorageURL
+                .appendingPathComponent(secondStaged).path
+        ))
+    }
+
     func testTransientAssetCopyFailureMakesFetchedBatchNonDurable() async throws {
         let missingSource = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(UUID().uuidString)-missing.pdf")
@@ -253,8 +449,8 @@ final class PDFMaterializationStagingTests: XCTestCase {
         try await db.dbWriter.write { db in
             try db.execute(
                 sql: """
-                    INSERT INTO reference(id, title, dateAdded, dateModified)
-                    VALUES(93, 'r', ?, ?)
+                    INSERT INTO reference(id, syncId, title, dateAdded, dateModified)
+                    VALUES(93, '93', 'r', ?, ?)
                     """,
                 arguments: [Date(), Date()]
             )
@@ -301,8 +497,8 @@ final class PDFMaterializationStagingTests: XCTestCase {
         try await db.dbWriter.write { db in
             try db.execute(
                 sql: """
-                    INSERT INTO reference(id, title, dateAdded, dateModified)
-                    VALUES(94, 'r', ?, ?)
+                    INSERT INTO reference(id, syncId, title, dateAdded, dateModified)
+                    VALUES(94, '94', 'r', ?, ?)
                     """,
                 arguments: [Date(), Date()]
             )
@@ -347,8 +543,8 @@ final class PDFMaterializationStagingTests: XCTestCase {
         try await db.dbWriter.write { db in
             try db.execute(
                 sql: """
-                    INSERT INTO reference(id, title, dateAdded, dateModified)
-                    VALUES(96, 'r', ?, ?)
+                    INSERT INTO reference(id, syncId, title, dateAdded, dateModified)
+                    VALUES(96, '96', 'r', ?, ?)
                     """,
                 arguments: [Date(), Date()]
             )
@@ -401,8 +597,8 @@ final class PDFMaterializationStagingTests: XCTestCase {
         try await db.dbWriter.write { db in
             try db.execute(
                 sql: """
-                    INSERT INTO reference(id, title, dateAdded, dateModified)
-                    VALUES(97, 'r', ?, ?)
+                    INSERT INTO reference(id, syncId, title, dateAdded, dateModified)
+                    VALUES(97, '97', 'r', ?, ?)
                     """,
                 arguments: [Date(), Date()]
             )
@@ -469,7 +665,7 @@ final class PDFMaterializationStagingTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: src) }
 
         try await db.dbWriter.write { db in
-            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(95, 'r', ?, ?)", arguments: [Date(), Date()])
+            try db.execute(sql: "INSERT INTO reference(id, syncId, title, dateAdded, dateModified) VALUES(95, '95', 'r', ?, ?)", arguments: [Date(), Date()])
         }
 
         let payload = ReferencePDFRecord(
@@ -532,6 +728,80 @@ final class PDFMaterializationStagingTests: XCTestCase {
         await fulfillment(of: [writerDone], timeout: 2.0)
         try await blocker.value
         _ = await applyTask.value
+    }
+
+    func testLatePDFAfterParentAliasMaterializesUnderWinner() async throws {
+        let source = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString)-aliased.pdf")
+        try Data("%PDF-aliased-parent".utf8).write(to: source)
+        defer { try? FileManager.default.removeItem(at: source) }
+
+        var reference = Reference(syncId: "reference-winner", title: "Winner")
+        try db.saveReference(&reference)
+        let referenceId = try XCTUnwrap(reference.id)
+        let referenceSyncId = reference.syncId
+        let losingIdentity = "reference-loser"
+        try await db.dbWriter.write { db in
+            try SyncIdentityAliasStore.record(
+                entityType: .reference,
+                losingId: losingIdentity,
+                winningId: referenceSyncId,
+                db: db
+            )
+        }
+        let payload = ReferencePDFRecord(
+            referenceId: 0,
+            referenceSyncId: losingIdentity,
+            assetURL: source,
+            assetVersion: 4,
+            contentHash: "aliased-hash",
+            originalFilename: "aliased.pdf",
+            dateModified: Date()
+        )
+        let record = ReferencePDFRecord.makeRecord(
+            recordName: "referencePDF:\(losingIdentity)",
+            payload: payload
+        )
+        let library = SyncedLibrary(
+            appDatabase: db,
+            stateFileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("\(UUID().uuidString).engine-state"),
+            pdfAssetSyncEnabledProvider: { true }
+        )
+
+        let applied = await library.applyFetchedRecordsForTest(
+            modifications: [record],
+            deletions: []
+        )
+        XCTAssertTrue(applied)
+
+        let storedFilename = try await db.dbWriter.read { db in
+            let row = try XCTUnwrap(Row.fetchOne(db, sql: """
+                SELECT pc.localFilename, pc.contentHash, r.syncId
+                FROM pdfCache pc
+                JOIN reference r ON r.id = pc.referenceId
+                WHERE pc.referenceId = ?
+                """, arguments: [referenceId]))
+            XCTAssertEqual(row["syncId"] as String?, referenceSyncId)
+            XCTAssertEqual(row["contentHash"] as String?, "aliased-hash")
+            XCTAssertEqual(try Int.fetchOne(db, sql: """
+                SELECT isDirty FROM syncState
+                WHERE entityType = 'referencePDF' AND entityId = ?
+                """, arguments: [referenceSyncId]), 1)
+            XCTAssertEqual(try Int.fetchOne(db, sql: """
+                SELECT isPushEligible FROM tombstone
+                WHERE entityType = 'referencePDF' AND entityId = ?
+                """, arguments: [losingIdentity]), 1)
+            XCTAssertEqual(try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM syncState
+                WHERE entityType = 'referencePDF' AND entityId = ?
+                """, arguments: [losingIdentity]), 0)
+            return row["localFilename"] as String
+        }
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: AppDatabase.pdfStorageURL
+                .appendingPathComponent(storedFilename).path
+        ))
     }
 }
 #endif

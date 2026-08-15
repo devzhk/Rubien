@@ -5,14 +5,16 @@ import RubienCore
 
 /// `PDFAnnotationRecord` ↔ `CKRecord` mapping.
 ///
-/// `referenceId` is stored as a plain Int64 (post A-pks it becomes a String
-/// UUID) — not a `CKRecord.Reference`, because we manage cascade-on-delete via
-/// SQLite FKs. `rectsData` already lives as JSON in the DB, so we ship it as a
-/// single String field instead of exploding it into a CKRecord list.
+/// The wire relationship is a plain global `referenceSyncId`, not a
+/// `CKRecord.Reference`, because SQLite owns local cascade-on-delete behavior.
+/// The legacy `referenceId` field remains readable for old records. `rectsData`
+/// already lives as JSON, so it ships as one String field.
 extension PDFAnnotationRecord {
 
     public enum RecordField {
+        public static let syncId         = SyncRecordIdentity.syncIdField
         public static let referenceId   = "referenceId"
+        public static let referenceSyncId = "referenceSyncId"
         public static let type          = "type"
         public static let selectedText  = "selectedText"
         public static let noteText      = "noteText"
@@ -29,7 +31,9 @@ extension PDFAnnotationRecord {
 
     /// Schema-invariant test (Phase E) reads this. Keep in lockstep with `RecordField`.
     public static let allFieldNames: [String] = [
+        RecordField.syncId,
         RecordField.referenceId,
+        RecordField.referenceSyncId,
         RecordField.type,
         RecordField.selectedText,
         RecordField.noteText,
@@ -45,7 +49,14 @@ extension PDFAnnotationRecord {
     ]
 
     public func populate(record: CKRecord) {
-        record[RecordField.referenceId]   = referenceId
+        let wireReferenceSyncId = referenceSyncId.isEmpty
+            ? String(referenceId)
+            : referenceSyncId
+        SyncRecordIdentity.write(syncId, to: record)
+        record[RecordField.referenceSyncId] = wireReferenceSyncId
+        record[RecordField.referenceId] = SyncRecordIdentity.legacyInteger(
+            for: wireReferenceSyncId
+        )
         record[RecordField.type]          = type.rawValue
         record[RecordField.selectedText]  = selectedText
         record[RecordField.noteText]      = noteText
@@ -80,7 +91,11 @@ extension PDFAnnotationRecord {
     /// Missing `dateModified` falls back to `Date()` for forward compat with
     /// peers that wrote the record before this field was added.
     public init?(record: CKRecord) {
-        guard let referenceId = record[RecordField.referenceId] as? Int64 else {
+        guard let referenceSyncId = SyncRecordIdentity.decodedForeignKey(
+            from: record,
+            globalField: RecordField.referenceSyncId,
+            legacyField: RecordField.referenceId
+        ) else {
             return nil
         }
 
@@ -89,7 +104,12 @@ extension PDFAnnotationRecord {
             .flatMap(AnnotationType.init(rawValue:)) ?? .highlight
 
         self.init(
-            referenceId: referenceId,
+            syncId: SyncRecordIdentity.decodedSyncId(
+                from: record,
+                expectedType: .pdfAnnotation
+            ),
+            referenceId: (record[RecordField.referenceId] as? Int64) ?? 0,
+            referenceSyncId: referenceSyncId,
             type: type,
             selectedText: record[RecordField.selectedText] as? String,
             noteText: record[RecordField.noteText] as? String,

@@ -20,7 +20,7 @@ final class PDFUploadQueueTests: XCTestCase {
 
     func testEnqueueInsertsRow() async throws {
         try await db.dbWriter.write { db in
-            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(1, 'r', ?, ?)", arguments: [Date(), Date()])
+            try db.execute(sql: "INSERT INTO reference(id, syncId, title, dateAdded, dateModified) VALUES(1, '1', 'r', ?, ?)", arguments: [Date(), Date()])
         }
         let queue = PDFUploadQueue(db: db)
         try await queue.enqueue(referenceId: 1, localFilename: "abc.pdf")
@@ -33,7 +33,7 @@ final class PDFUploadQueueTests: XCTestCase {
 
     func testRemoveByReferenceIdDeletesRow() async throws {
         try await db.dbWriter.write { db in
-            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(1, 'r', ?, ?)", arguments: [Date(), Date()])
+            try db.execute(sql: "INSERT INTO reference(id, syncId, title, dateAdded, dateModified) VALUES(1, '1', 'r', ?, ?)", arguments: [Date(), Date()])
             try db.execute(sql: """
                 INSERT INTO pdfUploadQueue(referenceId, localFilename, queuedAt) VALUES(1, 'x.pdf', ?)
             """, arguments: [Date()])
@@ -50,7 +50,7 @@ final class PDFUploadQueueTests: XCTestCase {
     func testPendingReferenceIdsReturnsAllInQueueOrder() async throws {
         try await db.dbWriter.write { db in
             for i: Int64 in [1, 2, 3] {
-                try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(?, 'r', ?, ?)", arguments: [i, Date(), Date()])
+                try db.execute(sql: "INSERT INTO reference(id, syncId, title, dateAdded, dateModified) VALUES(?, ?, 'r', ?, ?)", arguments: [i, String(i), Date(), Date()])
                 try db.execute(sql: """
                     INSERT INTO pdfUploadQueue(referenceId, localFilename, queuedAt)
                     VALUES(?, ?, ?)
@@ -68,7 +68,7 @@ final class PDFUploadQueueTests: XCTestCase {
         XCTAssertEqual(initialCount, 0)
 
         try await db.dbWriter.write { db in
-            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(1, 'r', ?, ?)", arguments: [Date(), Date()])
+            try db.execute(sql: "INSERT INTO reference(id, syncId, title, dateAdded, dateModified) VALUES(1, '1', 'r', ?, ?)", arguments: [Date(), Date()])
             try db.execute(sql: """
                 INSERT INTO pdfUploadQueue(referenceId, localFilename, queuedAt) VALUES(1, 'x.pdf', ?)
             """, arguments: [Date()])
@@ -82,7 +82,7 @@ final class PDFUploadQueueTests: XCTestCase {
     /// a future refactor to INSERT OR IGNORE would trip this test.
     func testEnqueueReplacesExistingRowAndBumpsQueuedAt() async throws {
         try await db.dbWriter.write { db in
-            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(1, 'r', ?, ?)", arguments: [Date(), Date()])
+            try db.execute(sql: "INSERT INTO reference(id, syncId, title, dateAdded, dateModified) VALUES(1, '1', 'r', ?, ?)", arguments: [Date(), Date()])
         }
         let queue = PDFUploadQueue(db: db)
         try await queue.enqueue(referenceId: 1, localFilename: "first.pdf")

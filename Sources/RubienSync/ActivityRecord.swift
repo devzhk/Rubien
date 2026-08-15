@@ -5,8 +5,10 @@ import RubienCore
 
 extension ReadingActivity {
     public enum RecordField {
+        public static let syncId = SyncRecordIdentity.syncIdField
         public static let installationId = "installationId"
         public static let referenceId = "referenceId"
+        public static let referenceSyncId = "referenceSyncId"
         public static let localDay = "localDay"
         public static let epochRevision = "epochRevision"
         public static let generation = "generation"
@@ -16,8 +18,10 @@ extension ReadingActivity {
     }
 
     public static let allFieldNames = [
+        RecordField.syncId,
         RecordField.installationId,
         RecordField.referenceId,
+        RecordField.referenceSyncId,
         RecordField.localDay,
         RecordField.epochRevision,
         RecordField.generation,
@@ -27,8 +31,18 @@ extension ReadingActivity {
     ]
 
     public func populate(record: CKRecord) {
+        let wireReferenceSyncId = referenceSyncId.isEmpty
+            ? String(referenceId)
+            : referenceSyncId
+        let wireSyncId = syncId.isEmpty
+            ? "\(generation)/\(installationId)/\(wireReferenceSyncId)/\(localDay.rawValue)"
+            : syncId
+        SyncRecordIdentity.write(wireSyncId, to: record)
         record[RecordField.installationId] = installationId
-        record[RecordField.referenceId] = referenceId
+        record[RecordField.referenceSyncId] = wireReferenceSyncId
+        record[RecordField.referenceId] = SyncRecordIdentity.legacyInteger(
+            for: wireReferenceSyncId
+        )
         record[RecordField.localDay] = localDay.rawValue
         record[RecordField.epochRevision] = Int64(epochRevision)
         record[RecordField.generation] = generation
@@ -47,7 +61,11 @@ extension ReadingActivity {
     public init?(record: CKRecord) {
         guard let installationId = record[RecordField.installationId] as? String,
               !installationId.contains("/"),
-              let referenceId = record[RecordField.referenceId] as? Int64,
+              let referenceSyncId = SyncRecordIdentity.decodedForeignKey(
+                from: record,
+                globalField: RecordField.referenceSyncId,
+                legacyField: RecordField.referenceId
+              ),
               let rawDay = record[RecordField.localDay] as? String,
               let localDay = LocalDay(rawValue: rawDay),
               let epochRevision = record[RecordField.epochRevision] as? Int64,
@@ -60,8 +78,13 @@ extension ReadingActivity {
         else { return nil }
 
         self.init(
+            syncId: SyncRecordIdentity.decodedSyncId(
+                from: record,
+                expectedType: .readingActivity
+            ),
             installationId: installationId,
-            referenceId: referenceId,
+            referenceId: (record[RecordField.referenceId] as? Int64) ?? 0,
+            referenceSyncId: referenceSyncId,
             localDay: localDay,
             epochRevision: Int(epochRevision),
             generation: generation,
@@ -74,6 +97,7 @@ extension ReadingActivity {
 
 extension AssistantActivity {
     public enum RecordField {
+        public static let syncId = SyncRecordIdentity.syncIdField
         public static let provider = "provider"
         public static let epochRevision = "epochRevision"
         public static let generation = "generation"
@@ -83,6 +107,7 @@ extension AssistantActivity {
     }
 
     public static let allFieldNames = [
+        RecordField.syncId,
         RecordField.provider,
         RecordField.epochRevision,
         RecordField.generation,
@@ -92,6 +117,7 @@ extension AssistantActivity {
     ]
 
     public func populate(record: CKRecord) {
+        SyncRecordIdentity.write(id, to: record)
         record[RecordField.provider] = provider
         record[RecordField.epochRevision] = Int64(epochRevision)
         record[RecordField.generation] = generation
@@ -132,6 +158,7 @@ extension AssistantActivity {
 
 extension ActivityEpoch {
     public enum RecordField {
+        public static let syncId = SyncRecordIdentity.syncIdField
         public static let kind = "kind"
         public static let revision = "revision"
         public static let generation = "generation"
@@ -140,6 +167,7 @@ extension ActivityEpoch {
     }
 
     public static let allFieldNames = [
+        RecordField.syncId,
         RecordField.kind,
         RecordField.revision,
         RecordField.generation,
@@ -148,6 +176,7 @@ extension ActivityEpoch {
     ]
 
     public func populate(record: CKRecord) {
+        SyncRecordIdentity.write(kind.rawValue, to: record)
         record[RecordField.kind] = kind.rawValue
         record[RecordField.revision] = Int64(revision)
         record[RecordField.generation] = generation

@@ -81,6 +81,21 @@ final class SyncCoordinatorTests: XCTestCase {
         )
         XCTAssertFalse(coordinator.userEnabled, "default must be false")
         XCTAssertEqual(coordinator.status, .disabled)
+        XCTAssertTrue(coordinator.identityDiagnostics?.writerUpgradeRequired == true)
+    }
+
+    func testAcknowledgingWriterUpgradeRefreshesDiagnosticsWhileStopped() async throws {
+        let coordinator = SyncCoordinator(appDatabase: db, defaults: defaults)
+        XCTAssertTrue(coordinator.identityDiagnostics?.writerUpgradeRequired == true)
+
+        try await coordinator.acknowledgeWriterUpgrade()
+
+        XCTAssertFalse(coordinator.identityDiagnostics?.writerUpgradeRequired ?? true)
+        XCTAssertEqual(
+            coordinator.identityDiagnostics?.writerUpgradeAcknowledgedSchemaVersion,
+            AppDatabase.currentSchemaVersion
+        )
+        XCTAssertNotNil(coordinator.identityDiagnostics?.writerUpgradeAcknowledgedAt)
     }
 
     func testInitialStateReadsPersistedEnabled() {

@@ -25,6 +25,7 @@ final class ReferenceExportTests: XCTestCase {
             JSONSerialization.jsonObject(with: artifact.data) as? [[String: Any]]
         )
         XCTAssertEqual(rows.compactMap { ($0["id"] as? NSNumber)?.int64Value }, [third.id!, first.id!])
+        XCTAssertEqual(rows.compactMap { $0["syncId"] as? String }, [third.syncId, first.syncId])
 
         XCTAssertThrowsError(try service.export(ReferenceExportRequest(
             format: .json,

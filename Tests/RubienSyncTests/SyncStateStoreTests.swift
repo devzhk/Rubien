@@ -29,7 +29,7 @@ final class SyncStateStoreTests: XCTestCase {
         try db.dbWriter.write { db in
             try self.store.setApplyingRemote(db)
             try db.execute(sql: """
-                INSERT INTO tag(name, color) VALUES('x', '#000000')
+                INSERT INTO tag(syncId, name, color) VALUES('1001', 'x', '#000000')
                 """)
             try self.store.clearApplyingRemote(db)
 
@@ -51,7 +51,7 @@ final class SyncStateStoreTests: XCTestCase {
             try self.store.clearApplyingRemote(db)
 
             try db.execute(sql: """
-                INSERT INTO tag(name, color) VALUES('y', '#000000')
+                INSERT INTO tag(syncId, name, color) VALUES('1002', 'y', '#000000')
                 """)
             let dirty = try Int.fetchOne(
                 db,
@@ -73,7 +73,7 @@ final class SyncStateStoreTests: XCTestCase {
         )
 
         try db.dbWriter.write { db in
-            try db.execute(sql: "INSERT INTO tag(id, name, color) VALUES(1, 't', '#000')")
+            try db.execute(sql: "INSERT INTO tag(id, syncId, name, color) VALUES(1, '1', 't', '#000')")
 
             // Simulate a clean push cycle: batch builder stamps pushInFlight,
             // then the ack arrives with no intervening local edits.
@@ -100,7 +100,7 @@ final class SyncStateStoreTests: XCTestCase {
         )
 
         try db.dbWriter.write { db in
-            try db.execute(sql: "INSERT INTO tag(id, name, color) VALUES(1, 'a', '#000')")
+            try db.execute(sql: "INSERT INTO tag(id, syncId, name, color) VALUES(1, '1', 'a', '#000')")
             try self.store.markPushInFlight(db, entityType: .tag, entityId: "1")
 
             // Racing local edit: the UPDATE trigger clears pushInFlight
@@ -130,7 +130,7 @@ final class SyncStateStoreTests: XCTestCase {
         try db.dbWriter.write { db in
             // Fresh local row → trigger sets isDirty=1; no systemFields
             // cached yet (we've never synced before).
-            try db.execute(sql: "INSERT INTO tag(id, name, color) VALUES(1, 't', '#000')")
+            try db.execute(sql: "INSERT INTO tag(id, syncId, name, color) VALUES(1, '1', 't', '#000')")
 
             let dirtyBefore = try Int.fetchOne(
                 db,
@@ -196,6 +196,56 @@ final class SyncStateStoreTests: XCTestCase {
             try self.store.removeTombstone(db, entityType: .reference, entityId: "42")
             let after = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM tombstone") ?? -1
             XCTAssertEqual(after, 0)
+        }
+    }
+
+    func testIneligibleTombstoneStaysDurableButIsNotReturnedForPush() throws {
+        try db.dbWriter.write { db in
+            try self.store.upsertTombstone(
+                db,
+                entityType: .reference,
+                entityId: "retired-local-only",
+                isPushEligible: false
+            )
+
+            XCTAssertTrue(try self.store.tombstones(db).isEmpty)
+            XCTAssertFalse(
+                try self.store.tombstoneIsPushEligible(
+                    db,
+                    entityType: .reference,
+                    entityId: "retired-local-only"
+                )
+            )
+            XCTAssertEqual(
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM tombstone"),
+                1
+            )
+        }
+    }
+
+    func testWriterUpgradeAcknowledgementDeletesOnlyItsGate() throws {
+        try db.dbWriter.write { db in
+            XCTAssertTrue(try self.store.writerUpgradeRequired(db))
+            try self.store.acknowledgeWriterUpgrade(db)
+            XCTAssertFalse(try self.store.writerUpgradeRequired(db))
+            XCTAssertEqual(
+                try String.fetchOne(
+                    db,
+                    sql: "SELECT value FROM syncSession WHERE key = 'fullHistoryReplayPending'"
+                ),
+                "1"
+            )
+            XCTAssertNotNil(try String.fetchOne(
+                db,
+                sql: "SELECT value FROM syncSession WHERE key = 'writerUpgradeAcknowledgedAt'"
+            ))
+            XCTAssertEqual(
+                try String.fetchOne(
+                    db,
+                    sql: "SELECT value FROM syncSession WHERE key = 'writerUpgradeAcknowledgedSchemaVersion'"
+                ),
+                AppDatabase.currentSchemaVersion
+            )
         }
     }
 
@@ -323,8 +373,8 @@ final class SyncStateStoreTests: XCTestCase {
             // behavior for the two tag inserts that follow.
             try db.execute(sql: "DELETE FROM syncState")
 
-            try db.execute(sql: "INSERT INTO tag(id, name, color) VALUES(1, 'a', '#fff')")
-            try db.execute(sql: "INSERT INTO tag(id, name, color) VALUES(2, 'b', '#fff')")
+            try db.execute(sql: "INSERT INTO tag(id, syncId, name, color) VALUES(1, '1', 'a', '#fff')")
+            try db.execute(sql: "INSERT INTO tag(id, syncId, name, color) VALUES(2, '2', 'b', '#fff')")
 
             let dirty = try self.store.dirtyEntities(db)
             let ids = dirty.map { $0.1 }.sorted()

@@ -11,10 +11,9 @@ private let log = Logger(subsystem: "Rubien", category: "SyncedLibrary")
 /// `SyncedDatabase` sample: one engine per process, DB is source of truth,
 /// engine state is a derived cache in a sidecar file.
 ///
-/// Scope of the current commit (B4): engine wiring, startup reconciliation,
-/// push/pull dispatch via `SyncEntityDispatch`. Not yet wired: PDF
-/// `CKAsset` handling (B8), `.serverRecordChanged` merge policy (B7 scalars),
-/// account-change UX (sign-out preservation).
+/// Owns engine startup/reconciliation, push/pull dispatch, PDF asset
+/// materialization, and account-change handling around the SQLite source of
+/// truth.
 @available(macOS 14.0, iOS 17.0, *)
 public actor SyncedLibrary: CKSyncEngineDelegate {
 
@@ -344,7 +343,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         // `drainPDFUploadQueueIntoSyncState` directly so this path stays
         // out of unentitled test runs.
         let pending: [CKSyncEngine.PendingRecordZoneChange] = drained.map { id in
-            .saveRecord(recordID(for: String(id), type: .referencePDF))
+            .saveRecord(recordID(for: id, type: .referencePDF))
         }
         engine.state.add(pendingRecordZoneChanges: pending)
     }
@@ -355,7 +354,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     /// an unentitled XCTest process where touching CKSyncEngine raises
     /// `CKException`) can exercise the DB effects without forcing engine
     /// construction.
-    func drainPDFUploadQueueIntoSyncState() async -> [Int64] {
+    func drainPDFUploadQueueIntoSyncState() async -> [String] {
         guard pdfAssetSyncEnabledProvider() else { return [] }
 
         let pendingIds: [Int64]
@@ -383,26 +382,35 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         // Conversely if remove succeeded but mark-dirty failed, we'd lose
         // the upload entirely (no syncState entry, no queue row). One
         // transaction sidesteps both.
+        let drainedSyncIds: [String]
         do {
-            try await appDatabase.dbWriter.write { db in
+            drainedSyncIds = try await appDatabase.dbWriter.write { db in
+                var result: [String] = []
                 for id in pendingIds {
+                    guard let syncId = try String.fetchOne(
+                        db,
+                        sql: "SELECT syncId FROM reference WHERE id = ?",
+                        arguments: [id]
+                    ) else { continue }
                     try db.execute(sql: """
                         INSERT INTO syncState(entityType, entityId, isDirty)
                             VALUES(?, ?, 1)
                             ON CONFLICT(entityType, entityId)
                                 DO UPDATE SET isDirty = 1
-                    """, arguments: [SyncEntityType.referencePDF.rawValue, String(id)])
+                    """, arguments: [SyncEntityType.referencePDF.rawValue, syncId])
                     try db.execute(
                         sql: "DELETE FROM pdfUploadQueue WHERE referenceId = ?",
                         arguments: [id]
                     )
+                    result.append(syncId)
                 }
+                return result
             }
         } catch {
             log.error("drainPDFUploadQueue: mark-dirty/clear write failed: \(error.localizedDescription, privacy: .public)")
             return []
         }
-        return pendingIds
+        return drainedSyncIds
     }
 
     // MARK: - Pending PDF content-hash resolver
@@ -634,17 +642,25 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         do {
             let dirty: [(SyncEntityType, String)]
             let deleted: [(SyncEntityType, String)]
-            (dirty, deleted) = try await appDatabase.dbWriter.read { db in
+            let writerUpgradeRequired: Bool
+            (dirty, deleted, writerUpgradeRequired) = try await appDatabase.dbWriter.read { db in
                 (try self.stateStore.dirtyEntities(db),
-                 try self.stateStore.tombstones(db))
+                 try self.stateStore.tombstones(db),
+                 try self.stateStore.writerUpgradeRequired(db))
             }
 
             var pending: [CKSyncEngine.PendingRecordZoneChange] = []
             pending.reserveCapacity(dirty.count + deleted.count)
             for (type, id) in dirty {
+                guard !writerUpgradeRequired || !type.isUnsafeForV12(entityId: id) else {
+                    continue
+                }
                 pending.append(.saveRecord(recordID(for: id, type: type)))
             }
             for (type, id) in deleted {
+                guard !writerUpgradeRequired || !type.isUnsafeForV12(entityId: id) else {
+                    continue
+                }
                 pending.append(.deleteRecord(recordID(for: id, type: type)))
             }
 
@@ -656,6 +672,22 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             }
         } catch {
             log.error("ingestPendingChanges failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Release the one-time mixed-version writer gate after the user has
+    /// confirmed that every older writable Mac is upgraded or offline.
+    /// Pending work remains durable in SQLite until this deletion commits.
+    public func acknowledgeWriterUpgrade() async throws {
+        try await appDatabase.dbWriter.write { db in
+            try self.stateStore.acknowledgeWriterUpgrade(db)
+        }
+        await ingestPendingChanges()
+    }
+
+    public func isWriterUpgradeRequired() async throws -> Bool {
+        try await appDatabase.dbWriter.read { db in
+            try self.stateStore.writerUpgradeRequired(db)
         }
     }
 
@@ -744,53 +776,28 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                     """)
                 guard state == nil else { return }
 
-                // Marking the session row as done first means a crash
-                // between here and the INSERT loop leaves us with no
-                // baseline run on the next launch — acceptable because the
-                // user can re-enable sync or run `rubien-cli sync reset`.
-                // The alternative (marking after all INSERTs) would risk
-                // an infinite re-baseline loop if the loop itself crashed
-                // mid-way.
-                try db.execute(sql: """
-                    INSERT INTO syncSession(key, value) VALUES('baselineState', 'complete')
-                    """)
-
                 var totalMarked = 0
                 for type in SyncEntityType.allCases {
-                    // Each entity type baselines from a source SQLite table
-                    // and an id expression. For most entities the table name
-                    // matches the rawValue and id is the surrogate PK;
-                    // referenceTag uses a composite key, and referencePDF
-                    // (a virtual sibling-record entity) reads from the
-                    // local-only `pdfCache` table keyed by referenceId.
+                    // Most v13 entities baseline directly from their stored
+                    // global syncId. Natural-key entities keep their existing
+                    // string key, while the synthesized ReferencePDF joins
+                    // through its owning Reference to obtain the same global
+                    // identity used by CloudKit dispatch.
                     let sourceTable: String
                     let idExpression: String
                     switch type {
-                    case .referenceTag:
+                    case .assistantActivity:
                         sourceTable = type.rawValue
-                        idExpression = "referenceId || '\(SyncConstants.pivotSeparator)' || tagId"
-                    case .readingActivity:
-                        sourceTable = type.rawValue
-                        idExpression = "generation || '/' || installationId || '/' || referenceId || '/' || localDay"
+                        idExpression = "id"
                     case .activityEpoch:
                         sourceTable = type.rawValue
                         idExpression = "kind"
                     case .referencePDF:
-                        // No `referencePDF` SQLite table exists — the wire
-                        // format is synthesized from `pdfCache` rows.
-                        // entityId for syncState matches the dispatch path
-                        // (Int64(referenceId) stringified).
-                        //
-                        // Future synthesized/sibling-record entities (records
-                        // that don't 1:1 with a SQLite table) should add their
-                        // own case here following this shape: pick the local
-                        // source table, pick the column whose value the
-                        // dispatch path expects to parse from entityId.
-                        sourceTable = "pdfCache"
-                        idExpression = "referenceId"
+                        sourceTable = "pdfCache pc JOIN reference r ON r.id = pc.referenceId"
+                        idExpression = "r.syncId"
                     default:
                         sourceTable = type.rawValue
-                        idExpression = "id"
+                        idExpression = "syncId"
                     }
                     // SQLite grammar quirk: the INSERT-SELECT form needs
                     // an explicit `WHERE true` before `ON CONFLICT`,
@@ -803,6 +810,13 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                         """)
                     totalMarked += db.changesCount
                 }
+                // This write shares the baseline transaction. A failed or
+                // interrupted INSERT loop rolls back both the dirty markers
+                // and this completion gate, so startup retries safely.
+                try db.execute(sql: """
+                    INSERT INTO syncSession(key, value)
+                    VALUES('baselineState', 'complete')
+                    """)
                 log.info("initial baseline marked \(totalMarked, privacy: .public) rows dirty")
             }
         } catch {
@@ -1020,9 +1034,38 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     ) async -> CKSyncEngine.RecordZoneChangeBatch? {
         guard syncEngine === _engine else { return nil }
 
-        let pending = syncEngine.state
+        let scopedPending = syncEngine.state
             .pendingRecordZoneChanges
             .filter { context.options.scope.contains($0) }
+        let pending: [CKSyncEngine.PendingRecordZoneChange]
+        do {
+            pending = try await appDatabase.dbWriter.read { db in
+                let writerUpgradeRequired = try self.stateStore.writerUpgradeRequired(db)
+                return try scopedPending.filter { change in
+                    guard let identity = Self.pendingIdentity(for: change) else {
+                        return false
+                    }
+                    if writerUpgradeRequired,
+                       identity.type.isUnsafeForV12(entityId: identity.entityId)
+                    {
+                        return false
+                    }
+                    if identity.isDelete {
+                        return try self.stateStore.tombstoneIsPushEligible(
+                            db,
+                            entityType: identity.type,
+                            entityId: identity.entityId
+                        )
+                    }
+                    return true
+                }
+            }
+        } catch {
+            log.error(
+                "failed to filter pending sync changes: \(error.localizedDescription, privacy: .public)"
+            )
+            return nil
+        }
         guard !pending.isEmpty else { return nil }
 
         return await CKSyncEngine.RecordZoneChangeBatch(
@@ -1041,6 +1084,11 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             do {
                 return try await appDatabase.dbWriter.write { db in
                     guard let (entityType, entityId) = SyncEntityType.parseRecordName(recordID.recordName) else {
+                        return nil
+                    }
+                    if try stateStore.writerUpgradeRequired(db),
+                       entityType.isUnsafeForV12(entityId: entityId)
+                    {
                         return nil
                     }
                     guard try entityType.activityFactIsPushEligible(
@@ -1069,6 +1117,27 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                 return nil
             }
         }
+    }
+
+    private static func pendingIdentity(
+        for change: CKSyncEngine.PendingRecordZoneChange
+    ) -> (type: SyncEntityType, entityId: String, isDelete: Bool)? {
+        let recordID: CKRecord.ID
+        let isDelete: Bool
+        switch change {
+        case .saveRecord(let id):
+            recordID = id
+            isDelete = false
+        case .deleteRecord(let id):
+            recordID = id
+            isDelete = true
+        @unknown default:
+            return nil
+        }
+        guard let (type, entityId) = SyncEntityType.parseRecordName(
+            recordID.recordName
+        ) else { return nil }
+        return (type, entityId, isDelete)
     }
 
     // MARK: - Event handlers
@@ -1224,14 +1293,30 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         }
 
         // Phase 1 — pre-stage referencePDF assets outside any DB transaction.
-        // `prepare` validates recordName and Int64 entityId internally, so a
-        // malformed name simply returns nil with no staged file. Frozen into
+        // `prepare` validates recordName and global identity internally, so a
+        // malformed record simply returns nil with no staged file. Frozen into
         // a `let` for safe capture by the @Sendable write closure below.
         var preparedBuilder: [CKRecord.ID: SyncEntityType.PreparedReferencePDFMaterialization] = [:]
         var pdfStagingFailed = false
         for record in sortedMods where record.recordType == SyncConstants.RecordType.referencePDF {
             do {
-                if let prepared = try SyncEntityType.prepareReferencePDFMaterialization(record: record) {
+                if var prepared = try SyncEntityType
+                    .prepareReferencePDFMaterialization(record: record)
+                {
+                    let preparedSnapshot = prepared
+                    let hint = try await appDatabase.dbWriter.read { db in
+                        try SyncEntityType.referencePDFReuseHint(
+                            for: preparedSnapshot,
+                            db: db
+                        )
+                    }
+                    if let hint {
+                        let liveURL = AppDatabase.pdfStorageURL
+                            .appendingPathComponent(hint.localFilename)
+                        if FileManager.default.fileExists(atPath: liveURL.path) {
+                            prepared = prepared.withReuseHint(hint)
+                        }
+                    }
                     preparedBuilder[record.recordID] = prepared
                 }
             } catch {
@@ -1333,8 +1418,8 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         //
         //   a) A modification committed → unlink prior files it displaced.
         //   b) Some prepared rows were skipped or their modification
-        //      transaction rolled back (prepared but no apply call — defensive,
-        //      should not occur given the pre-stage validates Int64(entityId)).
+        //      transaction rolled back (prepared but no apply call — for
+        //      example, an unresolved global parent moved it to syncOrphan).
         //      → unlink the staged file we never used.
         //
         // A later deletion-phase failure does not change which PDF
@@ -1378,8 +1463,9 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         db: Database
     ) throws -> BatchOutcome {
         var local = BatchOutcome.empty
-        var appliedReferenceIDs = Set<Int64>()
+        var appliedReferenceSyncIDs = Set<String>()
         var changedEpochKinds = Set<ActivityKind>()
+        var globalDependenciesChanged = false
         try stateStore.setApplyingRemote(db)
 
         for record in sortedMods {
@@ -1392,6 +1478,31 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                 continue
             }
 
+            let dependencyStatus = try type.remoteDependencyStatus(
+                for: record,
+                entityId: entityId,
+                db: db
+            )
+            if dependencyStatus != .ready {
+                let stagedFilename = preparedPDFs[record.recordID]?.stagedFilename
+                if let displaced = try SyncEntityType.quarantineRemoteRecord(
+                    record,
+                    stagedFilename: stagedFilename,
+                    db: db
+                ) {
+                    local.displacedFilenames.append(displaced)
+                }
+                if stagedFilename != nil {
+                    // Ownership of the staged file moved to syncOrphan; keep
+                    // the post-transaction cleanup from unlinking it.
+                    local.appliedPDFRecordIDs.insert(record.recordID)
+                }
+                // Quarantine owns the server version until dependencies resolve.
+                // Do not acknowledge it yet: `markPulled` clears `isDirty`, which
+                // would discard a pending local edit for a row we did not apply.
+                continue
+            }
+
             if type == .referencePDF {
                 guard let prepared = preparedPDFs[record.recordID] else {
                     // Prepare returned nil (malformed name or no asset).
@@ -1400,16 +1511,41 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                     // write a pdfCache row pointing at a missing file.
                     continue
                 }
-                if let prior = try SyncEntityType.applyPreparedReferencePDF(prepared, db: db) {
+                guard let canonicalPrepared = try SyncEntityType
+                    .canonicalizedReferencePDFMaterialization(
+                        prepared,
+                        db: db
+                    ) else { continue }
+                let pdfOutcome = try SyncEntityType
+                    .applyPreparedReferencePDFPreservingUnchanged(
+                        canonicalPrepared,
+                        db: db
+                    )
+                if let prior = pdfOutcome.displacedFilename {
                     local.displacedFilenames.append(prior)
                 }
+                if pdfOutcome.reusedExistingFile {
+                    local.displacedFilenames.append(prepared.stagedFilename)
+                }
                 local.appliedPDFRecordIDs.insert(record.recordID)
-                try stateStore.markPulled(
+                try SyncEntityType.retireAliasedReferencePDFIdentity(
+                    observedEntityId: entityId,
+                    canonicalEntityId: canonicalPrepared.referenceSyncId,
+                    stateStore: stateStore,
+                    db: db
+                )
+                if try !stateStore.hasPushEligibleTombstone(
                     db,
                     entityType: type,
-                    entityId: entityId,
-                    record: record
-                )
+                    entityId: entityId
+                ) {
+                    try stateStore.markPulled(
+                        db,
+                        entityType: type,
+                        entityId: entityId,
+                        record: record
+                    )
+                }
                 continue
             }
 
@@ -1419,12 +1555,19 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                 db: db,
                 stateStore: stateStore
             )
-            if type == .reference, applied, let referenceID = Int64(entityId) {
-                appliedReferenceIDs.insert(referenceID)
+            if applied, type.suppliesGlobalDependencies {
+                globalDependenciesChanged = true
+            }
+            if type == .reference, applied {
+                appliedReferenceSyncIDs.insert(entityId)
             } else if type == .activityEpoch, let kind = ActivityKind(rawValue: entityId) {
                 changedEpochKinds.insert(kind)
             }
-            if applied {
+            if applied, try !stateStore.hasPushEligibleTombstone(
+                db,
+                entityType: type,
+                entityId: entityId
+            ) {
                 try stateStore.markPulled(
                     db,
                     entityType: type,
@@ -1434,24 +1577,35 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             }
         }
 
+        if globalDependenciesChanged {
+            local.displacedFilenames += try SyncEntityType
+                .repairResolvableLegacyForeignKeyOrphans(db: db)
+            local.displacedFilenames += try SyncEntityType
+                .replayQuarantinedRemoteRecords(
+                    stateStore: stateStore,
+                    db: db
+                )
+        }
+
         try SyncEntityType.replayQuarantinedActivity(
-            referenceIds: appliedReferenceIDs,
+            referenceSyncIds: appliedReferenceSyncIDs,
             epochKinds: changedEpochKinds,
             db: db
         )
 
         for deletion in deletions {
             guard let type = SyncEntityType.forRecordType(deletion.recordType) else { continue }
-            guard let entityId = SyncEntityType.parseRecordName(deletion.recordID.recordName)?.1 else {
+            guard let parsed = SyncEntityType.parseRecordName(
+                deletion.recordID.recordName
+            ), parsed.0 == type else {
                 log.error("skipping malformed delete recordName \(deletion.recordID.recordName, privacy: .public)")
                 continue
             }
-            if let filename = try type.applyRemoteDelete(
+            let entityId = parsed.1
+            local.deletedFilenames += try type.applyRemoteDelete(
                 entityId: entityId,
                 db: db
-            ) {
-                local.deletedFilenames.append(filename)
-            }
+            )
             try stateStore.removeState(db, entityType: type, entityId: entityId)
             try stateStore.upsertTombstone(
                 db,
@@ -1724,19 +1878,55 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             preparedPDF = nil
         }
 
-        // Closure returns `displacedFilename` to avoid mutating captures
+        // Closure returns displaced filenames to avoid mutating captures
         // across the @Sendable boundary. `commitFailed` is only set in the
         // catch block, outside the closure, so it can stay a `var`.
         var commitFailed = false
-        var displacedFilename: String? = nil
+        var displacedFilenames: [String] = []
 
         do {
-            displacedFilename = try await appDatabase.dbWriter.write { [stateStore] db -> String? in
+            displacedFilenames = try await appDatabase.dbWriter.write { [stateStore] db -> [String] in
                 try stateStore.setApplyingRemote(db)
-                let displaced: String?
+                var displacedFilenames: [String] = []
+                let dependencyStatus = try type.remoteDependencyStatus(
+                    for: serverRecord,
+                    entityId: entityId,
+                    db: db
+                )
+                if dependencyStatus != .ready {
+                    let displaced = try SyncEntityType.quarantineRemoteRecord(
+                        serverRecord,
+                        stagedFilename: preparedPDF?.stagedFilename,
+                        db: db
+                    )
+                    try stateStore.clearApplyingRemote(db)
+                    if let displaced {
+                        displacedFilenames.append(displaced)
+                    }
+                    return displacedFilenames
+                }
                 let applied: Bool
                 if type == .referencePDF, let prepared = preparedPDF {
-                    displaced = try SyncEntityType.applyPreparedReferencePDF(prepared, db: db)
+                    guard let canonicalPrepared = try SyncEntityType
+                        .canonicalizedReferencePDFMaterialization(
+                            prepared,
+                            db: db
+                        ) else {
+                        try stateStore.clearApplyingRemote(db)
+                        return []
+                    }
+                    if let displaced = try SyncEntityType.applyPreparedReferencePDF(
+                        canonicalPrepared,
+                        db: db
+                    ) {
+                        displacedFilenames.append(displaced)
+                    }
+                    try SyncEntityType.retireAliasedReferencePDFIdentity(
+                        observedEntityId: entityId,
+                        canonicalEntityId: canonicalPrepared.referenceSyncId,
+                        stateStore: stateStore,
+                        db: db
+                    )
                     applied = true
                 } else {
                     applied = try type.applyRemoteRecord(
@@ -1745,9 +1935,12 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                         db: db,
                         stateStore: stateStore
                     )
-                    displaced = nil
                 }
-                if applied {
+                if applied, try !stateStore.hasPushEligibleTombstone(
+                    db,
+                    entityType: type,
+                    entityId: entityId
+                ) {
                     try stateStore.markPulled(
                         db,
                         entityType: type,
@@ -1761,8 +1954,17 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                         db: db
                     )
                 }
+                if applied, type.suppliesGlobalDependencies {
+                    displacedFilenames += try SyncEntityType
+                        .repairResolvableLegacyForeignKeyOrphans(db: db)
+                    displacedFilenames += try SyncEntityType
+                        .replayQuarantinedRemoteRecords(
+                            stateStore: stateStore,
+                            db: db
+                        )
+                }
                 try stateStore.clearApplyingRemote(db)
-                return displaced
+                return displacedFilenames
             }
         } catch {
             log.error("serverRecordChanged merge failed: \(error.localizedDescription, privacy: .public)")
@@ -1770,17 +1972,18 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         }
 
         // Post-commit file I/O (off the writer queue). On commit success
-        // the staged file is now owned by `pdfCache` (the apply call
-        // succeeded because pre-stage validated the entityId), so we
-        // only need to unlink the displaced prior file (if any). On commit
-        // failure we unlink the staged file we never promoted.
+        // the staged file is now owned by either `pdfCache` or `syncOrphan`,
+        // so we only unlink a displaced prior file. On commit failure we
+        // unlink the staged file we never promoted.
         if commitFailed {
             if let staged = preparedPDF?.stagedURL {
                 try? FileManager.default.removeItem(at: staged)
             }
-        } else if let displaced = displacedFilename {
-            let url = AppDatabase.pdfStorageURL.appendingPathComponent(displaced)
-            try? FileManager.default.removeItem(at: url)
+        } else {
+            for displaced in displacedFilenames {
+                let url = AppDatabase.pdfStorageURL.appendingPathComponent(displaced)
+                try? FileManager.default.removeItem(at: url)
+            }
         }
     }
 

@@ -11,9 +11,13 @@ final class ActivityRecordTests: XCTestCase {
     }
 
     func testReadingActivityRoundTripsEveryField() throws {
+        let referenceSyncId = "42"
+        let syncId = "generation-a/mac-a/\(referenceSyncId)/2026-07-15"
         let activity = ReadingActivity(
+            syncId: syncId,
             installationId: "mac-a",
             referenceId: 42,
+            referenceSyncId: referenceSyncId,
             localDay: try day(),
             epochRevision: 3,
             generation: "generation-a",
@@ -69,9 +73,12 @@ final class ActivityRecordTests: XCTestCase {
         try database.saveReference(&reference)
         let referenceId = try XCTUnwrap(reference.id)
         let generation = "remote-generation"
+        let syncId = "\(generation)/remote-mac/\(reference.syncId)/2026-07-15"
         let activity = ReadingActivity(
+            syncId: syncId,
             installationId: "remote-mac",
             referenceId: referenceId,
+            referenceSyncId: reference.syncId,
             localDay: try day(),
             epochRevision: 1,
             generation: generation,
@@ -119,9 +126,9 @@ final class ActivityRecordTests: XCTestCase {
         }
     }
 
-    func testV11RegisteredMigrationBackfillsHistoricalQuarantineAndReplaysIt() throws {
+    func testV13MigrationBackfillsHistoricalQuarantineAndReplaysIt() throws {
         let queue = try DatabaseQueue()
-        _ = try AppDatabase(queue)
+        try AppDatabase.makeV12DatabaseForTesting(on: queue)
 
         let referenceId: Int64 = 42
         let activity = ReadingActivity(
@@ -141,47 +148,43 @@ final class ActivityRecordTests: XCTestCase {
 
         try queue.write { db in
             try db.execute(
-                sql: "DROP INDEX activityQuarantine_entityType_referenceId_receivedAt"
+                sql: """
+                    INSERT INTO reference(id, title, dateAdded, dateModified)
+                    VALUES(?, 'Late parent', ?, ?)
+                    """,
+                arguments: [referenceId, Date(), Date()]
             )
-            try db.execute(
-                sql: "ALTER TABLE activityQuarantine DROP COLUMN referenceId"
-            )
-            try db.execute(sql: """
-                CREATE INDEX activityQuarantine_entityType_receivedAt
-                ON activityQuarantine(entityType, receivedAt)
-                """)
             try db.execute(
                 sql: """
                     INSERT INTO activityQuarantine (
                         recordName, entityType, reason, epochRevision,
-                        generation, recordData, receivedAt
-                    ) VALUES (?, 'readingActivity', 'reference', 0, ?, ?, ?)
+                        generation, referenceId, recordData, receivedAt
+                    ) VALUES (?, 'readingActivity', 'reference', 0, ?, ?, ?, ?)
                     """,
                 arguments: [
                     recordName,
                     activity.generation,
+                    referenceId,
                     recordData,
                     Date(timeIntervalSince1970: 402),
                 ]
-            )
-            try db.execute(
-                sql: "DELETE FROM grdb_migrations WHERE identifier = 'v11'"
             )
         }
 
         let database = try AppDatabase(queue)
         try database.dbWriter.write { db in
-            let quarantinedReferenceId = try Int64.fetchOne(
+            let quarantinedReferenceSyncId = try String.fetchOne(
                 db,
-                sql: "SELECT referenceId FROM activityQuarantine"
+                sql: "SELECT referenceSyncId FROM activityQuarantine"
             )
-            XCTAssertEqual(quarantinedReferenceId, referenceId)
-
-            var reference = Reference(title: "Late parent")
-            reference.id = referenceId
-            try reference.insert(db)
+            let referenceSyncId = try XCTUnwrap(String.fetchOne(
+                db,
+                sql: "SELECT syncId FROM reference WHERE id = ?",
+                arguments: [referenceId]
+            ))
+            XCTAssertEqual(quarantinedReferenceSyncId, referenceSyncId)
             try SyncEntityType.replayQuarantinedActivity(
-                referenceIds: [referenceId],
+                referenceSyncIds: [referenceSyncId],
                 db: db
             )
 
@@ -199,7 +202,7 @@ final class ActivityRecordTests: XCTestCase {
                 try String.fetchAll(
                     db,
                     sql: "SELECT identifier FROM grdb_migrations"
-                ).contains("v11")
+                ).contains("v13")
             )
         }
     }
@@ -395,6 +398,80 @@ final class ActivityRecordTests: XCTestCase {
                     $0.0 == .readingActivity && $0.1 == entityId
                 }
             )
+        }
+    }
+
+    func testLateReadingActivityCanonicalizesAliasedReferenceIdentity() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        var reference = Reference(syncId: "reference-winner", title: "Paper")
+        try database.saveReference(&reference)
+        let referenceId = try XCTUnwrap(reference.id)
+        let referenceSyncId = reference.syncId
+        let context = try database.activityCaptureContext(for: .reading)
+        let losingReference = "reference-loser"
+        try await database.dbWriter.write { db in
+            try SyncIdentityAliasStore.record(
+                entityType: .reference,
+                losingId: losingReference,
+                winningId: referenceSyncId,
+                db: db
+            )
+        }
+        let localDay = try day("2026-08-14")
+        let observedIdentity =
+            "\(context.generation)/late-mac/\(losingReference)/\(localDay.rawValue)"
+        let canonicalIdentity =
+            "\(context.generation)/late-mac/\(referenceSyncId)/\(localDay.rawValue)"
+        let incoming = ReadingActivity(
+            syncId: observedIdentity,
+            installationId: "late-mac",
+            referenceId: 0,
+            referenceSyncId: losingReference,
+            localDay: localDay,
+            epochRevision: context.revision,
+            generation: context.generation,
+            activeSeconds: 75,
+            lastActiveAt: Date(timeIntervalSince1970: 1_000),
+            dateModified: Date(timeIntervalSince1970: 1_001)
+        )
+        let record = ReadingActivity.makeRecord(
+            recordName: "readingActivity:\(observedIdentity)",
+            activity: incoming
+        )
+        let stateURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).engine-state")
+        defer { try? FileManager.default.removeItem(at: stateURL) }
+        let library = SyncedLibrary(
+            appDatabase: database,
+            stateFileURL: stateURL
+        )
+
+        let applied = await library.applyFetchedRecordsForTest(
+            modifications: [record],
+            deletions: []
+        )
+        XCTAssertTrue(applied)
+
+        try await database.dbWriter.read { db in
+            let stored = try XCTUnwrap(ReadingActivity.fetchOne(
+                db,
+                sql: "SELECT * FROM readingActivity WHERE syncId = ?",
+                arguments: [canonicalIdentity]
+            ))
+            XCTAssertEqual(stored.referenceId, referenceId)
+            XCTAssertEqual(stored.referenceSyncId, referenceSyncId)
+            XCTAssertEqual(stored.activeSeconds, 75)
+            XCTAssertEqual(try Int.fetchOne(db, sql: """
+                SELECT isDirty FROM syncState
+                WHERE entityType = 'readingActivity' AND entityId = ?
+                """, arguments: [canonicalIdentity]), 1)
+            XCTAssertEqual(try Int.fetchOne(db, sql: """
+                SELECT isPushEligible FROM tombstone
+                WHERE entityType = 'readingActivity' AND entityId = ?
+                """, arguments: [observedIdentity]), 1)
+            XCTAssertEqual(try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM readingActivity WHERE syncId = ?
+                """, arguments: [observedIdentity]), 0)
         }
     }
 }

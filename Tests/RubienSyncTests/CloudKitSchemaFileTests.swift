@@ -63,6 +63,8 @@ final class CloudKitSchemaFileTests: XCTestCase {
                 ReferencePDFRecord.RecordField.dateModified: "TIMESTAMP QUERYABLE SORTABLE",
                 ReferencePDFRecord.RecordField.originalFilename: "STRING QUERYABLE SEARCHABLE SORTABLE",
                 ReferencePDFRecord.RecordField.referenceId: "INT64 QUERYABLE SORTABLE",
+                ReferencePDFRecord.RecordField.referenceSyncId: "STRING QUERYABLE SEARCHABLE SORTABLE",
+                ReferencePDFRecord.RecordField.syncId: "STRING QUERYABLE SEARCHABLE SORTABLE",
             ]
         }
 
@@ -76,7 +78,26 @@ final class CloudKitSchemaFileTests: XCTestCase {
             })
         }
 
-        return try Dictionary(uniqueKeysWithValues: recordFieldNames(for: entity).map {
+        let cloudOnlyViewFields = Set([
+            DatabaseView.RecordField.scopeSyncJSON,
+            DatabaseView.RecordField.filtersSyncJSON,
+            DatabaseView.RecordField.sortsSyncJSON,
+            DatabaseView.RecordField.groupBySyncJSON,
+            DatabaseView.RecordField.columnWrapsSyncJSON,
+        ])
+        var result = try Dictionary(uniqueKeysWithValues: recordFieldNames(for: entity)
+            .filter {
+                if entity == .databaseView, cloudOnlyViewFields.contains($0) {
+                    return false
+                }
+                if (entity == .assistantActivity || entity == .activityEpoch),
+                   $0 == SyncRecordIdentity.syncIdField
+                {
+                    return false
+                }
+                return true
+            }
+            .map {
             recordField in
             let columnName = databaseColumnName(
                 for: recordField,
@@ -91,6 +112,15 @@ final class CloudKitSchemaFileTests: XCTestCase {
                 try cloudKitSignature(forSQLiteType: columnType)
             )
         })
+        if entity == .assistantActivity || entity == .activityEpoch {
+            result[SyncRecordIdentity.syncIdField] = "STRING QUERYABLE SEARCHABLE SORTABLE"
+        }
+        if entity == .databaseView {
+            for field in cloudOnlyViewFields {
+                result[field] = "STRING QUERYABLE SEARCHABLE SORTABLE"
+            }
+        }
+        return result
     }
 
     private func databaseColumnName(

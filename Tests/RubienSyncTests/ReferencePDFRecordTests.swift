@@ -26,6 +26,7 @@ final class ReferencePDFRecordTests: XCTestCase {
 
         XCTAssertNotNil(decoded)
         XCTAssertEqual(decoded?.referenceId, 42)
+        XCTAssertEqual(decoded?.referenceSyncId, "42")
         XCTAssertEqual(decoded?.assetVersion, 7)
         XCTAssertEqual(decoded?.contentHash, "abc123")
         XCTAssertEqual(decoded?.originalFilename, "paper.pdf")
@@ -45,7 +46,7 @@ final class ReferencePDFRecordTests: XCTestCase {
         // The schema-invariant test (Phase E Task 29) introspects this list.
         // Every CKRecord field key declared in RecordField must appear here.
         let expected: Set<String> = [
-            "referenceId", "asset", "assetVersion",
+            "syncId", "referenceId", "referenceSyncId", "asset", "assetVersion",
             "contentHash", "originalFilename", "dateModified"
         ]
         XCTAssertEqual(Set(ReferencePDFRecord.allFieldNames), expected)

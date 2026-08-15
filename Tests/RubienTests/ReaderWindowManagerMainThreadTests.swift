@@ -14,7 +14,10 @@ final class ReaderWindowManagerMainThreadTests: XCTestCase {
     func testRecordReaderOpenReturnsImmediatelyEvenWhenWriterIsBusy() async throws {
         let db = try AppDatabase(DatabaseQueue())
         try await db.dbWriter.write { db in
-            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(1, 'r', ?, ?)", arguments: [Date(), Date()])
+            try db.execute(
+                sql: "INSERT INTO reference(id, syncId, title, dateAdded, dateModified) VALUES(1, ?, 'r', ?, ?)",
+                arguments: [UUID().uuidString.lowercased(), Date(), Date()]
+            )
         }
 
         // Synthetic writer-busy condition: occupy the writer queue with a

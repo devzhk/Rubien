@@ -1,6 +1,7 @@
 #if canImport(CloudKit)
 import Foundation
 import CloudKit
+import GRDB
 import RubienCore
 
 /// `DatabaseView` ↔ `CKRecord` mapping.
@@ -12,6 +13,7 @@ import RubienCore
 extension DatabaseView {
 
     public enum RecordField {
+        public static let syncId          = SyncRecordIdentity.syncIdField
         public static let name            = "name"
         public static let icon            = "icon"
         public static let scopeJSON       = "scopeJSON"
@@ -20,6 +22,11 @@ extension DatabaseView {
         public static let sortsJSON       = "sortsJSON"
         public static let groupByJSON     = "groupByJSON"
         public static let columnWrapsJSON = "columnWrapsJSON"
+        public static let scopeSyncJSON       = "scopeSyncJSON"
+        public static let filtersSyncJSON     = "filtersSyncJSON"
+        public static let sortsSyncJSON       = "sortsSyncJSON"
+        public static let groupBySyncJSON     = "groupBySyncJSON"
+        public static let columnWrapsSyncJSON = "columnWrapsSyncJSON"
         public static let isDefault       = "isDefault"
         public static let displayOrder    = "displayOrder"
         public static let dateCreated     = "dateCreated"
@@ -28,6 +35,7 @@ extension DatabaseView {
 
     /// Schema-invariant test (Phase E) reads this. Keep in lockstep with `RecordField`.
     public static let allFieldNames: [String] = [
+        RecordField.syncId,
         RecordField.name,
         RecordField.icon,
         RecordField.scopeJSON,
@@ -36,6 +44,11 @@ extension DatabaseView {
         RecordField.sortsJSON,
         RecordField.groupByJSON,
         RecordField.columnWrapsJSON,
+        RecordField.scopeSyncJSON,
+        RecordField.filtersSyncJSON,
+        RecordField.sortsSyncJSON,
+        RecordField.groupBySyncJSON,
+        RecordField.columnWrapsSyncJSON,
         RecordField.isDefault,
         RecordField.displayOrder,
         RecordField.dateCreated,
@@ -43,6 +56,7 @@ extension DatabaseView {
     ]
 
     public func populate(record: CKRecord) {
+        SyncRecordIdentity.write(syncId, to: record)
         record[RecordField.name]            = name
         record[RecordField.icon]            = icon
         record[RecordField.scopeJSON]       = scopeJSON
@@ -55,6 +69,42 @@ extension DatabaseView {
         record[RecordField.displayOrder]    = Int64(displayOrder)
         record[RecordField.dateCreated]     = dateCreated
         record[RecordField.dateModified]    = dateModified
+    }
+
+    func populateForSync(record: CKRecord, db: Database) throws {
+        let legacyFields = [
+            RecordField.scopeJSON,
+            RecordField.filtersJSON,
+            RecordField.sortsJSON,
+            RecordField.groupByJSON,
+            RecordField.columnWrapsJSON,
+        ]
+        let priorLegacy = Dictionary(uniqueKeysWithValues: legacyFields.map {
+            ($0, record[$0])
+        })
+        populate(record: record)
+
+        let projection = try DatabaseViewPortableCodec.projection(
+            for: self,
+            db: db
+        )
+        record[RecordField.scopeSyncJSON] = projection.scope
+        record[RecordField.filtersSyncJSON] = projection.filters
+        record[RecordField.sortsSyncJSON] = projection.sorts
+        record[RecordField.groupBySyncJSON] = projection.groupBy
+        record[RecordField.columnWrapsSyncJSON] = projection.columnWraps
+
+        if projection.legacyIsLossless {
+            record[RecordField.scopeJSON] = projection.legacyScope
+            record[RecordField.filtersJSON] = projection.legacyFilters
+            record[RecordField.sortsJSON] = projection.legacySorts
+            record[RecordField.groupByJSON] = projection.legacyGroupBy
+            record[RecordField.columnWrapsJSON] = projection.legacyColumnWraps
+        } else {
+            for field in legacyFields {
+                record[field] = priorLegacy[field] ?? nil
+            }
+        }
     }
 
     public static func makeRecord(
@@ -77,6 +127,10 @@ extension DatabaseView {
     /// future-shape additions survive round-trip intact.
     public init(record: CKRecord) {
         self.init(
+            syncId: SyncRecordIdentity.decodedSyncId(
+                from: record,
+                expectedType: .databaseView
+            ),
             name: (record[RecordField.name] as? String) ?? "",
             icon: (record[RecordField.icon] as? String) ?? "tablecells",
             scope: .all,

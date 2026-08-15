@@ -13,8 +13,11 @@ import RubienCore
 extension MetadataEvidence {
 
     public enum RecordField {
+        public static let syncId      = SyncRecordIdentity.syncIdField
         public static let intakeId     = "intakeId"
+        public static let intakeSyncId = "intakeSyncId"
         public static let referenceId  = "referenceId"
+        public static let referenceSyncId = "referenceSyncId"
         public static let bundleHash   = "bundleHash"
         public static let source       = "source"
         public static let recordKey    = "recordKey"
@@ -26,8 +29,11 @@ extension MetadataEvidence {
 
     /// Schema-invariant test (Phase E) reads this. Keep in lockstep with `RecordField`.
     public static let allFieldNames: [String] = [
+        RecordField.syncId,
         RecordField.intakeId,
+        RecordField.intakeSyncId,
         RecordField.referenceId,
+        RecordField.referenceSyncId,
         RecordField.bundleHash,
         RecordField.source,
         RecordField.recordKey,
@@ -38,8 +44,17 @@ extension MetadataEvidence {
     ]
 
     public func populate(record: CKRecord) {
-        record[RecordField.intakeId]    = intakeId
-        record[RecordField.referenceId] = referenceId
+        let wireIntakeSyncId = intakeSyncId ?? intakeId.map(String.init)
+        let wireReferenceSyncId = referenceSyncId ?? referenceId.map(String.init)
+        SyncRecordIdentity.write(syncId, to: record)
+        record[RecordField.intakeSyncId] = wireIntakeSyncId
+        record[RecordField.referenceSyncId] = wireReferenceSyncId
+        record[RecordField.intakeId] = wireIntakeSyncId.flatMap(
+            SyncRecordIdentity.legacyInteger(for:)
+        )
+        record[RecordField.referenceId] = wireReferenceSyncId.flatMap(
+            SyncRecordIdentity.legacyInteger(for:)
+        )
         record[RecordField.bundleHash]  = bundleHash
         record[RecordField.source]      = source.rawValue
         record[RecordField.recordKey]   = recordKey
@@ -81,8 +96,22 @@ extension MetadataEvidence {
             .flatMap(FetchMode.init(rawValue:)) ?? .manual
 
         self.init(
+            syncId: SyncRecordIdentity.decodedSyncId(
+                from: record,
+                expectedType: .metadataEvidence
+            ),
             intakeId: record[RecordField.intakeId] as? Int64,
+            intakeSyncId: SyncRecordIdentity.decodedForeignKey(
+                from: record,
+                globalField: RecordField.intakeSyncId,
+                legacyField: RecordField.intakeId
+            ),
             referenceId: record[RecordField.referenceId] as? Int64,
+            referenceSyncId: SyncRecordIdentity.decodedForeignKey(
+                from: record,
+                globalField: RecordField.referenceSyncId,
+                legacyField: RecordField.referenceId
+            ),
             bundleHash: bundleHash,
             source: source,
             recordKey: record[RecordField.recordKey] as? String,

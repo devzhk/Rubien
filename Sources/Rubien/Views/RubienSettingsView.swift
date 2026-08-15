@@ -13,6 +13,8 @@ struct RubienSettingsView: View {
     @EnvironmentObject private var coordinator: SyncCoordinator
     @State private var cacheBytes: Int64 = 0
     @State private var backfillRemaining: Int = 0
+    @State private var showWriterUpgradeConfirmation = false
+    @State private var writerUpgradeStatusMessage: String?
 
     // Assistant pane (Phase 2c-5; per-provider in 3b-3). Availability probes + mirrors
     // of the path overrides (RubienPreferences isn't observable, so the "Choose…"
@@ -328,8 +330,66 @@ struct RubienSettingsView: View {
                     }
                 }
             }
+
+            if let diagnostics = coordinator.identityDiagnostics,
+               diagnostics.writerUpgradeRequired {
+                Section {
+                    LabeledContent(
+                        String(localized: "Waiting to sync", bundle: .module),
+                        value: String(
+                            format: String(localized: "%d changes, %d deletions", bundle: .module),
+                            diagnostics.blockedSaveCount,
+                            diagnostics.blockedDeleteCount
+                        )
+                    )
+                    Button(String(localized: "I've upgraded every Mac…", bundle: .module)) {
+                        showWriterUpgradeConfirmation = true
+                    }
+                    if let writerUpgradeStatusMessage {
+                        Text(writerUpgradeStatusMessage)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text(String(localized: "Sync Identity Upgrade", bundle: .module))
+                } footer: {
+                    Text(String(
+                        localized: "New globally identified items can still sync. Changes that an older Rubien could silently attach to the wrong item are held on this Mac until every Mac that can write this library is upgraded or kept offline.",
+                        bundle: .module
+                    ))
+                }
+                .confirmationDialog(
+                    String(localized: "Have all writable Macs been upgraded?", bundle: .module),
+                    isPresented: $showWriterUpgradeConfirmation,
+                    titleVisibility: .visible
+                ) {
+                    Button(String(localized: "Release Held Changes", bundle: .module)) {
+                        writerUpgradeStatusMessage = String(localized: "Releasing held changes…", bundle: .module)
+                        Task {
+                            do {
+                                try await coordinator.acknowledgeWriterUpgrade()
+                                writerUpgradeStatusMessage = nil
+                            } catch {
+                                writerUpgradeStatusMessage = String(
+                                    format: String(localized: "Could not release held changes: %@", bundle: .module),
+                                    error.localizedDescription
+                                )
+                            }
+                        }
+                    }
+                    Button(String(localized: "Cancel", bundle: .module), role: .cancel) {}
+                } message: {
+                    Text(String(
+                        localized: "Continue only if every Mac allowed to edit this library is running this version of Rubien or will remain offline. Reopening an older writer can make future edits unsafe.",
+                        bundle: .module
+                    ))
+                }
+            }
         }
         .formStyle(.grouped)
+        .task {
+            coordinator.refreshIdentityDiagnostics()
+        }
     }
 
     /// One-shot read of cache size + in-flight upload count, then poll

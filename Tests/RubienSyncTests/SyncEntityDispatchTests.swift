@@ -64,7 +64,7 @@ final class SyncEntityDispatchTests: XCTestCase {
         let systemFields = SyncStateStore.archiveSystemFields(of: cached)
 
         try db.dbWriter.write { db in
-            try db.execute(sql: "INSERT INTO tag(id, name, color) VALUES(1, 'Alpha', '#111')")
+            try db.execute(sql: "INSERT INTO tag(id, syncId, name, color) VALUES(1, '1', 'Alpha', '#111')")
 
             let record = try SyncEntityType.tag.buildPushRecord(
                 db: db,
@@ -93,7 +93,7 @@ final class SyncEntityDispatchTests: XCTestCase {
         let systemFields = SyncStateStore.archiveSystemFields(of: cached)
 
         try db.dbWriter.write { db in
-            try db.execute(sql: "INSERT INTO tag(id, name, color) VALUES(1, 'Alpha', '#111')")
+            try db.execute(sql: "INSERT INTO tag(id, syncId, name, color) VALUES(1, '1', 'Alpha', '#111')")
 
             let record = try SyncEntityType.tag.buildPushRecord(
                 db: db,
@@ -128,16 +128,16 @@ final class SyncEntityDispatchTests: XCTestCase {
         try db.dbWriter.write { db in
             try self.store.setApplyingRemote(db)
 
-            let ref = Reference(title: "Synced from Cloud")
+            let ref = Reference(syncId: "42", title: "Synced from Cloud")
             let record = Reference.makeRecord(recordName: "reference:42", reference: ref)
 
             try SyncEntityType.reference.applyRemoteRecord(record, entityId: "42", db: db)
 
             try self.store.clearApplyingRemote(db)
 
-            let fetched = try Reference.fetchOne(db, key: 42)
+            let fetched = try Reference.filter(Column("syncId") == "42").fetchOne(db)
             XCTAssertEqual(fetched?.title, "Synced from Cloud")
-            XCTAssertEqual(fetched?.id, 42)
+            XCTAssertNotNil(fetched?.id)
         }
     }
 
@@ -147,10 +147,12 @@ final class SyncEntityDispatchTests: XCTestCase {
 
             var initial = Reference(title: "initial")
             initial.id = 7
+            initial.syncId = "7"
             try initial.insert(db)
 
             var updated = Reference(title: "updated")
             updated.id = 7
+            updated.syncId = "7"
             let record = Reference.makeRecord(recordName: "reference:7", reference: updated)
 
             try SyncEntityType.reference.applyRemoteRecord(record, entityId: "7", db: db)
@@ -175,7 +177,7 @@ final class SyncEntityDispatchTests: XCTestCase {
     func testApplyRemoteReferenceDoesNotTouchPDFCache() throws {
         try db.dbWriter.write { db in
             // Local state: ref + an existing cache row.
-            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(11, 'r', ?, ?)", arguments: [Date(), Date()])
+            try db.execute(sql: "INSERT INTO reference(id, syncId, title, dateAdded, dateModified) VALUES(11, '11', 'r', ?, ?)", arguments: [Date(), Date()])
             try db.execute(sql: """
                 INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
                 VALUES(11, 'abc-123_arxiv.pdf', 'h', 1, ?, ?)
@@ -185,6 +187,7 @@ final class SyncEntityDispatchTests: XCTestCase {
 
             var remote = Reference(title: "with-pdf-renamed")
             remote.id = 11
+            remote.syncId = "11"
             let record = Reference.makeRecord(recordName: "reference:11", reference: remote)
 
             try SyncEntityType.reference.applyRemoteRecord(record, entityId: "11", db: db)
@@ -210,10 +213,12 @@ final class SyncEntityDispatchTests: XCTestCase {
 
             var ref = Reference(title: "parent")
             ref.id = 10
+            ref.syncId = "10"
             try ref.insert(db)
 
             var ann = PDFAnnotationRecord(
                 referenceId: 10,
+                referenceSyncId: "10",
                 type: .highlight,
                 pageIndex: 0,
                 rects: [CGRect(x: 0, y: 0, width: 10, height: 10)]
@@ -222,6 +227,7 @@ final class SyncEntityDispatchTests: XCTestCase {
 
             var updated = Reference(title: "parent-renamed")
             updated.id = 10
+            updated.syncId = "10"
             let record = Reference.makeRecord(recordName: "reference:10", reference: updated)
             try SyncEntityType.reference.applyRemoteRecord(record, entityId: "10", db: db)
 
@@ -240,13 +246,25 @@ final class SyncEntityDispatchTests: XCTestCase {
 
             // Seed parents so FK is satisfiable
             var ref = Reference(id: 1, title: "r")
-            var tag = Tag(id: 2, name: "t", color: "#000")
+            var tag = Tag(id: 2, syncId: "2", name: "t", color: "#000")
             try ref.insert(db)
             try tag.insert(db)
 
-            let record = ReferenceTag.makeRecord(
-                referenceTag: ReferenceTag(referenceId: 1, tagId: 2)
+            let pivot = ReferenceTag(
+                syncId: "1/2",
+                referenceId: 1,
+                tagId: 2,
+                referenceSyncId: "1",
+                tagSyncId: "2"
             )
+            let record = CKRecord(
+                recordType: SyncConstants.RecordType.referenceTag,
+                recordID: CKRecord.ID(
+                    recordName: "referenceTag:1/2",
+                    zoneID: SyncConstants.libraryZoneID
+                )
+            )
+            pivot.populate(record: record)
             try SyncEntityType.referenceTag.applyRemoteRecord(record, entityId: "1/2", db: db)
 
             try self.store.clearApplyingRemote(db)
@@ -267,6 +285,7 @@ final class SyncEntityDispatchTests: XCTestCase {
             try ref.insert(db)
             var ann = PDFAnnotationRecord(
                 referenceId: 5,
+                referenceSyncId: "5",
                 type: .highlight,
                 pageIndex: 0,
                 rects: [.zero]
@@ -289,10 +308,16 @@ final class SyncEntityDispatchTests: XCTestCase {
     func testApplyRemoteDeletePivotByCompositeKey() throws {
         try db.dbWriter.write { db in
             var ref = Reference(id: 1, title: "r")
-            var tag = Tag(id: 2, name: "t", color: "#000")
+            var tag = Tag(id: 2, syncId: "2", name: "t", color: "#000")
             try ref.insert(db)
             try tag.insert(db)
-            try ReferenceTag(referenceId: 1, tagId: 2).insert(db)
+            try ReferenceTag(
+                syncId: "1/2",
+                referenceId: 1,
+                tagId: 2,
+                referenceSyncId: "1",
+                tagSyncId: "2"
+            ).insert(db)
 
             try self.store.setApplyingRemote(db)
             try SyncEntityType.referenceTag.applyRemoteDelete(entityId: "1/2", db: db)
@@ -314,7 +339,7 @@ final class SyncEntityDispatchTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: tmpFile) }
 
         try db.dbWriter.write { db in
-            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(11, 'r', ?, ?)", arguments: [Date(), Date()])
+            try db.execute(sql: "INSERT INTO reference(id, syncId, title, dateAdded, dateModified) VALUES(11, '11', 'r', ?, ?)", arguments: [Date(), Date()])
 
             try self.store.setApplyingRemote(db)
 
@@ -358,7 +383,7 @@ final class SyncEntityDispatchTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: secondSrc) }
 
         let firstFilename: String = try db.dbWriter.write { db in
-            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(33, 'r', ?, ?)", arguments: [Date(), Date()])
+            try db.execute(sql: "INSERT INTO reference(id, syncId, title, dateAdded, dateModified) VALUES(33, '33', 'r', ?, ?)", arguments: [Date(), Date()])
             try self.store.setApplyingRemote(db)
 
             let p1 = ReferencePDFRecord(
@@ -418,8 +443,8 @@ final class SyncEntityDispatchTests: XCTestCase {
         let fileURL = pdfsDir.appendingPathComponent(filename)
         try Data("%PDF-bytes-to-be-unlinked".utf8).write(to: fileURL)
 
-        let returnedFilename: String? = try db.dbWriter.write { db in
-            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(55, 'r', ?, ?)", arguments: [Date(), Date()])
+        let returnedFilenames: [String] = try db.dbWriter.write { db in
+            try db.execute(sql: "INSERT INTO reference(id, syncId, title, dateAdded, dateModified) VALUES(55, '55', 'r', ?, ?)", arguments: [Date(), Date()])
             try db.execute(sql: """
                 INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt)
                 VALUES(55, ?, 'h', 1, ?)
@@ -437,7 +462,7 @@ final class SyncEntityDispatchTests: XCTestCase {
             """)
 
             try self.store.setApplyingRemote(db)
-            let returnedFilename = try SyncEntityType.reference.applyRemoteDelete(
+            let returnedFilenames = try SyncEntityType.reference.applyRemoteDelete(
                 entityId: "55",
                 db: db
             )
@@ -472,10 +497,10 @@ final class SyncEntityDispatchTests: XCTestCase {
             let confirmed = try Int.fetchOne(db,
                 sql: "SELECT confirmedByServer FROM tombstone WHERE entityType='reference' AND entityId='55'") ?? -1
             XCTAssertEqual(confirmed, 1, "pull-side tombstone must be confirmedByServer=1")
-            return returnedFilename
+            return returnedFilenames
         }
 
-        XCTAssertEqual(returnedFilename, filename)
+        XCTAssertEqual(returnedFilenames, [filename])
         XCTAssertTrue(
             FileManager.default.fileExists(atPath: fileURL.path),
             "low-level delete must leave file I/O to its post-commit caller"
@@ -492,15 +517,19 @@ final class SyncEntityDispatchTests: XCTestCase {
         let fileURL = pdfsDir.appendingPathComponent(filename)
         try Data("%PDF-to-be-deleted".utf8).write(to: fileURL)
 
-        let returnedFilename: String? = try db.dbWriter.write { db in
-            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(11, 'r', ?, ?)", arguments: [Date(), Date()])
+        let returnedFilenames: [String] = try db.dbWriter.write { db in
+            try db.execute(sql: "INSERT INTO reference(id, syncId, title, dateAdded, dateModified) VALUES(11, '11', 'r', ?, ?)", arguments: [Date(), Date()])
             try db.execute(sql: """
                 INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt)
                 VALUES(11, ?, 'h', 1, ?)
             """, arguments: [filename, Date()])
+            try db.execute(sql: """
+                INSERT INTO pdfUploadQueue(referenceId, localFilename, queuedAt)
+                VALUES(11, ?, ?)
+            """, arguments: [filename, Date()])
 
             try self.store.setApplyingRemote(db)
-            let returnedFilename = try SyncEntityType.referencePDF.applyRemoteDelete(
+            let returnedFilenames = try SyncEntityType.referencePDF.applyRemoteDelete(
                 entityId: "11",
                 db: db
             )
@@ -511,9 +540,17 @@ final class SyncEntityDispatchTests: XCTestCase {
                 0,
                 "cache row dropped"
             )
-            return returnedFilename
+            XCTAssertEqual(
+                try Int.fetchOne(
+                    db,
+                    sql: "SELECT COUNT(*) FROM pdfUploadQueue WHERE referenceId=11"
+                ) ?? -1,
+                0,
+                "authoritative remote delete must also drop a pending re-upload"
+            )
+            return returnedFilenames
         }
-        XCTAssertEqual(returnedFilename, filename)
+        XCTAssertEqual(returnedFilenames, [filename])
         XCTAssertTrue(
             FileManager.default.fileExists(atPath: fileURL.path),
             "low-level delete must not unlink before its transaction commits"
@@ -531,7 +568,7 @@ final class SyncEntityDispatchTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: fileURL) }
 
         try db.dbWriter.write { db in
-            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(20, 'r', ?, ?)", arguments: [Date(), Date()])
+            try db.execute(sql: "INSERT INTO reference(id, syncId, title, dateAdded, dateModified) VALUES(20, '20', 'r', ?, ?)", arguments: [Date(), Date()])
             try db.execute(sql: """
                 INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
                 VALUES(20, ?, 'somehash', 3, ?, ?)
@@ -585,7 +622,7 @@ final class SyncEntityDispatchTests: XCTestCase {
         let expectedHash = try PDFContentHasher.sha256(of: fileURL)
 
         try db.dbWriter.write { db in
-            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(40, 'r', ?, ?)", arguments: [Date(), Date()])
+            try db.execute(sql: "INSERT INTO reference(id, syncId, title, dateAdded, dateModified) VALUES(40, '40', 'r', ?, ?)", arguments: [Date(), Date()])
             try db.execute(sql: """
                 INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
                 VALUES(40, ?, 'pending', 1, ?, ?)
@@ -611,7 +648,7 @@ final class SyncEntityDispatchTests: XCTestCase {
     func testBuildPushRecordReferencePDFReturnsNilWhenFileVanished() throws {
         // Cache row says materialized but file is gone (drift case).
         try db.dbWriter.write { db in
-            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(21, 'r', ?, ?)", arguments: [Date(), Date()])
+            try db.execute(sql: "INSERT INTO reference(id, syncId, title, dateAdded, dateModified) VALUES(21, '21', 'r', ?, ?)", arguments: [Date(), Date()])
             try db.execute(sql: """
                 INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
                 VALUES(21, 'definitely-not-there-\(UUID().uuidString).pdf', 'h', 1, ?, ?)
@@ -632,7 +669,7 @@ final class SyncEntityDispatchTests: XCTestCase {
 
 private extension Reference {
     init(id: Int64, title: String) {
-        self.init(title: title)
+        self.init(syncId: String(id), title: title)
         self.id = id
     }
 }
