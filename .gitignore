@@ -10,6 +10,7 @@ DerivedData/
 xcuserdata/
 .swiftpm/
 .xcodebuild/
+.xcodebuild-ios/
 *.profraw
 
 # === Swift Package Manager ===
@@ -52,8 +53,9 @@ test_pdfview
 test_pdfview.swift
 test_pdfview_margins
 
-# === Claude / AI ===
+# === Agent tooling ===
 .claude/
+.codex/
 
 # === Sparkle ===
 .sparkle-public-key
