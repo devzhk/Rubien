@@ -10,11 +10,14 @@ Rubien is a native macOS agentic research library and reference manager (SwiftUI
 
 When writing code against these libraries, verify your API references against the version below — LLM memory often defaults to older releases.
 
+**`Package.resolved` is tracked in git — these versions are enforced, not aspirational.** Every dependency uses a `from:` range, so before pinning, a fresh resolve silently took whatever was newest; the checkout had already drifted (GRDB 7.10.0 here vs 7.11.1 in a sibling worktree). This repo ships signed, notarized apps rather than a library anyone consumes, so the artifact that gets notarized should be the one that was tested. Upgrade with `swift package update` as **its own commit** — never as a side effect of unrelated work — run the suites, and update the list below in the same commit. Sparkle deserves particular care: it is embedded and signed, and a bump can trip `release.sh`'s DMG-growth guardrail on its own. The pinned set matches shipped v0.7.3 (verified against the Sparkle framework inside `/Applications/Rubien.app`).
+
 - **Swift toolchain:** 6.x (Xcode 15+ on Mac; CI Linux uses `swift:6.3-jammy`). Strict concurrency, region-based isolation, `~Copyable` are available; don't reach for pre-Swift-6 patterns from memory.
 - **macOS:** deployment target is **14.4 Sonoma** (`Package.swift`); build host needs Xcode 16.3+ (GRDB 7.10 declares `swift-tools-version: 6.1`); CI + maintainer build on **macOS 26 Tahoe** (`runs-on: macos-26`). Anything added after 14.4 must be `@available`-gated — macOS 15 SwiftUI shims (`pointerStyle`, `presentationSizing(.fitted)`, `Color.mix`) live in `Sources/Rubien/Views/BackDeploymentSupport.swift`; follow that pattern. `CKSyncEngine` and the Observation framework (both macOS 14.0) and `TableColumnForEach` (14.4) are fair game without a gate; any SwiftUI/PDFKit API introduced after 14.4 needs one. Keep the three min-version sources in lockstep when changing the floor: `Package.swift` `.macOS(...)`, `LSMinimumSystemVersion` in `scripts/build-app.sh`, and `MIN_SYSTEM_VERSION` in `scripts/release.sh`.
-- **GRDB:** 7.10 (`Package.swift` declares `from: "7.0.0"`). GRDB 7 has a different read/write concurrency surface than 5.x/6.x; check the current docs before writing query code from stale memory.
-- **swift-argument-parser:** 1.7 (`from: "1.3.0"`). API stable across 1.x.
-- **swift-crypto:** 3.x (Linux only; macOS uses system CryptoKit).
+- **GRDB:** 7.10.0 (`Package.swift` declares `from: "7.0.0"`). GRDB 7 has a different read/write concurrency surface than 5.x/6.x; check the current docs before writing query code from stale memory.
+- **swift-argument-parser:** 1.7.1 (`from: "1.3.0"`). API stable across 1.x.
+- **swift-crypto:** 3.15.1 (Linux only; macOS uses system CryptoKit). Pulls in swift-asn1 1.7.0.
+- **Sparkle:** 2.9.2 (`from: "2.7.0"`, macOS + `Sparkle` trait only).
 - **Linux PDF system libs:** poppler-glib 22.02, gdk-pixbuf 2.42, cairo system (Ubuntu 22.04 baseline). API specifics in `Docs/Linux-PDF-Backend.md`.
 - **MCP server:** Node.js ≥ 20; TypeScript per `mcp-server/package.json`.
 

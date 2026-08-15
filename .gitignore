@@ -14,7 +14,16 @@ xcuserdata/
 
 # === Swift Package Manager ===
 .build/
-Package.resolved
+# `Package.resolved` is deliberately TRACKED, not ignored. Every dependency
+# uses a `from:` range, so an unpinned resolve silently picks whatever is
+# newest — which had already drifted between worktrees (GRDB 7.10.0 vs 7.11.1).
+# This repo ships signed, notarized apps rather than a consumed library, so
+# reproducibility wins: the artifact that gets notarized is the one that was
+# tested. Sparkle especially, since it is embedded and signed and a bump can
+# trip release.sh's DMG-growth guardrail on its own.
+#
+# Upgrade deliberately (`swift package update`) as its own commit, never as a
+# side effect. Keep AGENTS.md's "Pinned versions" list in step.
 
 # === Build outputs ===
 build/
