@@ -46,6 +46,11 @@ func visibleReferenceTableWrappableColumns(
 }
 
 struct ReferenceTableView: View {
+    private enum BatchToolbarAction {
+        case delete
+        case export
+    }
+
     private struct PipelineInput: Equatable {
         let references: [Reference]
         let tagMap: [Int64: [Tag]]
@@ -111,6 +116,7 @@ struct ReferenceTableView: View {
 
     @State private var selection = Set<Reference.ID>()
     @State private var showDeleteConfirm = false
+    @State private var hoveredBatchToolbarAction: BatchToolbarAction?
     // Owned here (not in `ReferenceTableContent`) so the Display menu in
     // `ViewChromeBar` can see the same live state — a second UserDefaults
     // read would be stale right after the user hides a column.
@@ -475,22 +481,18 @@ struct ReferenceTableView: View {
             Text(String(format: String(localized: "%d selected", bundle: .module), selection.count))
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.secondary)
-            Spacer()
+            Divider().frame(height: 16)
             Button(role: .destructive) { showDeleteConfirm = true } label: {
                 Label(String(localized: "common.delete", bundle: .module), systemImage: "trash")
                     .font(.system(size: 12))
             }
             .buttonStyle(.plain)
             .foregroundStyle(.red)
-            Divider().frame(height: 16)
-            Button { batchRefreshMetadata() } label: {
-                Label(String(localized: "Refresh metadata", bundle: .module), systemImage: "arrow.clockwise")
-                    .font(.system(size: 12))
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .disabled(isRefreshingMetadata)
-            Divider().frame(height: 16)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(batchToolbarHoverBackground(for: .delete, color: .red))
+            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .onHover { updateBatchToolbarHover(.delete, hovering: $0) }
             Menu {
                 exportFormatButtons(scope: .selected, exportIDs: exportIDs)
             } label: {
@@ -500,18 +502,37 @@ struct ReferenceTableView: View {
             .menuStyle(.borderlessButton)
             .fixedSize()
             .disabled(selectedExportIDs(in: exportIDs).isEmpty)
-            Divider().frame(height: 16)
-            Button { selection.removeAll() } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .semibold))
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(batchToolbarHoverBackground(for: .export, color: .primary))
+            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .onHover { updateBatchToolbarHover(.export, hovering: $0) }
+            Spacer(minLength: 0)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
         .liquidGlassSurface(in: Rectangle(), fallback: .bar)
         .overlay(alignment: .top) { Divider() }
+    }
+
+    private func batchToolbarHoverBackground(
+        for action: BatchToolbarAction,
+        color: Color
+    ) -> some View {
+        RoundedRectangle(cornerRadius: 6, style: .continuous)
+            .fill(hoveredBatchToolbarAction == action ? color.opacity(0.10) : .clear)
+            .animation(.easeOut(duration: 0.12), value: hoveredBatchToolbarAction)
+    }
+
+    private func updateBatchToolbarHover(
+        _ action: BatchToolbarAction,
+        hovering: Bool
+    ) {
+        if hovering {
+            hoveredBatchToolbarAction = action
+        } else if hoveredBatchToolbarAction == action {
+            hoveredBatchToolbarAction = nil
+        }
     }
 
     // MARK: - Empty State
