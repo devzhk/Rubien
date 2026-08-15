@@ -346,6 +346,14 @@ assigning an identity:
    epoch kinds. Rebuild reading-activity IDs with the reference sync ID when
    the old fact is not server-backed.
 
+A matching archive for a compound record proves that record's own server
+identity, but it proves its numeric parent components only when
+`lastPushedAt IS NOT NULL` for that compound. `markPushed` sets this timestamp;
+`markPulled` does not. A v12 record this device pushed therefore remains valid
+transitive evidence if a parent's archive was later cleared, while a record
+this device merely pulled cannot promote the local rows addressed by v12's
+numeric FK decode into proven legacy parents.
+
 This distinction is what protects the reported incident. The unsent LinkedIn
 row at local ID 1796 gets a UUID. Pulling legacy `reference:1796` then finds no
 row with `syncId == "1796"` and inserts KnapFormer at a free local integer ID;

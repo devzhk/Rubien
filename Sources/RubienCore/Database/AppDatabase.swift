@@ -1467,7 +1467,7 @@ public final class AppDatabase: Sendable {
         _ db: Database
     ) throws -> Set<V13EntityKey> {
         let rows = try Row.fetchAll(db, sql: """
-            SELECT entityType, entityId, systemFields
+            SELECT entityType, entityId, systemFields, lastPushedAt
             FROM syncState
             WHERE systemFields IS NOT NULL
             ORDER BY entityType, entityId
@@ -1480,6 +1480,7 @@ public final class AppDatabase: Sendable {
         }
 
         var proven = Set<V13EntityKey>()
+        var locallyPushed = Set<V13EntityKey>()
         var failed = 0
         for row in rows {
             let entityType: String = row["entityType"]
@@ -1493,7 +1494,12 @@ public final class AppDatabase: Sendable {
                 failed += 1
                 continue
             }
-            proven.insert(.init(entityType: entityType, entityId: entityId))
+            let key = V13EntityKey(entityType: entityType, entityId: entityId)
+            proven.insert(key)
+            let lastPushedAt: Date? = row["lastPushedAt"]
+            if lastPushedAt != nil {
+                locallyPushed.insert(key)
+            }
         }
 
         let allowedFailures = min(10, max(1, rows.count / 100))
@@ -1503,10 +1509,12 @@ public final class AppDatabase: Sendable {
                 failed: failed
             )
         }
-        // Some v12 record names themselves prove parent identities even when
-        // the parent's cached system fields were lost. Preserve that evidence
-        // transitively so replay cannot insert a second parent under a UUID.
-        for key in Array(proven) {
+        // A compound record this device pushed proves which local parent rows
+        // its numeric record-name components described, even if a parent's
+        // cached system fields were later lost. A pulled v12 compound does not:
+        // v12 decoded those components as local row addresses, so using one as
+        // proof could preserve an unrelated parent and overwrite it on replay.
+        for key in locallyPushed {
             switch key.entityType {
             case "referenceTag":
                 let components = key.entityId.split(

@@ -243,7 +243,7 @@ final class MigrationV13Tests: XCTestCase {
         }
     }
 
-    func testProvenCompoundRecordPreservesItsParentIdentities() throws {
+    func testLocallyPushedCompoundRecordPreservesItsParentIdentities() throws {
         let queue = try makeV12Queue()
         let archived = archivedSystemFields(
             recordType: "CDReferenceTag",
@@ -264,9 +264,12 @@ final class MigrationV13Tests: XCTestCase {
                 VALUES(951, 952, ?)
                 """, arguments: [now])
             try db.execute(sql: """
-                UPDATE syncState SET systemFields = ?
+                UPDATE syncState
+                SET systemFields = ?, lastPushedAt = ?, isDirty = 0
                 WHERE entityType='referenceTag' AND entityId='951/952'
-                """, arguments: [archived])
+                """, arguments: [
+                    archived, Date(timeIntervalSince1970: 10),
+                ])
         }
 
         _ = try AppDatabase(queue)
@@ -287,6 +290,59 @@ final class MigrationV13Tests: XCTestCase {
             XCTAssertEqual(pivot["syncId"] as String?, "951/952")
             XCTAssertEqual(pivot["referenceSyncId"] as String?, "951")
             XCTAssertEqual(pivot["tagSyncId"] as String?, "952")
+        }
+    }
+
+    func testPulledCompoundRecordDoesNotProveItsLocalParentIdentities() throws {
+        let queue = try makeV12Queue()
+        let archived = archivedSystemFields(
+            recordType: "CDReferenceTag",
+            recordName: "referenceTag:961/962"
+        )
+        try queue.write { db in
+            let now = Date()
+            try db.execute(sql: """
+                INSERT INTO reference(id, title, dateAdded, dateModified)
+                VALUES(961, 'Unrelated local reference', ?, ?)
+                """, arguments: [now, now])
+            try db.execute(sql: """
+                INSERT INTO tag(id, name, color, dateModified)
+                VALUES(962, 'Unrelated local tag', '#007AFF', ?)
+                """, arguments: [now])
+            try db.execute(sql: """
+                INSERT INTO referenceTag(referenceId, tagId, dateModified)
+                VALUES(961, 962, ?)
+                """, arguments: [now])
+            // markPulled archives system fields but deliberately leaves
+            // lastPushedAt nil. That archive proves the child record existed,
+            // not that its numeric components identify these local parents.
+            try db.execute(sql: """
+                UPDATE syncState SET systemFields = ?, isDirty = 0
+                WHERE entityType='referenceTag' AND entityId='961/962'
+                """, arguments: [archived])
+        }
+
+        _ = try AppDatabase(queue)
+
+        try queue.read { db in
+            let referenceSyncId = try XCTUnwrap(String.fetchOne(
+                db,
+                sql: "SELECT syncId FROM reference WHERE id=961"
+            ))
+            let tagSyncId = try XCTUnwrap(String.fetchOne(
+                db,
+                sql: "SELECT syncId FROM tag WHERE id=962"
+            ))
+            XCTAssertFalse(SyncIdentifier.isCanonicalDecimal(referenceSyncId))
+            XCTAssertFalse(SyncIdentifier.isCanonicalDecimal(tagSyncId))
+
+            let pivot = try XCTUnwrap(Row.fetchOne(db, sql: """
+                SELECT syncId, referenceSyncId, tagSyncId FROM referenceTag
+                WHERE referenceId=961 AND tagId=962
+                """))
+            XCTAssertEqual(pivot["syncId"] as String?, "961/962")
+            XCTAssertEqual(pivot["referenceSyncId"] as String?, referenceSyncId)
+            XCTAssertEqual(pivot["tagSyncId"] as String?, tagSyncId)
         }
     }
 
