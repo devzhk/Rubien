@@ -138,6 +138,14 @@ Six test targets:
 
 `swift test` needs the full Xcode toolchain (not just CommandLineTools). Verify with `xcode-select -p` and switch with `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer` if needed.
 
+**Foot-gun — a full-suite run deadlocks, and it looks like slowness.**
+`RubienSyncTests.ActivityRecordTests/testActivityDeletionRequeuesPreviouslyConfirmedTombstone`
+wedges whenever the suite runs as a group: the `xctest` process sits at 0% CPU
+indefinitely with no self-timeout. The same test passes alone, so it is
+suite-ordering/shared-state dependent. This was reproduced on clean main in
+repository history (`326411c`, 2026-08-08). Run that test alone and run the
+broader suite with `--skip ActivityRecordTests` before blaming a feature diff.
+
 ## Releases
 
 Before preparing, cutting, verifying, recovering, or publishing any Rubien release, read `Docs/Release-Runbook.md` in full and follow its order exactly. It is the single source of truth for versioning, CI gating (including the narrow docs-only exception), release notes, agent-approval and host-access requirements, signing/notarization, artifact hosting and verification, dSYM retention, Linux CLI publication, and the coupled MCP npm package.
