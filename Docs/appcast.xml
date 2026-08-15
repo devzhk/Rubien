@@ -640,5 +640,22 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.7.4</title>
+            <description sparkle:format="plain-text"><![CDATA[• More reliable iCloud sync through stable global identities, stronger legacy reconciliation, and new sync diagnostics.
+• Support for importing Oxford Academic and GeoscienceWorld papers.
+• Fixed completed Claude assistant turns that could remain stuck while summarizing.
+• Improved multi-selection Delete/Export placement and hover feedback.]]></description>
+            <pubDate>Sat, 15 Aug 2026 23:17:23 +0000</pubDate>
+            <sparkle:version>42</sparkle:version>
+            <sparkle:shortVersionString>0.7.4</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien/releases/download/v0.7.4/Rubien-0.7.4.dmg"
+                sparkle:edSignature="f090VsHVGylcTazAqTqlkqGs7Llrar/LIYUoa80XOlxASiPeDQWeYIGcZVAH1k8rZ/uAkp8sDjCMncUDAkEJBw=="
+                length="18297496"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
