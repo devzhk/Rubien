@@ -19,12 +19,12 @@ final class DatabaseViewReorderTests: XCTestCase {
         return view
     }
 
-    private func isDirty(_ db: AppDatabase, entityId: Int64) throws -> Int? {
+    private func isDirty(_ db: AppDatabase, entityId: String) throws -> Int? {
         try db.dbWriter.read { db in
             try Int.fetchOne(
                 db,
                 sql: "SELECT isDirty FROM syncState WHERE entityType = 'databaseView' AND entityId = ?",
-                arguments: [String(entityId)]
+                arguments: [entityId]
             )
         }
     }
@@ -52,7 +52,7 @@ final class DatabaseViewReorderTests: XCTestCase {
         XCTAssertEqual(userViews.map(\.name), ["C", "B", "A"])
         XCTAssertEqual(userViews.map(\.displayOrder), [0, 1, 2])
         for v in [a, b, c] {
-            XCTAssertEqual(try isDirty(db, entityId: v.id!), 1, "\(v.name) should be dirtied by reorder")
+            XCTAssertEqual(try isDirty(db, entityId: v.syncId), 1, "\(v.name) should be dirtied by reorder")
         }
     }
 
@@ -69,7 +69,7 @@ final class DatabaseViewReorderTests: XCTestCase {
         try db.reorderDatabaseViews([a.id!, b.id!, c.id!])  // already in this order
 
         for v in [a, b, c] {
-            XCTAssertEqual(try isDirty(db, entityId: v.id!), 0, "no row may be dirtied when nothing moves")
+            XCTAssertEqual(try isDirty(db, entityId: v.syncId), 0, "no row may be dirtied when nothing moves")
         }
         XCTAssertEqual(
             try db.fetchDatabaseView(id: b.id!)!.dateModified, modifiedBefore,
@@ -92,7 +92,7 @@ final class DatabaseViewReorderTests: XCTestCase {
         try db.reorderDatabaseViews([only.id!])  // moves 1 -> 0
 
         XCTAssertEqual(try db.fetchDatabaseView(id: only.id!)!.displayOrder, 0)
-        XCTAssertEqual(try isDirty(db, entityId: only.id!), 1)
+        XCTAssertEqual(try isDirty(db, entityId: only.syncId), 1)
     }
 
     // MARK: - Default view isolation + deterministic tie-break
@@ -109,7 +109,7 @@ final class DatabaseViewReorderTests: XCTestCase {
         let defaultAfter = try db.fetchDefaultDatabaseView()!
         XCTAssertEqual(defaultAfter.displayOrder, defaultBefore.displayOrder, "default displayOrder unchanged")
         XCTAssertEqual(defaultAfter.dateModified, defaultBefore.dateModified, "default dateModified unchanged")
-        XCTAssertNotEqual(try isDirty(db, entityId: defaultAfter.id!), 1, "default view must not be dirtied")
+        XCTAssertNotEqual(try isDirty(db, entityId: defaultAfter.syncId), 1, "default view must not be dirtied")
 
         // B now collides with the default at displayOrder 0; the (displayOrder, id)
         // tie-breaker must still produce a deterministic, stable total order.

@@ -5,6 +5,7 @@ public struct MetadataIntake: Identifiable, Codable, Hashable, Sendable {
     public static let databaseTableName = "metadataIntake"
 
     public var id: Int64?
+    public var syncId: String
     public var sourceKind: MetadataIntakeSourceKind
     public var verificationStatus: VerificationStatus
     public var title: String
@@ -17,12 +18,14 @@ public struct MetadataIntake: Identifiable, Codable, Hashable, Sendable {
     public var candidatesJSON: String?
     public var statusMessage: String?
     public var linkedReferenceId: Int64?
+    public var linkedReferenceSyncId: String?
     public var evidenceBundleHash: String?
     public var createdAt: Date
     public var updatedAt: Date
 
     public init(
         id: Int64? = nil,
+        syncId: String = SyncIdentifier.random(),
         sourceKind: MetadataIntakeSourceKind,
         verificationStatus: VerificationStatus,
         title: String,
@@ -35,11 +38,13 @@ public struct MetadataIntake: Identifiable, Codable, Hashable, Sendable {
         candidatesJSON: String? = nil,
         statusMessage: String? = nil,
         linkedReferenceId: Int64? = nil,
+        linkedReferenceSyncId: String? = nil,
         evidenceBundleHash: String? = nil,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
         self.id = id
+        self.syncId = syncId
         self.sourceKind = sourceKind
         self.verificationStatus = verificationStatus
         self.title = title
@@ -52,6 +57,7 @@ public struct MetadataIntake: Identifiable, Codable, Hashable, Sendable {
         self.candidatesJSON = candidatesJSON?.rubien_nilIfBlank
         self.statusMessage = statusMessage?.rubien_nilIfBlank
         self.linkedReferenceId = linkedReferenceId
+        self.linkedReferenceSyncId = linkedReferenceSyncId
         self.evidenceBundleHash = evidenceBundleHash?.rubien_nilIfBlank
         self.createdAt = createdAt
         self.updatedAt = updatedAt
@@ -82,15 +88,17 @@ public struct MetadataIntake: Identifiable, Codable, Hashable, Sendable {
     }
 
     public enum Columns: String, ColumnExpression {
-        case id, sourceKind, verificationStatus, title, originalInput, sourceURL, pdfPath
+        case id, syncId, sourceKind, verificationStatus, title, originalInput, sourceURL, pdfPath
         case seedJSON, fallbackReferenceJSON, currentReferenceJSON, candidatesJSON
-        case statusMessage, linkedReferenceId, evidenceBundleHash, createdAt, updatedAt
+        case statusMessage, linkedReferenceId, linkedReferenceSyncId
+        case evidenceBundleHash, createdAt, updatedAt
     }
 }
 
 extension MetadataIntake: FetchableRecord, MutablePersistableRecord {
     public init(row: Row) {
         id = row["id"]
+        syncId = row["syncId"]
         sourceKind = row["sourceKind"]
         verificationStatus = row["verificationStatus"]
         title = row["title"]
@@ -103,6 +111,7 @@ extension MetadataIntake: FetchableRecord, MutablePersistableRecord {
         candidatesJSON = row["candidatesJSON"]
         statusMessage = row["statusMessage"]
         linkedReferenceId = row["linkedReferenceId"]
+        linkedReferenceSyncId = row["linkedReferenceSyncId"]
         evidenceBundleHash = row["evidenceBundleHash"]
         createdAt = row["createdAt"]
         updatedAt = row["updatedAt"]
@@ -110,6 +119,7 @@ extension MetadataIntake: FetchableRecord, MutablePersistableRecord {
 
     public func encode(to container: inout PersistenceContainer) {
         container["id"] = id
+        container["syncId"] = syncId
         container["sourceKind"] = sourceKind
         container["verificationStatus"] = verificationStatus
         container["title"] = title
@@ -122,6 +132,7 @@ extension MetadataIntake: FetchableRecord, MutablePersistableRecord {
         container["candidatesJSON"] = candidatesJSON
         container["statusMessage"] = statusMessage
         container["linkedReferenceId"] = linkedReferenceId
+        container["linkedReferenceSyncId"] = linkedReferenceSyncId
         container["evidenceBundleHash"] = evidenceBundleHash
         container["createdAt"] = createdAt
         container["updatedAt"] = updatedAt
@@ -132,8 +143,11 @@ public struct MetadataEvidence: Identifiable, Codable, Hashable, Sendable {
     public static let databaseTableName = "metadataEvidence"
 
     public var id: Int64?
+    public var syncId: String
     public var intakeId: Int64?
+    public var intakeSyncId: String?
     public var referenceId: Int64?
+    public var referenceSyncId: String?
     public var bundleHash: String
     public var source: MetadataSource
     public var recordKey: String?
@@ -144,8 +158,11 @@ public struct MetadataEvidence: Identifiable, Codable, Hashable, Sendable {
 
     public init(
         id: Int64? = nil,
+        syncId: String = SyncIdentifier.random(),
         intakeId: Int64? = nil,
+        intakeSyncId: String? = nil,
         referenceId: Int64? = nil,
+        referenceSyncId: String? = nil,
         bundleHash: String,
         source: MetadataSource,
         recordKey: String? = nil,
@@ -155,8 +172,11 @@ public struct MetadataEvidence: Identifiable, Codable, Hashable, Sendable {
         createdAt: Date = Date()
     ) {
         self.id = id
+        self.syncId = syncId
         self.intakeId = intakeId
+        self.intakeSyncId = intakeSyncId
         self.referenceId = referenceId
+        self.referenceSyncId = referenceSyncId
         self.bundleHash = bundleHash
         self.source = source
         self.recordKey = recordKey?.rubien_nilIfBlank
@@ -175,15 +195,19 @@ public struct MetadataEvidence: Identifiable, Codable, Hashable, Sendable {
     }
 
     public enum Columns: String, ColumnExpression {
-        case id, intakeId, referenceId, bundleHash, source, recordKey, sourceURL, fetchMode, payloadJSON, createdAt
+        case id, syncId, intakeId, intakeSyncId, referenceId, referenceSyncId
+        case bundleHash, source, recordKey, sourceURL, fetchMode, payloadJSON, createdAt
     }
 }
 
 extension MetadataEvidence: FetchableRecord, MutablePersistableRecord {
     public init(row: Row) {
         id = row["id"]
+        syncId = row["syncId"]
         intakeId = row["intakeId"]
+        intakeSyncId = row["intakeSyncId"]
         referenceId = row["referenceId"]
+        referenceSyncId = row["referenceSyncId"]
         bundleHash = row["bundleHash"]
         source = row["source"]
         recordKey = row["recordKey"]
@@ -195,8 +219,11 @@ extension MetadataEvidence: FetchableRecord, MutablePersistableRecord {
 
     public func encode(to container: inout PersistenceContainer) {
         container["id"] = id
+        container["syncId"] = syncId
         container["intakeId"] = intakeId
+        container["intakeSyncId"] = intakeSyncId
         container["referenceId"] = referenceId
+        container["referenceSyncId"] = referenceSyncId
         container["bundleHash"] = bundleHash
         container["source"] = source
         container["recordKey"] = recordKey

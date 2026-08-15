@@ -76,9 +76,13 @@ public struct PDFAnnotationDraft: Equatable, Sendable {
         self.dateModified = dateModified
     }
 
-    func makeRecord(referenceId: Int64) -> PDFAnnotationRecord {
+    func makeRecord(
+        referenceId: Int64,
+        referenceSyncId: String = ""
+    ) -> PDFAnnotationRecord {
         PDFAnnotationRecord(
             referenceId: referenceId,
+            referenceSyncId: referenceSyncId,
             type: type,
             selectedText: selectedText,
             noteText: noteText,
@@ -93,7 +97,9 @@ public struct PDFAnnotationDraft: Equatable, Sendable {
 
 public struct PDFAnnotationRecord: Identifiable, Codable, Hashable {
     public var id: Int64?
+    public var syncId: String
     public var referenceId: Int64
+    public var referenceSyncId: String
     public var type: AnnotationType
     public var selectedText: String?
     public var noteText: String?
@@ -109,7 +115,9 @@ public struct PDFAnnotationRecord: Identifiable, Codable, Hashable {
 
     public init(
         id: Int64? = nil,
+        syncId: String = SyncIdentifier.random(),
         referenceId: Int64,
+        referenceSyncId: String = "",
         type: AnnotationType,
         selectedText: String? = nil,
         noteText: String? = nil,
@@ -126,7 +134,9 @@ public struct PDFAnnotationRecord: Identifiable, Codable, Hashable {
         let union = normalizedRects.unionRect ?? .zero
 
         self.id = id
+        self.syncId = syncId
         self.referenceId = referenceId
+        self.referenceSyncId = referenceSyncId
         self.type = type
         self.selectedText = selectedText
         self.noteText = noteText
@@ -186,7 +196,7 @@ extension PDFAnnotationRecord: FetchableRecord, MutablePersistableRecord {
     }
 
     public enum Columns: String, ColumnExpression {
-        case id, referenceId, type, selectedText, noteText, color
+        case id, syncId, referenceId, referenceSyncId, type, selectedText, noteText, color
         case pageIndex, boundsX, boundsY, boundsWidth, boundsHeight, rectsData
         case dateCreated, dateModified
     }

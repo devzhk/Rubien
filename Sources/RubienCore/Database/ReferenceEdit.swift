@@ -1028,10 +1028,13 @@ extension AppDatabase {
         let toInsert = finalSet.subtracting(current)
         let toDelete = current.subtracting(finalSet)
         for tagId in toInsert {
-            try db.execute(
-                sql: "INSERT OR IGNORE INTO referenceTag(referenceId, tagId, dateModified) VALUES (?, ?, ?)",
-                arguments: [referenceId, tagId, now]
+            let pivot = try Self.makeReferenceTag(
+                referenceId: referenceId,
+                tagId: tagId,
+                dateModified: now,
+                db: db
             )
+            try pivot.insert(db, onConflict: .ignore)
         }
         if !toDelete.isEmpty {
             let placeholders = toDelete.map { _ in "?" }.joined(separator: ",")
@@ -1072,7 +1075,13 @@ extension AppDatabase {
                 try updated.update(db)
                 return true
             } else {
-                var pv = PropertyValue(referenceId: referenceId, propertyId: propertyId, value: value, dateModified: now)
+                var pv = try Self.makePropertyValue(
+                    referenceId: referenceId,
+                    propertyId: propertyId,
+                    value: value,
+                    dateModified: now,
+                    db: db
+                )
                 try pv.insert(db)
                 return true
             }

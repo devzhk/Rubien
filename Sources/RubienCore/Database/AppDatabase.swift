@@ -52,12 +52,19 @@ public struct ReferenceMentionCandidate: Sendable, Equatable {
 public final class AppDatabase: Sendable {
     /// Bumped whenever a new migration is registered. Surfaced in
     /// `rubien-cli sync status` JSON for diagnostics.
-    public static let currentSchemaVersion = "v12"
+    public static let currentSchemaVersion = "v13"
 
     public let dbWriter: any DatabaseWriter
+    private let includesV13Migration: Bool
 
     public init(_ dbWriter: any DatabaseWriter) throws {
         self.dbWriter = dbWriter
+        self.includesV13Migration = true
+        let migrator = self.migrator
+        let hasNewerSchema = try dbWriter.read(migrator.hasBeenSuperseded)
+        guard !hasNewerSchema else {
+            throw SyncIdentityMigrationError.databaseSchemaIsNewerThanThisBuild
+        }
         try Self.recoverPendingV11BlockedBySyncOrphans(on: dbWriter)
         try migrator.migrate(dbWriter)
     }
@@ -691,6 +698,15 @@ public final class AppDatabase: Sendable {
             try Self.applyV12Body(db)
         }
 
+        // v13 (2026-08): separate per-device SQLite row IDs from the stable
+        // identities used by CloudKit. Existing server-backed record names are
+        // preserved; every unconfirmed independent row receives a UUID.
+        if includesV13Migration {
+            migrator.registerMigration("v13") { db in
+                try Self.applyV13Body(db)
+            }
+        }
+
         return migrator
     }
 
@@ -1088,6 +1104,685 @@ public final class AppDatabase: Sendable {
         }
     }
 
+    private struct V13EntityKey: Hashable {
+        let entityType: String
+        let entityId: String
+    }
+
+    private struct V13IdentityMapping {
+        let entityType: String
+        let oldId: String
+        let newId: String
+        let proven: Bool
+        let ensureState: Bool
+    }
+
+    fileprivate static func applyV13Body(_ db: Database) throws {
+        let provenLegacyKeys = try classifyV13ArchivedSystemFields(db)
+
+        try db.execute(sql: "ALTER TABLE reference ADD COLUMN syncId TEXT")
+        try db.execute(sql: "ALTER TABLE tag ADD COLUMN syncId TEXT")
+        try db.execute(sql: "ALTER TABLE referenceTag ADD COLUMN syncId TEXT")
+        try db.execute(sql: "ALTER TABLE referenceTag ADD COLUMN referenceSyncId TEXT")
+        try db.execute(sql: "ALTER TABLE referenceTag ADD COLUMN tagSyncId TEXT")
+        try db.execute(sql: "ALTER TABLE pdfAnnotation ADD COLUMN syncId TEXT")
+        try db.execute(sql: "ALTER TABLE pdfAnnotation ADD COLUMN referenceSyncId TEXT")
+        try db.execute(sql: "ALTER TABLE webAnnotation ADD COLUMN syncId TEXT")
+        try db.execute(sql: "ALTER TABLE webAnnotation ADD COLUMN referenceSyncId TEXT")
+        try db.execute(sql: "ALTER TABLE metadataIntake ADD COLUMN syncId TEXT")
+        try db.execute(sql: "ALTER TABLE metadataIntake ADD COLUMN linkedReferenceSyncId TEXT")
+        try db.execute(sql: "ALTER TABLE metadataEvidence ADD COLUMN syncId TEXT")
+        try db.execute(sql: "ALTER TABLE metadataEvidence ADD COLUMN intakeSyncId TEXT")
+        try db.execute(sql: "ALTER TABLE metadataEvidence ADD COLUMN referenceSyncId TEXT")
+        try db.execute(sql: "ALTER TABLE propertyDefinition ADD COLUMN syncId TEXT")
+        try db.execute(sql: "ALTER TABLE propertyValue ADD COLUMN syncId TEXT")
+        try db.execute(sql: "ALTER TABLE propertyValue ADD COLUMN referenceSyncId TEXT")
+        try db.execute(sql: "ALTER TABLE propertyValue ADD COLUMN propertySyncId TEXT")
+        try db.execute(sql: "ALTER TABLE databaseView ADD COLUMN syncId TEXT")
+        try db.execute(sql: "ALTER TABLE readingActivity ADD COLUMN syncId TEXT")
+        try db.execute(sql: "ALTER TABLE readingActivity ADD COLUMN referenceSyncId TEXT")
+        try db.execute(sql: "ALTER TABLE activityQuarantine ADD COLUMN referenceSyncId TEXT")
+        try db.execute(sql: "ALTER TABLE tombstone ADD COLUMN isPushEligible INTEGER NOT NULL DEFAULT 0")
+
+        try db.execute(sql: """
+            INSERT INTO syncSession(key, value) VALUES('applyingRemote', '1')
+                ON CONFLICT(key) DO UPDATE SET value = '1'
+            """)
+        defer {
+            try? db.execute(sql: "DELETE FROM syncSession WHERE key = 'applyingRemote'")
+        }
+
+        var mappings: [V13IdentityMapping] = []
+        let simpleTables = [
+            "reference", "tag", "pdfAnnotation", "webAnnotation",
+            "metadataIntake", "metadataEvidence", "propertyDefinition",
+            "databaseView",
+        ]
+        for table in simpleTables {
+            let ids = try Int64.fetchAll(db, sql: "SELECT id FROM \(table) ORDER BY id")
+            for id in ids {
+                let oldId = String(id)
+                let key = V13EntityKey(entityType: table, entityId: oldId)
+                let proven = provenLegacyKeys.contains(key)
+                let newId = proven ? oldId : SyncIdentifier.random()
+                try db.execute(
+                    sql: "UPDATE \(table) SET syncId = ? WHERE id = ?",
+                    arguments: [newId, id]
+                )
+                mappings.append(.init(
+                    entityType: table,
+                    oldId: oldId,
+                    newId: newId,
+                    proven: proven,
+                    ensureState: true
+                ))
+            }
+        }
+
+        let referenceIDs = try v13IdentityMap(db, table: "reference")
+        let tagIDs = try v13IdentityMap(db, table: "tag")
+        let propertyIDs = try v13IdentityMap(db, table: "propertyDefinition")
+        let intakeIDs = try v13IdentityMap(db, table: "metadataIntake")
+
+        let referenceTagRows = try Row.fetchAll(db, sql: """
+            SELECT referenceId, tagId FROM referenceTag
+            ORDER BY referenceId, tagId
+            """)
+        for row in referenceTagRows {
+            let referenceId: Int64 = row["referenceId"]
+            let tagId: Int64 = row["tagId"]
+            guard let referenceSyncId = referenceIDs[referenceId],
+                  let tagSyncId = tagIDs[tagId] else {
+                throw SyncIdentityMigrationError.invalidIdentityData(
+                    "referenceTag \(referenceId)/\(tagId) has an unresolved parent"
+                )
+            }
+            let oldId = "\(referenceId)/\(tagId)"
+            let key = V13EntityKey(entityType: "referenceTag", entityId: oldId)
+            let proven = provenLegacyKeys.contains(key)
+            let newId = proven
+                ? oldId
+                : "\(referenceSyncId)/\(tagSyncId)"
+            try db.execute(sql: """
+                UPDATE referenceTag
+                SET syncId = ?, referenceSyncId = ?, tagSyncId = ?
+                WHERE referenceId = ? AND tagId = ?
+                """, arguments: [
+                    newId, referenceSyncId, tagSyncId, referenceId, tagId,
+                ])
+            mappings.append(.init(
+                entityType: "referenceTag",
+                oldId: oldId,
+                newId: newId,
+                proven: proven,
+                ensureState: true
+            ))
+        }
+
+        let propertyValueRows = try Row.fetchAll(db, sql: """
+            SELECT id, referenceId, propertyId FROM propertyValue ORDER BY id
+            """)
+        for row in propertyValueRows {
+            let id: Int64 = row["id"]
+            let referenceId: Int64 = row["referenceId"]
+            let propertyId: Int64 = row["propertyId"]
+            guard let referenceSyncId = referenceIDs[referenceId],
+                  let propertySyncId = propertyIDs[propertyId] else {
+                throw SyncIdentityMigrationError.invalidIdentityData(
+                    "propertyValue \(id) has an unresolved parent"
+                )
+            }
+            let oldId = String(id)
+            let key = V13EntityKey(entityType: "propertyValue", entityId: oldId)
+            let proven = provenLegacyKeys.contains(key)
+            let newId = proven
+                ? oldId
+                : "\(referenceSyncId)/\(propertySyncId)"
+            try db.execute(sql: """
+                UPDATE propertyValue
+                SET syncId = ?, referenceSyncId = ?, propertySyncId = ?
+                WHERE id = ?
+                """, arguments: [
+                    newId, referenceSyncId, propertySyncId, id,
+                ])
+            mappings.append(.init(
+                entityType: "propertyValue",
+                oldId: oldId,
+                newId: newId,
+                proven: proven,
+                ensureState: true
+            ))
+        }
+
+        let readingRows = try Row.fetchAll(db, sql: """
+            SELECT generation, installationId, referenceId, localDay
+            FROM readingActivity
+            ORDER BY generation, installationId, referenceId, localDay
+            """)
+        for row in readingRows {
+            let generation: String = row["generation"]
+            let installationId: String = row["installationId"]
+            let referenceId: Int64 = row["referenceId"]
+            let localDay: String = row["localDay"]
+            guard let referenceSyncId = referenceIDs[referenceId] else {
+                throw SyncIdentityMigrationError.invalidIdentityData(
+                    "readingActivity has an unresolved Reference \(referenceId)"
+                )
+            }
+            let oldId = "\(generation)/\(installationId)/\(referenceId)/\(localDay)"
+            let key = V13EntityKey(entityType: "readingActivity", entityId: oldId)
+            let proven = provenLegacyKeys.contains(key)
+            let newId = proven
+                ? oldId
+                : "\(generation)/\(installationId)/\(referenceSyncId)/\(localDay)"
+            try db.execute(sql: """
+                UPDATE readingActivity
+                SET syncId = ?, referenceSyncId = ?
+                WHERE generation = ? AND installationId = ?
+                  AND referenceId = ? AND localDay = ?
+                """, arguments: [
+                    newId, referenceSyncId, generation, installationId,
+                    referenceId, localDay,
+                ])
+            mappings.append(.init(
+                entityType: "readingActivity",
+                oldId: oldId,
+                newId: newId,
+                proven: proven,
+                ensureState: true
+            ))
+        }
+
+        try v13BackfillGlobalForeignKeys(
+            db,
+            referenceIDs: referenceIDs,
+            intakeIDs: intakeIDs
+        )
+
+        for (referenceId, referenceSyncId) in referenceIDs {
+            mappings.append(.init(
+                entityType: "referencePDF",
+                oldId: String(referenceId),
+                newId: referenceSyncId,
+                proven: provenLegacyKeys.contains(.init(
+                    entityType: "referencePDF",
+                    entityId: String(referenceId)
+                )),
+                ensureState: false
+            ))
+        }
+
+        for mapping in mappings {
+            try v13MigrateState(mapping, db: db)
+        }
+        try db.execute(sql: "UPDATE syncState SET pushInFlight = 0")
+        try db.execute(sql: """
+            UPDATE tombstone
+            SET isPushEligible = CASE WHEN confirmedByServer = 1 THEN 1 ELSE 0 END
+            """)
+
+        for table in [
+            "reference", "tag", "referenceTag", "pdfAnnotation",
+            "webAnnotation", "metadataIntake", "metadataEvidence",
+            "propertyDefinition", "propertyValue", "databaseView",
+            "readingActivity",
+        ] {
+            try db.create(
+                index: "\(table)_syncId",
+                on: table,
+                columns: ["syncId"],
+                options: .unique
+            )
+        }
+        try db.execute(sql: """
+            DROP INDEX IF EXISTS activityQuarantine_entityType_referenceId_receivedAt
+            """)
+        try db.create(
+            index: "activityQuarantine_entityType_referenceSyncId_receivedAt",
+            on: "activityQuarantine",
+            columns: ["entityType", "referenceSyncId", "receivedAt"]
+        )
+
+        try installV13SyncTriggers(db)
+        try installV13IdentityValidationTriggers(db)
+
+        try db.execute(sql: """
+            INSERT INTO syncSession(key, value) VALUES('fullHistoryReplayPending', '1')
+                ON CONFLICT(key) DO UPDATE SET value = '1'
+            """)
+        try db.execute(sql: """
+            INSERT INTO syncSession(key, value) VALUES('writerUpgradeRequired', '1')
+                ON CONFLICT(key) DO UPDATE SET value = '1'
+            """)
+    }
+
+    private static func classifyV13ArchivedSystemFields(
+        _ db: Database
+    ) throws -> Set<V13EntityKey> {
+        let rows = try Row.fetchAll(db, sql: """
+            SELECT entityType, entityId, systemFields
+            FROM syncState
+            WHERE systemFields IS NOT NULL
+            ORDER BY entityType, entityId
+            """)
+        guard !rows.isEmpty else { return [] }
+        guard ArchivedSyncRecordInspector.isAvailable else {
+            throw SyncIdentityMigrationError.requiresAppleIdentityMigration(
+                archivedRecordCount: rows.count
+            )
+        }
+
+        var proven = Set<V13EntityKey>()
+        var failed = 0
+        for row in rows {
+            let entityType: String = row["entityType"]
+            let entityId: String = row["entityId"]
+            let data: Data = row["systemFields"]
+            guard let entity = SyncIdentityEntity(rawValue: entityType),
+                  let archived = ArchivedSyncRecordInspector.inspect(data),
+                  archived.recordType == entity.recordType,
+                  archived.recordName == entity.qualifiedRecordName(entityId: entityId)
+            else {
+                failed += 1
+                continue
+            }
+            proven.insert(.init(entityType: entityType, entityId: entityId))
+        }
+
+        let allowedFailures = min(10, max(1, rows.count / 100))
+        guard failed <= allowedFailures else {
+            throw SyncIdentityMigrationError.identityArchiveClassificationFailed(
+                total: rows.count,
+                failed: failed
+            )
+        }
+        // Some v12 record names themselves prove parent identities even when
+        // the parent's cached system fields were lost. Preserve that evidence
+        // transitively so replay cannot insert a second parent under a UUID.
+        for key in Array(proven) {
+            switch key.entityType {
+            case "referenceTag":
+                let components = key.entityId.split(
+                    separator: "/",
+                    omittingEmptySubsequences: false
+                )
+                guard components.count == 2 else { continue }
+                let referenceId = String(components[0])
+                let tagId = String(components[1])
+                if SyncIdentifier.isCanonicalDecimal(referenceId) {
+                    proven.insert(.init(entityType: "reference", entityId: referenceId))
+                }
+                if SyncIdentifier.isCanonicalDecimal(tagId) {
+                    proven.insert(.init(entityType: "tag", entityId: tagId))
+                }
+            case "readingActivity":
+                let components = key.entityId.split(
+                    separator: "/",
+                    omittingEmptySubsequences: false
+                )
+                guard components.count == 4 else { continue }
+                let referenceId = String(components[2])
+                if SyncIdentifier.isCanonicalDecimal(referenceId) {
+                    proven.insert(.init(entityType: "reference", entityId: referenceId))
+                }
+            case "referencePDF":
+                if SyncIdentifier.isCanonicalDecimal(key.entityId) {
+                    proven.insert(.init(entityType: "reference", entityId: key.entityId))
+                }
+            default:
+                break
+            }
+        }
+        return proven
+    }
+
+    private static func v13IdentityMap(
+        _ db: Database,
+        table: String
+    ) throws -> [Int64: String] {
+        let rows = try Row.fetchAll(
+            db,
+            sql: "SELECT id, syncId FROM \(table) ORDER BY id"
+        )
+        return try Dictionary(uniqueKeysWithValues: rows.map { row in
+            let id: Int64 = row["id"]
+            guard let syncId: String = row["syncId"], !syncId.isEmpty else {
+                throw SyncIdentityMigrationError.invalidIdentityData(
+                    "\(table) \(id) has no sync identity"
+                )
+            }
+            return (id, syncId)
+        })
+    }
+
+    private static func v13BackfillGlobalForeignKeys(
+        _ db: Database,
+        referenceIDs: [Int64: String],
+        intakeIDs: [Int64: String]
+    ) throws {
+        for table in ["pdfAnnotation", "webAnnotation"] {
+            let rows = try Row.fetchAll(
+                db,
+                sql: "SELECT id, referenceId FROM \(table) ORDER BY id"
+            )
+            for row in rows {
+                let id: Int64 = row["id"]
+                let referenceId: Int64 = row["referenceId"]
+                guard let referenceSyncId = referenceIDs[referenceId] else {
+                    throw SyncIdentityMigrationError.invalidIdentityData(
+                        "\(table) \(id) has an unresolved Reference \(referenceId)"
+                    )
+                }
+                try db.execute(
+                    sql: "UPDATE \(table) SET referenceSyncId = ? WHERE id = ?",
+                    arguments: [referenceSyncId, id]
+                )
+            }
+        }
+
+        let intakeRows = try Row.fetchAll(db, sql: """
+            SELECT id, linkedReferenceId FROM metadataIntake ORDER BY id
+            """)
+        for row in intakeRows {
+            let id: Int64 = row["id"]
+            let referenceId: Int64? = row["linkedReferenceId"]
+            let referenceSyncId = referenceId.flatMap { referenceIDs[$0] }
+            if referenceId != nil, referenceSyncId == nil {
+                throw SyncIdentityMigrationError.invalidIdentityData(
+                    "metadataIntake \(id) has an unresolved linked Reference"
+                )
+            }
+            try db.execute(
+                sql: "UPDATE metadataIntake SET linkedReferenceSyncId = ? WHERE id = ?",
+                arguments: [referenceSyncId, id]
+            )
+        }
+
+        let evidenceRows = try Row.fetchAll(db, sql: """
+            SELECT id, intakeId, referenceId FROM metadataEvidence ORDER BY id
+            """)
+        for row in evidenceRows {
+            let id: Int64 = row["id"]
+            let intakeId: Int64? = row["intakeId"]
+            let referenceId: Int64? = row["referenceId"]
+            let intakeSyncId = intakeId.flatMap { intakeIDs[$0] }
+            let referenceSyncId = referenceId.flatMap { referenceIDs[$0] }
+            if intakeId != nil, intakeSyncId == nil {
+                throw SyncIdentityMigrationError.invalidIdentityData(
+                    "metadataEvidence \(id) has an unresolved intake"
+                )
+            }
+            if referenceId != nil, referenceSyncId == nil {
+                throw SyncIdentityMigrationError.invalidIdentityData(
+                    "metadataEvidence \(id) has an unresolved Reference"
+                )
+            }
+            try db.execute(sql: """
+                UPDATE metadataEvidence
+                SET intakeSyncId = ?, referenceSyncId = ?
+                WHERE id = ?
+                """, arguments: [intakeSyncId, referenceSyncId, id])
+        }
+
+        let quarantinedRows = try Row.fetchAll(db, sql: """
+            SELECT recordName, referenceId FROM activityQuarantine
+            WHERE entityType = 'readingActivity'
+            """)
+        for row in quarantinedRows {
+            let recordName: String = row["recordName"]
+            let referenceId: Int64? = row["referenceId"]
+            let referenceSyncId = referenceId.flatMap {
+                referenceIDs[$0] ?? String($0)
+            }
+            try db.execute(sql: """
+                UPDATE activityQuarantine SET referenceSyncId = ?
+                WHERE recordName = ?
+                """, arguments: [referenceSyncId, recordName])
+        }
+    }
+
+    private static func v13MigrateState(
+        _ mapping: V13IdentityMapping,
+        db: Database
+    ) throws {
+        let row = try Row.fetchOne(db, sql: """
+            SELECT systemFields, lastPushedAt, isDirty
+            FROM syncState
+            WHERE entityType = ? AND entityId = ?
+            """, arguments: [mapping.entityType, mapping.oldId])
+        if row == nil, !mapping.ensureState { return }
+
+        if mapping.newId != mapping.oldId,
+           try Bool.fetchOne(db, sql: """
+               SELECT EXISTS(
+                   SELECT 1 FROM syncState
+                   WHERE entityType = ? AND entityId = ?
+               )
+               """, arguments: [mapping.entityType, mapping.newId]) == true {
+            throw SyncIdentityMigrationError.invalidIdentityData(
+                "syncState collision for \(mapping.entityType):\(mapping.newId)"
+            )
+        }
+
+        if row != nil {
+            try db.execute(sql: """
+                DELETE FROM syncState WHERE entityType = ? AND entityId = ?
+                """, arguments: [mapping.entityType, mapping.oldId])
+        }
+
+        let systemFields: Data? = mapping.proven ? row?["systemFields"] : nil
+        let lastPushedAt: Date? = mapping.proven ? row?["lastPushedAt"] : nil
+        let wasDirty: Int = row?["isDirty"] ?? 1
+        try db.execute(sql: """
+            INSERT INTO syncState(
+                entityType, entityId, systemFields, lastPushedAt,
+                isDirty, pushInFlight
+            ) VALUES (?, ?, ?, ?, ?, 0)
+            """, arguments: [
+                mapping.entityType,
+                mapping.newId,
+                systemFields,
+                lastPushedAt,
+                mapping.proven ? wasDirty : 1,
+            ])
+    }
+
+    private static func installV13SyncTriggers(_ db: Database) throws {
+        let tables = [
+            "reference", "tag", "referenceTag", "pdfAnnotation",
+            "webAnnotation", "metadataIntake", "metadataEvidence",
+            "propertyDefinition", "propertyValue", "databaseView",
+            "readingActivity",
+        ]
+        let applyingRemoteGuard =
+            "WHEN (SELECT value FROM syncSession WHERE key='applyingRemote') IS NULL"
+
+        for table in tables {
+            for suffix in ["ai", "au", "ad"] {
+                try db.execute(sql: "DROP TRIGGER IF EXISTS \(table)_\(suffix)")
+            }
+            let markDirtyBody = """
+                INSERT INTO syncState(entityType, entityId, isDirty, pushInFlight)
+                    VALUES('\(table)', NEW.syncId, 1, 0)
+                    ON CONFLICT(entityType, entityId)
+                        DO UPDATE SET isDirty = 1, pushInFlight = 0;
+                """
+            for (suffix, event) in [("ai", "INSERT"), ("au", "UPDATE")] {
+                try db.execute(sql: """
+                    CREATE TRIGGER \(table)_\(suffix) AFTER \(event) ON \(table)
+                        \(applyingRemoteGuard)
+                    BEGIN
+                        \(markDirtyBody)
+                    END;
+                    """)
+            }
+
+            let proof = """
+                EXISTS(
+                    SELECT 1 FROM syncState
+                    WHERE entityType='\(table)'
+                      AND entityId=OLD.syncId
+                      AND systemFields IS NOT NULL
+                )
+                """
+            let eligible: String
+            switch table {
+            case "referenceTag":
+                eligible = """
+                    (\(v13SQLIsNonDecimal("OLD.referenceSyncId"))
+                     OR \(v13SQLIsNonDecimal("OLD.tagSyncId"))
+                     OR \(proof))
+                    """
+            case "readingActivity":
+                eligible = """
+                    (\(v13SQLIsNonDecimal("OLD.referenceSyncId")) OR \(proof))
+                    """
+            default:
+                eligible = "(\(v13SQLIsNonDecimal("OLD.syncId")) OR \(proof))"
+            }
+
+            try db.execute(sql: """
+                CREATE TRIGGER \(table)_ad AFTER DELETE ON \(table)
+                    \(applyingRemoteGuard)
+                BEGIN
+                    INSERT INTO tombstone(
+                        entityType, entityId, deletedAt, isPushEligible
+                    ) VALUES(
+                        '\(table)', OLD.syncId, \(sqlNowISO8601),
+                        CASE WHEN \(eligible) THEN 1 ELSE 0 END
+                    )
+                    ON CONFLICT(entityType, entityId) DO UPDATE SET
+                        deletedAt = excluded.deletedAt,
+                        isPushEligible = MAX(
+                            tombstone.isPushEligible,
+                            excluded.isPushEligible
+                        );
+                    DELETE FROM syncState
+                    WHERE entityType='\(table)' AND entityId=OLD.syncId;
+                END;
+                """)
+        }
+    }
+
+    private static func v13SQLIsNonDecimal(_ expression: String) -> String {
+        """
+        NOT (
+            \(expression) <> ''
+            AND \(expression) NOT GLOB '*[^0-9]*'
+            AND printf('%lld', CAST(\(expression) AS INTEGER)) = \(expression)
+        )
+        """
+    }
+
+    private static func installV13IdentityValidationTriggers(
+        _ db: Database
+    ) throws {
+        let tables = [
+            "reference", "tag", "referenceTag", "pdfAnnotation",
+            "webAnnotation", "metadataIntake", "metadataEvidence",
+            "propertyDefinition", "propertyValue", "databaseView",
+            "readingActivity",
+        ]
+        for table in tables {
+            try db.execute(sql: """
+                CREATE TRIGGER \(table)_sync_identity_bi
+                BEFORE INSERT ON \(table)
+                WHEN NEW.syncId IS NULL OR trim(NEW.syncId) = ''
+                BEGIN
+                    SELECT RAISE(ABORT, '\(table) requires syncId');
+                END;
+                """)
+            try db.execute(sql: """
+                CREATE TRIGGER \(table)_sync_identity_bu
+                BEFORE UPDATE ON \(table)
+                WHEN NEW.syncId IS NULL OR trim(NEW.syncId) = ''
+                  OR (
+                    OLD.syncId <> NEW.syncId
+                    AND (SELECT value FROM syncSession
+                         WHERE key='applyingRemote') IS NULL
+                  )
+                BEGIN
+                    SELECT RAISE(ABORT, '\(table) syncId is immutable');
+                END;
+                """)
+        }
+
+        for table in ["referenceTag", "pdfAnnotation", "webAnnotation", "propertyValue", "readingActivity"] {
+            let predicate: String
+            switch table {
+            case "referenceTag":
+                predicate = """
+                    NEW.referenceSyncId IS NULL OR trim(NEW.referenceSyncId) = ''
+                    OR NEW.tagSyncId IS NULL OR trim(NEW.tagSyncId) = ''
+                    OR NOT EXISTS(
+                        SELECT 1 FROM reference
+                        WHERE id=NEW.referenceId AND syncId=NEW.referenceSyncId
+                    )
+                    OR NOT EXISTS(
+                        SELECT 1 FROM tag
+                        WHERE id=NEW.tagId AND syncId=NEW.tagSyncId
+                    )
+                    """
+            case "propertyValue":
+                predicate = """
+                    NEW.referenceSyncId IS NULL OR trim(NEW.referenceSyncId) = ''
+                    OR NEW.propertySyncId IS NULL OR trim(NEW.propertySyncId) = ''
+                    OR NOT EXISTS(
+                        SELECT 1 FROM reference
+                        WHERE id=NEW.referenceId AND syncId=NEW.referenceSyncId
+                    )
+                    OR NOT EXISTS(
+                        SELECT 1 FROM propertyDefinition
+                        WHERE id=NEW.propertyId AND syncId=NEW.propertySyncId
+                    )
+                    """
+            default:
+                predicate = """
+                    NEW.referenceSyncId IS NULL OR trim(NEW.referenceSyncId) = ''
+                    OR NOT EXISTS(
+                        SELECT 1 FROM reference
+                        WHERE id=NEW.referenceId AND syncId=NEW.referenceSyncId
+                    )
+                    """
+            }
+            for (suffix, event) in [("bi", "INSERT"), ("bu", "UPDATE")] {
+                try db.execute(sql: """
+                    CREATE TRIGGER \(table)_global_fk_\(suffix)
+                    BEFORE \(event) ON \(table)
+                    WHEN \(predicate)
+                    BEGIN
+                        SELECT RAISE(ABORT, '\(table) has inconsistent global FK');
+                    END;
+                    """)
+            }
+        }
+
+        let optionalFKs: [(table: String, local: String, global: String, parent: String)] = [
+            ("metadataIntake", "linkedReferenceId", "linkedReferenceSyncId", "reference"),
+            ("metadataEvidence", "intakeId", "intakeSyncId", "metadataIntake"),
+            ("metadataEvidence", "referenceId", "referenceSyncId", "reference"),
+        ]
+        for fk in optionalFKs {
+            for (suffix, event) in [("bi", "INSERT"), ("bu", "UPDATE")] {
+                try db.execute(sql: """
+                    CREATE TRIGGER \(fk.table)_\(fk.global)_\(suffix)
+                    BEFORE \(event) ON \(fk.table)
+                    WHEN (NEW.\(fk.local) IS NULL) <> (NEW.\(fk.global) IS NULL)
+                      OR (
+                        NEW.\(fk.local) IS NOT NULL
+                        AND NOT EXISTS(
+                            SELECT 1 FROM \(fk.parent)
+                            WHERE id=NEW.\(fk.local) AND syncId=NEW.\(fk.global)
+                        )
+                      )
+                    BEGIN
+                        SELECT RAISE(ABORT, '\(fk.table) has inconsistent \(fk.global)');
+                    END;
+                    """)
+            }
+        }
+    }
+
     fileprivate static func applyV7Body(_ db: Database) throws {
         try db.execute(sql: """
             CREATE TABLE readingActivity (
@@ -1460,6 +2155,23 @@ public final class AppDatabase: Sendable {
         }
     }
 
+    /// Test-only: builds the exact registered v1...v12 schema without v13 so
+    /// migration tests can exercise the real production v13 registration.
+    public static func makeV12DatabaseForTesting(on queue: DatabaseQueue) throws {
+        _ = try AppDatabase(queue, includesV13Migration: false)
+    }
+
+    private init(
+        _ dbWriter: any DatabaseWriter,
+        includesV13Migration: Bool
+    ) throws {
+        self.dbWriter = dbWriter
+        self.includesV13Migration = includesV13Migration
+        let migrator = self.migrator
+        try Self.recoverPendingV11BlockedBySyncOrphans(on: dbWriter)
+        try migrator.migrate(dbWriter)
+    }
+
     /// Tables whose rows sync to CloudKit. Order is not significant here; pull-side
     /// FK ordering is handled by the sync engine.
     private var syncedTables: [String] {
@@ -1498,6 +2210,94 @@ public final class AppDatabase: Sendable {
 
 // MARK: - Database Access
 extension AppDatabase {
+    static func requiredSyncId(
+        table: String,
+        id: Int64,
+        db: Database
+    ) throws -> String {
+        guard let syncId = try String.fetchOne(
+            db,
+            sql: "SELECT syncId FROM \(table) WHERE id = ?",
+            arguments: [id]
+        ), !syncId.isEmpty else {
+            throw SyncIdentityMigrationError.invalidIdentityData(
+                "missing \(table) sync identity for local row \(id)"
+            )
+        }
+        return syncId
+    }
+
+    static func makeReferenceTag(
+        referenceId: Int64,
+        tagId: Int64,
+        dateModified: Date = Date(),
+        db: Database
+    ) throws -> ReferenceTag {
+        let referenceSyncId = try requiredSyncId(
+            table: "reference",
+            id: referenceId,
+            db: db
+        )
+        let tagSyncId = try requiredSyncId(table: "tag", id: tagId, db: db)
+        return ReferenceTag(
+            syncId: "\(referenceSyncId)/\(tagSyncId)",
+            referenceId: referenceId,
+            tagId: tagId,
+            referenceSyncId: referenceSyncId,
+            tagSyncId: tagSyncId,
+            dateModified: dateModified
+        )
+    }
+
+    static func makePropertyValue(
+        referenceId: Int64,
+        propertyId: Int64,
+        value: String?,
+        dateModified: Date = Date(),
+        db: Database
+    ) throws -> PropertyValue {
+        let referenceSyncId = try requiredSyncId(
+            table: "reference",
+            id: referenceId,
+            db: db
+        )
+        let propertySyncId = try requiredSyncId(
+            table: "propertyDefinition",
+            id: propertyId,
+            db: db
+        )
+        return PropertyValue(
+            syncId: "\(referenceSyncId)/\(propertySyncId)",
+            referenceId: referenceId,
+            referenceSyncId: referenceSyncId,
+            propertyId: propertyId,
+            propertySyncId: propertySyncId,
+            value: value,
+            dateModified: dateModified
+        )
+    }
+
+    static func hydrateMetadataIntakeRelations(
+        _ intake: inout MetadataIntake,
+        db: Database
+    ) throws {
+        intake.linkedReferenceSyncId = try intake.linkedReferenceId.map {
+            try requiredSyncId(table: "reference", id: $0, db: db)
+        }
+    }
+
+    static func hydrateMetadataEvidenceRelations(
+        _ evidence: inout MetadataEvidence,
+        db: Database
+    ) throws {
+        evidence.intakeSyncId = try evidence.intakeId.map {
+            try requiredSyncId(table: "metadataIntake", id: $0, db: db)
+        }
+        evidence.referenceSyncId = try evidence.referenceId.map {
+            try requiredSyncId(table: "reference", id: $0, db: db)
+        }
+    }
+
     public static let shared = makeShared()
 
     /// Shared App Group identifier. Both `Rubien.app` (sandboxed) and the
@@ -2316,20 +3116,38 @@ extension AppDatabase {
     ) throws {
         guard !ids.isEmpty else { return }
         let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
-        let cachedIds = try Int64.fetchAll(
+        let cachedRows = try Row.fetchAll(
             db,
-            sql: "SELECT referenceId FROM pdfCache WHERE referenceId IN (\(placeholders))",
+            sql: """
+                SELECT r.syncId,
+                       CASE
+                           WHEN \(v13SQLIsNonDecimal("r.syncId")) THEN 1
+                           WHEN EXISTS (
+                               SELECT 1 FROM syncState s
+                               WHERE s.entityType = 'referencePDF'
+                                 AND s.entityId = r.syncId
+                                 AND s.systemFields IS NOT NULL
+                           ) THEN 1
+                           ELSE 0
+                       END AS isPushEligible
+                FROM pdfCache p
+                JOIN reference r ON r.id = p.referenceId
+                WHERE p.referenceId IN (\(placeholders))
+                """,
             arguments: StatementArguments(ids)
         )
-        for id in cachedIds {
-            let entityId = String(id)
+        for row in cachedRows {
+            let entityId: String = row["syncId"]
+            let isPushEligible: Int = row["isPushEligible"]
             // Mirrors the SQL the reference_ad trigger emits for the parent.
             try db.execute(sql: """
-                INSERT INTO tombstone(entityType, entityId, deletedAt)
-                    VALUES('referencePDF', ?, \(sqlNowISO8601))
+                INSERT INTO tombstone(entityType, entityId, deletedAt, isPushEligible)
+                    VALUES('referencePDF', ?, \(sqlNowISO8601), ?)
                     ON CONFLICT(entityType, entityId)
-                        DO UPDATE SET deletedAt = excluded.deletedAt;
-                """, arguments: [entityId])
+                        DO UPDATE SET
+                            deletedAt = excluded.deletedAt,
+                            isPushEligible = MAX(tombstone.isPushEligible, excluded.isPushEligible);
+                """, arguments: [entityId, isPushEligible])
             try db.execute(sql: """
                 DELETE FROM syncState WHERE entityType='referencePDF' AND entityId=?
                 """, arguments: [entityId])
@@ -2546,6 +3364,13 @@ extension AppDatabase {
                     resolvedId = existing.id
                     entryDisposition = .existing
                 } else {
+                    if try Int.fetchOne(
+                        db,
+                        sql: "SELECT 1 FROM reference WHERE syncId = ? LIMIT 1",
+                        arguments: [ref.syncId]
+                    ) != nil {
+                        ref.syncId = SyncIdentifier.random()
+                    }
                     ref.dateAdded = insertionTimestamp
                     ref.dateModified = insertionTimestamp
                     try ref.insert(db)
@@ -2587,10 +3412,18 @@ extension AppDatabase {
                         var fingerprints = Set(
                             existing.map(ImportedAnnotationFingerprint.init)
                         )
+                        let referenceSyncId = try Self.requiredSyncId(
+                            table: "reference",
+                            id: id,
+                            db: db
+                        )
                         for draft in drafts {
                             let fingerprint = ImportedAnnotationFingerprint(draft)
                             guard fingerprints.insert(fingerprint).inserted else { continue }
-                            var annotation = draft.makeRecord(referenceId: id)
+                            var annotation = draft.makeRecord(
+                                referenceId: id,
+                                referenceSyncId: referenceSyncId
+                            )
                             try annotation.insert(db)
                             annotationsInserted += 1
                         }
@@ -2710,6 +3543,7 @@ extension AppDatabase {
             if intake.createdAt > intake.updatedAt {
                 intake.createdAt = intake.updatedAt
             }
+            try Self.hydrateMetadataIntakeRelations(&intake, db: db)
             try intake.save(db)
         }
     }
@@ -2746,6 +3580,7 @@ extension AppDatabase {
 
     public func saveMetadataEvidence(_ evidence: inout MetadataEvidence) throws {
         try dbWriter.write { db in
+            try Self.hydrateMetadataEvidenceRelations(&evidence, db: db)
             try evidence.save(db)
         }
     }
@@ -2795,6 +3630,7 @@ extension AppDatabase {
                     existingIntake.evidenceBundleHash = envelope.reference.evidenceBundleHash
                     existingIntake.statusMessage = envelope.reference.verificationStatus.displayName
                     existingIntake.updatedAt = Date()
+                    try Self.hydrateMetadataIntakeRelations(&existingIntake, db: db)
                     try existingIntake.save(db)
                 }
 
@@ -2816,6 +3652,7 @@ extension AppDatabase {
                     evidence: envelope.evidence,
                     options: options
                 )
+                try Self.hydrateMetadataIntakeRelations(&intake, db: db)
                 try intake.save(db)
                 try upsertEvidence(bundle: envelope.evidence, intakeId: intake.id, referenceId: nil, db: db)
                 return DetailedMetadataPersistenceResult(result: .intake(intake), disposition: .queued)
@@ -2831,6 +3668,7 @@ extension AppDatabase {
                     evidence: envelope.evidence,
                     options: options
                 )
+                try Self.hydrateMetadataIntakeRelations(&intake, db: db)
                 try intake.save(db)
                 try upsertEvidence(bundle: envelope.evidence, intakeId: intake.id, referenceId: nil, db: db)
                 return DetailedMetadataPersistenceResult(result: .intake(intake), disposition: .queued)
@@ -2846,6 +3684,7 @@ extension AppDatabase {
                     evidence: envelope.evidence,
                     options: options
                 )
+                try Self.hydrateMetadataIntakeRelations(&intake, db: db)
                 try intake.save(db)
                 try upsertEvidence(bundle: envelope.evidence, intakeId: intake.id, referenceId: nil, db: db)
                 return DetailedMetadataPersistenceResult(result: .intake(intake), disposition: .queued)
@@ -2861,6 +3700,7 @@ extension AppDatabase {
                     evidence: envelope.evidence,
                     options: options
                 )
+                try Self.hydrateMetadataIntakeRelations(&intake, db: db)
                 try intake.save(db)
                 try upsertEvidence(bundle: envelope.evidence, intakeId: intake.id, referenceId: nil, db: db)
                 return DetailedMetadataPersistenceResult(result: .intake(intake), disposition: .queued)
@@ -2948,6 +3788,7 @@ extension AppDatabase {
             storedIntake.evidenceBundleHash = evidence?.bundleHash ?? reference.evidenceBundleHash
             storedIntake.updatedAt = Date()
             storedIntake.statusMessage = "Manually confirmed and added to library"
+            try Self.hydrateMetadataIntakeRelations(&storedIntake, db: db)
             try storedIntake.save(db)
 
             try upsertEvidence(
@@ -3149,6 +3990,7 @@ extension AppDatabase {
             existing.intakeId = intakeId ?? existing.intakeId
             existing.referenceId = referenceId ?? existing.referenceId
             existing.payloadJSON = payloadJSON
+            try Self.hydrateMetadataEvidenceRelations(&existing, db: db)
             try existing.save(db)
             return
         }
@@ -3163,6 +4005,7 @@ extension AppDatabase {
             fetchMode: bundle.fetchMode,
             payloadJSON: payloadJSON
         )
+        try Self.hydrateMetadataEvidenceRelations(&evidence, db: db)
         try evidence.save(db)
     }
 
@@ -3593,7 +4436,11 @@ extension AppDatabase {
         try dbWriter.write { db in
             try ReferenceTag.filter(ReferenceTag.Columns.referenceId == refId).deleteAll(db)
             for tagId in tagIds {
-                let pivot = ReferenceTag(referenceId: refId, tagId: tagId)
+                let pivot = try Self.makeReferenceTag(
+                    referenceId: refId,
+                    tagId: tagId,
+                    db: db
+                )
                 try pivot.insert(db)
             }
         }
@@ -3673,6 +4520,11 @@ extension AppDatabase {
 extension AppDatabase {
     public func saveAnnotation(_ annotation: inout PDFAnnotationRecord) throws {
         try dbWriter.write { db in
+            annotation.referenceSyncId = try Self.requiredSyncId(
+                table: "reference",
+                id: annotation.referenceId,
+                db: db
+            )
             try annotation.save(db)
         }
     }
@@ -3681,6 +4533,11 @@ extension AppDatabase {
         guard !annotations.isEmpty else { return }
         try dbWriter.write { db in
             for index in annotations.indices {
+                annotations[index].referenceSyncId = try Self.requiredSyncId(
+                    table: "reference",
+                    id: annotations[index].referenceId,
+                    db: db
+                )
                 try annotations[index].save(db)
             }
         }
@@ -3727,6 +4584,11 @@ extension AppDatabase {
 extension AppDatabase {
     public func saveWebAnnotation(_ annotation: inout WebAnnotationRecord) throws {
         try dbWriter.write { db in
+            annotation.referenceSyncId = try Self.requiredSyncId(
+                table: "reference",
+                id: annotation.referenceId,
+                db: db
+            )
             try annotation.save(db)
         }
     }
@@ -4121,7 +4983,7 @@ extension AppDatabase {
 
     private static func loadReferenceTagMappings(_ db: Database) throws -> [Int64: [Tag]] {
         let rows = try Row.fetchAll(db, sql: """
-            SELECT rt.referenceId, t.id, t.name, t.color
+            SELECT rt.referenceId, t.id, t.syncId, t.name, t.color
             FROM referenceTag rt
             JOIN tag t ON t.id = rt.tagId
             ORDER BY t.name
@@ -4129,7 +4991,12 @@ extension AppDatabase {
         var map: [Int64: [Tag]] = [:]
         for row in rows {
             let refId: Int64 = row["referenceId"]
-            let tag = Tag(id: row["id"], name: row["name"], color: row["color"])
+            let tag = Tag(
+                id: row["id"],
+                syncId: row["syncId"],
+                name: row["name"],
+                color: row["color"]
+            )
             map[refId, default: []].append(tag)
         }
         return map
@@ -4371,13 +5238,19 @@ extension AppDatabase {
                         // delete the old pivots. INSERT OR IGNORE handles
                         // refs already carrying both tags so we don't trip
                         // the composite PK.
-                        try db.execute(
-                            sql: """
-                                INSERT OR IGNORE INTO referenceTag(referenceId, tagId, dateModified)
-                                SELECT referenceId, ?, \(sqlNowISO8601) FROM referenceTag WHERE tagId = ?
-                                """,
-                            arguments: [replacementId, tagId]
+                        let referenceIds = try Int64.fetchAll(
+                            db,
+                            sql: "SELECT referenceId FROM referenceTag WHERE tagId = ?",
+                            arguments: [tagId]
                         )
+                        for referenceId in referenceIds {
+                            let pivot = try Self.makeReferenceTag(
+                                referenceId: referenceId,
+                                tagId: replacementId,
+                                db: db
+                            )
+                            try pivot.insert(db, onConflict: .ignore)
+                        }
                     } else if !clearInUse {
                         throw PropertyOptionError.optionInUse(count: affectedCount)
                     }
@@ -4597,6 +5470,11 @@ extension AppDatabase {
                 .filter(PropertyDefinition.Columns.defaultFieldKey == PropertyDefinition.tagsFieldKey)
                 .fetchOne(db),
                let tagsPropId = tagsProp.id {
+                let referenceSyncId = try Self.requiredSyncId(
+                    table: "reference",
+                    id: refId,
+                    db: db
+                )
                 let tagIds = try Int64.fetchAll(
                     db,
                     sql: "SELECT tagId FROM referenceTag WHERE referenceId = ? ORDER BY tagId",
@@ -4606,8 +5484,11 @@ extension AppDatabase {
                     let stringIds = tagIds.map(String.init)
                     let encoded = PropertyValue.encodeMultiSelect(stringIds)
                     rows.append(PropertyValue(
+                        syncId: "virtual:tags:\(referenceSyncId)",
                         referenceId: refId,
+                        referenceSyncId: referenceSyncId,
                         propertyId: tagsPropId,
+                        propertySyncId: tagsProp.syncId,
                         value: encoded
                     ))
                 }
@@ -4658,7 +5539,12 @@ extension AppDatabase {
                     _ = try existing.delete(db)
                 }
             } else if let value {
-                var pv = PropertyValue(referenceId: referenceId, propertyId: propertyId, value: value)
+                var pv = try Self.makePropertyValue(
+                    referenceId: referenceId,
+                    propertyId: propertyId,
+                    value: value,
+                    db: db
+                )
                 try pv.insert(db)
             }
         }
@@ -4730,10 +5616,12 @@ extension AppDatabase {
                         // INSERT OR IGNORE keeps the operation idempotent —
                         // the dirty-tracking trigger only fires when a row is
                         // actually inserted, so re-adding skips sync churn.
-                        try db.execute(
-                            sql: "INSERT OR IGNORE INTO referenceTag(referenceId, tagId, dateModified) VALUES (?, ?, \(sqlNowISO8601))",
-                            arguments: [referenceId, tagId]
+                        let pivot = try Self.makeReferenceTag(
+                            referenceId: referenceId,
+                            tagId: tagId,
+                            db: db
                         )
+                        try pivot.insert(db, onConflict: .ignore)
                     }
                 case .remove:
                     let placeholders = tagIds.map { _ in "?" }.joined(separator: ",")
@@ -4783,7 +5671,12 @@ extension AppDatabase {
                     _ = try existing.delete(db)
                 }
             } else if let encoded {
-                var pv = PropertyValue(referenceId: referenceId, propertyId: propertyId, value: encoded)
+                var pv = try Self.makePropertyValue(
+                    referenceId: referenceId,
+                    propertyId: propertyId,
+                    value: encoded,
+                    db: db
+                )
                 try pv.insert(db)
             }
         }

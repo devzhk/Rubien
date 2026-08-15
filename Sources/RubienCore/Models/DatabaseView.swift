@@ -140,6 +140,7 @@ public enum ViewScope: Codable, Hashable, Sendable {
 
 public struct DatabaseView: Identifiable, Codable, Hashable, Sendable {
     public var id: Int64?
+    public var syncId: String
     public var name: String
     public var icon: String
     public var scopeJSON: String
@@ -159,6 +160,7 @@ public struct DatabaseView: Identifiable, Codable, Hashable, Sendable {
 
     public init(
         id: Int64? = nil,
+        syncId: String = SyncIdentifier.random(),
         name: String,
         icon: String = ViewIconCatalog.defaultIcon,
         scope: ViewScope = .all,
@@ -173,6 +175,7 @@ public struct DatabaseView: Identifiable, Codable, Hashable, Sendable {
         dateModified: Date = Date()
     ) {
         self.id = id
+        self.syncId = syncId
         self.name = name
         self.icon = icon
         self.scopeJSON = Self.encodeJSON(scope) ?? "{}"
@@ -248,7 +251,7 @@ extension DatabaseView: FetchableRecord, MutablePersistableRecord {
     }
 
     public enum Columns: String, ColumnExpression {
-        case id, name, icon, scopeJSON, columnsJSON, filtersJSON, sortsJSON, groupByJSON
+        case id, syncId, name, icon, scopeJSON, columnsJSON, filtersJSON, sortsJSON, groupByJSON
         case columnWrapsJSON
         case isDefault, displayOrder, dateCreated, dateModified
     }

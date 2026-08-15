@@ -65,10 +65,13 @@ final class MigrationV11Tests: XCTestCase {
         try queue.writeWithoutTransaction { db in
             try db.execute(sql: "PRAGMA foreign_keys = OFF")
             do {
+                try db.execute(sql: "DROP TRIGGER IF EXISTS referenceTag_global_fk_bi")
                 try db.execute(sql: """
                     INSERT INTO referenceTag (
-                        referenceId, tagId, dateModified
-                    ) VALUES (9001, 9002, ?)
+                        syncId, referenceId, tagId,
+                        referenceSyncId, tagSyncId, dateModified
+                    ) VALUES ('orphan-reference/orphan-tag', 9001, 9002,
+                              'orphan-reference', 'orphan-tag', ?)
                     """, arguments: [Date(timeIntervalSince1970: 1)])
                 try db.execute(
                     sql: "DELETE FROM grdb_migrations WHERE identifier = 'v11'"
@@ -109,9 +112,7 @@ final class MigrationV11Tests: XCTestCase {
         let recordData = try JSONEncoder().encode(quarantined)
 
         try queue.write { db in
-            try db.execute(
-                sql: "DROP INDEX activityQuarantine_entityType_referenceId_receivedAt"
-            )
+            try db.execute(sql: "DROP INDEX IF EXISTS activityQuarantine_entityType_referenceId_receivedAt")
             try db.execute(
                 sql: "ALTER TABLE activityQuarantine DROP COLUMN referenceId"
             )
@@ -151,10 +152,13 @@ final class MigrationV11Tests: XCTestCase {
         try queue.writeWithoutTransaction { db in
             try db.execute(sql: "PRAGMA foreign_keys = OFF")
             do {
+                try db.execute(sql: "DROP TRIGGER IF EXISTS referenceTag_global_fk_bi")
                 try db.execute(sql: """
                     INSERT INTO referenceTag (
-                        referenceId, tagId, dateModified
-                    ) VALUES (9101, 9102, ?)
+                        syncId, referenceId, tagId,
+                        referenceSyncId, tagSyncId, dateModified
+                    ) VALUES ('orphan-reference/orphan-tag', 9101, 9102,
+                              'orphan-reference', 'orphan-tag', ?)
                     """, arguments: [Date(timeIntervalSince1970: 103)])
             } catch {
                 try? db.execute(sql: "PRAGMA foreign_keys = ON")

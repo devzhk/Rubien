@@ -328,7 +328,7 @@ extension AppDatabase {
         for chunk in referenceIDs.chunkedForExport() {
             let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
             let rows = try Row.fetchAll(db, sql: """
-                SELECT rt.referenceId, t.id, t.name, t.color
+                SELECT rt.referenceId, t.id, t.syncId, t.name, t.color
                 FROM referenceTag rt
                 JOIN tag t ON t.id = rt.tagId
                 WHERE rt.referenceId IN (\(placeholders))
@@ -337,7 +337,12 @@ extension AppDatabase {
             for row in rows {
                 let referenceID: Int64 = row["referenceId"]
                 map[referenceID, default: []].append(
-                    Tag(id: row["id"], name: row["name"], color: row["color"])
+                    Tag(
+                        id: row["id"],
+                        syncId: row["syncId"],
+                        name: row["name"],
+                        color: row["color"]
+                    )
                 )
             }
         }

@@ -85,12 +85,20 @@ extension AppDatabase {
                 current: current
             ) else { return .staleEpoch }
 
+            let referenceSyncId = try Self.requiredSyncId(
+                table: "reference",
+                id: referenceId,
+                db: db
+            )
+            let syncId = "\(acceptedContext.generation)/\(installationId)/\(referenceSyncId)/\(localDay.rawValue)"
+
             try db.execute(
                 sql: """
                     INSERT INTO readingActivity
-                        (installationId, referenceId, localDay, epochRevision, generation,
+                        (syncId, installationId, referenceId, referenceSyncId,
+                         localDay, epochRevision, generation,
                          activeSeconds, lastActiveAt, dateModified)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(generation, installationId, referenceId, localDay)
                     DO UPDATE SET
                         epochRevision = MAX(readingActivity.epochRevision, excluded.epochRevision),
@@ -99,8 +107,10 @@ extension AppDatabase {
                         dateModified = excluded.dateModified
                     """,
                 arguments: [
+                    syncId,
                     installationId,
                     referenceId,
+                    referenceSyncId,
                     localDay,
                     acceptedContext.revision,
                     acceptedContext.generation,

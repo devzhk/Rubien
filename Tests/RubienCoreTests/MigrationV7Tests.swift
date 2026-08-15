@@ -66,8 +66,13 @@ final class MigrationV7Tests: XCTestCase {
             for table in syncedTables {
                 let triggers = try String.fetchAll(
                     db,
-                    sql: "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name=? ORDER BY name",
-                    arguments: [table]
+                    sql: """
+                        SELECT name FROM sqlite_master
+                        WHERE type='trigger' AND tbl_name=?
+                          AND name IN (?, ?, ?)
+                        ORDER BY name
+                        """,
+                    arguments: [table, "\(table)_ad", "\(table)_ai", "\(table)_au"]
                 )
                 XCTAssertEqual(
                     triggers,
@@ -103,7 +108,7 @@ final class MigrationV7Tests: XCTestCase {
             context: context
         )
 
-        let expected = "\(context.generation)/installation-a/\(referenceId)/2026-07-15"
+        let expected = "\(context.generation)/installation-a/\(reference.syncId)/2026-07-15"
         let isDirty = try appDatabase.dbWriter.read { db in
             try Int.fetchOne(
                 db,

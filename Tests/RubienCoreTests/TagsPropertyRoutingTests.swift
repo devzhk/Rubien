@@ -339,6 +339,24 @@ final class TagsPropertyRoutingTests: XCTestCase {
         let tagId = try makeTag(db, name: "soon-to-die")
         try db.setTags(forReference: refA, tagIds: [tagId])
         try db.setTags(forReference: refB, tagIds: [tagId])
+        let identities = try db.dbWriter.read { dbConn -> (String, String, String) in
+            let refASyncId = try XCTUnwrap(String.fetchOne(
+                dbConn,
+                sql: "SELECT syncId FROM reference WHERE id = ?",
+                arguments: [refA]
+            ))
+            let refBSyncId = try XCTUnwrap(String.fetchOne(
+                dbConn,
+                sql: "SELECT syncId FROM reference WHERE id = ?",
+                arguments: [refB]
+            ))
+            let tagSyncId = try XCTUnwrap(String.fetchOne(
+                dbConn,
+                sql: "SELECT syncId FROM tag WHERE id = ?",
+                arguments: [tagId]
+            ))
+            return (refASyncId, refBSyncId, tagSyncId)
+        }
 
         // Clear pre-existing tombstones from earlier mutations so the
         // assertion sees only the cascade-emitted ones.
@@ -354,15 +372,15 @@ final class TagsPropertyRoutingTests: XCTestCase {
         let pairs: [(String, String)] = entries.map { ($0["entityType"] ?? "", $0["entityId"] ?? "") }
 
         XCTAssertTrue(
-            pairs.contains(where: { $0.0 == "tag" && $0.1 == String(tagId) }),
+            pairs.contains(where: { $0.0 == "tag" && $0.1 == identities.2 }),
             "expected a CDTag tombstone for the deleted tag; got \(pairs)"
         )
         XCTAssertTrue(
-            pairs.contains(where: { $0.0 == "referenceTag" && $0.1 == "\(refA)/\(tagId)" }),
+            pairs.contains(where: { $0.0 == "referenceTag" && $0.1 == "\(identities.0)/\(identities.2)" }),
             "expected a CDReferenceTag tombstone for refA cascade; got \(pairs)"
         )
         XCTAssertTrue(
-            pairs.contains(where: { $0.0 == "referenceTag" && $0.1 == "\(refB)/\(tagId)" }),
+            pairs.contains(where: { $0.0 == "referenceTag" && $0.1 == "\(identities.1)/\(identities.2)" }),
             "expected a CDReferenceTag tombstone for refB cascade; got \(pairs)"
         )
     }

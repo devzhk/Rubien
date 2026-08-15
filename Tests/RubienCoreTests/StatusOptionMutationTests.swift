@@ -28,10 +28,10 @@ final class StatusOptionMutationTests: XCTestCase {
         // Insert a couple of references with the status we're about to rename.
         try db.dbWriter.write { writer in
             try writer.execute(sql: """
-                INSERT INTO reference(id, title, dateAdded, dateModified, readingStatus)
-                VALUES (1, 'a', ?, ?, 'Skimmed'),
-                       (2, 'b', ?, ?, 'Skimmed'),
-                       (3, 'c', ?, ?, 'Read')
+                INSERT INTO reference(id, syncId, title, dateAdded, dateModified, readingStatus)
+                VALUES (1, 'ref-1', 'a', ?, ?, 'Skimmed'),
+                       (2, 'ref-2', 'b', ?, ?, 'Skimmed'),
+                       (3, 'ref-3', 'c', ?, ?, 'Read')
             """, arguments: [
                 Date(), Date(), Date(), Date(), Date(), Date()
             ])
@@ -78,8 +78,8 @@ final class StatusOptionMutationTests: XCTestCase {
 
         try db.dbWriter.write { writer in
             try writer.execute(sql: """
-                INSERT INTO reference(id, title, dateAdded, dateModified, readingStatus)
-                VALUES (1, 'a', ?, ?, 'To Skim')
+                INSERT INTO reference(id, syncId, title, dateAdded, dateModified, readingStatus)
+                VALUES (1, 'ref-1', 'a', ?, ?, 'To Skim')
             """, arguments: [Date(), Date()])
         }
 
@@ -144,9 +144,9 @@ final class StatusOptionMutationTests: XCTestCase {
         let prop = try statusDef(db)
         try db.dbWriter.write { writer in
             try writer.execute(sql: """
-                INSERT INTO reference(id, title, dateAdded, dateModified, readingStatus)
-                VALUES (1, 'a', ?, ?, 'Skimmed'),
-                       (2, 'b', ?, ?, 'Skimmed')
+                INSERT INTO reference(id, syncId, title, dateAdded, dateModified, readingStatus)
+                VALUES (1, 'ref-1', 'a', ?, ?, 'Skimmed'),
+                       (2, 'ref-2', 'b', ?, ?, 'Skimmed')
             """, arguments: [Date(), Date(), Date(), Date()])
         }
         XCTAssertThrowsError(
@@ -167,10 +167,10 @@ final class StatusOptionMutationTests: XCTestCase {
         let prop = try statusDef(db)
         try db.dbWriter.write { writer in
             try writer.execute(sql: """
-                INSERT INTO reference(id, title, dateAdded, dateModified, readingStatus)
-                VALUES (1, 'a', ?, ?, 'Skimmed'),
-                       (2, 'b', ?, ?, 'Skimmed'),
-                       (3, 'c', ?, ?, 'Read')
+                INSERT INTO reference(id, syncId, title, dateAdded, dateModified, readingStatus)
+                VALUES (1, 'ref-1', 'a', ?, ?, 'Skimmed'),
+                       (2, 'ref-2', 'b', ?, ?, 'Skimmed'),
+                       (3, 'ref-3', 'c', ?, ?, 'Read')
             """, arguments: [Date(), Date(), Date(), Date(), Date(), Date()])
         }
         try db.deletePropertyOption(
@@ -287,8 +287,8 @@ final class StatusOptionMutationTests: XCTestCase {
         let prop = try statusDef(db)
         try db.dbWriter.write { writer in
             try writer.execute(sql: """
-                INSERT INTO reference(id, title, dateAdded, dateModified, readingStatus)
-                VALUES (1, 'a', ?, ?, 'Skimmed')
+                INSERT INTO reference(id, syncId, title, dateAdded, dateModified, readingStatus)
+                VALUES (1, 'ref-1', 'a', ?, ?, 'Skimmed')
             """, arguments: [Date(), Date()])
         }
         XCTAssertThrowsError(
@@ -332,8 +332,8 @@ final class StatusOptionMutationTests: XCTestCase {
 
         try db.dbWriter.write { writer in
             try writer.execute(sql: """
-                INSERT INTO propertyDefinition(name, type, optionsJSON, sortOrder, isDefault, isVisible)
-                VALUES ('Method', 'singleSelect', ?, 99, 0, 1)
+                INSERT INTO propertyDefinition(syncId, name, type, optionsJSON, sortOrder, isDefault, isVisible)
+                VALUES ('property-method', 'Method', 'singleSelect', ?, 99, 0, 1)
                 """, arguments: [rawOptions])
         }
 

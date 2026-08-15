@@ -23,8 +23,8 @@ final class PDFAssetCacheTests: XCTestCase {
     private func makeRef(id: Int64) throws {
         try db.dbWriter.write { db in
             try db.execute(
-                sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(?, 'r', ?, ?)",
-                arguments: [id, Date(), Date()]
+                sql: "INSERT INTO reference(id, syncId, title, dateAdded, dateModified) VALUES(?, ?, 'r', ?, ?)",
+                arguments: [id, "test-reference-\(id)", Date(), Date()]
             )
         }
     }

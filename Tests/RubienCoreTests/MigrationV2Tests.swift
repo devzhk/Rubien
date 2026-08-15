@@ -93,7 +93,7 @@ final class MigrationV2Tests: XCTestCase {
         let db = try AppDatabase(DatabaseQueue())
         try db.dbWriter.write { db in
             // Insert a Reference + cache row; omit lastOpenedAt to exercise default.
-            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(1, 'r', ?, ?)", arguments: [Date(), Date()])
+            try db.execute(sql: "INSERT INTO reference(id, syncId, title, dateAdded, dateModified) VALUES(1, 'ref-1', 'r', ?, ?)", arguments: [Date(), Date()])
             try db.execute(sql: """
                 INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion)
                 VALUES(1, 'x.pdf', 'h', 1)
@@ -112,7 +112,7 @@ final class MigrationV2Tests: XCTestCase {
             // Nullability: materializedAt may be NULL (the on-demand "metadata
             // known but file not on this device" signal). Insert another row
             // with explicit NULL to confirm the column accepts it.
-            try db.execute(sql: "INSERT INTO reference(id, title, dateAdded, dateModified) VALUES(2, 'r', ?, ?)", arguments: [Date(), Date()])
+            try db.execute(sql: "INSERT INTO reference(id, syncId, title, dateAdded, dateModified) VALUES(2, 'ref-2', 'r', ?, ?)", arguments: [Date(), Date()])
             try db.execute(sql: """
                 INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt)
                 VALUES(2, 'y.pdf', 'h', 1, NULL)

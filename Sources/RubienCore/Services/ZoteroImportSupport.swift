@@ -92,10 +92,12 @@ extension AppDatabase {
         guard let tagId = tag.id else { return }
 
         for refId in referenceIds {
-            try db.execute(
-                sql: "INSERT OR IGNORE INTO referenceTag (referenceId, tagId) VALUES (?, ?)",
-                arguments: [refId, tagId]
+            let pivot = try Self.makeReferenceTag(
+                referenceId: refId,
+                tagId: tagId,
+                db: db
             )
+            try pivot.insert(db, onConflict: .ignore)
         }
     }
 
@@ -125,10 +127,11 @@ extension AppDatabase {
                     try row.update(db)
                 }
             } else {
-                var row = PropertyValue(
+                var row = try Self.makePropertyValue(
                     referenceId: refId,
                     propertyId: propertyId,
-                    value: PropertyValue.encodeMultiSelect([trimmed])
+                    value: PropertyValue.encodeMultiSelect([trimmed]),
+                    db: db
                 )
                 try row.insert(db)
             }
@@ -157,7 +160,12 @@ extension AppDatabase {
                 row.value = trimmed
                 try row.update(db)
             } else {
-                var row = PropertyValue(referenceId: refId, propertyId: propertyId, value: trimmed)
+                var row = try Self.makePropertyValue(
+                    referenceId: refId,
+                    propertyId: propertyId,
+                    value: trimmed,
+                    db: db
+                )
                 try row.insert(db)
             }
         }
@@ -227,4 +235,3 @@ extension AppDatabase {
         }
     }
 }
-

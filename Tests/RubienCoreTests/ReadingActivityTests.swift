@@ -68,11 +68,20 @@ final class ReadingActivityTests: XCTestCase {
             for suffix in ["ai", "au", "ad"] {
                 try db.execute(sql: "DROP TRIGGER IF EXISTS readingActivity_\(suffix)")
             }
+            let referenceSyncIds = Dictionary(
+                uniqueKeysWithValues: try Row.fetchAll(
+                    db,
+                    sql: "SELECT id, syncId FROM reference"
+                ).map { row in
+                    (row["id"] as Int64, row["syncId"] as String)
+                }
+            )
             let insert = try db.makeStatement(sql: """
                 INSERT INTO readingActivity
-                    (installationId, referenceId, localDay, epochRevision, generation,
+                    (syncId, installationId, referenceId, referenceSyncId,
+                     localDay, epochRevision, generation,
                      activeSeconds, lastActiveAt, dateModified)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """)
             for dayOffset in 0 ..< dayCount {
                 let activeAt = try XCTUnwrap(
@@ -80,9 +89,11 @@ final class ReadingActivityTests: XCTestCase {
                 )
                 let localDay = LocalDay(date: activeAt, calendar: calendar)
                 for referenceId in referenceIds {
+                    let referenceSyncId = try XCTUnwrap(referenceSyncIds[referenceId])
                     for installation in 0 ..< installationCount {
                         try insert.execute(arguments: [
-                            "scale-\(installation)", referenceId, localDay,
+                            "\(context.generation)/scale-\(installation)/\(referenceSyncId)/\(localDay.rawValue)",
+                            "scale-\(installation)", referenceId, referenceSyncId, localDay,
                             context.revision, context.generation, secondsPerComponent,
                             activeAt, activeAt,
                         ])

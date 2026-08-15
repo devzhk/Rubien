@@ -761,9 +761,10 @@ final class AppDatabaseTests: XCTestCase {
     /// CDReferencePDF record (and its asset bytes against quota).
     func testDeleteReferencesEmitsReferencePDFTombstoneWhenCacheRowExists() throws {
         let db = try makeDatabase()
-        var ref = Reference(title: "with PDF")
+        var ref = Reference(syncId: "1abc-global-reference", title: "with PDF")
         try db.saveReference(&ref)
         let id = ref.id!
+        let syncId = ref.syncId
         try db.dbWriter.write { db in
             try db.execute(sql: """
                 INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
@@ -777,13 +778,13 @@ final class AppDatabaseTests: XCTestCase {
             // Parent reference tombstone (from v1 trigger).
             let refTomb = try Int.fetchOne(db,
                 sql: "SELECT COUNT(*) FROM tombstone WHERE entityType='reference' AND entityId=?",
-                arguments: [String(id)]) ?? -1
+                arguments: [syncId]) ?? -1
             XCTAssertEqual(refTomb, 1, "parent reference tombstone from trigger")
 
             // Sibling referencePDF tombstone (from the new Swift emit).
             let pdfTomb = try Int.fetchOne(db,
                 sql: "SELECT COUNT(*) FROM tombstone WHERE entityType='referencePDF' AND entityId=?",
-                arguments: [String(id)]) ?? -1
+                arguments: [syncId]) ?? -1
             XCTAssertEqual(pdfTomb, 1, "sibling referencePDF tombstone must propagate the delete to peers")
 
             // pdfCache row dropped via FK cascade.
@@ -802,13 +803,14 @@ final class AppDatabaseTests: XCTestCase {
         var ref = Reference(title: "no PDF")
         try db.saveReference(&ref)
         let id = ref.id!
+        let syncId = ref.syncId
 
         try db.deleteReferences(ids: [id])
 
         try db.dbWriter.read { db in
             let pdfTomb = try Int.fetchOne(db,
                 sql: "SELECT COUNT(*) FROM tombstone WHERE entityType='referencePDF' AND entityId=?",
-                arguments: [String(id)]) ?? -1
+                arguments: [syncId]) ?? -1
             XCTAssertEqual(pdfTomb, 0, "no pdfCache row → no referencePDF tombstone")
         }
     }
@@ -818,9 +820,13 @@ final class AppDatabaseTests: XCTestCase {
     /// `deleteReferences`. Both must emit the sibling tombstone.
     func testDeleteReferencesReturningPDFPathsEmitsReferencePDFTombstone() throws {
         let db = try makeDatabase()
-        var ref = Reference(title: "with PDF for return-paths variant")
+        var ref = Reference(
+            syncId: "2abc-global-reference",
+            title: "with PDF for return-paths variant"
+        )
         try db.saveReference(&ref)
         let id = ref.id!
+        let syncId = ref.syncId
         try db.dbWriter.write { db in
             try db.execute(sql: """
                 INSERT INTO pdfCache(referenceId, localFilename, contentHash, assetVersion, materializedAt, lastOpenedAt)
@@ -834,7 +840,7 @@ final class AppDatabaseTests: XCTestCase {
         try db.dbWriter.read { db in
             let pdfTomb = try Int.fetchOne(db,
                 sql: "SELECT COUNT(*) FROM tombstone WHERE entityType='referencePDF' AND entityId=?",
-                arguments: [String(id)]) ?? -1
+                arguments: [syncId]) ?? -1
             XCTAssertEqual(pdfTomb, 1)
         }
     }

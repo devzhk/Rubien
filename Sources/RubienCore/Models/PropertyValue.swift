@@ -3,21 +3,30 @@ import GRDB
 
 public struct PropertyValue: Identifiable, Codable, Hashable, Sendable {
     public var id: Int64?
+    public var syncId: String
     public var referenceId: Int64
+    public var referenceSyncId: String
     public var propertyId: Int64
+    public var propertySyncId: String
     public var value: String?
     public var dateModified: Date
 
     public init(
         id: Int64? = nil,
+        syncId: String = "",
         referenceId: Int64,
+        referenceSyncId: String = "",
         propertyId: Int64,
+        propertySyncId: String = "",
         value: String? = nil,
         dateModified: Date = Date()
     ) {
         self.id = id
+        self.syncId = syncId
         self.referenceId = referenceId
+        self.referenceSyncId = referenceSyncId
         self.propertyId = propertyId
+        self.propertySyncId = propertySyncId
         self.value = value
         self.dateModified = dateModified
     }
@@ -33,7 +42,8 @@ extension PropertyValue: FetchableRecord, MutablePersistableRecord {
     }
 
     public enum Columns: String, ColumnExpression {
-        case id, referenceId, propertyId, value, dateModified
+        case id, syncId, referenceId, referenceSyncId, propertyId, propertySyncId
+        case value, dateModified
     }
 }
 

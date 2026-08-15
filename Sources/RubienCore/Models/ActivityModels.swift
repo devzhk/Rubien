@@ -111,8 +111,10 @@ public enum ActivityKind: String, Codable, CaseIterable, DatabaseValueConvertibl
 public struct ReadingActivity: Codable, Hashable, Sendable {
     public static let databaseTableName = "readingActivity"
 
+    @EmptySyncIdentifier public var syncId: String
     public var installationId: String
     public var referenceId: Int64
+    @EmptySyncIdentifier public var referenceSyncId: String
     public var localDay: LocalDay
     public var epochRevision: Int
     public var generation: String
@@ -121,8 +123,10 @@ public struct ReadingActivity: Codable, Hashable, Sendable {
     public var dateModified: Date
 
     public init(
+        syncId: String = "",
         installationId: String,
         referenceId: Int64,
+        referenceSyncId: String = "",
         localDay: LocalDay,
         epochRevision: Int,
         generation: String,
@@ -131,8 +135,10 @@ public struct ReadingActivity: Codable, Hashable, Sendable {
         dateModified: Date = Date()
     ) {
         precondition(activeSeconds >= 0)
+        self.syncId = syncId
         self.installationId = installationId
         self.referenceId = referenceId
+        self.referenceSyncId = referenceSyncId
         self.localDay = localDay
         self.epochRevision = epochRevision
         self.generation = generation
@@ -142,19 +148,23 @@ public struct ReadingActivity: Codable, Hashable, Sendable {
     }
 
     public var entityId: String {
-        "\(generation)/\(installationId)/\(referenceId)/\(localDay.rawValue)"
+        if !syncId.isEmpty { return syncId }
+        return "\(generation)/\(installationId)/\(referenceId)/\(localDay.rawValue)"
     }
 
     public enum Columns: String, ColumnExpression {
-        case installationId, referenceId, localDay, epochRevision, generation
+        case syncId, installationId, referenceId, referenceSyncId
+        case localDay, epochRevision, generation
         case activeSeconds, lastActiveAt, dateModified
     }
 }
 
 extension ReadingActivity: FetchableRecord, MutablePersistableRecord {
     public init(row: Row) {
+        syncId = row[Columns.syncId]
         installationId = row[Columns.installationId]
         referenceId = row[Columns.referenceId]
+        referenceSyncId = row[Columns.referenceSyncId]
         localDay = row[Columns.localDay]
         epochRevision = row[Columns.epochRevision]
         generation = row[Columns.generation]
@@ -164,8 +174,10 @@ extension ReadingActivity: FetchableRecord, MutablePersistableRecord {
     }
 
     public func encode(to container: inout PersistenceContainer) {
+        container[Columns.syncId] = syncId
         container[Columns.installationId] = installationId
         container[Columns.referenceId] = referenceId
+        container[Columns.referenceSyncId] = referenceSyncId
         container[Columns.localDay] = localDay
         container[Columns.epochRevision] = epochRevision
         container[Columns.generation] = generation
@@ -323,6 +335,7 @@ public struct ActivityQuarantine: Codable, Hashable, Sendable {
     public var epochRevision: Int
     public var generation: String
     public var referenceId: Int64?
+    public var referenceSyncId: String?
     public var recordData: Data
     public var receivedAt: Date
 }
@@ -335,6 +348,7 @@ extension ActivityQuarantine: FetchableRecord, MutablePersistableRecord {
         epochRevision = row["epochRevision"]
         generation = row["generation"]
         referenceId = row["referenceId"]
+        referenceSyncId = row["referenceSyncId"]
         recordData = row["recordData"]
         receivedAt = row["receivedAt"]
     }
@@ -346,6 +360,7 @@ extension ActivityQuarantine: FetchableRecord, MutablePersistableRecord {
         container["epochRevision"] = epochRevision
         container["generation"] = generation
         container["referenceId"] = referenceId
+        container["referenceSyncId"] = referenceSyncId
         container["recordData"] = recordData
         container["receivedAt"] = receivedAt
     }

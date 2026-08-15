@@ -255,6 +255,7 @@ public enum ReadingStatus {
 
 public struct Reference: Identifiable, Codable, Hashable, Sendable {
     public var id: Int64?
+    @RandomSyncIdentifier public var syncId: String
     public var title: String
     public var authors: [AuthorName]
     public var year: Int?
@@ -331,6 +332,7 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
 
     public init(
         id: Int64? = nil,
+        syncId: String = SyncIdentifier.random(),
         title: String,
         authors: [AuthorName] = [],
         year: Int? = nil,
@@ -385,6 +387,7 @@ public struct Reference: Identifiable, Codable, Hashable, Sendable {
         pmcid: String? = nil
     ) {
         self.id = id
+        self.syncId = syncId
         self.title = title
         self.authors = authors
         self.year = year
@@ -486,7 +489,8 @@ extension Reference {
 
     public static func == (lhs: Reference, rhs: Reference) -> Bool {
         guard lhs.id == rhs.id else { return false }
-        guard lhs.title == rhs.title,
+        guard lhs.syncId == rhs.syncId,
+              lhs.title == rhs.title,
               lhs.authors == rhs.authors,
               lhs.year == rhs.year,
               lhs.journal == rhs.journal,
@@ -549,6 +553,7 @@ extension Reference {
             return
         }
 
+        hasher.combine(syncId)
         hasher.combine(title)
         hasher.combine(authors)
         hasher.combine(year)
@@ -603,6 +608,7 @@ extension Reference {
 extension Reference {
     public static let lightColumns: [any SQLSelectable] = [
         Columns.id,
+        Columns.syncId,
         Columns.title,
         Columns.authors,
         Columns.year,
@@ -800,6 +806,7 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
     /// Custom row decoding: handles both legacy plain-text and JSON-array authors
     public init(row: Row) {
         id = row["id"]
+        syncId = row["syncId"]
         title = row["title"]
 
         // Authors: try JSON array first, fall back to legacy plain text
@@ -874,6 +881,7 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
 
     public func encode(to container: inout PersistenceContainer) {
         container["id"] = id
+        container["syncId"] = syncId
         container["title"] = title
         // Encode authors as JSON string
         if let data = try? JSONEncoder().encode(authors),
@@ -940,7 +948,7 @@ extension Reference: FetchableRecord, MutablePersistableRecord {
     }
 
     public enum Columns: String, ColumnExpression {
-        case id, title, authors, authorsNormalized, year, journal, volume, issue, pages
+        case id, syncId, title, authors, authorsNormalized, year, journal, volume, issue, pages
         case doi, url, abstract, dateAdded, dateModified
         case notes, webContent, siteName, favicon, referenceType, metadataSource
         case verificationStatus, acceptedByRuleID, recordKey, verificationSourceURL, evidenceBundleHash, verifiedAt, reviewedBy

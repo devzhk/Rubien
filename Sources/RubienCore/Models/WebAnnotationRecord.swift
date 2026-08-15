@@ -3,7 +3,9 @@ import GRDB
 
 public struct WebAnnotationRecord: Identifiable, Codable, Hashable {
     public var id: Int64?
+    public var syncId: String
     public var referenceId: Int64
+    public var referenceSyncId: String
     public var type: AnnotationType
     public var noteText: String?
     public var color: String
@@ -15,7 +17,9 @@ public struct WebAnnotationRecord: Identifiable, Codable, Hashable {
 
     public init(
         id: Int64? = nil,
+        syncId: String = SyncIdentifier.random(),
         referenceId: Int64,
+        referenceSyncId: String = "",
         type: AnnotationType,
         noteText: String? = nil,
         color: String = "#FFDE59",
@@ -26,7 +30,9 @@ public struct WebAnnotationRecord: Identifiable, Codable, Hashable {
         dateModified: Date = Date()
     ) {
         self.id = id
+        self.syncId = syncId
         self.referenceId = referenceId
+        self.referenceSyncId = referenceSyncId
         self.type = type
         self.noteText = noteText
         self.color = color
@@ -46,7 +52,7 @@ extension WebAnnotationRecord: FetchableRecord, MutablePersistableRecord {
     }
 
     public enum Columns: String, ColumnExpression {
-        case id, referenceId, type, selectedText, noteText, color
+        case id, syncId, referenceId, referenceSyncId, type, selectedText, noteText, color
         case anchorText, prefixText, suffixText, dateCreated, dateModified
     }
 
@@ -54,7 +60,9 @@ extension WebAnnotationRecord: FetchableRecord, MutablePersistableRecord {
     // Writes mirror `anchorText` so the constraint holds; reads ignore it.
     public func encode(to container: inout PersistenceContainer) {
         container[Columns.id] = id
+        container[Columns.syncId] = syncId
         container[Columns.referenceId] = referenceId
+        container[Columns.referenceSyncId] = referenceSyncId
         container[Columns.type] = type.rawValue
         container[Columns.selectedText] = anchorText
         container[Columns.noteText] = noteText

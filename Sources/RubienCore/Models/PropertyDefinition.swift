@@ -55,6 +55,7 @@ public struct SelectOption: Codable, Hashable, Sendable {
 
 public struct PropertyDefinition: Identifiable, Codable, Hashable, Sendable {
     public var id: Int64?
+    public var syncId: String
     public var name: String
     public var type: PropertyType
     public var optionsJSON: String
@@ -66,6 +67,7 @@ public struct PropertyDefinition: Identifiable, Codable, Hashable, Sendable {
 
     public init(
         id: Int64? = nil,
+        syncId: String = SyncIdentifier.random(),
         name: String,
         type: PropertyType,
         options: [SelectOption] = [],
@@ -76,6 +78,7 @@ public struct PropertyDefinition: Identifiable, Codable, Hashable, Sendable {
         dateModified: Date = Date()
     ) {
         self.id = id
+        self.syncId = syncId
         self.name = name
         self.type = type
         self.optionsJSON = Self.encodeOptions(options)
@@ -199,7 +202,8 @@ extension PropertyDefinition: FetchableRecord, MutablePersistableRecord {
     }
 
     public enum Columns: String, ColumnExpression {
-        case id, name, type, optionsJSON, sortOrder, isDefault, defaultFieldKey, isVisible, dateModified
+        case id, syncId, name, type, optionsJSON, sortOrder, isDefault
+        case defaultFieldKey, isVisible, dateModified
     }
 }
 

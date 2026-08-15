@@ -724,7 +724,13 @@ final class ReferenceEditApplyTests: XCTestCase {
         let id = try makeRef(db)
         let m = try makeCustom(db, name: "Topics", type: .multiSelect, options: ["ml", "nlp", "rl"])
         try db.dbWriter.write {
-            var pv = PropertyValue(referenceId: id, propertyId: m, value: PropertyValue.encodeMultiSelect(["ml", "ml", "nlp"]), dateModified: t1)
+            var pv = try AppDatabase.makePropertyValue(
+                referenceId: id,
+                propertyId: m,
+                value: PropertyValue.encodeMultiSelect(["ml", "ml", "nlp"]),
+                dateModified: t1,
+                db: $0
+            )
             try pv.insert($0)
         }
         try db.applyReferenceEdit(id: id, edit: .init(properties: [String(m): .addRemove(add: [.string("rl")], remove: [])]))
