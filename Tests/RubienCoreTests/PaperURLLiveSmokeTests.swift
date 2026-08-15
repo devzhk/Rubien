@@ -79,6 +79,58 @@ final class PaperURLLiveSmokeTests: XCTestCase {
         )
     }
 
+    func testOxfordAcademicLive() async throws {
+        let outcome = try await smokeURL(
+            "https://academic.oup.com/gji/article/239/3/1469/7760394",
+            expectedTitleContains: "deep neural Helmholtz operators"
+        )
+        XCTAssertEqual(outcome.reference.doi, "10.1093/gji/ggae342")
+    }
+
+    func testGeoscienceWorldLive() async throws {
+        let outcome = try await smokeURL(
+            "https://pubs.geoscienceworld.org/seg/geophysics/article-abstract/86/4/M151/606279/Fluid-and-lithofacies-prediction-based-on?redirectedFrom=PDF",
+            expectedTitleContains: "fluid and lithofacies prediction"
+        )
+        XCTAssertEqual(outcome.reference.doi, "10.1190/geo2020-0521.1")
+        XCTAssertEqual(
+            outcome.scrapedPDFURL,
+            "https://pubs.geoscienceworld.org/seg/geophysics/article-pdf/86/4/M151/5388388/geo-2020-0521.1.pdf"
+        )
+    }
+
+    func testGeoscienceWorldGenericTitleLive() async throws {
+        try XCTSkipIf(ProcessInfo.processInfo.environment["RUBIEN_LIVE_TESTS"] != "1",
+                      "Set RUBIEN_LIVE_TESTS=1 to run live smoke tests")
+        let url = URL(
+            string: "https://pubs.geoscienceworld.org/tle/article/20/11/1307/665648/Correction"
+        )!
+        do {
+            let outcome = try await PaperURLResolver.resolve(url)
+            XCTAssertEqual(outcome.reference.doi, "10.1190/tle20111307b.1")
+        } catch PaperURLResolver.ResolveError.noAuthorsAvailable(let reference, _) {
+            // Crossref currently has no author for this correction, so normal
+            // intake keeps it reviewable. Reaching this exact DOI still proves
+            // the locator-enriched search found the generic-title record.
+            XCTAssertEqual(reference.title, "Correction")
+            XCTAssertEqual(reference.doi, "10.1190/tle20111307b.1")
+        }
+    }
+
+    func testGeoscienceWorldDOIHintLive() async throws {
+        try XCTSkipIf(ProcessInfo.processInfo.environment["RUBIEN_LIVE_TESTS"] != "1",
+                      "Set RUBIEN_LIVE_TESTS=1 to run live smoke tests")
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: "https://pubs.geoscienceworld.org/seg/geophysics/article-abstract/86/4/M151/606279/Fluid-and-lithofacies-prediction-based-on")!,
+            doiHint: "10.1190/geo2020-0521.1"
+        )
+        XCTAssertEqual(outcome.reference.doi, "10.1190/geo2020-0521.1")
+        XCTAssertEqual(
+            outcome.scrapedPDFURL,
+            "https://pubs.geoscienceworld.org/seg/geophysics/article-pdf/86/4/M151/5388388/geo-2020-0521.1.pdf"
+        )
+    }
+
     func testELifeLive() async throws {
         try XCTSkipIf(ProcessInfo.processInfo.environment["RUBIEN_LIVE_TESTS"] != "1",
                       "Set RUBIEN_LIVE_TESTS=1 to run live smoke tests")

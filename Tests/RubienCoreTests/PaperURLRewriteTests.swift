@@ -128,6 +128,117 @@ final class PaperURLRewriteTests: XCTestCase {
         )
     }
 
+    func testOxfordAcademicLandingNoChange() {
+        XCTAssertEqual(
+            rewrite("https://academic.oup.com/gji/article/239/3/1469/7760394"),
+            "https://academic.oup.com/gji/article/239/3/1469/7760394"
+        )
+    }
+
+    func testOxfordAcademicPublisherPDFMatchesAssignedIssueArticle() throws {
+        let articleURL = try XCTUnwrap(URL(
+            string: "https://academic.oup.com/gji/article/239/3/1469/7760394"
+        ))
+        let pdfURL = try XCTUnwrap(URL(
+            string: "https://academic.oup.com/gji/article-pdf/239/3/1469/59632523/ggae342.pdf"
+        ))
+
+        XCTAssertTrue(PaperURLResolver.publisherPDFURL(pdfURL, matches: articleURL))
+    }
+
+    func testOxfordAcademicPublisherPDFRejectsDifferentArticle() throws {
+        let articleURL = try XCTUnwrap(URL(
+            string: "https://academic.oup.com/gji/article/239/3/1469/7760394"
+        ))
+
+        for untrustedURL in [
+            "https://academic.oup.com/gji/article/239/3/1469/7760394",
+            "https://academic.oup.com/gji/article-pdf/239/3/1470/59632523/ggae342.pdf",
+            "https://academic.oup.com/mnras/article-pdf/239/3/1469/59632523/ggae342.pdf",
+            "https://academic.oup.com/gji/article-pdf/239/3/1469/not-an-asset/ggae342.pdf",
+        ] {
+            let pdfURL = try XCTUnwrap(URL(string: untrustedURL))
+            XCTAssertFalse(
+                PaperURLResolver.publisherPDFURL(pdfURL, matches: articleURL),
+                untrustedURL
+            )
+        }
+    }
+
+    func testOxfordAcademicAdvanceArticlePDFMatchesDOIArticle() throws {
+        let articleURL = try XCTUnwrap(URL(
+            string: "https://academic.oup.com/gji/advance-article/doi/10.1093/gji/ggae342/7760394"
+        ))
+        let pdfURL = try XCTUnwrap(URL(
+            string: "https://academic.oup.com/gji/advance-article-pdf/doi/10.1093/gji/ggae342/59184400/ggae342.pdf"
+        ))
+
+        XCTAssertTrue(PaperURLResolver.publisherPDFURL(pdfURL, matches: articleURL))
+    }
+
+    func testOxfordAcademicLegacyDOIPDFMatchesDOIArticle() throws {
+        let articleURL = try XCTUnwrap(URL(
+            string: "https://academic.oup.com/gji/article/doi/10.1111/j.1365-246X.1997.tb01866.x/676314"
+        ))
+        let pdfURL = try XCTUnwrap(URL(
+            string: "https://academic.oup.com/gji/article-pdf/doi/10.1111/j.1365-246X.1997.tb01866.x/12345678/legacy.pdf"
+        ))
+
+        XCTAssertTrue(PaperURLResolver.publisherPDFURL(pdfURL, matches: articleURL))
+    }
+
+    func testOxfordAcademicDOIPDFRejectsDifferentIdentity() throws {
+        let articleURL = try XCTUnwrap(URL(
+            string: "https://academic.oup.com/gji/article/doi/10.1111/archive/part/article/676314"
+        ))
+
+        for untrustedURL in [
+            "https://academic.oup.com/gji/article-pdf/doi/10.1111/archive/part/other/12345678/legacy.pdf",
+            "https://academic.oup.com/mnras/article-pdf/doi/10.1111/archive/part/article/12345678/legacy.pdf",
+        ] {
+            let pdfURL = try XCTUnwrap(URL(string: untrustedURL))
+            XCTAssertFalse(
+                PaperURLResolver.publisherPDFURL(pdfURL, matches: articleURL),
+                untrustedURL
+            )
+        }
+    }
+
+    func testGeoscienceWorldLandingDropsNavigationQuery() {
+        XCTAssertEqual(
+            rewrite("https://pubs.geoscienceworld.org/seg/geophysics/article-abstract/86/4/M151/606279/Fluid-and-lithofacies-prediction-based-on?redirectedFrom=PDF"),
+            "https://pubs.geoscienceworld.org/seg/geophysics/article-abstract/86/4/M151/606279/Fluid-and-lithofacies-prediction-based-on"
+        )
+    }
+
+    func testGeoscienceWorldPublisherPDFMatchesArticle() throws {
+        let articleURL = try XCTUnwrap(URL(
+            string: "https://pubs.geoscienceworld.org/seg/geophysics/article-abstract/86/4/M151/606279/Fluid-and-lithofacies-prediction-based-on"
+        ))
+        let pdfURL = try XCTUnwrap(URL(
+            string: "https://pubs.geoscienceworld.org/seg/geophysics/article-pdf/86/4/M151/5388388/geo-2020-0521.1.pdf"
+        ))
+
+        XCTAssertTrue(PaperURLResolver.publisherPDFURL(pdfURL, matches: articleURL))
+    }
+
+    func testGeoscienceWorldPublisherPDFRejectsDifferentArticle() throws {
+        let articleURL = try XCTUnwrap(URL(
+            string: "https://pubs.geoscienceworld.org/seg/geophysics/article/86/4/M151/606279/title"
+        ))
+        for untrustedURL in [
+            "https://pubs.geoscienceworld.org/seg/geophysics/article/86/4/M151/606279/title",
+            "https://pubs.geoscienceworld.org/seg/geophysics/article-pdf/86/4/M152/5388388/file.pdf",
+            "https://pubs.geoscienceworld.org/seg/tle/article-pdf/86/4/M151/5388388/file.pdf",
+            "https://pubs.geoscienceworld.org/seg/geophysics/article-pdf/86/4/M151/not-an-asset/file.pdf",
+            "https://pubs.geoscienceworld.org/seg//geophysics/article-pdf/86/4/M151/5388388/file.pdf",
+            "https://pubs.geoscienceworld.org/bad%20society/geophysics/article-pdf/86/4/M151/5388388/file.pdf",
+        ] {
+            let pdfURL = try XCTUnwrap(URL(string: untrustedURL))
+            XCTAssertFalse(PaperURLResolver.publisherPDFURL(pdfURL, matches: articleURL))
+        }
+    }
+
     func testELifePDFRewrite() {
         XCTAssertEqual(rewrite("https://www.elifesciences.org/articles/29515.pdf"),
                        "https://elifesciences.org/articles/29515")

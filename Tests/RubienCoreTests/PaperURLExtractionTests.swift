@@ -79,6 +79,22 @@ final class PaperURLExtractionTests: XCTestCase {
         }
     }
 
+    func testOxfordAcademicArticleExtractsAsPaperURL() {
+        let input = "https://academic.oup.com/gji/article/239/3/1469/7760394"
+        guard case .paperURL(let url) = extract(input) else {
+            return XCTFail("Expected .paperURL")
+        }
+        XCTAssertEqual(url.absoluteString, input)
+    }
+
+    func testGeoscienceWorldArticleExtractsAsPaperURL() {
+        let input = "https://pubs.geoscienceworld.org/seg/geophysics/article-abstract/86/4/M151/606279/Fluid-and-lithofacies-prediction-based-on?redirectedFrom=PDF"
+        guard case .paperURL(let url) = extract(input) else {
+            return XCTFail("Expected .paperURL")
+        }
+        XCTAssertEqual(url.absoluteString, input)
+    }
+
     func testAPSAbstractExtractsAsPaperURL() {
         let input = "https://journals.aps.org/prl/abstract/10.1103/3v91-5pzf"
         guard case .paperURL(let url) = extract(input) else {

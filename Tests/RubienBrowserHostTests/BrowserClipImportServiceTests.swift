@@ -90,7 +90,7 @@ final class BrowserClipImportServiceTests: XCTestCase {
         )
         let service = BrowserClipImportService(
             database: database,
-            metadataResolver: { input, seed, fallback in
+            metadataResolver: { input, seed, fallback, _ in
                 XCTAssertEqual(input, "https://arxiv.org/abs/2501.01234")
                 XCTAssertNil(seed)
                 XCTAssertEqual(fallback?.decodedWebContent?.body, "<article>Captured full text</article>")
@@ -149,7 +149,7 @@ final class BrowserClipImportServiceTests: XCTestCase {
         )
         let service = BrowserClipImportService(
             database: database,
-            metadataResolver: { input, _, _ in
+            metadataResolver: { input, _, _, _ in
                 XCTAssertEqual(input, pageURL)
                 return self.verifiedOutcome(fetched)
             }
@@ -185,7 +185,7 @@ final class BrowserClipImportServiceTests: XCTestCase {
         )
         let service = BrowserClipImportService(
             database: database,
-            metadataResolver: { input, seed, fallback in
+            metadataResolver: { input, seed, fallback, _ in
                 var inputs = resolutionInputs.value
                 inputs.append(input)
                 resolutionInputs.value = inputs
@@ -231,6 +231,93 @@ final class BrowserClipImportServiceTests: XCTestCase {
         XCTAssertEqual(try database.referenceCount(), 0)
     }
 
+    func testOxfordAcademicPageOffersAssociatedAuthenticatedPDF() async throws {
+        let database = try makeDatabase()
+        let articleURL = "https://academic.oup.com/gji/article/239/3/1469/7760394"
+        let pdfURL = "https://academic.oup.com/gji/article-pdf/239/3/1469/59632523/ggae342.pdf"
+        let fetched = Reference(
+            title: "Deep neural Helmholtz operators for 3-D elastic wave propagation and inversion",
+            authors: [AuthorName(given: "Caifeng", family: "Zou")],
+            year: 2024,
+            journal: "Geophysical Journal International",
+            doi: "10.1093/gji/ggae342",
+            url: articleURL,
+            referenceType: .journalArticle
+        )
+        let service = BrowserClipImportService(
+            database: database,
+            metadataResolver: { input, _, _, publisherPDFURLHint in
+                XCTAssertEqual(input, articleURL)
+                XCTAssertEqual(publisherPDFURLHint, pdfURL)
+                return self.verifiedOutcome(fetched)
+            }
+        )
+
+        let prepared = try await service.prepareClip(request(page: BrowserClipPage(
+            url: articleURL,
+            title: fetched.title,
+            citation: BrowserCitationMetadata(
+                title: fetched.title,
+                authors: ["Caifeng Zou"],
+                publicationDate: "2024-09-18",
+                journalTitle: fetched.journal,
+                doi: fetched.doi,
+                pdfURL: pdfURL
+            )
+        )))
+
+        XCTAssertEqual(prepared.preview.kind, .paper)
+        XCTAssertFalse(prepared.preview.willQueueForReview)
+        XCTAssertTrue(prepared.preview.willDownloadPDF)
+        XCTAssertEqual(prepared.preview.pdfDownloadURL, pdfURL)
+        XCTAssertEqual(try database.referenceCount(), 0)
+    }
+
+    func testGeoscienceWorldPageOffersAssociatedAuthenticatedPDF() async throws {
+        let database = try makeDatabase()
+        let articleURL = "https://pubs.geoscienceworld.org/seg/geophysics/article-abstract/86/4/M151/606279/Fluid-and-lithofacies-prediction-based-on"
+        let pdfURL = "https://pubs.geoscienceworld.org/seg/geophysics/article-pdf/86/4/M151/5388388/geo-2020-0521.1.pdf"
+        let fetched = Reference(
+            title: "Fluid and lithofacies prediction based on integration of well-log data and seismic inversion: A machine-learning approach",
+            authors: [AuthorName(given: "Luanxiao", family: "Zhao")],
+            year: 2021,
+            journal: "Geophysics",
+            volume: "86",
+            issue: "4",
+            pages: "M151-M165",
+            doi: "10.1190/geo2020-0521.1",
+            url: articleURL,
+            referenceType: .journalArticle
+        )
+        let service = BrowserClipImportService(
+            database: database,
+            metadataResolver: { input, _, _, publisherPDFURLHint in
+                XCTAssertEqual(input, articleURL)
+                XCTAssertEqual(publisherPDFURLHint, pdfURL)
+                return self.verifiedOutcome(fetched)
+            }
+        )
+
+        let prepared = try await service.prepareClip(request(page: BrowserClipPage(
+            url: articleURL,
+            title: fetched.title,
+            citation: BrowserCitationMetadata(
+                title: fetched.title,
+                authors: ["Luanxiao Zhao"],
+                publicationDate: "2021/07/01",
+                journalTitle: fetched.journal,
+                doi: fetched.doi,
+                pdfURL: pdfURL
+            )
+        )))
+
+        XCTAssertEqual(prepared.preview.kind, .paper)
+        XCTAssertFalse(prepared.preview.willQueueForReview)
+        XCTAssertTrue(prepared.preview.willDownloadPDF)
+        XCTAssertEqual(prepared.preview.pdfDownloadURL, pdfURL)
+        XCTAssertEqual(try database.referenceCount(), 0)
+    }
+
     func testCapturedDOIFallbackRejectsResolvedMetadataThatDoesNotMatchPage() async throws {
         let database = try makeDatabase()
         let articleURL = "https://www.nature.com/articles/s41586-026-10751-w"
@@ -246,7 +333,7 @@ final class BrowserClipImportServiceTests: XCTestCase {
         )
         let service = BrowserClipImportService(
             database: database,
-            metadataResolver: { input, _, fallback in
+            metadataResolver: { input, _, fallback, _ in
                 if input == articleURL {
                     return MetadataResolutionPipeline.IdentifierResolutionOutcome(
                         result: .rejected(RejectedEnvelope(
@@ -293,7 +380,7 @@ final class BrowserClipImportServiceTests: XCTestCase {
         )
         let service = BrowserClipImportService(
             database: database,
-            metadataResolver: { _, _, _ in self.verifiedOutcome(fetched) }
+            metadataResolver: { _, _, _, _ in self.verifiedOutcome(fetched) }
         )
 
         for untrustedURL in [
@@ -330,7 +417,7 @@ final class BrowserClipImportServiceTests: XCTestCase {
         )
         let service = BrowserClipImportService(
             database: database,
-            metadataResolver: { input, _, fallback in
+            metadataResolver: { input, _, fallback, _ in
                 XCTAssertEqual(input, articleURL)
                 XCTAssertNotNil(fallback?.webContent)
                 return self.verifiedOutcome(fetched, preferredPDFURL: pdfURL)
@@ -414,7 +501,7 @@ final class BrowserClipImportServiceTests: XCTestCase {
 
         let service = BrowserClipImportService(
             database: database,
-            metadataResolver: { _, _, _ in
+            metadataResolver: { _, _, _, _ in
                 self.verifiedOutcome(
                     existing,
                     preferredPDFURL: "https://www.science.org/doi/pdf/10.1126/scirobotics.adz7397?download=true"
@@ -455,7 +542,7 @@ final class BrowserClipImportServiceTests: XCTestCase {
         )
         let service = BrowserClipImportService(
             database: database,
-            metadataResolver: { _, _, _ in
+            metadataResolver: { _, _, _, _ in
                 self.verifiedOutcome(
                     fetched,
                     preferredPDFURL: "https://www.science.org/doi/pdf/10.1126/sciimmunol.adv1149?download=true"
@@ -502,7 +589,7 @@ final class BrowserClipImportServiceTests: XCTestCase {
         )
         let service = BrowserClipImportService(
             database: database,
-            metadataResolver: { _, _, _ in
+            metadataResolver: { _, _, _, _ in
                 self.verifiedOutcome(
                     fetched,
                     preferredPDFURL: "https://www.science.org/doi/pdf/10.1126/sciimmunol.adv1149?download=true"
@@ -539,7 +626,7 @@ final class BrowserClipImportServiceTests: XCTestCase {
         )
         let service = BrowserClipImportService(
             database: database,
-            metadataResolver: { _, _, _ in self.verifiedOutcome(fetched) },
+            metadataResolver: { _, _, _, _ in self.verifiedOutcome(fetched) },
             pdfDownloader: { _, _ in
                 XCTFail("The staged authenticated PDF should be preferred")
                 return "unexpected.pdf"
@@ -578,7 +665,7 @@ final class BrowserClipImportServiceTests: XCTestCase {
         let paperURL = "https://aclanthology.org/2024.acl-long.2.pdf"
         let service = BrowserClipImportService(
             database: database,
-            metadataResolver: { _, _, fallback in
+            metadataResolver: { _, _, fallback, _ in
                 MetadataResolutionPipeline.IdentifierResolutionOutcome(
                     result: .candidate(CandidateEnvelope(
                         seed: nil,
@@ -638,7 +725,7 @@ final class BrowserClipImportServiceTests: XCTestCase {
         let database = try makeDatabase()
         let service = BrowserClipImportService(
             database: database,
-            metadataResolver: { _, _, fallback in
+            metadataResolver: { _, _, fallback, _ in
                 MetadataResolutionPipeline.IdentifierResolutionOutcome(
                     result: .candidate(CandidateEnvelope(
                         seed: nil,

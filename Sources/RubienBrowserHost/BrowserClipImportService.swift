@@ -159,7 +159,8 @@ struct BrowserClipImportService {
     typealias MetadataResolveOperation = (
         String,
         MetadataResolutionSeed?,
-        Reference?
+        Reference?,
+        String?
     ) async -> MetadataResolutionPipeline.IdentifierResolutionOutcome
     typealias FilePreparer = (
         String,
@@ -184,11 +185,12 @@ struct BrowserClipImportService {
         pdfDeleter: PDFDeleter? = nil
     ) {
         self.database = database
-        self.metadataResolver = metadataResolver ?? { input, seed, fallback in
+        self.metadataResolver = metadataResolver ?? { input, seed, fallback, pdfURLHint in
             await MetadataResolutionPipeline.resolveIdentifierInput(
                 input,
                 seed: seed,
-                fallback: fallback
+                fallback: fallback,
+                publisherPDFURLHint: pdfURLHint
             )
         }
         self.filePreparer = filePreparer ?? Self.prepareFile
@@ -362,7 +364,16 @@ struct BrowserClipImportService {
             asPaper: true
         )
 
-        let initialResolution = await metadataResolver(input, nil, capturedFallback)
+        let capturedPublisherPDFURL = trustedCapturedPublisherPDFURL(
+            in: page,
+            pageURL: pageURL
+        )
+        let initialResolution = await metadataResolver(
+            input,
+            nil,
+            capturedFallback,
+            capturedPublisherPDFURL
+        )
         let resolution: MetadataResolutionPipeline.IdentifierResolutionOutcome
         if !isVerified(initialResolution.result),
            let capturedDOI = capturedFallback.doi {
@@ -370,7 +381,8 @@ struct BrowserClipImportService {
             let doiResolution = await metadataResolver(
                 capturedDOI,
                 capturedSeed,
-                capturedFallback
+                capturedFallback,
+                nil
             )
             resolution = capturedPaperIdentityMatches(
                 doiResolution.result,
@@ -389,7 +401,7 @@ struct BrowserClipImportService {
             input: input,
             result: enrichedResult,
             preferredPDFURL: resolution.preferredPDFURL
-                ?? trustedCapturedPublisherPDFURL(in: page, pageURL: pageURL),
+                ?? capturedPublisherPDFURL,
             browserPDFSource: browserPDFSource
         )
     }
@@ -439,9 +451,7 @@ struct BrowserClipImportService {
               pdfURL.scheme?.lowercased() == "https",
               sameOrigin(pdfURL, pageURL),
               pdfURL.pathExtension.lowercased() == "pdf",
-              let pageLandingURL = PaperURLResolver.canonicalLandingURL(for: pageURL),
-              let pdfLandingURL = PaperURLResolver.canonicalLandingURL(for: pdfURL),
-              pageLandingURL == pdfLandingURL else {
+              PaperURLResolver.publisherPDFURL(pdfURL, matches: pageURL) else {
             return nil
         }
         return pdfURL.absoluteString

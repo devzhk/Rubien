@@ -41,9 +41,53 @@ public enum PaperURLResolver {
         return rewritePDFURLToLanding(canonical, host: host)
     }
 
+    /// Returns true when a publisher PDF URL identifies the same paper as an
+    /// article URL. Most publishers have a direct PDF-to-landing rewrite;
+    /// Oxford Academic and GeoscienceWorld use mutable PDF asset IDs, so their
+    /// PDFs are compared by stable journal/issue locators (or an Oxford DOI).
+    public static func publisherPDFURL(_ pdfURL: URL, matches articleURL: URL) -> Bool {
+        guard pdfURL.pathExtension.lowercased() == "pdf",
+              articleURL.pathExtension.lowercased() != "pdf" else {
+            return false
+        }
+
+        let articleIsOxford = isOxfordAcademicHost(articleURL)
+        let pdfIsOxford = isOxfordAcademicHost(pdfURL)
+        if articleIsOxford || pdfIsOxford {
+            guard articleIsOxford,
+                  pdfIsOxford,
+                  let article = oxfordAcademicArticle(from: articleURL),
+                  let pdfIdentity = oxfordAcademicPDFIdentity(from: pdfURL) else {
+                return false
+            }
+            return article.identity == pdfIdentity
+        }
+
+        let articleIsGeoscienceWorld = isGeoscienceWorldHost(articleURL)
+        let pdfIsGeoscienceWorld = isGeoscienceWorldHost(pdfURL)
+        if articleIsGeoscienceWorld || pdfIsGeoscienceWorld {
+            guard articleIsGeoscienceWorld,
+                  pdfIsGeoscienceWorld,
+                  let article = geoscienceWorldArticle(from: articleURL),
+                  let pdfIdentity = geoscienceWorldPDFIdentity(from: pdfURL) else {
+                return false
+            }
+            return article.assignedIssueIdentity == pdfIdentity
+        }
+
+        if let articleLandingURL = canonicalLandingURL(for: articleURL),
+           let pdfLandingURL = canonicalLandingURL(for: pdfURL),
+           articleLandingURL == pdfLandingURL {
+            return true
+        }
+        return false
+    }
+
     public static func resolve(
         _ url: URL,
         session: URLSession = .shared,
+        doiHint: String? = nil,
+        publisherPDFURLHint: String? = nil,
         // Wrapped in an explicit @Sendable closure rather than passing
         // `MetadataFetcher.fetchFromDOI` directly: Swift 6 can't auto-infer
         // Sendable for static funcs on a type with mutable static state
@@ -63,12 +107,26 @@ public enum PaperURLResolver {
 
         // 3. Rewrite PDF URL → landing URL if applicable.
         let landingURL = rewritePDFURLToLanding(canonical, host: host)
+        let matchedPublisherPDFURL: String? = publisherPDFURLHint
+            .flatMap(URL.init(string:))
+            .flatMap { pdfURL in
+                guard pdfURL.scheme?.lowercased() == "https",
+                      pdfURL.user == nil,
+                      pdfURL.password == nil,
+                      pdfURL.port == nil || pdfURL.port == 443,
+                      Self.publisherPDFURL(pdfURL, matches: landingURL) else {
+                    return nil
+                }
+                return pdfURL.absoluteString
+            }
 
         // 4. Resolve publisher metadata. APS, Science, and ACS URLs carry an
         // authoritative DOI in the path, so resolve them through CrossRef
         // without fetching publisher pages that commonly reject automated
-        // clients. eLife exposes a stable, keyless JSON API; the remaining
-        // hosts use the generic citation_* scraper.
+        // clients. Oxford Academic's landing pages are similarly protected;
+        // its Silverchair minimal page bridges numeric article IDs to DOIs.
+        // eLife exposes a stable, keyless JSON API; the remaining hosts use
+        // the generic citation_* scraper.
         let (sourceReference, publisherPDFURL): (Reference, String?)
         if host == .aps {
             (sourceReference, publisherPDFURL) = try await resolveAPS(
@@ -79,6 +137,21 @@ public enum PaperURLResolver {
             (sourceReference, publisherPDFURL) = try await resolveDOIPublisher(
                 landingURL: landingURL,
                 host: host,
+                crossrefFetcher: crossrefFetcher
+            )
+        } else if host == .oxfordAcademic {
+            (sourceReference, publisherPDFURL) = try await resolveOxfordAcademic(
+                landingURL: landingURL,
+                session: session,
+                doiHint: doiHint,
+                crossrefFetcher: crossrefFetcher
+            )
+        } else if host == .geoscienceWorld {
+            (sourceReference, publisherPDFURL) = try await resolveGeoscienceWorld(
+                landingURL: landingURL,
+                session: session,
+                doiHint: doiHint,
+                matchedPublisherPDFURL: matchedPublisherPDFURL,
                 crossrefFetcher: crossrefFetcher
             )
         } else if host == .eLife {
@@ -102,7 +175,8 @@ public enum PaperURLResolver {
         // 5. Normalize source metadata through CrossRef when it carries a DOI.
         // DOI-bearing publisher paths already resolved directly in step 4.
         var finalReference = sourceReference
-        if host != .aps, host != .science, host != .acs,
+        if host != .aps, host != .science, host != .acs, host != .oxfordAcademic,
+           host != .geoscienceWorld,
            let doi = sourceReference.doi?.trimmingCharacters(in: .whitespacesAndNewlines),
            !doi.isEmpty {
             do {
@@ -184,6 +258,187 @@ public enum PaperURLResolver {
         // and ePDF inputs have already been rewritten to the canonical landing.
         reference.url = landingURL.absoluteString
         return (reference, pdfURL.absoluteString)
+    }
+
+    // MARK: - Oxford Academic numeric article ID
+
+    private static func resolveOxfordAcademic(
+        landingURL: URL,
+        session: URLSession,
+        doiHint: String?,
+        crossrefFetcher: @Sendable (String) async throws -> Reference
+    ) async throws -> (Reference, String?) {
+        guard let article = oxfordAcademicArticle(from: landingURL) else {
+            throw ResolveError.insufficientMetadata
+        }
+
+        if article.doi == nil,
+           let hinted = try await validatedDOIHint(
+            doiHint,
+            crossrefFetcher: crossrefFetcher,
+            validation: { reference, hint in
+                oxfordAcademicReference(reference, matches: article, expectedDOI: hint)
+            }
+           ) {
+            var reference = hinted
+            reference.url = landingURL.absoluteString
+            return (reference, nil)
+        }
+
+        let doi: String
+        if let pathDOI = article.doi {
+            doi = pathDOI
+        } else {
+            guard let minimalURL = URL(
+                string: "https://oup.silverchair-cdn.com/article-minimal/\(article.resourceID)"
+            ) else {
+                throw ResolveError.insufficientMetadata
+            }
+            let response = try await fetchHTML(
+                url: minimalURL,
+                session: session,
+                permittedFinalHosts: ["oup.silverchair-cdn.com"]
+            )
+            guard let pageDOI = parseOxfordAcademicDOI(response.data) else {
+                throw ResolveError.insufficientMetadata
+            }
+            doi = pageDOI
+        }
+
+        var reference = try await crossrefFetcher(doi)
+        reference.url = landingURL.absoluteString
+        // Oxford's PDF URLs contain a separate, mutable asset ID. Let the
+        // normal DOI/OpenAlex download path locate an accessible copy rather
+        // than synthesizing a brittle publisher URL.
+        return (reference, nil)
+    }
+
+    // MARK: - GeoscienceWorld numeric article ID
+
+    private static func resolveGeoscienceWorld(
+        landingURL: URL,
+        session: URLSession,
+        doiHint: String?,
+        matchedPublisherPDFURL: String?,
+        crossrefFetcher: @Sendable (String) async throws -> Reference
+    ) async throws -> (Reference, String?) {
+        guard let article = geoscienceWorldArticle(from: landingURL) else {
+            throw ResolveError.insufficientMetadata
+        }
+
+        let hinted = try await validatedDOIHint(
+            doiHint,
+            crossrefFetcher: crossrefFetcher,
+            validation: { reference, hint in
+                geoscienceWorldReference(reference, matches: article, expectedDOI: hint)
+            }
+        )
+        if let hinted, let matchedPublisherPDFURL {
+            var reference = hinted
+            reference.url = landingURL.absoluteString
+            return (reference, matchedPublisherPDFURL)
+        }
+
+        let candidate: GeoscienceWorldCrossrefCandidate?
+        do {
+            candidate = try await fetchGeoscienceWorldCrossrefCandidate(
+                for: article,
+                expectedDOI: hinted?.doi,
+                session: session
+            )
+        } catch {
+            if error is CancellationError
+                || (error as? URLError)?.code == .cancelled {
+                throw error
+            }
+            if var reference = hinted {
+                reference.url = landingURL.absoluteString
+                return (reference, nil)
+            }
+            throw error
+        }
+        guard let candidate else {
+            if var reference = hinted {
+                reference.url = landingURL.absoluteString
+                return (reference, nil)
+            }
+            throw ResolveError.insufficientMetadata
+        }
+
+        var reference = if let hinted {
+            hinted
+        } else {
+            try await crossrefFetcher(candidate.doi)
+        }
+        reference.url = landingURL.absoluteString
+        return (reference, candidate.pdfURL)
+    }
+
+    private static func validatedDOIHint(
+        _ rawHint: String?,
+        crossrefFetcher: @Sendable (String) async throws -> Reference,
+        validation: @Sendable (Reference, String) -> Bool
+    ) async throws -> Reference? {
+        guard let hint = rawHint?.trimmingCharacters(in: .whitespacesAndNewlines),
+              isValidDOI(hint) else { return nil }
+        do {
+            let reference = try await crossrefFetcher(hint)
+            return validation(reference, hint) ? reference : nil
+        } catch let error as MetadataFetcher.FetchError {
+            switch error {
+            case .httpError(let statusCode)
+                where statusCode == 400 || statusCode == 404 || statusCode == 410:
+                return nil
+            case .invalidURL, .unrecognizedIdentifier, .unsupported:
+                return nil
+            case .httpError, .parseError:
+                throw error
+            }
+        } catch let error as URLError where error.code == .badURL {
+            return nil
+        } catch {
+            throw error
+        }
+    }
+
+    private static func oxfordAcademicReference(
+        _ reference: Reference,
+        matches article: OxfordAcademicArticle,
+        expectedDOI: String
+    ) -> Bool {
+        guard case .assignedIssue(_, let volume, let issue, let firstPage) = article.identity,
+              reference.doi?.caseInsensitiveCompare(expectedDOI) == .orderedSame,
+              let rawURL = reference.url,
+              let url = URL(string: rawURL),
+              let indexedArticle = oxfordAcademicArticle(from: url),
+              indexedArticle.resourceID == article.resourceID,
+              indexedArticle.identity == article.identity,
+              reference.volume?.caseInsensitiveCompare(volume) == .orderedSame,
+              reference.issue?.caseInsensitiveCompare(issue) == .orderedSame,
+              self.firstPage(reference.pages, matches: firstPage) else {
+            return false
+        }
+        return true
+    }
+
+    private static func geoscienceWorldReference(
+        _ reference: Reference,
+        matches article: GeoscienceWorldArticle,
+        expectedDOI: String
+    ) -> Bool {
+        let identity = article.assignedIssueIdentity
+        guard reference.doi?.caseInsensitiveCompare(expectedDOI) == .orderedSame,
+              let rawURL = reference.url,
+              let url = URL(string: rawURL),
+              let indexedArticle = geoscienceWorldArticle(from: url),
+              indexedArticle.resourceID == article.resourceID,
+              indexedArticle.assignedIssueIdentity == identity,
+              reference.volume?.caseInsensitiveCompare(identity.volume) == .orderedSame,
+              reference.issue?.caseInsensitiveCompare(identity.issue) == .orderedSame,
+              firstPage(reference.pages, matches: identity.firstPage) else {
+            return false
+        }
+        return true
     }
 
     // MARK: - Cell Press PII path
@@ -294,7 +549,8 @@ public enum PaperURLResolver {
             case .aclAnthology:
                 return meta.conferenceTitle != nil ? .conferencePaper : .journalArticle
             case .ieeeXplore, .acmDL, .nature, .springer, .scienceDirect, .cellPress,
-                 .science, .acs, .aanda, .eLife, .eNeuro, .aps:
+                 .science, .acs, .aanda, .oxfordAcademic, .geoscienceWorld,
+                 .eLife, .eNeuro, .aps:
                 if meta.journal != nil { return .journalArticle }
                 if meta.conferenceTitle != nil { return .conferencePaper }
                 return .journalArticle
@@ -508,7 +764,7 @@ internal enum KnownPaperHost: CaseIterable {
     case openReview, aclAnthology, cvfOpenAccess
     case neurIPS, neurIPSProceedings
     case pmlr, ieeeXplore, acmDL, nature, springer, scienceDirect, cellPress
-    case science, acs, aanda, eLife, eNeuro, aps
+    case science, acs, aanda, oxfordAcademic, geoscienceWorld, eLife, eNeuro, aps
 
     /// Returns the host bucket if the URL matches both a known host and a
     /// known path shape (landing OR PDF). Returns nil otherwise — callers
@@ -580,6 +836,14 @@ internal enum KnownPaperHost: CaseIterable {
                 : .acs
         case "aanda.org":
             return PaperURLResolver.aandaArticle(from: canonical) == nil ? nil : .aanda
+        case "academic.oup.com":
+            return PaperURLResolver.oxfordAcademicArticle(from: canonical) == nil
+                ? nil
+                : .oxfordAcademic
+        case "pubs.geoscienceworld.org":
+            return PaperURLResolver.geoscienceWorldArticle(from: canonical) == nil
+                ? nil
+                : .geoscienceWorld
         case "elifesciences.org":
             if PaperURLResolver.eLifeArticleID(from: canonical) != nil { return .eLife }
             return nil
@@ -646,6 +910,52 @@ internal extension PaperURLResolver {
         let articleID: String
     }
 
+    enum OxfordAcademicArticleIdentity: Sendable, Equatable {
+        case assignedIssue(
+            journalSlug: String,
+            volume: String,
+            issue: String,
+            firstPage: String
+        )
+        case doi(journalSlug: String, doi: String)
+    }
+
+    struct OxfordAcademicArticle: Sendable {
+        let resourceID: String
+        let doi: String?
+        let identity: OxfordAcademicArticleIdentity
+    }
+
+    struct GeoscienceWorldAssignedIssueIdentity: Sendable, Equatable {
+        let journalSlug: String
+        let volume: String
+        let issue: String
+        let firstPage: String
+    }
+
+    struct GeoscienceWorldArticle: Sendable {
+        let assignedIssueIdentity: GeoscienceWorldAssignedIssueIdentity
+        let resourceID: String
+        let titleQuery: String
+    }
+
+    struct GeoscienceWorldCrossrefCandidate: Sendable {
+        let doi: String
+        let pdfURL: String?
+    }
+
+    private static func isOxfordAcademicHost(_ url: URL) -> Bool {
+        guard var host = url.host?.lowercased() else { return false }
+        if host.hasPrefix("www.") { host.removeFirst(4) }
+        return host == "academic.oup.com"
+    }
+
+    private static func isGeoscienceWorldHost(_ url: URL) -> Bool {
+        guard var host = url.host?.lowercased() else { return false }
+        if host.hasPrefix("www.") { host.removeFirst(4) }
+        return host == "pubs.geoscienceworld.org"
+    }
+
     enum APSPageKind: String, Sendable {
         case abstract, accepted, pdf
     }
@@ -694,6 +1004,415 @@ internal extension PaperURLResolver {
         components.fragment = nil
 
         return components.url
+    }
+
+    /// Parse current Oxford Academic journal URLs. Issue-assigned article
+    /// pages carry only a numeric Silverchair resource ID; advance/article
+    /// DOI routes also expose the DOI directly in the path.
+    static func oxfordAcademicArticle(from url: URL) -> OxfordAcademicArticle? {
+        guard let canonical = canonicalize(url),
+              canonical.host == "academic.oup.com" else { return nil }
+
+        var path = canonical.path(percentEncoded: false)
+        if path.hasSuffix("/") { path.removeLast() }
+        guard path.hasPrefix("/") else { return nil }
+        let segments = path.split(separator: "/", omittingEmptySubsequences: false)
+            .dropFirst()
+            .map(String.init)
+        guard !segments.contains(where: \.isEmpty),
+              let journalSlug = segments.first,
+              isSafePublisherSlug(journalSlug, allowsUnderscore: false),
+              let resourceID = segments.last,
+              isNumericPublisherID(resourceID) else { return nil }
+
+        let issueRoutes = ["article", "article-abstract"]
+        let doiRoutes = issueRoutes + ["advance-article", "advance-article-abstract"]
+        if segments.count >= 6,
+           doiRoutes.contains(segments[1]),
+           segments[2] == "doi" {
+            let doi = segments[3..<(segments.count - 1)].joined(separator: "/")
+            guard isValidDOI(doi) else { return nil }
+            return OxfordAcademicArticle(
+                resourceID: resourceID,
+                doi: doi,
+                identity: .doi(
+                    journalSlug: journalSlug.lowercased(),
+                    doi: doi.lowercased()
+                )
+            )
+        }
+
+        if segments.count == 6,
+           issueRoutes.contains(segments[1]) {
+            return OxfordAcademicArticle(
+                resourceID: resourceID,
+                doi: nil,
+                identity: .assignedIssue(
+                    journalSlug: journalSlug.lowercased(),
+                    volume: segments[2].lowercased(),
+                    issue: segments[3].lowercased(),
+                    firstPage: segments[4].lowercased()
+                )
+            )
+        }
+        return nil
+    }
+
+    /// Parse Oxford's publisher-PDF routes without classifying them as paper
+    /// landing pages. Keeping these URLs out of `KnownPaperHost` preserves the
+    /// direct-file import path when a user opens or pastes the PDF itself.
+    static func oxfordAcademicPDFIdentity(
+        from url: URL
+    ) -> OxfordAcademicArticleIdentity? {
+        guard let canonical = canonicalize(url),
+              canonical.host == "academic.oup.com" else { return nil }
+
+        var path = canonical.path(percentEncoded: false)
+        if path.hasSuffix("/") { path.removeLast() }
+        guard path.hasPrefix("/") else { return nil }
+        let segments = path.split(separator: "/", omittingEmptySubsequences: false)
+            .dropFirst()
+            .map(String.init)
+        guard !segments.contains(where: \.isEmpty),
+              let journalSlug = segments.first,
+              isSafePublisherSlug(journalSlug, allowsUnderscore: false),
+              let filename = segments.last,
+              filename.lowercased().hasSuffix(".pdf"),
+              segments.count >= 2,
+              isNumericPublisherID(segments[segments.count - 2]) else { return nil }
+
+        let doiRoutes = ["article-pdf", "advance-article-pdf"]
+        if segments.count >= 7,
+           doiRoutes.contains(segments[1]),
+           segments[2] == "doi" {
+            let doi = segments[3..<(segments.count - 2)].joined(separator: "/")
+            guard isValidDOI(doi) else { return nil }
+            return .doi(
+                journalSlug: journalSlug.lowercased(),
+                doi: doi.lowercased()
+            )
+        }
+
+        if segments.count == 7,
+           segments[1] == "article-pdf" {
+            return .assignedIssue(
+                journalSlug: journalSlug.lowercased(),
+                volume: segments[2].lowercased(),
+                issue: segments[3].lowercased(),
+                firstPage: segments[4].lowercased()
+            )
+        }
+        return nil
+    }
+
+    /// Parse GeoscienceWorld landing pages. Current URLs optionally carry a
+    /// society prefix before the journal slug; Crossref's primary URLs often
+    /// omit it, so identity starts at the journal immediately before the
+    /// article route.
+    static func geoscienceWorldArticle(from url: URL) -> GeoscienceWorldArticle? {
+        guard let canonical = canonicalize(url),
+              canonical.host == "pubs.geoscienceworld.org" else { return nil }
+        var path = canonical.path(percentEncoded: false)
+        if path.hasSuffix("/") { path.removeLast() }
+        guard path.hasPrefix("/") else { return nil }
+        let segments = path
+            .split(separator: "/", omittingEmptySubsequences: false)
+            .dropFirst()
+            .map(String.init)
+        guard !segments.contains(where: \.isEmpty),
+              let routeIndex = segments.firstIndex(where: {
+            $0 == "article" || $0 == "article-abstract"
+        }),
+              routeIndex == 1 || routeIndex == 2,
+              segments.count == routeIndex + 6 else { return nil }
+
+        let journalSlug = segments[routeIndex - 1]
+        let volume = segments[routeIndex + 1]
+        let issue = segments[routeIndex + 2]
+        let firstPage = segments[routeIndex + 3]
+        let resourceID = segments[routeIndex + 4]
+        let titleSlug = segments[routeIndex + 5]
+        guard (routeIndex == 1 || isSafePublisherSlug(segments[0])),
+              isSafePublisherSlug(journalSlug),
+              !volume.isEmpty,
+              !issue.isEmpty,
+              !firstPage.isEmpty,
+              isNumericPublisherID(resourceID),
+              isSafePublisherSlug(titleSlug) else { return nil }
+
+        let titleQuery = titleSlug
+            .replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: "_", with: " ")
+        return GeoscienceWorldArticle(
+            assignedIssueIdentity: GeoscienceWorldAssignedIssueIdentity(
+                journalSlug: journalSlug.lowercased(),
+                volume: volume.lowercased(),
+                issue: issue.lowercased(),
+                firstPage: firstPage.lowercased()
+            ),
+            resourceID: resourceID,
+            titleQuery: titleQuery
+        )
+    }
+
+    /// Parse direct GeoscienceWorld PDF URLs without classifying them as paper
+    /// landings. Direct PDF pastes therefore keep the existing remote-file
+    /// import behavior, while the browser extension can safely associate a
+    /// page's citation PDF with its active article.
+    static func geoscienceWorldPDFIdentity(
+        from url: URL
+    ) -> GeoscienceWorldAssignedIssueIdentity? {
+        guard let canonical = canonicalize(url),
+              canonical.host == "pubs.geoscienceworld.org" else { return nil }
+        var path = canonical.path(percentEncoded: false)
+        if path.hasSuffix("/") { path.removeLast() }
+        guard path.hasPrefix("/") else { return nil }
+        let segments = path
+            .split(separator: "/", omittingEmptySubsequences: false)
+            .dropFirst()
+            .map(String.init)
+        guard !segments.contains(where: \.isEmpty),
+              let routeIndex = segments.firstIndex(of: "article-pdf"),
+              routeIndex == 1 || routeIndex == 2,
+              segments.count == routeIndex + 6 else { return nil }
+
+        let journalSlug = segments[routeIndex - 1]
+        let volume = segments[routeIndex + 1]
+        let issue = segments[routeIndex + 2]
+        let firstPage = segments[routeIndex + 3]
+        let assetID = segments[routeIndex + 4]
+        let filename = segments[routeIndex + 5]
+        guard (routeIndex == 1 || isSafePublisherSlug(segments[0])),
+              isSafePublisherSlug(journalSlug),
+              !volume.isEmpty,
+              !issue.isEmpty,
+              !firstPage.isEmpty,
+              isNumericPublisherID(assetID),
+              filename.lowercased().hasSuffix(".pdf") else { return nil }
+        return GeoscienceWorldAssignedIssueIdentity(
+            journalSlug: journalSlug.lowercased(),
+            volume: volume.lowercased(),
+            issue: issue.lowercased(),
+            firstPage: firstPage.lowercased()
+        )
+    }
+
+    private static func isSafePublisherSlug(
+        _ value: String,
+        allowsUnderscore: Bool = true
+    ) -> Bool {
+        let scalars = value.unicodeScalars
+        guard let first = scalars.first, isASCIIAlphaNumeric(first) else { return false }
+        return scalars.dropFirst().allSatisfy { scalar in
+            isASCIIAlphaNumeric(scalar)
+                || scalar == "-"
+                || (allowsUnderscore && scalar == "_")
+        }
+    }
+
+    private static func isNumericPublisherID(_ value: String) -> Bool {
+        !value.isEmpty && value.unicodeScalars.allSatisfy { scalar in
+            (48...57).contains(scalar.value)
+        }
+    }
+
+    private static func isASCIIAlphaNumeric(_ scalar: Unicode.Scalar) -> Bool {
+        (48...57).contains(scalar.value)
+            || (65...90).contains(scalar.value)
+            || (97...122).contains(scalar.value)
+    }
+
+    static func geoscienceWorldCrossrefSearchURL(
+        for article: GeoscienceWorldArticle
+    ) -> URL? {
+        let identity = article.assignedIssueIdentity
+        let bibliographicQuery = [
+            article.titleQuery,
+            identity.journalSlug,
+            identity.volume,
+            identity.issue,
+            identity.firstPage,
+            article.resourceID,
+        ].joined(separator: " ")
+        var components = URLComponents(string: "https://api.crossref.org/works")
+        components?.queryItems = [
+            URLQueryItem(name: "query.bibliographic", value: bibliographicQuery),
+            URLQueryItem(name: "filter", value: "type:journal-article"),
+            URLQueryItem(name: "rows", value: "20"),
+            URLQueryItem(
+                name: "select",
+                value: "DOI,volume,issue,page,resource,link"
+            ),
+        ]
+        return components?.url
+    }
+
+    private static func fetchGeoscienceWorldCrossrefCandidate(
+        for article: GeoscienceWorldArticle,
+        expectedDOI: String? = nil,
+        session: URLSession
+    ) async throws -> GeoscienceWorldCrossrefCandidate? {
+        guard let url = geoscienceWorldCrossrefSearchURL(for: article) else {
+            throw ResolveError.insufficientMetadata
+        }
+
+        let data = try await withRetry(maxAttempts: 3) {
+            var request = URLRequest(url: url)
+            request.setValue(MetadataFetcher.userAgent, forHTTPHeaderField: "User-Agent")
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            request.timeoutInterval = 15
+
+            let (data, response) = try await session.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw ResolveError.fetchFailed(statusCode: 0, host: url.host ?? "")
+            }
+            guard (200..<300).contains(httpResponse.statusCode) else {
+                throw ResolveError.fetchFailed(
+                    statusCode: httpResponse.statusCode,
+                    host: url.host ?? ""
+                )
+            }
+            let finalHost = (httpResponse.url ?? url).host?.lowercased() ?? ""
+            guard finalHost == "api.crossref.org" else {
+                throw ResolveError.redirectedAwayFromAllowlist(finalHost: finalHost)
+            }
+            let contentType = (httpResponse.value(forHTTPHeaderField: "Content-Type") ?? "")
+                .lowercased()
+            guard contentType.isEmpty || contentType.hasPrefix("application/json") else {
+                throw ResolveError.unexpectedContentType(contentType)
+            }
+            return data
+        }
+
+        return parseGeoscienceWorldCrossrefCandidate(
+            data,
+            expectedArticle: article,
+            expectedDOI: expectedDOI
+        )
+    }
+
+    static func parseGeoscienceWorldCrossrefCandidate(
+        _ data: Data,
+        expectedArticle: GeoscienceWorldArticle,
+        expectedDOI: String? = nil
+    ) -> GeoscienceWorldCrossrefCandidate? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let message = json["message"] as? [String: Any],
+              let items = message["items"] as? [[String: Any]] else { return nil }
+
+        var matchesByDOI: [String: GeoscienceWorldCrossrefCandidate] = [:]
+        for item in items {
+            guard let rawDOI = item["DOI"] as? String else { continue }
+            let doi = rawDOI.trimmingCharacters(in: .whitespacesAndNewlines)
+            let matchesExpectedDOI = expectedDOI.map {
+                doi.caseInsensitiveCompare($0) == .orderedSame
+            } ?? true
+            guard isValidDOI(doi),
+                  matchesExpectedDOI,
+                  let resource = item["resource"] as? [String: Any],
+                  let primary = resource["primary"] as? [String: Any],
+                  let primaryURLString = primary["URL"] as? String,
+                  let primaryURL = URL(string: primaryURLString),
+                  let indexedArticle = geoscienceWorldArticle(from: primaryURL),
+                  indexedArticle.resourceID == expectedArticle.resourceID,
+                  indexedArticle.assignedIssueIdentity == expectedArticle.assignedIssueIdentity,
+                  field(item["volume"], matches: expectedArticle.assignedIssueIdentity.volume),
+                  field(item["issue"], matches: expectedArticle.assignedIssueIdentity.issue),
+                  firstPage(item["page"], matches: expectedArticle.assignedIssueIdentity.firstPage)
+            else { continue }
+
+            let pdfURL = geoscienceWorldPDFURL(
+                from: item["link"],
+                matching: expectedArticle.assignedIssueIdentity
+            )
+            matchesByDOI[doi.lowercased()] = GeoscienceWorldCrossrefCandidate(
+                doi: doi,
+                pdfURL: pdfURL
+            )
+        }
+
+        guard matchesByDOI.count == 1 else { return nil }
+        return matchesByDOI.values.first
+    }
+
+    private static func field(_ value: Any?, matches expected: String) -> Bool {
+        guard let value = value as? String else { return false }
+        return value.lowercased() == expected.lowercased()
+    }
+
+    private static func firstPage(_ value: Any?, matches expected: String) -> Bool {
+        guard let pages = value as? String else { return false }
+        let first = pages.split(
+            whereSeparator: { $0 == "-" || $0 == "–" || $0 == "—" }
+        ).first.map(String.init) ?? pages
+        return first.lowercased() == expected.lowercased()
+    }
+
+    private static func geoscienceWorldPDFURL(
+        from value: Any?,
+        matching expectedIdentity: GeoscienceWorldAssignedIssueIdentity
+    ) -> String? {
+        guard let links = value as? [[String: Any]] else { return nil }
+        for link in links {
+            guard (link["content-type"] as? String)?.lowercased() == "application/pdf",
+                  let rawURL = link["URL"] as? String,
+                  let url = URL(string: rawURL),
+                  url.scheme?.lowercased() == "https",
+                  geoscienceWorldPDFIdentity(from: url) == expectedIdentity else { continue }
+            return url.absoluteString
+        }
+        return nil
+    }
+
+    private static let oxfordAcademicPrimaryCitationRegex = try! NSRegularExpression(
+        pattern: #"<div\b[^>]*\bclass\s*=\s*[\"'][^\"']*\bww-citation-primary\b[^\"']*[\"'][^>]*>(.*?)</div>"#,
+        options: [.caseInsensitive, .dotMatchesLineSeparators]
+    )
+
+    private static let oxfordAcademicDOIRegex = try! NSRegularExpression(
+        pattern: #"https?://doi\.org/(10\.[0-9]{4,9}/[^\s<>\"']+)"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let fullDOIRegex = try! NSRegularExpression(
+        pattern: #"^10\.[0-9]{4,9}/\S+$"#,
+        options: [.caseInsensitive]
+    )
+
+    private static func isValidDOI(_ doi: String) -> Bool {
+        let range = NSRange(doi.startIndex..., in: doi)
+        return fullDOIRegex.firstMatch(
+            in: doi,
+            options: [],
+            range: range
+        ) != nil
+    }
+
+    /// The Silverchair minimal page does not expose citation_* tags, but its
+    /// primary citation links the authoritative OUP DOI before article-body
+    /// references. Take the DOI from that block and let Crossref provide
+    /// metadata. The prefix is intentionally not fixed to 10.1093 because
+    /// Oxford hosts journal archives containing legacy publisher DOIs.
+    static func parseOxfordAcademicDOI(_ data: Data) -> String? {
+        guard let html = String(data: data, encoding: .utf8) else { return nil }
+        let htmlRange = NSRange(html.startIndex..., in: html)
+        guard let citationMatch = oxfordAcademicPrimaryCitationRegex.firstMatch(
+            in: html,
+            options: [],
+            range: htmlRange
+        ),
+        let citationRange = Range(citationMatch.range(at: 1), in: html) else { return nil }
+        let citation = String(html[citationRange])
+        let citationNSRange = NSRange(citation.startIndex..., in: citation)
+        guard let doiMatch = oxfordAcademicDOIRegex.firstMatch(
+            in: citation,
+            options: [],
+            range: citationNSRange
+        ),
+        let doiRange = Range(doiMatch.range(at: 1), in: citation) else { return nil }
+        let encoded = String(citation[doiRange])
+        let decoded = encoded.removingPercentEncoding ?? encoded
+        return decoded.trimmingCharacters(in: CharacterSet(charactersIn: ".,;"))
     }
 
     /// Parse Science and ACS article paths. Both publishers use one DOI suffix
@@ -1120,6 +1839,16 @@ internal extension PaperURLResolver {
             if let article = aandaArticle(from: canonical), article.pageKind == .pdf {
                 components.path = aandaPath(for: article, pageKind: .fullHTML)
             }
+
+        case .oxfordAcademic:
+            // Article and article-abstract pages are already stable landings.
+            // Publisher PDF URLs are deliberately handled as remote files.
+            break
+
+        case .geoscienceWorld:
+            // Remove navigation state such as `redirectedFrom=PDF`; the path
+            // itself is the stable article landing identity.
+            components.queryItems = nil
 
         case .eLife:
             // /articles/29515.pdf → /articles/29515

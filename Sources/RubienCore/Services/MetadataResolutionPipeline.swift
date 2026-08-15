@@ -86,7 +86,8 @@ public enum MetadataResolutionPipeline {
     public static func resolveIdentifier(
         _ identifier: MetadataFetcher.Identifier,
         seed: MetadataResolutionSeed?,
-        fallback: Reference?
+        fallback: Reference?,
+        publisherPDFURLHint: String? = nil
     ) async -> IdentifierResolutionOutcome {
         do {
             let reference: Reference
@@ -108,7 +109,11 @@ public enum MetadataResolutionPipeline {
                 reference = try await MetadataFetcher.fetchFromPMCID(value)
                 scrapedPDFURL = nil
             case .paperURL(let url):
-                let outcome = try await PaperURLResolver.resolve(url)
+                let outcome = try await PaperURLResolver.resolve(
+                    url,
+                    doiHint: fallback?.doi,
+                    publisherPDFURLHint: publisherPDFURLHint
+                )
                 reference = outcome.reference
                 scrapedPDFURL = outcome.scrapedPDFURL
             }
@@ -165,7 +170,8 @@ public enum MetadataResolutionPipeline {
     public static func resolveIdentifierInput(
         _ input: String,
         seed: MetadataResolutionSeed? = nil,
-        fallback: Reference? = nil
+        fallback: Reference? = nil,
+        publisherPDFURLHint: String? = nil
     ) async -> IdentifierResolutionOutcome {
         guard let identifier = MetadataFetcher.extractIdentifier(from: input) else {
             return IdentifierResolutionOutcome(result: .rejected(RejectedEnvelope(
@@ -176,7 +182,12 @@ public enum MetadataResolutionPipeline {
                 message: "Enter a DOI, arXiv ID, PMID, PMCID, ISBN, or supported paper URL."
             )))
         }
-        return await resolveIdentifier(identifier, seed: seed, fallback: fallback)
+        return await resolveIdentifier(
+            identifier,
+            seed: seed,
+            fallback: fallback,
+            publisherPDFURLHint: publisherPDFURLHint
+        )
     }
 
     private static func resolveByTitle(

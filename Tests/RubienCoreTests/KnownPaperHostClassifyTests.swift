@@ -343,6 +343,65 @@ final class KnownPaperHostClassifyTests: XCTestCase {
         XCTAssertNil(classify("https://www.aanda.org/articles/aa/ref/2026/02/aa57022-25/aa57022-25.html"))
     }
 
+    // Oxford Academic journals
+    func testOxfordAcademicIssueArticle() {
+        XCTAssertEqual(
+            classify("https://academic.oup.com/gji/article/239/3/1469/7760394"),
+            .oxfordAcademic
+        )
+    }
+    func testOxfordAcademicAbstractAndAdvanceArticle() {
+        XCTAssertEqual(
+            classify("https://academic.oup.com/gji/article-abstract/239/3/1469/7760394"),
+            .oxfordAcademic
+        )
+        XCTAssertEqual(
+            classify("https://academic.oup.com/gji/advance-article/doi/10.1093/gji/ggae342/7760394"),
+            .oxfordAcademic
+        )
+        XCTAssertEqual(
+            classify("https://academic.oup.com/gji/advance-article-abstract/doi/10.1093/gji/ggae342/7760394"),
+            .oxfordAcademic
+        )
+        XCTAssertEqual(
+            classify("https://academic.oup.com/gji/article/doi/10.1111/j.1365-246X.1997.tb01866.x/676314"),
+            .oxfordAcademic
+        )
+    }
+    func testOxfordAcademicRejectsNonArticlesAndMalformedPaths() {
+        XCTAssertNil(classify("https://academic.oup.com/gji/"))
+        XCTAssertNil(classify("https://academic.oup.com/gji/issue/239/3"))
+        XCTAssertNil(classify("https://academic.oup.com/gji/article/239/3/1469/not-an-id"))
+        XCTAssertNil(classify("https://academic.oup.com/gji/article/239/3/1469/7760394/references"))
+        XCTAssertNil(classify("https://academic.oup.com/gji/advance-article/doi/not-a-doi/7760394"))
+        XCTAssertNil(classify(
+            "https://academic.oup.com/gji/article-pdf/239/3/1469/59632523/ggae342.pdf"
+        ))
+    }
+
+    // GeoscienceWorld journals
+    func testGeoscienceWorldArticleAndAbstract() {
+        XCTAssertEqual(
+            classify("https://pubs.geoscienceworld.org/seg/geophysics/article-abstract/86/4/M151/606279/Fluid-and-lithofacies-prediction-based-on?redirectedFrom=PDF"),
+            .geoscienceWorld
+        )
+        XCTAssertEqual(
+            classify("https://pubs.geoscienceworld.org/geophysics/article/86/4/M151/606279/Fluid-and-lithofacies-prediction-based-on"),
+            .geoscienceWorld
+        )
+    }
+    func testGeoscienceWorldRejectsNonArticlesAndPublisherPDFs() {
+        XCTAssertNil(classify("https://pubs.geoscienceworld.org/seg/geophysics"))
+        XCTAssertNil(classify("https://pubs.geoscienceworld.org/seg/geophysics/issue/86/4"))
+        XCTAssertNil(classify("https://pubs.geoscienceworld.org/seg/geophysics/article/86/4/M151/not-an-id/title"))
+        XCTAssertNil(classify("https://pubs.geoscienceworld.org/seg/geophysics/article/86/4/M151/606279/title/references"))
+        XCTAssertNil(classify("https://pubs.geoscienceworld.org/seg//geophysics/article/86/4/M151/606279/title"))
+        XCTAssertNil(classify("https://pubs.geoscienceworld.org/bad%20society/geophysics/article/86/4/M151/606279/title"))
+        XCTAssertNil(classify(
+            "https://pubs.geoscienceworld.org/seg/geophysics/article-pdf/86/4/M151/5388388/geo-2020-0521.1.pdf"
+        ))
+    }
+
     // eLife
     func testELifeArticle() {
         XCTAssertEqual(classify("https://elifesciences.org/articles/29515"), .eLife)

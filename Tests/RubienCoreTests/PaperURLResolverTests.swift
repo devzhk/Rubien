@@ -334,6 +334,563 @@ final class PaperURLResolverTests: XCTestCase {
         )
     }
 
+    // MARK: - Oxford Academic DOI bridge
+
+    func testOxfordAcademicArticleResolvesMinimalPageDOIThroughCrossref() async throws {
+        let input = "https://academic.oup.com/gji/article/239/3/1469/7760394"
+        let minimalURL = "https://oup.silverchair-cdn.com/article-minimal/7760394"
+        StubURLProtocol.stub(
+            minimalURL,
+            body: """
+            <html><body>
+              <a href="https://doi.org/10.1093/gji/decoy-reference">Earlier unrelated DOI</a>
+              <h1 class="wi-article-title article-title-main">Deep neural Helmholtz operators for 3-D elastic wave propagation and inversion</h1>
+              <div class="ww-citation-primary"><em>Geophysical Journal International</em>, Volume 239, Issue 3, December 2024, Pages 1469–1484, <a href='https://doi.org/10.1093/gji/ggae342'>https://doi.org/10.1093/gji/ggae342</a></div>
+            </body></html>
+            """
+        )
+        let recorder = CrossrefDOIRecorder()
+
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: input)!,
+            session: StubURLProtocol.makeSession(),
+            crossrefFetcher: { doi in
+                await recorder.record(doi)
+                return Reference(
+                    title: "Deep neural Helmholtz operators for 3-D elastic wave propagation and inversion",
+                    authors: [
+                        AuthorName(given: "Caifeng", family: "Zou"),
+                        AuthorName(given: "Kamyar", family: "Azizzadenesheli"),
+                        AuthorName(given: "Zachary E", family: "Ross"),
+                        AuthorName(given: "Robert W", family: "Clayton")
+                    ],
+                    year: 2024,
+                    journal: "Geophysical Journal International",
+                    volume: "239",
+                    issue: "3",
+                    pages: "1469-1484",
+                    doi: doi,
+                    url: "https://doi.org/\(doi)"
+                )
+            }
+        )
+
+        XCTAssertEqual(StubURLProtocol.requests.map(\.url), [URL(string: minimalURL)!])
+        let resolvedDOIs = await recorder.values
+        XCTAssertEqual(resolvedDOIs, ["10.1093/gji/ggae342"])
+        XCTAssertEqual(outcome.reference.title, "Deep neural Helmholtz operators for 3-D elastic wave propagation and inversion")
+        XCTAssertEqual(outcome.reference.authors.count, 4)
+        XCTAssertEqual(outcome.reference.url, input)
+        XCTAssertEqual(outcome.reference.doi, "10.1093/gji/ggae342")
+        XCTAssertEqual(outcome.reference.referenceType, .journalArticle)
+        XCTAssertNil(outcome.scrapedPDFURL)
+    }
+
+    func testOxfordAcademicPriorPublisherDOIPathResolvesWithoutFetchingHTML() async throws {
+        let input = "https://academic.oup.com/gji/article/doi/10.1111/j.1365-246X.1997.tb01866.x/676314"
+        let legacyDOI = "10.1111/j.1365-246X.1997.tb01866.x"
+        let recorder = CrossrefDOIRecorder()
+
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: input)!,
+            session: StubURLProtocol.makeSession(),
+            crossrefFetcher: { doi in
+                await recorder.record(doi)
+                return Reference(
+                    title: "A legacy GJI article",
+                    authors: [AuthorName(given: "Jane", family: "Researcher")],
+                    doi: doi
+                )
+            }
+        )
+
+        XCTAssertTrue(StubURLProtocol.requests.isEmpty)
+        let resolvedDOIs = await recorder.values
+        XCTAssertEqual(resolvedDOIs, [legacyDOI])
+        XCTAssertEqual(outcome.reference.url, input)
+    }
+
+    func testOxfordAcademicLegacyGJIArticleAcceptsPriorPublisherDOI() async throws {
+        let input = "https://academic.oup.com/gji/article/130/3/717/676314"
+        let minimalURL = "https://oup.silverchair-cdn.com/article-minimal/676314"
+        let legacyDOI = "10.1111/j.1365-246X.1997.tb01866.x"
+        StubURLProtocol.stub(
+            minimalURL,
+            body: """
+            <html><body>
+              <div class='ww-citation-primary'>Geophysical Journal International, <a href="https://doi.org/\(legacyDOI)">https://doi.org/\(legacyDOI)</a></div>
+            </body></html>
+            """
+        )
+        let recorder = CrossrefDOIRecorder()
+
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: input)!,
+            session: StubURLProtocol.makeSession(),
+            crossrefFetcher: { doi in
+                await recorder.record(doi)
+                return Reference(
+                    title: "A legacy GJI article",
+                    authors: [AuthorName(given: "Jane", family: "Researcher")],
+                    doi: doi
+                )
+            }
+        )
+
+        XCTAssertEqual(StubURLProtocol.requests.map(\.url), [URL(string: minimalURL)!])
+        let resolvedDOIs = await recorder.values
+        XCTAssertEqual(resolvedDOIs, [legacyDOI])
+        XCTAssertEqual(outcome.reference.url, input)
+    }
+
+    func testOxfordAcademicValidatedDOIHintSkipsMinimalPage() async throws {
+        let input = "https://academic.oup.com/gji/article/239/3/1469/7760394"
+        let doi = "10.1093/gji/ggae342"
+        let recorder = CrossrefDOIRecorder()
+
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: input)!,
+            session: StubURLProtocol.makeSession(),
+            doiHint: doi,
+            crossrefFetcher: { requestedDOI in
+                await recorder.record(requestedDOI)
+                return Reference(
+                    title: "Deep neural Helmholtz operators for 3-D elastic wave propagation and inversion",
+                    authors: [AuthorName(given: "Caifeng", family: "Zou")],
+                    volume: "239",
+                    issue: "3",
+                    pages: "1469-1484",
+                    doi: requestedDOI,
+                    url: input
+                )
+            }
+        )
+
+        XCTAssertTrue(StubURLProtocol.requests.isEmpty)
+        let resolvedDOIs = await recorder.values
+        XCTAssertEqual(resolvedDOIs, [doi])
+        XCTAssertEqual(outcome.reference.url, input)
+    }
+
+    func testOxfordAcademicMismatchedDOIHintFallsBackToMinimalPage() async throws {
+        let input = "https://academic.oup.com/gji/article/239/3/1469/7760394"
+        let minimalURL = "https://oup.silverchair-cdn.com/article-minimal/7760394"
+        StubURLProtocol.stub(
+            minimalURL,
+            body: """
+            <div class='ww-citation-primary'>
+              <a href='https://doi.org/10.1093/gji/ggae342'>DOI</a>
+            </div>
+            """
+        )
+        let recorder = CrossrefDOIRecorder()
+
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: input)!,
+            session: StubURLProtocol.makeSession(),
+            doiHint: "10.1093/gji/untrusted",
+            crossrefFetcher: { requestedDOI in
+                await recorder.record(requestedDOI)
+                if requestedDOI == "10.1093/gji/untrusted" {
+                    return Reference(
+                        title: "Unrelated",
+                        authors: [AuthorName(given: "Wrong", family: "Author")],
+                        volume: "239",
+                        issue: "3",
+                        pages: "1469-1484",
+                        doi: requestedDOI,
+                        url: "https://academic.oup.com/gji/article/239/3/1469/9999999"
+                    )
+                }
+                return Reference(
+                    title: "Deep neural Helmholtz operators for 3-D elastic wave propagation and inversion",
+                    authors: [AuthorName(given: "Caifeng", family: "Zou")],
+                    doi: requestedDOI
+                )
+            }
+        )
+
+        XCTAssertEqual(StubURLProtocol.requests.map(\.url), [URL(string: minimalURL)!])
+        let resolvedDOIs = await recorder.values
+        XCTAssertEqual(resolvedDOIs, ["10.1093/gji/untrusted", "10.1093/gji/ggae342"])
+        XCTAssertEqual(outcome.reference.doi, "10.1093/gji/ggae342")
+    }
+
+    // MARK: - GeoscienceWorld Crossref bridge
+
+    func testGeoscienceWorldArticleResolvesExactCrossrefLocatorAndPDF() async throws {
+        let input = "https://pubs.geoscienceworld.org/seg/geophysics/article-abstract/86/4/M151/606279/Fluid-and-lithofacies-prediction-based-on?redirectedFrom=PDF"
+        let landing = "https://pubs.geoscienceworld.org/seg/geophysics/article-abstract/86/4/M151/606279/Fluid-and-lithofacies-prediction-based-on"
+        let pdfURL = "https://pubs.geoscienceworld.org/seg/geophysics/article-pdf/86/4/M151/5388388/geo-2020-0521.1.pdf"
+        let article = try XCTUnwrap(PaperURLResolver.geoscienceWorldArticle(
+            from: URL(string: input)!
+        ))
+        let searchURL = try XCTUnwrap(
+            PaperURLResolver.geoscienceWorldCrossrefSearchURL(for: article)
+        )
+        StubURLProtocol.stub(
+            searchURL.absoluteString,
+            contentType: "application/json; charset=utf-8",
+            body: """
+            {
+              "message": {
+                "items": [{
+                  "DOI": "10.1190/geo2020-0521.1",
+                  "title": ["Fluid and lithofacies prediction based on integration of well-log data and seismic inversion: A machine-learning approach"],
+                  "volume": "86",
+                  "issue": "4",
+                  "page": "M151-M165",
+                  "resource": {
+                    "primary": {
+                      "URL": "https://pubs.geoscienceworld.org/geophysics/article/86/4/M151/606279/Fluid-and-lithofacies-prediction-based-on"
+                    }
+                  },
+                  "link": [{
+                    "URL": "\(pdfURL)",
+                    "content-type": "application/pdf"
+                  }]
+                }]
+              }
+            }
+            """
+        )
+        let recorder = CrossrefDOIRecorder()
+
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: input)!,
+            session: StubURLProtocol.makeSession(),
+            crossrefFetcher: { doi in
+                await recorder.record(doi)
+                return Reference(
+                    title: "Fluid and lithofacies prediction based on integration of well-log data and seismic inversion: A machine-learning approach",
+                    authors: [AuthorName(given: "Luanxiao", family: "Zhao")],
+                    year: 2021,
+                    journal: "Geophysics",
+                    volume: "86",
+                    issue: "4",
+                    pages: "M151-M165",
+                    doi: doi,
+                    url: "https://doi.org/\(doi)"
+                )
+            }
+        )
+
+        XCTAssertEqual(StubURLProtocol.requests.map(\.url), [searchURL])
+        XCTAssertEqual(StubURLProtocol.requests.first?.value(forHTTPHeaderField: "Accept"), "application/json")
+        let resolvedDOIs = await recorder.values
+        XCTAssertEqual(resolvedDOIs, ["10.1190/geo2020-0521.1"])
+        XCTAssertEqual(outcome.reference.url, landing)
+        XCTAssertEqual(outcome.reference.doi, "10.1190/geo2020-0521.1")
+        XCTAssertNil(outcome.reference.metadataSource)
+        XCTAssertEqual(outcome.scrapedPDFURL, pdfURL)
+    }
+
+    func testGeoscienceWorldValidatedDOIAndPDFHintsSkipBibliographicSearch() async throws {
+        let input = "https://pubs.geoscienceworld.org/seg/geophysics/article-abstract/86/4/M151/606279/Fluid-and-lithofacies-prediction-based-on"
+        let doi = "10.1190/geo2020-0521.1"
+        let pdfURL = "https://pubs.geoscienceworld.org/seg/geophysics/article-pdf/86/4/M151/5388388/geo-2020-0521.1.pdf"
+        let recorder = CrossrefDOIRecorder()
+
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: input)!,
+            session: StubURLProtocol.makeSession(),
+            doiHint: doi,
+            publisherPDFURLHint: pdfURL,
+            crossrefFetcher: { requestedDOI in
+                await recorder.record(requestedDOI)
+                return Reference(
+                    title: "Fluid and lithofacies prediction based on integration of well-log data and seismic inversion: A machine-learning approach",
+                    authors: [AuthorName(given: "Luanxiao", family: "Zhao")],
+                    year: 2021,
+                    journal: "Geophysics",
+                    volume: "86",
+                    issue: "4",
+                    pages: "M151-M165",
+                    doi: requestedDOI,
+                    url: "https://pubs.geoscienceworld.org/geophysics/article/86/4/M151/606279/Fluid-and-lithofacies-prediction-based-on"
+                )
+            }
+        )
+
+        XCTAssertTrue(StubURLProtocol.requests.isEmpty)
+        let resolvedDOIs = await recorder.values
+        XCTAssertEqual(resolvedDOIs, [doi])
+        XCTAssertEqual(outcome.reference.url, input)
+        XCTAssertEqual(outcome.scrapedPDFURL, pdfURL)
+    }
+
+    func testGeoscienceWorldValidatedDOIWithoutPDFHintSearchesForPDF() async throws {
+        let input = "https://pubs.geoscienceworld.org/seg/geophysics/article-abstract/86/4/M151/606279/Fluid-and-lithofacies-prediction-based-on"
+        let doi = "10.1190/geo2020-0521.1"
+        let pdfURL = "https://pubs.geoscienceworld.org/seg/geophysics/article-pdf/86/4/M151/5388388/geo-2020-0521.1.pdf"
+        let article = try XCTUnwrap(PaperURLResolver.geoscienceWorldArticle(
+            from: URL(string: input)!
+        ))
+        let searchURL = try XCTUnwrap(
+            PaperURLResolver.geoscienceWorldCrossrefSearchURL(for: article)
+        )
+        StubURLProtocol.stub(
+            searchURL.absoluteString,
+            contentType: "application/json",
+            body: """
+            {
+              "message": {
+                "items": [{
+                  "DOI": "\(doi)",
+                  "volume": "86",
+                  "issue": "4",
+                  "page": "M151-M165",
+                  "resource": {
+                    "primary": {
+                      "URL": "https://pubs.geoscienceworld.org/geophysics/article/86/4/M151/606279/Fluid-and-lithofacies-prediction-based-on"
+                    }
+                  },
+                  "link": [{
+                    "URL": "\(pdfURL)",
+                    "content-type": "application/pdf"
+                  }]
+                }]
+              }
+            }
+            """
+        )
+        let recorder = CrossrefDOIRecorder()
+
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: input)!,
+            session: StubURLProtocol.makeSession(),
+            doiHint: doi,
+            crossrefFetcher: { requestedDOI in
+                await recorder.record(requestedDOI)
+                return Reference(
+                    title: "Fluid and lithofacies prediction",
+                    authors: [AuthorName(given: "Luanxiao", family: "Zhao")],
+                    volume: "86",
+                    issue: "4",
+                    pages: "M151-M165",
+                    doi: requestedDOI,
+                    url: "https://pubs.geoscienceworld.org/geophysics/article/86/4/M151/606279/Fluid-and-lithofacies-prediction-based-on"
+                )
+            }
+        )
+
+        XCTAssertEqual(StubURLProtocol.requests.map(\.url), [searchURL])
+        let resolvedDOIs = await recorder.values
+        XCTAssertEqual(resolvedDOIs, [doi])
+        XCTAssertEqual(outcome.scrapedPDFURL, pdfURL)
+    }
+
+    func testGeoscienceWorldValidatedDOIPreservesMetadataWhenPDFDiscoveryFails() async throws {
+        let input = "https://pubs.geoscienceworld.org/seg/geophysics/article-abstract/86/4/M151/606279/Fluid-and-lithofacies-prediction-based-on"
+        let doi = "10.1190/geo2020-0521.1"
+        let article = try XCTUnwrap(PaperURLResolver.geoscienceWorldArticle(
+            from: URL(string: input)!
+        ))
+        let searchURL = try XCTUnwrap(
+            PaperURLResolver.geoscienceWorldCrossrefSearchURL(for: article)
+        )
+        StubURLProtocol.stub(searchURL.absoluteString, body: "not JSON")
+        let recorder = CrossrefDOIRecorder()
+
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: input)!,
+            session: StubURLProtocol.makeSession(),
+            doiHint: doi,
+            crossrefFetcher: { requestedDOI in
+                await recorder.record(requestedDOI)
+                return Reference(
+                    title: "Fluid and lithofacies prediction",
+                    authors: [AuthorName(given: "Luanxiao", family: "Zhao")],
+                    volume: "86",
+                    issue: "4",
+                    pages: "M151-M165",
+                    doi: requestedDOI,
+                    url: "https://pubs.geoscienceworld.org/geophysics/article/86/4/M151/606279/Fluid-and-lithofacies-prediction-based-on"
+                )
+            }
+        )
+
+        XCTAssertEqual(StubURLProtocol.requests.map(\.url), [searchURL])
+        let resolvedDOIs = await recorder.values
+        XCTAssertEqual(resolvedDOIs, [doi])
+        XCTAssertEqual(outcome.reference.doi, doi)
+        XCTAssertNil(outcome.scrapedPDFURL)
+    }
+
+    func testGeoscienceWorldMismatchedDOIHintFallsBackToExactSearch() async throws {
+        let input = "https://pubs.geoscienceworld.org/seg/geophysics/article/86/4/M151/606279/Fluid-and-lithofacies-prediction-based-on"
+        let article = try XCTUnwrap(PaperURLResolver.geoscienceWorldArticle(
+            from: URL(string: input)!
+        ))
+        let searchURL = try XCTUnwrap(
+            PaperURLResolver.geoscienceWorldCrossrefSearchURL(for: article)
+        )
+        StubURLProtocol.stub(
+            searchURL.absoluteString,
+            contentType: "application/json",
+            body: """
+            {
+              "message": {
+                "items": [{
+                  "DOI": "10.1190/geo2020-0521.1",
+                  "volume": "86",
+                  "issue": "4",
+                  "page": "M151-M165",
+                  "resource": {
+                    "primary": {
+                      "URL": "https://pubs.geoscienceworld.org/geophysics/article/86/4/M151/606279/Fluid-and-lithofacies-prediction-based-on"
+                    }
+                  }
+                }]
+              }
+            }
+            """
+        )
+        let recorder = CrossrefDOIRecorder()
+
+        let outcome = try await PaperURLResolver.resolve(
+            URL(string: input)!,
+            session: StubURLProtocol.makeSession(),
+            doiHint: "10.1190/untrusted-hint",
+            crossrefFetcher: { requestedDOI in
+                await recorder.record(requestedDOI)
+                if requestedDOI == "10.1190/untrusted-hint" {
+                    return Reference(
+                        title: "Unrelated",
+                        authors: [AuthorName(given: "Wrong", family: "Author")],
+                        volume: "86",
+                        issue: "4",
+                        pages: "M151-M165",
+                        doi: requestedDOI,
+                        url: "https://pubs.geoscienceworld.org/geophysics/article/86/4/M151/999999/Unrelated"
+                    )
+                }
+                return Reference(
+                    title: "Fluid and lithofacies prediction based on integration of well-log data and seismic inversion: A machine-learning approach",
+                    authors: [AuthorName(given: "Luanxiao", family: "Zhao")],
+                    volume: "86",
+                    issue: "4",
+                    pages: "M151-M165",
+                    doi: requestedDOI
+                )
+            }
+        )
+
+        XCTAssertEqual(StubURLProtocol.requests.map(\.url), [searchURL])
+        let resolvedDOIs = await recorder.values
+        XCTAssertEqual(resolvedDOIs, ["10.1190/untrusted-hint", "10.1190/geo2020-0521.1"])
+        XCTAssertEqual(outcome.reference.doi, "10.1190/geo2020-0521.1")
+    }
+
+    func testGeoscienceWorldTransientDOIHintFailureDoesNotStartSearch() async throws {
+        let input = "https://pubs.geoscienceworld.org/seg/geophysics/article/86/4/M151/606279/Fluid-and-lithofacies-prediction-based-on"
+
+        do {
+            _ = try await PaperURLResolver.resolve(
+                URL(string: input)!,
+                session: StubURLProtocol.makeSession(),
+                doiHint: "10.1190/geo2020-0521.1",
+                crossrefFetcher: { _ in throw URLError(.timedOut) }
+            )
+            XCTFail("Expected timedOut")
+        } catch let error as URLError {
+            XCTAssertEqual(error.code, .timedOut)
+        } catch {
+            XCTFail("Wrong error type: \(error)")
+        }
+        XCTAssertTrue(StubURLProtocol.requests.isEmpty)
+    }
+
+    func testGeoscienceWorldHTTP408DOIHintFailureDoesNotStartSearch() async throws {
+        let input = "https://pubs.geoscienceworld.org/seg/geophysics/article/86/4/M151/606279/Fluid-and-lithofacies-prediction-based-on"
+
+        do {
+            _ = try await PaperURLResolver.resolve(
+                URL(string: input)!,
+                session: StubURLProtocol.makeSession(),
+                doiHint: "10.1190/geo2020-0521.1",
+                crossrefFetcher: { _ in throw MetadataFetcher.FetchError.httpError(408) }
+            )
+            XCTFail("Expected HTTP 408")
+        } catch let error as MetadataFetcher.FetchError {
+            guard case .httpError(let statusCode) = error else {
+                return XCTFail("Wrong metadata fetch error: \(error)")
+            }
+            XCTAssertEqual(statusCode, 408)
+        } catch {
+            XCTFail("Wrong error type: \(error)")
+        }
+        XCTAssertTrue(StubURLProtocol.requests.isEmpty)
+    }
+
+    func testGeoscienceWorldGenericTitleSearchIncludesStableLocator() throws {
+        let article = try XCTUnwrap(PaperURLResolver.geoscienceWorldArticle(
+            from: URL(string: "https://pubs.geoscienceworld.org/tle/article/20/11/1307/665648/Correction")!
+        ))
+        let searchURL = try XCTUnwrap(
+            PaperURLResolver.geoscienceWorldCrossrefSearchURL(for: article)
+        )
+        let components = try XCTUnwrap(
+            URLComponents(url: searchURL, resolvingAgainstBaseURL: false)
+        )
+        let queryItems = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map {
+            ($0.name, $0.value)
+        })
+
+        XCTAssertEqual(
+            queryItems["query.bibliographic"],
+            "Correction tle 20 11 1307 665648"
+        )
+        XCTAssertFalse(queryItems.keys.contains("query.title"))
+    }
+
+    func testGeoscienceWorldRejectsCrossrefResultForDifferentResourceID() async throws {
+        let input = "https://pubs.geoscienceworld.org/seg/geophysics/article/86/4/M151/606279/Fluid-and-lithofacies-prediction-based-on"
+        let article = try XCTUnwrap(PaperURLResolver.geoscienceWorldArticle(
+            from: URL(string: input)!
+        ))
+        let searchURL = try XCTUnwrap(
+            PaperURLResolver.geoscienceWorldCrossrefSearchURL(for: article)
+        )
+        StubURLProtocol.stub(
+            searchURL.absoluteString,
+            contentType: "application/json",
+            body: """
+            {
+              "message": {
+                "items": [{
+                  "DOI": "10.1190/unrelated",
+                  "volume": "86",
+                  "issue": "4",
+                  "page": "M151-M165",
+                  "resource": {
+                    "primary": {
+                      "URL": "https://pubs.geoscienceworld.org/geophysics/article/86/4/M151/999999/Unrelated"
+                    }
+                  }
+                }]
+              }
+            }
+            """
+        )
+
+        do {
+            _ = try await PaperURLResolver.resolve(
+                URL(string: input)!,
+                session: StubURLProtocol.makeSession(),
+                crossrefFetcher: { _ in
+                    XCTFail("Mismatched Crossref record must not resolve a DOI")
+                    throw URLError(.badServerResponse)
+                }
+            )
+            XCTFail("Expected insufficientMetadata")
+        } catch PaperURLResolver.ResolveError.insufficientMetadata {
+            // expected
+        } catch {
+            XCTFail("Wrong error type: \(error)")
+        }
+    }
+
     // MARK: - Cell Press PII path
 
     func testCellPressArticleResolvesThroughPubMedWithoutScrapingPublisherHTML() async throws {
