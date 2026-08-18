@@ -1255,6 +1255,18 @@ final class WebReaderViewModel: ObservableObject {
               const article = document.getElementById('article-content');
               let activeId = null;
 
+              // Older clips can contain rich-editor code blocks serialized as
+              // bare <code> elements. Promote their structural multiline
+              // signals once so existing content uses the semantic reader CSS
+              // without double-styling ordinary <pre><code> blocks.
+              Array.from(article.querySelectorAll('code')).forEach((code) => {
+                if (code.closest('pre')) return;
+                if (!code.querySelector('br') && !code.hasAttribute('data-gutter')) return;
+                const pre = document.createElement('pre');
+                code.replaceWith(pre);
+                pre.appendChild(code);
+              });
+
               function send(name, payload) {
                 try {
                   window.webkit.messageHandlers[name].postMessage(payload);

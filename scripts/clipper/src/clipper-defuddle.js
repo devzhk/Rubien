@@ -22,6 +22,7 @@
 // confirmed necessary by a smoke test against a math-heavy Notion post.
 
 import Defuddle from 'defuddle/full';
+import { rubienNormalizeCodeBlocks } from './code-blocks.js';
 import { rubienPreserveMathJaxV2Latex } from './mathjax-v2.js';
 
 const SOURCE = 'defuddle';
@@ -32,8 +33,8 @@ const PARSE_TIMEOUT_MS = 45_000;
 // ============================================================================
 // Unified Notion per-host extractor.
 //
-// Replaces the three piecemeal normalizers (code blocks, lists, inline
-// code) below with a single tree walk over [data-block-id] elements.
+// Replaces the former Notion-specific piecemeal normalizers (code blocks,
+// lists, inline code) with a single tree walk over [data-block-id] elements.
 // Each block type has a dedicated handler that emits clean semantic HTML;
 // unknown classes fall through to extractDefault (text-preserving).
 //
@@ -599,6 +600,10 @@ window.RubienDefuddleExtract = function RubienDefuddleExtract() {
       let notionExtract = null; // { content, title } | null
       try {
         const clone = document.cloneNode(true);
+        const normalizedCodeBlocks = rubienNormalizeCodeBlocks(document, clone);
+        if (normalizedCodeBlocks > 0) {
+          debugPost('rubien_defuddle_code_blocks_normalized', 'count=' + normalizedCodeBlocks);
+        }
         rubienPreserveMathJaxV2Latex(clone);
         notionExtract = extractNotionPage(clone);
         if (notionExtract != null) {
