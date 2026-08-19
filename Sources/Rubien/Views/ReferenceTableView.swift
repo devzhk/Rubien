@@ -153,23 +153,7 @@ struct ReferenceTableView: View {
                 currentBuckets: snapshot.buckets ?? [],
                 isDirty: isDirty,
                 onSave: onSaveView,
-                onDiscard: onDiscardView,
-                canExportCurrentView: !exportIDs.isEmpty,
-                canExportEntireLibrary: canExportEntireLibrary,
-                onExportCurrentView: { format in
-                    export(
-                        scope: .currentView,
-                        format: format,
-                        exportIDs: exportIDs
-                    )
-                },
-                onExportEntireLibrary: { format in
-                    export(
-                        scope: .entireLibrary,
-                        format: format,
-                        exportIDs: exportIDs
-                    )
-                }
+                onDiscard: onDiscardView
             )
             subtitleRow
             if snapshot.sourceIsEmpty {
