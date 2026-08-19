@@ -657,5 +657,22 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.7.5</title>
+            <description sparkle:format="plain-text"><![CDATA[• Rename property options and tags directly in their pickers without losing existing values.
+• Refined selection controls with compact add actions, double-click editing, and per-view wrapping for Tags and multi-select columns.
+• Preserve multiline code blocks in saved web clips.
+• Streamline the table toolbar by removing the redundant Export button.]]></description>
+            <pubDate>Wed, 19 Aug 2026 07:02:29 +0000</pubDate>
+            <sparkle:version>43</sparkle:version>
+            <sparkle:shortVersionString>0.7.5</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien/releases/download/v0.7.5/Rubien-0.7.5.dmg"
+                sparkle:edSignature="D+wlTofURR/jLhe1sQQUmYn6bdvjZniLuvGx2smViHkq72dX6yVAipfr1kyjBla65h9Vk7f+tR6dosg3I/wTAg=="
+                length="18310158"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
