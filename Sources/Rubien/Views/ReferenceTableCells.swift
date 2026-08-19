@@ -323,27 +323,32 @@ struct EditableSingleSelectCell: View {
     @State private var showPicker = false
 
     var body: some View {
-        Group {
+        Button {
+            showPicker = true
+        } label: {
             if let current = options.first(where: { $0.value == value }) {
                 Text(current.value)
                     .font(.callout)
+                    .lineLimit(1)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 1)
                     .chipBackground(Color(hex: current.color))
-            } else if value.isEmpty {
-                Text("—")
-                    .font(.callout)
-                    .foregroundStyle(.quaternary)
-            } else {
+            } else if !value.isEmpty {
                 Text(value)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+            } else {
+                Text("Select…")
+                    .font(.callout)
+                    .foregroundStyle(.quaternary)
             }
         }
+        .buttonStyle(PickerSingleSelectionButtonStyle(isEmpty: value.isEmpty))
+        .help("Select option")
+        .accessibilityLabel("Select option")
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
-        .simultaneousGesture(TapGesture(count: 2).onEnded { showPicker = true })
         .popover(isPresented: $showPicker) {
             SelectOptionPicker(
                 selectedValues: value.isEmpty ? [] : [value],
@@ -376,41 +381,35 @@ struct EditableMultiSelectCell: View {
     var onRenameOption: ((String, String) throws -> Void)? = nil
     var onDeleteOption: ((String) -> Void)? = nil
     var deleteUnlessInUse: ((String) -> Int?)? = nil
+    var wrap = false
 
     @State private var showPicker = false
 
     var body: some View {
-        Group {
-            if selectedValues.isEmpty {
-                Text("—")
-                    .font(.callout)
-                    .foregroundStyle(.quaternary)
-            } else {
-                HStack(spacing: 2) {
-                    ForEach(selectedValues.prefix(2), id: \.self) { val in
-                        if let option = options.first(where: { $0.value == val }) {
-                            Text(option.value)
-                                .font(.callout)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 1)
-                                .chipBackground(Color(hex: option.color))
-                        } else {
-                            Text(val)
-                                .font(.callout)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    if selectedValues.count > 2 {
-                        Text("+\(selectedValues.count - 2)")
-                            .font(.callout)
-                            .foregroundStyle(.tertiary)
-                    }
-                }
+        let items = pickerSelectionItems(values: selectedValues, options: options)
+        PickerSelectionLayout(wraps: wrap) {
+            ForEach(pickerSelectionDisplayedItems(items, wraps: wrap)) { item in
+                PickerSelectionChip(
+                    item: item,
+                    font: .callout,
+                    verticalPadding: 1,
+                    wraps: wrap,
+                    editLabel: "Edit options",
+                    onEdit: { showPicker = true }
+                )
+            }
+            if !wrap {
+                PickerSelectionOverflowLabel(
+                    itemCount: items.count,
+                    accessibilityLabel: "more selected options"
+                )
+            }
+            PickerSelectionAddButton(title: "option", accessibilityLabel: "Add option") {
+                showPicker = true
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
-        .simultaneousGesture(TapGesture(count: 2).onEnded { showPicker = true })
         .popover(isPresented: $showPicker) {
             SelectOptionPicker(
                 selectedValues: selectedValues,
@@ -795,7 +794,8 @@ struct EditableCustomPropertyCell: View, Equatable {
                 },
                 deleteUnlessInUse: { optionValue in
                     deleteUnlessInUse(propId, optionValue)
-                }
+                },
+                wrap: wrap
             )
         case .checkbox:
             EditableCheckboxCell(

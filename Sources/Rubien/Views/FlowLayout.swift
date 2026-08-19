@@ -17,11 +17,12 @@ struct FlowLayout: Layout {
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         let maxWidth = bounds.width
         let (rows, indicesByRow) = layoutRows(subviews: subviews, maxWidth: maxWidth)
+        let childProposal = ProposedViewSize(width: maxWidth, height: nil)
         var y = bounds.minY
         for (rowIdx, row) in rows.enumerated() {
             var x = bounds.minX
             for subIdx in indicesByRow[rowIdx] {
-                let size = subviews[subIdx].sizeThatFits(.unspecified)
+                let size = subviews[subIdx].sizeThatFits(childProposal)
                 subviews[subIdx].place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
                 x += size.width + spacing
             }

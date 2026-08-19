@@ -30,14 +30,18 @@ func visibleReferenceTableWrappableColumns(
 ) -> [ReferenceTableWrappableColumn] {
     var result: [ReferenceTableWrappableColumn] = []
 
-    for builtin in [ColumnIdentifier.title, .authors] where isColumnVisible(builtin.rawValue) {
+    for builtin in [ColumnIdentifier.title, .authors, .tags] where isColumnVisible(builtin.rawValue) {
         result.append(ReferenceTableWrappableColumn(id: builtin.rawValue, label: builtin.header))
     }
 
     for property in referenceTableCustomProperties(propertyDefs)
         .sorted(by: { $0.sortOrder < $1.sortOrder }) {
         guard isColumnVisible(property.customizationID) else { continue }
-        guard property.type == .string || property.type == .url || property.type == .number else {
+        guard property.type == .string
+            || property.type == .url
+            || property.type == .number
+            || property.type == .multiSelect
+        else {
             continue
         }
         result.append(ReferenceTableWrappableColumn(id: property.customizationID, label: property.name))
@@ -857,7 +861,8 @@ private struct ReferenceTableContent: View {
                     onCreateTag: onCreateTag,
                     onRenameTag: onRenameTag,
                     onDeleteTag: onDeleteTag,
-                    deleteTagUnlessInUse: deleteTagUnlessInUse
+                    deleteTagUnlessInUse: deleteTagUnlessInUse,
+                    wrap: wrapForColumn(ColumnIdentifier.tags.rawValue)
                 )
                 .equatable()
             }
@@ -1446,11 +1451,14 @@ struct ReadingStatusCell: View, Equatable {
         } label: {
             Text(reference.readingStatus)
                 .font(.callout)
+                .lineLimit(1)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 1)
                 .chipBackground(color(forStatus: reference.readingStatus))
         }
         .buttonStyle(.plain)
+        .help("Select status")
+        .accessibilityLabel("Select status")
         .popover(isPresented: $showPicker) {
             // Use the shared SelectOptionPicker so the Status cell gets
             // search-or-create + the per-row trash affordance for free
@@ -1498,6 +1506,7 @@ struct TagsCellView: View, Equatable {
     let onRenameTag: (Int64, String) throws -> Void
     let onDeleteTag: (Int64) -> Void
     let deleteTagUnlessInUse: (Int64) -> Int?
+    let wrap: Bool
 
     @State private var showPopover = false
 
@@ -1508,37 +1517,33 @@ struct TagsCellView: View, Equatable {
         lhs.referenceId == rhs.referenceId
             && tagListVisuallyEqual(lhs.tags, rhs.tags)
             && tagListVisuallyEqual(lhs.allTags, rhs.allTags)
+            && lhs.wrap == rhs.wrap
     }
 
     var body: some View {
-        Button {
-            showPopover = true
-        } label: {
-            HStack(spacing: 3) {
-                if tags.isEmpty {
-                    Text("+ tag")
-                        .font(.callout)
-                        .foregroundStyle(.quaternary)
-                } else {
-                    ForEach(tags.prefix(3)) { tag in
-                        Text(tag.name)
-                            .font(.callout)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 1)
-                            .chipBackground(Color(hex: tag.color))
-                    }
-                    if tags.count > 3 {
-                        Text("+\(tags.count - 3)")
-                            .font(.callout)
-                            .foregroundStyle(.tertiary)
-                    }
-                    Image(systemName: "plus")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.quaternary)
-                }
+        let items = pickerSelectionItems(tags: tags)
+        PickerSelectionLayout(wraps: wrap) {
+            ForEach(pickerSelectionDisplayedItems(items, wraps: wrap)) { item in
+                PickerSelectionChip(
+                    item: item,
+                    font: .callout,
+                    verticalPadding: 1,
+                    wraps: wrap,
+                    editLabel: "Edit tags",
+                    onEdit: { showPopover = true }
+                )
+            }
+            if !wrap {
+                PickerSelectionOverflowLabel(
+                    itemCount: items.count,
+                    accessibilityLabel: "more selected tags"
+                )
+            }
+            PickerSelectionAddButton(title: "tag", accessibilityLabel: "Add tag") {
+                showPopover = true
             }
         }
-        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .popover(isPresented: $showPopover) {
             TagPickerPopover(
                 assignedTags: tags,

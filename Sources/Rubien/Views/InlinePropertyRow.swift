@@ -150,19 +150,31 @@ struct InlineSingleSelectRow: View {
 
     var body: some View {
         PropertyRowLayout(label: label) {
-            if let current = options.first(where: { $0.value == value }) {
-                Text(current.value)
-                    .font(.system(size: 12))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .chipBackground(Color(hex: current.color))
-            } else {
-                Text(value.isEmpty ? "Select..." : value)
-                    .font(.system(size: 12))
-                    .foregroundStyle(value.isEmpty ? .quaternary : .primary)
+            Button {
+                showPicker = true
+            } label: {
+                if let current = options.first(where: { $0.value == value }) {
+                    Text(current.value)
+                        .font(.system(size: 12))
+                        .lineLimit(1)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .chipBackground(Color(hex: current.color))
+                } else if !value.isEmpty {
+                    Text(value)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                } else {
+                    Text("Select…")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.quaternary)
+                }
             }
+            .buttonStyle(PickerSingleSelectionButtonStyle(isEmpty: value.isEmpty))
+            .help("Select option")
+            .accessibilityLabel("Select \(label)")
         }
-        .onTapGesture { showPicker = true }
         .popover(isPresented: $showPicker) {
             SelectOptionPicker(
                 selectedValues: value.isEmpty ? [] : [value],
@@ -198,25 +210,28 @@ struct InlineTagsRow: View {
     @State private var showPicker = false
 
     var body: some View {
+        let items = pickerSelectionItems(tags: tags)
         PropertyRowLayout(label: label) {
-            HStack(spacing: 4) {
-                if tags.isEmpty {
-                    Text("Empty")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.quaternary)
-                } else {
-                    ForEach(tags) { tag in
-                        Text(tag.name)
-                            .font(.system(size: 11))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .chipBackground(Color(hex: tag.color))
-                    }
+            FlowLayout(spacing: 2) {
+                ForEach(items.prefix(pickerSelectionVisibleLimit)) { item in
+                    PickerSelectionChip(
+                        item: item,
+                        font: .system(size: 11),
+                        verticalPadding: 2,
+                        wraps: true,
+                        editLabel: "Edit tags",
+                        onEdit: { showPicker = true }
+                    )
+                }
+                PickerSelectionOverflowLabel(
+                    itemCount: items.count,
+                    accessibilityLabel: "more selected tags"
+                )
+                PickerSelectionAddButton(title: "tag", accessibilityLabel: "Add tag") {
+                    showPicker = true
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .onTapGesture { showPicker = true }
             .popover(isPresented: $showPicker) {
                 TagPickerPopover(
                     assignedTags: tags,
@@ -250,27 +265,28 @@ struct InlineMultiSelectOptionRow: View {
     @State private var showPicker = false
 
     var body: some View {
+        let items = pickerSelectionItems(values: selectedValues, options: options)
         PropertyRowLayout(label: label) {
-            HStack(spacing: 4) {
-                if selectedValues.isEmpty {
-                    Text("Empty")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.quaternary)
-                } else {
-                    ForEach(selectedValues, id: \.self) { value in
-                        if let option = options.first(where: { $0.value == value }) {
-                            Text(option.value)
-                                .font(.system(size: 11))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .chipBackground(Color(hex: option.color))
-                        }
-                    }
+            FlowLayout(spacing: 2) {
+                ForEach(items.prefix(pickerSelectionVisibleLimit)) { item in
+                    PickerSelectionChip(
+                        item: item,
+                        font: .system(size: 11),
+                        verticalPadding: 2,
+                        wraps: true,
+                        editLabel: "Edit options",
+                        onEdit: { showPicker = true }
+                    )
+                }
+                PickerSelectionOverflowLabel(
+                    itemCount: items.count,
+                    accessibilityLabel: "more selected options"
+                )
+                PickerSelectionAddButton(title: "option", accessibilityLabel: "Add option") {
+                    showPicker = true
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .onTapGesture { showPicker = true }
             .popover(isPresented: $showPicker) {
                 SelectOptionPicker(
                     selectedValues: selectedValues,

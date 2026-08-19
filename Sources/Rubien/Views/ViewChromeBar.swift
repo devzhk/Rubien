@@ -148,7 +148,14 @@ struct ViewChromeBar: View {
     }
 
     private var displayButtonLabel: String {
-        columnWraps.isEmpty ? "Wrap" : "Wrapping \(columnWraps.count)"
+        let visibleWrapCount = visibleReferenceTableWrappableColumns(
+            propertyDefs: propertyDefs,
+            isColumnVisible: isColumnVisible
+        )
+        .lazy
+        .filter { columnWraps.contains($0.id) }
+        .count
+        return visibleWrapCount == 0 ? "Wrap" : "Wrapping \(visibleWrapCount)"
     }
 }
 
@@ -168,7 +175,7 @@ private struct DisplayMenuPopover: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Wrap Text")
+            Text("Wrap Columns")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 12)

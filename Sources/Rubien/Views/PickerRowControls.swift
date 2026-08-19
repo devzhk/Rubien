@@ -1,5 +1,184 @@
 #if os(macOS)
 import SwiftUI
+import RubienCore
+
+struct PickerSelectionItem: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let color: String
+}
+
+let pickerSelectionVisibleLimit = 2
+
+func pickerSelectionItems(
+    values: [String],
+    options: [SelectOption]
+) -> [PickerSelectionItem] {
+    values.map { value in
+        let option = options.first(where: { $0.value == value })
+        return PickerSelectionItem(
+            id: value,
+            name: value,
+            color: option?.color ?? "#8E8E93"
+        )
+    }
+}
+
+func pickerSelectionItems(tags: [Tag]) -> [PickerSelectionItem] {
+    tags.map { tag in
+        PickerSelectionItem(
+            id: tag.id.map(String.init) ?? tag.syncId,
+            name: tag.name,
+            color: tag.color
+        )
+    }
+}
+
+func pickerSelectionOverflowCount(
+    itemCount: Int,
+    visibleLimit: Int = pickerSelectionVisibleLimit
+) -> Int {
+    max(itemCount - visibleLimit, 0)
+}
+
+func pickerSelectionDisplayedItems(
+    _ items: [PickerSelectionItem],
+    wraps: Bool
+) -> [PickerSelectionItem] {
+    wraps ? items : Array(items.prefix(pickerSelectionVisibleLimit))
+}
+
+/// Passive count for selections omitted from the compact row. It deliberately
+/// has no button, hover, tooltip, or popover behavior.
+struct PickerSelectionOverflowLabel: View {
+    let itemCount: Int
+    let accessibilityLabel: String
+
+    var body: some View {
+        let overflowCount = pickerSelectionOverflowCount(itemCount: itemCount)
+        if overflowCount > 0 {
+            Text("+\(overflowCount)")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.tertiary)
+                .fixedSize()
+                .accessibilityLabel("\(overflowCount) \(accessibilityLabel)")
+        }
+    }
+}
+
+/// Switches table selection cells between compact single-line and wrapping
+/// layouts while preserving one shared rendering path for their contents.
+struct PickerSelectionLayout<Content: View>: View {
+    let wraps: Bool
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        let layout = wraps
+            ? AnyLayout(FlowLayout(spacing: 2))
+            : AnyLayout(HStackLayout(spacing: 2))
+        layout {
+            content()
+        }
+    }
+}
+
+struct PickerSelectionChip: View {
+    let item: PickerSelectionItem
+    let font: Font
+    let verticalPadding: CGFloat
+    let wraps: Bool
+    let editLabel: String
+    let onEdit: () -> Void
+
+    var body: some View {
+        Text(item.name)
+            .font(font)
+            .lineLimit(wraps ? nil : 1)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 6)
+            .padding(.vertical, verticalPadding)
+            .chipBackground(Color(hex: item.color))
+            .simultaneousGesture(
+                TapGesture(count: 2).onEnded(onEdit)
+            )
+            .help("\(item.name)\nDouble-click to \(editLabel.lowercased())")
+            .accessibilityLabel(item.name)
+            .accessibilityAction(named: Text(editLabel), onEdit)
+    }
+}
+
+/// Gives an empty single-select target discoverable pointer feedback without
+/// adding persistent button chrome or changing the appearance of value chips.
+struct PickerSingleSelectionButtonStyle: ButtonStyle {
+    let isEmpty: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        PickerSingleSelectionButtonBody(
+            configuration: configuration,
+            isEmpty: isEmpty
+        )
+    }
+}
+
+private struct PickerSingleSelectionButtonBody: View {
+    let configuration: ButtonStyleConfiguration
+    let isEmpty: Bool
+
+    @State private var isHovered = false
+
+    var body: some View {
+        configuration.label
+            .padding(.horizontal, isEmpty ? 5 : 0)
+            .padding(.vertical, isEmpty ? 3 : 0)
+            .background {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(
+                        isEmpty && (isHovered || configuration.isPressed)
+                            ? Color.primary.opacity(configuration.isPressed ? 0.14 : 0.08)
+                            : .clear
+                    )
+            }
+            .onHover { isHovered = $0 }
+            .animation(.easeOut(duration: 0.12), value: isHovered)
+    }
+}
+
+/// Explicit picker affordance used by single-select, multi-select, and Tags.
+/// `CompactHoverButtonStyle` supplies the requested pointer feedback.
+struct PickerSelectionAddButton: View {
+    let title: String
+    let accessibilityLabel: String
+    let action: () -> Void
+
+    @State private var isHovered = false
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 2) {
+                Image(systemName: "plus")
+                    .font(.system(size: 9))
+                Text(title)
+                    .font(.system(size: 10))
+            }
+            .foregroundStyle(.secondary)
+        }
+        .buttonStyle(CompactHoverButtonStyle())
+        .opacity(isFocused ? 1 : (isHovered ? 0.8 : 0.35))
+        .animation(.easeOut(duration: 0.12), value: isHovered)
+        .fixedSize()
+        .layoutPriority(1)
+        .focused($isFocused)
+        .focusEffectDisabled()
+        .onHover { isHovered = $0 }
+        .overlay {
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(Color.accentColor, lineWidth: isFocused ? 1.5 : 0)
+        }
+        .help(accessibilityLabel)
+        .accessibilityLabel(accessibilityLabel)
+    }
+}
 
 enum PickerItemRenameValidation: Equatable {
     case unchanged
