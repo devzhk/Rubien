@@ -133,6 +133,75 @@ final class LibraryViewModelTests: XCTestCase {
         XCTAssertFalse(all.contains(where: { $0.id == id }))
     }
 
+    func testRenameTagPreservesReferenceAssignment() throws {
+        let db = try makeTestDB()
+        let vm = LibraryViewModel(db: db)
+        vm.propertyDefs = try db.fetchAllPropertyDefinitions()
+
+        var tag = Tag(name: "Needs Rename")
+        try db.saveTag(&tag)
+        let tagID = try XCTUnwrap(tag.id)
+        var reference = Reference(title: "Tagged reference")
+        _ = try db.saveReference(&reference)
+        let referenceID = try XCTUnwrap(reference.id)
+        try db.setTags(forReference: referenceID, tagIds: [tagID])
+
+        try vm.renameTag(id: tagID, to: "Renamed")
+
+        let renamed = try XCTUnwrap(db.fetchAllTags().first { $0.id == tagID })
+        XCTAssertEqual(renamed.name, "Renamed")
+        XCTAssertEqual(try db.fetchTags(forReference: referenceID).map(\.id), [tagID])
+    }
+
+    // MARK: - Select Option Renaming
+
+    func testRenamePropertyOptionKeepsActiveAndSavedViewConfigurationInSync() throws {
+        let db = try makeTestDB()
+        let vm = LibraryViewModel(db: db)
+        let property = try db.createPropertyDefinition(
+            name: "Topic",
+            type: .multiSelect,
+            options: [SelectOption(value: "ML", color: "#007AFF")]
+        )
+        let target = FieldTarget.custom(property.id!)
+        var savedView = DatabaseView(
+            name: "ML",
+            filters: [ViewFilter(
+                target: target,
+                op: .containsAnyOf,
+                value: .selectKeys(["ML"])
+            )],
+            groupBy: GroupConfig(
+                target: target,
+                customOrder: ["ML"],
+                collapsed: ["ML"]
+            )
+        )
+        try db.saveDatabaseView(&savedView)
+        vm.propertyDefs = [property]
+        vm.databaseViews = [savedView]
+        vm.viewFilters = savedView.parsedFilters
+        vm.viewGroupBy = savedView.parsedGroupBy
+
+        try vm.renamePropertyOption(
+            propertyId: property.id!,
+            from: "ML",
+            to: "Machine Learning"
+        )
+
+        XCTAssertEqual(vm.viewFilters.first?.value, .selectKeys(["Machine Learning"]))
+        XCTAssertEqual(vm.viewGroupBy?.customOrder, ["Machine Learning"])
+        XCTAssertEqual(vm.viewGroupBy?.collapsed, ["Machine Learning"])
+        XCTAssertEqual(
+            vm.databaseViews.first?.parsedFilters.first?.value,
+            .selectKeys(["Machine Learning"])
+        )
+        XCTAssertEqual(
+            try db.fetchDatabaseView(id: savedView.id!)?.parsedFilters.first?.value,
+            .selectKeys(["Machine Learning"])
+        )
+    }
+
     // MARK: - Error Handling
 
     func testErrorMessageClearsOnNil() throws {

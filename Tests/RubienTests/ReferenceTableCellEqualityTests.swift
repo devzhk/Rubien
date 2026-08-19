@@ -44,6 +44,7 @@ final class ReferenceTableCellEqualityTests: XCTestCase {
             onCancel: {},
             commitCustom: { _, _, _ in },
             onCreateOption: { _, _ in },
+            onRenameOption: { _, _, _ in },
             onDeleteOption: { _, _ in },
             deleteUnlessInUse: { _, _ in nil }
         )

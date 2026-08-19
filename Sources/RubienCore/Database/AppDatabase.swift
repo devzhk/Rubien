@@ -5188,9 +5188,8 @@ extension AppDatabase {
     ///   is the stringified tag id, `to` is the new display name. Renames
     ///   the Tag row directly — `ReferenceTag` pivots are untouched
     ///   (identity-stable: tag id is the canonical reference).
-    /// - **Built-in singleSelect bound to a Reference column** (e.g. Status →
-    ///   `readingStatus`): bulk-update the column directly using the fixed
-    ///   `builtInSingleSelectKeys` allow-list to avoid SQL injection.
+    /// - **Built-in Status**: bulk-update the fixed `readingStatus` reference
+    ///   column directly.
     /// - **Custom singleSelect**: rename in `optionsJSON`, bulk-update
     ///   `propertyValue.value` rows that match the old scalar.
     /// - **Custom multiSelect**: rename in `optionsJSON`, then for each
@@ -5200,86 +5199,11 @@ extension AppDatabase {
     /// Throws `PropertyOptionError.optionNotFound` if the option doesn't
     /// exist on the property; `.duplicateValue(to)` if the rename would
     /// collide with another existing option (collapsing two distinct options
-    /// would break picker identity). No-op if `from == to`.
+    /// would break picker identity). No-op if `from == to`. Delegates to the
+    /// combined update API so every public rename path shares one transaction.
     public func renamePropertyOption(propertyId: Int64, from: String, to: String) throws {
         guard from != to else { return }
-        try dbWriter.write { db in
-            guard var prop = try PropertyDefinition.fetchOne(db, id: propertyId) else {
-                throw PropertyOptionError.propertyNotFound
-            }
-
-            // Tags-property routing: `from` = tag id (string). Rename the Tag
-            // row by id; pivots are unchanged because tag id is the identity.
-            if prop.isTags {
-                guard let tagId = Int64(from) else {
-                    throw PropertyOptionError.optionNotFound
-                }
-                guard var tag = try Tag.fetchOne(db, id: tagId) else {
-                    throw PropertyOptionError.optionNotFound
-                }
-                // Exclude self from the duplicate check — otherwise renaming
-                // a tag to its current name (a no-op idempotent rename) would
-                // spuriously throw `.duplicateValue`. The early `from != to`
-                // guard above doesn't cover this because `from` is an id and
-                // `to` is a name (different domains).
-                if try Tag
-                    .filter(Tag.Columns.name == to)
-                    .filter(Tag.Columns.id != tagId)
-                    .fetchOne(db) != nil {
-                    throw PropertyOptionError.duplicateValue(to)
-                }
-                if tag.name == to { return }
-                tag.name = to
-                tag.dateModified = Date()
-                try tag.update(db)
-                return
-            }
-
-            guard prop.type == .singleSelect || prop.type == .multiSelect else {
-                throw PropertyOptionError.unsupportedPropertyType
-            }
-            var options = prop.options
-            guard let idx = options.firstIndex(where: { $0.value == from }) else {
-                throw PropertyOptionError.optionNotFound
-            }
-            if options.contains(where: { $0.value == to }) {
-                throw PropertyOptionError.duplicateValue(to)
-            }
-            options[idx] = SelectOption(value: to, color: options[idx].color)
-            prop.options = options
-            prop.dateModified = Date()
-            try prop.update(db)
-
-            if prop.type == .singleSelect {
-                if let key = prop.defaultFieldKey,
-                   Self.builtInSingleSelectKeys.contains(key) {
-                    try db.execute(
-                        sql: "UPDATE reference SET \(key) = ? WHERE \(key) = ?",
-                        arguments: [to, from]
-                    )
-                } else {
-                    try db.execute(
-                        sql: "UPDATE propertyValue SET value = ? WHERE propertyId = ? AND value = ?",
-                        arguments: [to, propertyId, from]
-                    )
-                }
-            } else {
-                // Custom multiSelect: rewrite each affected row's JSON array.
-                // We only touch rows whose decoded array actually contains
-                // `from`, so unrelated values stay quiet (no dirty churn).
-                let rows = try PropertyValue
-                    .filter(PropertyValue.Columns.propertyId == propertyId)
-                    .fetchAll(db)
-                for var row in rows {
-                    guard let raw = row.value else { continue }
-                    let arr = PropertyValue.decodeMultiSelect(raw)
-                    guard arr.contains(from) else { continue }
-                    let next = arr.map { $0 == from ? to : $0 }
-                    row.value = PropertyValue.encodeMultiSelect(next)
-                    try row.update(db)
-                }
-            }
-        }
+        try updatePropertyOption(propertyId: propertyId, option: from, newName: to)
     }
 
     /// Delete a select option from a PropertyDefinition. The disposition of

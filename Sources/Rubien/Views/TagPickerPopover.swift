@@ -2,6 +2,19 @@
 import SwiftUI
 import RubienCore
 
+func validateTagRename(
+    draft: String,
+    tag: Tag,
+    allTags: [Tag]
+) -> PickerItemRenameValidation {
+    validatePickerItemRename(
+        draft: draft,
+        originalValue: tag.name,
+        otherValues: allTags.filter { $0.id != tag.id }.map(\.name),
+        duplicateMessage: "A tag with this name already exists."
+    )
+}
+
 struct TagPickerPopover: View {
     let assignedTags: [Tag]
     let allTags: [Tag]
@@ -12,6 +25,7 @@ struct TagPickerPopover: View {
     /// animation. The `Int64?` return is required so the popover can include
     /// the newly-created id in that immediate commit.
     let onCreateTag: (String) -> Int64?
+    let onRenameTag: ((Int64, String) throws -> Void)?
     let onDeleteTag: (Int64) -> Void
     /// Probe (mirrors SelectOptionPicker.deleteUnlessInUse): returns the in-use
     /// reference count when the tag is still assigned (→ inline confirm), or nil
@@ -21,6 +35,9 @@ struct TagPickerPopover: View {
     let deleteTagUnlessInUse: (Int64) -> Int?
     @State private var search = ""
     @State private var localIds: Set<Int64> = []
+    @State private var renamingTagID: Int64?
+    @State private var renameText = ""
+    @State private var renameError: String?
     /// Set while an in-use tag awaits delete confirmation; renders the inline
     /// confirm prompt in place of the tag list.
     @State private var confirming: (id: Int64, name: String, count: Int)?
@@ -55,6 +72,14 @@ struct TagPickerPopover: View {
         search = ""
     }
 
+    private func creatableTagName(from draft: String) -> String? {
+        let candidate = normalizedPickerItemName(draft)
+        guard !candidate.isEmpty,
+              !allTags.contains(where: { pickerItemNamesMatch($0.name, candidate) })
+        else { return nil }
+        return candidate
+    }
+
     var body: some View {
         Group {
             if let pending = confirming {
@@ -80,9 +105,8 @@ struct TagPickerPopover: View {
                     .textFieldStyle(.plain)
                     .font(.system(size: 12))
                     .onSubmit {
-                        let trimmed = search.trimmingCharacters(in: .whitespaces)
-                        if !trimmed.isEmpty && !allTags.contains(where: { $0.name.lowercased() == trimmed.lowercased() }) {
-                            handleCreate(trimmed)
+                        if let candidate = creatableTagName(from: search) {
+                            handleCreate(candidate)
                         }
                     }
             }
@@ -94,30 +118,39 @@ struct TagPickerPopover: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(filteredTags) { tag in
-                        TagPickerRow(
-                            tag: tag,
-                            isAssigned: isAssigned(tag),
-                            onToggle: {
-                                guard let id = tag.id else { return }
-                                if localIds.contains(id) { localIds.remove(id) } else { localIds.insert(id) }
-                                flushCommit()
-                            },
-                            onDelete: { requestDelete(tag) }
-                        )
+                        if renamingTagID == tag.id {
+                            PickerItemRenameRow(
+                                color: tag.color,
+                                placeholder: "Tag name",
+                                text: $renameText,
+                                errorMessage: renameError,
+                                onCommit: { commitRename(tag) },
+                                onCancel: cancelRename
+                            )
+                        } else {
+                            TagPickerRow(
+                                tag: tag,
+                                isAssigned: isAssigned(tag),
+                                onToggle: {
+                                    guard let id = tag.id else { return }
+                                    if localIds.contains(id) { localIds.remove(id) } else { localIds.insert(id) }
+                                    flushCommit()
+                                },
+                                onRename: onRenameTag == nil ? nil : { beginRename(tag) },
+                                onDelete: { requestDelete(tag) }
+                            )
+                        }
                     }
 
-                    if !search.isEmpty && !allTags.contains(where: { $0.name.lowercased() == search.trimmingCharacters(in: .whitespaces).lowercased() }) {
+                    if let candidate = creatableTagName(from: search) {
                         Button {
-                            let trimmed = search.trimmingCharacters(in: .whitespaces)
-                            if !trimmed.isEmpty {
-                                handleCreate(trimmed)
-                            }
+                            handleCreate(candidate)
                         } label: {
                             HStack(spacing: 6) {
                                 Image(systemName: "plus.circle.fill")
                                     .font(.system(size: 13))
                                     .foregroundStyle(Color.accentColor)
-                                Text("Create \"\(search.trimmingCharacters(in: .whitespaces))\"")
+                                Text("Create \"\(candidate)\"")
                                     .font(.system(size: 12))
                                     .foregroundStyle(Color.accentColor)
                                 Spacer()
@@ -157,6 +190,47 @@ struct TagPickerPopover: View {
         }
     }
 
+    private func beginRename(_ tag: Tag) {
+        guard let id = tag.id else { return }
+        renamingTagID = id
+        renameText = tag.name
+        renameError = nil
+    }
+
+    private func cancelRename() {
+        renamingTagID = nil
+        renameText = ""
+        renameError = nil
+    }
+
+    private func commitRename(_ tag: Tag) {
+        guard let id = tag.id else {
+            renameError = "This tag no longer exists."
+            return
+        }
+        switch validateTagRename(
+            draft: renameText,
+            tag: tag,
+            allTags: allTags
+        ) {
+        case .unchanged:
+            cancelRename()
+        case .invalid(let message):
+            renameError = message
+        case .valid(let newName):
+            do {
+                try onRenameTag?(id, newName)
+                cancelRename()
+            } catch PropertyOptionError.duplicateValue {
+                renameError = "A tag with this name already exists."
+            } catch PropertyOptionError.optionNotFound {
+                renameError = "This tag no longer exists."
+            } catch {
+                renameError = "Couldn’t rename this tag."
+            }
+        }
+    }
+
     // NOTE: this confirm view and the measured-min-height fix above deliberately
     // mirror SelectOptionPicker (InlinePropertyRow.swift). Two call sites don't
     // justify a shared abstraction yet; if a third in-use-confirm picker appears,
@@ -193,12 +267,13 @@ struct TagPickerPopover: View {
 
 // MARK: - Single tag row inside the picker
 //
-// Extracted so each row owns its hover state and shows the trash affordance only on
+// Extracted so each row owns its hover state and reveals its edit/delete controls on
 // pointer-over — matching `SelectOptionPickerRow` (the Status / select-option picker).
 private struct TagPickerRow: View {
     let tag: Tag
     let isAssigned: Bool
     let onToggle: () -> Void
+    let onRename: (() -> Void)?
     let onDelete: () -> Void
 
     @State private var isHovering = false
@@ -221,18 +296,18 @@ private struct TagPickerRow: View {
             }
             .buttonStyle(.plain)
 
-            if isHovering {
-                Button(action: onDelete) {
-                    Image(systemName: "trash")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Delete tag")
-            }
+            PickerRowActions(
+                isRowHovering: isHovering,
+                itemName: tag.name,
+                renameHelp: "Rename tag",
+                deleteHelp: "Delete tag",
+                onRename: onRename,
+                onDelete: onDelete
+            )
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 5)
+        .contentShape(Rectangle())
         .onHover { isHovering = $0 }
     }
 }

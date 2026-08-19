@@ -682,6 +682,19 @@ final class LibraryViewModel: ObservableObject {
         }
     }
 
+    /// Tags use their stable row id as the option identity, so renaming only
+    /// updates the Tag display name; existing reference assignments stay intact.
+    func renameTag(id: Int64, to newName: String) throws {
+        guard let tagsPropertyId = propertyDefs.first(where: { $0.isTags })?.id else {
+            throw PropertyOptionError.propertyNotFound
+        }
+        try renamePropertyOption(
+            propertyId: tagsPropertyId,
+            from: String(id),
+            to: newName
+        )
+    }
+
     func deleteTag(id: Int64) {
         do {
             try db.deleteTag(id: id)
@@ -697,6 +710,90 @@ final class LibraryViewModel: ObservableObject {
     func probeDeleteTag(id: Int64) -> Int? {
         guard let tagsPropId = propertyDefs.first(where: { $0.isTags })?.id else { return nil }
         return db.probeDeletePropertyOption(propertyId: tagsPropId, value: String(id))
+    }
+
+    /// Renames an option in the library and every view configuration that can
+    /// hold its string identity. The database migrates saved views atomically;
+    /// the mirrors below keep the active view and stashed unsaved drafts from
+    /// retaining the old key while observations catch up.
+    func renamePropertyOption(
+        propertyId: Int64,
+        from oldValue: String,
+        to newValue: String
+    ) throws {
+        guard let property = propertyDefs.first(where: { $0.id == propertyId }) else {
+            throw PropertyOptionError.propertyNotFound
+        }
+        let target: FieldTarget?
+        if property.defaultFieldKey == PropertyDefinition.readingStatusFieldKey {
+            target = .builtin(.readingStatus)
+        } else if property.isDefault {
+            target = nil
+        } else {
+            target = .custom(propertyId)
+        }
+
+        let now = Date()
+        try db.updatePropertyOption(
+            propertyId: propertyId,
+            option: oldValue,
+            newName: newValue,
+            now: now
+        )
+        guard let target else { return }
+
+        var filters = viewFilters
+        var activeFiltersChanged = false
+        for index in filters.indices {
+            if filters[index].renameOptionReference(
+                target: target,
+                from: oldValue,
+                to: newValue
+            ) {
+                activeFiltersChanged = true
+            }
+        }
+        if activeFiltersChanged { viewFilters = filters }
+
+        if var groupBy = viewGroupBy,
+           groupBy.renameOptionReference(
+               target: target,
+               from: oldValue,
+               to: newValue
+           ) {
+            viewGroupBy = groupBy
+        }
+
+        for id in Array(viewDrafts.keys) {
+            guard var draft = viewDrafts[id] else { continue }
+            for index in draft.filters.indices {
+                _ = draft.filters[index].renameOptionReference(
+                    target: target,
+                    from: oldValue,
+                    to: newValue
+                )
+            }
+            if var groupBy = draft.groupBy,
+               groupBy.renameOptionReference(
+                   target: target,
+                   from: oldValue,
+                   to: newValue
+               ) {
+                draft.groupBy = groupBy
+            }
+            viewDrafts[id] = draft
+        }
+
+        for index in databaseViews.indices {
+            if databaseViews[index].renameOptionReferences(
+                target: target,
+                from: oldValue,
+                to: newValue
+            ) {
+                databaseViews[index].dateModified = now
+            }
+        }
+        recomputeIsDirty()
     }
 
     func saveDatabaseView(_ view: inout DatabaseView) {
@@ -1189,8 +1286,18 @@ struct ContentView: View {
                     },
                     onUpdateTags: { refId, tagIds in viewModel.setTags(forReference: refId, tagIds: tagIds) },
                     onCreateTag: { name in viewModel.createTag(name: name) },
+                    onRenameTag: { tagId, newName in
+                        try viewModel.renameTag(id: tagId, to: newName)
+                    },
                     onDeleteTag: { tagId in viewModel.deleteTag(id: tagId) },
                     deleteTagUnlessInUse: { tagId in viewModel.probeDeleteTag(id: tagId) },
+                    onRenameOption: { propId, oldName, newName in
+                        try viewModel.renamePropertyOption(
+                            propertyId: propId,
+                            from: oldName,
+                            to: newName
+                        )
+                    },
                     pdfOperations: Binding(
                         get: { pdfDownloadCoordinator.operations },
                         set: { pdfDownloadCoordinator.operations = $0 }
@@ -1238,6 +1345,9 @@ struct ContentView: View {
                 viewModel.setTags(forReference: refId, tagIds: tagIds)
             },
             onCreateTag: { name in viewModel.createTag(name: name) },
+            onRenameTag: { tagId, newName in
+                try viewModel.renameTag(id: tagId, to: newName)
+            },
             onDeleteTag: { tagId in viewModel.deleteTag(id: tagId) },
             deleteTagUnlessInUse: { tagId in viewModel.probeDeleteTag(id: tagId) },
             onCreateOption: { propId, optionValue in
@@ -1249,6 +1359,13 @@ struct ContentView: View {
                 options.append(SelectOption(value: optionValue, color: color))
                 prop.options = options
                 try? viewModel.db.savePropertyDefinition(&prop)
+            },
+            onRenameOption: { propId, oldName, newName in
+                try viewModel.renamePropertyOption(
+                    propertyId: propId,
+                    from: oldName,
+                    to: newName
+                )
             },
             onDeleteOption: { propId, optionValue in
                 try? viewModel.db.deletePropertyOption(

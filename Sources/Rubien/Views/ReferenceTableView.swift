@@ -87,9 +87,11 @@ struct ReferenceTableView: View {
     let onUpdateReference: (Reference) -> Void
     let onUpdateTags: (Int64, [Int64]) -> Void
     let onCreateTag: (String) -> Int64?
+    let onRenameTag: (Int64, String) throws -> Void
     let onDeleteTag: (Int64) -> Void
     let deleteTagUnlessInUse: (Int64) -> Int?
     let onCreateOption: (Int64, String) -> Void
+    let onRenameOption: (Int64, String, String) throws -> Void
     let onDeleteOption: (Int64, String) -> Void
     let deleteUnlessInUse: (Int64, String) -> Int?
     var isRefreshingMetadata = false
@@ -265,9 +267,11 @@ struct ReferenceTableView: View {
             onUpdateReference: onUpdateReference,
             onUpdateTags: onUpdateTags,
             onCreateTag: onCreateTag,
+            onRenameTag: onRenameTag,
             onDeleteTag: onDeleteTag,
             deleteTagUnlessInUse: deleteTagUnlessInUse,
             onCreateOption: onCreateOption,
+            onRenameOption: onRenameOption,
             onDeleteOption: onDeleteOption,
             deleteUnlessInUse: deleteUnlessInUse,
             customProperties: referenceTableCustomProperties(propertyDefs),
@@ -659,9 +663,11 @@ private struct ReferenceTableContent: View {
     let onUpdateReference: (Reference) -> Void
     let onUpdateTags: (Int64, [Int64]) -> Void
     let onCreateTag: (String) -> Int64?
+    let onRenameTag: (Int64, String) throws -> Void
     let onDeleteTag: (Int64) -> Void
     let deleteTagUnlessInUse: (Int64) -> Int?
     let onCreateOption: (Int64, String) -> Void
+    let onRenameOption: (Int64, String, String) throws -> Void
     let onDeleteOption: (Int64, String) -> Void
     let deleteUnlessInUse: (Int64, String) -> Int?
     let customProperties: [PropertyDefinition]
@@ -822,6 +828,7 @@ private struct ReferenceTableContent: View {
                 onCancel: cancel,
                 commitCustom: commitCustom,
                 onCreateOption: onCreateOption,
+                onRenameOption: onRenameOption,
                 onDeleteOption: onDeleteOption,
                 deleteUnlessInUse: deleteUnlessInUse,
                 onTab: { back in
@@ -864,6 +871,7 @@ private struct ReferenceTableContent: View {
                     referenceId: ref.id ?? -1,
                     onUpdateTags: { tagIds in onUpdateTags(ref.id ?? -1, tagIds) },
                     onCreateTag: onCreateTag,
+                    onRenameTag: onRenameTag,
                     onDeleteTag: onDeleteTag,
                     deleteTagUnlessInUse: deleteTagUnlessInUse
                 )
@@ -884,6 +892,12 @@ private struct ReferenceTableContent: View {
                         guard var def = statusDef else { return }
                         _ = def.addOptionIfMissing(newOption)
                         try? db.savePropertyDefinition(&def)
+                    },
+                    onRenameStatusOption: { oldName, newName in
+                        guard let propId = statusDef?.id else {
+                            throw PropertyOptionError.propertyNotFound
+                        }
+                        try onRenameOption(propId, oldName, newName)
                     },
                     onDeleteStatusOption: { option in
                         guard let def = statusDef, let propId = def.id else { return }
@@ -1400,6 +1414,8 @@ struct ReadingStatusCell: View, Equatable {
     /// `addOptionIfMissing`. Lets users add a new Status option inline by
     /// typing in the picker's search field.
     let onCreateStatusOption: (String) -> Void
+    /// Atomically renames the option and migrates references using it.
+    let onRenameStatusOption: (String, String) throws -> Void
     /// Wired by the parent to `db.deletePropertyOption` (with auto-reassign
     /// on `.optionInUse`). Lets users delete a Status option via the trash
     /// affordance on each option row.
@@ -1471,6 +1487,7 @@ struct ReadingStatusCell: View, Equatable {
                     // value via onCommit above; we just need to make sure
                     // the option exists in the live def first.
                 },
+                onRenameOption: onRenameStatusOption,
                 onDeleteOption: { option in
                     onDeleteStatusOption(option)
                 }
@@ -1494,6 +1511,7 @@ struct TagsCellView: View, Equatable {
     let referenceId: Int64
     let onUpdateTags: ([Int64]) -> Void
     let onCreateTag: (String) -> Int64?
+    let onRenameTag: (Int64, String) throws -> Void
     let onDeleteTag: (Int64) -> Void
     let deleteTagUnlessInUse: (Int64) -> Int?
 
@@ -1543,6 +1561,7 @@ struct TagsCellView: View, Equatable {
                 allTags: allTags,
                 onCommit: { tagIds in onUpdateTags(tagIds) },
                 onCreateTag: onCreateTag,
+                onRenameTag: onRenameTag,
                 onDeleteTag: onDeleteTag,
                 deleteTagUnlessInUse: deleteTagUnlessInUse
             )

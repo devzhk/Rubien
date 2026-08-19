@@ -1390,6 +1390,17 @@ extension AppDatabase {
                         try row.update(db)
                     }
                 }
+                if let target = Self.viewTarget(forOptionIn: prop, propertyId: propertyId) {
+                    let views = try DatabaseView.fetchAll(db)
+                    for var view in views where view.renameOptionReferences(
+                        target: target,
+                        from: option,
+                        to: effectiveNewName
+                    ) {
+                        view.dateModified = now
+                        try view.update(db)
+                    }
+                }
             }
             let refreshed = try PropertyDefinition.fetchOne(db, id: propertyId) ?? prop
             return (refreshed, changed)
@@ -1400,6 +1411,16 @@ extension AppDatabase {
         if isAllASCIIDigits(name) {
             throw PropertyMutationError.allDigitName(name)
         }
+    }
+
+    private static func viewTarget(
+        forOptionIn property: PropertyDefinition,
+        propertyId: Int64
+    ) -> FieldTarget? {
+        if property.defaultFieldKey == PropertyDefinition.readingStatusFieldKey {
+            return .builtin(.readingStatus)
+        }
+        return property.isDefault ? nil : .custom(propertyId)
     }
 
     /// `#RRGGBB` only (6 hex digits) — the option-recolor contract (§6).

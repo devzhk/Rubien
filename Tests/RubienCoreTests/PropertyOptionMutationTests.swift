@@ -179,6 +179,57 @@ final class PropertyOptionMutationTests: XCTestCase {
         XCTAssertEqual(stored?["dateModified"] as Date?, t2)
     }
 
+    func testUpdateOptionRenameMigratesSavedViewFiltersAndGrouping() throws {
+        let db = try makeDB()
+        let prop = try db.createPropertyDefinition(
+            name: "Modality",
+            type: .multiSelect,
+            options: [
+                SelectOption(value: "ml", color: "#111111"),
+                SelectOption(value: "nlp", color: "#222222"),
+            ]
+        )
+        let target = FieldTarget.custom(prop.id!)
+        var view = DatabaseView(
+            name: "ML papers",
+            filters: [
+                ViewFilter(
+                    target: target,
+                    op: .containsAnyOf,
+                    value: .selectKeys(["ml", "nlp"])
+                ),
+                ViewFilter(
+                    target: .builtin(.readingStatus),
+                    op: .equals,
+                    value: .selectKeys(["Read"])
+                ),
+            ],
+            groupBy: GroupConfig(
+                target: target,
+                customOrder: ["nlp", "ml"],
+                collapsed: ["ml"]
+            )
+        )
+        try db.saveDatabaseView(&view)
+
+        try db.updatePropertyOption(
+            propertyId: prop.id!,
+            option: "ml",
+            newName: "machine-learning",
+            now: t2
+        )
+
+        let updated = try XCTUnwrap(db.fetchDatabaseView(id: view.id!))
+        XCTAssertEqual(
+            updated.parsedFilters[0].value,
+            .selectKeys(["machine-learning", "nlp"])
+        )
+        XCTAssertEqual(updated.parsedFilters[1].value, .selectKeys(["Read"]))
+        XCTAssertEqual(updated.parsedGroupBy?.customOrder, ["nlp", "machine-learning"])
+        XCTAssertEqual(updated.parsedGroupBy?.collapsed, ["machine-learning"])
+        XCTAssertEqual(updated.dateModified, t2)
+    }
+
     func testUpdateOptionRejectsDuplicateRenameTarget() throws {
         let db = try makeDB()
         let prop = try db.createPropertyDefinition(name: "Stage", type: .singleSelect, options: [SelectOption(value: "a", color: "#111111"), SelectOption(value: "b", color: "#222222")])
@@ -244,11 +295,24 @@ final class PropertyOptionMutationTests: XCTestCase {
         try db.dbWriter.write {
             try $0.execute(sql: "UPDATE reference SET dateModified = ? WHERE id = ?", arguments: [t1, id])
         }
+        var view = DatabaseView(
+            name: "Skimmed",
+            filters: [ViewFilter(
+                target: .builtin(.readingStatus),
+                op: .equals,
+                value: .selectKeys(["Skimmed"])
+            )]
+        )
+        try db.saveDatabaseView(&view)
         try db.updatePropertyOption(propertyId: status.id!, option: "Skimmed", newName: "Browsed", now: t2)
         // Status is a Reference column — the rename bulk-updates the column.
         let updated = try db.dbWriter.read { try Reference.fetchOne($0, id: id)! }
         XCTAssertEqual(updated.readingStatus, "Browsed")
         XCTAssertEqual(updated.dateModified, t2)
+        XCTAssertEqual(
+            try db.fetchDatabaseView(id: view.id!)?.parsedFilters.first?.value,
+            .selectKeys(["Browsed"])
+        )
     }
 
     func testUpdateOptionNoOpDoesNotStampDefinitionOrValues() throws {

@@ -316,6 +316,7 @@ struct EditableSingleSelectCell: View {
     let options: [SelectOption]
     let onSelect: (String) -> Void
     var onCreateOption: ((String) -> Void)? = nil
+    var onRenameOption: ((String, String) throws -> Void)? = nil
     var onDeleteOption: ((String) -> Void)? = nil
     var deleteUnlessInUse: ((String) -> Int?)? = nil
 
@@ -357,6 +358,7 @@ struct EditableSingleSelectCell: View {
                 // option set (it would otherwise display "Create X" but the
                 // value would be silently dropped by the rawValue guard).
                 onCreateOption: onCreateOption,
+                onRenameOption: onRenameOption,
                 onDeleteOption: onDeleteOption,
                 deleteUnlessInUse: deleteUnlessInUse
             )
@@ -371,6 +373,7 @@ struct EditableMultiSelectCell: View {
     let options: [SelectOption]
     let onUpdate: ([String]) -> Void
     var onCreateOption: ((String) -> Void)? = nil
+    var onRenameOption: ((String, String) throws -> Void)? = nil
     var onDeleteOption: ((String) -> Void)? = nil
     var deleteUnlessInUse: ((String) -> Int?)? = nil
 
@@ -414,6 +417,7 @@ struct EditableMultiSelectCell: View {
                 options: options,
                 onCommit: onUpdate,
                 onCreateOption: onCreateOption,
+                onRenameOption: onRenameOption,
                 onDeleteOption: onDeleteOption,
                 deleteUnlessInUse: deleteUnlessInUse
             )
@@ -693,6 +697,7 @@ struct EditableCustomPropertyCell: View, Equatable {
     let onCancel: () -> Void
     let commitCustom: (Int64, Int64, String?) -> Void
     let onCreateOption: (Int64, String) -> Void
+    let onRenameOption: (Int64, String, String) throws -> Void
     let onDeleteOption: (Int64, String) -> Void
     let deleteUnlessInUse: (Int64, String) -> Int?
     var onTab: ((_ backwards: Bool) -> Void)? = nil
@@ -760,6 +765,9 @@ struct EditableCustomPropertyCell: View, Equatable {
                 onCreateOption: { newName in
                     onCreateOption(propId, newName)
                 },
+                onRenameOption: { oldName, newName in
+                    try onRenameOption(propId, oldName, newName)
+                },
                 onDeleteOption: { optionValue in
                     onDeleteOption(propId, optionValue)
                 },
@@ -778,6 +786,9 @@ struct EditableCustomPropertyCell: View, Equatable {
                 },
                 onCreateOption: { newName in
                     onCreateOption(propId, newName)
+                },
+                onRenameOption: { oldName, newName in
+                    try onRenameOption(propId, oldName, newName)
                 },
                 onDeleteOption: { optionValue in
                     onDeleteOption(propId, optionValue)

@@ -8,6 +8,29 @@ import RubienPDFKit
 
 private let detailLog = Logger(subsystem: "Rubien", category: "reference-detail")
 
+/// Mirrors an option rename into the detail panel's locally cached custom
+/// value. The database performs the same migration persistently; this helper
+/// keeps the currently visible row in sync without waiting for a reload.
+func customSelectValue(
+    _ currentValue: String,
+    afterRenaming oldName: String,
+    to newName: String,
+    type: PropertyType
+) -> String {
+    switch type {
+    case .singleSelect:
+        return currentValue == oldName ? newName : currentValue
+    case .multiSelect:
+        let values = PropertyValue.decodeMultiSelect(currentValue)
+        guard values.contains(oldName) else { return currentValue }
+        return PropertyValue.encodeMultiSelect(
+            values.map { $0 == oldName ? newName : $0 }
+        )
+    default:
+        return currentValue
+    }
+}
+
 /// Materializes database-backed reader content as a derived local file so
 /// Finder can reveal it. Imports and clips deliberately do not retain their
 /// source path, so this copy is regenerated from the current stored content.
@@ -277,8 +300,10 @@ struct ReferenceDetailView: View {
     var onOpenWebReader: ((Reference) -> Void)?
     var onUpdateTags: ((Int64, [Int64]) -> Void)?
     var onCreateTag: ((String) -> Int64?)?
+    var onRenameTag: ((Int64, String) throws -> Void)?
     var onDeleteTag: ((Int64) -> Void)?
     var deleteTagUnlessInUse: ((Int64) -> Int?)?
+    var onRenameOption: ((Int64, String, String) throws -> Void)?
 
     @State private var editedRef: Reference
     @State private var editingField: String?
@@ -327,8 +352,10 @@ struct ReferenceDetailView: View {
          onOpenPDFReader: ((Reference) -> Void)? = nil, onOpenWebReader: ((Reference) -> Void)? = nil,
          onUpdateTags: ((Int64, [Int64]) -> Void)? = nil,
          onCreateTag: ((String) -> Int64?)? = nil,
+         onRenameTag: ((Int64, String) throws -> Void)? = nil,
          onDeleteTag: ((Int64) -> Void)? = nil,
          deleteTagUnlessInUse: ((Int64) -> Int?)? = nil,
+         onRenameOption: ((Int64, String, String) throws -> Void)? = nil,
          pdfOperations: Binding<ReferenceDetailPDFOperationRegistry>,
          propertyDefs: Binding<[PropertyDefinition]>) {
         self.reference = reference
@@ -342,8 +369,10 @@ struct ReferenceDetailView: View {
         self.onOpenWebReader = onOpenWebReader
         self.onUpdateTags = onUpdateTags
         self.onCreateTag = onCreateTag
+        self.onRenameTag = onRenameTag
         self.onDeleteTag = onDeleteTag
         self.deleteTagUnlessInUse = deleteTagUnlessInUse
+        self.onRenameOption = onRenameOption
         self._editedRef = State(initialValue: reference)
         self._pdfOperations = pdfOperations
         self._propertyDefs = propertyDefs
@@ -693,6 +722,14 @@ struct ReferenceDetailView: View {
                         try? db.savePropertyDefinition(&statusDef)
                     }
                 },
+                onRenameOption: { oldName, newName in
+                    guard let propId = propertyDefs
+                        .first(forFieldKey: PropertyDefinition.readingStatusFieldKey)?.id
+                    else {
+                        throw PropertyOptionError.propertyNotFound
+                    }
+                    try renameOption(propId: propId, from: oldName, to: newName)
+                },
                 onDeleteOption: { option in
                     // Try clean delete first; on .optionInUse, auto-reassign
                     // to the first remaining option. Mirrors the table-cell
@@ -724,6 +761,7 @@ struct ReferenceDetailView: View {
                     onUpdateTags?(refId, tagIds)
                 },
                 onCreateTag: { name in onCreateTag?(name) ?? nil },
+                onRenameTag: onRenameTag,
                 onDeleteTag: { tagId in
                     onDeleteTag?(tagId)
                 },
@@ -1110,6 +1148,14 @@ struct ReferenceDetailView: View {
                 onCreateOption: { newOption in
                     addOptionToProperty(propId: propId, optionValue: newOption)
                 },
+                onRenameOption: { oldName, newName in
+                    try renameCustomOption(
+                        propId: propId,
+                        type: .singleSelect,
+                        from: oldName,
+                        to: newName
+                    )
+                },
                 onDeleteOption: { optionValue in
                     try? db.deletePropertyOption(propertyId: propId, value: optionValue, clearInUse: true)
                 },
@@ -1129,6 +1175,14 @@ struct ReferenceDetailView: View {
                 },
                 onCreateOption: { newOption in
                     addOptionToProperty(propId: propId, optionValue: newOption)
+                },
+                onRenameOption: { oldName, newName in
+                    try renameCustomOption(
+                        propId: propId,
+                        type: .multiSelect,
+                        from: oldName,
+                        to: newName
+                    )
                 },
                 onDeleteOption: { optionValue in
                     try? db.deletePropertyOption(propertyId: propId, value: optionValue, clearInUse: true)
@@ -1485,6 +1539,40 @@ struct ReferenceDetailView: View {
         guard var prop = propertyDefs.first(where: { $0.id == propId }) else { return }
         if prop.addOptionIfMissing(optionValue) {
             try? db.savePropertyDefinition(&prop)
+        }
+    }
+
+    /// The detail panel keeps custom values in local state rather than a live
+    /// observation. Mirror the database's bulk migration after a successful
+    /// rename so the selected chip updates immediately without changing rows.
+    private func renameCustomOption(
+        propId: Int64,
+        type: PropertyType,
+        from oldName: String,
+        to newName: String
+    ) throws {
+        try renameOption(propId: propId, from: oldName, to: newName)
+        guard let currentValue = customValues[propId] else { return }
+        let migratedValue = customSelectValue(
+            currentValue,
+            afterRenaming: oldName,
+            to: newName,
+            type: type
+        )
+        if migratedValue != currentValue {
+            customValues[propId] = migratedValue
+        }
+    }
+
+    private func renameOption(propId: Int64, from oldName: String, to newName: String) throws {
+        if let onRenameOption {
+            try onRenameOption(propId, oldName, newName)
+        } else {
+            try db.updatePropertyOption(
+                propertyId: propId,
+                option: oldName,
+                newName: newName
+            )
         }
     }
 

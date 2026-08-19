@@ -132,6 +132,9 @@ struct InlineSingleSelectRow: View {
     /// the current options list (used for Type, whose options drive BibTeX
     /// buckets and cannot be user-extended).
     var onCreateOption: ((String) -> Void)? = nil
+    /// Pass non-nil to expose inline option renaming. The shared picker owns
+    /// validation and surfaces any persistence error without dismissing.
+    var onRenameOption: ((String, String) throws -> Void)? = nil
     /// Pass non-nil to expose a trash affordance on each option row (revealed
     /// on hover). The caller handles persistence + the in-use reassignment
     /// path. See `SelectOptionPicker.onDeleteOption`.
@@ -171,6 +174,7 @@ struct InlineSingleSelectRow: View {
                     }
                 },
                 onCreateOption: onCreateOption,
+                onRenameOption: onRenameOption,
                 onDeleteOption: onDeleteOption,
                 deleteUnlessInUse: deleteUnlessInUse,
                 lockedHint: lockedHint
@@ -187,6 +191,7 @@ struct InlineTagsRow: View {
     let allTags: [Tag]
     let onUpdateTags: ([Int64]) -> Void
     let onCreateTag: (String) -> Int64?
+    var onRenameTag: ((Int64, String) throws -> Void)? = nil
     let onDeleteTag: (Int64) -> Void
     let deleteTagUnlessInUse: (Int64) -> Int?
 
@@ -218,6 +223,7 @@ struct InlineTagsRow: View {
                     allTags: allTags,
                     onCommit: onUpdateTags,
                     onCreateTag: onCreateTag,
+                    onRenameTag: onRenameTag,
                     onDeleteTag: onDeleteTag,
                     deleteTagUnlessInUse: deleteTagUnlessInUse
                 )
@@ -234,6 +240,8 @@ struct InlineMultiSelectOptionRow: View {
     let options: [SelectOption]
     let onUpdate: ([String]) -> Void
     let onCreateOption: (String) -> Void
+    /// Pass non-nil to expose inline option renaming.
+    var onRenameOption: ((String, String) throws -> Void)? = nil
     /// Pass non-nil to expose a trash affordance per option (see
     /// `SelectOptionPicker.onDeleteOption` / `deleteUnlessInUse`).
     var onDeleteOption: ((String) -> Void)? = nil
@@ -269,6 +277,7 @@ struct InlineMultiSelectOptionRow: View {
                     options: options,
                     onCommit: onUpdate,
                     onCreateOption: onCreateOption,
+                    onRenameOption: onRenameOption,
                     onDeleteOption: onDeleteOption,
                     deleteUnlessInUse: deleteUnlessInUse
                 )
@@ -429,6 +438,26 @@ struct InlineDateRow: View {
 
 // MARK: - Select Option Picker (for custom single/multi-select)
 
+typealias SelectOptionRenameValidation = PickerItemRenameValidation
+
+/// Validates the user-entered label before the database-backed rename runs.
+/// Keep this separate from the view so trimming and duplicate handling remain
+/// deterministic and directly testable.
+func validateSelectOptionRename(
+    draft: String,
+    originalValue: String,
+    options: [SelectOption]
+) -> SelectOptionRenameValidation {
+    validatePickerItemRename(
+        draft: draft,
+        originalValue: originalValue,
+        otherValues: options
+            .filter { $0.value != originalValue }
+            .map(\.value),
+        duplicateMessage: "An option with this name already exists."
+    )
+}
+
 struct SelectOptionPicker: View {
     let selectedValues: [String]
     let options: [SelectOption]
@@ -440,6 +469,10 @@ struct SelectOptionPicker: View {
     /// fixed (currently only Type post-Phase-3); the picker hides the create
     /// path entirely so users aren't led to expect mutability that doesn't apply.
     let onCreateOption: ((String) -> Void)?
+    /// When non-nil, each option row shows a pencil button on hover. The
+    /// callback performs the atomic database rename, including migration of
+    /// values already assigned to references.
+    var onRenameOption: ((String, String) throws -> Void)? = nil
     /// When non-nil, each option row shows a small trash button on hover that
     /// invokes this callback with the option value. Caller is responsible for
     /// the actual mutation (calling `db.deletePropertyOption`) and any in-use
@@ -459,6 +492,9 @@ struct SelectOptionPicker: View {
 
     @State private var search = ""
     @State private var localSelected: Set<String> = []
+    @State private var renamingValue: String?
+    @State private var renameText = ""
+    @State private var renameError: String?
     /// Set while an in-use option awaits delete confirmation; renders the
     /// inline confirm prompt in place of the option list.
     @State private var confirming: (value: String, count: Int)?
@@ -482,6 +518,29 @@ struct SelectOptionPicker: View {
     }
 
     private var canCreate: Bool { onCreateOption != nil }
+
+    private func creatableOptionName(from draft: String) -> String? {
+        let candidate = normalizedPickerItemName(draft)
+        guard !candidate.isEmpty,
+              !normalizedOptions.contains(where: {
+                  pickerItemNamesMatch($0.value, candidate)
+              })
+        else { return nil }
+        return candidate
+    }
+
+    private func handleCreate(_ candidate: String) {
+        onCreateOption?(candidate)
+        if isSingleSelect {
+            localSelected = [candidate]
+            onCommit([candidate])
+            dismiss()
+        } else {
+            localSelected.insert(candidate)
+            onCommit(Array(localSelected))
+        }
+        search = ""
+    }
 
     var body: some View {
         Group {
@@ -512,20 +571,10 @@ struct SelectOptionPicker: View {
                     .textFieldStyle(.plain)
                     .font(.system(size: 12))
                     .onSubmit {
-                        guard let onCreateOption else { return }
-                        let trimmed = search.trimmingCharacters(in: .whitespaces)
-                        if !trimmed.isEmpty && !normalizedOptions.contains(where: { $0.value.lowercased() == trimmed.lowercased() }) {
-                            onCreateOption(trimmed)
-                            if isSingleSelect {
-                                localSelected = [trimmed]
-                                onCommit([trimmed])
-                                dismiss()
-                            } else {
-                                localSelected.insert(trimmed)
-                                onCommit(Array(localSelected))
-                            }
-                            search = ""
-                        }
+                        guard onCreateOption != nil,
+                              let candidate = creatableOptionName(from: search)
+                        else { return }
+                        handleCreate(candidate)
                     }
             }
             .padding(.horizontal, 12)
@@ -536,57 +585,57 @@ struct SelectOptionPicker: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(filteredOptions, id: \.value) { option in
-                        SelectOptionPickerRow(
-                            option: option,
-                            isSelected: localSelected.contains(option.value),
-                            onTap: {
-                                if isSingleSelect {
-                                    localSelected = [option.value]
-                                    onCommit([option.value])
-                                    dismiss()
-                                } else {
-                                    if localSelected.contains(option.value) {
-                                        localSelected.remove(option.value)
+                        if renamingValue == option.value {
+                            PickerItemRenameRow(
+                                color: option.color,
+                                placeholder: "Option name",
+                                text: $renameText,
+                                errorMessage: renameError,
+                                onCommit: { commitRename(option.value) },
+                                onCancel: cancelRename
+                            )
+                        } else {
+                            SelectOptionPickerRow(
+                                option: option,
+                                isSelected: localSelected.contains(option.value),
+                                onTap: {
+                                    if isSingleSelect {
+                                        localSelected = [option.value]
+                                        onCommit([option.value])
+                                        dismiss()
                                     } else {
-                                        localSelected.insert(option.value)
+                                        if localSelected.contains(option.value) {
+                                            localSelected.remove(option.value)
+                                        } else {
+                                            localSelected.insert(option.value)
+                                        }
+                                        // Eager commit so the cell behind the popover
+                                        // updates without waiting for NSPopover's
+                                        // dismiss animation. Matches the existing
+                                        // eager-commit pattern in the create paths.
+                                        onCommit(Array(localSelected))
                                     }
-                                    // Eager commit so the cell behind the popover
-                                    // updates without waiting for NSPopover's
-                                    // dismiss animation. Matches the existing
-                                    // eager-commit pattern in the create paths
-                                    // below (line ~466 and ~516).
-                                    onCommit(Array(localSelected))
+                                },
+                                onRename: onRenameOption == nil ? nil : {
+                                    beginRename(option.value)
+                                },
+                                onDelete: onDeleteOption == nil ? nil : {
+                                    requestDelete(option.value)
                                 }
-                            },
-                            onDelete: onDeleteOption == nil ? nil : {
-                                requestDelete(option.value)
-                            }
-                        )
+                            )
+                        }
                     }
 
-                    if let onCreateOption,
-                       !search.isEmpty,
-                       !normalizedOptions.contains(where: { $0.value.lowercased() == search.trimmingCharacters(in: .whitespaces).lowercased() }) {
+                    if onCreateOption != nil,
+                       let candidate = creatableOptionName(from: search) {
                         Button {
-                            let trimmed = search.trimmingCharacters(in: .whitespaces)
-                            if !trimmed.isEmpty {
-                                onCreateOption(trimmed)
-                                if isSingleSelect {
-                                    localSelected = [trimmed]
-                                    onCommit([trimmed])
-                                    dismiss()
-                                } else {
-                                    localSelected.insert(trimmed)
-                                    onCommit(Array(localSelected))
-                                }
-                                search = ""
-                            }
+                            handleCreate(candidate)
                         } label: {
                             HStack(spacing: 6) {
                                 Image(systemName: "plus.circle.fill")
                                     .font(.system(size: 13))
                                     .foregroundStyle(Color.accentColor)
-                                Text("Create \"\(search.trimmingCharacters(in: .whitespaces))\"")
+                                Text("Create \"\(candidate)\"")
                                     .font(.system(size: 12))
                                     .foregroundStyle(Color.accentColor)
                                 Spacer()
@@ -643,6 +692,45 @@ struct SelectOptionPicker: View {
         // nil → already deleted (unused) or a safe no-op; nothing to confirm.
     }
 
+    private func beginRename(_ value: String) {
+        renamingValue = value
+        renameText = value
+        renameError = nil
+    }
+
+    private func cancelRename() {
+        renamingValue = nil
+        renameText = ""
+        renameError = nil
+    }
+
+    private func commitRename(_ originalValue: String) {
+        switch validateSelectOptionRename(
+            draft: renameText,
+            originalValue: originalValue,
+            options: normalizedOptions
+        ) {
+        case .unchanged:
+            cancelRename()
+        case .invalid(let message):
+            renameError = message
+        case .valid(let newValue):
+            do {
+                try onRenameOption?(originalValue, newValue)
+                if localSelected.remove(originalValue) != nil {
+                    localSelected.insert(newValue)
+                }
+                cancelRename()
+            } catch PropertyOptionError.duplicateValue {
+                renameError = "An option with this name already exists."
+            } catch PropertyOptionError.optionNotFound {
+                renameError = "This option no longer exists."
+            } catch {
+                renameError = "Couldn’t rename this option."
+            }
+        }
+    }
+
     @ViewBuilder
     private func confirmView(_ pending: (value: String, count: Int)) -> some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -680,6 +768,8 @@ private struct SelectOptionPickerRow: View {
     let option: SelectOption
     let isSelected: Bool
     let onTap: () -> Void
+    /// When non-nil, a small pencil button appears on hover.
+    let onRename: (() -> Void)?
     /// When non-nil, a small trash button appears on hover.
     let onDelete: (() -> Void)?
 
@@ -696,15 +786,14 @@ private struct SelectOptionPickerRow: View {
                 .padding(.vertical, 2)
                 .chipBackground(Color(hex: option.color))
             Spacer()
-            if let onDelete, isHovering {
-                Button(action: onDelete) {
-                    Image(systemName: "trash")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Delete option")
-            }
+            PickerRowActions(
+                isRowHovering: isHovering,
+                itemName: option.value,
+                renameHelp: "Rename option",
+                deleteHelp: "Delete option",
+                onRename: onRename,
+                onDelete: onDelete
+            )
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 5)
@@ -713,4 +802,5 @@ private struct SelectOptionPickerRow: View {
         .onHover { isHovering = $0 }
     }
 }
+
 #endif
