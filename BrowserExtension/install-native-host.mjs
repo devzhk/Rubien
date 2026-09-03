@@ -27,7 +27,8 @@ const extensionID = createHash('sha256')
   .replace(/[0-9a-f]/g, (digit) =>
     String.fromCharCode('a'.charCodeAt(0) + Number.parseInt(digit, 16)),
   );
-const expectedExtensionID = 'pggebflfobimhklmgebcfgeobajkgdbb';
+const expectedExtensionID = 'imfaobbkcgaknmlphgkdpkdamfeimegc';
+const legacySideloadedExtensionID = 'pggebflfobimhklmgebcfgeobajkgdbb';
 
 if (extensionID !== expectedExtensionID) {
   throw new Error(
@@ -50,7 +51,10 @@ const hostManifest = {
   description: 'Import the active Chrome tab into Rubien',
   path: helperPath,
   type: 'stdio',
-  allowed_origins: [`chrome-extension://${extensionID}/`],
+  allowed_origins: [
+    `chrome-extension://${extensionID}/`,
+    `chrome-extension://${legacySideloadedExtensionID}/`,
+  ],
 };
 
 if (!process.argv.includes('--dry-run')) {

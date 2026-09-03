@@ -6,6 +6,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 VERSION="${1:-$(tr -d '[:space:]' < "$PROJECT_DIR/VERSION")}"
 OUTPUT_DIR="${2:-$PROJECT_DIR/build}"
 ARTIFACT_NAME="Rubien-Browser-Extension-${VERSION}.zip"
+STORE_ARTIFACT_NAME="Rubien-Browser-Extension-${VERSION}-Chrome-Web-Store.zip"
 
 validate_chrome_version() {
     local value="$1"
@@ -89,4 +90,42 @@ for legal_file in LICENSE THIRD_PARTY_NOTICES; do
     fi
 done
 
+# Chrome Web Store uploads require manifest.json at the ZIP root and reject the
+# manifest `key` field. The checked-in key remains useful for unpacked builds:
+# it makes development exercise the exact Web Store identity.
+/usr/bin/plutil -remove key "$EXTENSION_DIR/manifest.json"
+(
+    cd "$EXTENSION_DIR"
+    COPYFILE_DISABLE=1 /usr/bin/zip -q -r -X \
+        "$STAGING_ROOT/$STORE_ARTIFACT_NAME" .
+)
+mv -f "$STAGING_ROOT/$STORE_ARTIFACT_NAME" "$OUTPUT_DIR/$STORE_ARTIFACT_NAME"
+
+/usr/bin/unzip -tq "$OUTPUT_DIR/$STORE_ARTIFACT_NAME"
+STORE_PACKAGED_VERSION="$({
+    /usr/bin/unzip -p "$OUTPUT_DIR/$STORE_ARTIFACT_NAME" manifest.json
+} | /usr/bin/plutil -extract version raw -o - -- -)"
+if [ "$STORE_PACKAGED_VERSION" != "$VERSION" ]; then
+    echo "✗ Chrome Web Store manifest version mismatch: expected $VERSION, found $STORE_PACKAGED_VERSION" >&2
+    exit 1
+fi
+if /usr/bin/unzip -p "$OUTPUT_DIR/$STORE_ARTIFACT_NAME" manifest.json \
+    | /usr/bin/plutil -extract key raw -o - -- - >/dev/null 2>&1; then
+    echo "✗ Chrome Web Store package must not contain manifest key" >&2
+    exit 1
+fi
+if /usr/bin/unzip -Z1 "$OUTPUT_DIR/$STORE_ARTIFACT_NAME" \
+    | grep -q '^Rubien-Browser-Extension/'; then
+    echo "✗ Chrome Web Store package must place manifest.json at the ZIP root" >&2
+    exit 1
+fi
+for legal_file in LICENSE THIRD_PARTY_NOTICES; do
+    if ! /usr/bin/unzip -p "$OUTPUT_DIR/$STORE_ARTIFACT_NAME" "$legal_file" \
+        | grep -q '[^[:space:]]'; then
+        echo "✗ Chrome Web Store package is missing $legal_file" >&2
+        exit 1
+    fi
+done
+
 echo "   Browser extension: $OUTPUT_DIR/$ARTIFACT_NAME (manifest $PACKAGED_VERSION)"
+echo "   Chrome Web Store: $OUTPUT_DIR/$STORE_ARTIFACT_NAME (manifest $STORE_PACKAGED_VERSION, no key)"

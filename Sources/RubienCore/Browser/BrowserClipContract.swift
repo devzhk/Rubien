@@ -6,8 +6,21 @@ import Foundation
 public enum BrowserClipContract {
     public static let protocolVersion = 4
     public static let nativeHostName = "com.rubien.browser_clipper"
-    public static let extensionID = "pggebflfobimhklmgebcfgeobajkgdbb"
+    /// Primary identity assigned by the Chrome Web Store publisher key.
+    public static let extensionID = "imfaobbkcgaknmlphgkdpkdamfeimegc"
+    /// Kept during the migration so previously loaded unpacked releases can
+    /// still connect after the app updates its native-host manifest.
+    public static let legacySideloadedExtensionID = "pggebflfobimhklmgebcfgeobajkgdbb"
     public static let allowedExtensionOrigin = "chrome-extension://\(extensionID)/"
+    public static let allowedExtensionOrigins = [
+        allowedExtensionOrigin,
+        "chrome-extension://\(legacySideloadedExtensionID)/",
+    ]
+
+    public static func isAllowedExtensionOrigin(_ origin: String?) -> Bool {
+        guard let origin else { return false }
+        return allowedExtensionOrigins.contains(origin)
+    }
 
     /// The HTML limit is enforced in both the extension and helper. The larger
     /// envelope cap leaves room for worst-case JSON escaping (one input byte

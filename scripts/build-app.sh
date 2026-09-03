@@ -701,6 +701,7 @@ echo "   DMG data fork: ${DMG_SIZE_BYTES} bytes"
 echo "   App: $APP_BUNDLE"
 echo "   DMG: $DMG_PATH"
 echo "   Browser extension: $OUTPUT_DIR/Rubien-Browser-Extension-$VERSION.zip"
+echo "   Chrome Web Store: $OUTPUT_DIR/Rubien-Browser-Extension-$VERSION-Chrome-Web-Store.zip"
 if [ "$MODE" = "release" ]; then
     echo "   dSYMs: $DSYM_ARCHIVE_PATH"
 fi

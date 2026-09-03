@@ -56,7 +56,7 @@ enum RubienBrowserHost {
     }
 
     static func validateCallerOrigin(_ origin: String?) throws {
-        guard origin == BrowserClipContract.allowedExtensionOrigin else {
+        guard BrowserClipContract.isAllowedExtensionOrigin(origin) else {
             throw BrowserClipHostError.unauthorizedOrigin(origin)
         }
     }

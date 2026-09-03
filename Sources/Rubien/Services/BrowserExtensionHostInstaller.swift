@@ -78,7 +78,7 @@ enum BrowserExtensionHostInstaller {
             description: "Import the current Chrome tab into Rubien",
             path: helperURL.standardizedFileURL.path,
             type: "stdio",
-            allowedOrigins: [BrowserClipContract.allowedExtensionOrigin]
+            allowedOrigins: BrowserClipContract.allowedExtensionOrigins
         )
 
         let encoder = JSONEncoder()

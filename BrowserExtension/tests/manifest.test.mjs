@@ -1,9 +1,20 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 const extensionRoot = new URL('../', import.meta.url);
 const manifest = JSON.parse(await readFile(new URL('manifest.json', extensionRoot), 'utf8'));
+
+function extensionIDForKey(key) {
+  return createHash('sha256')
+    .update(Buffer.from(key, 'base64'))
+    .digest('hex')
+    .slice(0, 32)
+    .replace(/[0-9a-f]/g, (digit) =>
+      String.fromCharCode('a'.charCodeAt(0) + Number.parseInt(digit, 16)),
+    );
+}
 
 function pngMetadata(data) {
   assert.equal(data.subarray(1, 4).toString('ascii'), 'PNG');
@@ -32,5 +43,12 @@ test('manifest maps the macOS shortcut to Command', () => {
   assert.equal(
     manifest.commands._execute_action.suggested_key.mac,
     'Command+Shift+R'
+  );
+});
+
+test('manifest key derives the Chrome Web Store extension ID', () => {
+  assert.equal(
+    extensionIDForKey(manifest.key),
+    'imfaobbkcgaknmlphgkdpkdamfeimegc',
   );
 });

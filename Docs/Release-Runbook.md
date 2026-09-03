@@ -10,7 +10,8 @@ tags, release notes, and downloadable artifacts:
 | Artifact | Repo | Why |
 |---|---|---|
 | Source, tags, release notes | `devzhk/Rubien` | canonical project history |
-| DMG, browser extension, Linux CLI | `devzhk/Rubien` Releases | one public download location |
+| DMG, manual browser extension, Linux CLI | `devzhk/Rubien` Releases | one public download location |
+| Browser extension | Chrome Web Store | automatic extension updates |
 | Sparkle appcast | `devzhk/Rubien` Pages → `https://devzhk.github.io/Rubien/appcast.xml` | stable feed URL for every shipped app |
 
 **The appcast URL and the app's `SUFeedURL` never change.** Historical
@@ -64,12 +65,18 @@ the legacy 0.6.3 release or any of its four assets.
    ```
    Do not pass the token as a command-line argument or commit it. Replace an
    expired token before the next release.
+8. **Chrome Web Store publisher account and listing.** Register the publisher,
+   create the Rubien Importer listing, and retain its public key. The checked-in
+   manifest key must derive the listing ID
+   `imfaobbkcgaknmlphgkdpkdamfeimegc`. Store uploads reject a manifest `key`, so
+   upload only the dedicated `-Chrome-Web-Store.zip` artifact produced by the
+   packaging script, never the GitHub/manual-install ZIP.
 
 ## Per-release procedure
 
 Host prerequisites: `gh` authenticated, the Developer ID identity available, the EdDSA private key in Keychain, the `RubienNotary` notarytool profile in the login Keychain (from One-time setup §4 — it persists across releases; you do **not** re-run `store-credentials` each time), and a current CloudKit management token saved for `cktool` (One-time setup §7). Steps 1–4 establish the release prerequisites: release-preparation changes committed and pushed to `origin/main`, the CI gate satisfied, a clean synchronized `main`, and both live CloudKit environments validated against the checked-in schema.
 
-The order is strict: **prepare and commit → push and satisfy the CI gate → validate CloudKit Development and Production → smoke-test release-candidate browser assets → obtain explicit approval and sign/publish with host access → verify published Mac and Linux artifacts → publish any coupled npm package**. Normally the green run must match `HEAD` exactly. The only exception is a descendant containing Markdown-only documentation changes after an already-green release-preparation SHA; the commands below prove that no release input changed. Do not start signing while release-preparation commits exist only locally.
+The order is strict: **prepare and commit → push and satisfy the CI gate → validate CloudKit Development and Production → smoke-test release-candidate browser assets → obtain explicit approval and sign/publish with host access → verify published Mac and Linux artifacts → submit the matching extension to the Chrome Web Store → publish any coupled npm package**. Normally the green run must match `HEAD` exactly. The only exception is a descendant containing Markdown-only documentation changes after an already-green release-preparation SHA; the commands below prove that no release input changed. Do not start signing while release-preparation commits exist only locally.
 
 > **An agent may run the signed release pipeline only after the user explicitly approves the release command.** Before requesting approval, show the exact version/build and release notes, confirm the release-preparation SHA passed the CI gate, and confirm the CloudKit validation passed. The approval authorizes the consequential effects of `release.sh`: signed build and notarization, an appcast commit and push, a source tag, a public GitHub release, and Linux-release workflow dispatch. For 0.6.3 it also authorizes the full compatibility-mirror release in `devzhk/Rubien-releases`. Run it with elevated/unsandboxed host access so it can read the Developer ID and Sparkle EdDSA keys, use the `RubienNotary` and CloudKit management tokens in the login Keychain, write `build/`, access the network, and update Git/GitHub. A failed credential check inside the ordinary sandbox does **not** prove a credential is missing; repeat the read-only preflight with approved host access. Once explicit approval is recorded, no separate interactive-host handoff is required.
 
@@ -152,6 +159,12 @@ gh release view "v$(tr -d '[:space:]' < VERSION)" \
 # For 0.6.3, repeat the command with --repo devzhk/Rubien-releases and expect
 # those same four asset names; also compare the two releases' title and notes.
 # Copy the dSYM zip path printed by build-app.sh to durable private storage.
+
+# 11. After the matching Mac release is public, upload
+# build/Rubien-Browser-Extension-X.Y.Z-Chrome-Web-Store.zip to the existing
+# Chrome Web Store listing, complete its privacy/listing declarations, and
+# submit it for review. Choose deferred publishing when available so approval
+# cannot expose an extension before its matching Rubien app is public.
 ```
 
 **You must bump `VERSION` (if the marketing version is changing) and `BUILD.txt` (every release) before running — `release.sh` does not bump them for you. Then run `./scripts/generate-cli-version.sh` and commit the regenerated `Sources/RubienCLI/GeneratedVersion.swift` alongside the bump; the file is checked in and CI's "Verify generated CLI version is in sync" step fails the build if it drifts from `VERSION` + `BUILD.txt`. Push that commit and watch the CI run for its exact SHA to a successful conclusion. If CI fails, stop: fix the issue in a new commit, push, and watch again. A green run for an older commit and local test results are not substitutes unless `HEAD` is a Markdown-only descendant and the explicit diff check above passes.**
@@ -209,20 +222,30 @@ gh workflow run linux-cli-release.yml --repo devzhk/Rubien -f tag="v${VERSION}"
 ### Browser-extension release contract
 
 The Rubien app, native messaging host, and Chrome extension share a versioned
-wire protocol, so they are one release unit even though Chrome requires the
-extension to be installed manually. Every production release must publish both
-of these assets under the same public GitHub Release tag:
+wire protocol, so they are one release unit. Every production release must
+publish both of these assets under the same public GitHub Release tag:
 
 - `Rubien-X.Y.Z.dmg`
 - `Rubien-Browser-Extension-X.Y.Z.zip`
 
-`scripts/package-browser-extension.sh` stamps the staged extension manifest
-from the root `VERSION`, validates Chrome's numeric version format, verifies the
-ZIP, and fails if the packaged manifest version differs. Do not publish a new
-extension or native-host behavior against an old Rubien release: bump Rubien's
-`VERSION`/`BUILD.txt`, pass the normal exact-SHA CI gate, and release the DMG and
-ZIP together. App-only releases still include the matching extension ZIP so a
-user never has to guess which pair is compatible.
+`scripts/package-browser-extension.sh` also creates
+`build/Rubien-Browser-Extension-X.Y.Z-Chrome-Web-Store.zip`. The GitHub ZIP
+keeps its outer directory and checked-in key for stable unpacked installation;
+the store ZIP places `manifest.json` at the archive root and removes `key`, as
+required by the store. The script stamps both manifests from the root
+`VERSION`, validates Chrome's numeric version format, verifies both ZIPs, and
+fails on layout, key, or version drift.
+
+Do not publish a new extension or native-host behavior against an old Rubien
+release: bump Rubien's `VERSION`/`BUILD.txt`, pass the normal exact-SHA CI gate,
+and release the app and extension together. App-only releases still include the
+matching GitHub ZIP and produce the matching store ZIP so a user never has to
+guess which pair is compatible. `release.sh` verifies the store artifact but
+does not upload or submit it: Web Store upload, review submission, and
+publication are separate external effects and require explicit user approval.
+Upload only after the matching Mac release is public. First reviews can take
+substantially longer than ordinary release publication, so keep the GitHub ZIP
+as the supported manual-install fallback.
 
 **This is a human-run smoke gate.** When an agent is driving the release, it
 must ask the user to perform the app/extension checks below and wait for the
@@ -455,8 +478,8 @@ Avoid losing both anchors simultaneously by storing them in independent failure 
 - `Docs/index.md` — GitHub Pages landing page.
 - `scripts/release.sh` — orchestrator. Reads (does not bump) `VERSION` + `BUILD.txt`, calls `build-app.sh`, notarizes, signs the appcast item, commits + pushes the appcast, tags the source, and calls `gh release create --repo "$RELEASES_REPO"` to upload the DMG and browser-extension ZIP to `devzhk/Rubien`. The dispatched Linux workflow creates the one-time full 0.6.3 compatibility mirror in the legacy repository.
 - `scripts/validate-cloudkit-schema.sh` — read-only authenticated release gate. Uses `cktool` to validate `CloudKit/RubienSchema.ckdb` for Development, exports both live schemas, and fails when any checked-in type, field signature, index attribute, or grant is missing. CloudKit does not expose `validate-schema` for Production, so the authenticated Production export is the verification source. Live append-only extras are allowed.
-- `scripts/build-app.sh` — assembles + signs the `.app` bundle and the DMG, then packages a ready-to-unzip Chrome extension ZIP. Also usable standalone for dev builds.
+- `scripts/build-app.sh` — assembles + signs the `.app` bundle and the DMG, then packages ready-to-unzip GitHub/manual and Chrome Web Store extension ZIPs. Also usable standalone for dev builds.
   - The `embed_sparkle_framework` step inside this script manually copies `Sparkle.framework` into the bundle's `Contents/Frameworks/`. SwiftPM-via-`xcodebuild` does not auto-embed framework dependencies into the assembled bundle, so the script handles it explicitly before code-signing runs.
 - `scripts/lib/codesign.sh` — ordered Sparkle component signing. The order matters: `Installer.xpc → Downloader.xpc → Autoupdate → Updater.app → Sparkle.framework`. Never use `--deep`. `Downloader.xpc` needs `--preserve-metadata=entitlements`.
-- `scripts/package-browser-extension.sh` — creates `build/Rubien-Browser-Extension-<version>.zip` from the extension sources and checked-in Defuddle bundle, stamps and validates its manifest version from `VERSION`, and verifies the archive; `release.sh` uploads it beside the DMG.
+- `scripts/package-browser-extension.sh` — creates the keyed, directory-wrapped `build/Rubien-Browser-Extension-<version>.zip` for GitHub/manual installs and the root-manifest, no-key `build/Rubien-Browser-Extension-<version>-Chrome-Web-Store.zip` for store submission. It stamps and validates both from `VERSION`; `release.sh` uploads only the manual artifact beside the DMG and verifies that the store artifact is ready for the separately authorized submission.
 - `scripts/lib/appcast.sh` — renders + prepends an `<item>` block to the chosen appcast.

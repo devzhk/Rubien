@@ -4,7 +4,16 @@ This Manifest V3 Chrome extension prepares the active tab for Rubien with one cl
 
 Chrome 110 or newer is required. During unusually slow client-side extraction, the service worker makes a lightweight extension API call every 25 seconds so Chrome does not discard the in-flight action.
 
-The checked-in manifest key gives unpacked builds the stable extension ID `pggebflfobimhklmgebcfgeobajkgdbb`. The native host accepts messages only from that exact origin.
+The checked-in manifest key gives unpacked builds the same stable identity as
+the Chrome Web Store listing: `imfaobbkcgaknmlphgkdpkdamfeimegc`.
+During migration, the native host also accepts the legacy unpacked identity
+`pggebflfobimhklmgebcfgeobajkgdbb` so existing installations keep working.
+
+## Chrome Web Store installation
+
+Install **Rubien Importer** from the Chrome Web Store, then launch the matching
+Rubien app once so it registers the bundled native-messaging host. The store
+listing is published only after the matching Rubien release is available.
 
 ## GitHub Release installation
 
@@ -84,4 +93,9 @@ or replayed confirmation cannot commit an abandoned import.
 
 `dist/ClipperDefuddle.js` is generated and ignored. Rebuild it with `npm --prefix scripts/clipper run build`; do not edit it by hand.
 
-The app packaging script embeds and signs `rubien-browser-host` beside `rubien-cli`, including its release dSYM. Chrome Web Store publication is intentionally deferred. If a store build receives a different extension ID, add that exact origin to both the Swift contract and the generated native-host manifest before release.
+The app packaging script embeds and signs `rubien-browser-host` beside
+`rubien-cli`, including its release dSYM. It emits a GitHub/manual-install ZIP
+with the outer `Rubien-Browser-Extension` directory and a separate
+`-Chrome-Web-Store.zip` whose `manifest.json` is at the archive root and omits
+the store-forbidden `key` field. The native host allows only the Web Store and
+legacy migration origins listed above.

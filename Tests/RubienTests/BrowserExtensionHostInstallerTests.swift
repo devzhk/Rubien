@@ -40,7 +40,7 @@ final class BrowserExtensionHostInstallerTests: XCTestCase {
         XCTAssertEqual(object["type"] as? String, "stdio")
         XCTAssertEqual(
             object["allowed_origins"] as? [String],
-            [BrowserClipContract.allowedExtensionOrigin]
+            BrowserClipContract.allowedExtensionOrigins
         )
 
         let firstData = try Data(contentsOf: manifestURL)

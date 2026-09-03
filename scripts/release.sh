@@ -115,12 +115,17 @@ fi
 DMG_NAME="Rubien-Release.dmg"
 DMG_PATH="$PROJECT_DIR/build/$DMG_NAME"
 BROWSER_EXTENSION_PATH="$PROJECT_DIR/build/Rubien-Browser-Extension-${VERSION}.zip"
+CHROME_WEB_STORE_EXTENSION_PATH="$PROJECT_DIR/build/Rubien-Browser-Extension-${VERSION}-Chrome-Web-Store.zip"
 if [ ! -f "$DMG_PATH" ]; then
     echo "✗ Expected DMG not produced at $DMG_PATH" >&2
     exit 1
 fi
 if [ ! -f "$BROWSER_EXTENSION_PATH" ]; then
     echo "✗ Expected browser extension not produced at $BROWSER_EXTENSION_PATH" >&2
+    exit 1
+fi
+if [ ! -f "$CHROME_WEB_STORE_EXTENSION_PATH" ]; then
+    echo "✗ Expected Chrome Web Store package not produced at $CHROME_WEB_STORE_EXTENSION_PATH" >&2
     exit 1
 fi
 check_dmg_size_growth "$DMG_PATH" "Pre-notarization"

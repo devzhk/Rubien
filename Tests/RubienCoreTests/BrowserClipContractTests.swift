@@ -3,6 +3,28 @@ import XCTest
 @testable import RubienCore
 
 final class BrowserClipContractTests: XCTestCase {
+    func testAllowsWebStoreAndLegacySideloadedOriginsOnly() {
+        XCTAssertEqual(
+            BrowserClipContract.extensionID,
+            "imfaobbkcgaknmlphgkdpkdamfeimegc"
+        )
+        XCTAssertEqual(BrowserClipContract.allowedExtensionOrigins, [
+            "chrome-extension://imfaobbkcgaknmlphgkdpkdamfeimegc/",
+            "chrome-extension://pggebflfobimhklmgebcfgeobajkgdbb/",
+        ])
+        XCTAssertEqual(
+            Set(BrowserClipContract.allowedExtensionOrigins).count,
+            BrowserClipContract.allowedExtensionOrigins.count
+        )
+        XCTAssertTrue(BrowserClipContract.isAllowedExtensionOrigin(
+            BrowserClipContract.allowedExtensionOrigin
+        ))
+        XCTAssertFalse(BrowserClipContract.isAllowedExtensionOrigin(nil))
+        XCTAssertFalse(BrowserClipContract.isAllowedExtensionOrigin(
+            "chrome-extension://attacker/"
+        ))
+    }
+
     func testDeepLinksRoundTripImportedDestinations() throws {
         let destinations: [BrowserClipDeepLinkDestination] = [
             .reference(42),

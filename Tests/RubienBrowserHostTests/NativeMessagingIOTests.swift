@@ -118,11 +118,9 @@ final class NativeMessagingIOTests: XCTestCase {
     }
 
     func testCallerOriginMustMatchManifestOrigin() throws {
-        XCTAssertNoThrow(
-            try RubienBrowserHost.validateCallerOrigin(
-                BrowserClipContract.allowedExtensionOrigin
-            )
-        )
+        for origin in BrowserClipContract.allowedExtensionOrigins {
+            XCTAssertNoThrow(try RubienBrowserHost.validateCallerOrigin(origin))
+        }
         XCTAssertThrowsError(
             try RubienBrowserHost.validateCallerOrigin("chrome-extension://attacker/")
         ) { error in
@@ -130,6 +128,9 @@ final class NativeMessagingIOTests: XCTestCase {
                 error as? BrowserClipHostError,
                 .unauthorizedOrigin("chrome-extension://attacker/")
             )
+        }
+        XCTAssertThrowsError(try RubienBrowserHost.validateCallerOrigin(nil)) { error in
+            XCTAssertEqual(error as? BrowserClipHostError, .unauthorizedOrigin(nil))
         }
     }
 }
