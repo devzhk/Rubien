@@ -168,6 +168,19 @@ From the CLI: `swift run rubien-cli sync status` gives JSON.
 - `identity.invalidRemoteRecordCount > 0` → malformed or identity-conflicting wire records are quarantined and will not be fixed by waiting for a parent; preserve the library and report the count
 - `identity.writerUpgradeRequired: true` → UUID-addressed traffic may continue, but `blockedSaveCount` / `blockedDeleteCount` identify v12-readable work held locally until the fleet acknowledgement
 - `identity.ineligibleLegacyTombstoneCount > 0` → ambiguous pre-v13 deletes are intentionally quarantined and must not be made eligible by hand
+- `identity.contradictoryIntentCount > 0` → quit and relaunch Rubien once so v14 startup repair runs. If it remains non-zero, preserve a complete stopped-library backup and stop before manual mutation.
+- `identity.pushInFlightCount > 0` → may be legitimate while the app is actively sending. After a quit/relaunch and before a new send starts, v14 clears abandoned markers; a persistent idle count should be handled like contradictory intent.
+- `identity.removableOrphanSyncStateCount > 0` → relaunch once. Startup removes only clean state with no server evidence; if the count persists, back up and stop before manual mutation.
+- `identity.preservedOrphanSyncStateCount > 0` → record the count and affected database rows, but take no destructive action. Dirty, server-evidenced, and previously-pushed orphan state is deliberately retained for a future remote-inventory or explicit-republish workflow.
+- `identity.unpublishedLiveEntityCount > 0` → a live row is not durably represented as published or pending. Relaunch once, then preserve a backup and investigate the trigger/queue path if it remains.
+- `identity.missingPDFCacheUploadCount > 0` → record the affected sync IDs and restore or reattach their local PDFs before retrying. A dirty PDF with no cache row is not sent or silently converted to a delete.
+- `identity.stalePDFIdentityCount > 0` with `ambiguousPDFIdentityCount == 0` → relaunch so safe numeric PDF identities can be rekeyed automatically.
+- `identity.ambiguousPDFIdentityCount > 0` → preserve a full backup and use a targeted operator repair; Rubien will not guess whether the numeric key names an old server record or a current local row.
+
+For the filesystem half of PDF diagnosis, run
+`rubien-cli sync status --check-pdf-files`. Restore or reattach each
+`missingFile`/`missingCache` item using the reported sync ID. The ordinary
+`sync status` path remains database-only.
 
 ### 6.1 v13 multi-Mac rollout and writer acknowledgement
 
@@ -286,6 +299,7 @@ full re-upload.
 - **v11** (pre-release schema repair, 2026-07) — conditionally restores `activityQuarantine.referenceId`, backfills it from quarantined `ReadingActivity` payloads, replaces the stale quarantine index, and reconciles non-unique scheduled-run indexes found in development libraries created before the released v7/v8 migrations. Healthy released databases already have the column; v11 checks `db.columns(in:)` first and is an idempotent no-op for their data. No CloudKit schema change.
 - **v12** (derived web Markdown cache, 2026-08) — added local-only `webContentMarkdownCache`, keyed to Reference with cascade deletion. Cached Markdown is derived from canonical HTML and invalidated by source hash/converter version. No CloudKit schema change.
 - **v13** (global sync identities, 2026-08) — separates stable CloudKit `syncId` values from local integer row IDs, adds shadow global FKs and validation triggers, portable saved-view wire JSON, exact tombstone eligibility, wire-record orphan quarantine, mandatory full-history replay, and the selective v12-writer interlock. Existing proven numeric CloudKit identities remain permanent legacy names; unconfirmed local rows receive UUIDs. This is forward-only and requires the backup/all-writers rollout in §6.1 plus the additive Production schema fields in §2.5.
+- **v14** (durable sync intent, 2026-09) — makes save and delete intent mutually exclusive in every dirty-tracking trigger, upgrades stranded activity tombstones, repairs safe stale PDF state keys, and normalizes contradictory queue rows. Runtime startup repair separately clears abandoned in-flight markers and conservatively removes only clean orphan state with no server evidence. The CloudKit wire schema and global identity version remain unchanged.
 
 **Forward-only.** Migrations are one-way. A v1 binary opening a v2 DB errors with `no such column: pdfPath` (the failure mode that hit the dev when the worktree migrated the live library before the matching binary shipped). Always upgrade the binary first, then let it migrate the DB on launch.
 

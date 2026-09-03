@@ -122,6 +122,41 @@ final class SyncStateStoreTests: XCTestCase {
         }
     }
 
+    func testMarkPushedDoesNotRecreateStateAfterLocalDeleteRaced() throws {
+        let record = CKRecord(
+            recordType: SyncConstants.RecordType.tag,
+            recordID: CKRecord.ID(recordName: "delete-race")
+        )
+        try db.dbWriter.write { db in
+            try db.execute(sql: """
+                INSERT INTO tag(syncId, name, color)
+                VALUES('delete-race', 'Delete race', '#000')
+                """)
+            XCTAssertTrue(try self.store.markPushInFlight(
+                db,
+                entityType: .tag,
+                entityId: "delete-race"
+            ))
+
+            try db.execute(sql: "DELETE FROM tag WHERE syncId='delete-race'")
+            try self.store.markPushed(
+                db,
+                entityType: .tag,
+                entityId: "delete-race",
+                record: record
+            )
+
+            XCTAssertNil(try Row.fetchOne(db, sql: """
+                SELECT 1 FROM syncState
+                WHERE entityType='tag' AND entityId='delete-race'
+                """))
+            XCTAssertNotNil(try Row.fetchOne(db, sql: """
+                SELECT 1 FROM tombstone
+                WHERE entityType='tag' AND entityId='delete-race'
+                """))
+        }
+    }
+
     func testClearSystemFieldsPreservesDirtyFlag() throws {
         // Closes codex-rescue Blocker 4: on .unknownItem we drop cached
         // system fields (to force a fresh create on retry) but must NOT
@@ -210,7 +245,7 @@ final class SyncStateStoreTests: XCTestCase {
 
             XCTAssertTrue(try self.store.tombstones(db).isEmpty)
             XCTAssertFalse(
-                try self.store.tombstoneIsPushEligible(
+                try self.store.hasActiveDeleteIntent(
                     db,
                     entityType: .reference,
                     entityId: "retired-local-only"
@@ -380,6 +415,382 @@ final class SyncStateStoreTests: XCTestCase {
             let ids = dirty.map { $0.1 }.sorted()
             XCTAssertEqual(ids, ["1", "2"])
             XCTAssertTrue(dirty.allSatisfy { $0.0 == .tag })
+        }
+    }
+
+    func testQueueSaveAndQueueDeleteKeepIntentMutuallyExclusive() throws {
+        try db.dbWriter.write { db in
+            try self.store.upsertTombstone(
+                db,
+                entityType: .tag,
+                entityId: "intent-tag",
+                confirmedByServer: true,
+                isPushEligible: false
+            )
+            try self.store.queueSave(
+                db,
+                entityType: .tag,
+                entityId: "intent-tag"
+            )
+
+            XCTAssertFalse(try self.store.hasTombstone(
+                db,
+                entityType: .tag,
+                entityId: "intent-tag"
+            ))
+            XCTAssertEqual(try Int.fetchOne(db, sql: """
+                SELECT isDirty FROM syncState
+                WHERE entityType='tag' AND entityId='intent-tag'
+                """), 1)
+
+            try self.store.queueDelete(
+                db,
+                entityType: .tag,
+                entityId: "intent-tag"
+            )
+
+            XCTAssertNil(try Row.fetchOne(db, sql: """
+                SELECT 1 FROM syncState
+                WHERE entityType='tag' AND entityId='intent-tag'
+                """))
+            let tombstone = try XCTUnwrap(Row.fetchOne(db, sql: """
+                SELECT confirmedByServer, isPushEligible FROM tombstone
+                WHERE entityType='tag' AND entityId='intent-tag'
+                """))
+            XCTAssertEqual(tombstone["confirmedByServer"] as Int?, 0)
+            XCTAssertEqual(tombstone["isPushEligible"] as Int?, 1)
+        }
+    }
+
+    func testMarkPushInFlightRequiresDirtyButAllowsRetry() throws {
+        try db.dbWriter.write { db in
+            try db.execute(sql: """
+                INSERT INTO syncState(
+                    entityType, entityId, isDirty, pushInFlight
+                ) VALUES
+                    ('tag', 'clean', 0, 0),
+                    ('tag', 'dirty', 1, 1)
+                """)
+
+            XCTAssertFalse(try self.store.markPushInFlight(
+                db,
+                entityType: .tag,
+                entityId: "clean"
+            ))
+            XCTAssertTrue(try self.store.markPushInFlight(
+                db,
+                entityType: .tag,
+                entityId: "dirty"
+            ))
+            XCTAssertEqual(try Int.fetchOne(db, sql: """
+                SELECT pushInFlight FROM syncState
+                WHERE entityType='tag' AND entityId='clean'
+                """), 0)
+        }
+    }
+
+    func testReleasePushInFlightKeepsDurableDirtyIntent() throws {
+        try db.dbWriter.write { db in
+            try self.store.queueSave(db, entityType: .tag, entityId: "retry")
+            XCTAssertTrue(try self.store.markPushInFlight(
+                db,
+                entityType: .tag,
+                entityId: "retry"
+            ))
+
+            try self.store.releasePushInFlight(
+                db,
+                entityType: .tag,
+                entityId: "retry"
+            )
+
+            let row = try XCTUnwrap(Row.fetchOne(db, sql: """
+                SELECT isDirty, pushInFlight FROM syncState
+                WHERE entityType='tag' AND entityId='retry'
+                """))
+            XCTAssertEqual(row["isDirty"] as Int?, 1)
+            XCTAssertEqual(row["pushInFlight"] as Int?, 0)
+        }
+    }
+
+    func testAdoptSystemFieldsKeepingDirtyClearsOppositeIntent() throws {
+        let record = CKRecord(
+            recordType: SyncConstants.RecordType.tag,
+            recordID: CKRecord.ID(recordName: "merge")
+        )
+        try db.dbWriter.write { db in
+            try self.store.upsertTombstone(
+                db,
+                entityType: .tag,
+                entityId: "merge",
+                confirmedByServer: true
+            )
+
+            try self.store.adoptSystemFieldsKeepingDirty(
+                db,
+                entityType: .tag,
+                entityId: "merge",
+                record: record
+            )
+
+            XCTAssertFalse(try self.store.hasTombstone(
+                db,
+                entityType: .tag,
+                entityId: "merge"
+            ))
+            let row = try XCTUnwrap(Row.fetchOne(db, sql: """
+                SELECT isDirty, pushInFlight, systemFields FROM syncState
+                WHERE entityType='tag' AND entityId='merge'
+                """))
+            XCTAssertEqual(row["isDirty"] as Int?, 1)
+            XCTAssertEqual(row["pushInFlight"] as Int?, 0)
+            XCTAssertNotNil(row["systemFields"] as Data?)
+        }
+    }
+
+    func testMarkPulledClearsStaleInFlightState() throws {
+        let record = CKRecord(
+            recordType: SyncConstants.RecordType.tag,
+            recordID: CKRecord.ID(recordName: "pulled")
+        )
+        try db.dbWriter.write { db in
+            try db.execute(sql: """
+                INSERT INTO syncState(entityType, entityId, isDirty, pushInFlight)
+                VALUES('tag', 'pulled', 1, 1)
+                """)
+
+            try self.store.markPulled(
+                db,
+                entityType: .tag,
+                entityId: "pulled",
+                record: record
+            )
+
+            let row = try XCTUnwrap(Row.fetchOne(db, sql: """
+                SELECT isDirty, pushInFlight FROM syncState
+                WHERE entityType='tag' AND entityId='pulled'
+                """))
+            XCTAssertEqual(row["isDirty"] as Int?, 0)
+            XCTAssertEqual(row["pushInFlight"] as Int?, 0)
+        }
+    }
+
+    func testRuntimeRepairNormalizesIntentAndPreservesEvidence() throws {
+        let published = CKRecord(
+            recordType: SyncConstants.RecordType.tag,
+            recordID: CKRecord.ID(recordName: "published")
+        )
+        try db.dbWriter.write { db in
+            try db.execute(sql: "DELETE FROM syncState")
+            try db.execute(sql: "DELETE FROM tombstone")
+            try db.execute(sql: """
+                INSERT INTO tag(syncId, name, color, dateModified)
+                VALUES('live', 'Live', '#fff', ?)
+                """, arguments: [Date()])
+            try db.execute(sql: """
+                INSERT INTO tombstone(
+                    entityType, entityId, confirmedByServer, isPushEligible
+                ) VALUES
+                    ('tag', 'live', 0, 1),
+                    ('tag', 'deleted', 0, 1)
+                """)
+            try db.execute(sql: """
+                INSERT INTO syncState(
+                    entityType, entityId, systemFields, lastPushedAt,
+                    isDirty, pushInFlight
+                ) VALUES
+                    ('tag', 'deleted', NULL, NULL, 1, 1),
+                    ('tag', 'clean-orphan', NULL, NULL, 0, 0),
+                    ('tag', 'dirty-orphan', NULL, NULL, 1, 1),
+                    ('tag', 'published', ?, ?, 0, 0)
+                """, arguments: [
+                    SyncStateStore.archiveSystemFields(of: published),
+                    Date(),
+                ])
+
+            let first = try self.store.repairDurableIntent(db)
+            XCTAssertEqual(first.removedLiveTombstoneCount, 1)
+            XCTAssertEqual(first.removedDeleteStateCount, 1)
+            XCTAssertEqual(first.removedCleanOrphanStateCount, 1)
+            XCTAssertEqual(first.preservedOrphanStateCount, 2)
+            XCTAssertGreaterThanOrEqual(first.clearedPushInFlightCount, 1)
+
+            XCTAssertNotNil(try Row.fetchOne(db, sql: """
+                SELECT 1 FROM syncState
+                WHERE entityType='tag' AND entityId='live' AND isDirty=1
+                """))
+            XCTAssertNil(try Row.fetchOne(db, sql: """
+                SELECT 1 FROM syncState
+                WHERE entityType='tag' AND entityId IN ('deleted', 'clean-orphan')
+                """))
+            XCTAssertEqual(try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM syncState
+                WHERE entityType='tag'
+                  AND entityId IN ('dirty-orphan', 'published')
+                """), 2)
+
+            let second = try self.store.repairDurableIntent(db)
+            XCTAssertEqual(second.performedRepairCount, 0)
+            XCTAssertEqual(second.preservedOrphanStateCount, 2)
+        }
+    }
+
+    func testRuntimeRepairPreservesCanonicalNumericPDFIdentity() throws {
+        try db.dbWriter.write { db in
+            try db.execute(sql: "DELETE FROM syncState")
+            try db.execute(sql: """
+                INSERT INTO reference(
+                    id, syncId, title, dateAdded, dateModified
+                ) VALUES(42, '42', 'Legacy PDF owner', ?, ?)
+                """, arguments: [Date(), Date()])
+            try db.execute(sql: """
+                INSERT INTO pdfCache(
+                    referenceId, localFilename, contentHash, assetVersion,
+                    materializedAt
+                ) VALUES(42, 'legacy.pdf', 'hash', 1, ?)
+                """, arguments: [Date()])
+            try db.execute(sql: """
+                INSERT INTO syncState(
+                    entityType, entityId, isDirty, pushInFlight
+                ) VALUES('referencePDF', '42', 1, 0)
+                """)
+
+            let report = try self.store.repairDurableIntent(db)
+            XCTAssertEqual(report.repairedPDFIdentityCount, 0)
+            XCTAssertEqual(report.ambiguousPDFIdentityCount, 0)
+            XCTAssertNotNil(try Row.fetchOne(db, sql: """
+                SELECT 1 FROM syncState
+                WHERE entityType='referencePDF' AND entityId='42'
+                """))
+        }
+    }
+
+    func testRuntimeRepairReportsAmbiguousNumericPDFCollision() throws {
+        try db.dbWriter.write { db in
+            try db.execute(sql: "DELETE FROM syncState")
+            try db.execute(sql: """
+                INSERT INTO reference(
+                    id, syncId, title, dateAdded, dateModified
+                ) VALUES
+                    (42, 'reference-uuid', 'Legacy interpretation', ?, ?),
+                    (43, '42', 'Canonical interpretation', ?, ?)
+                """, arguments: [Date(), Date(), Date(), Date()])
+            try db.execute(sql: """
+                INSERT INTO pdfCache(
+                    referenceId, localFilename, contentHash, assetVersion,
+                    materializedAt
+                ) VALUES
+                    (42, 'legacy.pdf', 'legacy-hash', 1, ?),
+                    (43, 'canonical.pdf', 'canonical-hash', 1, ?)
+                """, arguments: [Date(), Date()])
+            try db.execute(sql: """
+                INSERT INTO syncState(
+                    entityType, entityId, isDirty, pushInFlight
+                ) VALUES('referencePDF', '42', 1, 0)
+                """)
+
+            let report = try self.store.repairDurableIntent(db)
+            XCTAssertEqual(report.repairedPDFIdentityCount, 0)
+            XCTAssertEqual(report.ambiguousPDFIdentityCount, 1)
+            XCTAssertNotNil(try Row.fetchOne(db, sql: """
+                SELECT 1 FROM syncState
+                WHERE entityType='referencePDF' AND entityId='42'
+                """))
+            XCTAssertNil(try Row.fetchOne(db, sql: """
+                SELECT 1 FROM syncState
+                WHERE entityType='referencePDF' AND entityId='reference-uuid'
+                """))
+        }
+    }
+
+    func testRuntimeRepairPreservesActiveDeleteForLiveRowWithoutDirtyState() throws {
+        try db.dbWriter.write { db in
+            try db.execute(sql: "DELETE FROM syncState")
+            try db.execute(sql: "DELETE FROM tombstone")
+            try db.execute(sql: """
+                INSERT INTO tag(syncId, name, color, dateModified)
+                VALUES('pending-delete', 'Fetched Again', '#fff', ?)
+                """, arguments: [Date()])
+            try db.execute(sql: """
+                DELETE FROM syncState
+                WHERE entityType='tag' AND entityId='pending-delete'
+                """)
+            try db.execute(sql: """
+                INSERT INTO tombstone(
+                    entityType, entityId, confirmedByServer, isPushEligible
+                ) VALUES('tag', 'pending-delete', 0, 1)
+                """)
+
+            let report = try self.store.repairDurableIntent(db)
+            XCTAssertEqual(report.removedLiveTombstoneCount, 0)
+            XCTAssertNil(try Row.fetchOne(db, sql: """
+                SELECT 1 FROM syncState
+                WHERE entityType='tag' AND entityId='pending-delete'
+                """))
+            XCTAssertNotNil(try Row.fetchOne(db, sql: """
+                SELECT 1 FROM tombstone
+                WHERE entityType='tag' AND entityId='pending-delete'
+                  AND confirmedByServer=0 AND isPushEligible=1
+                """))
+        }
+    }
+
+    func testRuntimeRepairRetiresLegacyIneligibleTombstoneBesideLiveEpoch() throws {
+        try db.dbWriter.write { db in
+            try db.execute(sql: """
+                UPDATE syncState SET isDirty=0, pushInFlight=0
+                WHERE entityType='activityEpoch' AND entityId='assistant'
+                """)
+            try db.execute(sql: """
+                INSERT INTO tombstone(
+                    entityType, entityId, confirmedByServer, isPushEligible
+                ) VALUES('activityEpoch', 'assistant', 0, 0)
+                """)
+
+            let report = try self.store.repairDurableIntent(db)
+            XCTAssertEqual(report.removedLiveTombstoneCount, 1)
+            XCTAssertEqual(report.upgradedActivityTombstoneCount, 0)
+            XCTAssertNil(try Row.fetchOne(db, sql: """
+                SELECT 1 FROM tombstone
+                WHERE entityType='activityEpoch' AND entityId='assistant'
+                """))
+            let state = try XCTUnwrap(Row.fetchOne(db, sql: """
+                SELECT isDirty, pushInFlight FROM syncState
+                WHERE entityType='activityEpoch' AND entityId='assistant'
+                """))
+            XCTAssertEqual(state["isDirty"] as Int?, 1)
+            XCTAssertEqual(state["pushInFlight"] as Int?, 0)
+        }
+    }
+
+    func testClearSystemFieldsPushTimestampProtectsOrphanFromRepair() throws {
+        let record = CKRecord(
+            recordType: SyncConstants.RecordType.tag,
+            recordID: CKRecord.ID(recordName: "previously-pushed")
+        )
+        try db.dbWriter.write { db in
+            try db.execute(sql: "DELETE FROM syncState")
+            try db.execute(sql: """
+                INSERT INTO syncState(
+                    entityType, entityId, systemFields, lastPushedAt,
+                    isDirty, pushInFlight
+                ) VALUES('tag', 'previously-pushed', ?, ?, 0, 0)
+                """, arguments: [
+                    SyncStateStore.archiveSystemFields(of: record),
+                    Date(),
+                ])
+            try self.store.clearSystemFields(
+                db,
+                entityType: .tag,
+                entityId: "previously-pushed"
+            )
+
+            let report = try self.store.repairDurableIntent(db)
+            XCTAssertEqual(report.removedCleanOrphanStateCount, 0)
+            XCTAssertNotNil(try Row.fetchOne(db, sql: """
+                SELECT 1 FROM syncState
+                WHERE entityType='tag' AND entityId='previously-pushed'
+                """))
         }
     }
 }

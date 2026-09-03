@@ -33,7 +33,7 @@ final class SyncStatusCommandTests: XCTestCase {
             "enabled", "containerIdentifier", "entitlementPresent",
             "iCloudAccountAvailable", "appLockHeld", "baselineState",
             "dirtyByEntityType", "tombstoneCount", "syncEngineState",
-            "schemaVersion", "identity"
+            "schemaVersion", "identity", "pdfMaterialization"
         ] {
             XCTAssertNotNil(json?[key], "missing field '\(key)' in JSON output")
         }
@@ -45,6 +45,103 @@ final class SyncStatusCommandTests: XCTestCase {
         XCTAssertEqual(
             identity?["identitySchemaVersion"] as? Int,
             SyncIdentityDiagnostics.identitySchemaVersion
+        )
+        XCTAssertTrue(json?["pdfMaterialization"] is NSNull)
+    }
+
+    func testSyncStatusCanOptInToPDFFileChecks() throws {
+        let tmpRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rubien-cli-pdf-check-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: tmpRoot,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: tmpRoot) }
+
+        let dbPath = tmpRoot.appendingPathComponent("library.sqlite").path
+        do {
+            let pool = try DatabasePool(path: dbPath)
+            let appDB = try AppDatabase(pool)
+            try appDB.dbWriter.write { db in
+                try db.execute(sql: "DELETE FROM syncState")
+                try db.execute(sql: """
+                    INSERT INTO reference(
+                        syncId, title, dateAdded, dateModified
+                    ) VALUES('pdf-check', 'PDF check', ?, ?)
+                    """, arguments: [Date(), Date()])
+                let referenceID = try XCTUnwrap(Int64.fetchOne(
+                    db,
+                    sql: "SELECT id FROM reference WHERE syncId='pdf-check'"
+                ))
+                try db.execute(sql: """
+                    INSERT INTO pdfCache(
+                        referenceId, localFilename, contentHash,
+                        assetVersion, materializedAt
+                    ) VALUES(?, 'missing.pdf', 'hash', 1, ?)
+                    """, arguments: [referenceID, Date()])
+                try db.execute(sql: "DELETE FROM syncState")
+                try db.execute(sql: """
+                    INSERT INTO syncState(entityType, entityId, isDirty)
+                    VALUES('referencePDF', 'pdf-check', 1)
+                    """)
+            }
+        }
+
+        let process = Process()
+        process.executableURL = cliURL
+        process.arguments = ["sync", "status", "--check-pdf-files"]
+        var environment = ProcessInfo.processInfo.environment
+        environment["RUBIEN_LIBRARY_ROOT"] = tmpRoot.path
+        process.environment = environment
+        let stdout = Pipe()
+        process.standardOutput = stdout
+        process.standardError = Pipe()
+
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+        let data = stdout.fileHandleForReading.readDataToEndOfFile()
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        let materialization = try XCTUnwrap(
+            json["pdfMaterialization"] as? [String: Any]
+        )
+        XCTAssertEqual(materialization["checkedDirtyPDFCount"] as? Int, 1)
+        XCTAssertEqual(materialization["missingFileCount"] as? Int, 1)
+        let issues = try XCTUnwrap(materialization["issues"] as? [[String: Any]])
+        XCTAssertEqual(issues.first?["syncId"] as? String, "pdf-check")
+        XCTAssertEqual(issues.first?["reason"] as? String, "missingFile")
+    }
+
+    func testPDFFileCheckFailsWhenLibraryCannotBeOpened() throws {
+        let tmpRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "rubien-cli-pdf-check-failure-\(UUID().uuidString)"
+            )
+        try FileManager.default.createDirectory(
+            at: tmpRoot,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: tmpRoot) }
+        let blockedRoot = tmpRoot.appendingPathComponent("not-a-directory")
+        try Data("file blocks library directory".utf8).write(to: blockedRoot)
+
+        let process = Process()
+        process.executableURL = cliURL
+        process.arguments = ["sync", "status", "--check-pdf-files"]
+        var environment = ProcessInfo.processInfo.environment
+        environment["RUBIEN_LIBRARY_ROOT"] = blockedRoot.path
+        process.environment = environment
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertNotEqual(
+            process.terminationStatus,
+            0,
+            "an explicit PDF audit must not fabricate a clean result"
         )
     }
 

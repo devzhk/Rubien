@@ -260,6 +260,115 @@ final class SyncOrphanToleranceTests: XCTestCase {
         XCTAssertEqual(try orphanCount(), 0)
     }
 
+    func testQuarantinedReplayDoesNotResurrectActiveLocalDelete() async throws {
+        let library = makeLibrary()
+        let referenceSyncId = "deleted-ref"
+        let tagSyncId = "later-tag"
+        let entityId = "\(referenceSyncId)/\(tagSyncId)"
+
+        let childApplied = await library.applyFetchedRecordsForTest(
+            modifications: [makeReferenceTagRecord(
+                referenceSyncId: referenceSyncId,
+                tagSyncId: tagSyncId
+            )],
+            deletions: []
+        )
+        XCTAssertTrue(childApplied)
+        try await db.dbWriter.write { db in
+            try SyncStateStore().queueDelete(
+                db,
+                entityType: .referenceTag,
+                entityId: entityId
+            )
+        }
+
+        let parentsApplied = await library.applyFetchedRecordsForTest(
+            modifications: [
+                makeReferenceRecord(syncId: referenceSyncId, title: "Deleted"),
+                makeTagRecord(syncId: tagSyncId, name: "Later"),
+            ],
+            deletions: []
+        )
+        XCTAssertTrue(parentsApplied)
+
+        let result = try await db.dbWriter.read { db in
+            return (
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM referenceTag") ?? -1,
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM syncOrphan") ?? -1,
+                try Int.fetchOne(db, sql: """
+                    SELECT COUNT(*) FROM tombstone
+                    WHERE entityType = 'referenceTag' AND entityId = ?
+                      AND confirmedByServer = 0 AND isPushEligible = 1
+                    """, arguments: [entityId]) ?? -1,
+                try Int.fetchOne(db, sql: """
+                    SELECT COUNT(*) FROM syncState
+                    WHERE entityType = 'referenceTag' AND entityId = ?
+                    """, arguments: [entityId]) ?? -1
+            )
+        }
+        XCTAssertEqual(result.0, 0)
+        XCTAssertEqual(result.1, 0)
+        XCTAssertEqual(result.2, 1)
+        XCTAssertEqual(result.3, 0)
+    }
+
+    func testQuarantinedReplayReplacesConfirmedHistoricalTombstone() async throws {
+        let library = makeLibrary()
+        let referenceSyncId = "restored-ref"
+        let tagSyncId = "later-tag"
+        let entityId = "\(referenceSyncId)/\(tagSyncId)"
+
+        let childApplied = await library.applyFetchedRecordsForTest(
+            modifications: [makeReferenceTagRecord(
+                referenceSyncId: referenceSyncId,
+                tagSyncId: tagSyncId
+            )],
+            deletions: []
+        )
+        XCTAssertTrue(childApplied)
+        try await db.dbWriter.write { db in
+            try SyncStateStore().upsertTombstone(
+                db,
+                entityType: .referenceTag,
+                entityId: entityId,
+                confirmedByServer: true
+            )
+        }
+
+        let parentsApplied = await library.applyFetchedRecordsForTest(
+            modifications: [
+                makeReferenceRecord(syncId: referenceSyncId, title: "Restored"),
+                makeTagRecord(syncId: tagSyncId, name: "Later"),
+            ],
+            deletions: []
+        )
+        XCTAssertTrue(parentsApplied)
+
+        let result = try await db.dbWriter.read { db in
+            let state = try Row.fetchOne(db, sql: """
+                SELECT isDirty, systemFields FROM syncState
+                WHERE entityType = 'referenceTag' AND entityId = ?
+                """, arguments: [entityId])
+            let isDirty: Int? = state?["isDirty"]
+            let systemFields: Data? = state?["systemFields"]
+            return (
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM referenceTag") ?? -1,
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM syncOrphan") ?? -1,
+                try Int.fetchOne(db, sql: """
+                    SELECT COUNT(*) FROM tombstone
+                    WHERE entityType = 'referenceTag' AND entityId = ?
+                    """, arguments: [entityId]) ?? -1,
+                isDirty,
+                systemFields
+            )
+        }
+        XCTAssertEqual(result.0, 1)
+        XCTAssertEqual(result.1, 0)
+        XCTAssertEqual(result.2, 0)
+        XCTAssertEqual(result.3, 0)
+        XCTAssertNotNil(result.4)
+    }
+
     func testIncrementalBoundaryPreservesOrphanAndFullHistoryRetiresIt() async throws {
         let library = makeLibrary()
         let child = makeReferenceTagRecord(

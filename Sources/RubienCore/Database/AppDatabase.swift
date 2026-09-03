@@ -52,14 +52,16 @@ public struct ReferenceMentionCandidate: Sendable, Equatable {
 public final class AppDatabase: Sendable {
     /// Bumped whenever a new migration is registered. Surfaced in
     /// `rubien-cli sync status` JSON for diagnostics.
-    public static let currentSchemaVersion = "v13"
+    public static let currentSchemaVersion = "v14"
 
     public let dbWriter: any DatabaseWriter
     private let includesV13Migration: Bool
+    private let includesV14Migration: Bool
 
     public init(_ dbWriter: any DatabaseWriter) throws {
         self.dbWriter = dbWriter
         self.includesV13Migration = true
+        self.includesV14Migration = true
         let migrator = self.migrator
         let hasNewerSchema = try dbWriter.read(migrator.hasBeenSuperseded)
         guard !hasNewerSchema else {
@@ -708,6 +710,15 @@ public final class AppDatabase: Sendable {
             // repair them when the parent arrives.
             migrator.registerMigration("v13", foreignKeyChecks: .immediate) { db in
                 try Self.applyV13Body(db)
+            }
+            if includesV14Migration {
+                // v14 (2026-09): make SQLite save/delete intent mutually
+                // exclusive and repair queue residue before CKSyncEngine can
+                // schedule it. The body is frozen and intentionally separate
+                // from the mutable runtime repair implementation.
+                migrator.registerMigration("v14", foreignKeyChecks: .immediate) { db in
+                    try Self.applyV14Body(db)
+                }
             }
         }
 
@@ -1461,6 +1472,397 @@ public final class AppDatabase: Sendable {
             INSERT INTO syncSession(key, value) VALUES('writerUpgradeRequired', '1')
                 ON CONFLICT(key) DO UPDATE SET value = '1'
             """)
+    }
+
+    /// Frozen v14 migration body. Do not route this through RubienSync's
+    /// runtime repair: changing runtime policy must never alter an already
+    /// shipped migration for fresh installs.
+    fileprivate static func applyV14Body(_ db: Database) throws {
+        try installV14SyncTriggers(db)
+        try migrateSafeV14PDFStateIdentities(db)
+
+        // Preserve the meaning of legacy activity tombstones before making
+        // them sendable. The v7 delete triggers wrote isPushEligible=0; a
+        // later remote modification could rematerialize the row and stamp a
+        // clean state. That historical shape is a live/save decision, not an
+        // active local delete.
+        let legacyActivitySources: [
+            (entityType: String, from: String, identity: String)
+        ] = [
+            ("assistantActivity", "assistantActivity e", "e.id"),
+            ("activityEpoch", "activityEpoch e", "e.kind"),
+        ]
+        for source in legacyActivitySources {
+            try db.execute(sql: """
+                INSERT INTO syncState(
+                    entityType, entityId, isDirty, pushInFlight
+                )
+                SELECT ?, \(source.identity), 1, 0
+                FROM \(source.from)
+                WHERE EXISTS (
+                    SELECT 1 FROM tombstone legacy
+                    WHERE legacy.entityType = ?
+                      AND legacy.entityId = \(source.identity)
+                      AND legacy.confirmedByServer = 0
+                      AND legacy.isPushEligible = 0
+                )
+                ON CONFLICT(entityType, entityId) DO UPDATE SET
+                    isDirty = 1,
+                    pushInFlight = 0
+                """, arguments: [source.entityType, source.entityType])
+            try db.execute(sql: """
+                DELETE FROM tombstone
+                WHERE entityType = ?
+                  AND confirmedByServer = 0
+                  AND isPushEligible = 0
+                  AND EXISTS (
+                    SELECT 1 FROM \(source.from)
+                    WHERE \(source.identity) = tombstone.entityId
+                  )
+                """, arguments: [source.entityType])
+        }
+
+        // The v7 activity delete triggers omitted isPushEligible, so v13's
+        // DEFAULT 0 left absent-row tombstones permanently inert.
+        try db.execute(sql: """
+            UPDATE tombstone
+            SET isPushEligible = 1
+            WHERE confirmedByServer = 0
+              AND isPushEligible = 0
+              AND entityType IN ('assistantActivity', 'activityEpoch')
+            """)
+
+        // Frozen local identity metadata for v14. Keep this literal inside
+        // the migration rather than consulting the mutable runtime catalog.
+        let sources: [(entityType: String, from: String, identity: String)] = [
+            ("reference", "reference e", "e.syncId"),
+            ("tag", "tag e", "e.syncId"),
+            ("referenceTag", "referenceTag e", "e.syncId"),
+            ("pdfAnnotation", "pdfAnnotation e", "e.syncId"),
+            ("webAnnotation", "webAnnotation e", "e.syncId"),
+            ("metadataIntake", "metadataIntake e", "e.syncId"),
+            ("metadataEvidence", "metadataEvidence e", "e.syncId"),
+            ("propertyDefinition", "propertyDefinition e", "e.syncId"),
+            ("propertyValue", "propertyValue e", "e.syncId"),
+            ("databaseView", "databaseView e", "e.syncId"),
+            ("readingActivity", "readingActivity e", "e.syncId"),
+            ("assistantActivity", "assistantActivity e", "e.id"),
+            ("activityEpoch", "activityEpoch e", "e.kind"),
+            (
+                "referencePDF",
+                "pdfCache pc JOIN reference e ON e.id = pc.referenceId",
+                "e.syncId"
+            ),
+        ]
+
+        for source in sources {
+            // A dirty live row is an explicit local recreation. A live row
+            // with an active tombstone and no dirty state may instead be a
+            // stale server modification materialized after a local delete,
+            // so that exact delete remains authoritative.
+            try db.execute(sql: """
+                INSERT INTO syncState(
+                    entityType, entityId, isDirty, pushInFlight
+                )
+                SELECT ?, \(source.identity), 1, 0
+                FROM \(source.from)
+                WHERE EXISTS (
+                    SELECT 1 FROM tombstone ts
+                    WHERE ts.entityType = ?
+                      AND ts.entityId = \(source.identity)
+                )
+                  AND (
+                    EXISTS (
+                        SELECT 1 FROM syncState ss
+                        WHERE ss.entityType = ?
+                          AND ss.entityId = \(source.identity)
+                          AND ss.isDirty = 1
+                    )
+                    OR NOT EXISTS (
+                        SELECT 1 FROM tombstone active
+                        WHERE active.entityType = ?
+                          AND active.entityId = \(source.identity)
+                          AND active.confirmedByServer = 0
+                          AND active.isPushEligible = 1
+                    )
+                  )
+                ON CONFLICT(entityType, entityId) DO UPDATE SET
+                    isDirty = 1,
+                    pushInFlight = 0
+                """, arguments: [
+                    source.entityType,
+                    source.entityType,
+                    source.entityType,
+                    source.entityType,
+                ])
+            try db.execute(sql: """
+                DELETE FROM tombstone
+                WHERE entityType = ?
+                  AND EXISTS (
+                    SELECT 1 FROM \(source.from)
+                    WHERE \(source.identity) = tombstone.entityId
+                  )
+                  AND EXISTS (
+                    SELECT 1 FROM syncState ss
+                    WHERE ss.entityType = tombstone.entityType
+                      AND ss.entityId = tombstone.entityId
+                      AND ss.isDirty = 1
+                  )
+                """, arguments: [source.entityType])
+
+            // Without a live row, or with an active local delete and no
+            // newer dirty recreation, the surviving tombstone is the only
+            // usable intent. Drop contradictory state.
+            try db.execute(sql: """
+                DELETE FROM syncState
+                WHERE entityType = ?
+                  AND EXISTS (
+                    SELECT 1 FROM tombstone ts
+                    WHERE ts.entityType = syncState.entityType
+                      AND ts.entityId = syncState.entityId
+                  )
+                  AND (
+                    NOT EXISTS (
+                        SELECT 1 FROM \(source.from)
+                        WHERE \(source.identity) = syncState.entityId
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM tombstone active
+                        WHERE active.entityType = syncState.entityType
+                          AND active.entityId = syncState.entityId
+                          AND active.confirmedByServer = 0
+                          AND active.isPushEligible = 1
+                    )
+                  )
+                """, arguments: [source.entityType])
+        }
+    }
+
+    private static func installV14SyncTriggers(_ db: Database) throws {
+        let applyingRemoteGuard =
+            "WHEN (SELECT value FROM syncSession WHERE key='applyingRemote') IS NULL"
+        // Frozen with the v14 trigger definitions. Do not reuse the mutable
+        // file-global expression: fresh installs must reproduce shipped SQL.
+        let v14NowISO8601 = "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))"
+        let syncIdTables = [
+            "reference", "tag", "referenceTag", "pdfAnnotation",
+            "webAnnotation", "metadataIntake", "metadataEvidence",
+            "propertyDefinition", "propertyValue", "databaseView",
+            "readingActivity",
+        ]
+
+        func isNonDecimal(_ expression: String) -> String {
+            """
+            NOT (
+                \(expression) <> ''
+                AND \(expression) NOT GLOB '*[^0-9]*'
+                AND printf('%lld', CAST(\(expression) AS INTEGER)) = \(expression)
+            )
+            """
+        }
+
+        for table in syncIdTables {
+            for suffix in ["ai", "au", "ad"] {
+                try db.execute(sql: "DROP TRIGGER IF EXISTS \(table)_\(suffix)")
+            }
+            let markDirtyBody = """
+                DELETE FROM tombstone
+                    WHERE entityType='\(table)' AND entityId=NEW.syncId;
+                INSERT INTO syncState(entityType, entityId, isDirty, pushInFlight)
+                    VALUES('\(table)', NEW.syncId, 1, 0)
+                    ON CONFLICT(entityType, entityId)
+                        DO UPDATE SET isDirty = 1, pushInFlight = 0;
+                """
+            for (suffix, event) in [("ai", "INSERT"), ("au", "UPDATE")] {
+                try db.execute(sql: """
+                    CREATE TRIGGER \(table)_\(suffix) AFTER \(event) ON \(table)
+                        \(applyingRemoteGuard)
+                    BEGIN
+                        \(markDirtyBody)
+                    END;
+                    """)
+            }
+
+            let proof = """
+                EXISTS(
+                    SELECT 1 FROM syncState
+                    WHERE entityType='\(table)'
+                      AND entityId=OLD.syncId
+                      AND systemFields IS NOT NULL
+                )
+                """
+            let eligible: String
+            switch table {
+            case "referenceTag":
+                eligible = """
+                    (\(isNonDecimal("OLD.referenceSyncId"))
+                     OR \(isNonDecimal("OLD.tagSyncId"))
+                     OR \(proof))
+                    """
+            case "readingActivity":
+                eligible = """
+                    (\(isNonDecimal("OLD.referenceSyncId")) OR \(proof))
+                    """
+            default:
+                eligible = "(\(isNonDecimal("OLD.syncId")) OR \(proof))"
+            }
+
+            try db.execute(sql: """
+                CREATE TRIGGER \(table)_ad AFTER DELETE ON \(table)
+                    \(applyingRemoteGuard)
+                BEGIN
+                    INSERT INTO tombstone(
+                        entityType, entityId, deletedAt,
+                        confirmedByServer, isPushEligible
+                    ) VALUES(
+                        '\(table)', OLD.syncId, \(v14NowISO8601), 0,
+                        CASE WHEN \(eligible) THEN 1 ELSE 0 END
+                    )
+                    ON CONFLICT(entityType, entityId) DO UPDATE SET
+                        deletedAt = excluded.deletedAt,
+                        confirmedByServer = 0,
+                        isPushEligible = MAX(
+                            tombstone.isPushEligible,
+                            excluded.isPushEligible
+                        );
+                    DELETE FROM syncState
+                    WHERE entityType='\(table)' AND entityId=OLD.syncId;
+                END;
+                """)
+        }
+
+        let naturalKeyTables: [
+            (table: String, newKey: String, oldKey: String)
+        ] = [
+            ("assistantActivity", "NEW.id", "OLD.id"),
+            ("activityEpoch", "NEW.kind", "OLD.kind"),
+        ]
+        for entry in naturalKeyTables {
+            for suffix in ["ai", "au", "ad"] {
+                try db.execute(sql: "DROP TRIGGER IF EXISTS \(entry.table)_\(suffix)")
+            }
+            let markDirtyBody = """
+                DELETE FROM tombstone
+                    WHERE entityType='\(entry.table)'
+                      AND entityId=\(entry.newKey);
+                INSERT INTO syncState(entityType, entityId, isDirty, pushInFlight)
+                    VALUES('\(entry.table)', \(entry.newKey), 1, 0)
+                    ON CONFLICT(entityType, entityId)
+                        DO UPDATE SET isDirty = 1, pushInFlight = 0;
+                """
+            for (suffix, event) in [("ai", "INSERT"), ("au", "UPDATE")] {
+                try db.execute(sql: """
+                    CREATE TRIGGER \(entry.table)_\(suffix)
+                    AFTER \(event) ON \(entry.table)
+                        \(applyingRemoteGuard)
+                    BEGIN
+                        \(markDirtyBody)
+                    END;
+                    """)
+            }
+            try db.execute(sql: """
+                CREATE TRIGGER \(entry.table)_ad AFTER DELETE ON \(entry.table)
+                    \(applyingRemoteGuard)
+                BEGIN
+                    INSERT INTO tombstone(
+                        entityType, entityId, deletedAt,
+                        confirmedByServer, isPushEligible
+                    ) VALUES(
+                        '\(entry.table)', \(entry.oldKey),
+                        \(v14NowISO8601), 0, 1
+                    )
+                    ON CONFLICT(entityType, entityId) DO UPDATE SET
+                        deletedAt = excluded.deletedAt,
+                        confirmedByServer = 0,
+                        isPushEligible = 1;
+                    DELETE FROM syncState
+                    WHERE entityType='\(entry.table)'
+                      AND entityId=\(entry.oldKey);
+                END;
+                """)
+        }
+    }
+
+    private static func migrateSafeV14PDFStateIdentities(_ db: Database) throws {
+        let rows = try Row.fetchAll(db, sql: """
+            SELECT entityId
+            FROM syncState
+            WHERE entityType = 'referencePDF'
+              AND systemFields IS NULL
+              AND lastPushedAt IS NULL
+            ORDER BY entityId
+            """)
+        for row in rows {
+            let oldId: String = row["entityId"]
+            guard isV14CanonicalDecimal(oldId),
+                  let localId = Int64(oldId)
+            else { continue }
+            let owners = try Row.fetchAll(db, sql: """
+                SELECT r.id, r.syncId
+                FROM reference r
+                JOIN pdfCache pc ON pc.referenceId = r.id
+                WHERE r.id = ?
+                """, arguments: [localId])
+            let alreadyCanonical = try Bool.fetchOne(db, sql: """
+                SELECT EXISTS(
+                    SELECT 1
+                    FROM pdfCache pc
+                    JOIN reference r ON r.id = pc.referenceId
+                    WHERE r.syncId = ?
+                )
+                """, arguments: [oldId]) ?? true
+            // A numeric canonical identity can also name a different
+            // PDF-owning reference's local row. That collision is ambiguous:
+            // v14 deliberately preserves the state for runtime diagnostics
+            // instead of guessing which interpretation was intended.
+            guard !alreadyCanonical else { continue }
+
+            guard owners.count == 1,
+                  let owner = owners.first,
+                  let ownerId: Int64 = owner["id"],
+                  let newId: String = owner["syncId"],
+                  newId != oldId
+            else { continue }
+            let collidesWithOtherReference = try Bool.fetchOne(db, sql: """
+                SELECT EXISTS(
+                    SELECT 1 FROM reference
+                    WHERE syncId = ? AND id <> ?
+                )
+                """, arguments: [oldId, ownerId]) ?? true
+            guard !collidesWithOtherReference else { continue }
+
+            let targetExists = try Bool.fetchOne(db, sql: """
+                SELECT EXISTS(
+                    SELECT 1 FROM syncState
+                    WHERE entityType = 'referencePDF' AND entityId = ?
+                )
+                """, arguments: [newId]) ?? true
+            if targetExists {
+                try db.execute(sql: """
+                    UPDATE syncState
+                    SET isDirty = 1, pushInFlight = 0
+                    WHERE entityType = 'referencePDF' AND entityId = ?
+                    """, arguments: [newId])
+                try db.execute(sql: """
+                    DELETE FROM syncState
+                    WHERE entityType = 'referencePDF' AND entityId = ?
+                    """, arguments: [oldId])
+            } else {
+                try db.execute(sql: """
+                    UPDATE syncState
+                    SET entityId = ?, isDirty = 1, pushInFlight = 0
+                    WHERE entityType = 'referencePDF' AND entityId = ?
+                    """, arguments: [newId, oldId])
+            }
+        }
+    }
+
+    /// Frozen copy of the decimal-identity rule shipped with v14. Do not
+    /// replace this with `SyncIdentifier.isCanonicalDecimal`: migrations must
+    /// not inherit later runtime-policy changes on fresh installations.
+    private static func isV14CanonicalDecimal(_ value: String) -> Bool {
+        guard let parsed = Int64(value) else { return false }
+        return String(parsed) == value
     }
 
     private static func classifyV13ArchivedSystemFields(
@@ -2259,15 +2661,31 @@ public final class AppDatabase: Sendable {
     /// Test-only: builds the exact registered v1...v12 schema without v13 so
     /// migration tests can exercise the real production v13 registration.
     public static func makeV12DatabaseForTesting(on queue: DatabaseQueue) throws {
-        _ = try AppDatabase(queue, includesV13Migration: false)
+        _ = try AppDatabase(
+            queue,
+            includesV13Migration: false,
+            includesV14Migration: false
+        )
+    }
+
+    /// Test-only: builds the exact registered v1...v13 schema without v14 so
+    /// migration tests can exercise the real production v14 registration.
+    public static func makeV13DatabaseForTesting(on queue: DatabaseQueue) throws {
+        _ = try AppDatabase(
+            queue,
+            includesV13Migration: true,
+            includesV14Migration: false
+        )
     }
 
     private init(
         _ dbWriter: any DatabaseWriter,
-        includesV13Migration: Bool
+        includesV13Migration: Bool,
+        includesV14Migration: Bool
     ) throws {
         self.dbWriter = dbWriter
         self.includesV13Migration = includesV13Migration
+        self.includesV14Migration = includesV14Migration
         let migrator = self.migrator
         try Self.recoverPendingV11BlockedBySyncOrphans(on: dbWriter)
         try migrator.migrate(dbWriter)

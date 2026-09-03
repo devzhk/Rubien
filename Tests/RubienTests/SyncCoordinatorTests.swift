@@ -302,7 +302,7 @@ final class SyncCoordinatorTests: XCTestCase {
                 accountStatus: { _ in .available }
             ),
             makeLibrary: stubLibraryFactory(),
-            startLibrary: { _ in },
+            startLibrary: { _ in true },
             lockURL: tmpLockURL
         )
         await coordinator.performStartSyncForTest()
@@ -311,6 +311,28 @@ final class SyncCoordinatorTests: XCTestCase {
         await coordinator.performStopSyncForTest()
         XCTAssertNil(coordinator.librarySnapshotForTest)
         XCTAssertEqual(coordinator.status, .disabled)
+    }
+
+    func testFailedLibraryStartDoesNotPublishLiveLibrary() async throws {
+        let coordinator = SyncCoordinator(
+            appDatabase: db,
+            defaults: defaults,
+            probes: allPassProbes(),
+            makeLibrary: stubLibraryFactory(),
+            startLibrary: { _ in false },
+            isAppActive: { false },
+            lockURL: tmpLockURL
+        )
+
+        await coordinator.performStartSyncForTest()
+
+        guard case .unavailable = coordinator.status else {
+            return XCTFail("expected unavailable status, got \(coordinator.status)")
+        }
+        XCTAssertNil(coordinator.librarySnapshotForTest)
+        let contender = try SyncFileLock(fileURL: tmpLockURL)
+        XCTAssertTrue(try contender.tryLockExclusive())
+        try contender.unlock()
     }
 
     func testTransactionObserverIsInstalledBeforeLibraryStart() async {
@@ -326,6 +348,7 @@ final class SyncCoordinatorTests: XCTestCase {
                     await library.isEngineStartupPreparedForTest
                 let isReady = observerInstalled && startupPrepared
                 await probe.record(isReady)
+                return true
             },
             isAppActive: { false },
             lockURL: tmpLockURL
@@ -349,7 +372,7 @@ final class SyncCoordinatorTests: XCTestCase {
                 accountStatus: { _ in .available }
             ),
             makeLibrary: stubLibraryFactory(),
-            startLibrary: { _ in },
+            startLibrary: { _ in true },
             lockURL: tmpLockURL
         )
         async let first: Void = coordinator.performStartSyncForTest()
@@ -383,7 +406,7 @@ final class SyncCoordinatorTests: XCTestCase {
                         )
                 )
             },
-            startLibrary: { _ in },
+            startLibrary: { _ in true },
             isAppActive: { false },
             lockURL: tmpLockURL
         )
@@ -422,7 +445,7 @@ final class SyncCoordinatorTests: XCTestCase {
                 accountStatus: { _ in .available }
             ),
             makeLibrary: stubLibraryFactory(),
-            startLibrary: { _ in },
+            startLibrary: { _ in true },
             lockURL: tmpLockURL
         )
         await coordinator.startIfEnabled()
@@ -517,7 +540,7 @@ final class SyncCoordinatorTests: XCTestCase {
             defaults: defaults,
             probes: allPassProbes(),
             makeLibrary: stubLibraryFactory(),
-            startLibrary: { _ in },
+            startLibrary: { _ in true },
             fetchLibrary: { _ in await spy.record() },
             idleFetchInterval: interval,
             isAppActive: appActive,
@@ -641,7 +664,7 @@ final class SyncCoordinatorTests: XCTestCase {
             defaults: defaults,
             probes: allPassProbes(),
             makeLibrary: stubLibraryFactory(),
-            startLibrary: { _ in },
+            startLibrary: { _ in true },
             fetchLibrary: { _ in
                 // Simulate the user toggling sync off during the launch fetch.
                 await box.coordinator?.performStopSyncForTest()

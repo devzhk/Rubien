@@ -94,6 +94,65 @@ final class SyncedLibraryStartupTests: XCTestCase {
         XCTAssertFalse(hasEngine)
     }
 
+    func testObserverIngestAfterSidecarPreparationWaitsForDurableRepair() async throws {
+        let library = SyncedLibrary(
+            appDatabase: db,
+            stateFileURL: stateFile
+        )
+        try await db.dbWriter.write { db in
+            try db.execute(sql: """
+                UPDATE syncState SET isDirty = 1
+                WHERE entityType = 'propertyDefinition'
+                """)
+        }
+
+        let prepared = await library.prepareForStart()
+        XCTAssertTrue(prepared)
+        await library.ingestPendingChanges()
+
+        let intentReady = await library.isDurableIntentReadyForEngineForTest
+        let hasEngine = await library.hasEngineForTest
+        XCTAssertFalse(intentReady)
+        XCTAssertFalse(
+            hasEngine,
+            "post-commit ingestion must not construct CKSyncEngine before durable-intent repair"
+        )
+    }
+
+    func testObserverIngestWaitsForFinalStartupDatabaseStep() async throws {
+        let library = SyncedLibrary(
+            appDatabase: db,
+            stateFileURL: stateFile
+        )
+        let prepared = await library.prepareForStart()
+        XCTAssertTrue(prepared)
+        await library.beginFinalStartupDatabaseStepForTest()
+
+        await library.ingestPendingChanges()
+
+        let hasEngine = await library.hasEngineForTest
+        XCTAssertFalse(
+            hasEngine,
+            "readiness must not permit engine construction before final startup DB work"
+        )
+        await library.endFinalStartupDatabaseStepForTest()
+    }
+
+    func testReentrantStartFailsClosedDuringFinalStartupDatabaseStep() async throws {
+        let library = SyncedLibrary(
+            appDatabase: db,
+            stateFileURL: stateFile
+        )
+        await library.beginFinalStartupDatabaseStepForTest()
+
+        let started = await library.start()
+        let hasEngine = await library.hasEngineForTest
+
+        XCTAssertFalse(started)
+        XCTAssertFalse(hasEngine)
+        await library.endFinalStartupDatabaseStepForTest()
+    }
+
     func testStartupPreparationFailureDoesNotConstructEngine() async throws {
         let library = SyncedLibrary(
             appDatabase: db,
@@ -107,6 +166,25 @@ final class SyncedLibraryStartupTests: XCTestCase {
         XCTAssertFalse(prepared)
         await library.start()
         let hasEngine = await library.hasEngineForTest
+        XCTAssertFalse(hasEngine)
+    }
+
+    func testDurableRepairFailureDoesNotConstructEngine() async throws {
+        let library = SyncedLibrary(
+            appDatabase: db,
+            stateFileURL: stateFile
+        )
+        let prepared = await library.prepareForStart()
+        XCTAssertTrue(prepared)
+        try await db.dbWriter.write { db in
+            try db.execute(sql: "DROP TABLE syncState")
+        }
+
+        let started = await library.start()
+        let intentReady = await library.isDurableIntentReadyForEngineForTest
+        let hasEngine = await library.hasEngineForTest
+        XCTAssertFalse(started)
+        XCTAssertFalse(intentReady)
         XCTAssertFalse(hasEngine)
     }
 
@@ -198,6 +276,46 @@ final class SyncedLibraryStartupTests: XCTestCase {
         XCTAssertEqual(propertyCount, 30, "all 30 seeded property definitions (v1: 28 + v5: 2) must be marked dirty")
         XCTAssertEqual(viewCount, 1, "seeded default view must be marked dirty")
         XCTAssertEqual(sessionValue, "complete", "baselineState must be gated after first run")
+    }
+
+    func testBaselineReplacesLiveConfirmedTombstoneWithSaveIntent() async throws {
+        let library = SyncedLibrary(
+            appDatabase: db,
+            stateFileURL: stateFile
+        )
+        try await db.dbWriter.write { db in
+            try db.execute(sql: "DELETE FROM syncState")
+            try db.execute(sql: "DELETE FROM syncSession")
+            try db.execute(sql: """
+                INSERT INTO tag(syncId, name, color, dateModified)
+                VALUES('baseline-live', 'Baseline live', '#fff', ?)
+                """, arguments: [Date()])
+            try db.execute(sql: """
+                DELETE FROM syncState
+                WHERE entityType='tag' AND entityId='baseline-live'
+                """)
+            try SyncStateStore().upsertTombstone(
+                db,
+                entityType: .tag,
+                entityId: "baseline-live",
+                confirmedByServer: true
+            )
+        }
+
+        await library.performInitialBaselineIfNeeded()
+
+        try await db.dbWriter.read { db in
+            XCTAssertNil(try Row.fetchOne(db, sql: """
+                SELECT 1 FROM tombstone
+                WHERE entityType='tag' AND entityId='baseline-live'
+                """))
+            let state = try XCTUnwrap(Row.fetchOne(db, sql: """
+                SELECT isDirty, pushInFlight FROM syncState
+                WHERE entityType='tag' AND entityId='baseline-live'
+                """))
+            XCTAssertEqual(state["isDirty"] as Int?, 1)
+            XCTAssertEqual(state["pushInFlight"] as Int?, 0)
+        }
     }
 
     func testBaselineIsOneShot() async throws {

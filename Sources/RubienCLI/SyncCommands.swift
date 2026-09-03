@@ -19,6 +19,12 @@ struct StatusCommand: ParsableCommand {
         abstract: "Print sync state as JSON."
     )
 
+    @Flag(
+        name: .long,
+        help: "Check dirty PDF cache rows against files in the active library."
+    )
+    var checkPdfFiles = false
+
     func run() throws {
         let defaults = UserDefaults.standard
 
@@ -30,8 +36,18 @@ struct StatusCommand: ParsableCommand {
         let baselineState: String
         let pdfBackfillRemaining: Int
         let identityDiagnostics: [String: Any]
+        let pdfMaterializationDiagnostics: [String: Any]?
 
-        if let pool = try? makePool() {
+        // The explicit filesystem audit must fail closed: returning a clean
+        // zero-count object when the library cannot be opened would make the
+        // recovery command actively misleading.
+        let pool: DatabasePool?
+        if checkPdfFiles {
+            pool = try makePool()
+        } else {
+            pool = try? makePool()
+        }
+        if let pool {
             dirtyByType = (try? pool.read { db in
                 var counts: [String: Int] = [:]
                 for type in SyncEntityType.allCases {
@@ -67,11 +83,20 @@ struct StatusCommand: ParsableCommand {
                     sql: "SELECT COUNT(*) FROM syncState WHERE entityType='referencePDF' AND isDirty=1") ?? 0
             }) ?? 0
             identityDiagnostics = (try? pool.read { db in
-                let diagnostics = try SyncIdentityDiagnostics.read(from: db)
-                let data = try JSONEncoder().encode(diagnostics)
-                return try JSONSerialization.jsonObject(with: data) as? [String: Any]
-                    ?? [:]
+                try Self.jsonObject(
+                    SyncIdentityDiagnostics.read(from: db)
+                )
             }) ?? Self.identityFallback
+            if checkPdfFiles {
+                pdfMaterializationDiagnostics = try Self.jsonObject(
+                    try PDFMaterializationDiagnostics.read(
+                        from: pool,
+                        pdfStorageURL: AppDatabase.pdfStorageURL
+                    )
+                )
+            } else {
+                pdfMaterializationDiagnostics = nil
+            }
         } else {
             dirtyByType = [:]
             confirmed = 0
@@ -79,6 +104,7 @@ struct StatusCommand: ParsableCommand {
             baselineState = "pending"
             pdfBackfillRemaining = 0
             identityDiagnostics = Self.identityFallback
+            pdfMaterializationDiagnostics = nil
         }
 
         let sidecarPath = AppDatabase.syncEngineStateURL
@@ -128,6 +154,8 @@ struct StatusCommand: ParsableCommand {
             "tombstoneCount": ["confirmed": confirmed, "unconfirmed": unconfirmed],
             "pdfBackfillRemaining": pdfBackfillRemaining,
             "identity": identityDiagnostics,
+            "pdfMaterialization": pdfMaterializationDiagnostics
+                ?? NSNull(),
             "syncEngineState": syncEngineState,
             "schemaVersion": AppDatabase.currentSchemaVersion
         ]
@@ -138,6 +166,14 @@ struct StatusCommand: ParsableCommand {
         )
         FileHandle.standardOutput.write(data)
         FileHandle.standardOutput.write(Data("\n".utf8))
+    }
+
+    private static func jsonObject<T: Encodable>(
+        _ value: T
+    ) throws -> [String: Any] {
+        let data = try JSONEncoder().encode(value)
+        return try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            ?? [:]
     }
 
     private func makePool() throws -> DatabasePool {
@@ -162,6 +198,14 @@ struct StatusCommand: ParsableCommand {
             "writerUpgradeRequired": true,
             "blockedSaveCount": 0,
             "blockedDeleteCount": 0,
+            "contradictoryIntentCount": 0,
+            "pushInFlightCount": 0,
+            "removableOrphanSyncStateCount": 0,
+            "preservedOrphanSyncStateCount": 0,
+            "unpublishedLiveEntityCount": 0,
+            "missingPDFCacheUploadCount": 0,
+            "stalePDFIdentityCount": 0,
+            "ambiguousPDFIdentityCount": 0,
             "writerUpgradeAcknowledgedAt": NSNull(),
             "writerUpgradeAcknowledgedSchemaVersion": NSNull(),
         ]

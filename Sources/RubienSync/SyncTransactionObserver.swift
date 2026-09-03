@@ -38,9 +38,9 @@ final class SyncTransactionObserver: TransactionObserver, @unchecked Sendable {
     func databaseDidCommit(_ db: Database) {
         // Intentionally not awaited: the observer can't be async and
         // GRDB's write queue shouldn't block on CloudKit I/O. The actor
-        // will serialize concurrent ingest calls naturally.
+        // coalesces bursts before its add-only engine handoff.
         Task { [library] in
-            await library.ingestPendingChanges()
+            await library.schedulePendingChangeIngest()
         }
     }
 

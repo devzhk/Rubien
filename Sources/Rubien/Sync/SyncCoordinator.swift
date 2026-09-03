@@ -81,8 +81,9 @@ public final class SyncCoordinator: ObservableObject {
     private let makeLibrary: @Sendable (AppDatabase) async -> SyncedLibrary
 
     /// Runs `start()` on the library after the broadcaster subscription
-    /// is installed. Tests inject a no-op to skip `CKSyncEngine` init.
-    private let startLibrary: @Sendable (SyncedLibrary) async -> Void
+    /// is installed and reports whether the durable startup gate completed.
+    /// Tests inject a successful no-op to skip `CKSyncEngine` init.
+    private let startLibrary: @Sendable (SyncedLibrary) async -> Bool
 
     /// Fetch seam, mirroring `startLibrary`. Production binds to the library's
     /// `fetchRemoteChanges()`; tests inject a counting spy so the timer /
@@ -109,7 +110,7 @@ public final class SyncCoordinator: ObservableObject {
         defaults: UserDefaults = .standard,
         probes: Probes = .live,
         makeLibrary: (@Sendable (AppDatabase) async -> SyncedLibrary)? = nil,
-        startLibrary: (@Sendable (SyncedLibrary) async -> Void)? = nil,
+        startLibrary: (@Sendable (SyncedLibrary) async -> Bool)? = nil,
         fetchLibrary: (@Sendable (SyncedLibrary) async -> Bool)? = nil,
         idleFetchInterval: TimeInterval = SyncConstants.idleFetchInterval,
         isAppActive: (@MainActor () -> Bool)? = nil,
@@ -352,12 +353,23 @@ public final class SyncCoordinator: ObservableObject {
             await newLibrary.removeTransactionObserver()
             return
         }
-        await startLibrary(newLibrary)
+        let started = await startLibrary(newLibrary)
 
         guard generation == lifecycleGeneration else {
             await newLibrary.removeTransactionObserver()
             return
         }
+        guard started else {
+            await newLibrary.removeTransactionObserver()
+            status = .unavailable(reason: "Sync state repair failed")
+            releaseSyncResources(ifOwnedBy: generation)
+            return
+        }
+
+        // Startup may have normalized durable intent before constructing the
+        // engine. Refresh the cheap SQL-only diagnostics after that repair so
+        // Settings never displays stale pre-start counts.
+        refreshIdentityDiagnostics()
 
         library = newLibrary
         status = .idle

@@ -399,7 +399,7 @@ final class MigrationV13Tests: XCTestCase {
         let queue = try DatabaseQueue()
         _ = try AppDatabase(queue)
         try queue.write { db in
-            try db.execute(sql: "INSERT INTO grdb_migrations(identifier) VALUES('v14')")
+            try db.execute(sql: "INSERT INTO grdb_migrations(identifier) VALUES('v15')")
         }
         XCTAssertThrowsError(try AppDatabase(queue)) { error in
             XCTAssertEqual(

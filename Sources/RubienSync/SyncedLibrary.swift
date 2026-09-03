@@ -53,6 +53,11 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         let recordType: String
     }
 
+    private struct ServerRecordChangedMergeOutcome: Sendable {
+        var displacedFilenames: [String] = []
+        var stagedPDFConsumed = false
+    }
+
     /// Lazy container factory. Deferring construction means unit tests can
     /// exercise the actor's DB-touching side effects (baseline, tombstone
     /// compaction, startup reconciliation) without triggering the CloudKit
@@ -76,6 +81,12 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     /// subscriptions may call into this actor before `start()`, so every
     /// engine-forcing entry point checks this gate.
     private var isEngineStartupPrepared = false
+    /// Separate from sidecar preparation: CKSyncEngine must also stay lazy
+    /// until SQLite durable intent has been normalized successfully.
+    private var isDurableIntentReadyForEngine = false
+    /// Blocks reentrant observer/fetch/PDF entry points during the final
+    /// database-only steps of the first `start()` call.
+    private var isPreEngineStartupSequenceActive = false
     private var isStartupPreparationInProgress = false
     private var engineStartupGeneration: UInt64 = 0
     private var accountResetPending = false
@@ -237,9 +248,10 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         let replayKey = Self.fullHistoryReplaySessionKey
         do {
             try await appDatabase.dbWriter.write { db in
-                try db.execute(
-                    sql: "UPDATE syncState SET systemFields = NULL, isDirty = 1"
-                )
+                try db.execute(sql: """
+                    UPDATE syncState
+                    SET systemFields = NULL, isDirty = 1, pushInFlight = 0
+                    """)
                 try db.execute(sql: "DELETE FROM tombstone")
                 try db.execute(
                     sql: """
@@ -262,10 +274,24 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     }
 
     /// Start the engine (creates it if needed). Idempotent; safe to call on
-    /// every app launch. Runs (in order): baseline-if-pending → tombstone
-    /// compaction → startup reconciliation → PDF-upload-queue drain. Each
-    /// step short-circuits if nothing to do.
-    public func start() async {
+    /// every app launch. All database-only normalization runs before the
+    /// first engine access because CKSyncEngine may schedule automatically as
+    /// soon as it is constructed.
+    @discardableResult
+    public func start() async -> Bool {
+        let protectsFirstEngineConstruction = _engine == nil
+        if protectsFirstEngineConstruction {
+            // Never report success while another reentrant start still owns
+            // the database-only preparation sequence. Callers fail closed
+            // and may retry after that original attempt finishes.
+            guard !isPreEngineStartupSequenceActive else { return false }
+            isPreEngineStartupSequenceActive = true
+        }
+        defer {
+            if protectsFirstEngineConstruction {
+                isPreEngineStartupSequenceActive = false
+            }
+        }
         // Step 1 — resolve any 'pending' contentHash rows BEFORE the engine
         // is constructed. Auto-scheduling means the engine can request a
         // push batch immediately after `_ = engine`; doing the resolver
@@ -277,19 +303,45 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             await resolvePendingPDFContentHashes()
         }
 
-        guard await prepareForStart() else { return }
-        _ = engine
+        guard await prepareForStart() else { return false }
         await performInitialBaselineIfNeeded()
+        _ = await drainPDFUploadQueueIntoSyncState()
+        guard await repairDurableIntentForStartup() else { return false }
         await compactStaleTombstones()
+        if protectsFirstEngineConstruction {
+            isPreEngineStartupSequenceActive = false
+        }
+        _ = engine
         // Startup reconciliation — idempotent because
         // `engine.state.add(pendingRecordZoneChanges:)` dedups internally,
         // so recalling on every `start()` is cheap and doesn't need a
         // process-lifetime guard.
-        await ingestPendingChanges()
-        // Drain any PDF rows queued by previous sessions (or by the v2
-        // migration backfill of the existing library). The drainer self-
-        // gates on the feature flag.
-        await drainPDFUploadQueue()
+        await reconcilePendingChanges()
+        return true
+    }
+
+    private func repairDurableIntentForStartup() async -> Bool {
+        guard !isDurableIntentReadyForEngine else { return true }
+        do {
+            let report = try await appDatabase.dbWriter.write { db in
+                try self.stateStore.repairDurableIntent(db)
+            }
+            if report.performedRepairCount > 0 {
+                log.notice(
+                    "startup sync repair normalized \(report.removedLiveTombstoneCount, privacy: .public) live overlaps, \(report.removedDeleteStateCount, privacy: .public) delete overlaps, \(report.removedCleanOrphanStateCount, privacy: .public) clean orphans, \(report.clearedPushInFlightCount, privacy: .public) in-flight rows, \(report.repairedPDFIdentityCount, privacy: .public) PDF identities, and \(report.upgradedActivityTombstoneCount, privacy: .public) activity tombstones"
+                )
+            }
+            isDurableIntentReadyForEngine = true
+            return true
+        } catch {
+            isDurableIntentReadyForEngine = false
+            log.error(
+                "startup durable-intent repair failed: \(error.localizedDescription, privacy: .public)"
+            )
+            // Never construct CKSyncEngine against state we failed to
+            // normalize; automatic scheduling can begin in its initializer.
+            return false
+        }
     }
 
     // MARK: - PDF upload queue drainer (B8 / Task 14)
@@ -324,12 +376,18 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     /// `pdfAssetSyncEnabledProvider()` so it stays a no-op until Phase E
     /// flips the flag on by default.
     public func drainPDFUploadQueue() async {
-        guard isEngineStartupPrepared else { return }
+        guard isEngineStartupPrepared,
+              isDurableIntentReadyForEngine,
+              !isPreEngineStartupSequenceActive
+        else {
+            return
+        }
         let generation = engineStartupGeneration
         let drained = await drainPDFUploadQueueIntoSyncState()
         guard !drained.isEmpty else { return }
         guard isEngineStartupPrepared,
-              generation == engineStartupGeneration
+              generation == engineStartupGeneration,
+              !deferEngineMutationIfDelegateCallbackActive()
         else {
             // The DB-side dirty rows remain durable for the replacement
             // engine's next `ingestPendingChanges()` pass.
@@ -392,12 +450,11 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                         sql: "SELECT syncId FROM reference WHERE id = ?",
                         arguments: [id]
                     ) else { continue }
-                    try db.execute(sql: """
-                        INSERT INTO syncState(entityType, entityId, isDirty)
-                            VALUES(?, ?, 1)
-                            ON CONFLICT(entityType, entityId)
-                                DO UPDATE SET isDirty = 1
-                    """, arguments: [SyncEntityType.referencePDF.rawValue, syncId])
+                    try self.stateStore.queueSave(
+                        db,
+                        entityType: .referencePDF,
+                        entityId: syncId
+                    )
                     try db.execute(
                         sql: "DELETE FROM pdfUploadQueue WHERE referenceId = ?",
                         arguments: [id]
@@ -551,14 +608,41 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         if inFlight { publishStatus(.syncing) } else { publishIdleIfQuiescent() }
     }
 
+    private func beginSendCycle() {
+        sendCycleError = nil
+        noteSend(inFlight: true)
+    }
+
+    private func finishSendCycle() {
+        isSendInFlight = false
+        publishIdleIfQuiescent()
+    }
+
     private func publishIdleIfQuiescent() {
         guard !isFetchInFlight, !isSendInFlight else { return }
-        publishStatus(.idle)
+        if let sendCycleError {
+            publishStatus(.error(sendCycleError))
+        } else {
+            publishStatus(.idle)
+        }
     }
 
     /// Test-only hook. Production callers go through `publishStatus`.
     func publishStatusForTest(_ status: SyncStatus) {
         publishStatus(status)
+    }
+
+    func beginSendCycleForTest() {
+        beginSendCycle()
+    }
+
+    func noteSendFailureForTest(_ error: CKError) {
+        sendCycleError = error
+        publishStatus(.error(error))
+    }
+
+    func finishSendCycleForTest() {
+        finishSendCycle()
     }
 
     /// The post-commit observer that feeds mutations to the engine.
@@ -574,11 +658,26 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     /// visible whenever a poll's fetch overlaps an automatic send.
     private var isFetchInFlight = false
     private var isSendInFlight  = false
+    private var sendCycleError: CKError?
 
     /// Overlap guard for explicit fetches. `SyncedLibrary` is an actor, so the
     /// read-then-set below has no suspension point and is race-free across
     /// concurrent callers (launch / foreground / idle timer / error recovery).
     private var isExplicitFetchRunning = false
+
+    /// Post-commit bursts are coalesced before the add-only engine handoff.
+    /// Full cache enumeration/removal is reserved for startup, failure
+    /// recovery, and the external idle/foreground fetch boundary.
+    private var pendingIngestTask: Task<Void, Never>?
+    private var pendingIngestGeneration: UInt64 = 0
+    private var scheduledIngestExecutionCountForTest = 0
+    private var deferredPendingReconciliation = false
+    private var deferredDurableRepair = false
+    private var deferredReconciliationTask: Task<Void, Never>?
+    private var activeDelegateEventCount = 0
+    private var activeSendBatchCallbackCount = 0
+    private var reconciliationAwaitingSendBoundary = false
+    private var loggedUnrecognizedPendingChanges: Set<String> = []
 
     /// Install a GRDB `TransactionObserver` that forwards post-commit
     /// activity into the engine automatically. One call at app startup,
@@ -599,9 +698,18 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     /// (to drop the registration synchronously) and to nil our own
     /// retention (so the observer can deallocate).
     public func removeTransactionObserver() async {
-        guard let observer = transactionObserver else { return }
-        appDatabase.dbWriter.remove(transactionObserver: observer)
+        if let observer = transactionObserver {
+            appDatabase.dbWriter.remove(transactionObserver: observer)
+        }
         transactionObserver = nil
+        pendingIngestTask?.cancel()
+        pendingIngestTask = nil
+        pendingIngestGeneration &+= 1
+        deferredReconciliationTask?.cancel()
+        deferredReconciliationTask = nil
+        deferredPendingReconciliation = false
+        deferredDurableRepair = false
+        reconciliationAwaitingSendBoundary = false
     }
 
     /// Test-only accessor. We can't exercise the engine side of the
@@ -616,6 +724,19 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         isEngineStartupPrepared
     }
 
+    var isDurableIntentReadyForEngineForTest: Bool {
+        isDurableIntentReadyForEngine
+    }
+
+    func beginFinalStartupDatabaseStepForTest() {
+        isDurableIntentReadyForEngine = true
+        isPreEngineStartupSequenceActive = true
+    }
+
+    func endFinalStartupDatabaseStepForTest() {
+        isPreEngineStartupSequenceActive = false
+    }
+
     var hasEngineForTest: Bool {
         _engine != nil
     }
@@ -628,6 +749,188 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         accountResetPending
     }
 
+    var scheduledIngestRunsForTest: Int {
+        scheduledIngestExecutionCountForTest
+    }
+
+    var pendingIngestGenerationForTest: UInt64 {
+        pendingIngestGeneration
+    }
+
+    var hasPendingIngestTaskForTest: Bool {
+        pendingIngestTask != nil
+    }
+
+    func runScheduledPendingChangeIngestForTest(generation: UInt64) async {
+        await runScheduledPendingChangeIngest(generation: generation)
+    }
+
+    var hasDeferredPendingReconciliationForTest: Bool {
+        deferredPendingReconciliation
+    }
+
+    var activeDelegateCallbackCountForTest: Int {
+        activeDelegateEventCount
+    }
+
+    var isReconciliationAwaitingSendBoundaryForTest: Bool {
+        reconciliationAwaitingSendBoundary
+    }
+
+    func beginDelegateCallbackForTest() {
+        beginEngineEventCallback()
+    }
+
+    func endDelegateCallbackForTest() {
+        endEngineEventCallback()
+    }
+
+    func beginSendBatchCallbackForTest() {
+        beginEngineSendBatchCallback()
+    }
+
+    func endSendBatchCallbackForTest() {
+        endEngineSendBatchCallback()
+    }
+
+    func reachSendBoundaryForTest() {
+        promoteSendBoundaryReconciliation()
+    }
+
+    func reachExternalIdleBoundaryForTest() {
+        promoteSendBoundaryReconciliation()
+    }
+
+    func noteBatchAnomalyForTest() {
+        deferredPendingReconciliation = true
+    }
+
+    /// Returns true when the caller must leave CKSyncEngine untouched. This
+    /// check belongs immediately after the caller's final suspension point;
+    /// an entry-time check alone is insufficient under actor reentrancy.
+    @discardableResult
+    func deferEngineMutationIfDelegateCallbackActive() -> Bool {
+        guard activeDelegateEventCount > 0 else { return false }
+        deferPendingReconciliationForActiveCallback()
+        return true
+    }
+
+    private func beginEngineEventCallback() {
+        activeDelegateEventCount += 1
+    }
+
+    private func endEngineEventCallback() {
+        precondition(activeDelegateEventCount > 0)
+        activeDelegateEventCount -= 1
+        if activeDelegateEventCount == 0 {
+            scheduleDeferredReconciliationAfterCallback()
+        }
+    }
+
+    private func beginEngineSendBatchCallback() {
+        activeDelegateEventCount += 1
+        activeSendBatchCallbackCount += 1
+    }
+
+    private func endEngineSendBatchCallback() {
+        precondition(activeDelegateEventCount > 0)
+        precondition(activeSendBatchCallbackCount > 0)
+        activeSendBatchCallbackCount -= 1
+        activeDelegateEventCount -= 1
+        // CKSyncEngine still has to consume the returned batch and its record
+        // providers. The matching sent/did-send event promotes deferred work.
+    }
+
+    private func deferPendingReconciliationForActiveCallback() {
+        if activeSendBatchCallbackCount > 0 {
+            reconciliationAwaitingSendBoundary = true
+        } else {
+            deferredPendingReconciliation = true
+        }
+    }
+
+    private func promoteSendBoundaryReconciliation() {
+        guard reconciliationAwaitingSendBoundary else { return }
+        reconciliationAwaitingSendBoundary = false
+        deferredPendingReconciliation = true
+    }
+
+    private func scheduleDeferredReconciliationAfterCallback() {
+        guard deferredPendingReconciliation || deferredDurableRepair,
+              deferredReconciliationTask == nil
+        else { return }
+        // This is deliberately the callback's final action. With no later
+        // await in either delegate entry point, actor isolation prevents
+        // pending-state mutation from beginning until that turn has returned.
+        deferredReconciliationTask = Task { [weak self] in
+            await Task.yield()
+            _ = await self?.consumeDeferredPendingReconciliation()
+        }
+    }
+
+    @discardableResult
+    private func consumeDeferredPendingReconciliation() async -> Bool {
+        let needsRepair = deferredDurableRepair
+        let needsReconciliation = deferredPendingReconciliation || needsRepair
+        deferredDurableRepair = false
+        deferredPendingReconciliation = false
+        deferredReconciliationTask = nil
+        guard needsReconciliation else { return false }
+
+        if needsRepair {
+            do {
+                _ = try await appDatabase.dbWriter.write { db in
+                    try self.stateStore.repairDurableIntent(db)
+                }
+            } catch {
+                log.error(
+                    "deferred durable-intent repair failed: \(error.localizedDescription, privacy: .public)"
+                )
+                // Do not canonicalize CKSyncEngine from state that failed
+                // normalization. Keep both requests durable in actor state;
+                // the next callback completion or external idle boundary
+                // will retry them.
+                deferredDurableRepair = true
+                deferredPendingReconciliation = true
+                return true
+            }
+        }
+        await reconcilePendingChanges()
+        return true
+    }
+
+    /// Called by the synchronous GRDB observer after commit. Replacing the
+    /// prior task makes an import burst pay for one SQLite scan and one
+    /// add-only engine update instead of one per inserted row.
+    public func schedulePendingChangeIngest() {
+        // Recovery writes can notify the transaction observer while an async
+        // CKSyncEngine delegate turn is suspended. Defer all engine-state
+        // mutation until that turn has actually returned.
+        if activeDelegateEventCount > 0 {
+            deferPendingReconciliationForActiveCallback()
+            return
+        }
+        pendingIngestTask?.cancel()
+        pendingIngestGeneration &+= 1
+        let generation = pendingIngestGeneration
+        pendingIngestTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(100))
+            } catch {
+                return
+            }
+            guard let self, !Task.isCancelled else { return }
+            await self.runScheduledPendingChangeIngest(generation: generation)
+        }
+    }
+
+    private func runScheduledPendingChangeIngest(generation: UInt64) async {
+        guard generation == pendingIngestGeneration else { return }
+        pendingIngestTask = nil
+        scheduledIngestExecutionCountForTest += 1
+        await ingestPendingChanges(expectedScheduledGeneration: generation)
+    }
+
     /// Call from the app after any write transaction that might have left
     /// rows dirty. Forwards freshly-dirty entity IDs and tombstones into the
     /// engine's pending queue. Idempotent: CKSyncEngine dedups by recordID
@@ -637,41 +940,87 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     /// hook that dispatches into the actor — safe because it fires
     /// post-commit (no mid-transaction mutation).
     public func ingestPendingChanges() async {
-        guard isEngineStartupPrepared else { return }
+        await ingestPendingChanges(expectedScheduledGeneration: nil)
+    }
+
+    private func ingestPendingChanges(
+        expectedScheduledGeneration: UInt64?
+    ) async {
+        guard isEngineStartupPrepared,
+              isDurableIntentReadyForEngine,
+              !isPreEngineStartupSequenceActive
+        else {
+            return
+        }
         let generation = engineStartupGeneration
         do {
-            let dirty: [(SyncEntityType, String)]
-            let deleted: [(SyncEntityType, String)]
-            let writerUpgradeRequired: Bool
-            (dirty, deleted, writerUpgradeRequired) = try await appDatabase.dbWriter.read { db in
-                (try self.stateStore.dirtyEntities(db),
-                 try self.stateStore.tombstones(db),
-                 try self.stateStore.writerUpgradeRequired(db))
+            let desired = try await appDatabase.dbWriter.read { db in
+                try self.stateStore.desiredPendingIntents(db).intents
             }
-
-            var pending: [CKSyncEngine.PendingRecordZoneChange] = []
-            pending.reserveCapacity(dirty.count + deleted.count)
-            for (type, id) in dirty {
-                guard !writerUpgradeRequired || !type.isUnsafeForV12(entityId: id) else {
-                    continue
-                }
-                pending.append(.saveRecord(recordID(for: id, type: type)))
-            }
-            for (type, id) in deleted {
-                guard !writerUpgradeRequired || !type.isUnsafeForV12(entityId: id) else {
-                    continue
-                }
-                pending.append(.deleteRecord(recordID(for: id, type: type)))
-            }
+            let pending = desired.map(pendingChange(for:))
 
             if !pending.isEmpty {
+                if let expectedScheduledGeneration,
+                   expectedScheduledGeneration != pendingIngestGeneration
+                {
+                    return
+                }
                 guard isEngineStartupPrepared,
-                      generation == engineStartupGeneration
+                      generation == engineStartupGeneration,
+                      !deferEngineMutationIfDelegateCallbackActive()
                 else { return }
                 engine.state.add(pendingRecordZoneChanges: pending)
             }
         } catch {
             log.error("ingestPendingChanges failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    /// Make CKSyncEngine's derived pending cache exactly match current
+    /// SQLite intent for every record type this build understands. Unknown
+    /// future record types are left untouched for forward compatibility.
+    public func reconcilePendingChanges() async {
+        guard isEngineStartupPrepared,
+              isDurableIntentReadyForEngine,
+              !isPreEngineStartupSequenceActive
+        else {
+            return
+        }
+        let generation = engineStartupGeneration
+        do {
+            let desiredResolution = try await appDatabase.dbWriter.read { db in
+                try self.stateStore.desiredPendingIntents(db)
+            }
+            guard isEngineStartupPrepared,
+                  generation == engineStartupGeneration,
+                  !deferEngineMutationIfDelegateCallbackActive()
+            else { return }
+
+            let syncEngine = engine
+            let knownCurrent = recognizedPendingIdentities(
+                from: syncEngine.state.pendingRecordZoneChanges
+            )
+            let plan = SyncPendingIntentPlanner.plan(
+                current: knownCurrent,
+                desired: desiredResolution.intents
+            )
+            if !plan.removals.isEmpty {
+                syncEngine.state.remove(
+                    pendingRecordZoneChanges: plan.removals.map(pendingChange(for:))
+                )
+            }
+            if !plan.additions.isEmpty {
+                syncEngine.state.add(
+                    pendingRecordZoneChanges: plan.additions.map(pendingChange(for:))
+                )
+            }
+            if desiredResolution.anomalyDetected {
+                log.error("durable sync intent remained contradictory during pending-cache reconciliation")
+            }
+        } catch {
+            log.error(
+                "pending-cache reconciliation failed: \(error.localizedDescription, privacy: .public)"
+            )
         }
     }
 
@@ -701,6 +1050,13 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     /// already exists.
     @discardableResult
     public func fetchRemoteChanges() async -> Bool {
+        // Actor reentrancy can admit an external foreground/idle request while
+        // an async delegate handler is awaiting SQLite. Treat it as a benign
+        // no-op so neither pending-state mutation nor fetch re-entry occurs
+        // before the callback returns.
+        guard activeDelegateEventCount == 0,
+              !isPreEngineStartupSequenceActive
+        else { return true }
         guard !isExplicitFetchRunning else { return true }
         isExplicitFetchRunning = true
         defer { isExplicitFetchRunning = false }
@@ -714,13 +1070,33 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             invalidateEngineStartup(retireEngine: true)
             statePersistenceGate.resetAfterEngineRecovery()
             guard await prepareForStart() else { return false }
+            guard await repairDurableIntentForStartup() else { return false }
             _ = engine
-            await ingestPendingChanges()
+            await reconcilePendingChanges()
         } else {
             guard await prepareForStart() else { return false }
+            guard await repairDurableIntentForStartup() else { return false }
         }
 
         guard isEngineStartupPrepared else { return false }
+        // A resolver can return no batch after detecting stale engine intent,
+        // in which case CKSyncEngine may emit no terminal send event. The
+        // normal external fetch boundary is the fallback canonicalization
+        // point required to keep that anomaly from becoming permanent.
+        promoteSendBoundaryReconciliation()
+        let consumedDeferredWork = await consumeDeferredPendingReconciliation()
+        // A failed durable repair leaves its retry flag set. Do not fetch or
+        // canonicalize from state that could still contain invalid intent.
+        guard !deferredDurableRepair else { return false }
+        if !consumedDeferredWork {
+            await reconcilePendingChanges()
+        }
+        // The awaits above can admit a delegate callback. Recheck at the
+        // actual fetch boundary, where there is no later suspension before
+        // entering CKSyncEngine.
+        guard activeDelegateEventCount == 0,
+              !isPreEngineStartupSequenceActive
+        else { return true }
         let fetchGeneration = engineStartupGeneration
         let fetchEngine = engine
         do {
@@ -737,6 +1113,14 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         precondition(
             isEngineStartupPrepared,
             "CKSyncEngine must not be constructed before startup preparation"
+        )
+        precondition(
+            isDurableIntentReadyForEngine,
+            "CKSyncEngine must not be constructed before durable-intent repair"
+        )
+        precondition(
+            !isPreEngineStartupSequenceActive,
+            "CKSyncEngine must not be constructed before startup DB work finishes"
         )
         if let engine = _engine { return engine }
 
@@ -777,36 +1161,33 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                 guard state == nil else { return }
 
                 var totalMarked = 0
-                for type in SyncEntityType.allCases {
-                    // Most v13 entities baseline directly from their stored
-                    // global syncId. Natural-key entities keep their existing
-                    // string key, while the synthesized ReferencePDF joins
-                    // through its owning Reference to obtain the same global
-                    // identity used by CloudKit dispatch.
-                    let sourceTable: String
-                    let idExpression: String
-                    switch type {
-                    case .assistantActivity:
-                        sourceTable = type.rawValue
-                        idExpression = "id"
-                    case .activityEpoch:
-                        sourceTable = type.rawValue
-                        idExpression = "kind"
-                    case .referencePDF:
-                        sourceTable = "pdfCache pc JOIN reference r ON r.id = pc.referenceId"
-                        idExpression = "r.syncId"
-                    default:
-                        sourceTable = type.rawValue
-                        idExpression = "syncId"
-                    }
+                for source in SyncLocalEntityCatalog.current {
+                    // Baseline is a real save-intent writer, not merely a
+                    // bookkeeping backfill. Establish exclusivity in this
+                    // transaction before marking each live identity dirty.
+                    try db.execute(sql: """
+                        DELETE FROM tombstone
+                        WHERE entityType = ?
+                          AND EXISTS (
+                            SELECT 1 FROM \(source.baselineFromClause)
+                            WHERE \(source.baselineIdentityExpression) =
+                                  tombstone.entityId
+                          )
+                        """, arguments: [source.entityType])
                     // SQLite grammar quirk: the INSERT-SELECT form needs
                     // an explicit `WHERE true` before `ON CONFLICT`,
                     // otherwise the parser rejects the upsert clause as
                     // ambiguous with the SELECT's WHERE slot.
                     try db.execute(sql: """
-                        INSERT INTO syncState(entityType, entityId, isDirty)
-                            SELECT '\(type.rawValue)', \(idExpression), 1 FROM \(sourceTable) WHERE true
-                            ON CONFLICT(entityType, entityId) DO UPDATE SET isDirty = 1
+                        INSERT INTO syncState(
+                            entityType, entityId, isDirty, pushInFlight
+                        )
+                            SELECT '\(source.entityType)',
+                                   \(source.baselineIdentityExpression), 1, 0
+                            FROM \(source.baselineFromClause) WHERE true
+                            ON CONFLICT(entityType, entityId) DO UPDATE SET
+                                isDirty = 1,
+                                pushInFlight = 0
                         """)
                     totalMarked += db.changesCount
                 }
@@ -853,6 +1234,8 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             log.debug("ignoring callback from retired sync engine")
             return
         }
+        beginEngineEventCallback()
+        defer { endEngineEventCallback() }
 
         switch event {
         case .stateUpdate(let event):
@@ -877,6 +1260,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             }
 
         case .sentRecordZoneChanges(let event):
+            promoteSendBoundaryReconciliation()
             await handleSentZoneChanges(event, syncEngine: syncEngine)
 
         case .willFetchChanges:
@@ -884,7 +1268,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             statePersistenceGate.beginFetch()
             noteFetch(inFlight: true)
         case .willSendChanges:
-            noteSend(inFlight: true)
+            beginSendCycle()
         case .didFetchChanges:
             let durableState = statePersistenceGate.finishFetch()
             if let durableState {
@@ -904,7 +1288,8 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             }
             noteFetch(inFlight: false)
         case .didSendChanges:
-            noteSend(inFlight: false)
+            promoteSendBoundaryReconciliation()
+            finishSendCycle()
 
         case .didFetchRecordZoneChanges(let event):
             // A failed batch means later parents may not have committed. Do
@@ -945,6 +1330,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         @unknown default:
             log.error("unhandled CKSyncEngine.Event case — a newer OS added a variant we don't know about")
         }
+
     }
 
     private func reconcileFetchedZoneAfterFetch(
@@ -967,11 +1353,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                 )
                 return outcome
             }
-            for filename in outcome.pdfFilenamesToDelete {
-                let url = AppDatabase.pdfStorageURL
-                    .appendingPathComponent(filename)
-                try? FileManager.default.removeItem(at: url)
-            }
+            Self.unlinkStoredPDFFilenames(outcome.pdfFilenamesToDelete)
             if outcome.reconciledRowCount > 0 {
                 log.notice(
                     "reconciled \(outcome.reconciledRowCount, privacy: .public) terminal FK orphan rows after zone fetch"
@@ -1033,39 +1415,38 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         syncEngine: CKSyncEngine
     ) async -> CKSyncEngine.RecordZoneChangeBatch? {
         guard syncEngine === _engine else { return nil }
+        // This delegate entry point suspends on SQLite below. Count it just
+        // like handleEvent so actor reentrancy cannot admit observer ingestion
+        // or an explicit fetch that mutates CKSyncEngine mid-send.
+        beginEngineSendBatchCallback()
+        defer { endEngineSendBatchCallback() }
 
         let scopedPending = syncEngine.state
             .pendingRecordZoneChanges
             .filter { context.options.scope.contains($0) }
-        let pending: [CKSyncEngine.PendingRecordZoneChange]
+        let resolution: BatchIntentResolution
         do {
-            pending = try await appDatabase.dbWriter.read { db in
-                let writerUpgradeRequired = try self.stateStore.writerUpgradeRequired(db)
-                return try scopedPending.filter { change in
-                    guard let identity = Self.pendingIdentity(for: change) else {
-                        return false
-                    }
-                    if writerUpgradeRequired,
-                       identity.type.isUnsafeForV12(entityId: identity.entityId)
-                    {
-                        return false
-                    }
-                    if identity.isDelete {
-                        return try self.stateStore.tombstoneIsPushEligible(
-                            db,
-                            entityType: identity.type,
-                            entityId: identity.entityId
-                        )
-                    }
-                    return true
-                }
+            let identities = recognizedPendingIdentities(from: scopedPending)
+            resolution = try await appDatabase.dbWriter.read { db in
+                try self.stateStore.resolveBatchIntents(
+                    db,
+                    pendingIdentities: identities
+                )
             }
         } catch {
             log.error(
-                "failed to filter pending sync changes: \(error.localizedDescription, privacy: .public)"
+                "failed to resolve pending sync changes: \(error.localizedDescription, privacy: .public)"
             )
             return nil
         }
+        if resolution.anomalyDetected {
+            log.error("contradictory or stale sync intent reached batch construction")
+            reconciliationAwaitingSendBoundary = true
+        }
+        let pending = Self.originalPendingChanges(
+            selected: resolution.intents,
+            scopedPending: scopedPending
+        )
         guard !pending.isEmpty else { return nil }
 
         return await CKSyncEngine.RecordZoneChangeBatch(
@@ -1105,11 +1486,14 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                         entityId: entityId,
                         systemFields: systemFields
                     ) else { return nil }
-                    try stateStore.markPushInFlight(
+                    // This predicate is the authoritative last word, not a
+                    // duplicate of the resolver's earlier dirty read: the
+                    // resolver and provider execute in separate transactions.
+                    guard try stateStore.markPushInFlight(
                         db,
                         entityType: entityType,
                         entityId: entityId
-                    )
+                    ) else { return nil }
                     return record
                 }
             } catch {
@@ -1121,23 +1505,95 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
 
     private static func pendingIdentity(
         for change: CKSyncEngine.PendingRecordZoneChange
-    ) -> (type: SyncEntityType, entityId: String, isDelete: Bool)? {
-        let recordID: CKRecord.ID
-        let isDelete: Bool
+    ) -> PendingSyncIdentity? {
+        let operation: SyncPendingOperation
         switch change {
-        case .saveRecord(let id):
-            recordID = id
-            isDelete = false
-        case .deleteRecord(let id):
-            recordID = id
-            isDelete = true
+        case .saveRecord:
+            operation = .save
+        case .deleteRecord:
+            operation = .delete
         @unknown default:
             return nil
         }
+        guard let recordID = pendingRecordID(for: change) else { return nil }
         guard let (type, entityId) = SyncEntityType.parseRecordName(
             recordID.recordName
-        ) else { return nil }
-        return (type, entityId, isDelete)
+        ), recordID.zoneID == SyncConstants.libraryZoneID else { return nil }
+        return PendingSyncIdentity(
+            type: type,
+            entityId: entityId,
+            operation: operation
+        )
+    }
+
+    private static func pendingRecordID(
+        for change: CKSyncEngine.PendingRecordZoneChange
+    ) -> CKRecord.ID? {
+        switch change {
+        case .saveRecord(let id), .deleteRecord(let id):
+            return id
+        @unknown default:
+            return nil
+        }
+    }
+
+    private func recognizedPendingIdentities(
+        from changes: [CKSyncEngine.PendingRecordZoneChange]
+    ) -> [PendingSyncIdentity] {
+        changes.compactMap { change in
+            guard let identity = Self.pendingIdentity(for: change) else {
+                let recordID = Self.pendingRecordID(for: change)
+                let key = recordID.map {
+                    "\($0.zoneID.ownerName)/\($0.zoneID.zoneName)/\($0.recordName)"
+                } ?? "unknown-enum-case"
+                if loggedUnrecognizedPendingChanges.insert(key).inserted {
+                    log.error(
+                        "preserving unrecognized engine pending change \(key, privacy: .public)"
+                    )
+                }
+                return nil
+            }
+            return identity
+        }
+    }
+
+    var loggedUnrecognizedPendingChangeCountForTest: Int {
+        loggedUnrecognizedPendingChanges.count
+    }
+
+    func recognizedPendingIdentitiesForTest(
+        from changes: [CKSyncEngine.PendingRecordZoneChange]
+    ) -> [PendingSyncIdentity] {
+        recognizedPendingIdentities(from: changes)
+    }
+
+    /// Preserve the exact pending values accepted by SendChangesContext.
+    /// Rebuilding from recordName would silently move a parseable record from
+    /// another zone into Rubien's library zone.
+    static func originalPendingChanges(
+        selected: [PendingSyncIdentity],
+        scopedPending: [CKSyncEngine.PendingRecordZoneChange]
+    ) -> [CKSyncEngine.PendingRecordZoneChange] {
+        var originals: [
+            PendingSyncIdentity: CKSyncEngine.PendingRecordZoneChange
+        ] = [:]
+        for change in scopedPending {
+            guard let identity = pendingIdentity(for: change) else { continue }
+            originals[identity] = change
+        }
+        return selected.compactMap { originals[$0] }
+    }
+
+    private func pendingChange(
+        for identity: PendingSyncIdentity
+    ) -> CKSyncEngine.PendingRecordZoneChange {
+        let id = recordID(for: identity.entityId, type: identity.type)
+        switch identity.operation {
+        case .save:
+            return .saveRecord(id)
+        case .delete:
+            return .deleteRecord(id)
+        }
     }
 
     // MARK: - Event handlers
@@ -1161,6 +1617,16 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         fullHistoryReconciliationAwaitingDurableState = false
         isFetchInFlight = false
         isSendInFlight = false
+        sendCycleError = nil
+        pendingIngestTask?.cancel()
+        pendingIngestTask = nil
+        pendingIngestGeneration &+= 1
+        deferredReconciliationTask?.cancel()
+        deferredReconciliationTask = nil
+        deferredPendingReconciliation = false
+        deferredDurableRepair = false
+        reconciliationAwaitingSendBoundary = false
+        isDurableIntentReadyForEngine = false
 
         // A concurrent startup preparation will observe the generation
         // change and return without enabling its engine. It leaves this
@@ -1425,14 +1891,10 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         // A later deletion-phase failure does not change which PDF
         // modifications committed, so cleanup keys off the committed outcome
         // instead of treating the whole event as all-or-nothing.
-        for filename in execution.committedOutcome.displacedFilenames {
-            let url = AppDatabase.pdfStorageURL.appendingPathComponent(filename)
-            try? FileManager.default.removeItem(at: url)
-        }
-        for filename in execution.committedOutcome.deletedFilenames {
-            let url = AppDatabase.pdfStorageURL.appendingPathComponent(filename)
-            try? FileManager.default.removeItem(at: url)
-        }
+        Self.unlinkStoredPDFFilenames(
+            execution.committedOutcome.displacedFilenames
+                + execution.committedOutcome.deletedFilenames
+        )
         for (recordID, prepared) in preparedPDFs
             where !execution.committedOutcome.appliedPDFRecordIDs.contains(recordID)
         {
@@ -1475,6 +1937,17 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             }
             guard let entityId = SyncEntityType.parseRecordName(record.recordID.recordName)?.1 else {
                 log.error("skipping malformed recordName \(record.recordID.recordName, privacy: .public)")
+                continue
+            }
+            if try stateStore.activeDeleteSuppressesRemoteRecord(
+                db,
+                entityType: type,
+                entityId: entityId
+            ) {
+                // A local delete is newer than this fetched modification.
+                // Avoid rematerializing the row while its exact delete is
+                // still pending. Prepared PDF files remain outside the
+                // applied set and are removed by post-commit cleanup.
                 continue
             }
 
@@ -1534,11 +2007,16 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                     stateStore: stateStore,
                     db: db
                 )
-                if try !stateStore.hasPushEligibleTombstone(
+                if try !stateStore.hasActiveDeleteIntent(
                     db,
                     entityType: type,
                     entityId: entityId
                 ) {
+                    try stateStore.removeTombstone(
+                        db,
+                        entityType: type,
+                        entityId: entityId
+                    )
                     try stateStore.markPulled(
                         db,
                         entityType: type,
@@ -1563,11 +2041,16 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             } else if type == .activityEpoch, let kind = ActivityKind(rawValue: entityId) {
                 changedEpochKinds.insert(kind)
             }
-            if applied, try !stateStore.hasPushEligibleTombstone(
+            if applied, try !stateStore.hasActiveDeleteIntent(
                 db,
                 entityType: type,
                 entityId: entityId
             ) {
+                try stateStore.removeTombstone(
+                    db,
+                    entityType: type,
+                    entityId: entityId
+                )
                 try stateStore.markPulled(
                     db,
                     entityType: type,
@@ -1697,6 +2180,63 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         _ event: CKSyncEngine.Event.SentRecordZoneChanges,
         syncEngine: CKSyncEngine
     ) async {
+        let sendErrors = event.failedRecordSaves.map { $0.error }
+            + event.failedRecordDeletes.map { $0.value }
+        if let firstError = sendErrors.first {
+            sendCycleError = firstError
+            publishStatus(.error(firstError))
+        }
+        if !sendErrors.isEmpty {
+            var inputs: [SyncSendFailureInput] = []
+            inputs.reserveCapacity(sendErrors.count)
+            for failure in event.failedRecordSaves {
+                let type = SyncEntityType.forRecordType(
+                    failure.record.recordType
+                )?.rawValue ?? failure.record.recordType
+                inputs.append(.init(error: failure.error, entityType: type))
+            }
+            for failure in event.failedRecordDeletes {
+                let type = SyncEntityType.parseRecordName(
+                    failure.key.recordName
+                )?.0.rawValue ?? "unknown"
+                inputs.append(.init(error: failure.value, entityType: type))
+            }
+            for summary in SyncSendFailureSummarizer.summarize(inputs) {
+                let types = summary.entityTypes.joined(separator: ",")
+                log.error(
+                    "CloudKit send failure domain=\(summary.error._domain, privacy: .public) code=\(summary.error.errorCode, privacy: .public) affected=\(summary.count, privacy: .public) entityTypes=\(types, privacy: .public): \(summary.error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+
+        // A failed save no longer owns its in-flight marker. Release every
+        // affected row before specialized recovery mutates its fields.
+        let failedSaveIdentities: [(SyncEntityType, String)] = event.failedRecordSaves.compactMap {
+            guard let type = SyncEntityType.forRecordType($0.record.recordType),
+                  let parsed = SyncEntityType.parseRecordName(
+                    $0.record.recordID.recordName
+                  ), parsed.0 == type
+            else { return nil }
+            return parsed
+        }
+        if !failedSaveIdentities.isEmpty {
+            do {
+                try await appDatabase.dbWriter.write { [stateStore] db in
+                    for (type, entityId) in failedSaveIdentities {
+                        try stateStore.releasePushInFlight(
+                            db,
+                            entityType: type,
+                            entityId: entityId
+                        )
+                    }
+                }
+            } catch {
+                log.error(
+                    "failed to release save attempts: \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+
         // Successful saves: archive system fields so the next push can
         // rehydrate with a valid change tag.
         for saved in event.savedRecords {
@@ -1747,29 +2287,38 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         }
         if !confirmedDeletes.isEmpty {
             do {
-                try await appDatabase.dbWriter.write { [stateStore] db in
+                let filenames = try await appDatabase.dbWriter.write {
+                    [stateStore] db in
+                    var filenames: [String] = []
                     for (type, entityId) in confirmedDeletes {
-                        try stateStore.markTombstoneConfirmed(
+                        filenames += try Self.finalizeDeleteOutcome(
                             db,
+                            stateStore: stateStore,
                             entityType: type,
-                            entityId: entityId
+                            entityId: entityId,
+                            retainConfirmedTombstone: true
                         )
                     }
+                    return filenames
                 }
+                Self.unlinkStoredPDFFilenames(filenames)
             } catch {
-                log.error("mark tombstones confirmed failed: \(error.localizedDescription, privacy: .public)")
+                log.error("finalize acknowledged deletes failed: \(error.localizedDescription, privacy: .public)")
             }
         }
 
-        // Failed saves: handle the three error classes we recover from
-        // automatically. Others (quota exceeded, etc.) are left to the
-        // engine's own retry policy.
+        // Failed saves remain durable and user-visible. Recovery below only
+        // adjusts the retry preconditions; canonicalization is deferred until
+        // after this delegate callback returns.
         for failure in event.failedRecordSaves {
             guard let type = SyncEntityType.forRecordType(failure.record.recordType) else { continue }
-            guard let entityId = SyncEntityType.parseRecordName(failure.record.recordID.recordName)?.1 else {
+            guard let parsed = SyncEntityType.parseRecordName(
+                failure.record.recordID.recordName
+            ), parsed.0 == type else {
                 log.error("skipping malformed failed-save recordName \(failure.record.recordID.recordName, privacy: .public)")
                 continue
             }
+            let entityId = parsed.1
 
             switch failure.error.code {
             case .serverRecordChanged:
@@ -1778,6 +2327,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                     entityId: entityId,
                     error: failure.error
                 )
+                deferredPendingReconciliation = true
 
             case .zoneNotFound:
                 // Library zone was deleted (or never created for this
@@ -1789,6 +2339,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                 syncEngine.state.add(pendingDatabaseChanges: [
                     .saveZone(CKRecordZone(zoneID: SyncConstants.libraryZoneID))
                 ])
+                deferredPendingReconciliation = true
 
             case .unknownItem:
                 // Server says this record doesn't exist. Either (a) the
@@ -1804,6 +2355,11 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                 do {
                     try await appDatabase.dbWriter.write { [stateStore] db in
                         try stateStore.clearSystemFields(db, entityType: type, entityId: entityId)
+                        try stateStore.releasePushInFlight(
+                            db,
+                            entityType: type,
+                            entityId: entityId
+                        )
                     }
                     // The normal launch / foreground / idle fetch will observe
                     // any server tombstone. Never re-enter CKSyncEngine from
@@ -1811,11 +2367,14 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                 } catch {
                     log.error("unknownItem recovery failed: \(error.localizedDescription, privacy: .public)")
                 }
+                deferredPendingReconciliation = true
+
+            case .invalidArguments:
+                deferredDurableRepair = true
+                deferredPendingReconciliation = true
 
             default:
-                log.error(
-                    "unhandled record-save failure code=\(failure.error.code.rawValue, privacy: .public) type=\(failure.record.recordType, privacy: .public) id=\(entityId, privacy: .public): \(failure.error.localizedDescription, privacy: .public)"
-                )
+                deferredPendingReconciliation = true
             }
         }
 
@@ -1823,27 +2382,137 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         // side). Purge the tombstone so we don't keep retrying.
         for failure in event.failedRecordDeletes {
             if failure.value.code == .unknownItem {
-                guard let entityId = SyncEntityType.parseRecordName(failure.key.recordName)?.1 else {
-                    log.error("skipping malformed failed-delete recordName \(failure.key.recordName, privacy: .public)")
-                    continue
-                }
-                do {
-                    try await appDatabase.dbWriter.write { [stateStore] db in
-                        for type in SyncEntityType.allCases {
-                            try stateStore.removeTombstone(db, entityType: type, entityId: entityId)
-                        }
-                    }
-                } catch {
-                    log.error("failed-delete tombstone purge failed: \(error.localizedDescription, privacy: .public)")
-                }
+                await removeUnknownItemDeleteTombstone(recordID: failure.key)
             }
+            if failure.value.code == .invalidArguments {
+                deferredDurableRepair = true
+            }
+            deferredPendingReconciliation = true
         }
     }
 
+    private func removeUnknownItemDeleteTombstone(
+        recordID: CKRecord.ID
+    ) async {
+        guard let (type, entityId) = SyncEntityType.parseRecordName(
+            recordID.recordName
+        ) else {
+            log.error(
+                "skipping malformed failed-delete recordName \(recordID.recordName, privacy: .public)"
+            )
+            return
+        }
+        do {
+            let filenames = try await appDatabase.dbWriter.write {
+                [stateStore] db in
+                try Self.finalizeDeleteOutcome(
+                    db,
+                    stateStore: stateStore,
+                    entityType: type,
+                    entityId: entityId,
+                    retainConfirmedTombstone: false
+                )
+            }
+            Self.unlinkStoredPDFFilenames(filenames)
+        } catch {
+            log.error(
+                "failed to finalize unknown-item delete: \(error.localizedDescription, privacy: .public)"
+            )
+        }
+    }
+
+    /// Complete a server-confirmed delete without clobbering a newer local
+    /// recreation. The exact active tombstone is the ownership token for the
+    /// original request; v14 insert/update triggers remove it when the user
+    /// recreates the entity and queue a dirty save instead.
+    private static func finalizeDeleteOutcome(
+        _ db: Database,
+        stateStore: SyncStateStore,
+        entityType: SyncEntityType,
+        entityId: String,
+        retainConfirmedTombstone: Bool
+    ) throws -> [String] {
+        guard try stateStore.hasActiveDeleteIntent(
+            db,
+            entityType: entityType,
+            entityId: entityId
+        ) else { return [] }
+        let hasNewerDirtyState = try Bool.fetchOne(db, sql: """
+            SELECT EXISTS(
+                SELECT 1 FROM syncState
+                WHERE entityType = ? AND entityId = ? AND isDirty = 1
+            )
+            """, arguments: [entityType.rawValue, entityId]) ?? true
+        let hasLiveEntity = try SyncLocalEntityCatalog.contains(
+            entityType: entityType.rawValue,
+            entityId: entityId,
+            in: db
+        )
+        if hasNewerDirtyState && hasLiveEntity {
+            // The delete request was superseded while in flight. Its server
+            // success means the recreation must now be sent as a create.
+            try stateStore.queueSave(
+                db,
+                entityType: entityType,
+                entityId: entityId
+            )
+            return []
+        }
+
+        try stateStore.setApplyingRemote(db)
+        let filenames = try entityType.applyRemoteDelete(
+            entityId: entityId,
+            db: db
+        )
+        try stateStore.removeState(
+            db,
+            entityType: entityType,
+            entityId: entityId
+        )
+        if retainConfirmedTombstone {
+            try stateStore.markTombstoneConfirmed(
+                db,
+                entityType: entityType,
+                entityId: entityId
+            )
+        } else {
+            try stateStore.removeTombstone(
+                db,
+                entityType: entityType,
+                entityId: entityId
+            )
+        }
+        try stateStore.clearApplyingRemote(db)
+        return filenames
+    }
+
+    func finalizeDeleteOutcomeForTest(
+        entityType: SyncEntityType,
+        entityId: String,
+        retainConfirmedTombstone: Bool
+    ) async throws {
+        let filenames = try await appDatabase.dbWriter.write { [stateStore] db in
+            try Self.finalizeDeleteOutcome(
+                db,
+                stateStore: stateStore,
+                entityType: entityType,
+                entityId: entityId,
+                retainConfirmedTombstone: retainConfirmedTombstone
+            )
+        }
+        Self.unlinkStoredPDFFilenames(filenames)
+    }
+
+    func removeUnknownItemDeleteTombstoneForTest(
+        recordID: CKRecord.ID
+    ) async {
+        await removeUnknownItemDeleteTombstone(recordID: recordID)
+    }
+
     /// Conflict resolution on `.serverRecordChanged`. CloudKit returns the
-    /// server's current version in the error payload; we rehydrate it as
-    /// the new systemFields baseline so the next push carries a valid
-    /// change tag, then leave the row dirty for that next push.
+    /// server's current version in the error payload; we apply it and store
+    /// its system fields as the new clean baseline. An exact active local
+    /// delete still wins and suppresses the stale server version entirely.
     ///
     /// Merge policy for v1: **server wins**. The pull path will overwrite
     /// our local row with the server's scalars, and our local edits get
@@ -1861,6 +2530,18 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             log.error("serverRecordChanged without serverRecord — awaiting next external fetch")
             return
         }
+        await mergeServerRecordChanged(
+            type: type,
+            entityId: entityId,
+            serverRecord: serverRecord
+        )
+    }
+
+    private func mergeServerRecordChanged(
+        type: SyncEntityType,
+        entityId: String,
+        serverRecord: CKRecord
+    ) async {
 
         // referencePDF: pre-stage bytes outside the transaction so the writer
         // queue isn't held by a large copyItem during conflict resolution.
@@ -1878,16 +2559,23 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             preparedPDF = nil
         }
 
-        // Closure returns displaced filenames to avoid mutating captures
-        // across the @Sendable boundary. `commitFailed` is only set in the
-        // catch block, outside the closure, so it can stay a `var`.
-        var commitFailed = false
-        var displacedFilenames: [String] = []
+        var mergeOutcome: ServerRecordChangedMergeOutcome?
 
         do {
-            displacedFilenames = try await appDatabase.dbWriter.write { [stateStore] db -> [String] in
+            mergeOutcome = try await appDatabase.dbWriter.write {
+                [stateStore] db -> ServerRecordChangedMergeOutcome in
+                if try stateStore.activeDeleteSuppressesRemoteRecord(
+                    db,
+                    entityType: type,
+                    entityId: entityId
+                ) {
+                    // The save was superseded by a local delete while in
+                    // flight. Do not apply or quarantine the stale server
+                    // version; its exact tombstone remains the durable intent.
+                    return ServerRecordChangedMergeOutcome()
+                }
                 try stateStore.setApplyingRemote(db)
-                var displacedFilenames: [String] = []
+                var outcome = ServerRecordChangedMergeOutcome()
                 let dependencyStatus = try type.remoteDependencyStatus(
                     for: serverRecord,
                     entityId: entityId,
@@ -1901,9 +2589,10 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                     )
                     try stateStore.clearApplyingRemote(db)
                     if let displaced {
-                        displacedFilenames.append(displaced)
+                        outcome.displacedFilenames.append(displaced)
                     }
-                    return displacedFilenames
+                    outcome.stagedPDFConsumed = preparedPDF != nil
+                    return outcome
                 }
                 let applied: Bool
                 if type == .referencePDF, let prepared = preparedPDF {
@@ -1913,14 +2602,15 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                             db: db
                         ) else {
                         try stateStore.clearApplyingRemote(db)
-                        return []
+                        return outcome
                     }
                     if let displaced = try SyncEntityType.applyPreparedReferencePDF(
                         canonicalPrepared,
                         db: db
                     ) {
-                        displacedFilenames.append(displaced)
+                        outcome.displacedFilenames.append(displaced)
                     }
+                    outcome.stagedPDFConsumed = true
                     try SyncEntityType.retireAliasedReferencePDFIdentity(
                         observedEntityId: entityId,
                         canonicalEntityId: canonicalPrepared.referenceSyncId,
@@ -1936,11 +2626,16 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                         stateStore: stateStore
                     )
                 }
-                if applied, try !stateStore.hasPushEligibleTombstone(
+                if applied, try !stateStore.hasActiveDeleteIntent(
                     db,
                     entityType: type,
                     entityId: entityId
                 ) {
+                    try stateStore.removeTombstone(
+                        db,
+                        entityType: type,
+                        entityId: entityId
+                    )
                     try stateStore.markPulled(
                         db,
                         entityType: type,
@@ -1955,36 +2650,51 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                     )
                 }
                 if applied, type.suppliesGlobalDependencies {
-                    displacedFilenames += try SyncEntityType
+                    outcome.displacedFilenames += try SyncEntityType
                         .repairResolvableLegacyForeignKeyOrphans(db: db)
-                    displacedFilenames += try SyncEntityType
+                    outcome.displacedFilenames += try SyncEntityType
                         .replayQuarantinedRemoteRecords(
                             stateStore: stateStore,
                             db: db
                         )
                 }
                 try stateStore.clearApplyingRemote(db)
-                return displacedFilenames
+                return outcome
             }
         } catch {
             log.error("serverRecordChanged merge failed: \(error.localizedDescription, privacy: .public)")
-            commitFailed = true
         }
 
-        // Post-commit file I/O (off the writer queue). On commit success
-        // the staged file is now owned by either `pdfCache` or `syncOrphan`,
-        // so we only unlink a displaced prior file. On commit failure we
-        // unlink the staged file we never promoted.
-        if commitFailed {
-            if let staged = preparedPDF?.stagedURL {
-                try? FileManager.default.removeItem(at: staged)
-            }
-        } else {
-            for displaced in displacedFilenames {
-                let url = AppDatabase.pdfStorageURL.appendingPathComponent(displaced)
-                try? FileManager.default.removeItem(at: url)
-            }
+        // Post-commit file I/O (off the writer queue). A staged file consumed
+        // by `pdfCache` or `syncOrphan` is retained. A skipped, invalid, or
+        // failed merge never promotes it, so it is safe to unlink here.
+        if preparedPDF != nil, mergeOutcome?.stagedPDFConsumed != true,
+           let staged = preparedPDF?.stagedURL
+        {
+            try? FileManager.default.removeItem(at: staged)
         }
+        if let mergeOutcome {
+            Self.unlinkStoredPDFFilenames(mergeOutcome.displacedFilenames)
+        }
+    }
+
+    private static func unlinkStoredPDFFilenames(_ filenames: [String]) {
+        for filename in filenames {
+            let url = AppDatabase.pdfStorageURL.appendingPathComponent(filename)
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    func mergeServerRecordChangedForTest(
+        type: SyncEntityType,
+        entityId: String,
+        serverRecord: CKRecord
+    ) async {
+        await mergeServerRecordChanged(
+            type: type,
+            entityId: entityId,
+            serverRecord: serverRecord
+        )
     }
 
     // MARK: - Helpers

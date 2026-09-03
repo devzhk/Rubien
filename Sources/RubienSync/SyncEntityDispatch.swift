@@ -1623,16 +1623,10 @@ extension SyncEntityType {
                     }
                 }
                 for childID in childEntityIDs {
-                    try stateStore.removeState(
+                    try stateStore.queueDelete(
                         db,
                         entityType: .readingActivity,
                         entityId: childID
-                    )
-                    try stateStore.upsertTombstone(
-                        db,
-                        entityType: .readingActivity,
-                        entityId: childID,
-                        confirmedByServer: false
                     )
                 }
                 try db.execute(
@@ -1808,14 +1802,24 @@ extension SyncEntityType {
         if type == .tag || type == .propertyDefinition {
             // A view may embed either identity in several JSON fields. Its
             // portable projection is generated only on push, so conservatively
-            // republish all views after a parent identity changes.
+            // republish all views after a parent identity changes. Keep this
+            // set-based: one replay can resolve several aliases and libraries
+            // may contain many saved views.
             try db.execute(sql: """
-                INSERT INTO syncState(entityType, entityId, isDirty, pushInFlight)
-                SELECT 'databaseView', syncId, 1, 0 FROM databaseView WHERE 1
+                DELETE FROM tombstone
+                WHERE entityType = 'databaseView'
+                  AND entityId IN (SELECT syncId FROM databaseView)
+                """)
+            try db.execute(sql: """
+                INSERT INTO syncState(
+                    entityType, entityId, isDirty, pushInFlight
+                )
+                SELECT 'databaseView', syncId, 1, 0 FROM databaseView
+                WHERE true
                 ON CONFLICT(entityType, entityId) DO UPDATE SET
                     isDirty = 1,
                     pushInFlight = 0
-            """)
+                """)
         }
     }
 
@@ -2316,13 +2320,11 @@ extension SyncEntityType {
         entityId: String,
         db: Database
     ) throws {
-        try db.execute(sql: """
-            INSERT INTO syncState(entityType, entityId, isDirty, pushInFlight)
-            VALUES (?, ?, 1, 0)
-            ON CONFLICT(entityType, entityId) DO UPDATE SET
-                isDirty = 1,
-                pushInFlight = 0
-            """, arguments: [type.rawValue, entityId])
+        try SyncStateStore().queueSave(
+            db,
+            entityType: type,
+            entityId: entityId
+        )
     }
 
     /// Retire a reconciliation loser without ever guessing that a local-only
@@ -2352,29 +2354,21 @@ extension SyncEntityType {
             """, arguments: [type.rawValue, entityId]) ?? false
         let canDeleteFromServer = serverObserved || archivedOnServer || alreadyEligible
 
-        try stateStore.removeState(
-            db,
-            entityType: type,
-            entityId: entityId
-        )
         if canDeleteFromServer {
-            // A record observed in the current fetch exists now. A confirmed
-            // tombstone only proves that an earlier incarnation was deleted,
-            // so discard it before queuing this exact identity again.
-            if serverObserved {
-                try stateStore.removeTombstone(
-                    db,
-                    entityType: type,
-                    entityId: entityId
-                )
-            }
-            try stateStore.upsertTombstone(
+            // Replace any retained confirmed tombstone: proof of an earlier
+            // deletion must not suppress this new, server-evidenced delete.
+            try stateStore.queueDelete(
                 db,
                 entityType: type,
                 entityId: entityId,
                 isPushEligible: true
             )
         } else {
+            try stateStore.removeState(
+                db,
+                entityType: type,
+                entityId: entityId
+            )
             try db.execute(sql: """
                 DELETE FROM tombstone
                 WHERE entityType = ? AND entityId = ?
@@ -2789,14 +2783,10 @@ extension SyncEntityType {
                 )
                 try stateStore.removeState(db, entityType: .readingActivity, entityId: oldID)
                 try stateStore.removeTombstone(db, entityType: .readingActivity, entityId: oldID)
-                try db.execute(
-                    sql: """
-                        INSERT INTO syncState(entityType, entityId, isDirty, pushInFlight)
-                        VALUES('readingActivity', ?, 1, 0)
-                        ON CONFLICT(entityType, entityId)
-                            DO UPDATE SET isDirty = 1, pushInFlight = 0
-                        """,
-                    arguments: [newID]
+                try stateStore.queueSave(
+                    db,
+                    entityType: .readingActivity,
+                    entityId: newID
                 )
             }
 
@@ -2818,14 +2808,10 @@ extension SyncEntityType {
                 arguments: [nextRevision, nextGeneration, now, oldRevision, oldGeneration]
             )
             for id in ids {
-                try db.execute(
-                    sql: """
-                        INSERT INTO syncState(entityType, entityId, isDirty, pushInFlight)
-                        VALUES('assistantActivity', ?, 1, 0)
-                        ON CONFLICT(entityType, entityId)
-                            DO UPDATE SET isDirty = 1, pushInFlight = 0
-                        """,
-                    arguments: [id]
+                try stateStore.queueSave(
+                    db,
+                    entityType: .assistantActivity,
+                    entityId: id
                 )
             }
         }
@@ -2864,21 +2850,12 @@ extension SyncEntityType {
             sql: "DELETE FROM activityQuarantine WHERE recordName = ?",
             arguments: [recordName]
         )
-        try stateStore.removeState(db, entityType: type, entityId: entityId)
-        // The record was just observed on the server. If an older confirmed
-        // tombstone remains locally, remove it before inserting this new
-        // unconfirmed deletion; `upsertTombstone` deliberately never
-        // downgrades confirmed rows on its own.
-        try stateStore.removeTombstone(
+        // The record was just observed on the server. Queue a fresh local
+        // delete even if an older confirmed tombstone still exists.
+        try stateStore.queueDelete(
             db,
             entityType: type,
             entityId: entityId
-        )
-        try stateStore.upsertTombstone(
-            db,
-            entityType: type,
-            entityId: entityId,
-            confirmedByServer: false
         )
     }
 
@@ -2979,21 +2956,10 @@ extension SyncEntityType {
                 outcome.pdfFilenamesToDelete.append(filename)
                 continue
             }
-            try stateStore.removeState(
+            try stateStore.queueDelete(
                 db,
                 entityType: .referencePDF,
                 entityId: entityId
-            )
-            try stateStore.removeTombstone(
-                db,
-                entityType: .referencePDF,
-                entityId: entityId
-            )
-            try stateStore.upsertTombstone(
-                db,
-                entityType: .referencePDF,
-                entityId: entityId,
-                confirmedByServer: false
             )
             try db.execute(
                 sql: "DELETE FROM pdfCache WHERE rowid = ?",
@@ -3014,21 +2980,10 @@ extension SyncEntityType {
             ) else { continue }
             let entityId: String = row["legacyReferenceSyncId"]
             let filename: String = row["localFilename"]
-            try stateStore.removeState(
+            try stateStore.queueDelete(
                 db,
                 entityType: .referencePDF,
                 entityId: entityId
-            )
-            try stateStore.removeTombstone(
-                db,
-                entityType: .referencePDF,
-                entityId: entityId
-            )
-            try stateStore.upsertTombstone(
-                db,
-                entityType: .referencePDF,
-                entityId: entityId,
-                confirmedByServer: false
             )
             try db.execute(
                 sql: "DELETE FROM syncLegacyPDFCacheOrphan WHERE rowid = ?",
@@ -3092,13 +3047,10 @@ extension SyncEntityType {
                     db: db
                   ) == .unresolved
             else { continue }
-            try stateStore.removeState(db, entityType: type, entityId: parsed.1)
-            try stateStore.removeTombstone(db, entityType: type, entityId: parsed.1)
-            try stateStore.upsertTombstone(
+            try stateStore.queueDelete(
                 db,
                 entityType: type,
                 entityId: parsed.1,
-                confirmedByServer: false,
                 isPushEligible: true
             )
             if let filename: String = orphan["stagedFilename"] {
@@ -3294,6 +3246,30 @@ extension SyncEntityType {
                     db: db
                 ) == .ready else { continue }
 
+                if try stateStore.activeDeleteSuppressesRemoteRecord(
+                    db,
+                    entityType: type,
+                    entityId: entityId
+                ) {
+                    // The dependency arrived after this server record was
+                    // quarantined, but a newer local delete still owns the
+                    // identity. Retire the stale wire copy without ever
+                    // rematerializing it.
+                    let stagedFilename: String? = row["stagedFilename"]
+                    try db.execute(
+                        sql: "DELETE FROM syncOrphan WHERE recordName = ?",
+                        arguments: [record.recordID.recordName]
+                    )
+                    if let stagedFilename {
+                        displacedFilenames += try unreferencedPDFFilenames(
+                            Set([stagedFilename]),
+                            db: db
+                        )
+                    }
+                    madeProgress = true
+                    continue
+                }
+
                 let applied: Bool
                 if type == .referencePDF {
                     guard let payload = ReferencePDFRecord(record: record),
@@ -3335,11 +3311,18 @@ extension SyncEntityType {
                 legacyOrphanRepairNeeded = legacyOrphanRepairNeeded
                     || type.suppliesGlobalDependencies
 
-                if try !stateStore.hasPushEligibleTombstone(
+                if try !stateStore.hasActiveDeleteIntent(
                     db,
                     entityType: type,
                     entityId: entityId
                 ) {
+                    // Confirmed and legacy-ineligible tombstones are
+                    // historical. A replayed server row supersedes them.
+                    try stateStore.removeTombstone(
+                        db,
+                        entityType: type,
+                        entityId: entityId
+                    )
                     try stateStore.markPulled(
                         db,
                         entityType: type,
@@ -3672,12 +3655,10 @@ extension SyncEntityType {
                 if let localSeconds, localSeconds > activity.activeSeconds,
                    let parsed = SyncEntityType.parseRecordName(recordName)
                 {
-                    try db.execute(
-                        sql: """
-                            UPDATE syncState SET isDirty = 1, pushInFlight = 0
-                            WHERE entityType = 'readingActivity' AND entityId = ?
-                            """,
-                        arguments: [parsed.1]
+                    try SyncStateStore().queueSave(
+                        db,
+                        entityType: .readingActivity,
+                        entityId: parsed.1
                     )
                 }
                 didApply = true

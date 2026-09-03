@@ -527,6 +527,54 @@ final class TagReconcileTests: XCTestCase {
         }
     }
 
+    func testRetiringArchivedLoserReopensConfirmedTombstone() throws {
+        var local = Tag(
+            syncId: "z-archived-loser",
+            name: "Archived collision",
+            color: "#111111"
+        )
+        try db.saveTag(&local)
+        let localSyncId = local.syncId
+        try db.dbWriter.write { db in
+            try db.execute(sql: """
+                UPDATE syncState
+                SET systemFields = X'01', isDirty = 0
+                WHERE entityType = 'tag' AND entityId = ?
+                """, arguments: [localSyncId])
+            try self.store.upsertTombstone(
+                db,
+                entityType: .tag,
+                entityId: localSyncId,
+                confirmedByServer: true
+            )
+        }
+
+        // A canonical decimal identity wins over the local non-decimal one.
+        // The losing record was previously archived on the server, but is not
+        // the identity observed by this fetch.
+        try applyTagUnderRemote(
+            tagRecord(
+                syncId: "1",
+                name: local.name,
+                color: "#ABCDEF"
+            ),
+            entityId: "1"
+        )
+
+        try db.dbWriter.read { db in
+            XCTAssertEqual(try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM syncState
+                WHERE entityType = 'tag' AND entityId = 'z-archived-loser'
+                """), 0)
+            let tombstone = try XCTUnwrap(Row.fetchOne(db, sql: """
+                SELECT confirmedByServer, isPushEligible FROM tombstone
+                WHERE entityType = 'tag' AND entityId = 'z-archived-loser'
+                """))
+            XCTAssertEqual(tombstone["confirmedByServer"] as Int?, 0)
+            XCTAssertEqual(tombstone["isPushEligible"] as Int?, 1)
+        }
+    }
+
     func testLateRetiredTagWithMissingWinnerIsDeletedAgainWithoutResurrection() async throws {
         let library = makeLibrary()
         var winner = Tag(syncId: "a-tag", name: "Shared")

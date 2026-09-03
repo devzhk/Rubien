@@ -172,6 +172,11 @@ final class PDFUploadDrainerTests: XCTestCase {
                 VALUES(1, 'a.pdf', 'h', 1, ?, ?)
             """, arguments: [Date(), Date()])
             try db.execute(sql: "DELETE FROM syncState WHERE entityType='referencePDF'")
+            try db.execute(sql: """
+                INSERT INTO tombstone(
+                    entityType, entityId, confirmedByServer, isPushEligible
+                ) VALUES('referencePDF', '1', 1, 0)
+                """)
         }
 
         let library = SyncedLibrary(
@@ -184,13 +189,19 @@ final class PDFUploadDrainerTests: XCTestCase {
         let secondPass = await library.drainPDFUploadQueueIntoSyncState()
         XCTAssertEqual(secondPass, [], "second drain on the now-empty queue must return nothing")
 
-        let dirtyCount = try await db.dbWriter.read { db in
-            try Int.fetchOne(db, sql: """
+        let (dirtyCount, tombstoneCount) = try await db.dbWriter.read { db in
+            let dirty = try Int.fetchOne(db, sql: """
                 SELECT COUNT(*) FROM syncState
                 WHERE entityType='referencePDF' AND entityId='1' AND isDirty=1
             """) ?? -1
+            let tombstones = try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM tombstone
+                WHERE entityType='referencePDF' AND entityId='1'
+                """) ?? -1
+            return (dirty, tombstones)
         }
         XCTAssertEqual(dirtyCount, 1, "second drain on the now-empty queue must not insert a duplicate row")
+        XCTAssertEqual(tombstoneCount, 0, "queueSave must retire an exact stale PDF tombstone")
     }
 }
 #endif

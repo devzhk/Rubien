@@ -1235,7 +1235,9 @@ Prints iCloud sync state as JSON. Never instantiates the CloudKit sync
 engine — reads `syncState` / `tombstone` / `syncSession` tables directly
 and probes entitlement / iCloud availability via OS-level APIs. Safe to
 run while the app is using the library (acquires and releases the sync
-file lock only to read `appLockHeld`).
+file lock only to read `appLockHeld`). The default command performs no PDF
+filesystem scan. Add `--check-pdf-files` for an explicit materialization check
+against this library's resolved PDF directory.
 
 ### Example
 
@@ -1252,6 +1254,8 @@ $ rubien-cli sync status
   "identity" : {
     "blockedDeleteCount" : 0,
     "blockedSaveCount" : 2,
+    "ambiguousPDFIdentityCount" : 0,
+    "contradictoryIntentCount" : 0,
     "fullHistoryReplayPending" : false,
     "identityCountsByEntityType" : {
       "reference" : { "compoundOrNatural" : 0, "legacy" : 41, "uuid" : 6 }
@@ -1259,14 +1263,21 @@ $ rubien-cli sync status
     "identitySchemaVersion" : 13,
     "ineligibleLegacyTombstoneCount" : 0,
     "invalidRemoteRecordCount" : 0,
+    "missingPDFCacheUploadCount" : 0,
+    "preservedOrphanSyncStateCount" : 0,
+    "pushInFlightCount" : 0,
     "quarantinedRecordCount" : 0,
+    "removableOrphanSyncStateCount" : 0,
+    "stalePDFIdentityCount" : 0,
+    "unpublishedLiveEntityCount" : 0,
     "unresolvedGlobalForeignKeyCount" : 0,
     "writerUpgradeAcknowledgedAt" : null,
     "writerUpgradeAcknowledgedSchemaVersion" : null,
     "writerUpgradeRequired" : true
   },
+  "pdfMaterialization" : null,
   "pdfBackfillRemaining" : 0,
-  "schemaVersion" : "v13",
+  "schemaVersion" : "v14",
   "syncEngineState" : {
     "sidecarExists" : true,
     "sidecarLastModified" : "2026-04-22T14:32:11Z",
@@ -1287,9 +1298,17 @@ $ rubien-cli sync status
 - `dirtyByEntityType` — per-table count of rows with `isDirty=1`
 - `tombstoneCount` — `.confirmed` (server ack'd) vs `.unconfirmed` (pending delete)
 - `pdfBackfillRemaining` — count of dirty `referencePDF` sync-state rows. Unlike the staging queue, it remains non-zero until the upload is confirmed by CloudKit.
-- `identity` — v13 identity diagnostics: per-entity UUID/legacy/compound counts, unresolved global relationships, quarantined legacy deletes, replay state, and the selective writer-upgrade gate. `blockedSaveCount` and `blockedDeleteCount` are held locally while safe UUID-addressed traffic continues.
+- `identity` — identity and durable-intent diagnostics. In addition to the v13 UUID migration and writer-gate fields, v14 reports contradictory save/delete intent, in-flight rows, removable and preserved orphan state, unpublished live rows, missing PDF cache rows, and stale/ambiguous PDF identities.
+- `pdfMaterialization` — `null` by default. With `--check-pdf-files`, contains `checkedDirtyPDFCount`, `missingCacheCount`, `missingFileCount`, and an `issues` array with each affected `syncId`, filename, and reason. The database snapshot completes before filesystem checks begin.
 - `syncEngineState` — sidecar-file metadata
 - `schemaVersion` — DB migration version
+
+To inspect blocked PDF bytes without making routine status checks walk the
+filesystem:
+
+```bash
+rubien-cli sync status --check-pdf-files
+```
 
 ---
 
