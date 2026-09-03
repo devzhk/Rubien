@@ -13,8 +13,9 @@ final class SyncRepairParityTests: XCTestCase {
                 INSERT INTO tag(syncId, name, color, dateModified)
                 VALUES
                     ('live-tag', 'Live', '#fff', ?),
-                    ('fetched-delete', 'Fetched Again', '#fff', ?)
-                """, arguments: [Date(), Date()])
+                    ('fetched-delete', 'Fetched Again', '#fff', ?),
+                    ('runtime-in-flight', 'In Flight', '#fff', ?)
+                """, arguments: [Date(), Date(), Date()])
             try db.execute(sql: """
                 DELETE FROM syncState
                 WHERE entityType='tag' AND entityId='fetched-delete'
@@ -60,11 +61,20 @@ final class SyncRepairParityTests: XCTestCase {
                     ('referencePDF', '42', 1, 0),
                     ('referencePDF', '-1', 1, 0)
                 """)
+            try db.execute(sql: """
+                UPDATE syncState SET pushInFlight=1
+                WHERE entityType='tag' AND entityId='runtime-in-flight'
+                """)
+            try db.execute(sql: """
+                INSERT INTO syncState(
+                    entityType, entityId, isDirty, pushInFlight
+                ) VALUES('tag', 'runtime-clean-orphan', 0, 0)
+                """)
         }
         return queue
     }
 
-    private func snapshot(_ queue: DatabaseQueue) throws -> [[String]] {
+    private func sharedRuleSnapshot(_ queue: DatabaseQueue) throws -> [[String]] {
         try queue.read { db in
             let states = try Row.fetchAll(db, sql: """
                 SELECT entityType, entityId, isDirty, pushInFlight
@@ -113,7 +123,33 @@ final class SyncRepairParityTests: XCTestCase {
             _ = try SyncStateStore().repairDurableIntent(db)
         }
 
-        XCTAssertEqual(try snapshot(migrated), try snapshot(repaired))
+        XCTAssertEqual(
+            try sharedRuleSnapshot(migrated),
+            try sharedRuleSnapshot(repaired)
+        )
+
+        // Process-restart cleanup is intentionally runtime-only. Pin both
+        // sides so these rows can never accidentally enter the parity scope.
+        try migrated.read { db in
+            XCTAssertEqual(try Int.fetchOne(db, sql: """
+                SELECT pushInFlight FROM syncState
+                WHERE entityType='tag' AND entityId='runtime-in-flight'
+                """), 1)
+            XCTAssertNotNil(try Row.fetchOne(db, sql: """
+                SELECT 1 FROM syncState
+                WHERE entityType='tag' AND entityId='runtime-clean-orphan'
+                """))
+        }
+        try repaired.read { db in
+            XCTAssertEqual(try Int.fetchOne(db, sql: """
+                SELECT pushInFlight FROM syncState
+                WHERE entityType='tag' AND entityId='runtime-in-flight'
+                """), 0)
+            XCTAssertNil(try Row.fetchOne(db, sql: """
+                SELECT 1 FROM syncState
+                WHERE entityType='tag' AND entityId='runtime-clean-orphan'
+                """))
+        }
     }
 }
 #endif

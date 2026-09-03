@@ -263,6 +263,65 @@ final class MigrationV14Tests: XCTestCase {
         }
     }
 
+    func testDeleteReopensConfirmedTombstoneForEveryTriggerFamily() throws {
+        let database = try AppDatabase(DatabaseQueue())
+
+        try database.dbWriter.write { db in
+            try db.execute(sql: """
+                INSERT INTO tombstone(
+                    entityType, entityId, confirmedByServer, isPushEligible
+                ) VALUES
+                    ('tag', 'remote-tag', 1, 1),
+                    ('assistantActivity', 'remote-activity', 1, 1)
+                """)
+            try db.execute(sql: """
+                INSERT INTO syncSession(key, value)
+                VALUES('applyingRemote', '1')
+                """)
+            try db.execute(sql: """
+                INSERT INTO tag(syncId, name, color, dateModified)
+                VALUES('remote-tag', 'Remote', '#007AFF', ?)
+                """, arguments: [Date()])
+            try db.execute(sql: """
+                INSERT INTO assistantActivity(
+                    id, provider, epochRevision, generation,
+                    startedAt, localDay, dateModified
+                ) VALUES(
+                    'remote-activity', 'codex', 0, 'generation-1',
+                    ?, '2026-09-02', ?
+                )
+                """, arguments: [Date(), Date()])
+            try db.execute(sql: """
+                DELETE FROM syncSession WHERE key='applyingRemote'
+                """)
+
+            try db.execute(sql: "DELETE FROM tag WHERE syncId='remote-tag'")
+            try db.execute(sql: """
+                DELETE FROM assistantActivity WHERE id='remote-activity'
+                """)
+
+            XCTAssertEqual(try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM tombstone
+                WHERE confirmedByServer=0 AND isPushEligible=1
+                  AND (
+                    (entityType='tag' AND entityId='remote-tag')
+                    OR (
+                        entityType='assistantActivity'
+                        AND entityId='remote-activity'
+                    )
+                  )
+                """), 2)
+            XCTAssertEqual(try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM syncState
+                WHERE (entityType='tag' AND entityId='remote-tag')
+                   OR (
+                       entityType='assistantActivity'
+                       AND entityId='remote-activity'
+                   )
+                """), 0)
+        }
+    }
+
     func testV14UpgradesUnconfirmedActivityTombstonesToPushEligible() throws {
         let queue = try makeV13Queue()
         try queue.write { db in
@@ -353,6 +412,56 @@ final class MigrationV14Tests: XCTestCase {
         }
     }
 
+    func testV14MergesCleanLegacyPDFStateWithoutForcingTargetDirty() throws {
+        let queue = try makeV13Queue()
+        let pushedAt = Date(timeIntervalSince1970: 1_788_000_000)
+        try queue.write { db in
+            try db.execute(sql: "DELETE FROM syncState")
+            try db.execute(sql: """
+                INSERT INTO reference(
+                    id, syncId, title, dateAdded, dateModified
+                ) VALUES(42, 'reference-uuid', 'PDF owner', ?, ?)
+                """, arguments: [Date(), Date()])
+            try db.execute(sql: """
+                INSERT INTO pdfCache(
+                    referenceId, localFilename, contentHash, assetVersion,
+                    materializedAt
+                ) VALUES(42, 'paper.pdf', 'hash', 1, ?)
+                """, arguments: [Date()])
+            try db.execute(sql: """
+                INSERT INTO syncState(
+                    entityType, entityId, systemFields, lastPushedAt,
+                    isDirty, pushInFlight
+                ) VALUES
+                    ('referencePDF', 'reference-uuid', X'01', ?, 0, 1),
+                    ('referencePDF', '42', NULL, NULL, 0, 1)
+                """, arguments: [pushedAt])
+        }
+
+        _ = try AppDatabase(queue)
+
+        try queue.read { db in
+            XCTAssertNil(try Row.fetchOne(db, sql: """
+                SELECT 1 FROM syncState
+                WHERE entityType='referencePDF' AND entityId='42'
+                """))
+            let target = try XCTUnwrap(Row.fetchOne(db, sql: """
+                SELECT systemFields, lastPushedAt, isDirty, pushInFlight
+                FROM syncState
+                WHERE entityType='referencePDF' AND entityId='reference-uuid'
+                """))
+            let targetPushedAt = try XCTUnwrap(target["lastPushedAt"] as Date?)
+            XCTAssertEqual(target["systemFields"] as Data?, Data([1]))
+            XCTAssertEqual(
+                targetPushedAt.timeIntervalSince1970,
+                pushedAt.timeIntervalSince1970,
+                accuracy: 0.001
+            )
+            XCTAssertEqual(target["isDirty"] as Int?, 0)
+            XCTAssertEqual(target["pushInFlight"] as Int?, 0)
+        }
+    }
+
     func testV14PreservesProvenLegacyPDFState() throws {
         let queue = try makeV13Queue()
         try queue.write { db in
@@ -402,6 +511,37 @@ final class MigrationV14Tests: XCTestCase {
                     referenceId, localFilename, contentHash, assetVersion,
                     materializedAt
                 ) VALUES(42, 'paper.pdf', 'hash', 1, ?)
+                """, arguments: [Date()])
+            try db.execute(sql: """
+                INSERT INTO syncState(
+                    entityType, entityId, isDirty, pushInFlight
+                ) VALUES('referencePDF', '42', 1, 0)
+                """)
+        }
+
+        _ = try AppDatabase(queue)
+
+        try queue.read { db in
+            XCTAssertNotNil(try Row.fetchOne(db, sql: """
+                SELECT 1 FROM syncState
+                WHERE entityType='referencePDF' AND entityId='42'
+                """))
+        }
+    }
+
+    func testV14PreservesCanonicalNumericPDFIdentityAtDifferentLocalRow() throws {
+        let queue = try makeV13Queue()
+        try queue.write { db in
+            try db.execute(sql: """
+                INSERT INTO reference(
+                    id, syncId, title, dateAdded, dateModified
+                ) VALUES(43, '42', 'Canonical PDF owner', ?, ?)
+                """, arguments: [Date(), Date()])
+            try db.execute(sql: """
+                INSERT INTO pdfCache(
+                    referenceId, localFilename, contentHash, assetVersion,
+                    materializedAt
+                ) VALUES(43, 'paper.pdf', 'hash', 1, ?)
                 """, arguments: [Date()])
             try db.execute(sql: """
                 INSERT INTO syncState(

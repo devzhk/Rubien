@@ -716,6 +716,9 @@ public final class AppDatabase: Sendable {
                 // exclusive and repair queue residue before CKSyncEngine can
                 // schedule it. The body is frozen and intentionally separate
                 // from the mutable runtime repair implementation.
+                // Keep checks immediate: deferred mode would validate the
+                // whole database at commit and reject transient FK orphans
+                // that v13 deliberately preserved for later replay repair.
                 migrator.registerMigration("v14", foreignKeyChecks: .immediate) { db in
                     try Self.applyV14Body(db)
                 }
@@ -1785,7 +1788,7 @@ public final class AppDatabase: Sendable {
 
     private static func migrateSafeV14PDFStateIdentities(_ db: Database) throws {
         let rows = try Row.fetchAll(db, sql: """
-            SELECT entityId
+            SELECT entityId, isDirty
             FROM syncState
             WHERE entityType = 'referencePDF'
               AND systemFields IS NULL
@@ -1794,6 +1797,7 @@ public final class AppDatabase: Sendable {
             """)
         for row in rows {
             let oldId: String = row["entityId"]
+            let sourceIsDirty: Int = row["isDirty"]
             guard isV14CanonicalDecimal(oldId),
                   let localId = Int64(oldId)
             else { continue }
@@ -1803,20 +1807,10 @@ public final class AppDatabase: Sendable {
                 JOIN pdfCache pc ON pc.referenceId = r.id
                 WHERE r.id = ?
                 """, arguments: [localId])
-            let alreadyCanonical = try Bool.fetchOne(db, sql: """
-                SELECT EXISTS(
-                    SELECT 1
-                    FROM pdfCache pc
-                    JOIN reference r ON r.id = pc.referenceId
-                    WHERE r.syncId = ?
-                )
-                """, arguments: [oldId]) ?? true
             // A numeric canonical identity can also name a different
             // PDF-owning reference's local row. That collision is ambiguous:
             // v14 deliberately preserves the state for runtime diagnostics
             // instead of guessing which interpretation was intended.
-            guard !alreadyCanonical else { continue }
-
             guard owners.count == 1,
                   let owner = owners.first,
                   let ownerId: Int64 = owner["id"],
@@ -1840,9 +1834,9 @@ public final class AppDatabase: Sendable {
             if targetExists {
                 try db.execute(sql: """
                     UPDATE syncState
-                    SET isDirty = 1, pushInFlight = 0
+                    SET isDirty = MAX(isDirty, ?), pushInFlight = 0
                     WHERE entityType = 'referencePDF' AND entityId = ?
-                    """, arguments: [newId])
+                    """, arguments: [sourceIsDirty, newId])
                 try db.execute(sql: """
                     DELETE FROM syncState
                     WHERE entityType = 'referencePDF' AND entityId = ?

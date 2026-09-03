@@ -486,7 +486,7 @@ public struct SyncStateStore: Sendable {
         _ db: Database
     ) throws -> (repaired: Int, ambiguous: Int) {
         let rows = try Row.fetchAll(db, sql: """
-            SELECT entityId, systemFields, lastPushedAt
+            SELECT entityId, systemFields, lastPushedAt, isDirty
             FROM syncState
             WHERE entityType = 'referencePDF'
             ORDER BY entityId
@@ -497,6 +497,7 @@ public struct SyncStateStore: Sendable {
             let oldId: String = row["entityId"]
             let systemFields: Data? = row["systemFields"]
             let lastPushedAt: Date? = row["lastPushedAt"]
+            let sourceIsDirty: Int = row["isDirty"]
             guard let classification = try PDFSyncStateIdentityClassifier
                 .classify(
                     entityId: oldId,
@@ -520,9 +521,14 @@ public struct SyncStateStore: Sendable {
                 )
                 """, arguments: [newId]) ?? true
             if targetExists {
-                // Preserve target system fields and push timestamp; only
-                // merge the stale row's outstanding save intent.
-                try queueSave(db, entityType: .referencePDF, entityId: newId)
+                // Preserve target evidence and merge only the stale row's
+                // actual dirty intent. Overlap normalization below decides
+                // whether any target tombstone yields to that merged result.
+                try db.execute(sql: """
+                    UPDATE syncState
+                    SET isDirty = MAX(isDirty, ?), pushInFlight = 0
+                    WHERE entityType='referencePDF' AND entityId=?
+                    """, arguments: [sourceIsDirty, newId])
                 try removeState(db, entityType: .referencePDF, entityId: oldId)
             } else {
                 try db.execute(sql: """

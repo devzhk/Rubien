@@ -665,6 +665,86 @@ final class SyncStateStoreTests: XCTestCase {
         }
     }
 
+    func testRuntimeRepairPreservesCanonicalNumericPDFAtDifferentLocalRow() throws {
+        try db.dbWriter.write { db in
+            try db.execute(sql: "DELETE FROM syncState")
+            try db.execute(sql: """
+                INSERT INTO reference(
+                    id, syncId, title, dateAdded, dateModified
+                ) VALUES(43, '42', 'Canonical PDF owner', ?, ?)
+                """, arguments: [Date(), Date()])
+            try db.execute(sql: """
+                INSERT INTO pdfCache(
+                    referenceId, localFilename, contentHash, assetVersion,
+                    materializedAt
+                ) VALUES(43, 'paper.pdf', 'hash', 1, ?)
+                """, arguments: [Date()])
+            try db.execute(sql: """
+                INSERT INTO syncState(
+                    entityType, entityId, isDirty, pushInFlight
+                ) VALUES('referencePDF', '42', 1, 0)
+                """)
+
+            let report = try self.store.repairDurableIntent(db)
+
+            XCTAssertEqual(report.repairedPDFIdentityCount, 0)
+            XCTAssertEqual(report.ambiguousPDFIdentityCount, 0)
+            XCTAssertNotNil(try Row.fetchOne(db, sql: """
+                SELECT 1 FROM syncState
+                WHERE entityType='referencePDF' AND entityId='42'
+                """))
+        }
+    }
+
+    func testRuntimeRepairMergesCleanLegacyPDFStateWithoutForcingTargetDirty() throws {
+        let pushedAt = Date(timeIntervalSince1970: 1_788_000_000)
+        try db.dbWriter.write { db in
+            try db.execute(sql: "DELETE FROM syncState")
+            try db.execute(sql: "DELETE FROM tombstone")
+            try db.execute(sql: """
+                INSERT INTO reference(
+                    id, syncId, title, dateAdded, dateModified
+                ) VALUES(42, 'reference-uuid', 'PDF owner', ?, ?)
+                """, arguments: [Date(), Date()])
+            try db.execute(sql: """
+                INSERT INTO pdfCache(
+                    referenceId, localFilename, contentHash, assetVersion,
+                    materializedAt
+                ) VALUES(42, 'paper.pdf', 'hash', 1, ?)
+                """, arguments: [Date()])
+            try db.execute(sql: """
+                INSERT INTO syncState(
+                    entityType, entityId, systemFields, lastPushedAt,
+                    isDirty, pushInFlight
+                ) VALUES
+                    ('referencePDF', 'reference-uuid', X'01', ?, 0, 1),
+                    ('referencePDF', '42', NULL, NULL, 0, 1)
+                """, arguments: [pushedAt])
+
+            let report = try self.store.repairDurableIntent(db)
+
+            XCTAssertEqual(report.repairedPDFIdentityCount, 1)
+            XCTAssertNil(try Row.fetchOne(db, sql: """
+                SELECT 1 FROM syncState
+                WHERE entityType='referencePDF' AND entityId='42'
+                """))
+            let target = try XCTUnwrap(Row.fetchOne(db, sql: """
+                SELECT systemFields, lastPushedAt, isDirty, pushInFlight
+                FROM syncState
+                WHERE entityType='referencePDF' AND entityId='reference-uuid'
+                """))
+            let targetPushedAt = try XCTUnwrap(target["lastPushedAt"] as Date?)
+            XCTAssertEqual(target["systemFields"] as Data?, Data([1]))
+            XCTAssertEqual(
+                targetPushedAt.timeIntervalSince1970,
+                pushedAt.timeIntervalSince1970,
+                accuracy: 0.001
+            )
+            XCTAssertEqual(target["isDirty"] as Int?, 0)
+            XCTAssertEqual(target["pushInFlight"] as Int?, 0)
+        }
+    }
+
     func testRuntimeRepairReportsAmbiguousNumericPDFCollision() throws {
         try db.dbWriter.write { db in
             try db.execute(sql: "DELETE FROM syncState")
