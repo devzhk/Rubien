@@ -252,6 +252,219 @@ enum WebReaderMathRendering {
     """
 }
 
+/// DOM enhancement for semantic code blocks in clipped articles. The button
+/// stays outside `<pre>` so its icon never becomes part of copied code or the
+/// annotation text index. Clipboard access remains in the page's click event:
+/// WebKit can enforce user activation, and untrusted source pages never receive
+/// a native pasteboard message handler.
+enum WebReaderCodeBlockCopy {
+    static let styleSheet = #"""
+            #article-content .rubien-code-block {
+              position: relative;
+              margin: 0 0 1em;
+            }
+
+            #article-content .rubien-code-block > pre {
+              margin: 0 !important;
+              padding-right: 52px !important;
+            }
+
+            .rubien-code-copy {
+              -webkit-appearance: none;
+              appearance: none;
+              position: absolute;
+              top: 9px;
+              right: 9px;
+              z-index: 1;
+              display: inline-flex;
+              align-items: center;
+              justify-content: center;
+              width: 30px;
+              height: 30px;
+              padding: 0;
+              border: 1px solid rgba(15, 23, 42, 0.14);
+              border-radius: 7px;
+              background: rgba(255, 255, 255, 0.82);
+              color: #5b6472;
+              box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+              cursor: pointer;
+              opacity: 0.82;
+              transition: background-color 0.15s ease, border-color 0.15s ease,
+                color 0.15s ease, opacity 0.15s ease, transform 0.1s ease;
+            }
+
+            .rubien-code-copy:hover {
+              background: rgba(255, 255, 255, 0.98);
+              border-color: rgba(15, 23, 42, 0.24);
+              color: #1f2937;
+              opacity: 1;
+            }
+
+            .rubien-code-copy:active {
+              transform: scale(0.94);
+            }
+
+            .rubien-code-copy:focus-visible {
+              outline: 2px solid #2563eb;
+              outline-offset: 2px;
+            }
+
+            .rubien-code-copy svg {
+              width: 16px;
+              height: 16px;
+              fill: none;
+              stroke: currentColor;
+              stroke-linecap: round;
+              stroke-linejoin: round;
+              stroke-width: 1.8;
+            }
+
+            .rubien-code-copy .rubien-code-copy-check {
+              display: none;
+            }
+
+            .rubien-code-copy.is-copied {
+              color: #15803d;
+              border-color: rgba(21, 128, 61, 0.3);
+            }
+
+            .rubien-code-copy.is-copied .rubien-code-copy-icon {
+              display: none;
+            }
+
+            .rubien-code-copy.is-copied .rubien-code-copy-check {
+              display: block;
+            }
+
+            @media (prefers-color-scheme: dark) {
+              .rubien-code-copy {
+                background: rgba(30, 30, 30, 0.84);
+                border-color: rgba(255, 255, 255, 0.14);
+                color: #aeb6c2;
+                box-shadow: 0 1px 2px rgba(0, 0, 0, 0.22);
+              }
+
+              .rubien-code-copy:hover {
+                background: rgba(47, 47, 47, 0.98);
+                border-color: rgba(255, 255, 255, 0.25);
+                color: #f3f4f6;
+              }
+
+              .rubien-code-copy.is-copied {
+                color: #86efac;
+                border-color: rgba(134, 239, 172, 0.35);
+              }
+            }
+    """#
+
+    static let javaScript = #"""
+              function rubienCodeBlockText(pre) {
+                if (!pre || typeof pre.querySelector !== 'function') return '';
+                const code = pre.querySelector('code');
+                return String((code || pre).textContent || '');
+              }
+
+              function rubienEnhanceCodeBlocks(articleRoot) {
+                if (!articleRoot || typeof articleRoot.querySelectorAll !== 'function') return;
+                Array.from(articleRoot.querySelectorAll('pre')).forEach((pre) => {
+                  if (!pre.querySelector('code')) return;
+                  if (
+                    pre.parentElement &&
+                    pre.parentElement.classList.contains('rubien-code-block')
+                  ) return;
+                  const parent = pre.parentNode;
+                  if (!parent) return;
+
+                  const wrapper = document.createElement('div');
+                  wrapper.className = 'rubien-code-block';
+                  parent.insertBefore(wrapper, pre);
+                  wrapper.appendChild(pre);
+
+                  const button = document.createElement('button');
+                  button.type = 'button';
+                  button.className = 'rubien-code-copy';
+                  button.setAttribute('aria-label', 'Copy code');
+                  button.title = 'Copy code';
+                  button.innerHTML =
+                    '<svg class="rubien-code-copy-icon" viewBox="0 0 20 20" aria-hidden="true" focusable="false">' +
+                    '<rect x="7" y="3" width="10" height="11" rx="2"></rect>' +
+                    '<path d="M5 6H4.5A1.5 1.5 0 0 0 3 7.5v8A1.5 1.5 0 0 0 4.5 17h8A1.5 1.5 0 0 0 14 15.5V15"></path>' +
+                    '</svg>' +
+                    '<svg class="rubien-code-copy-check" viewBox="0 0 20 20" aria-hidden="true" focusable="false">' +
+                    '<path d="m4.5 10.5 3.5 3.5 7.5-8"></path>' +
+                    '</svg>';
+                  wrapper.appendChild(button);
+                });
+              }
+
+              function rubienFallbackCopyText(text) {
+                const selection = window.getSelection && window.getSelection();
+                const savedRanges = [];
+                if (selection) {
+                  for (let i = 0; i < selection.rangeCount; i++) {
+                    savedRanges.push(selection.getRangeAt(i).cloneRange());
+                  }
+                }
+
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                textarea.setAttribute('readonly', '');
+                textarea.style.position = 'fixed';
+                textarea.style.left = '-10000px';
+                textarea.style.top = '0';
+                textarea.style.opacity = '0';
+                document.body.appendChild(textarea);
+                textarea.focus();
+                textarea.select();
+
+                let copied = false;
+                try {
+                  copied = document.execCommand('copy');
+                } catch (_) {}
+                textarea.remove();
+
+                if (selection) {
+                  selection.removeAllRanges();
+                  savedRanges.forEach((range) => selection.addRange(range));
+                }
+                return copied;
+              }
+
+              async function rubienCopyCodeBlock(button) {
+                const wrapper = button && button.closest('.rubien-code-block');
+                const pre = wrapper && wrapper.querySelector('pre');
+                if (!pre) return;
+                const text = rubienCodeBlockText(pre);
+                let copied = false;
+
+                try {
+                  if (
+                    typeof navigator !== 'undefined' &&
+                    navigator.clipboard &&
+                    typeof navigator.clipboard.writeText === 'function'
+                  ) {
+                    await navigator.clipboard.writeText(text);
+                    copied = true;
+                  }
+                } catch (_) {}
+                if (!copied) copied = rubienFallbackCopyText(text);
+
+                button.classList.toggle('is-copied', copied);
+                button.setAttribute('aria-label', copied ? 'Copied' : 'Copy failed');
+                button.title = copied ? 'Copied' : 'Copy failed';
+                if (button.rubienCopyResetTimer) {
+                  window.clearTimeout(button.rubienCopyResetTimer);
+                }
+                button.rubienCopyResetTimer = window.setTimeout(() => {
+                  button.classList.remove('is-copied');
+                  button.setAttribute('aria-label', 'Copy code');
+                  button.title = 'Copy code';
+                  button.rubienCopyResetTimer = null;
+                }, 1400);
+              }
+    """#
+}
+
 /// Keeps the hosting `NSWindow`'s resize floor in step with the web reader's visible
 /// panels (#5/#13). SwiftUI's `.frame(minWidth:)` governs layout but not the window's
 /// user-resize limit once the hosting controller's sizing is detached (readers pass
@@ -1140,6 +1353,8 @@ final class WebReaderViewModel: ObservableObject {
               font-size: 0.92em;
             }
 
+            \(WebReaderCodeBlockCopy.styleSheet)
+
             #article-content blockquote {
               border-left: 4px solid rgba(59, 130, 246, 0.35);
               padding-left: 14px;
@@ -1254,6 +1469,7 @@ final class WebReaderViewModel: ObservableObject {
             (function () {
               const article = document.getElementById('article-content');
               let activeId = null;
+              \(WebReaderCodeBlockCopy.javaScript)
 
               // Older clips can contain rich-editor code blocks serialized as
               // bare <code> elements. Promote their structural multiline
@@ -1266,6 +1482,7 @@ final class WebReaderViewModel: ObservableObject {
                 code.replaceWith(pre);
                 pre.appendChild(code);
               });
+              rubienEnhanceCodeBlocks(article);
 
               function send(name, payload) {
                 try {
@@ -1688,6 +1905,12 @@ final class WebReaderViewModel: ObservableObject {
               article.addEventListener('click', (event) => {
                 const target = event.target;
                 if (!(target instanceof Element)) return;
+                const copyButton = target.closest('.rubien-code-copy');
+                if (copyButton) {
+                  event.preventDefault();
+                  void rubienCopyCodeBlock(copyButton);
+                  return;
+                }
                 const marker = target.closest('[data-annotation-id]');
                 if (!marker) {
                   // The click event fires at the end of a drag-selection
