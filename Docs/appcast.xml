@@ -674,5 +674,21 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.7.6</title>
+            <description sparkle:format="plain-text"><![CDATA[• Fix iCloud sync queues that could become stuck and prevent new references or PDFs from reaching other Macs.
+• Add durable, self-healing sync-intent reconciliation and improved failure diagnostics.
+• Prepare Rubien Importer for Chrome Web Store distribution while preserving compatibility with existing manual installations.]]></description>
+            <pubDate>Fri, 04 Sep 2026 05:09:21 +0000</pubDate>
+            <sparkle:version>44</sparkle:version>
+            <sparkle:shortVersionString>0.7.6</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien/releases/download/v0.7.6/Rubien-0.7.6.dmg"
+                sparkle:edSignature="YJxrk1f4O13oOAeEBpFHwtQFIrBEUA0AUadgZHQnzZm0UZ2igHsLEHFLryPIleGrYEcv1PCJmDAiXd0Q1NgfAg=="
+                length="18435067"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
