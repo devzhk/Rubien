@@ -94,11 +94,12 @@ final class SyncFailureRecoveryTests: XCTestCase {
             tag: Tag(syncId: id, name: "Server Version", color: "#007AFF")
         )
 
-        await library.mergeServerRecordChangedForTest(
+        let recovered = await library.mergeServerRecordChangedForTest(
             type: .tag,
             entityId: id,
             serverRecord: server
         )
+        XCTAssertTrue(recovered)
 
         try await database.dbWriter.read { db in
             XCTAssertEqual(try Int.fetchOne(db, sql: """
@@ -113,6 +114,48 @@ final class SyncFailureRecoveryTests: XCTestCase {
                 WHERE entityType='tag' AND entityId=?
                   AND confirmedByServer=0 AND isPushEligible=1
                 """, arguments: [id]), 1)
+        }
+    }
+
+    func testServerRecordChangedMergeReportsRecoveryAndClearsDurableIntent() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let library = SyncedLibrary(appDatabase: database)
+        let id = "resolved-server-conflict"
+        try await database.dbWriter.write { db in
+            try db.execute(sql: """
+                INSERT INTO tag(syncId, name, color, dateModified)
+                VALUES(?, 'Local Version', '#fff', ?)
+                """, arguments: [id, Date()])
+            XCTAssertTrue(try SyncStateStore().markPushInFlight(
+                db,
+                entityType: .tag,
+                entityId: id
+            ))
+        }
+        let server = Tag.makeRecord(
+            recordName: SyncEntityType.tag.qualifiedRecordName(entityId: id),
+            tag: Tag(syncId: id, name: "Server Version", color: "#007AFF")
+        )
+
+        let recovered = await library.mergeServerRecordChangedForTest(
+            type: .tag,
+            entityId: id,
+            serverRecord: server
+        )
+
+        XCTAssertTrue(recovered)
+        try await database.dbWriter.read { db in
+            XCTAssertEqual(try String.fetchOne(db, sql: """
+                SELECT name FROM tag WHERE syncId=?
+                """, arguments: [id]), "Server Version")
+            let state = try Row.fetchOne(db, sql: """
+                SELECT isDirty, pushInFlight, systemFields IS NOT NULL AS hasServerState
+                FROM syncState
+                WHERE entityType='tag' AND entityId=?
+                """, arguments: [id])
+            XCTAssertEqual(state?["isDirty"] as Int?, 0)
+            XCTAssertEqual(state?["pushInFlight"] as Int?, 0)
+            XCTAssertEqual(state?["hasServerState"] as Int?, 1)
         }
     }
 

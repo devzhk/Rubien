@@ -56,6 +56,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     private struct ServerRecordChangedMergeOutcome: Sendable {
         var displacedFilenames: [String] = []
         var stagedPDFConsumed = false
+        var conflictResolved = false
     }
 
     /// Lazy container factory. Deferring construction means unit tests can
@@ -2182,10 +2183,6 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     ) async {
         let sendErrors = event.failedRecordSaves.map { $0.error }
             + event.failedRecordDeletes.map { $0.value }
-        if let firstError = sendErrors.first {
-            sendCycleError = firstError
-            publishStatus(.error(firstError))
-        }
         if !sendErrors.isEmpty {
             var inputs: [SyncSendFailureInput] = []
             inputs.reserveCapacity(sendErrors.count)
@@ -2307,32 +2304,43 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             }
         }
 
-        // Failed saves remain durable and user-visible. Recovery below only
-        // adjusts the retry preconditions; canonicalization is deferred until
-        // after this delegate callback returns.
+        // Only failures that remain unresolved after recovery become
+        // user-visible. In particular, `.serverRecordChanged` is a normal
+        // optimistic-lock race: when its server record is merged successfully,
+        // the conflict is durably reconciled and retaining an error here would
+        // leave a stale banner until some unrelated future send cycle.
+        var unrecoveredSendErrors: [CKError] = []
         for failure in event.failedRecordSaves {
-            guard let type = SyncEntityType.forRecordType(failure.record.recordType) else { continue }
+            guard let type = SyncEntityType.forRecordType(failure.record.recordType) else {
+                unrecoveredSendErrors.append(failure.error)
+                continue
+            }
             guard let parsed = SyncEntityType.parseRecordName(
                 failure.record.recordID.recordName
             ), parsed.0 == type else {
                 log.error("skipping malformed failed-save recordName \(failure.record.recordID.recordName, privacy: .public)")
+                unrecoveredSendErrors.append(failure.error)
                 continue
             }
             let entityId = parsed.1
 
             switch failure.error.code {
             case .serverRecordChanged:
-                await handleServerRecordChanged(
+                let recovered = await handleServerRecordChanged(
                     type: type,
                     entityId: entityId,
                     error: failure.error
                 )
+                if !recovered {
+                    unrecoveredSendErrors.append(failure.error)
+                }
                 deferredPendingReconciliation = true
 
             case .zoneNotFound:
                 // Library zone was deleted (or never created for this
                 // account). Recreate it — the engine retries the save
                 // once we acknowledge the zone creation.
+                unrecoveredSendErrors.append(failure.error)
                 guard isEngineStartupPrepared,
                       syncEngine === _engine
                 else { continue }
@@ -2367,13 +2375,16 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                 } catch {
                     log.error("unknownItem recovery failed: \(error.localizedDescription, privacy: .public)")
                 }
+                unrecoveredSendErrors.append(failure.error)
                 deferredPendingReconciliation = true
 
             case .invalidArguments:
+                unrecoveredSendErrors.append(failure.error)
                 deferredDurableRepair = true
                 deferredPendingReconciliation = true
 
             default:
+                unrecoveredSendErrors.append(failure.error)
                 deferredPendingReconciliation = true
             }
         }
@@ -2381,6 +2392,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         // Failed deletes — typically .unknownItem (already gone server-
         // side). Purge the tombstone so we don't keep retrying.
         for failure in event.failedRecordDeletes {
+            unrecoveredSendErrors.append(failure.value)
             if failure.value.code == .unknownItem {
                 await removeUnknownItemDeleteTombstone(recordID: failure.key)
             }
@@ -2388,6 +2400,11 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                 deferredDurableRepair = true
             }
             deferredPendingReconciliation = true
+        }
+
+        if let firstError = unrecoveredSendErrors.first {
+            sendCycleError = firstError
+            publishStatus(.error(firstError))
         }
     }
 
@@ -2525,12 +2542,12 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         type: SyncEntityType,
         entityId: String,
         error: CKError
-    ) async {
+    ) async -> Bool {
         guard let serverRecord = error.serverRecord else {
             log.error("serverRecordChanged without serverRecord — awaiting next external fetch")
-            return
+            return false
         }
-        await mergeServerRecordChanged(
+        return await mergeServerRecordChanged(
             type: type,
             entityId: entityId,
             serverRecord: serverRecord
@@ -2541,7 +2558,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         type: SyncEntityType,
         entityId: String,
         serverRecord: CKRecord
-    ) async {
+    ) async -> Bool {
 
         // referencePDF: pre-stage bytes outside the transaction so the writer
         // queue isn't held by a large copyItem during conflict resolution.
@@ -2552,9 +2569,9 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                 preparedPDF = try SyncEntityType.prepareReferencePDFMaterialization(record: serverRecord)
             } catch {
                 log.error("serverRecordChanged prepare failed: \(error.localizedDescription, privacy: .public)")
-                return
+                return false
             }
-            guard preparedPDF != nil else { return }
+            guard preparedPDF != nil else { return false }
         } else {
             preparedPDF = nil
         }
@@ -2572,7 +2589,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                     // The save was superseded by a local delete while in
                     // flight. Do not apply or quarantine the stale server
                     // version; its exact tombstone remains the durable intent.
-                    return ServerRecordChangedMergeOutcome()
+                    return ServerRecordChangedMergeOutcome(conflictResolved: true)
                 }
                 try stateStore.setApplyingRemote(db)
                 var outcome = ServerRecordChangedMergeOutcome()
@@ -2642,6 +2659,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                         entityId: entityId,
                         record: serverRecord
                     )
+                    outcome.conflictResolved = true
                 }
                 if type == .activityEpoch, let kind = ActivityKind(rawValue: entityId) {
                     try SyncEntityType.replayQuarantinedActivity(
@@ -2676,6 +2694,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         if let mergeOutcome {
             Self.unlinkStoredPDFFilenames(mergeOutcome.displacedFilenames)
         }
+        return mergeOutcome?.conflictResolved == true
     }
 
     private static func unlinkStoredPDFFilenames(_ filenames: [String]) {
@@ -2685,11 +2704,12 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         }
     }
 
+    @discardableResult
     func mergeServerRecordChangedForTest(
         type: SyncEntityType,
         entityId: String,
         serverRecord: CKRecord
-    ) async {
+    ) async -> Bool {
         await mergeServerRecordChanged(
             type: type,
             entityId: entityId,
