@@ -252,7 +252,7 @@ enum WebReaderMathRendering {
     """
 }
 
-/// DOM enhancement for semantic code blocks in clipped articles. The button
+/// DOM enhancement for preformatted code blocks in clipped articles. The button
 /// stays outside `<pre>` so its icon never becomes part of copied code or the
 /// annotation text index. Clipboard access remains in the page's click event:
 /// WebKit can enforce user activation, and untrusted source pages never receive
@@ -367,7 +367,6 @@ enum WebReaderCodeBlockCopy {
               function rubienEnhanceCodeBlocks(articleRoot) {
                 if (!articleRoot || typeof articleRoot.querySelectorAll !== 'function') return;
                 Array.from(articleRoot.querySelectorAll('pre')).forEach((pre) => {
-                  if (!pre.querySelector('code')) return;
                   if (
                     pre.parentElement &&
                     pre.parentElement.classList.contains('rubien-code-block')

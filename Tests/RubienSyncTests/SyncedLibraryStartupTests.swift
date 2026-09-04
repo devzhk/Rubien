@@ -242,6 +242,31 @@ final class SyncedLibraryStartupTests: XCTestCase {
         )
     }
 
+    func testAccountResetClearsPendingIntentRefreshes() async throws {
+        let library = SyncedLibrary(
+            appDatabase: db,
+            stateFileURL: stateFile
+        )
+        let unknownItem = CKError(_nsError: NSError(
+            domain: CKErrorDomain,
+            code: CKError.unknownItem.rawValue
+        ))
+        let visibleError = await library.recoverUnknownItemSaveFailure(
+            type: .tag,
+            entityId: "old-account-record",
+            error: unknownItem
+        )
+        XCTAssertNil(visibleError)
+        let refreshesBeforeReset = await library.pendingIntentRefreshesForTest
+        XCTAssertFalse(refreshesBeforeReset.isEmpty)
+
+        let reset = await library.resetForAccountChange()
+        XCTAssertTrue(reset)
+
+        let refreshesAfterReset = await library.pendingIntentRefreshesForTest
+        XCTAssertTrue(refreshesAfterReset.isEmpty)
+    }
+
     // MARK: - Baseline one-shot
 
     func testBaselineMarksAllSeedRowsDirtyOnFirstRun() async throws {

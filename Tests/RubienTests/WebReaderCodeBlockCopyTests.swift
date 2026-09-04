@@ -34,7 +34,7 @@ final class WebReaderCodeBlockCopyTests: XCTestCase {
         )
     }
 
-    func testEnhancementAddsOneAccessibleButtonForSemanticPreOnly() throws {
+    func testEnhancementAddsAccessibleButtonsForSemanticAndBarePre() throws {
         let context = try XCTUnwrap(JSContext())
         let script = """
         \(WebReaderCodeBlockCopy.javaScript)
@@ -75,6 +75,7 @@ final class WebReaderCodeBlockCopyTests: XCTestCase {
           querySelector: function (_) { return code; }
         };
         const rawPre = {
+          textContent: 'raw pre text',
           parentNode: host,
           parentElement: host,
           querySelector: function (_) { return null; }
@@ -88,6 +89,8 @@ final class WebReaderCodeBlockCopyTests: XCTestCase {
 
         const wrapper = host.wrappers[0];
         const button = wrapper.children[1];
+        const rawWrapper = host.wrappers[1];
+        const rawButton = rawWrapper.children[1];
         JSON.stringify({
           wrapperCount: host.wrappers.length,
           wrapperClass: wrapper.className,
@@ -97,7 +100,10 @@ final class WebReaderCodeBlockCopyTests: XCTestCase {
           ariaLabel: button.attributes['aria-label'],
           title: button.title,
           hasCopyIcon: button.innerHTML.includes('rubien-code-copy-icon'),
-          hasCheckIcon: button.innerHTML.includes('rubien-code-copy-check')
+          hasCheckIcon: button.innerHTML.includes('rubien-code-copy-check'),
+          rawWrapperClass: rawWrapper.className,
+          rawChildCount: rawWrapper.children.length,
+          rawAriaLabel: rawButton.attributes['aria-label']
         });
         """
 
@@ -106,7 +112,7 @@ final class WebReaderCodeBlockCopyTests: XCTestCase {
         XCTAssertNil(context.exception)
         let json = try XCTUnwrap(value?.toString())
         let result = try JSONDecoder().decode(EnhancementResult.self, from: Data(json.utf8))
-        XCTAssertEqual(result.wrapperCount, 1)
+        XCTAssertEqual(result.wrapperCount, 2)
         XCTAssertEqual(result.wrapperClass, "rubien-code-block")
         XCTAssertEqual(result.childCount, 2)
         XCTAssertEqual(result.buttonType, "button")
@@ -115,6 +121,9 @@ final class WebReaderCodeBlockCopyTests: XCTestCase {
         XCTAssertEqual(result.title, "Copy code")
         XCTAssertTrue(result.hasCopyIcon)
         XCTAssertTrue(result.hasCheckIcon)
+        XCTAssertEqual(result.rawWrapperClass, "rubien-code-block")
+        XCTAssertEqual(result.rawChildCount, 2)
+        XCTAssertEqual(result.rawAriaLabel, "Copy code")
     }
 
     func testFallbackCopyPreservesCodeTextAndRestoresSelection() throws {
@@ -190,6 +199,9 @@ final class WebReaderCodeBlockCopyTests: XCTestCase {
         let title: String
         let hasCopyIcon: Bool
         let hasCheckIcon: Bool
+        let rawWrapperClass: String
+        let rawChildCount: Int
+        let rawAriaLabel: String
     }
 
     private struct FallbackResult: Decodable {

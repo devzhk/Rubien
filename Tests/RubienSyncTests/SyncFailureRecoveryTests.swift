@@ -177,12 +177,14 @@ final class SyncFailureRecoveryTests: XCTestCase {
             )
         }
 
-        await library.removeUnknownItemDeleteTombstoneForTest(
+        let visibleError = await library.recoverUnknownItemDeleteFailure(
             recordID: CKRecord.ID(
                 recordName: SyncEntityType.referencePDF
                     .qualifiedRecordName(entityId: id)
-            )
+            ),
+            error: error(.unknownItem)
         )
+        XCTAssertNil(visibleError)
 
         try await database.dbWriter.read { db in
             XCTAssertEqual(try Int.fetchOne(db, sql: """
@@ -301,12 +303,14 @@ final class SyncFailureRecoveryTests: XCTestCase {
             )
         }
 
-        await library.removeUnknownItemDeleteTombstoneForTest(
+        let visibleError = await library.recoverUnknownItemDeleteFailure(
             recordID: CKRecord.ID(
                 recordName: SyncEntityType.tag
                     .qualifiedRecordName(entityId: id)
-            )
+            ),
+            error: error(.unknownItem)
         )
+        XCTAssertNil(visibleError)
 
         try await database.dbWriter.read { db in
             XCTAssertEqual(try Int.fetchOne(db, sql: """
@@ -366,6 +370,110 @@ final class SyncFailureRecoveryTests: XCTestCase {
                 SELECT COUNT(*) FROM tombstone
                 WHERE entityType='tag' AND entityId=?
                 """, arguments: [id]), 0)
+        }
+    }
+
+    func testServerRecordChangedQuarantineCountsAsRecoveredConflict() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let library = SyncedLibrary(appDatabase: database)
+        let annotation = PDFAnnotationRecord(
+            syncId: "waiting-child",
+            referenceId: 0,
+            referenceSyncId: "missing-parent",
+            type: .highlight,
+            pageIndex: 0,
+            rects: []
+        )
+        let server = PDFAnnotationRecord.makeRecord(
+            recordName: SyncEntityType.pdfAnnotation
+                .qualifiedRecordName(entityId: annotation.syncId),
+            annotation: annotation
+        )
+
+        let recovered = await library.mergeServerRecordChangedForTest(
+            type: .pdfAnnotation,
+            entityId: annotation.syncId,
+            serverRecord: server
+        )
+
+        XCTAssertTrue(recovered)
+        try await database.dbWriter.read { db in
+            XCTAssertEqual(try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM syncOrphan WHERE recordName = ?
+                """, arguments: [server.recordID.recordName]), 1)
+        }
+    }
+
+    func testServerRecordChangedInvalidQuarantineRemainsUnrecovered() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let library = SyncedLibrary(appDatabase: database)
+        let entityId = "record-name-id"
+        let server = Reference.makeRecord(
+            recordName: SyncEntityType.reference
+                .qualifiedRecordName(entityId: entityId),
+            reference: Reference(
+                syncId: "mismatched-payload-id",
+                title: "Invalid"
+            )
+        )
+
+        let recovered = await library.mergeServerRecordChangedForTest(
+            type: .reference,
+            entityId: entityId,
+            serverRecord: server
+        )
+
+        XCTAssertFalse(recovered)
+        try await database.dbWriter.read { db in
+            XCTAssertEqual(try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM syncOrphan WHERE recordName = ?
+                """, arguments: [server.recordID.recordName]), 1)
+        }
+    }
+
+    func testServerRecordChangedAliasMergeCountsAsRecoveredConflict() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let library = SyncedLibrary(appDatabase: database)
+        let winner = "tag-winner"
+        let loser = "tag-retired-alias"
+        try await database.dbWriter.write { db in
+            try db.execute(sql: """
+                INSERT INTO tag(syncId, name, color, dateModified)
+                VALUES(?, 'Local Winner', '#fff', ?)
+                """, arguments: [winner, Date()])
+            try SyncIdentityAliasStore.record(
+                entityType: .tag,
+                losingId: loser,
+                winningId: winner,
+                db: db
+            )
+            try SyncStateStore().upsertTombstone(
+                db,
+                entityType: .tag,
+                entityId: loser
+            )
+        }
+        let server = Tag.makeRecord(
+            recordName: SyncEntityType.tag.qualifiedRecordName(entityId: loser),
+            tag: Tag(syncId: loser, name: "Late Server Alias", color: "#007AFF")
+        )
+
+        let recovered = await library.mergeServerRecordChangedForTest(
+            type: .tag,
+            entityId: loser,
+            serverRecord: server
+        )
+
+        XCTAssertTrue(recovered)
+        try await database.dbWriter.read { db in
+            XCTAssertEqual(try String.fetchOne(db, sql: """
+                SELECT name FROM tag WHERE syncId = ?
+                """, arguments: [winner]), "Late Server Alias")
+            XCTAssertEqual(try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM tombstone
+                WHERE entityType = 'tag' AND entityId = ?
+                  AND confirmedByServer = 0 AND isPushEligible = 1
+                """, arguments: [loser]), 1)
         }
     }
 }

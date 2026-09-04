@@ -1633,6 +1633,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         deferredReconciliationTask = nil
         deferredPendingReconciliation = false
         deferredDurableRepair = false
+        pendingIntentRefreshes.removeAll()
         reconciliationAwaitingSendBoundary = false
         isDurableIntentReadyForEngine = false
 
@@ -2389,14 +2390,20 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         // Failed deletes — typically .unknownItem (already gone server-
         // side). Purge the tombstone so we don't keep retrying.
         for failure in event.failedRecordDeletes {
-            unrecoveredSendErrors.append(failure.value)
             if failure.value.code == .unknownItem {
-                await removeUnknownItemDeleteTombstone(recordID: failure.key)
+                if let unrecoveredError = await recoverUnknownItemDeleteFailure(
+                    recordID: failure.key,
+                    error: failure.value
+                ) {
+                    unrecoveredSendErrors.append(unrecoveredError)
+                }
+            } else {
+                unrecoveredSendErrors.append(failure.value)
+                if failure.value.code == .invalidArguments {
+                    deferredDurableRepair = true
+                }
+                deferredPendingReconciliation = true
             }
-            if failure.value.code == .invalidArguments {
-                deferredDurableRepair = true
-            }
-            deferredPendingReconciliation = true
         }
 
         if let firstError = unrecoveredSendErrors.first {
@@ -2443,16 +2450,22 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         }
     }
 
-    private func removeUnknownItemDeleteTombstone(
-        recordID: CKRecord.ID
-    ) async {
+    /// Treat an `.unknownItem` delete as a successful acknowledgement: the
+    /// requested server state (record absent) already holds. Return an error
+    /// only when local finalization fails so benign recovery does not leave a
+    /// persistent sync banner.
+    func recoverUnknownItemDeleteFailure(
+        recordID: CKRecord.ID,
+        error cloudError: CKError
+    ) async -> CKError? {
+        defer { deferredPendingReconciliation = true }
         guard let (type, entityId) = SyncEntityType.parseRecordName(
             recordID.recordName
         ) else {
             log.error(
                 "skipping malformed failed-delete recordName \(recordID.recordName, privacy: .public)"
             )
-            return
+            return cloudError
         }
         do {
             let filenames = try await appDatabase.dbWriter.write {
@@ -2466,10 +2479,12 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                 )
             }
             Self.unlinkStoredPDFFilenames(filenames)
+            return nil
         } catch {
             log.error(
                 "failed to finalize unknown-item delete: \(error.localizedDescription, privacy: .public)"
             )
+            return cloudError
         }
     }
 
@@ -2555,12 +2570,6 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         Self.unlinkStoredPDFFilenames(filenames)
     }
 
-    func removeUnknownItemDeleteTombstoneForTest(
-        recordID: CKRecord.ID
-    ) async {
-        await removeUnknownItemDeleteTombstone(recordID: recordID)
-    }
-
     /// Conflict resolution on `.serverRecordChanged`. CloudKit returns the
     /// server's current version in the error payload; we apply it and store
     /// its system fields as the new clean baseline. An exact active local
@@ -2644,6 +2653,10 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                         outcome.displacedFilenames.append(displaced)
                     }
                     outcome.stagedPDFConsumed = preparedPDF != nil
+                    // Quarantine is the durable, accepted outcome for a valid
+                    // record whose dependency has not arrived yet. Invalid
+                    // records remain visible as unrecovered send conflicts.
+                    outcome.conflictResolved = dependencyStatus == .unresolved
                     return outcome
                 }
                 let applied: Bool
@@ -2678,22 +2691,27 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                         stateStore: stateStore
                     )
                 }
-                if applied, try !stateStore.hasActiveDeleteIntent(
-                    db,
-                    entityType: type,
-                    entityId: entityId
-                ) {
-                    try stateStore.removeTombstone(
+                if applied {
+                    if try !stateStore.hasActiveDeleteIntent(
                         db,
                         entityType: type,
                         entityId: entityId
-                    )
-                    try stateStore.markPulled(
-                        db,
-                        entityType: type,
-                        entityId: entityId,
-                        record: serverRecord
-                    )
+                    ) {
+                        try stateStore.removeTombstone(
+                            db,
+                            entityType: type,
+                            entityId: entityId
+                        )
+                        try stateStore.markPulled(
+                            db,
+                            entityType: type,
+                            entityId: entityId,
+                            record: serverRecord
+                        )
+                    }
+                    // A retired alias intentionally keeps its exact delete
+                    // while applying the late payload to the canonical row.
+                    // That is also a completed conflict merge.
                     outcome.conflictResolved = true
                 }
                 if type == .activityEpoch, let kind = ActivityKind(rawValue: entityId) {
