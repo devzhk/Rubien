@@ -34,6 +34,45 @@ final class SyncPendingIntentTests: XCTestCase {
         XCTAssertEqual(plan.additions, [missing])
     }
 
+    func testPurePlannerRefreshesAnAlreadyPendingDesiredIntent() {
+        let save = PendingSyncIdentity(
+            type: .databaseView,
+            entityId: "333",
+            operation: .save
+        )
+
+        let plan = SyncPendingIntentPlanner.plan(
+            current: [save],
+            desired: [save],
+            refreshing: [save]
+        )
+
+        XCTAssertEqual(plan.removals, [save])
+        XCTAssertEqual(plan.additions, [save])
+    }
+
+    func testPurePlannerDoesNotRefreshIntentThatIsNoLongerDesired() {
+        let save = PendingSyncIdentity(
+            type: .databaseView,
+            entityId: "333",
+            operation: .save
+        )
+        let delete = PendingSyncIdentity(
+            type: .databaseView,
+            entityId: "333",
+            operation: .delete
+        )
+
+        let plan = SyncPendingIntentPlanner.plan(
+            current: [save],
+            desired: [delete],
+            refreshing: [save]
+        )
+
+        XCTAssertEqual(plan.removals, [save])
+        XCTAssertEqual(plan.additions, [delete])
+    }
+
     func testResolverDeduplicatesContradictionWithLiveSaveWinning() throws {
         let database = try AppDatabase(DatabaseQueue())
         let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"

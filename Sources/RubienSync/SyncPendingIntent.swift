@@ -42,13 +42,26 @@ public struct SyncPendingChangePlan: Equatable, Sendable {
 public enum SyncPendingIntentPlanner {
     public static func plan(
         current: [PendingSyncIdentity],
-        desired: [PendingSyncIdentity]
+        desired: [PendingSyncIdentity],
+        refreshing: Set<PendingSyncIdentity> = []
     ) -> SyncPendingChangePlan {
         let currentSet = Set(current)
         let desiredSet = Set(desired)
+        // A recovered save can keep the same record identity while its cached
+        // server fields change from an update into a create. CKSyncEngine
+        // deduplicates a plain add, so force that identity through a
+        // remove-then-add cycle. Limit refreshes to still-desired intent so a
+        // concurrent delete or cleanup wins normally.
+        let refreshSet = refreshing.intersection(desiredSet)
         return SyncPendingChangePlan(
-            additions: desiredSet.subtracting(currentSet).sorted(by: order),
-            removals: currentSet.subtracting(desiredSet).sorted(by: order)
+            additions: desiredSet
+                .subtracting(currentSet)
+                .union(refreshSet)
+                .sorted(by: order),
+            removals: currentSet
+                .subtracting(desiredSet)
+                .union(currentSet.intersection(refreshSet))
+                .sorted(by: order)
         )
     }
 

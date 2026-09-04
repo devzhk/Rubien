@@ -675,6 +675,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     private var deferredPendingReconciliation = false
     private var deferredDurableRepair = false
     private var deferredReconciliationTask: Task<Void, Never>?
+    private var pendingIntentRefreshes: Set<PendingSyncIdentity> = []
     private var activeDelegateEventCount = 0
     private var activeSendBatchCallbackCount = 0
     private var reconciliationAwaitingSendBoundary = false
@@ -768,6 +769,10 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
 
     var hasDeferredPendingReconciliationForTest: Bool {
         deferredPendingReconciliation
+    }
+
+    var pendingIntentRefreshesForTest: Set<PendingSyncIdentity> {
+        pendingIntentRefreshes
     }
 
     var activeDelegateCallbackCountForTest: Int {
@@ -1003,7 +1008,8 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             )
             let plan = SyncPendingIntentPlanner.plan(
                 current: knownCurrent,
-                desired: desiredResolution.intents
+                desired: desiredResolution.intents,
+                refreshing: pendingIntentRefreshes
             )
             if !plan.removals.isEmpty {
                 syncEngine.state.remove(
@@ -1015,6 +1021,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                     pendingRecordZoneChanges: plan.additions.map(pendingChange(for:))
                 )
             }
+            pendingIntentRefreshes.removeAll()
             if desiredResolution.anomalyDetected {
                 log.error("durable sync intent remained contradictory during pending-cache reconciliation")
             }
@@ -2360,23 +2367,13 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                 // if the server has a tombstone a subsequent fetch will
                 // deliver the deletion (pull path sets isDirty=0); if
                 // not, the fresh re-push succeeds.
-                do {
-                    try await appDatabase.dbWriter.write { [stateStore] db in
-                        try stateStore.clearSystemFields(db, entityType: type, entityId: entityId)
-                        try stateStore.releasePushInFlight(
-                            db,
-                            entityType: type,
-                            entityId: entityId
-                        )
-                    }
-                    // The normal launch / foreground / idle fetch will observe
-                    // any server tombstone. Never re-enter CKSyncEngine from
-                    // this delegate callback.
-                } catch {
-                    log.error("unknownItem recovery failed: \(error.localizedDescription, privacy: .public)")
+                if let unrecoveredError = await recoverUnknownItemSaveFailure(
+                    type: type,
+                    entityId: entityId,
+                    error: failure.error
+                ) {
+                    unrecoveredSendErrors.append(unrecoveredError)
                 }
-                unrecoveredSendErrors.append(failure.error)
-                deferredPendingReconciliation = true
 
             case .invalidArguments:
                 unrecoveredSendErrors.append(failure.error)
@@ -2405,6 +2402,44 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         if let firstError = unrecoveredSendErrors.first {
             sendCycleError = firstError
             publishStatus(.error(firstError))
+        }
+    }
+
+    /// Turn an update rejected with `.unknownItem` into a fresh create. The DB
+    /// mutation is safe inside the delegate callback; the engine refresh is
+    /// only recorded here and consumed by post-callback reconciliation. Return
+    /// an error only when preparing that retry failed—a recovered missing-record
+    /// conflict is normal sync work and must not leave a persistent banner.
+    func recoverUnknownItemSaveFailure(
+        type: SyncEntityType,
+        entityId: String,
+        error cloudError: CKError
+    ) async -> CKError? {
+        defer { deferredPendingReconciliation = true }
+        do {
+            try await appDatabase.dbWriter.write { [stateStore] db in
+                try stateStore.clearSystemFields(
+                    db,
+                    entityType: type,
+                    entityId: entityId
+                )
+                try stateStore.releasePushInFlight(
+                    db,
+                    entityType: type,
+                    entityId: entityId
+                )
+            }
+            pendingIntentRefreshes.insert(.init(
+                type: type,
+                entityId: entityId,
+                operation: .save
+            ))
+            return nil
+        } catch {
+            log.error(
+                "unknownItem recovery failed: \(error.localizedDescription, privacy: .public)"
+            )
+            return cloudError
         }
     }
 

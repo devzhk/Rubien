@@ -196,6 +196,58 @@ final class SyncFailureRecoveryTests: XCTestCase {
         }
     }
 
+    func testUnknownItemSavePreparesFreshCreateAndForcesPendingRefresh() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let library = SyncedLibrary(appDatabase: database)
+        let id = "stale-server-record"
+        let store = SyncStateStore()
+        let record = Tag.makeRecord(
+            recordName: SyncEntityType.tag.qualifiedRecordName(entityId: id),
+            tag: Tag(syncId: id, name: "Local", color: "#fff")
+        )
+
+        try await database.dbWriter.write { db in
+            try db.execute(sql: """
+                INSERT INTO tag(syncId, name, color, dateModified)
+                VALUES(?, 'Local', '#fff', ?)
+                """, arguments: [id, Date()])
+            try store.markPushed(
+                db,
+                entityType: .tag,
+                entityId: id,
+                record: record
+            )
+            try store.queueSave(db, entityType: .tag, entityId: id)
+            XCTAssertTrue(try store.markPushInFlight(
+                db,
+                entityType: .tag,
+                entityId: id
+            ))
+        }
+
+        let visibleError = await library.recoverUnknownItemSaveFailure(
+            type: .tag,
+            entityId: id,
+            error: error(.unknownItem)
+        )
+        XCTAssertNil(visibleError)
+
+        try await database.dbWriter.read { db in
+            let state = try XCTUnwrap(Row.fetchOne(db, sql: """
+                SELECT systemFields, isDirty, pushInFlight
+                FROM syncState
+                WHERE entityType='tag' AND entityId=?
+                """, arguments: [id]))
+            XCTAssertNil(state["systemFields"] as Data?)
+            XCTAssertEqual(state["isDirty"] as Int?, 1)
+            XCTAssertEqual(state["pushInFlight"] as Int?, 0)
+        }
+        let refreshes = await library.pendingIntentRefreshesForTest
+        XCTAssertEqual(refreshes, [
+            .init(type: .tag, entityId: id, operation: .save),
+        ])
+    }
+
     func testDeleteAcknowledgementFinalizesRematerializedLocalRow() async throws {
         let database = try AppDatabase(DatabaseQueue())
         let library = SyncedLibrary(appDatabase: database)
