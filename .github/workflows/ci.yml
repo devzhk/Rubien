@@ -92,8 +92,9 @@ jobs:
     # catalog. Catches server/CLI drift (renamed subcommands, envelope shape,
     # version-guard skew) that neither side's isolated suite can see.
     runs-on: ubuntu-22.04
-    # Backstop against a runaway; this job normally finishes in ~6 min.
-    timeout-minutes: 10
+    # Cold container setup can put this job just over 10 minutes even when
+    # every build and test step succeeds; retain a bounded runaway backstop.
+    timeout-minutes: 15
     container: swift:6.3-jammy
     steps:
       - uses: actions/checkout@v4
