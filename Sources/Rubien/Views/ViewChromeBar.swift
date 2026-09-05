@@ -230,12 +230,7 @@ private struct DisplayMenuPopover: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Picker("View density", selection: $density) {
-                ForEach(ReferenceTableDensity.allCases, id: \.self) { density in
-                    Text(density.label).tag(density)
-                }
-            }
-            .pickerStyle(.segmented)
+            densityPicker
             .padding(12)
             .onChange(of: density) { _, value in
                 if value == .comfortable { columnWraps.insert(ColumnIdentifier.title.rawValue) }
@@ -286,6 +281,47 @@ private struct DisplayMenuPopover: View {
         .frame(width: 290)
         .neutralGlassCard(cornerRadius: 16)
         .presentationBackground(.clear)
+    }
+
+    private var densityPicker: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("View density")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+            HStack(spacing: 4) {
+                ForEach(ReferenceTableDensity.allCases, id: \.self) { option in
+                    Button {
+                        density = option
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 9, weight: .semibold))
+                                .opacity(density == option ? 1 : 0)
+                                .accessibilityHidden(true)
+                            Text(option.label)
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .foregroundStyle(.primary)
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(ToolbarHoverButtonStyle(hoverOpacity: 0.07, pressedOpacity: 0.12))
+                    .background {
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color.accentColor.opacity(density == option ? 0.12 : 0))
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .strokeBorder(Color.accentColor.opacity(density == option ? 0.25 : 0), lineWidth: 0.5)
+                            .allowsHitTesting(false)
+                    }
+                    .accessibilityAddTraits(density == option ? .isSelected : [])
+                }
+            }
+            .padding(3)
+            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 9))
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("View density")
+        }
     }
 }
 
