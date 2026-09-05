@@ -4,12 +4,12 @@ import SwiftUI
 import CloudKit
 import RubienSync
 
-/// View modifier that overlays a non-blocking banner or shows a modal
+/// View modifier that shows a non-blocking toolbar message or a modal
 /// alert depending on the coordinator's current SyncStatus.
 ///
 /// - `.error(.quotaExceeded)` → modal alert with "Open iCloud Settings"
 /// - `.signedOut` / `.unavailable` / most user-actionable errors → top
-///   overlay banner, auto-dismissable
+///   message in the toolbar’s unused center space
 /// - `.idle` / `.syncing` / transient errors → nothing
 struct SyncStatusBanner: ViewModifier {
     let status: SyncStatus
@@ -17,9 +17,12 @@ struct SyncStatusBanner: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .overlay(alignment: .top) {
-                if let banner = bannerMessage {
-                    bannerView(banner)
+            .toolbar {
+                if #available(macOS 26.0, *) {
+                    ToolbarItem(placement: .principal) { toolbarMessage }
+                        .sharedBackgroundVisibility(.hidden)
+                } else {
+                    ToolbarItem(placement: .principal) { toolbarMessage }
                 }
             }
             .alert(
@@ -35,6 +38,16 @@ struct SyncStatusBanner: ViewModifier {
                     Text(String(localized: "Free space in iCloud Settings to resume sync.", bundle: .module))
                 }
             )
+    }
+
+    @ViewBuilder
+    private var toolbarMessage: some View {
+        if let banner = bannerMessage {
+            bannerView(banner)
+        } else {
+            // Keep trailing toolbar actions anchored at the right edge.
+            Color.clear.frame(width: 1, height: 1)
+        }
     }
 
     private var isQuotaExceeded: Bool {
@@ -121,18 +134,22 @@ struct SyncStatusBanner: ViewModifier {
     private func bannerView(_ banner: BannerMessage) -> some View {
         HStack(spacing: 12) {
             Text(banner.text)
-                .font(.callout)
+                .font(.system(size: 11))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .help(banner.text)
             if let action = banner.action {
                 Button(action.label, action: action.handler)
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .buttonStyle(CompactHoverButtonStyle())
+                    .fixedSize()
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .frame(maxWidth: 440)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
         .background(backgroundColor(banner.tone), in: RoundedRectangle(cornerRadius: 8))
-        .padding(.top, 10)
-        .transition(.move(edge: .top).combined(with: .opacity))
     }
 
     private func backgroundColor(_ tone: BannerMessage.Tone) -> Color {

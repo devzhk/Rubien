@@ -1450,12 +1450,6 @@ struct ContentView: View {
             }
         }
         .toolbar(content: {
-            // Clear center item: anchors the toolbar layout so the trailing
-            // details toggle is pushed to the far-right edge instead of packing
-            // next to the leading group.
-            ToolbarItem(placement: .principal) {
-                Color.clear.frame(width: 1, height: 1)
-            }
             // All primary actions live on the leading edge in one flat group:
             // Properties, Search, the add/import actions, then the More menu. On
             // macOS 26 the group opts out of the toolbar's shared Liquid Glass
@@ -1491,7 +1485,7 @@ struct ContentView: View {
             }
             #endif
             // Trailing toggle for the details panel, pushed to the far-right edge
-            // by the clear principal item at the top of this toolbar.
+            // by the principal item owned by SyncStatusBanner.
             ToolbarItemGroup(placement: .primaryAction) {
                 if mainDestination == .library {
                     if columnVisibility == .detailOnly, homeHasAttention {

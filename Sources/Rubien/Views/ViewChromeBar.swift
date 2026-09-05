@@ -307,11 +307,6 @@ private struct DisplayMenuPopover: View {
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
                             .fill(AccentColorManager.shared.effectiveColor.opacity(density == option ? 0.12 : 0))
                     }
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .strokeBorder(AccentColorManager.shared.effectiveColor.opacity(density == option ? 0.25 : 0), lineWidth: 0.5)
-                            .allowsHitTesting(false)
-                    }
                     .accessibilityAddTraits(density == option ? .isSelected : [])
                 }
             }
