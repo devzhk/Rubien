@@ -705,5 +705,26 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.7.8</title>
+            <description sparkle:format="plain-text"><![CDATA[• Scan your library more easily with Comfortable and Compact layouts, author/year bylines, and clearer column controls.
+• Search Everything, Papers, or Notes & highlights, including matching PDF and web annotations, with excerpts loaded as results appear.
+• Set up the Assistant more easily with connection details and binary paths together, clear conversation defaults, and visible permissions.
+• Enjoy softer accent highlights, consistent popovers, and tag/option controls that appear when a row is hovered or selected.
+• Keep your saved column order while new layouts prioritize tags and custom columns, followed by status, year, and authors.
+• Keep Home controls accessible with sync notices in the top toolbar, and newly imported titles and author bylines fully visible.
+• Confirm before deleting custom properties and retain matching search selections when changing year filters.
+• Use the same search scopes through the CLI and both MCP servers.]]></description>
+            <pubDate>Sat, 05 Sep 2026 20:46:35 +0000</pubDate>
+            <sparkle:version>46</sparkle:version>
+            <sparkle:shortVersionString>0.7.8</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien/releases/download/v0.7.8/Rubien-0.7.8.dmg"
+                sparkle:edSignature="wuV78WrqN0LNt57wf5yOSZaGnEL8NpRnI1gVhu5K6kOK21f3j+S1R7FSm5y3U5E/9mhVQSHUd4M1GEp2Qjo0DQ=="
+                length="18518478"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
