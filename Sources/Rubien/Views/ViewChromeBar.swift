@@ -284,6 +284,8 @@ private struct DisplayMenuPopover: View {
             }
         }
         .frame(width: 290)
+        .neutralGlassCard(cornerRadius: 16)
+        .presentationBackground(.clear)
     }
 }
 
