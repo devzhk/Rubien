@@ -85,6 +85,9 @@ final class LibraryUXTests: XCTestCase {
         final class Table: NSTableView {
             var invalidated: [IndexSet] = []
             override func row(for view: NSView) -> Int { 3 }
+            override func rect(ofRow row: Int) -> NSRect {
+                NSRect(x: 0, y: 0, width: 200, height: 100)
+            }
             override func noteHeightOfRows(withIndexesChanged indexes: IndexSet) {
                 invalidated.append(indexes)
             }

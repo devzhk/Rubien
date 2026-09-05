@@ -49,7 +49,18 @@ struct ReferenceCellHeightObserver: NSViewRepresentable {
                         let row = table.row(for: self)
                         guard table.usesAutomaticRowHeights, row >= 0 else { return }
                         self.needsHeightUpdate = false
-                        table.noteHeightOfRows(withIndexesChanged: IndexSet(integer: row))
+                        let rows = IndexSet(integer: row)
+                        table.noteHeightOfRows(withIndexesChanged: rows)
+                        // Newly inserted SwiftUI rows can retain AppKit's estimated
+                        // height even after their content has been measured. If
+                        // that cache still clips the title, reset automatic sizing
+                        // without rebuilding the table or changing its selection.
+                        if let height = self.measuredHeight,
+                           table.rect(ofRow: row).height + 0.5 < height {
+                            table.usesAutomaticRowHeights = false
+                            table.usesAutomaticRowHeights = true
+                            table.noteHeightOfRows(withIndexesChanged: rows)
+                        }
                         return
                     }
                     ancestor = view.superview
