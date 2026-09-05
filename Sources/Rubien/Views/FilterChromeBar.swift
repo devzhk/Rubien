@@ -29,6 +29,7 @@ struct FilterChromeBar: View {
 
 
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
     }
