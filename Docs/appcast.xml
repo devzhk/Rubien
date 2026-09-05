@@ -690,5 +690,20 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.7.7</title>
+            <description sparkle:format="plain-text"><![CDATA[• Improves iCloud sync recovery for conflicts, already-deleted records, and records missing from the server.
+• Adds copy buttons to code blocks in clipped web articles.]]></description>
+            <pubDate>Sat, 05 Sep 2026 00:25:41 +0000</pubDate>
+            <sparkle:version>45</sparkle:version>
+            <sparkle:shortVersionString>0.7.7</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien/releases/download/v0.7.7/Rubien-0.7.7.dmg"
+                sparkle:edSignature="Ur0jYfUtwvhye6uSjFJUjKy92qTxg5gZY8MNpc/wwPXyXy73gYxKU4RxBxdIgJKYzQ5WYx4tXcHV25crDmVAAw=="
+                length="18446608"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
