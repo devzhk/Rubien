@@ -131,6 +131,18 @@ private extension View {
     }
 }
 
+/// Compact bibliographic context for the Comfortable table layout.
+func referenceTableByline(_ reference: Reference) -> String? {
+    let authors = reference.authors
+    var parts: [String] = []
+    if let first = authors.first {
+        let name = first.family.isEmpty ? first.given : first.family
+        if !name.isEmpty { parts.append(authors.count > 1 ? "\(name) et al." : name) }
+    }
+    if let year = reference.year { parts.append(String(year)) }
+    return parts.isEmpty ? nil : parts.joined(separator: " · ")
+}
+
 // MARK: - Editable String Cell
 
 struct EditableStringCell: View, Equatable {
@@ -142,6 +154,9 @@ struct EditableStringCell: View, Equatable {
     var placeholder: String = "—"
     var onTab: ((_ backwards: Bool) -> Void)? = nil
     var wrap: Bool = false
+    var subtitle: String? = nil
+    var displayLineLimit: Int? = nil
+    var verticalPadding: CGFloat = 0
 
     // Closures (onBeginEdit/onCommit/onCancel/onTab) are tap/commit handlers,
     // not read in body. Safe to exclude per the plan's safety invariant.
@@ -150,6 +165,9 @@ struct EditableStringCell: View, Equatable {
             && lhs.isEditing == rhs.isEditing
             && lhs.placeholder == rhs.placeholder
             && lhs.wrap == rhs.wrap
+            && lhs.subtitle == rhs.subtitle
+            && lhs.displayLineLimit == rhs.displayLineLimit
+            && lhs.verticalPadding == rhs.verticalPadding
     }
 
     @State private var editText = ""
@@ -185,13 +203,22 @@ struct EditableStringCell: View, Equatable {
                 .padding(.vertical, 1)
                 .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 4))
         } else {
-            Text(value.isEmpty ? placeholder : value)
-                .font(.callout)
-                .foregroundStyle(value.isEmpty ? .quaternary : .primary)
-                .lineLimit(wrap ? nil : 1)
-                .truncationMode(.middle)
-                .fixedSize(horizontal: false, vertical: wrap)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(value.isEmpty ? placeholder : value)
+                    .font(.callout)
+                    .foregroundStyle(value.isEmpty ? .quaternary : .primary)
+                    .lineLimit(wrap ? displayLineLimit : 1)
+                    .truncationMode(subtitle == nil ? .middle : .tail)
+                    .fixedSize(horizontal: false, vertical: wrap)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            .padding(.vertical, verticalPadding)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

@@ -147,6 +147,21 @@ final class PdfCommandTests: XCTestCase {
         XCTAssertTrue(trimmed.hasPrefix("["), "Expected JSON array, got: \(trimmed.prefix(40))")
     }
 
+    func testSearchScopeFlagsPreserveJSONArrayContract() throws {
+        try skipIfBinaryMissing()
+        for scope in ["everything", "papers", "notes"] {
+            let result = try runCLI(["search", "unlikelyscopeterm", "--scope", scope])
+            XCTAssertEqual(result.exitCode, 0, result.stderr)
+            XCTAssertTrue(result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("["))
+        }
+        let invalid = try runCLI(["search", "term", "--scope", "invalid"])
+        XCTAssertNotEqual(invalid.exitCode, 0)
+        XCTAssertTrue(invalid.stderr.contains("--scope"))
+        let conflict = try runCLI(["search", "term", "--scope", "notes", "--in", "title"])
+        XCTAssertNotEqual(conflict.exitCode, 0)
+        XCTAssertTrue(conflict.stderr.contains("--in"))
+    }
+
     func testSearchRejectsUnknownOpValue() throws {
         try skipIfBinaryMissing()
         let r = try runCLI([

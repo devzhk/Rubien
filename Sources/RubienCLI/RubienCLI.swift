@@ -481,9 +481,23 @@ struct Search: ParsableCommand {
     )
     var op: String?
 
+    @Option(name: .long, help: "Content to search: everything, papers (metadata), or notes (notes and highlights). Omit for legacy FTS search. Cannot be combined with --in.")
+    var scope: String?
+
     func run() throws {
         var filter = ReferenceFilter()
         filter.keyword = query
+        if let scope {
+            guard let parsed = ReferenceSearchScope(rawValue: scope.lowercased()) else {
+                printJSONError("Unknown --scope '\(scope)'. Valid: everything, papers, notes")
+                throw ExitCode.failure
+            }
+            guard inFields == nil else {
+                printJSONError("Choose --scope or --in, not both")
+                throw ExitCode.failure
+            }
+            filter.contentScope = parsed
+        }
         if let inFields, !inFields.isEmpty {
             let raw = inFields
                 .split(separator: ",")

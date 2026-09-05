@@ -5159,6 +5159,14 @@ public enum ReferenceScope: Sendable {
     case tag(Int64)
 }
 
+/// Which library content a search should match. Papers means bibliographic
+/// records (including books and web sources), not a reference-type filter.
+public enum ReferenceSearchScope: String, CaseIterable, Sendable {
+    case everything
+    case papers
+    case notesAndHighlights = "notes"
+}
+
 /// Structured search predicates that can be pushed down to SQL.
 public struct ReferenceFilter: Sendable {
     public enum KeywordOperator: String, Sendable {
@@ -5166,6 +5174,8 @@ public struct ReferenceFilter: Sendable {
         case or
     }
 
+    /// nil preserves the legacy FTS-only contract for existing callers.
+    public var contentScope: ReferenceSearchScope? = nil
     public var keyword: String = ""
     public var author: String = ""
     public var yearFrom: Int? = nil
@@ -5193,7 +5203,7 @@ public struct ReferenceFilter: Sendable {
         keyword.isEmpty && author.isEmpty && yearFrom == nil
             && yearTo == nil && journal.isEmpty && referenceType == nil
             && !titleOnly && hasPDF == nil
-            && readingStatus == nil
+            && readingStatus == nil && contentScope != .notesAndHighlights
     }
 
     public init() {}
@@ -5230,6 +5240,11 @@ private let referenceFTSColumnAliases: [String: String] = {
 }()
 
 extension ReferenceFilter {
+    /// Literal query terms shared by matching and result excerpts.
+    public static func keywordTokens(_ raw: String) -> [String] {
+        sanitizedReferenceSearchTokens(raw)
+    }
+
     /// Caller-facing list of accepted column names for `keywordFields`,
     /// derived from `referenceFTSColumns` (single source of truth). Surface
     /// this in CLI/MCP help text.
@@ -5298,6 +5313,63 @@ fileprivate func sanitizedReferenceSearchTokens(_ raw: String) -> [String] {
                 .replacingOccurrences(of: ")", with: "")
         }
         .filter { !$0.isEmpty }
+}
+
+/// Foundation supplies Unicode case/diacritic matching that SQLite LIKE lacks.
+/// The function is installed on the connection used by each scoped fetch, so
+/// caller-supplied DatabaseQueues and pooled readers behave identically.
+private let referenceSearchContains = DatabaseFunction("rubienSearchContains", argumentCount: 2, pure: true) { values in
+    guard let text = String.fromDatabaseValue(values[0]),
+          let term = String.fromDatabaseValue(values[1]) else { return false }
+    return text.range(of: term, options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX")) != nil
+}
+
+/// Parameterized matching shared by the app and CLI. Annotation EXISTS queries
+/// use the existing referenceId indexes and cannot duplicate a reference row.
+private func scopedReferenceSearchPredicate(
+    scope: ReferenceSearchScope,
+    filter: ReferenceFilter,
+    tokens: [String]
+) -> (sql: String, arguments: [String], relevanceMatch: String?) {
+    let hasNotes = """
+        (COALESCE(reference.notes, '') != ''
+        OR EXISTS (SELECT 1 FROM pdfAnnotation WHERE referenceId = reference.id AND (COALESCE(selectedText, '') != '' OR COALESCE(noteText, '') != ''))
+        OR EXISTS (SELECT 1 FROM webAnnotation WHERE referenceId = reference.id AND (anchorText != '' OR COALESCE(noteText, '') != '')))
+        """
+    guard !tokens.isEmpty else {
+        return (scope == .notesAndHighlights ? hasNotes : "1", [], nil)
+    }
+    if filter.titleOnly && scope != .notesAndHighlights {
+        // Keep the existing title-only substring semantics.
+        return (tokens.map { _ in "reference.title LIKE ?" }.joined(separator: " AND "), tokens.map { "%\($0)%" }, nil)
+    }
+    var fields = sanitizedFTSFields(filter.keywordFields)
+    if scope == .notesAndHighlights {
+        fields = ["notes"]
+    } else if scope == .papers {
+        let metadataFields = referenceFTSColumns.map(\.canonical).filter { $0 != "notes" && $0 != "webContent" }
+        fields = fields.isEmpty ? metadataFields : fields.filter { metadataFields.contains($0) }
+        if fields.isEmpty { return ("0", [], nil) }
+    }
+    let combinator = filter.keywordOperator == .or ? " OR " : " AND "
+    let matches = tokens.map { token in
+        fields.isEmpty ? "\"\(token)\" *" : "(" + fields.map { "\($0):\"\(token)\" *" }.joined(separator: " OR ") + ")"
+    }
+    let includesAnnotations = scope != .papers && !filter.titleOnly && filter.keywordFields.isEmpty
+    guard includesAnnotations || scope == .notesAndHighlights else {
+        let match = matches.joined(separator: combinator)
+        return ("reference.id IN (SELECT rowid FROM referenceFts WHERE referenceFts MATCH ?)", [match], match)
+    }
+    var arguments: [String] = []
+    let predicates = zip(tokens, matches).map { token, match in
+        arguments.append(contentsOf: [match, token, token, token, token])
+        return """
+            (reference.id IN (SELECT rowid FROM referenceFts WHERE referenceFts MATCH ?)
+            OR EXISTS (SELECT 1 FROM pdfAnnotation WHERE referenceId = reference.id AND (rubienSearchContains(selectedText, ?) OR rubienSearchContains(noteText, ?)))
+            OR EXISTS (SELECT 1 FROM webAnnotation WHERE referenceId = reference.id AND (rubienSearchContains(anchorText, ?) OR rubienSearchContains(noteText, ?))))
+            """
+    }
+    return (predicates.joined(separator: combinator), arguments, matches.joined(separator: combinator))
 }
 
 extension AppDatabase {
@@ -5387,7 +5459,12 @@ extension AppDatabase {
         }
 
         // ── 2. Apply SQL-level predicates ─────────────────────────────────
-        if !sanitizedKeywordTokens.isEmpty {
+        if let contentScope = filter.contentScope {
+            db.add(function: referenceSearchContains)
+            let predicate = scopedReferenceSearchPredicate(scope: contentScope, filter: filter, tokens: sanitizedKeywordTokens)
+            request = request.filter(sql: predicate.sql, arguments: StatementArguments(predicate.arguments))
+            relevanceMatch = predicate.relevanceMatch
+        } else if !sanitizedKeywordTokens.isEmpty {
             if filter.titleOnly {
                 for token in sanitizedKeywordTokens {
                     request = request.filter(Reference.Columns.title.like("%\(token)%"))
@@ -5454,7 +5531,7 @@ extension AppDatabase {
             // already-FTS-filtered row, so the request shape (scope/filters/limit) is untouched.
             // bm25 is ascending (more negative = better); dateAdded + id make ties deterministic.
             request = request.order(
-                sql: "(SELECT bm25(referenceFts) FROM referenceFts WHERE referenceFts MATCH ? AND referenceFts.rowid = reference.id) ASC, reference.dateAdded DESC, reference.id DESC",
+                sql: "(SELECT bm25(referenceFts) FROM referenceFts WHERE referenceFts MATCH ? AND referenceFts.rowid = reference.id) ASC NULLS LAST, reference.dateAdded DESC, reference.id DESC",
                 arguments: [relevanceMatch]
             )
         } else {

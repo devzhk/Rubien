@@ -27,7 +27,7 @@ struct PropertyManagerPopover: View {
         VStack(alignment: .leading, spacing: 0) {
             // Header
             HStack {
-                Text("Properties")
+                Text("Manage Columns")
                     .font(.system(size: 12, weight: .semibold))
                 Spacer()
                 Button {

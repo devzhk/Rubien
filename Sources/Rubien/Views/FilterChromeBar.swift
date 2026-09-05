@@ -7,7 +7,6 @@ struct FilterChromeBar: View {
     let tags: [Tag]
     let propertyDefs: [PropertyDefinition]
 
-    @State private var showAdd: Bool = false
 
     var body: some View {
         FlowLayout(spacing: 6) {
@@ -28,23 +27,7 @@ struct FilterChromeBar: View {
                 )
             }
 
-            Button {
-                showAdd = true
-            } label: {
-                ChromeBarPill(iconName: "plus", label: "Add filter")
-            }
-            .buttonStyle(.plain)
-            .popover(isPresented: $showAdd) {
-                FilterEditorPopover(
-                    tags: tags,
-                    propertyDefs: propertyDefs,
-                    onCommit: { newFilter in
-                        filters.append(newFilter)
-                        showAdd = false
-                    },
-                    onCancel: { showAdd = false }
-                )
-            }
+
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)

@@ -9,12 +9,14 @@ struct ViewChromeBar: View {
     @Binding var sorts: [ViewSort]
     @Binding var groupBy: GroupConfig?
     @Binding var columnWraps: Set<String>
+    @Binding var density: ReferenceTableDensity
     /// Resolves the table's current visibility for a column by `customizationID`.
     /// Passed as a closure rather than a `TableColumnCustomization` binding so
     /// chrome-bar code doesn't depend on the Table's implementation type.
     let isColumnVisible: (String) -> Bool
     let tags: [Tag]
-    let propertyDefs: [PropertyDefinition]
+    @Binding var propertyDefs: [PropertyDefinition]
+    let db: AppDatabase
     let currentBuckets: [GroupBucket]
     let isDirty: Bool
     let onSave: () -> Void
@@ -22,6 +24,8 @@ struct ViewChromeBar: View {
 
     @EnvironmentObject private var syncCoordinator: SyncCoordinator
 
+    @State private var showFilterEditor = false
+    @State private var showColumns = false
     @State private var showSortEditor = false
     @State private var showGroupEditor = false
     @State private var showDisplayMenu = false
@@ -31,6 +35,9 @@ struct ViewChromeBar: View {
             row1
             Divider()
             row2
+            if !filters.isEmpty {
+                FilterChromeBar(filters: $filters, tags: tags, propertyDefs: propertyDefs)
+            }
             Divider()
         }
         .liquidGlassSurface(in: Rectangle(), fallback: .bar)
@@ -68,20 +75,75 @@ struct ViewChromeBar: View {
     }
 
     private var row2: some View {
-        HStack(spacing: 8) {
-            FilterChromeBar(
-                filters: $filters,
-                tags: tags,
-                propertyDefs: propertyDefs
-            )
-            sortButton
-            groupButton
-            displayButton
-                .padding(.trailing, 12)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 6) {
+                organizationControls
+                Spacer(minLength: 12)
+                Divider().frame(height: 16)
+                appearanceControls
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) { organizationControls }
+                HStack(spacing: 6) { appearanceControls }
+            }
         }
-        // Suppress the macOS focus ring on these always-on controls so one of
-        // them isn't auto-highlighted whenever the view loads.
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
         .focusEffectDisabled()
+    }
+
+    @ViewBuilder
+    private var organizationControls: some View {
+        Button {
+            showFilterEditor = true
+        } label: {
+            ChromeBarPill(iconName: "line.3.horizontal.decrease", label: filters.isEmpty ? "Filter" : "Filter \(filters.count)")
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $showFilterEditor) {
+            FilterEditorPopover(
+                tags: tags,
+                propertyDefs: propertyDefs,
+                onCommit: { filters.append($0); showFilterEditor = false },
+                onCancel: { showFilterEditor = false }
+            )
+        }
+        sortButton
+        groupButton
+    }
+
+    @ViewBuilder
+    private var appearanceControls: some View {
+        displayButton
+        Button {
+            showColumns = true
+        } label: {
+            ChromeBarPill(iconName: "tablecells", label: "Manage Columns")
+        }
+        .buttonStyle(.plain)
+        .popover(isPresented: $showColumns) {
+            PropertyManagerPopover(
+                propertyDefs: $propertyDefs,
+                onToggleVisibility: { id, visible in
+                    try? db.togglePropertyVisibility(id: id, visible: visible)
+                },
+                onDelete: { try? db.deletePropertyDefinition(id: $0) },
+                onReorder: { try? db.reorderProperties($0) },
+                onCreateProperty: { name, type in
+                    var property = PropertyDefinition(
+                        name: name, type: type,
+                        sortOrder: (propertyDefs.map(\.sortOrder).max() ?? 0) + 1,
+                        isDefault: false, isVisible: true
+                    )
+                    try? db.savePropertyDefinition(&property)
+                },
+                onRenameProperty: { id, name in
+                    guard var property = propertyDefs.first(where: { $0.id == id }) else { return }
+                    property.name = name
+                    try? db.savePropertyDefinition(&property)
+                }
+            )
+        }
     }
 
     private var sortButton: some View {
@@ -103,8 +165,8 @@ struct ViewChromeBar: View {
     private var sortButtonLabel: String {
         switch sorts.count {
         case 0: return "Sort"
-        case 1: return "Sorted by \(sorts[0].target.displayLabel(propertyDefs: propertyDefs))"
-        default: return "Sorted by \(sorts.count) fields"
+        case 1: return "Sort: \(sorts[0].target.displayLabel(propertyDefs: propertyDefs)) \(sorts[0].ascending ? "↑" : "↓")"
+        default: return "Sort: \(sorts.count) fields"
         }
     }
 
@@ -127,19 +189,20 @@ struct ViewChromeBar: View {
 
     private var groupButtonLabel: String {
         guard let groupBy else { return "Group" }
-        return "Grouped by \(groupBy.target.displayLabel(propertyDefs: propertyDefs))"
+        return "Group: \(groupBy.target.displayLabel(propertyDefs: propertyDefs))"
     }
 
     private var displayButton: some View {
         Button {
             showDisplayMenu = true
         } label: {
-            ChromeBarPill(iconName: "text.alignleft", label: displayButtonLabel)
+            ChromeBarPill(iconName: "rectangle.split.3x1", label: "Layout: \(density.label)")
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showDisplayMenu) {
             DisplayMenuPopover(
                 columnWraps: $columnWraps,
+                density: $density,
                 isColumnVisible: isColumnVisible,
                 propertyDefs: propertyDefs
             )
@@ -147,22 +210,14 @@ struct ViewChromeBar: View {
         }
     }
 
-    private var displayButtonLabel: String {
-        let visibleWrapCount = visibleReferenceTableWrappableColumns(
-            propertyDefs: propertyDefs,
-            isColumnVisible: isColumnVisible
-        )
-        .lazy
-        .filter { columnWraps.contains($0.id) }
-        .count
-        return visibleWrapCount == 0 ? "Wrap" : "Wrapping \(visibleWrapCount)"
-    }
+
 }
 
 /// Lists columns that are (a) currently visible in the table and (b) whose
 /// cell renderer honors the `wrap` flag, with a toggle each.
 private struct DisplayMenuPopover: View {
     @Binding var columnWraps: Set<String>
+    @Binding var density: ReferenceTableDensity
     let isColumnVisible: (String) -> Bool
     let propertyDefs: [PropertyDefinition]
 
@@ -175,7 +230,24 @@ private struct DisplayMenuPopover: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Wrap Columns")
+            Picker("View density", selection: $density) {
+                ForEach(ReferenceTableDensity.allCases, id: \.self) { density in
+                    Text(density.label).tag(density)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(12)
+            .onChange(of: density) { _, value in
+                if value == .comfortable { columnWraps.insert(ColumnIdentifier.title.rawValue) }
+                else { columnWraps.remove(ColumnIdentifier.title.rawValue) }
+            }
+            Text("Comfortable shows authors and year below the title.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 10)
+            Divider()
+            Text("Wrapping")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 12)
@@ -196,8 +268,12 @@ private struct DisplayMenuPopover: View {
                             else { columnWraps.remove(entry.id) }
                         }
                     )) {
-                        Text(entry.label)
-                            .font(.system(size: 12))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(entry.label).font(.system(size: 12))
+                            if entry.id == ColumnIdentifier.title.rawValue && density == .comfortable {
+                                Text("Up to two lines").font(.caption2).foregroundStyle(.secondary)
+                            }
+                        }
                     }
                     .toggleStyle(.switch)
                     .controlSize(.mini)
@@ -207,7 +283,7 @@ private struct DisplayMenuPopover: View {
                 .padding(.bottom, 6)
             }
         }
-        .frame(minWidth: 220)
+        .frame(width: 290)
     }
 }
 

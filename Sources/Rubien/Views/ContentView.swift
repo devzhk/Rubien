@@ -834,6 +834,7 @@ final class LibraryViewModel: ObservableObject {
             name: name,
             icon: icon,
             scope: scope,
+            columnWraps: referenceTableDefaultWraps(for: nil, density: RubienPreferences.referenceTableDensity),
             isDefault: false,
             displayOrder: maxOrder + 1
         )
@@ -874,7 +875,7 @@ final class LibraryViewModel: ObservableObject {
                 filters: [],
                 sorts: [.defaultSort],
                 groupBy: nil,
-                columnWraps: []
+                columnWraps: referenceTableDefaultWraps(for: nil, density: RubienPreferences.referenceTableDensity)
             ))
             return
         }
@@ -966,9 +967,17 @@ final class LibraryViewModel: ObservableObject {
     func selectDefaultViewIfNeeded() {
         guard !hasAppliedDefaultView else { return }
         if case .allReferences = selectedSidebar,
-           let defaultView = databaseViews.first(where: \.isDefault),
+           var defaultView = databaseViews.first(where: \.isDefault),
            let id = defaultView.id {
             hasAppliedDefaultView = true
+            do {
+                try initializeReferenceTableLayout(for: &defaultView, db: db, density: RubienPreferences.referenceTableDensity)
+                if let index = databaseViews.firstIndex(where: { $0.id == id }) {
+                    databaseViews[index] = defaultView
+                }
+            } catch {
+                errorMessage = "Save default layout failed: \(error.localizedDescription)"
+            }
             selectSidebar(.view(id), stashCurrentDraft: false)
         }
     }
@@ -992,7 +1001,6 @@ struct ContentView: View {
     @Environment(UpdateController.self) private var updateController
     #endif
     @State private var showSearch = false
-    @State private var showPropertyManager = false
     @State private var showInspector = true
     @State private var inspectorWidth: CGFloat = 380
     @State private var showAddReference = false
@@ -1138,7 +1146,7 @@ struct ContentView: View {
         )
     }
 
-    /// The leading toolbar's flat controls, in order: Manage Properties, Search, the
+    /// The leading toolbar's flat controls, in order: Search, the
     /// Add Reference button, then the More-import menu. Rendered with
     /// `ToolbarHoverButtonStyle` (no glass capsule, just a light hover) and a
     /// shared `.titleAndIcon` label style. The enclosing `ToolbarItemGroup` opts
@@ -1146,44 +1154,6 @@ struct ContentView: View {
     @ViewBuilder
     private var leadingToolbarButtons: some View {
         Group {
-            if mainDestination == .library {
-                Button {
-                    showPropertyManager.toggle()
-                } label: {
-                    Label("Manage Properties", systemImage: "slider.horizontal.3")
-                }
-                .help("Manage properties")
-                .popover(isPresented: $showPropertyManager) {
-                    PropertyManagerPopover(
-                        propertyDefs: Binding(
-                            get: { viewModel.propertyDefs },
-                            set: { viewModel.propertyDefs = $0 }
-                        ),
-                        onToggleVisibility: { propId, visible in
-                            try? viewModel.db.togglePropertyVisibility(id: propId, visible: visible)
-                        },
-                        onDelete: { propId in
-                            try? viewModel.db.deletePropertyDefinition(id: propId)
-                        },
-                        onReorder: { orderedIds in
-                            try? viewModel.db.reorderProperties(orderedIds)
-                        },
-                        onCreateProperty: { name, type in
-                            let maxOrder = viewModel.propertyDefs.map(\.sortOrder).max() ?? 0
-                            var newProp = PropertyDefinition(
-                                name: name, type: type, sortOrder: maxOrder + 1, isDefault: false, isVisible: true
-                            )
-                            try? viewModel.db.savePropertyDefinition(&newProp)
-                        },
-                        onRenameProperty: { propId, newName in
-                            if var prop = viewModel.propertyDefs.first(where: { $0.id == propId }) {
-                                prop.name = newName
-                                try? viewModel.db.savePropertyDefinition(&prop)
-                            }
-                        }
-                    )
-                }
-            }
 
             Button {
                 showSearch = true

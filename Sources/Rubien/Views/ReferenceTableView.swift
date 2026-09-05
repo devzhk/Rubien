@@ -49,6 +49,33 @@ func visibleReferenceTableWrappableColumns(
     return result
 }
 
+/// The untouched seeded view adopts the new presentation default. Views that
+/// have been saved keep their explicit wrapping choices, including an empty set.
+func referenceTableDefaultWraps(for view: DatabaseView?, density: ReferenceTableDensity) -> Set<String> {
+    if let view {
+        if view.isDefault && view.dateCreated == view.dateModified && view.parsedColumnWraps.isEmpty {
+            return density == .comfortable ? [ColumnIdentifier.title.rawValue] : []
+        }
+        return view.parsedColumnWraps
+    }
+    return density == .comfortable ? [ColumnIdentifier.title.rawValue] : []
+}
+
+/// Persist the seeded default once, so renaming or reordering the view cannot
+/// later change its effective layout. Existing saved views are left alone.
+func initializeReferenceTableLayout(
+    for view: inout DatabaseView,
+    db: AppDatabase,
+    density: ReferenceTableDensity
+) throws {
+    let wraps = referenceTableDefaultWraps(for: view, density: density)
+    guard wraps != view.parsedColumnWraps else { return }
+    var updated = view
+    updated.parsedColumnWraps = wraps
+    try db.saveDatabaseView(&updated)
+    view = updated
+}
+
 struct ReferenceTableView: View {
     private enum BatchToolbarAction {
         case delete
@@ -120,6 +147,8 @@ struct ReferenceTableView: View {
     var isActive = true
     var pdfAttachmentRevision = 0
 
+    @AppStorage(RubienPreferences.referenceTableDensityKey)
+    private var density: ReferenceTableDensity = .comfortable
     @State private var selection = Set<Reference.ID>()
     @State private var showDeleteConfirm = false
     @State private var hoveredBatchToolbarAction: BatchToolbarAction?
@@ -151,9 +180,11 @@ struct ReferenceTableView: View {
                 sorts: $sorts,
                 groupBy: $groupBy,
                 columnWraps: $viewColumnWraps,
+                density: $density,
                 isColumnVisible: { id in columnCustomization[visibility: id] != .hidden },
                 tags: allTags,
-                propertyDefs: propertyDefs,
+                propertyDefs: $propertyDefs,
+                db: db,
                 currentBuckets: snapshot.buckets ?? [],
                 isDirty: isDirty,
                 onSave: onSaveView,
@@ -267,6 +298,7 @@ struct ReferenceTableView: View {
             customPropertyValueMap: customPropertyValueMap,
             db: db,
             wrapForColumn: { id in viewColumnWraps.contains(id) },
+            density: density,
             columnCustomization: $columnCustomization
         )
         .background(
@@ -274,7 +306,7 @@ struct ReferenceTableView: View {
                 selectedId: selectedId,
                 scrollRequest: scrollRequest,
                 rowIDs: visibleTableRowIDs(processed: processed, buckets: buckets),
-                usesAutomaticRowHeights: hasVisibleWrappedColumn
+                usesAutomaticRowHeights: density == .comfortable || hasVisibleWrappedColumn
             )
         )
         .background(ReferenceTableRowHover())
@@ -665,6 +697,7 @@ private struct ReferenceTableContent: View {
     let customPropertyValueMap: [Int64: [Int64: String]]
     let db: AppDatabase
     let wrapForColumn: (String) -> Bool
+    let density: ReferenceTableDensity
     @Binding var columnCustomization: TableColumnCustomization<Reference>
 
     @State private var editingCell: EditingCellID? = nil
@@ -757,7 +790,10 @@ private struct ReferenceTableContent: View {
                     advanceEdit(from: id, fieldKey: ColumnIdentifier.title.rawValue, backwards: back)
                 }
             },
-            wrap: wrapForColumn(ColumnIdentifier.title.rawValue)
+            wrap: wrapForColumn(ColumnIdentifier.title.rawValue),
+            subtitle: density == .comfortable ? referenceTableByline(ref) : nil,
+            displayLineLimit: density == .comfortable ? 2 : nil,
+            verticalPadding: density == .comfortable ? 6 : 0
         )
         .equatable()
     }

@@ -14,6 +14,7 @@ struct SearchOverlay: View {
     @State private var selectedIndex: Int?
 
     // Filters
+    @State private var contentScope: ReferenceSearchScope = .everything
     @State private var titleOnly = false
     @State private var selectedType: ReferenceType?
     @State private var hasPDF: Bool?
@@ -21,6 +22,8 @@ struct SearchOverlay: View {
     @State private var yearTo = ""
     @State private var showFilters = false
     @State private var results: [Reference] = []
+    @State private var excerpts: [Int64: LibrarySearchExcerpt] = [:]
+    @State private var isSearching = false
     @State private var errorMessage: String?
     @State private var searchTask: Task<Void, Never>?
 
@@ -33,13 +36,13 @@ struct SearchOverlay: View {
     @State private var keyboardNavigated = false
 
     private var hasActiveFilters: Bool {
-        titleOnly || selectedType != nil ||
+        (contentScope != .notesAndHighlights && titleOnly) || selectedType != nil ||
         hasPDF != nil || !yearFrom.isEmpty || !yearTo.isEmpty
     }
 
     private var activeFilterCount: Int {
         var c = 0
-        if titleOnly { c += 1 }
+        if contentScope != .notesAndHighlights && titleOnly { c += 1 }
         if selectedType != nil { c += 1 }
         if hasPDF != nil { c += 1 }
         if !yearFrom.isEmpty || !yearTo.isEmpty { c += 1 }
@@ -48,6 +51,7 @@ struct SearchOverlay: View {
 
     private struct FilterState: Equatable {
         var query: String
+        var contentScope: ReferenceSearchScope
         var selectedType: ReferenceType?
         var hasPDF: Bool?
         var titleOnly: Bool
@@ -56,7 +60,7 @@ struct SearchOverlay: View {
     }
 
     private var filterState: FilterState {
-        FilterState(query: query, selectedType: selectedType, hasPDF: hasPDF, titleOnly: titleOnly, yearFrom: yearFrom, yearTo: yearTo)
+        FilterState(query: query, contentScope: contentScope, selectedType: selectedType, hasPDF: hasPDF, titleOnly: titleOnly, yearFrom: yearFrom, yearTo: yearTo)
     }
 
     var body: some View {
@@ -71,7 +75,7 @@ struct SearchOverlay: View {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 16))
                         .foregroundStyle(.secondary)
-                    TextField(String(localized: "Search references…", bundle: .module), text: $query)
+                    TextField(searchPlaceholder, text: $query)
                         .textFieldStyle(.plain)
                         .font(.system(size: 16))
                         .focused($isFocused)
@@ -115,6 +119,21 @@ struct SearchOverlay: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
 
+                Picker("Search scope", selection: $contentScope) {
+                    Text("Everything", bundle: .module).tag(ReferenceSearchScope.everything)
+                    Text("Papers", bundle: .module).tag(ReferenceSearchScope.papers)
+                    Text("Notes & highlights", bundle: .module).tag(ReferenceSearchScope.notesAndHighlights)
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 10)
+                Text(scopeDescription)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 10)
+
                 // Filter bar
                 Divider()
                 filterBar
@@ -134,13 +153,17 @@ struct SearchOverlay: View {
                 // Results
                 if results.isEmpty {
                     VStack(spacing: 6) {
-                        Image(systemName: "doc.text.magnifyingglass")
-                            .font(.system(size: 24))
-                            .foregroundStyle(.tertiary)
-                        Text("No results", bundle: .module)
+                        if isSearching {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "doc.text.magnifyingglass")
+                                .font(.system(size: 24))
+                                .foregroundStyle(.tertiary)
+                        }
+                        Text(isSearching ? String(localized: "Searching…", bundle: .module) : String(localized: "No results", bundle: .module))
                             .font(.callout)
                             .foregroundStyle(.secondary)
-                        if let errorMessage, !errorMessage.isEmpty {
+                        if !isSearching, let errorMessage, !errorMessage.isEmpty {
                             Text(errorMessage)
                                 .font(.caption)
                                 .foregroundStyle(.red)
@@ -166,6 +189,7 @@ struct SearchOverlay: View {
 
                                     SearchResultRow(
                                         reference: ref,
+                                        excerpt: excerpts[refId],
                                         hasPDF: ref.hasPDFInCache(in: db),
                                         isHighlighted: !isMultiSelectMode && selectedIndex == index,
                                         isMultiSelected: isMultiSelected
@@ -256,14 +280,10 @@ struct SearchOverlay: View {
             }
             return .handled
         }
-        .onChange(of: filterState) { oldState, newState in
+        .onChange(of: filterState) { _, _ in
             selectedIndex = 0
-            if oldState.query != newState.query ||
-               oldState.selectedType != newState.selectedType ||
-               oldState.hasPDF != newState.hasPDF ||
-               oldState.titleOnly != newState.titleOnly {
-                clearMultiSelection()
-            }
+            clearMultiSelection()
+            results = []
             scheduleSearch()
         }
         .animation(.easeInOut(duration: 0.18), value: isMultiSelectMode)
@@ -373,16 +393,34 @@ struct SearchOverlay: View {
         .padding(.vertical, 8)
     }
 
+    private var searchPlaceholder: String {
+        switch contentScope {
+        case .everything: return String(localized: "Search your library…", bundle: .module)
+        case .papers: return String(localized: "Search titles, authors, abstracts…", bundle: .module)
+        case .notesAndHighlights: return String(localized: "Search notes and highlighted text…", bundle: .module)
+        }
+    }
+
+    private var scopeDescription: String {
+        switch contentScope {
+        case .everything: return String(localized: "Reference metadata, saved web text, notes, and highlights.", bundle: .module)
+        case .papers: return String(localized: "Titles, authors, abstracts, and source metadata across all reference types.", bundle: .module)
+        case .notesAndHighlights: return String(localized: "Your notes and PDF or web highlights. Open a result to see its reference.", bundle: .module)
+        }
+    }
+
     // MARK: - Filter bar
 
     private var filterBar: some View {
         HStack(spacing: 6) {
-            FilterPill(
-                icon: "character.cursor.ibeam",
-                label: String(localized: "Title only", bundle: .module),
-                isActive: titleOnly
-            ) {
-                titleOnly.toggle()
+            if contentScope != .notesAndHighlights {
+                FilterPill(
+                    icon: "character.cursor.ibeam",
+                    label: String(localized: "Title only", bundle: .module),
+                    isActive: titleOnly
+                ) {
+                    titleOnly.toggle()
+                }
             }
 
             FilterPillMenu(icon: "doc.on.doc", label: typeLabel) {
@@ -491,6 +529,7 @@ struct SearchOverlay: View {
 
     private func scheduleSearch(immediate: Bool = false) {
         searchTask?.cancel()
+        isSearching = true
         searchTask = Task { @MainActor in
             if !immediate {
                 try? await Task.sleep(nanoseconds: 180_000_000)
@@ -502,24 +541,31 @@ struct SearchOverlay: View {
 
     @MainActor
     private func runSearch() async {
+        defer { if !Task.isCancelled { isSearching = false } }
         let limit = query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !hasActiveFilters ? 20 : 0
         let filter = buildFilter()
         let db = self.db
         let scope = self.scope
 
         do {
-            let fetched: [Reference] = try await withCheckedThrowingContinuation { continuation in
-                DispatchQueue.global(qos: .userInitiated).async {
-                    do {
-                        let refs = try db.fetchReferences(scope: scope, filter: filter, limit: limit, orderBy: .relevance)
-                        continuation.resume(returning: refs)
-                    } catch {
-                        continuation.resume(throwing: error)
-                    }
-                }
+            let worker = Task.detached(priority: .userInitiated) {
+                try Task.checkCancellation()
+                let refs = try db.fetchReferences(scope: scope, filter: filter, limit: limit, orderBy: .relevance)
+                try Task.checkCancellation()
+                let excerpts = try librarySearchExcerpts(
+                    db: db, references: refs, query: filter.keyword,
+                    scope: filter.contentScope ?? .everything, titleOnly: filter.titleOnly
+                )
+                return (refs, excerpts)
+            }
+            let fetched = try await withTaskCancellationHandler {
+                try await worker.value
+            } onCancel: {
+                worker.cancel()
             }
             guard !Task.isCancelled else { return }
-            results = fetched
+            results = fetched.0
+            excerpts = fetched.1
             errorMessage = nil
         } catch {
             guard !Task.isCancelled else { return }
@@ -532,7 +578,8 @@ struct SearchOverlay: View {
         filter.keyword = query
         filter.referenceType = selectedType
         filter.hasPDF = hasPDF
-        filter.titleOnly = titleOnly
+        filter.titleOnly = contentScope != .notesAndHighlights && titleOnly
+        filter.contentScope = contentScope
         filter.yearFrom = Int(yearFrom)
         filter.yearTo = Int(yearTo)
         return filter
@@ -679,6 +726,7 @@ private struct FilterPillMenu<Content: View>: View {
 
 private struct SearchResultRow: View {
     let reference: Reference
+    let excerpt: LibrarySearchExcerpt?
     /// Pre-computed by the parent so the row body stays sync.
     let hasPDF: Bool
     let isHighlighted: Bool
@@ -728,6 +776,12 @@ private struct SearchResultRow: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                }
+                if let excerpt {
+                    Text(excerpt.source + ": " + excerpt.text)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
                 }
             }
 

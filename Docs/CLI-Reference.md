@@ -78,6 +78,7 @@ Full-text search across the library. By default queries all 12 indexed FTS colum
 ```bash
 rubien-cli search "neural network" --limit 10
 rubien-cli search "transformer attention" --in title,abstract
+rubien-cli search "training budget" --scope notes
 rubien-cli search "diffusion gan" --op or --in title --limit 50
 ```
 
@@ -86,11 +87,14 @@ rubien-cli search "diffusion gan" --op or --in title --limit 50
 | `query` | String (required) | — | Search query (space-separated tokens) |
 | `-l, --limit` | Int | 20 | Maximum results |
 | `--in` | Comma list | (all 12 FTS columns) | Constrain to columns: `title`, `abstract`, `notes`, `authors`, `journal`, `doi`, `publisher`, `isbn`, `issn`, `institution`, `webContent`, `siteName` |
+| `--scope` | `everything` \| `papers` \| `notes` | (legacy FTS) | Everything adds PDF/web annotations; papers searches metadata and abstracts across all reference types; notes searches reference notes and PDF/web highlights or annotation notes. Mutually exclusive with `--in`. |
 | `--op` | `and` \| `or` | `and` | Combinator across query tokens — `and` = every token must match; `or` = any token |
 
 **Output:** JSON array of reference objects, ranked by full-text relevance (bm25, best match first). (`list --keyword` stays newest-first; use `search` when you want relevance ranking.)
 
 ---
+
+Scoped searches return the same reference JSON array, with each reference appearing once even if several annotations match. Metadata and reference notes use FTS prefix matching; annotation text uses Unicode case- and diacritic-insensitive literal substring matching. Multiple terms may match across a reference and its annotations. Existing calls without `--scope` retain their FTS-only behavior. No PDF body text is indexed by this feature.
 
 ## list
 

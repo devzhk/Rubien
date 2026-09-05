@@ -27,6 +27,17 @@ enum ColorSchemePreference: String, CaseIterable {
     }
 }
 
+enum ReferenceTableDensity: String, CaseIterable {
+    case comfortable, compact
+
+    var label: String {
+        switch self {
+        case .comfortable: return String(localized: "Comfortable", bundle: .module)
+        case .compact: return String(localized: "Compact", bundle: .module)
+        }
+    }
+}
+
 enum RubienPreferences {
     private static let appGroupDefaults =
         UserDefaults(suiteName: "9TXK4V3SS8.group.com.rubien.shared") ?? .standard
@@ -491,6 +502,11 @@ enum RubienPreferences {
                 UserDefaults.standard.removeObject(forKey: assistantCodexBinaryPathKey)
             }
         }
+    }
+
+    static let referenceTableDensityKey = "Rubien.referenceTableDensity"
+    static var referenceTableDensity: ReferenceTableDensity {
+        ReferenceTableDensity(rawValue: UserDefaults.standard.string(forKey: referenceTableDensityKey) ?? "") ?? .comfortable
     }
 
     static let columnConfigsKey = "Rubien.columnConfigs"
