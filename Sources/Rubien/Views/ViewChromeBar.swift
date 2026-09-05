@@ -209,7 +209,6 @@ struct ViewChromeBar: View {
         }
     }
 
-
 }
 
 /// Lists columns that are (a) currently visible in the table and (b) whose

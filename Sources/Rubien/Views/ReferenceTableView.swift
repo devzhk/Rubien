@@ -67,33 +67,6 @@ func visibleReferenceTableWrappableColumns(
     return result
 }
 
-/// The untouched seeded view adopts the new presentation default. Views that
-/// have been saved keep their explicit wrapping choices, including an empty set.
-func referenceTableDefaultWraps(for view: DatabaseView?, density: ReferenceTableDensity) -> Set<String> {
-    if let view {
-        if view.isDefault && view.dateCreated == view.dateModified && view.parsedColumnWraps.isEmpty {
-            return density == .comfortable ? [ColumnIdentifier.title.rawValue] : []
-        }
-        return view.parsedColumnWraps
-    }
-    return density == .comfortable ? [ColumnIdentifier.title.rawValue] : []
-}
-
-/// Persist the seeded default once, so renaming or reordering the view cannot
-/// later change its effective layout. Existing saved views are left alone.
-func initializeReferenceTableLayout(
-    for view: inout DatabaseView,
-    db: AppDatabase,
-    density: ReferenceTableDensity
-) throws {
-    let wraps = referenceTableDefaultWraps(for: view, density: density)
-    guard wraps != view.parsedColumnWraps else { return }
-    var updated = view
-    updated.parsedColumnWraps = wraps
-    try db.saveDatabaseView(&updated)
-    view = updated
-}
-
 struct ReferenceTableView: View {
     private enum BatchToolbarAction {
         case delete
@@ -291,9 +264,10 @@ struct ReferenceTableView: View {
         buckets: [GroupBucket]?,
         exportIDs: [Int64]
     ) -> some View {
-        ReferenceTableContent(
+        let rowIDs = visibleTableRowIDs(processed: processed, buckets: buckets)
+        return ReferenceTableContent(
             references: processed,
-            rowIDs: visibleTableRowIDs(processed: processed, buckets: buckets),
+            rowIDs: rowIDs,
             buckets: buckets,
             collapsedGroups: Binding(
                 get: { groupBy?.collapsed ?? [] },
@@ -327,7 +301,7 @@ struct ReferenceTableView: View {
             ReferenceTableSelectionScroller(
                 selectedId: selectedId,
                 scrollRequest: scrollRequest,
-                rowIDs: visibleTableRowIDs(processed: processed, buckets: buckets),
+                rowIDs: rowIDs,
                 usesAutomaticRowHeights: density == .comfortable || hasVisibleWrappedColumn
             )
         )

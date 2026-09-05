@@ -2,6 +2,21 @@
 import SwiftUI
 import RubienCore
 
+struct LibrarySearchFilterState: Equatable {
+    var query: String
+    var contentScope: ReferenceSearchScope
+    var selectedType: ReferenceType?
+    var hasPDF: Bool?
+    var titleOnly: Bool
+    var yearFrom: String
+    var yearTo: String
+
+    func preservesSelection(from old: Self) -> Bool {
+        query == old.query && contentScope == old.contentScope &&
+        selectedType == old.selectedType && hasPDF == old.hasPDF && titleOnly == old.titleOnly
+    }
+}
+
 struct SearchOverlay: View {
     let db: AppDatabase
     let scope: ReferenceScope
@@ -22,7 +37,7 @@ struct SearchOverlay: View {
     @State private var yearTo = ""
     @State private var showFilters = false
     @State private var results: [Reference] = []
-    @State private var excerpts: [Int64: LibrarySearchExcerpt] = [:]
+    @State private var excerptLoader = LibrarySearchExcerptLoader()
     @State private var isSearching = false
     @State private var errorMessage: String?
     @State private var searchTask: Task<Void, Never>?
@@ -49,18 +64,8 @@ struct SearchOverlay: View {
         return c
     }
 
-    private struct FilterState: Equatable {
-        var query: String
-        var contentScope: ReferenceSearchScope
-        var selectedType: ReferenceType?
-        var hasPDF: Bool?
-        var titleOnly: Bool
-        var yearFrom: String
-        var yearTo: String
-    }
-
-    private var filterState: FilterState {
-        FilterState(query: query, contentScope: contentScope, selectedType: selectedType, hasPDF: hasPDF, titleOnly: titleOnly, yearFrom: yearFrom, yearTo: yearTo)
+    private var filterState: LibrarySearchFilterState {
+        LibrarySearchFilterState(query: query, contentScope: contentScope, selectedType: selectedType, hasPDF: hasPDF, titleOnly: titleOnly, yearFrom: yearFrom, yearTo: yearTo)
     }
 
     var body: some View {
@@ -174,7 +179,7 @@ struct SearchOverlay: View {
                 } else {
                     ScrollViewReader { proxy in
                         ScrollView {
-                            VStack(spacing: 0) {
+                            LazyVStack(spacing: 0) {
                                 if query.isEmpty && !hasActiveFilters {
                                     Text("Recent references", bundle: .module)
                                         .font(.caption)
@@ -189,12 +194,13 @@ struct SearchOverlay: View {
 
                                     SearchResultRow(
                                         reference: ref,
-                                        excerpt: excerpts[refId],
+                                        excerpt: excerptLoader.excerpts[refId],
                                         hasPDF: ref.hasPDFInCache(in: db),
                                         isHighlighted: !isMultiSelectMode && selectedIndex == index,
                                         isMultiSelected: isMultiSelected
                                     )
                                     .id(index)
+                                    .onAppear { requestExcerpt(for: ref) }
                                     .contentShape(Rectangle())
                                     .onTapGesture {
                                         handleSearchTap(ref: ref, index: index,
@@ -243,7 +249,7 @@ struct SearchOverlay: View {
                 // Batch action bar (shown when multi-select is active)
                 if isMultiSelectMode && !multiSelection.isEmpty {
                     Divider()
-                    batchActionBar
+                    batchActionBar.disabled(isSearching)
                 }
 
                 // Footer
@@ -263,6 +269,7 @@ struct SearchOverlay: View {
         }
         .onDisappear {
             searchTask?.cancel()
+            excerptLoader.reset()
         }
         .onKeyPress(.upArrow) {
             if !isMultiSelectMode { moveSelection(-1) }
@@ -280,9 +287,10 @@ struct SearchOverlay: View {
             }
             return .handled
         }
-        .onChange(of: filterState) { _, _ in
+        .onChange(of: filterState) { old, new in
             selectedIndex = 0
-            clearMultiSelection()
+            if !new.preservesSelection(from: old) { clearMultiSelection() }
+            excerptLoader.reset()
             results = []
             scheduleSearch()
         }
@@ -552,11 +560,7 @@ struct SearchOverlay: View {
                 try Task.checkCancellation()
                 let refs = try db.fetchReferences(scope: scope, filter: filter, limit: limit, orderBy: .relevance)
                 try Task.checkCancellation()
-                let excerpts = try librarySearchExcerpts(
-                    db: db, references: refs, query: filter.keyword,
-                    scope: filter.contentScope ?? .everything, titleOnly: filter.titleOnly
-                )
-                return (refs, excerpts)
+                return refs
             }
             let fetched = try await withTaskCancellationHandler {
                 try await worker.value
@@ -564,12 +568,31 @@ struct SearchOverlay: View {
                 worker.cancel()
             }
             guard !Task.isCancelled else { return }
-            results = fetched.0
-            excerpts = fetched.1
+            results = fetched
+            multiSelection.formIntersection(fetched.compactMap(\.id))
+            if multiSelection.isEmpty { isMultiSelectMode = false }
             errorMessage = nil
         } catch {
             guard !Task.isCancelled else { return }
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private func requestExcerpt(for reference: Reference) {
+        let db = db
+        let filter = buildFilter()
+        guard !filter.titleOnly else { return }
+        excerptLoader.request(reference) { references in
+            let worker = Task.detached(priority: .userInitiated) {
+                try Task.checkCancellation()
+                return try librarySearchExcerpts(
+                    db: db, references: references, query: filter.keyword,
+                    scope: filter.contentScope ?? .everything, titleOnly: filter.titleOnly
+                )
+            }
+            return try await withTaskCancellationHandler {
+                try await worker.value
+            } onCancel: { worker.cancel() }
         }
     }
 

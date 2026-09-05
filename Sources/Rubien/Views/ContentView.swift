@@ -834,7 +834,7 @@ final class LibraryViewModel: ObservableObject {
             name: name,
             icon: icon,
             scope: scope,
-            columnWraps: referenceTableDefaultWraps(for: nil, density: RubienPreferences.referenceTableDensity),
+            columnWraps: [],
             isDefault: false,
             displayOrder: maxOrder + 1
         )
@@ -875,7 +875,7 @@ final class LibraryViewModel: ObservableObject {
                 filters: [],
                 sorts: [.defaultSort],
                 groupBy: nil,
-                columnWraps: referenceTableDefaultWraps(for: nil, density: RubienPreferences.referenceTableDensity)
+                columnWraps: []
             ))
             return
         }
@@ -967,17 +967,9 @@ final class LibraryViewModel: ObservableObject {
     func selectDefaultViewIfNeeded() {
         guard !hasAppliedDefaultView else { return }
         if case .allReferences = selectedSidebar,
-           var defaultView = databaseViews.first(where: \.isDefault),
+           let defaultView = databaseViews.first(where: \.isDefault),
            let id = defaultView.id {
             hasAppliedDefaultView = true
-            do {
-                try initializeReferenceTableLayout(for: &defaultView, db: db, density: RubienPreferences.referenceTableDensity)
-                if let index = databaseViews.firstIndex(where: { $0.id == id }) {
-                    databaseViews[index] = defaultView
-                }
-            } catch {
-                errorMessage = "Save default layout failed: \(error.localizedDescription)"
-            }
             selectSidebar(.view(id), stashCurrentDraft: false)
         }
     }
@@ -1451,7 +1443,7 @@ struct ContentView: View {
         }
         .toolbar(content: {
             // All primary actions live on the leading edge in one flat group:
-            // Properties, Search, the add/import actions, then the More menu. On
+            // Search, the add/import actions, then the More menu. On
             // macOS 26 the group opts out of the toolbar's shared Liquid Glass
             // platter (`sharedBackgroundVisibility`) so the buttons render flat
             // with only a light hover highlight, not as glass capsules.

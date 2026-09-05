@@ -347,6 +347,7 @@ struct EditableURLCell: View {
 // MARK: - Editable Single-Select Cell
 
 struct EditableSingleSelectCell: View {
+    let propertyName: String
     let value: String
     let options: [SelectOption]
     let onSelect: (String) -> Void
@@ -388,7 +389,7 @@ struct EditableSingleSelectCell: View {
         .focused($isFocused)
         .opacity(!value.isEmpty || isHovered || isRowHovered || isRowSelected || showPicker || isFocused ? 1 : 0)
         .help("Select option")
-        .accessibilityLabel("Select option")
+        .accessibilityLabel("Select \(propertyName)")
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .onHover { isHovered = $0 }
@@ -580,6 +581,7 @@ struct EditableDefaultPropertyCell: View, Equatable {
         switch fieldKey {
         case "referenceType":
             EditableSingleSelectCell(
+                propertyName: property.name,
                 value: reference.referenceType.rawValue,
                 options: property.options,
                 onSelect: { val in
@@ -810,6 +812,7 @@ struct EditableCustomPropertyCell: View, Equatable {
             )
         case .singleSelect:
             EditableSingleSelectCell(
+                propertyName: property.name,
                 value: currentValue,
                 options: property.options,
                 onSelect: { val in

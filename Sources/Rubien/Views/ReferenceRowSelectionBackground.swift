@@ -23,6 +23,8 @@ struct ReferenceRowSelectionBackground: NSViewRepresentable {
     final class Anchor: NSView {
         let fill = Fill()
 
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             attach()

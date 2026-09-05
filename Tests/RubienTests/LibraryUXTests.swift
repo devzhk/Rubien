@@ -168,31 +168,28 @@ final class LibraryUXTests: XCTestCase {
         XCTAssertEqual(metadata[reference.id!]?.text, "Scaling abstract")
     }
 
-    func testDefaultViewWrapsComfortablyWithoutOverridingSavedChoices() throws {
+    func testSelectingDefaultViewPreservesStoredWrappingWithoutWriting() throws {
         let db = try AppDatabase(DatabaseQueue(path: ":memory:"))
         var view = try XCTUnwrap(db.fetchDefaultDatabaseView())
-        XCTAssertEqual(referenceTableDefaultWraps(for: view, density: .comfortable), [ColumnIdentifier.title.rawValue])
-        XCTAssertEqual(referenceTableDefaultWraps(for: view, density: .compact), [])
-        view.dateModified = view.dateCreated.addingTimeInterval(1)
-        XCTAssertEqual(referenceTableDefaultWraps(for: view, density: .comfortable), [])
-        view.parsedColumnWraps = ["default_abstract"]
-        XCTAssertEqual(referenceTableDefaultWraps(for: view, density: .comfortable), ["default_abstract"])
+        view.parsedColumnWraps = [ColumnIdentifier.title.rawValue, "default_abstract"]
+        try db.saveDatabaseView(&view)
+        let before = try XCTUnwrap(db.fetchDatabaseView(id: view.id!))
+        let vm = LibraryViewModel(db: db)
+        vm.databaseViews = [before]
+        vm.selectDefaultViewIfNeeded()
+        let after = try XCTUnwrap(db.fetchDatabaseView(id: view.id!))
+        XCTAssertEqual(after.parsedColumnWraps, before.parsedColumnWraps)
+        XCTAssertEqual(after.dateModified, before.dateModified)
+        XCTAssertEqual(vm.viewColumnWraps, before.parsedColumnWraps)
     }
 
-    func testSeededWrappingSurvivesRenameReorderAndReload() throws {
+    func testNewViewsDoNotPersistTitleWrapping() throws {
         let db = try AppDatabase(DatabaseQueue(path: ":memory:"))
-        var view = try XCTUnwrap(db.fetchDefaultDatabaseView())
-        try initializeReferenceTableLayout(for: &view, db: db, density: .comfortable)
-        view.name = "My library"
-        try db.saveDatabaseView(&view)
-        try db.reorderDatabaseViews([999, view.id!])
-        let reloaded = try XCTUnwrap(db.fetchDatabaseView(id: view.id!))
-        XCTAssertEqual(reloaded.parsedColumnWraps, [ColumnIdentifier.title.rawValue])
-        XCTAssertEqual(referenceTableDefaultWraps(for: reloaded, density: .comfortable), reloaded.parsedColumnWraps)
-        view.parsedColumnWraps = []
-        try db.saveDatabaseView(&view)
-        try initializeReferenceTableLayout(for: &view, db: db, density: .comfortable)
-        XCTAssertEqual(view.parsedColumnWraps, [], "Existing saved wrapping data must not be rewritten")
+        let vm = LibraryViewModel(db: db)
+        vm.createDatabaseView(name: "New view")
+        let view = try XCTUnwrap(db.fetchAllDatabaseViews().first { $0.name == "New view" })
+        XCTAssertTrue(view.parsedColumnWraps.isEmpty)
+        XCTAssertTrue(referenceTableWraps(columnID: "title", savedWraps: view.parsedColumnWraps, density: .comfortable))
     }
 
     func testExcerptUsesTheSameLiteralTermsAsSearch() throws {

@@ -7,7 +7,6 @@ struct FilterChromeBar: View {
     let tags: [Tag]
     let propertyDefs: [PropertyDefinition]
 
-
     var body: some View {
         FlowLayout(spacing: 6) {
             Image(systemName: "line.3.horizontal.decrease")
@@ -26,7 +25,6 @@ struct FilterChromeBar: View {
                     onRemove: { filters.remove(at: index) }
                 )
             }
-
 
         }
         .frame(maxWidth: .infinity, alignment: .leading)

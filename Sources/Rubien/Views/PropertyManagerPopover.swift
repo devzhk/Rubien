@@ -14,6 +14,7 @@ struct PropertyManagerPopover: View {
     @State private var newPropName = ""
     @State private var newPropType: PropertyType = .string
     @State private var draggedId: Int64?
+    @State private var pendingDeletion: PropertyDefinition?
 
     private var visibleProps: [PropertyDefinition] {
         propertyDefs.filter(\.isVisible).sorted { $0.sortOrder < $1.sortOrder }
@@ -59,7 +60,7 @@ struct PropertyManagerPopover: View {
                             PropertyManagerRow(
                                 prop: prop,
                                 onToggleVisibility: { onToggleVisibility(prop.id!, false) },
-                                onDelete: prop.isDefault ? nil : { onDelete(prop.id!) },
+                                onDelete: prop.isDefault ? nil : { pendingDeletion = prop },
                                 onRename: prop.isDefault ? nil : { newName in onRenameProperty(prop.id!, newName) }
                             )
                             .onDrag {
@@ -88,7 +89,7 @@ struct PropertyManagerPopover: View {
                             HiddenPropertyRow(
                                 prop: prop,
                                 onShow: { onToggleVisibility(prop.id!, true) },
-                                onDelete: prop.isDefault ? nil : { onDelete(prop.id!) }
+                                onDelete: prop.isDefault ? nil : { pendingDeletion = prop }
                             )
                         }
                     }
@@ -142,6 +143,18 @@ struct PropertyManagerPopover: View {
         }
         .frame(width: 200)
         .activatePopoverHover()
+        .alert("Delete property?", isPresented: Binding(
+            get: { pendingDeletion != nil },
+            set: { if !$0 { pendingDeletion = nil } }
+        ), presenting: pendingDeletion) { property in
+            Button("Delete", role: .destructive) {
+                if let id = property.id { onDelete(id) }
+                pendingDeletion = nil
+            }
+            Button("Cancel", role: .cancel) { pendingDeletion = nil }
+        } message: { property in
+            Text("Deleting “\(property.name)” permanently removes this property and its values from every reference. This deletion also syncs to your other devices. To keep the values, hide the column instead.")
+        }
     }
 }
 
