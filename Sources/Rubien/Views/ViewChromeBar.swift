@@ -206,7 +206,6 @@ struct ViewChromeBar: View {
                 isColumnVisible: isColumnVisible,
                 propertyDefs: propertyDefs
             )
-            .activatePopoverHover()
         }
     }
 
@@ -279,8 +278,7 @@ private struct DisplayMenuPopover: View {
             }
         }
         .frame(width: 290)
-        .neutralGlassCard(cornerRadius: 16)
-        .presentationBackground(.clear)
+        .activatePopoverHover()
     }
 
     private var densityPicker: some View {

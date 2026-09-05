@@ -25,10 +25,8 @@ struct PropertyManagerPopover: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header
+            // Creation action; the toolbar button already names this popover.
             HStack {
-                Text("Manage Columns")
-                    .font(.system(size: 12, weight: .semibold))
                 Spacer()
                 Button {
                     showNewProperty = true
