@@ -7,6 +7,22 @@ import GRDB
 
 @MainActor
 final class LibraryUXTests: XCTestCase {
+    func testDensityDeterminesTitleWrappingRegardlessOfSavedView() {
+        let title = ColumnIdentifier.title.rawValue
+        let authors = ColumnIdentifier.authors.rawValue
+        for saved: Set<String> in [[], [title], [authors], [title, authors]] {
+            XCTAssertTrue(referenceTableWraps(columnID: title, savedWraps: saved, density: .comfortable))
+            XCTAssertFalse(referenceTableWraps(columnID: title, savedWraps: saved, density: .compact))
+            for density in ReferenceTableDensity.allCases {
+                XCTAssertEqual(referenceTableWraps(columnID: authors, savedWraps: saved, density: density),
+                               saved.contains(authors))
+            }
+        }
+        let controls = visibleReferenceTableWrappableColumns(propertyDefs: [], isColumnVisible: { _ in true })
+        XCTAssertFalse(controls.contains { $0.id == title }, "Density is the sole title-wrapping control")
+        XCTAssertTrue(controls.contains { $0.id == authors })
+    }
+
     func testComfortableTableFitsTitleAndBylineAfterMetadataUpdate() async throws {
         try await assertTableFitsUpdatedTitle(subtitle: "Cherubim et al. · 2026")
         try await assertTableFitsUpdatedTitle(subtitle: nil)
@@ -173,7 +189,7 @@ final class LibraryUXTests: XCTestCase {
         view.parsedColumnWraps = []
         try db.saveDatabaseView(&view)
         try initializeReferenceTableLayout(for: &view, db: db, density: .comfortable)
-        XCTAssertEqual(view.parsedColumnWraps, [], "An explicitly saved unwrapped title must stay unwrapped")
+        XCTAssertEqual(view.parsedColumnWraps, [], "Existing saved wrapping data must not be rewritten")
     }
 
     func testExcerptUsesTheSameLiteralTermsAsSearch() throws {

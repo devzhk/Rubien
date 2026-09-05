@@ -21,6 +21,14 @@ struct ReferenceTableWrappableColumn: Identifiable {
     let label: String
 }
 
+/// Title layout belongs to density; saved wrapping applies to other columns.
+func referenceTableWraps(columnID: String, savedWraps: Set<String>, density: ReferenceTableDensity) -> Bool {
+    if columnID == ColumnIdentifier.title.rawValue {
+        return density == .comfortable
+    }
+    return savedWraps.contains(columnID)
+}
+
 private let hardcodedReferenceTableDefaultFieldKeys: Set<String> = [
     "tags", "readingStatus", "lastReadAt", "readCount",
 ]
@@ -40,7 +48,7 @@ func visibleReferenceTableWrappableColumns(
 ) -> [ReferenceTableWrappableColumn] {
     var result: [ReferenceTableWrappableColumn] = []
 
-    for builtin in [ColumnIdentifier.title, .authors, .tags] where isColumnVisible(builtin.rawValue) {
+    for builtin in [ColumnIdentifier.authors, .tags] where isColumnVisible(builtin.rawValue) {
         result.append(ReferenceTableWrappableColumn(id: builtin.rawValue, label: builtin.header))
     }
 
@@ -309,7 +317,9 @@ struct ReferenceTableView: View {
             statusDef: propertyDefs.first(forFieldKey: PropertyDefinition.readingStatusFieldKey),
             customPropertyValueMap: customPropertyValueMap,
             db: db,
-            wrapForColumn: { id in viewColumnWraps.contains(id) },
+            wrapForColumn: { id in
+                referenceTableWraps(columnID: id, savedWraps: viewColumnWraps, density: density)
+            },
             density: density,
             columnCustomization: $columnCustomization
         )

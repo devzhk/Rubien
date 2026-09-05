@@ -231,11 +231,7 @@ private struct DisplayMenuPopover: View {
         VStack(alignment: .leading, spacing: 0) {
             densityPicker
             .padding(12)
-            .onChange(of: density) { _, value in
-                if value == .comfortable { columnWraps.insert(ColumnIdentifier.title.rawValue) }
-                else { columnWraps.remove(ColumnIdentifier.title.rawValue) }
-            }
-            Text("Comfortable shows authors and year below the title.")
+            Text("Comfortable shows up to two title lines with authors and year. Compact shows one title line.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 12)
@@ -262,12 +258,7 @@ private struct DisplayMenuPopover: View {
                             else { columnWraps.remove(entry.id) }
                         }
                     )) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(entry.label).font(.system(size: 12))
-                            if entry.id == ColumnIdentifier.title.rawValue && density == .comfortable {
-                                Text("Up to two lines").font(.caption2).foregroundStyle(.secondary)
-                            }
-                        }
+                        Text(entry.label).font(.system(size: 12))
                     }
                     .toggleStyle(.switch)
                     .controlSize(.mini)
