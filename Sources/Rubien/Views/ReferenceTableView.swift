@@ -744,17 +744,24 @@ private struct ReferenceTableContent: View {
         editingCell = nil
     }
 
-    // Tab skips columns hidden via `TableColumnCustomization` — landing on an
-    // invisible editor would strand `editingCell` with no way to commit or
-    // cancel, since the off-screen cell's focus chain is detached.
+    private var yearProperties: [PropertyDefinition] {
+        customProperties.filter { $0.isDefault && $0.defaultFieldKey == "year" }
+    }
+
+    private var metadataProperties: [PropertyDefinition] {
+        customProperties.filter { $0.isDefault && $0.defaultFieldKey != "year" }
+    }
+
+    // Tab skips hidden columns and follows the default visible column order.
     private func editableColumnKeys() -> [String] {
         var keys = [ColumnIdentifier.title.rawValue]
             + editablePropertyKeys(customProperties.filter { !$0.isDefault })
+            + editablePropertyKeys(yearProperties)
         // Title has `.disabledCustomizationBehavior(.visibility)` — always visible.
         if columnCustomization[visibility: ColumnIdentifier.authors.rawValue] != .hidden {
             keys.append(ColumnIdentifier.authors.rawValue)
         }
-        keys += editablePropertyKeys(customProperties.filter(\.isDefault))
+        keys += editablePropertyKeys(metadataProperties)
         return keys
     }
 
@@ -931,12 +938,6 @@ private struct ReferenceTableContent: View {
                 .customizationID(prop.customizationID)
             }
 
-            TableColumn(ColumnIdentifier.authors.header, value: \.authorsNormalized) { ref in
-                authorsCell(for: ref)
-            }
-            .width(min: 80, ideal: 140)
-            .customizationID(ColumnIdentifier.authors.rawValue)
-
             TableColumn(ColumnIdentifier.readingStatus.header, value: \.readingStatus) { ref in
                 ReadingStatusCell(
                     reference: ref,
@@ -991,6 +992,20 @@ private struct ReferenceTableContent: View {
             .width(min: 70, ideal: 90)
             .customizationID(ColumnIdentifier.readingStatus.rawValue)
 
+            TableColumnForEach(yearProperties) { prop in
+                TableColumn(prop.name) { ref in
+                    propertyCell(for: ref, prop: prop)
+                }
+                .width(min: 60, ideal: 100)
+                .customizationID(prop.customizationID)
+            }
+
+            TableColumn(ColumnIdentifier.authors.header, value: \.authorsNormalized) { ref in
+                authorsCell(for: ref)
+            }
+            .width(min: 80, ideal: 140)
+            .customizationID(ColumnIdentifier.authors.rawValue)
+
             TableColumn(ColumnIdentifier.dateAdded.header, value: \.dateAdded) { ref in
                 Text(ref.dateAdded, style: .date)
                     .font(.callout)
@@ -1021,7 +1036,7 @@ private struct ReferenceTableContent: View {
             .width(min: 50, ideal: 70)
             .customizationID(ColumnIdentifier.readCount.rawValue)
 
-            TableColumnForEach(customProperties.filter(\.isDefault)) { prop in
+            TableColumnForEach(metadataProperties) { prop in
                 TableColumn(prop.name) { ref in
                     propertyCell(for: ref, prop: prop)
                 }
