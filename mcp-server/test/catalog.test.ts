@@ -488,3 +488,31 @@ describe("rubien_list_references view param", () => {
     ]);
   });
 });
+
+
+describe("search scopes", () => {
+  it.each(["everything", "papers", "notes"])("forwards %s scope", async (scope) => {
+    const client = await connectedClient();
+    await client.callTool({ name: "rubien_search_references", arguments: { query: "scaling", scope } });
+    expect(vi.mocked(runCliAsTool)).toHaveBeenLastCalledWith(["search", "scaling", "--scope", scope]);
+    await client.close();
+  });
+
+  it("preserves the legacy default and rejects conflicting columns", async () => {
+    const client = await connectedClient();
+    await client.callTool({ name: "rubien_search_references", arguments: { query: "scaling" } });
+    expect(vi.mocked(runCliAsTool)).toHaveBeenLastCalledWith(["search", "scaling"]);
+    vi.mocked(runCliAsTool).mockClear();
+    const conflict = await client.callTool({
+      name: "rubien_search_references", arguments: { query: "scaling", scope: "notes", in: ["title"] },
+    });
+    expect(conflict.isError).toBe(true);
+    expect(vi.mocked(runCliAsTool)).not.toHaveBeenCalled();
+    const invalid = await client.callTool({
+      name: "rubien_search_references", arguments: { query: "scaling", scope: "invalid" },
+    });
+    expect(invalid.isError).toBe(true);
+    expect(vi.mocked(runCliAsTool)).not.toHaveBeenCalled();
+    await client.close();
+  });
+});

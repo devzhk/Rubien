@@ -905,6 +905,33 @@ final class MCPServerTests: XCTestCase {
         )
     }
 
+    func testSearchScopesReachCLIAndRetainLegacyDefaults() throws {
+        try skipIfBinaryMissing()
+        let paperID = try seedTitle("Scopedneedle metadata")
+        let noteID = try seedTitle("Unrelated title")
+        let update = try runCLI(["update", String(noteID), "--notes", "Scopedneedle note"])
+        XCTAssertEqual(update.exitCode, 0)
+        let responses = try runMCP([
+            toolCall(id: 1, name: "rubien_search_references", arguments: ["query": "scopedneedle"]),
+            toolCall(id: 2, name: "rubien_search_references", arguments: ["query": "scopedneedle", "scope": "everything"]),
+            toolCall(id: 3, name: "rubien_search_references", arguments: ["query": "scopedneedle", "scope": "papers"]),
+            toolCall(id: 4, name: "rubien_search_references", arguments: ["query": "scopedneedle", "scope": "notes"]),
+            toolCall(id: 5, name: "rubien_search_references", arguments: ["query": "x", "scope": "invalid"]),
+            toolCall(id: 6, name: "rubien_search_references", arguments: ["query": "x", "scope": "notes", "in": ["title"]]),
+        ])
+        for (id, expected) in [(1, [paperID, noteID]), (2, [paperID, noteID]), (3, [paperID]), (4, [noteID])] {
+            let result = try XCTUnwrap(response(responses, id: id)?["result"] as? [String: Any])
+            XCTAssertNil(result["isError"])
+            let text = try XCTUnwrap((result["content"] as? [[String: Any]])?.first?["text"] as? String)
+            let rows = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [[String: Any]])
+            XCTAssertEqual(Set(rows.compactMap { ($0["id"] as? NSNumber)?.intValue }), Set(expected))
+        }
+        for id in [5, 6] {
+            let result = try XCTUnwrap(response(responses, id: id)?["result"] as? [String: Any])
+            XCTAssertEqual(result["isError"] as? Bool, true)
+        }
+    }
+
     func testSearchAndListReturnArrays() throws {
         try skipIfBinaryMissing()
         try seedTitle("Deep Residual Learning")

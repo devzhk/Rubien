@@ -1206,6 +1206,12 @@ stderr; stdout carries only protocol messages.
 | Activity | `rubien_reading_activity` |
 | Sync | `rubien_get_sync_status` (the backing CLI command is Mac-only; a Linux call returns an in-band error) |
 
+`rubien_search_references` accepts optional `scope: "everything" | "papers" | "notes"`
+in both the native and npm MCP servers. It forwards to `search --scope` and is
+mutually exclusive with a non-empty `in` list. Omitting it preserves legacy FTS
+behavior and the same reference-array response. Scoped search requires CLI
+build 46 or newer.
+
 The two potentially long intake calls, `rubien_create_reference` and
 `rubien_download_pdf`, have a five-minute child timeout; other calls retain the
 60-second default. Advertised JSON-schema types, enums, bounds, required fields,

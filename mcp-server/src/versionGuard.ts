@@ -1,13 +1,7 @@
 import { probeCliVersion, type CliProbe } from "./cli.js";
 
-/**
- * The minimum rubien-cli build this server requires. Equals the build that
- * first shipped scoped export and selectable Markdown/HTML web reads, which
- * the 0.3.4 catalog forwards. Bump only when a future server release
- * genuinely needs a newer CLI feature; the released CLI's build must always
- * be >= this value.
- */
-export const MIN_CLI_BUILD = 41;
+/** Minimum CLI build supporting the optional notes/highlights search scopes. */
+export const MIN_CLI_BUILD = 46;
 
 export interface CliVersion {
   version: string;
