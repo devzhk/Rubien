@@ -10,6 +10,8 @@
 
 **Latest release:** see the [Releases page](https://github.com/devzhk/Rubien/releases/latest).
 
+**Privacy:** see the [Rubien Importer Privacy Policy](privacy.html).
+
 System requirements: macOS 14.4 (Sonoma) or later.
 
 ---
