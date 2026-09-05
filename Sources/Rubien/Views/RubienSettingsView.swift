@@ -20,6 +20,7 @@ struct RubienSettingsView: View {
     // of the path overrides (RubienPreferences isn't observable, so the "Choose…"
     // buttons keep these in sync to re-render the displayed path).
     @State private var claudeAvailability: AgentAvailability?
+    @State private var showAssistantAdvanced = false
     @State private var isProbingClaude = false
     /// Monotonic probe token: only the latest `recheckClaude` result is applied, so a
     /// Reset/Choose that supersedes an in-flight probe can't be overwritten by the
@@ -445,13 +446,31 @@ struct RubienSettingsView: View {
     @ViewBuilder
     private var assistantPane: some View {
         Form {
-            assistantWorkspaceSection
+            assistantConnectionSection
             assistantDefaultsSection
-            assistantPromptsSection
-            assistantConversationStorageSection
-            assistantClaudeCLISection
-            assistantCodexCLISection
-            assistantCodexRuntimeMetricsSection
+            assistantPermissionsSection
+            Section {
+                Button {
+                    showAssistantAdvanced.toggle()
+                } label: {
+                    HStack {
+                        Text(String(localized: "Advanced", bundle: .module))
+                        Spacer()
+                        Image(systemName: showAssistantAdvanced ? "chevron.up" : "chevron.down")
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityValue(showAssistantAdvanced ? "Expanded" : "Collapsed")
+            }
+            if showAssistantAdvanced {
+                assistantWorkspaceSection
+                assistantPromptsSection
+                assistantConversationStorageSection
+                assistantClaudeCLISection
+                assistantCodexCLISection
+                assistantCodexRuntimeMetricsSection
+            }
         }
         .formStyle(.grouped)
         .task {
@@ -744,15 +763,26 @@ struct RubienSettingsView: View {
         }
     }
 
-    private var assistantDefaultsSection: some View {
+    private var assistantConnectionSection: some View {
         Section {
             Picker(selection: $defaultProvider) {
                 Text(String(localized: "Claude Code", bundle: .module)).tag(AgentProviderKind.claude)
                 Text(String(localized: "Codex", bundle: .module)).tag(AgentProviderKind.codex)
             } label: {
-                Text(String(localized: "Backend", bundle: .module))
+                Text(String(localized: "Provider", bundle: .module))
             }
 
+            if defaultProvider == .claude { claudeStatusRow }
+            else { codexStatusRow }
+        } header: {
+            Text(String(localized: "Connection", bundle: .module))
+        } footer: {
+            Text(String(localized: "Rubien uses your existing Claude Code or Codex sign-in.", bundle: .module))
+        }
+    }
+
+    private var assistantDefaultsSection: some View {
+        Section {
             // Model/effort are the SELECTED backend's. Claude: static verified
             // aliases. Codex: discovered rows only — an unpinned default just shows
             // the first discovered model (no "first available" row), and the pref
@@ -786,6 +816,26 @@ struct RubienSettingsView: View {
                 Text(String(localized: "Reasoning effort", bundle: .module))
             }
 
+            Toggle(isOn: $defaultWebAccess) {
+                Text(String(localized: "Web search", bundle: .module))
+            }
+
+            Toggle(isOn: $defaultLoadUserTools) {
+                Text(String(localized: "Use connected apps, plugins, and MCP tools", bundle: .module))
+            }
+        } header: {
+            Text(String(localized: "Defaults for new conversations", bundle: .module))
+        } footer: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(String(localized: "Only applies to new conversations.", bundle: .module))
+                Text(String(localized: "Claude: loads your plugins, settings, and MCP servers.", bundle: .module))
+                Text(String(localized: "Codex: enables connected apps and plugins; MCP servers are already loaded.", bundle: .module))
+            }
+        }
+    }
+
+    private var assistantPermissionsSection: some View {
+        Section {
             // Codex-only: the OS sandbox a new Codex conversation runs in (D6).
             if defaultProvider.descriptor.supportsSandbox {
                 Picker(selection: $defaultCodexSandbox) {
@@ -794,14 +844,6 @@ struct RubienSettingsView: View {
                 } label: {
                     Text(String(localized: "Sandbox", bundle: .module))
                 }
-            }
-
-            Toggle(isOn: $defaultWebAccess) {
-                Text(String(localized: "Web search", bundle: .module))
-            }
-
-            Toggle(isOn: $defaultLoadUserTools) {
-                Text(String(localized: "Use connected apps, plugins, and MCP tools", bundle: .module))
             }
 
             Picker(selection: $defaultAutoApprove) {
@@ -815,14 +857,9 @@ struct RubienSettingsView: View {
                 Text(String(localized: "Approvals", bundle: .module))
             }
         } header: {
-            Text(String(localized: "Defaults for new conversations", bundle: .module))
+            Text(String(localized: "Permissions", bundle: .module))
         } footer: {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(String(localized: "Only applies to new conversations.", bundle: .module))
-                Text(String(localized: "Claude: loads your plugins, settings, and MCP servers.", bundle: .module))
-                Text(String(localized: "Codex: enables connected apps and plugins; MCP servers are already loaded.", bundle: .module))
-                Text(String(localized: "Permissions: your agent rules apply, so Rubien may not ask first.", bundle: .module))
-            }
+            Text(String(localized: "Applies to new conversations. Your agent rules apply, so Rubien may not ask first when connected tools are enabled.", bundle: .module))
         }
     }
 
@@ -945,7 +982,6 @@ struct RubienSettingsView: View {
 
     private var assistantClaudeCLISection: some View {
         Section {
-            claudeStatusRow
             agentBinaryPathRow(override: binaryPathOverride, onReset: {
                 RubienPreferences.assistantBinaryPath = nil
                 binaryPathOverride = ""
@@ -958,7 +994,6 @@ struct RubienSettingsView: View {
 
     private var assistantCodexCLISection: some View {
         Section {
-            codexStatusRow
             agentBinaryPathRow(override: codexBinaryPathOverride, onReset: {
                 RubienPreferences.assistantCodexBinaryPath = nil
                 codexBinaryPathOverride = ""
