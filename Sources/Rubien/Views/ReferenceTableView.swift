@@ -746,16 +746,23 @@ private struct ReferenceTableContent: View {
     // invisible editor would strand `editingCell` with no way to commit or
     // cancel, since the off-screen cell's focus chain is detached.
     private func editableColumnKeys() -> [String] {
-        var keys: [String] = [ColumnIdentifier.title.rawValue]
+        var keys = [ColumnIdentifier.title.rawValue]
+            + editablePropertyKeys(customProperties.filter { !$0.isDefault })
         // Title has `.disabledCustomizationBehavior(.visibility)` — always visible.
         if columnCustomization[visibility: ColumnIdentifier.authors.rawValue] != .hidden {
             keys.append(ColumnIdentifier.authors.rawValue)
         }
+        keys += editablePropertyKeys(customProperties.filter(\.isDefault))
+        return keys
+    }
+
+    private func editablePropertyKeys(_ properties: [PropertyDefinition]) -> [String] {
+        var keys: [String] = []
         let alreadyHandled: Set<String> = Set(
             [ColumnIdentifier.title, .authors, .tags, .readingStatus, .dateAdded, .referenceType]
                 .map(\.rawValue)
         )
-        for prop in customProperties {
+        for prop in properties {
             guard columnCustomization[visibility: prop.customizationID] != .hidden else { continue }
             if prop.isDefault {
                 guard let key = prop.defaultFieldKey, !alreadyHandled.contains(key) else { continue }
@@ -894,12 +901,6 @@ private struct ReferenceTableContent: View {
             .customizationID(ColumnIdentifier.title.rawValue)
             .disabledCustomizationBehavior(.visibility)
 
-            TableColumn(ColumnIdentifier.authors.header, value: \.authorsNormalized) { ref in
-                authorsCell(for: ref)
-            }
-            .width(min: 80, ideal: 140)
-            .customizationID(ColumnIdentifier.authors.rawValue)
-
             TableColumn(ColumnIdentifier.tags.header, value: \.title) { ref in
                 TagsCellView(
                     tags: tagMap[ref.id ?? -1] ?? [],
@@ -917,6 +918,20 @@ private struct ReferenceTableContent: View {
             }
             .width(min: 60, ideal: 120)
             .customizationID(ColumnIdentifier.tags.rawValue)
+
+            TableColumnForEach(customProperties.filter { !$0.isDefault }) { prop in
+                TableColumn(prop.name) { ref in
+                    propertyCell(for: ref, prop: prop)
+                }
+                .width(min: 60, ideal: 100)
+                .customizationID(prop.customizationID)
+            }
+
+            TableColumn(ColumnIdentifier.authors.header, value: \.authorsNormalized) { ref in
+                authorsCell(for: ref)
+            }
+            .width(min: 80, ideal: 140)
+            .customizationID(ColumnIdentifier.authors.rawValue)
 
             TableColumn(ColumnIdentifier.readingStatus.header, value: \.readingStatus) { ref in
                 ReadingStatusCell(
@@ -1002,7 +1017,7 @@ private struct ReferenceTableContent: View {
             .width(min: 50, ideal: 70)
             .customizationID(ColumnIdentifier.readCount.rawValue)
 
-            TableColumnForEach(customProperties) { prop in
+            TableColumnForEach(customProperties.filter(\.isDefault)) { prop in
                 TableColumn(prop.name) { ref in
                     propertyCell(for: ref, prop: prop)
                 }
