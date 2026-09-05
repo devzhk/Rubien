@@ -118,7 +118,7 @@ struct ViewChromeBar: View {
         Button {
             showColumns = true
         } label: {
-            ChromeBarPill(iconName: "tablecells", label: "Manage Columns")
+            ChromeBarPill(iconName: "rectangle.split.3x1", label: "Manage Columns")
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showColumns) {
@@ -196,7 +196,7 @@ struct ViewChromeBar: View {
         Button {
             showDisplayMenu = true
         } label: {
-            ChromeBarPill(iconName: "rectangle.split.3x1", label: "Layout: \(density.label)")
+            ChromeBarPill(iconName: "slider.horizontal.3", label: "Layout: \(density.label)")
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showDisplayMenu) {
