@@ -467,8 +467,6 @@ struct RubienSettingsView: View {
                 assistantWorkspaceSection
                 assistantPromptsSection
                 assistantConversationStorageSection
-                assistantClaudeCLISection
-                assistantCodexCLISection
                 assistantCodexRuntimeMetricsSection
             }
         }
@@ -772,12 +770,20 @@ struct RubienSettingsView: View {
                 Text(String(localized: "Provider", bundle: .module))
             }
 
-            if defaultProvider == .claude { claudeStatusRow }
-            else { codexStatusRow }
+            if defaultProvider == .claude {
+                claudeStatusRow
+                claudeBinaryPathRow
+            } else {
+                codexStatusRow
+                codexBinaryPathRow
+            }
         } header: {
             Text(String(localized: "Connection", bundle: .module))
         } footer: {
             Text(String(localized: "Rubien uses your existing Claude Code or Codex sign-in.", bundle: .module))
+            if defaultProvider == .codex {
+                Text(String(localized: "Codex uses your ~/.codex account and stores conversations there, not in Rubien.", bundle: .module))
+            }
         }
     }
 
@@ -980,32 +986,20 @@ struct RubienSettingsView: View {
         RubienPreferences.assistantReaderPromptOverride = effectiveReaderPrompt
     }
 
-    private var assistantClaudeCLISection: some View {
-        Section {
-            agentBinaryPathRow(override: binaryPathOverride, onReset: {
-                RubienPreferences.assistantBinaryPath = nil
-                binaryPathOverride = ""
-                recheckClaude()
-            }, onChoose: pickBinary, disabled: isProbingClaude)
-        } header: {
-            Text(String(localized: "Claude Code CLI", bundle: .module))
-        }
+    private var claudeBinaryPathRow: some View {
+        agentBinaryPathRow(override: binaryPathOverride, onReset: {
+            RubienPreferences.assistantBinaryPath = nil
+            binaryPathOverride = ""
+            recheckClaude()
+        }, onChoose: pickBinary, disabled: isProbingClaude)
     }
 
-    private var assistantCodexCLISection: some View {
-        Section {
-            agentBinaryPathRow(override: codexBinaryPathOverride, onReset: {
-                RubienPreferences.assistantCodexBinaryPath = nil
-                codexBinaryPathOverride = ""
-                recheckCodex()
-            }, onChoose: pickCodexBinary, disabled: isProbingCodex)
-        } header: {
-            Text(String(localized: "Codex CLI", bundle: .module))
-        } footer: {
-            // Privacy disclosure: Codex persists conversations itself (under ~/.codex),
-            // outside Rubien — the non-obvious fact worth surfacing before first use.
-            Text(String(localized: "Codex uses your ~/.codex account and stores conversations there, not in Rubien.", bundle: .module))
-        }
+    private var codexBinaryPathRow: some View {
+        agentBinaryPathRow(override: codexBinaryPathOverride, onReset: {
+            RubienPreferences.assistantCodexBinaryPath = nil
+            codexBinaryPathOverride = ""
+            recheckCodex()
+        }, onChoose: pickCodexBinary, disabled: isProbingCodex)
     }
 
     private var assistantCodexRuntimeMetricsSection: some View {
