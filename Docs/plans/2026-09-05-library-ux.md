@@ -9,7 +9,7 @@ Implement the approved previews on `codex/library-ux` in an isolated worktree.
 - Group Filter / Sort / Group on the left, Layout / Manage Columns on the right. Show current sort/group and removable active filters.
 - Layout contains Comfortable / Compact density and existing per-column wrapping. Comfortable shows smaller author/year below each title with a two-line title by default.
 - Search offers Everything / Papers / Notes & highlights with real matching behavior, preserving current filters and reference navigation.
-- Assistant settings lead with provider connection and everyday choices. Keep permissions visible; place paths, prompts, storage, and diagnostics in Advanced.
+- Assistant settings lead with provider connection and everyday choices. Keep the selected provider’s binary path in Connection and permissions visible; place workspace, prompts, storage, and diagnostics in Advanced.
 
 ## Implementation sequence
 
@@ -19,7 +19,7 @@ Implement the approved previews on `codex/library-ux` in an isolated worktree.
 4. Reorganize Assistant settings without changing permission defaults or provider configuration.
 5. Build and run relevant tests; inspect the running worktree app using a separate test library.
 6. Obtain independent codex-rescue review and parallel reuse/quality/efficiency reviews, address actionable findings, and revalidate.
-7. Commit coherent changes on this branch. Do not merge, release, or modify the installed app.
+7. Commit coherent changes on this branch. Following user acceptance, merge locally after final validation. Do not push, release, or modify the installed app.
 
 ## Verification
 
@@ -35,7 +35,7 @@ Implement the approved previews on `codex/library-ux` in an isolated worktree.
 - Added real metadata/notes/annotation scopes and matching excerpts. Existing callers retain legacy FTS behavior unless they opt into a scope. CLI parity is available through `search --scope everything|papers|notes` without changing the JSON array contract.
 - Reorganized Assistant settings into Connection, conversation defaults, visible Permissions, and expandable Advanced settings.
 - Built successfully on the macOS host. `Package.resolved` is unchanged.
-- Final regression run: 156 tests passed, 0 failures. Command:
+- Initial regression run: 156 tests passed, 0 failures. Command:
 
   ```sh
   swift test --disable-automatic-resolution --filter 'ReferenceSearchScopeTests|LibraryUXTests|ReferenceTableCellEqualityTests|SearchQueryTests|PdfCommandTests|AppDatabaseTests|RubienPreferencesTests|FilterEngineTests|GroupEngineTests|AssistantModelOptionsTests|LibraryViewModelTests'
@@ -43,7 +43,7 @@ Implement the approved previews on `codex/library-ux` in an isolated worktree.
 
 - Independent codex-rescue review and the reuse/quality/efficiency reviews completed. Fixed title-only substring matching, Unicode annotation matching, shared query normalization, unnecessary/canceled excerpt work, and stable seeded-view wrapping. A follow-up review found no further material issues.
 - `git diff --check` passed. Linux CI and the entire test suite were not run locally; changed Mac-only sources/tests are guarded.
-- Initial native inspection was blocked by a locked Mac. Subsequent checks used a temporary development preview bundle built from this worktree, against `/private/tmp/rubien-library-ux-fixture` with sync disabled. Confirmed Comfortable title/byline rendering, Manage Columns and custom property creation, Layout access, selected-row add controls and their pickers. Assistant setup and the complete search interaction flow still require a manual pass. No installed-app or production-library changes were made for this verification.
+- Initial native inspection was blocked by a locked Mac. Subsequent checks used a temporary development preview bundle built from this worktree, against `/private/tmp/rubien-library-ux-fixture` with sync disabled. Confirmed Comfortable title/byline rendering, Manage Columns and custom property creation, Layout access, selected-row add controls and their pickers. Subsequent native checks confirmed both Assistant providers and their binary-path controls in Connection. The complete search interaction flow still requires a manual pass. No installed-app or production-library changes were made for this verification.
 
 ## Follow-up: contextual add-option controls
 
@@ -60,3 +60,10 @@ The user confirmed that cell-level hover failed to reveal controls on unselected
 
 - Build and 20 focused tests passed. The independent review identified stationary-pointer programmatic scrolling; added clip-view bounds observation and regression coverage for notification delivery and cleanup. Follow-up review and reuse/quality/efficiency reviews found no remaining actionable issues.
 - Refreshed the sample preview. Direct pointer-only UI verification remains unavailable through the automation API; requested the user's hover check.
+
+## Final acceptance and local integration
+
+- Default columns are Title, Tags, custom columns, Status, Year, Authors, then other metadata. Existing saved column customization takes precedence.
+- Manage Columns is 200 points wide, omits its redundant heading, and places creation on the left. Layout uses the same native popover presentation, with smaller density labels, subdued selection color, and hover feedback. Active filters align left with the toolbar controls.
+- Both Assistant providers expose their binary-path override in Connection; Advanced retains the remaining runtime settings. Native checks covered provider switching, and the preview was restored to Claude.
+- The user accepted the preview and authorized local integration. Final build passed and the combined regression run passed 166 tests with zero failures, including row-hover and picker-selection coverage. Pinned dependencies remain unchanged. Independent reviews and focused native checks are recorded above; full-suite and Linux CI validation were not performed locally.
