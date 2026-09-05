@@ -1374,13 +1374,17 @@ struct ContentView: View {
             isActive: mainDestination == .library,
             pdfAttachmentRevision: pdfDownloadCoordinator.operations.revision
         )
-        .overlay(alignment: .trailing) {
-            if showInspector {
-                FloatingPanel(width: $inspectorWidth, range: 280...640) {
-                    detailPanel
+        .overlayPreferenceValue(ReferenceTableHeaderBoundsKey.self) { headerBounds in
+            if showInspector, let headerBounds {
+                GeometryReader { geometry in
+                    FloatingPanel(width: $inspectorWidth, range: 280...640) {
+                        detailPanel
+                    }
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .padding(.top, geometry[headerBounds].maxY + 8)
+                    .padding(.bottom, 8)
+                    .padding(.trailing, 6)
                 }
-                .padding(.vertical, 8)
-                .padding(.trailing, 6)
                 .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }

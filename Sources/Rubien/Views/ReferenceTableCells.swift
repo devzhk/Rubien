@@ -409,8 +409,10 @@ struct EditableMultiSelectCell: View {
     var onDeleteOption: ((String) -> Void)? = nil
     var deleteUnlessInUse: ((String) -> Int?)? = nil
     var wrap = false
+    var isRowSelected = false
 
     @State private var showPicker = false
+    @State private var isHovered = false
 
     var body: some View {
         let items = pickerSelectionItems(values: selectedValues, options: options)
@@ -431,12 +433,16 @@ struct EditableMultiSelectCell: View {
                     accessibilityLabel: "more selected options"
                 )
             }
-            PickerSelectionAddButton(title: "option", accessibilityLabel: "Add option") {
+            PickerSelectionAddButton(
+                title: "option", accessibilityLabel: "Add option",
+                isActive: isHovered || isRowSelected || showPicker
+            ) {
                 showPicker = true
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
+        .onHover { isHovered = $0 }
         .popover(isPresented: $showPicker) {
             SelectOptionPicker(
                 selectedValues: selectedValues,
@@ -728,6 +734,7 @@ struct EditableCustomPropertyCell: View, Equatable {
     let deleteUnlessInUse: (Int64, String) -> Int?
     var onTab: ((_ backwards: Bool) -> Void)? = nil
     var wrap: Bool = false
+    var isRowSelected = false
 
     private var propId: Int64 { property.id ?? 0 }
     private var currentValue: String { rawValue ?? "" }
@@ -737,6 +744,7 @@ struct EditableCustomPropertyCell: View, Equatable {
             && lhs.rawValue == rhs.rawValue
             && lhs.isEditing == rhs.isEditing
             && lhs.wrap == rhs.wrap
+            && lhs.isRowSelected == rhs.isRowSelected
             && propertyDefVisuallyEqual(lhs.property, rhs.property)
     }
 
@@ -822,7 +830,8 @@ struct EditableCustomPropertyCell: View, Equatable {
                 deleteUnlessInUse: { optionValue in
                     deleteUnlessInUse(propId, optionValue)
                 },
-                wrap: wrap
+                wrap: wrap,
+                isRowSelected: isRowSelected
             )
         case .checkbox:
             EditableCheckboxCell(

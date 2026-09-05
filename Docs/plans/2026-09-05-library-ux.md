@@ -43,4 +43,13 @@ Implement the approved previews on `codex/library-ux` in an isolated worktree.
 
 - Independent codex-rescue review and the reuse/quality/efficiency reviews completed. Fixed title-only substring matching, Unicode annotation matching, shared query normalization, unnecessary/canceled excerpt work, and stable seeded-view wrapping. A follow-up review found no further material issues.
 - `git diff --check` passed. Linux CI and the entire test suite were not run locally; changed Mac-only sources/tests are guarded.
-- Native visual verification is pending: the worktree app launched against `/private/tmp/rubien-library-ux-fixture` with sync disabled, but computer-use inspection was blocked because the Mac was locked. No installed-app or production-library changes were made for this verification.
+- Initial native inspection was blocked by a locked Mac. Subsequent checks used a temporary development preview bundle built from this worktree, against `/private/tmp/rubien-library-ux-fixture` with sync disabled. Confirmed Comfortable title/byline rendering, Manage Columns and custom property creation, Layout access, selected-row add controls and their pickers. Assistant setup and the complete search interaction flow still require a manual pass. No installed-app or production-library changes were made for this verification.
+
+## Follow-up: contextual add-option controls
+
+Show the existing + option and + tag affordances when their cell is hovered, their table row is selected, their picker is open, or the button has keyboard focus. Keep controls mounted to preserve keyboard/accessibility access and stable row geometry. Thread selection through the equatable table-cell dispatchers and cover selection invalidation before building and reviewing the change.
+
+- Native preview confirmed both controls appear on selected rows and open their existing pickers; idle rows omit the controls. The UI automation API has no pointer-only hover action, so hover-only transitions were not directly exercised.
+- Native inspection also exposed the Details overlay covering Layout and Manage Columns. Position the inspector below the measured table header so the toolbar stays accessible, including when controls or filters wrap.
+- Verified the placement fix in the native preview: Details starts below the toolbar and Layout opens while Details remains visible.
+- Build and 17 focused regression tests passed. Independent codex-rescue and reuse/quality/efficiency reviews found no actionable issues in the contextual controls or inspector correction.

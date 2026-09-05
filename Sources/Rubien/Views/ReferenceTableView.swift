@@ -6,6 +6,16 @@ import RubienCore
 
 private let tableLog = Logger(subsystem: "Rubien", category: "reference-table")
 
+/// Lets the containing inspector start below the toolbar, including any
+/// wrapped controls and active-filter rows, without a fixed height.
+struct ReferenceTableHeaderBoundsKey: PreferenceKey {
+    static var defaultValue: Anchor<CGRect>? { nil }
+
+    static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) {
+        value = nextValue() ?? value
+    }
+}
+
 struct ReferenceTableWrappableColumn: Identifiable {
     let id: String
     let label: String
@@ -191,6 +201,7 @@ struct ReferenceTableView: View {
                 onDiscard: onDiscardView
             )
             subtitleRow
+                .anchorPreference(key: ReferenceTableHeaderBoundsKey.self, value: .bounds) { $0 }
             if snapshot.sourceIsEmpty {
                 emptyState
             } else if snapshot.processed.isEmpty {
@@ -858,7 +869,8 @@ private struct ReferenceTableContent: View {
                 onTab: { back in
                     advanceEdit(from: refId, fieldKey: customKey, backwards: back)
                 },
-                wrap: wrapForColumn(prop.customizationID)
+                wrap: wrapForColumn(prop.customizationID),
+                isRowSelected: selection.contains(ref.id)
             )
             .equatable()
         } else {
@@ -898,7 +910,8 @@ private struct ReferenceTableContent: View {
                     onRenameTag: onRenameTag,
                     onDeleteTag: onDeleteTag,
                     deleteTagUnlessInUse: deleteTagUnlessInUse,
-                    wrap: wrapForColumn(ColumnIdentifier.tags.rawValue)
+                    wrap: wrapForColumn(ColumnIdentifier.tags.rawValue),
+                    isRowSelected: selection.contains(ref.id)
                 )
                 .equatable()
             }
@@ -1543,8 +1556,10 @@ struct TagsCellView: View, Equatable {
     let onDeleteTag: (Int64) -> Void
     let deleteTagUnlessInUse: (Int64) -> Int?
     let wrap: Bool
+    var isRowSelected = false
 
     @State private var showPopover = false
+    @State private var isHovered = false
 
     // Use the file-private helper (declared in ReferenceTableCells.swift) so
     // `Tag.dateModified` churn doesn't invalidate every visible tag cell on a
@@ -1554,6 +1569,7 @@ struct TagsCellView: View, Equatable {
             && tagListVisuallyEqual(lhs.tags, rhs.tags)
             && tagListVisuallyEqual(lhs.allTags, rhs.allTags)
             && lhs.wrap == rhs.wrap
+            && lhs.isRowSelected == rhs.isRowSelected
     }
 
     var body: some View {
@@ -1575,11 +1591,16 @@ struct TagsCellView: View, Equatable {
                     accessibilityLabel: "more selected tags"
                 )
             }
-            PickerSelectionAddButton(title: "tag", accessibilityLabel: "Add tag") {
+            PickerSelectionAddButton(
+                title: "tag", accessibilityLabel: "Add tag",
+                isActive: isHovered || isRowSelected || showPopover
+            ) {
                 showPopover = true
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .onHover { isHovered = $0 }
         .popover(isPresented: $showPopover) {
             TagPickerPopover(
                 assignedTags: tags,

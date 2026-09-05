@@ -29,6 +29,29 @@ final class ReferenceTableCellEqualityTests: XCTestCase {
         )
     }
 
+    func testRowSelectionInvalidatesCustomPropertyAddAffordance() {
+        let idle = makeCell(referenceId: 1, propertyId: 31)
+        var selected = idle
+        selected.isRowSelected = true
+        XCTAssertNotEqual(idle, selected, "Selecting a row must reveal its option controls")
+        selected.isRowSelected = false
+        XCTAssertEqual(idle, selected)
+    }
+
+    func testRowSelectionInvalidatesTagAddAffordance() {
+        let idle = TagsCellView(
+            tags: [], allTags: [], referenceId: 1,
+            onUpdateTags: { _ in }, onCreateTag: { _ in nil },
+            onRenameTag: { _, _ in }, onDeleteTag: { _ in },
+            deleteTagUnlessInUse: { _ in nil }, wrap: false
+        )
+        var selected = idle
+        selected.isRowSelected = true
+        XCTAssertNotEqual(idle, selected, "Selecting a row must reveal its tag control")
+        selected.isRowSelected = false
+        XCTAssertEqual(idle, selected)
+    }
+
     private func makeCell(referenceId: Int64, propertyId: Int64) -> EditableCustomPropertyCell {
         EditableCustomPropertyCell(
             referenceId: referenceId,

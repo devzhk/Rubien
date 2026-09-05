@@ -143,11 +143,13 @@ private struct PickerSingleSelectionButtonBody: View {
     }
 }
 
-/// Explicit picker affordance used by single-select, multi-select, and Tags.
-/// `CompactHoverButtonStyle` supplies the requested pointer feedback.
+/// Contextual picker affordance for multi-select and Tags cells. Keep the
+/// button mounted (as PickerRowActions does) so hiding it neither shifts the
+/// chips nor removes keyboard and accessibility access.
 struct PickerSelectionAddButton: View {
     let title: String
     let accessibilityLabel: String
+    var isActive = true
     let action: () -> Void
 
     @State private var isHovered = false
@@ -164,8 +166,9 @@ struct PickerSelectionAddButton: View {
             .foregroundStyle(.secondary)
         }
         .buttonStyle(CompactHoverButtonStyle())
-        .opacity(isFocused ? 1 : (isHovered ? 0.8 : 0.35))
+        .opacity(isFocused ? 1 : (isActive ? (isHovered ? 1 : 0.8) : 0))
         .animation(.easeOut(duration: 0.12), value: isHovered)
+        .animation(.easeOut(duration: 0.12), value: isActive)
         .fixedSize()
         .layoutPriority(1)
         .focused($isFocused)
