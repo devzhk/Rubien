@@ -67,7 +67,13 @@ final class SyncTransactionObserverRetentionTests: XCTestCase {
         for _ in 0 ..< 8 {
             await library.schedulePendingChangeIngest()
         }
-        try await Task.sleep(for: .milliseconds(250))
+        // Wait for the scheduled work, rather than assuming the CI executor
+        // starts and completes its debounce task within a fixed 250 ms window.
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
+        while await library.scheduledIngestRunsForTest == 0, clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
 
         let runCount = await library.scheduledIngestRunsForTest
         XCTAssertEqual(runCount, 1)
