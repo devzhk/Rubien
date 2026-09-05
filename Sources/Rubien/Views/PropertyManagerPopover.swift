@@ -140,7 +140,7 @@ struct PropertyManagerPopover: View {
                 .padding(12)
             }
         }
-        .frame(width: 220)
+        .frame(width: 200)
         .activatePopoverHover()
     }
 }
