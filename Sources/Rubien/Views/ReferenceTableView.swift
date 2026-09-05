@@ -285,6 +285,7 @@ struct ReferenceTableView: View {
     ) -> some View {
         ReferenceTableContent(
             references: processed,
+            rowIDs: visibleTableRowIDs(processed: processed, buckets: buckets),
             buckets: buckets,
             collapsedGroups: Binding(
                 get: { groupBy?.collapsed ?? [] },
@@ -320,7 +321,6 @@ struct ReferenceTableView: View {
                 usesAutomaticRowHeights: density == .comfortable || hasVisibleWrappedColumn
             )
         )
-        .background(ReferenceTableRowHover())
         .contextMenu(forSelectionType: Reference.ID.self) { ids in
             if let id = ids.first, let ref = references.first(where: { $0.id == id }) {
                 contextMenuContent(for: ref, exportIDs: exportIDs)
@@ -685,6 +685,7 @@ struct ReferenceTableView: View {
 
 private struct ReferenceTableContent: View {
     let references: [Reference]
+    let rowIDs: [Int64?]
     let buckets: [GroupBucket]?
     @Binding var collapsedGroups: Set<String>
     let tagMap: [Int64: [Tag]]
@@ -711,6 +712,7 @@ private struct ReferenceTableContent: View {
     let density: ReferenceTableDensity
     @Binding var columnCustomization: TableColumnCustomization<Reference>
 
+    @State private var hoveredReferenceID: Int64?
     @State private var editingCell: EditingCellID? = nil
 
     private func isEditing(_ refId: Int64?, _ key: String) -> Bool {
@@ -877,7 +879,8 @@ private struct ReferenceTableContent: View {
                     advanceEdit(from: refId, fieldKey: customKey, backwards: back)
                 },
                 wrap: wrapForColumn(prop.customizationID),
-                isRowSelected: selection.contains(ref.id)
+                isRowSelected: selection.contains(ref.id),
+                isRowHovered: ref.id != nil && hoveredReferenceID == ref.id
             )
             .equatable()
         } else {
@@ -912,7 +915,8 @@ private struct ReferenceTableContent: View {
                     onDeleteTag: onDeleteTag,
                     deleteTagUnlessInUse: deleteTagUnlessInUse,
                     wrap: wrapForColumn(ColumnIdentifier.tags.rawValue),
-                    isRowSelected: selection.contains(ref.id)
+                    isRowSelected: selection.contains(ref.id),
+                    isRowHovered: ref.id != nil && hoveredReferenceID == ref.id
                 )
                 .equatable()
             }
@@ -1043,6 +1047,7 @@ private struct ReferenceTableContent: View {
                 }
             }
         }
+        .background(ReferenceTableRowHover(rowIDs: rowIDs) { hoveredReferenceID = $0 })
         .onChange(of: columnCustomization) { _, newValue in
             persistColumnCustomization(newValue)
         }
@@ -1293,13 +1298,16 @@ private struct ReferenceTableSelectionScroller: NSViewRepresentable {
 
 // MARK: - Row hover highlight
 
-/// Draws a subtle hover highlight on the row under the pointer. SwiftUI's
-/// `Table` exposes no row-hover hook, so this bridges to the backing
+/// Publishes the hovered reference and draws a subtle row highlight. On our
+/// macOS deployment floor, row hover is bridged through the backing
 /// `NSTableView` (the same view the selection scroller reaches): a local
 /// mouse-moved monitor maps the pointer to a row and a lightweight,
 /// click-through overlay is positioned over it. Selected rows keep their own
 /// selection highlight, so no hover is drawn on them.
-private struct ReferenceTableRowHover: NSViewRepresentable {
+struct ReferenceTableRowHover: NSViewRepresentable {
+    let rowIDs: [Int64?]
+    let onHoverChange: (Int64?) -> Void
+
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> NSView {
@@ -1309,6 +1317,8 @@ private struct ReferenceTableRowHover: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.rowIDs = rowIDs
+        context.coordinator.onHoverChange = onHoverChange
         // The NSTableView may not be in the hierarchy yet at make time.
         context.coordinator.start(from: nsView)
     }
@@ -1318,24 +1328,45 @@ private struct ReferenceTableRowHover: NSViewRepresentable {
     }
 
     final class Coordinator {
+        var rowIDs: [Int64?] = [] {
+            didSet {
+                guard oldValue != rowIDs else { return }
+                // Sorting, filtering, and collapsing groups can replace the row
+                // beneath a stationary pointer. Re-resolve after table layout.
+                DispatchQueue.main.async { [weak self] in self?.refreshHover() }
+            }
+        }
+        var onHoverChange: (Int64?) -> Void = { _ in }
+        private var hoveredReferenceID: Int64?
         private weak var anchor: NSView?
         private weak var tableView: NSTableView?
         private var monitor: Any?
+        private var resignObserver: Any?
+        private var scrollObserver: Any?
+        private weak var observedClipView: NSClipView?
         private var hoverView: HoverHighlightView?
         private var hoveredRow = -1
 
         func start(from view: NSView) {
             anchor = view
             guard monitor == nil else { return }
-            monitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
+            monitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .mouseExited]) { [weak self] event in
                 self?.handle(event)
                 return event
             }
+            resignObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didResignKeyNotification, object: nil, queue: .main
+            ) { [weak self] _ in self?.clearHover() }
         }
 
         func stop() {
             if let monitor { NSEvent.removeMonitor(monitor) }
             monitor = nil
+            if let resignObserver { NotificationCenter.default.removeObserver(resignObserver) }
+            resignObserver = nil
+            if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) }
+            scrollObserver = nil
+            observedClipView = nil
             hoverView?.removeFromSuperview()
             hoverView = nil
             tableView = nil
@@ -1351,7 +1382,20 @@ private struct ReferenceTableRowHover: NSViewRepresentable {
             // Required so the window posts the .mouseMoved events the monitor needs.
             found.window?.acceptsMouseMovedEvents = true
             tableView = found
+            if let clipView = found.enclosingScrollView?.contentView {
+                observeScrolling(in: clipView)
+            }
             return found
+        }
+
+        func observeScrolling(in clipView: NSClipView) {
+            guard observedClipView !== clipView else { return }
+            if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) }
+            observedClipView = clipView
+            clipView.postsBoundsChangedNotifications = true
+            scrollObserver = NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification, object: clipView, queue: .main
+            ) { [weak self] _ in self?.refreshHover() }
         }
 
         private func handle(_ event: NSEvent) {
@@ -1361,24 +1405,39 @@ private struct ReferenceTableRowHover: NSViewRepresentable {
                 clearHover()
                 return
             }
-            let point = tableView.convert(event.locationInWindow, from: nil)
-            guard tableView.bounds.contains(point) else { clearHover(); return }
+            refreshHover()
+        }
+
+        private func refreshHover() {
+            guard let tableView = resolveTableView(), let window = tableView.window,
+                  window.isKeyWindow else { clearHover(); return }
+            let location = window.mouseLocationOutsideOfEventStream
+            let point = tableView.convert(location, from: nil)
+            guard tableView.visibleRect.contains(point) else { clearHover(); return }
             // The floating detail panel (and any other overlay) sits above the table
             // in the same window, so `bounds.contains` alone would highlight the row
             // *under* the panel while the pointer is over it. Require the table to be
             // the topmost view at the pointer before drawing hover. The hover overlay
             // itself is click-through (`hitTest` → nil), so it doesn't count as
             // occluding the row beneath it.
-            let hit = window.contentView?.hitTest(event.locationInWindow)
+            let hit = window.contentView?.hitTest(location)
             guard hit?.isDescendant(of: tableView) == true else { clearHover(); return }
             updateHover(to: tableView.row(at: point), in: tableView)
         }
 
-        private func updateHover(to row: Int, in tableView: NSTableView) {
-            let valid = row >= 0
-                && row < tableView.numberOfRows
-                && !tableView.selectedRowIndexes.contains(row)
-            guard valid else { clearHover(); return }
+        func updateHover(to row: Int, in tableView: NSTableView) {
+            guard row >= 0, row < tableView.numberOfRows, rowIDs.indices.contains(row),
+                  let referenceID = rowIDs[row] else { clearHover(); return }
+            if hoveredReferenceID != referenceID {
+                hoveredReferenceID = referenceID
+                onHoverChange(referenceID)
+            }
+            // Selection suppresses only the highlight, never the hover signal.
+            if tableView.selectedRowIndexes.contains(row) {
+                hoveredRow = -1
+                hoverView?.isHidden = true
+                return
+            }
             // Skip if we're already highlighting this row.
             if row == hoveredRow, hoverView?.isHidden == false { return }
             hoveredRow = row
@@ -1393,7 +1452,11 @@ private struct ReferenceTableRowHover: NSViewRepresentable {
             hv.isHidden = false
         }
 
-        private func clearHover() {
+        func clearHover() {
+            if hoveredReferenceID != nil {
+                hoveredReferenceID = nil
+                onHoverChange(nil)
+            }
             hoveredRow = -1
             hoverView?.isHidden = true
         }
@@ -1572,6 +1635,7 @@ struct TagsCellView: View, Equatable {
     let deleteTagUnlessInUse: (Int64) -> Int?
     let wrap: Bool
     var isRowSelected = false
+    var isRowHovered = false
 
     @State private var showPopover = false
     @State private var isHovered = false
@@ -1585,6 +1649,7 @@ struct TagsCellView: View, Equatable {
             && tagListVisuallyEqual(lhs.allTags, rhs.allTags)
             && lhs.wrap == rhs.wrap
             && lhs.isRowSelected == rhs.isRowSelected
+            && lhs.isRowHovered == rhs.isRowHovered
     }
 
     var body: some View {
@@ -1608,7 +1673,7 @@ struct TagsCellView: View, Equatable {
             }
             PickerSelectionAddButton(
                 title: "tag", accessibilityLabel: "Add tag",
-                isActive: isHovered || isRowSelected || showPopover
+                isActive: isHovered || isRowHovered || isRowSelected || showPopover
             ) {
                 showPopover = true
             }

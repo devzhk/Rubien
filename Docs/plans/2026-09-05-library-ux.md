@@ -53,3 +53,10 @@ Show the existing + option and + tag affordances when their cell is hovered, the
 - Native inspection also exposed the Details overlay covering Layout and Manage Columns. Position the inspector below the measured table header so the toolbar stays accessible, including when controls or filters wrap.
 - Verified the placement fix in the native preview: Details starts below the toolbar and Layout opens while Details remains visible.
 - Build and 17 focused regression tests passed. Independent codex-rescue and reuse/quality/efficiency reviews found no actionable issues in the contextual controls or inspector correction.
+
+## Follow-up: unselected row hover
+
+The user confirmed that cell-level hover failed to reveal controls on unselected rows. Reuse the existing native table row-hover tracker to publish the hovered reference independently of selection, pass that state through the equatable cells, and retain cell hover, focus, and open-picker visibility. Resolve group headers and reordered rows through the same row identity map as selection scrolling. Cover unselected/selected rows, group headers, exit, and mapping changes in regression tests before rebuilding the preview.
+
+- Build and 20 focused tests passed. The independent review identified stationary-pointer programmatic scrolling; added clip-view bounds observation and regression coverage for notification delivery and cleanup. Follow-up review and reuse/quality/efficiency reviews found no remaining actionable issues.
+- Refreshed the sample preview. Direct pointer-only UI verification remains unavailable through the automation API; requested the user's hover check.

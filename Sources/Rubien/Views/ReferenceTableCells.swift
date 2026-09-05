@@ -410,6 +410,7 @@ struct EditableMultiSelectCell: View {
     var deleteUnlessInUse: ((String) -> Int?)? = nil
     var wrap = false
     var isRowSelected = false
+    var isRowHovered = false
 
     @State private var showPicker = false
     @State private var isHovered = false
@@ -435,7 +436,7 @@ struct EditableMultiSelectCell: View {
             }
             PickerSelectionAddButton(
                 title: "option", accessibilityLabel: "Add option",
-                isActive: isHovered || isRowSelected || showPicker
+                isActive: isHovered || isRowHovered || isRowSelected || showPicker
             ) {
                 showPicker = true
             }
@@ -735,6 +736,7 @@ struct EditableCustomPropertyCell: View, Equatable {
     var onTab: ((_ backwards: Bool) -> Void)? = nil
     var wrap: Bool = false
     var isRowSelected = false
+    var isRowHovered = false
 
     private var propId: Int64 { property.id ?? 0 }
     private var currentValue: String { rawValue ?? "" }
@@ -745,6 +747,7 @@ struct EditableCustomPropertyCell: View, Equatable {
             && lhs.isEditing == rhs.isEditing
             && lhs.wrap == rhs.wrap
             && lhs.isRowSelected == rhs.isRowSelected
+            && lhs.isRowHovered == rhs.isRowHovered
             && propertyDefVisuallyEqual(lhs.property, rhs.property)
     }
 
@@ -831,7 +834,8 @@ struct EditableCustomPropertyCell: View, Equatable {
                     deleteUnlessInUse(propId, optionValue)
                 },
                 wrap: wrap,
-                isRowSelected: isRowSelected
+                isRowSelected: isRowSelected,
+                isRowHovered: isRowHovered
             )
         case .checkbox:
             EditableCheckboxCell(

@@ -36,6 +36,8 @@ final class ReferenceTableCellEqualityTests: XCTestCase {
         XCTAssertNotEqual(idle, selected, "Selecting a row must reveal its option controls")
         selected.isRowSelected = false
         XCTAssertEqual(idle, selected)
+        selected.isRowHovered = true
+        XCTAssertNotEqual(idle, selected, "Hovering an unselected row must reveal its option controls")
     }
 
     func testRowSelectionInvalidatesTagAddAffordance() {
@@ -50,6 +52,8 @@ final class ReferenceTableCellEqualityTests: XCTestCase {
         XCTAssertNotEqual(idle, selected, "Selecting a row must reveal its tag control")
         selected.isRowSelected = false
         XCTAssertEqual(idle, selected)
+        selected.isRowHovered = true
+        XCTAssertNotEqual(idle, selected, "Hovering an unselected row must reveal its tag control")
     }
 
     private func makeCell(referenceId: Int64, propertyId: Int64) -> EditableCustomPropertyCell {
