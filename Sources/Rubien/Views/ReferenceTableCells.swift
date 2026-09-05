@@ -347,7 +347,12 @@ struct EditableSingleSelectCell: View {
     var onDeleteOption: ((String) -> Void)? = nil
     var deleteUnlessInUse: ((String) -> Int?)? = nil
 
+    var isRowSelected = false
+    var isRowHovered = false
+
     @State private var showPicker = false
+    @State private var isHovered = false
+    @FocusState private var isFocused: Bool
 
     var body: some View {
         Button {
@@ -372,10 +377,13 @@ struct EditableSingleSelectCell: View {
             }
         }
         .buttonStyle(PickerSingleSelectionButtonStyle(isEmpty: value.isEmpty))
+        .focused($isFocused)
+        .opacity(!value.isEmpty || isHovered || isRowHovered || isRowSelected || showPicker || isFocused ? 1 : 0)
         .help("Select option")
         .accessibilityLabel("Select option")
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
+        .onHover { isHovered = $0 }
         .popover(isPresented: $showPicker) {
             SelectOptionPicker(
                 selectedValues: value.isEmpty ? [] : [value],
@@ -810,7 +818,9 @@ struct EditableCustomPropertyCell: View, Equatable {
                 },
                 deleteUnlessInUse: { optionValue in
                     deleteUnlessInUse(propId, optionValue)
-                }
+                },
+                isRowSelected: isRowSelected,
+                isRowHovered: isRowHovered
             )
         case .multiSelect:
             let selected = PropertyValue.decodeMultiSelect(currentValue)
