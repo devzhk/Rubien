@@ -823,6 +823,10 @@ private struct ReferenceTableContent: View {
             verticalPadding: density == .comfortable ? 6 : 0
         )
         .equatable()
+        .background(ReferenceRowSelectionBackground(
+            isSelected: selection.contains(ref.id),
+            accent: AccentColorManager.shared.effectiveNSColor
+        ))
     }
 
     @ViewBuilder
@@ -1213,6 +1217,9 @@ private struct ReferenceTableSelectionScroller: NSViewRepresentable {
             if tableView.usesAutomaticRowHeights != desiredValue {
                 tableView.usesAutomaticRowHeights = desiredValue
             }
+            // Selection is drawn beneath the cells by ReferenceRowSelectionBackground.
+            // Keep native selection semantics, but use normal text on the pale fill.
+            tableView.selectionHighlightStyle = .none
             configuredTableView = tableView
             configuredAutomaticRowHeights = desiredValue
         }
