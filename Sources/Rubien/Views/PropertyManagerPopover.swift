@@ -27,7 +27,6 @@ struct PropertyManagerPopover: View {
         VStack(alignment: .leading, spacing: 0) {
             // Creation action; the toolbar button already names this popover.
             HStack {
-                Spacer()
                 Button {
                     showNewProperty = true
                 } label: {
@@ -38,6 +37,7 @@ struct PropertyManagerPopover: View {
                 .buttonStyle(ToolbarHoverButtonStyle(hoverOpacity: 0.12, pressedOpacity: 0.18))
                 .focusEffectDisabled()
                 .help("Add new property")
+                Spacer()
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
