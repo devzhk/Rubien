@@ -218,7 +218,15 @@ struct EditableStringCell: View, Equatable {
                 }
             }
             .padding(.vertical, verticalPadding)
+            .fixedSize(horizontal: false, vertical: wrap || subtitle != nil)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+                if wrap || subtitle != nil {
+                    GeometryReader { geometry in
+                        ReferenceCellHeightObserver(height: geometry.size.height)
+                    }
+                }
+            }
         }
     }
 }

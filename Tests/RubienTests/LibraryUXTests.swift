@@ -1,11 +1,94 @@
 #if os(macOS)
 import XCTest
+import SwiftUI
 import GRDB
 @testable import Rubien
 @testable import RubienCore
 
 @MainActor
 final class LibraryUXTests: XCTestCase {
+    func testComfortableTableFitsTitleAndBylineAfterMetadataUpdate() async throws {
+        try await assertTableFitsUpdatedTitle(subtitle: "Cherubim et al. · 2026")
+        try await assertTableFitsUpdatedTitle(subtitle: nil)
+    }
+
+    private func assertTableFitsUpdatedTitle(subtitle: String?) async throws {
+        var cell = EditableStringCell(
+            value: "Helium escaping from the atmosphere of a nearby rocky exoplanet orbiting in a habitable zone",
+            isEditing: false, onBeginEdit: {}, onCommit: { _ in }, onCancel: {}
+        )
+        cell.wrap = true
+        cell.subtitle = subtitle
+        cell.displayLineLimit = 2
+        cell.verticalPadding = 6
+        let host = NSHostingController(rootView: cell)
+        let full = host.sizeThatFits(in: CGSize(width: 360, height: 1_000))
+        let compressed = host.sizeThatFits(in: CGSize(width: 360, height: 40))
+        func tableContent(_ title: String) -> some View {
+            var reference = Reference(title: title)
+            reference.id = 1
+            var displayedCell = EditableStringCell(value: title, isEditing: false,
+                onBeginEdit: {}, onCommit: { _ in }, onCancel: {})
+            displayedCell.wrap = true
+            displayedCell.subtitle = cell.subtitle
+            displayedCell.displayLineLimit = 2
+            displayedCell.verticalPadding = 6
+            return Table([reference]) {
+                TableColumn("Title") { _ in displayedCell.equatable() }
+                    .width(360)
+            }
+        }
+        let tableHost = NSHostingController(rootView: tableContent("Untitled"))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 200),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        tableHost.view.frame = NSRect(x: 0, y: 0, width: 420, height: 200)
+        window.contentViewController = tableHost
+        window.orderFront(nil)
+        defer { window.orderOut(nil); window.contentViewController = nil }
+        func findTable(_ view: NSView) -> NSTableView? {
+            if let table = view as? NSTableView { return table }
+            return view.subviews.lazy.compactMap { findTable($0) }.first
+        }
+        for _ in 0..<10 {
+            tableHost.view.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        tableHost.rootView = tableContent(cell.value)
+        for _ in 0..<10 {
+            tableHost.view.layoutSubtreeIfNeeded()
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let table = try XCTUnwrap(findTable(tableHost.view))
+        XCTAssertGreaterThanOrEqual(table.rect(ofRow: 0).height, full.height)
+        XCTAssertGreaterThan(full.height, 40)
+        XCTAssertEqual(compressed.height, full.height, accuracy: 0.5,
+                       "The row must measure the entire wrapped title and byline, even with a smaller height proposal")
+    }
+
+    func testTitleHeightChangesInvalidateOnlyTheirRowAndCoalesce() async throws {
+        final class Table: NSTableView {
+            var invalidated: [IndexSet] = []
+            override func row(for view: NSView) -> Int { 3 }
+            override func noteHeightOfRows(withIndexesChanged indexes: IndexSet) {
+                invalidated.append(indexes)
+            }
+        }
+        let table = Table()
+        table.usesAutomaticRowHeights = true
+        let anchor = ReferenceCellHeightObserver.Anchor()
+        table.addSubview(anchor)
+        anchor.updateHeight(42)
+        anchor.updateHeight(58)
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(table.invalidated, [IndexSet(integer: 3)])
+        anchor.updateHeight(58)
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(table.invalidated.count, 1, "Unchanged measurements must not create a layout loop")
+        anchor.updateHeight(74)
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(table.invalidated.count, 2)
+    }
+
     func testComfortableBylineHandlesMissingMetadata() {
         var reference = Reference(title: "Example")
         XCTAssertNil(referenceTableByline(reference))
