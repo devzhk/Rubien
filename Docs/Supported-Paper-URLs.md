@@ -31,6 +31,13 @@ These hosts have explicit article-path support. Rubien preserves the publisher l
 
 Rubien reads most pages from `citation_*` HTML metadata, then uses CrossRef to normalize records with a DOI. eLife uses its official API. APS, Science, and ACS URLs resolve directly through their embedded DOI so publisher HTML is not required. Oxford Academic issue URLs bridge their numeric article ID through Oxford's Silverchair minimal page, then resolve the discovered DOI through CrossRef; DOI-bearing Oxford paths skip that bridge. GeoscienceWorld pages are browser-protected: the extension validates the page's captured DOI against CrossRef's indexed article ID and issue locator, while other imports use a locator-enriched CrossRef search and require an exact match on article ID, journal, volume, issue, and first page. A publisher PDF is accepted only when its stable issue locator also matches. Science downloads use its `?download=true` endpoint so the browser can apply the user's authenticated publisher session. Cell Press URLs first resolve their formatted PII through PubMed; for journals not indexed there, Rubien reads the canonical title from Elsevier Linking Hub and requires a unique OpenAlex match constrained by the PII's ISSN and assignment year. This avoids relying on Cell's browser-protected article HTML. PDF access depends on the publisher.
 
+For OpenReview forum and PDF tabs, the browser extension stages the PDF using
+Chrome's session and imports the file through the PDF metadata pipeline. A forum
+URL maps to `/pdf` with the same `id`; no need to open the PDF tab first. This
+does not require a successful forum-page metadata request; unresolved metadata
+goes to review with the PDF preserved. Pasting the URL into the app or CLI still
+uses the publisher resolver and can be blocked by browser verification.
+
 ## Identifier, preprint, and direct-file URLs
 
 These URLs are supported without adding their hosts to the publisher allowlist.

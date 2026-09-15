@@ -254,59 +254,96 @@ test('confirmation downloads a publisher PDF with Chrome before importing', asyn
   assert.equal(context.confirmMessage.downloadPDF, true);
 });
 
-test('direct PDF is staged through Chrome with a token-bound filename', async () => {
-  const elements = new Map();
-  let downloadOptions;
+for (const [sourceURL, expectedDownloadURL] of [
+  ['https://publisher.example/private.pdf', 'https://publisher.example/private.pdf'],
+  ['https://openreview.net/pdf?id=vgZDcUetWS', 'https://openreview.net/pdf?id=vgZDcUetWS'],
+  ['https://openreview.net/pdf?download=true&id=vgZDcUetWS#page=2',
+    'https://openreview.net/pdf?download=true&id=vgZDcUetWS#page=2'],
+  ['https://openreview.net/forum?id=ieUs1hK3HG', 'https://openreview.net/pdf?id=ieUs1hK3HG'],
+  ['https://openreview.net/forum?noteId=another-note&id=ieUs1hK3HG&referrer=group#discussion',
+    'https://openreview.net/pdf?id=ieUs1hK3HG'],
+]) {
+  test(`PDF is staged through Chrome with a token-bound filename: ${sourceURL}`, async () => {
+    const elements = new Map();
+    let downloadOptions;
+    const context = vm.createContext({
+      URL,
+      clearTimeout,
+      console,
+      setTimeout,
+      sourceURL,
+      crypto: {
+        randomUUID: () => '123e4567-e89b-12d3-a456-426614174001',
+      },
+      document: {
+        addEventListener() {},
+        getElementById(id) {
+          if (!elements.has(id)) elements.set(id, makeElement());
+          return elements.get(id);
+        },
+      },
+      window: { addEventListener() {}, close() {} },
+      chrome: {
+        downloads: {
+          async download(options) {
+            downloadOptions = options;
+            return 18;
+          },
+          async search({ id }) {
+            return [{
+              id,
+              state: 'complete',
+              filename: '/Users/test/Downloads/Rubien/rubien-preview-123e4567-e89b-12d3-a456-426614174001.pdf',
+            }];
+          },
+          onChanged: { addListener() {}, removeListener() {} },
+        },
+      },
+    });
+    vm.runInContext(popupSource, context);
+
+    const page = await vm.runInContext(
+      'stageDirectFileWithChrome({ url: sourceURL })',
+      context
+    );
+
+    assert.equal(downloadOptions.url, expectedDownloadURL);
+    assert.equal(page.url, sourceURL);
+    assert.equal(
+      downloadOptions.filename,
+      'Rubien/rubien-preview-123e4567-e89b-12d3-a456-426614174001.pdf'
+    );
+    assert.equal(
+      page.browserDownloadedFilePath,
+      '/Users/test/Downloads/Rubien/rubien-preview-123e4567-e89b-12d3-a456-426614174001.pdf'
+    );
+    assert.equal(page.browserDownloadToken, '123e4567-e89b-12d3-a456-426614174001');
+  });
+}
+
+test('OpenReview staging excludes unrelated paths, missing IDs, and lookalike hosts', async () => {
   const context = vm.createContext({
     URL,
-    clearTimeout,
-    console,
-    setTimeout,
-    crypto: {
-      randomUUID: () => '123e4567-e89b-12d3-a456-426614174001',
-    },
-    document: {
-      addEventListener() {},
-      getElementById(id) {
-        if (!elements.has(id)) elements.set(id, makeElement());
-        return elements.get(id);
-      },
-    },
-    window: { addEventListener() {}, close() {} },
-    chrome: {
-      downloads: {
-        async download(options) {
-          downloadOptions = options;
-          return 18;
-        },
-        async search({ id }) {
-          return [{
-            id,
-            state: 'complete',
-            filename: '/Users/test/Downloads/Rubien/rubien-preview-123e4567-e89b-12d3-a456-426614174001.pdf',
-          }];
-        },
-        onChanged: { addListener() {}, removeListener() {} },
-      },
-    },
+    document: { addEventListener() {} },
+    window: { addEventListener() {} },
+    chrome: {},
   });
   vm.runInContext(popupSource, context);
-
-  const page = await vm.runInContext(
-    `stageDirectFileWithChrome({ url: 'https://publisher.example/private.pdf' })`,
-    context
-  );
-
-  assert.equal(downloadOptions.url, 'https://publisher.example/private.pdf');
-  assert.equal(
-    downloadOptions.filename,
-    'Rubien/rubien-preview-123e4567-e89b-12d3-a456-426614174001.pdf'
-  );
-  assert.equal(
-    page.browserDownloadedFilePath,
-    '/Users/test/Downloads/Rubien/rubien-preview-123e4567-e89b-12d3-a456-426614174001.pdf'
-  );
-  assert.equal(page.browserDownloadToken, '123e4567-e89b-12d3-a456-426614174001');
+  for (const url of [
+    'https://openreview.net/forum',
+    'https://openreview.net/forum?id=%20',
+    'https://openreview.net/challenge?id=vgZDcUetWS',
+    'https://openreview.net.example/forum?id=vgZDcUetWS',
+    'https://openreview.net/pdf',
+    'https://openreview.net/pdf?id=',
+    'https://openreview.net/pdf?id=%20',
+    'https://openreview.net.example/pdf?id=vgZDcUetWS',
+  ]) {
+    context.page = { url };
+    const result = await vm.runInContext('stageDirectFileWithChrome(page)', context);
+    assert.equal(result, context.page);
+    assert.equal(result.browserDownloadedFilePath, undefined);
+  }
 });
 
 test('download listener is registered before the initial status check', async () => {

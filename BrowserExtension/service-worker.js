@@ -52,7 +52,13 @@ async function extractTab(tab) {
     // same PDF/paper pipeline as Import Reference, so extraction is an optional
     // enrichment rather than a prerequisite.
     let page;
-    const directFileURL = /\.(?:pdf|md|markdown)$/i.test(new URL(rawURL).pathname);
+    const parsedURL = new URL(rawURL);
+    // Keep aligned with popup staging and the native host. OpenReview forum
+    // IDs map directly to PDFs, so neither tab needs DOM extraction to import.
+    const openReviewPaper = parsedURL.hostname === 'openreview.net' &&
+      ['/pdf', '/forum'].includes(parsedURL.pathname) &&
+      Boolean(parsedURL.searchParams.get('id')?.trim());
+    const directFileURL = /\.(?:pdf|md|markdown)$/i.test(parsedURL.pathname) || openReviewPaper;
     if (directFileURL) {
       page = {
         url: rawURL,

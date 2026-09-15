@@ -699,6 +699,47 @@ final class BrowserClipImportServiceTests: XCTestCase {
     }
 
     func testDirectChromePDFRejectsHTMLBodyAndDeletesBrowserFile() async throws {
+        try await assertChromePDFRejectsHTML(url: "https://files.example/private.pdf")
+    }
+
+    func testOpenReviewChromePDFRejectsHTMLBodyAndDeletesBrowserFile() async throws {
+        try await assertChromePDFRejectsHTML(url: "https://openreview.net/pdf?id=vgZDcUetWS")
+    }
+
+    func testOpenReviewForumPDFRejectsHTMLBodyAndDeletesBrowserFile() async throws {
+        try await assertChromePDFRejectsHTML(url: "https://openreview.net/forum?id=ieUs1hK3HG")
+    }
+
+    func testOpenReviewBrowserDownloadRequiresPaperEndpointAndMatchingToken() async throws {
+        let database = try makeDatabase()
+        let token = UUID()
+        let path = "/Users/test/Downloads/Rubien/rubien-preview-\(token.uuidString.lowercased()).pdf"
+        let service = BrowserClipImportService(database: database)
+        for (url, suppliedToken) in [
+            ("https://openreview.net/forum?id=", token.uuidString),
+            ("https://openreview.net/forum", token.uuidString),
+            ("https://openreview.net/challenge?id=ieUs1hK3HG", token.uuidString),
+            ("https://openreview.net/pdf?id=", token.uuidString),
+            ("https://openreview.net/pdf", token.uuidString),
+            ("https://openreview.net.example/pdf?id=vgZDcUetWS", token.uuidString),
+            ("https://openreview.net/pdf?id=vgZDcUetWS", UUID().uuidString),
+            ("https://openreview.net/forum?id=ieUs1hK3HG", UUID().uuidString),
+        ] {
+            do {
+                _ = try await service.prepareClip(request(page: BrowserClipPage(
+                    url: url,
+                    browserDownloadedFilePath: path,
+                    browserDownloadToken: suppliedToken
+                )))
+                XCTFail("Expected invalid browser download for \(url)")
+            } catch {
+                XCTAssertEqual(error as? BrowserClipHostError, .invalidBrowserDownload)
+            }
+        }
+        XCTAssertEqual(try database.referenceCount(), 0)
+    }
+
+    private func assertChromePDFRejectsHTML(url: String) async throws {
         let database = try makeDatabase()
         let token = UUID()
         let browserURL = try makeBrowserDownload(
@@ -709,7 +750,7 @@ final class BrowserClipImportServiceTests: XCTestCase {
 
         do {
             _ = try await service.prepareClip(request(page: BrowserClipPage(
-                url: "https://files.example/private.pdf",
+                url: url,
                 browserDownloadedFilePath: browserURL.path,
                 browserDownloadToken: token.uuidString.lowercased()
             )))
@@ -828,28 +869,70 @@ final class BrowserClipImportServiceTests: XCTestCase {
 
 #if os(macOS)
     func testDirectPDFPreviewQueuesOnlyAfterConfirmation() async throws {
+        try await assertPDFPreviewQueuesOnlyAfterConfirmation(
+            url: "https://files.example/paper.pdf"
+        )
+    }
+
+    func testOpenReviewBrowserPDFSkipsPublisherResolverAndPreservesPDFForReview() async throws {
+        try await assertPDFPreviewQueuesOnlyAfterConfirmation(
+            url: "https://openreview.net/pdf?id=vgZDcUetWS",
+            browserToken: UUID()
+        )
+    }
+
+    func testOpenReviewForumSkipsPublisherResolverAndPreservesLinkedPDFForReview() async throws {
+        try await assertPDFPreviewQueuesOnlyAfterConfirmation(
+            url: "https://openreview.net/forum?id=ieUs1hK3HG",
+            browserToken: UUID()
+        )
+    }
+
+    private func assertPDFPreviewQueuesOnlyAfterConfirmation(
+        url: String,
+        browserToken: UUID? = nil
+    ) async throws {
         let database = try makeDatabase()
         let temporary = try makeMaterializedSource(kind: .pdf, filename: "paper.pdf")
         try Data("test-pdf-placeholder".utf8).write(to: temporary.source.fileURL)
+        let browserPath = browserToken.map {
+            "/Users/test/Downloads/Rubien/rubien-preview-\($0.uuidString.lowercased()).pdf"
+        }
         let preparedPDF = PreparedPDFImport(
             sourceURL: temporary.source.fileURL,
             resolution: .seedOnly(IntakeEnvelope(
-                seed: MetadataResolutionSeed(fileName: "paper.pdf", title: "Needs PDF review"),
+                seed: MetadataResolutionSeed(
+                    fileName: "paper.pdf",
+                    title: "Needs PDF review",
+                    sourceURL: temporary.source.fileURL.absoluteString
+                ),
                 fallbackReference: Reference(title: "Needs PDF review"),
                 message: "No authoritative match"
             ))
         )
         let service = BrowserClipImportService(
             database: database,
-            filePreparer: { _, _ in .pdf(source: temporary.source, prepared: preparedPDF) }
+            metadataResolver: { _, _, _, _ in
+                XCTFail("A browser PDF must not depend on publisher-page resolution")
+                return MetadataResolutionPipeline.IdentifierResolutionOutcome(result: preparedPDF.resolution)
+            },
+            filePreparer: { input, path in
+                XCTAssertEqual(input, url)
+                XCTAssertEqual(path, browserPath)
+                return .pdf(source: temporary.source, prepared: preparedPDF)
+            }
         )
 
         let prepared = try await service.prepareClip(request(page: BrowserClipPage(
-            url: "https://files.example/paper.pdf"
+            url: url,
+            browserDownloadedFilePath: browserPath,
+            browserDownloadToken: browserToken?.uuidString.lowercased()
         )))
         XCTAssertEqual(prepared.preview.kind, .pdf)
         XCTAssertEqual(prepared.preview.title, "Needs PDF review")
         XCTAssertTrue(prepared.preview.willQueueForReview)
+        XCTAssertFalse(prepared.preview.willDownloadPDF)
+        XCTAssertFalse(prepared.preview.hasCapturedContent)
         XCTAssertEqual(try database.fetchPendingMetadataIntakes().count, 0)
         XCTAssertTrue(FileManager.default.fileExists(atPath: temporary.source.fileURL.path))
         // The outer Codex sandbox can make Rubien's Application Support root
@@ -865,7 +948,16 @@ final class BrowserClipImportServiceTests: XCTestCase {
         XCTAssertEqual(response.kind, .pdf)
         let intake = try XCTUnwrap(try database.fetchPendingMetadataIntakes().first)
         XCTAssertNotNil(intake.pdfPath)
+        if browserToken != nil {
+            XCTAssertEqual(intake.sourceURL, url)
+            XCTAssertEqual(intake.decodedSeed?.sourceURL, url)
+            XCTAssertEqual(intake.decodedFallbackReference?.url, url)
+        }
         if let pdfPath = intake.pdfPath {
+            XCTAssertEqual(
+                try Data(contentsOf: AppDatabase.pdfStorageURL.appendingPathComponent(pdfPath)),
+                Data("test-pdf-placeholder".utf8)
+            )
             PDFService.deletePDF(at: pdfPath)
         }
         XCTAssertFalse(FileManager.default.fileExists(atPath: temporary.directory.path))

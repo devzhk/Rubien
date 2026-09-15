@@ -296,13 +296,24 @@ function closePopup() {
 async function stageDirectFileWithChrome(page) {
   const parsed = new URL(page?.url || '');
   const match = parsed.pathname.match(/\.(pdf|md|markdown)$/i);
-  if (!match) return page;
+  // Keep aligned with service-worker extraction and native host validation.
+  const openReviewPaper = parsed.hostname === 'openreview.net' &&
+    ['/pdf', '/forum'].includes(parsed.pathname) &&
+    Boolean(parsed.searchParams.get('id')?.trim());
+  if (!match && !openReviewPaper) return page;
+
+  // OpenReview's forum and PDF URLs identify the same paper by id. Download
+  // only that paper, without carrying forum navigation parameters to the PDF.
+  const downloadURL = openReviewPaper && parsed.pathname === '/forum'
+    ? new URL('https://openreview.net/pdf')
+    : parsed;
+  if (downloadURL !== parsed) downloadURL.searchParams.set('id', parsed.searchParams.get('id'));
 
   setLoading('Downloading the source…', 'Chrome is using your signed-in session.');
-  const extension = match[1].toLowerCase();
+  const extension = openReviewPaper ? 'pdf' : match[1].toLowerCase();
   const token = crypto.randomUUID().toLowerCase();
   const downloaded = await downloadWithChrome(
-    parsed,
+    downloadURL,
     `Rubien/rubien-preview-${token}.${extension}`,
     true
   );

@@ -243,6 +243,13 @@ struct BrowserClipImportService {
                 in: page,
                 sourceURL: pageURL
             ) {
+                if Self.isOpenReviewPaperURL(pageURL) {
+                    // Chrome already fetched the authenticated PDF. Resolve
+                    // from its contents instead of the protected forum page.
+                    let preparedFile = try await filePreparer(pageURL.absoluteString, path)
+                    payload = preservingBrowserSource(in: preparedFile, sourceURL: pageURL)
+                    break
+                }
                 browserPDFSource = try Self.materializeBrowserDownload(
                     input: pageURL.absoluteString,
                     path: path,
@@ -409,6 +416,57 @@ struct BrowserClipImportService {
     private func isVerified(_ result: MetadataResolutionResult) -> Bool {
         if case .verified = result { return true }
         return false
+    }
+
+    /// PDF metadata is extracted from a private staging file. Keep the selected
+    /// browser URL in the durable metadata instead of that short-lived path.
+    private func preservingBrowserSource(
+        in payload: PreparedBrowserImport.Payload,
+        sourceURL: URL
+    ) -> PreparedBrowserImport.Payload {
+#if os(macOS)
+        guard case .pdf(let source, var prepared) = payload else { return payload }
+        func seedWithSource(_ seed: MetadataResolutionSeed?) -> MetadataResolutionSeed {
+            var seed = seed ?? MetadataResolutionSeed(fileName: prepared.sourceURL.lastPathComponent)
+            seed.sourceURL = sourceURL.absoluteString
+            return seed
+        }
+        func referenceWithSource(_ reference: Reference?) -> Reference? {
+            guard var reference else { return nil }
+            if reference.url == nil || reference.url.flatMap(URL.init(string:))?.isFileURL == true {
+                reference.url = sourceURL.absoluteString
+            }
+            return reference
+        }
+        switch prepared.resolution {
+        case .verified(var envelope):
+            envelope.reference = referenceWithSource(envelope.reference) ?? envelope.reference
+            prepared.resolution = .verified(envelope)
+        case .candidate(var envelope):
+            envelope.seed = seedWithSource(envelope.seed)
+            envelope.fallbackReference = referenceWithSource(envelope.fallbackReference)
+            envelope.currentReference = referenceWithSource(envelope.currentReference)
+            prepared.resolution = .candidate(envelope)
+        case .blocked(var envelope):
+            envelope.seed = seedWithSource(envelope.seed)
+            envelope.fallbackReference = referenceWithSource(envelope.fallbackReference)
+            envelope.currentReference = referenceWithSource(envelope.currentReference)
+            prepared.resolution = .blocked(envelope)
+        case .seedOnly(var envelope):
+            envelope.seed = seedWithSource(envelope.seed)
+            envelope.fallbackReference = referenceWithSource(envelope.fallbackReference)
+            envelope.currentReference = referenceWithSource(envelope.currentReference)
+            prepared.resolution = .seedOnly(envelope)
+        case .rejected(var envelope):
+            envelope.seed = seedWithSource(envelope.seed)
+            envelope.fallbackReference = referenceWithSource(envelope.fallbackReference)
+            envelope.currentReference = referenceWithSource(envelope.currentReference)
+            prepared.resolution = .rejected(envelope)
+        }
+        return .pdf(source: source, prepared: prepared)
+#else
+        return payload
+#endif
     }
 
     private func capturedPaperIdentityMatches(
@@ -978,7 +1036,7 @@ struct BrowserClipImportService {
         guard let path = page.browserDownloadedFilePath,
               let rawToken = page.browserDownloadToken,
               let token = UUID(uuidString: rawToken),
-              let kind = ImportSourceKind(pathExtension: sourceURL.pathExtension) else {
+              let kind = Self.browserFileKind(for: sourceURL) else {
             throw BrowserClipHostError.invalidBrowserDownload
         }
         let pathExtension = kind == .pdf ? "pdf" : sourceURL.pathExtension.lowercased()
@@ -987,6 +1045,21 @@ struct BrowserClipImportService {
             expectedDirectory: "Rubien",
             expectedFilename: "rubien-preview-\(token.uuidString.lowercased()).\(pathExtension)"
         )
+    }
+
+    // Keep aligned with the extension's extraction and download staging.
+    private static func isOpenReviewPaperURL(_ url: URL) -> Bool {
+        guard url.host?.lowercased() == "openreview.net",
+              url.path == "/pdf" || url.path == "/forum",
+              let id = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "id" })?.value else {
+            return false
+        }
+        return !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private static func browserFileKind(for url: URL) -> ImportSourceKind? {
+        isOpenReviewPaperURL(url) ? .pdf : ImportSourceKind(pathExtension: url.pathExtension)
     }
 
     private func validatedConfirmedPDFPath(
@@ -1088,7 +1161,7 @@ struct BrowserClipImportService {
         let materialized: MaterializedImportSource
         if let browserDownloadedFilePath {
             guard let expectedKind = URL(string: source).flatMap({
-                ImportSourceKind(pathExtension: $0.pathExtension)
+                Self.browserFileKind(for: $0)
             }) else {
                 throw BrowserClipHostError.invalidBrowserDownload
             }
