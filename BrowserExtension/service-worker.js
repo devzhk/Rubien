@@ -53,12 +53,12 @@ async function extractTab(tab) {
     // enrichment rather than a prerequisite.
     let page;
     const parsedURL = new URL(rawURL);
-    // Keep aligned with popup staging and the native host. OpenReview forum
-    // IDs map directly to PDFs, so neither tab needs DOM extraction to import.
-    const openReviewPaper = parsedURL.hostname === 'openreview.net' &&
-      ['/pdf', '/forum'].includes(parsedURL.pathname) &&
-      Boolean(parsedURL.searchParams.get('id')?.trim());
-    const directFileURL = /\.(?:pdf|md|markdown)$/i.test(parsedURL.pathname) || openReviewPaper;
+    // OpenReview PDF endpoints have no filename extension. Forum pages do
+    // have `citation_*` metadata in their authenticated DOM, so allow normal
+    // extraction there before popup staging maps the forum ID to its PDF.
+    const openReviewPDF = parsedURL.hostname === 'openreview.net' &&
+      parsedURL.pathname === '/pdf' && Boolean(parsedURL.searchParams.get('id')?.trim());
+    const directFileURL = /\.(?:pdf|md|markdown)$/i.test(parsedURL.pathname) || openReviewPDF;
     if (directFileURL) {
       page = {
         url: rawURL,

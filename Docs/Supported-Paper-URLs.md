@@ -33,10 +33,12 @@ Rubien reads most pages from `citation_*` HTML metadata, then uses CrossRef to n
 
 For OpenReview forum and PDF tabs, the browser extension stages the PDF using
 Chrome's session and imports the file through the PDF metadata pipeline. A forum
-URL maps to `/pdf` with the same `id`; no need to open the PDF tab first. This
-does not require a successful forum-page metadata request; unresolved metadata
-goes to review with the PDF preserved. Pasting the URL into the app or CLI still
-uses the publisher resolver and can be blocked by browser verification.
+URL maps to `/pdf` with the same `id`, while the extension reads the forum's
+rendered citation metadata to enrich any pending review. No need to open the
+PDF tab first. This does not require a successful native forum-page metadata
+request; unresolved metadata goes to review with the PDF and source link
+preserved. Pasting the URL into the app or CLI still uses the publisher resolver
+and can be blocked by browser verification.
 
 ## Identifier, preprint, and direct-file URLs
 

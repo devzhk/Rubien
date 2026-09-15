@@ -51,7 +51,8 @@ routes the current tab the same way as the app:
   metadata/import pipeline;
 - OpenReview forum and PDF tabs use that same browser download and PDF import
   flow (see [supported URL patterns](../Docs/Supported-Paper-URLs.md)); forum tabs
-  download the PDF with the same paper ID through the signed-in browser;
+  capture rendered citation metadata, then download the PDF with the same paper
+  ID through the signed-in browser;
 - direct `.md` or `.markdown` URLs download through Chrome and enter the
   Markdown importer;
 - other HTTP(S) pages become web references using the authenticated content

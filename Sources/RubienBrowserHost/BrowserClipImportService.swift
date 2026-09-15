@@ -244,10 +244,20 @@ struct BrowserClipImportService {
                 sourceURL: pageURL
             ) {
                 if Self.isOpenReviewPaperURL(pageURL) {
-                    // Chrome already fetched the authenticated PDF. Resolve
-                    // from its contents instead of the protected forum page.
+                    // Chrome already fetched the authenticated PDF. Its
+                    // metadata remains useful, but enrich unresolved results
+                    // with citation data rendered in the signed-in forum.
                     let preparedFile = try await filePreparer(pageURL.absoluteString, path)
-                    payload = preservingBrowserSource(in: preparedFile, sourceURL: pageURL)
+                    let capturedFallback = capturedOpenReviewFallback(
+                        from: page,
+                        pageURL: pageURL,
+                        canonicalURL: canonicalURL
+                    )
+                    payload = preservingBrowserSource(
+                        in: preparedFile,
+                        sourceURL: pageURL,
+                        capturedFallback: capturedFallback
+                    )
                     break
                 }
                 browserPDFSource = try Self.materializeBrowserDownload(
@@ -422,12 +432,22 @@ struct BrowserClipImportService {
     /// browser URL in the durable metadata instead of that short-lived path.
     private func preservingBrowserSource(
         in payload: PreparedBrowserImport.Payload,
-        sourceURL: URL
+        sourceURL: URL,
+        capturedFallback: Reference?
     ) -> PreparedBrowserImport.Payload {
 #if os(macOS)
         guard case .pdf(let source, var prepared) = payload else { return payload }
         func seedWithSource(_ seed: MetadataResolutionSeed?) -> MetadataResolutionSeed {
             var seed = seed ?? MetadataResolutionSeed(fileName: prepared.sourceURL.lastPathComponent)
+            if let capturedFallback {
+                let capturedSeed = MetadataResolutionSeed.fromReference(capturedFallback)
+                seed.title = capturedSeed.title ?? seed.title
+                seed.firstAuthor = capturedSeed.firstAuthor ?? seed.firstAuthor
+                seed.year = capturedSeed.year ?? seed.year
+                seed.journal = capturedSeed.journal ?? seed.journal
+                seed.publisher = capturedSeed.publisher ?? seed.publisher
+                seed.textSnippet = capturedSeed.textSnippet ?? seed.textSnippet
+            }
             seed.sourceURL = sourceURL.absoluteString
             return seed
         }
@@ -438,28 +458,37 @@ struct BrowserClipImportService {
             }
             return reference
         }
+        func referenceWithCapture(_ reference: Reference?) -> Reference? {
+            let sourceBacked = referenceWithSource(reference)
+            guard let capturedFallback else { return sourceBacked }
+            guard let sourceBacked else { return capturedFallback }
+            return MetadataResolution.mergeReference(
+                primary: capturedFallback,
+                fallback: sourceBacked
+            )
+        }
         switch prepared.resolution {
         case .verified(var envelope):
             envelope.reference = referenceWithSource(envelope.reference) ?? envelope.reference
             prepared.resolution = .verified(envelope)
         case .candidate(var envelope):
             envelope.seed = seedWithSource(envelope.seed)
-            envelope.fallbackReference = referenceWithSource(envelope.fallbackReference)
+            envelope.fallbackReference = referenceWithCapture(envelope.fallbackReference)
             envelope.currentReference = referenceWithSource(envelope.currentReference)
             prepared.resolution = .candidate(envelope)
         case .blocked(var envelope):
             envelope.seed = seedWithSource(envelope.seed)
-            envelope.fallbackReference = referenceWithSource(envelope.fallbackReference)
+            envelope.fallbackReference = referenceWithCapture(envelope.fallbackReference)
             envelope.currentReference = referenceWithSource(envelope.currentReference)
             prepared.resolution = .blocked(envelope)
         case .seedOnly(var envelope):
             envelope.seed = seedWithSource(envelope.seed)
-            envelope.fallbackReference = referenceWithSource(envelope.fallbackReference)
-            envelope.currentReference = referenceWithSource(envelope.currentReference)
+            envelope.fallbackReference = referenceWithCapture(envelope.fallbackReference)
+            envelope.currentReference = referenceWithCapture(envelope.currentReference)
             prepared.resolution = .seedOnly(envelope)
         case .rejected(var envelope):
             envelope.seed = seedWithSource(envelope.seed)
-            envelope.fallbackReference = referenceWithSource(envelope.fallbackReference)
+            envelope.fallbackReference = referenceWithCapture(envelope.fallbackReference)
             envelope.currentReference = referenceWithSource(envelope.currentReference)
             prepared.resolution = .rejected(envelope)
         }
@@ -467,6 +496,26 @@ struct BrowserClipImportService {
 #else
         return payload
 #endif
+    }
+
+    /// OpenReview emits `citation_*` tags for the root forum note. They are
+    /// user-visible page metadata, so they may improve a pending review but
+    /// must never turn a downloaded PDF into a verified reference on their own.
+    private func capturedOpenReviewFallback(
+        from page: BrowserClipPage,
+        pageURL: URL,
+        canonicalURL: URL?
+    ) -> Reference? {
+        guard let citation = page.citation,
+              citation.title?.rubien_nilIfBlank != nil || !citation.authors.isEmpty else {
+            return nil
+        }
+        return makeCapturedReference(
+            page,
+            pageURL: pageURL,
+            canonicalURL: canonicalURL,
+            asPaper: true
+        )
     }
 
     private func capturedPaperIdentityMatches(

@@ -888,6 +888,165 @@ final class BrowserClipImportServiceTests: XCTestCase {
         )
     }
 
+    func testOpenReviewForumCaptureCorrectsMalformedPDFAuthorsInPendingReview() async throws {
+        let database = try makeDatabase()
+        let temporary = try makeMaterializedSource(kind: .pdf, filename: "paper.pdf")
+        try Data("test-pdf-placeholder".utf8).write(to: temporary.source.fileURL)
+        let token = UUID()
+        let browserPath = "/Users/test/Downloads/Rubien/rubien-preview-\(token.uuidString.lowercased()).pdf"
+        let forumURL = "https://openreview.net/forum?id=ieUs1hK3HG"
+        let title = "Does Reasoning Improve Seeing? Understanding When Vision-Language Models Benefit from Thinking"
+        let malformedReference = Reference(
+            title: title,
+            authors: [AuthorName(given: "", family: "Does Reasoning Improve Seeing?")],
+            url: temporary.source.fileURL.absoluteString,
+            referenceType: .conferencePaper
+        )
+        let preparedPDF = PreparedPDFImport(
+            sourceURL: temporary.source.fileURL,
+            resolution: .seedOnly(IntakeEnvelope(
+                seed: MetadataResolutionSeed(
+                    fileName: "paper.pdf",
+                    title: title,
+                    firstAuthor: "Does Reasoning Improve Seeing?",
+                    sourceURL: temporary.source.fileURL.absoluteString
+                ),
+                fallbackReference: malformedReference,
+                currentReference: malformedReference,
+                message: "No authoritative metadata matched; keeping local attachment and seed only."
+            ))
+        )
+        let service = BrowserClipImportService(
+            database: database,
+            metadataResolver: { _, _, _, _ in
+                XCTFail("The authenticated browser PDF must not fetch the protected forum page")
+                return MetadataResolutionPipeline.IdentifierResolutionOutcome(result: preparedPDF.resolution)
+            },
+            filePreparer: { input, path in
+                XCTAssertEqual(input, forumURL)
+                XCTAssertEqual(path, browserPath)
+                return .pdf(source: temporary.source, prepared: preparedPDF)
+            }
+        )
+
+        let prepared = try await service.prepareClip(request(page: BrowserClipPage(
+            url: forumURL,
+            citation: BrowserCitationMetadata(
+                title: title,
+                authors: ["Jing Bi", "Luchuan Song", "Dingxin Zhang"],
+                publicationDate: "2026/05/01",
+                conferenceTitle: "ICML"
+            ),
+            browserDownloadedFilePath: browserPath,
+            browserDownloadToken: token.uuidString.lowercased()
+        )))
+
+        XCTAssertEqual(prepared.preview.title, title)
+        XCTAssertEqual(prepared.preview.authors, ["Jing Bi", "Luchuan Song", "Dingxin Zhang"])
+        XCTAssertEqual(prepared.preview.sourceURL, forumURL)
+        XCTAssertTrue(prepared.preview.willQueueForReview)
+
+        try FileManager.default.createDirectory(
+            at: AppDatabase.pdfStorageURL,
+            withIntermediateDirectories: true
+        )
+        let response = try await service.confirm(prepared)
+        XCTAssertEqual(response.result, .queued)
+        let intake = try XCTUnwrap(try database.fetchPendingMetadataIntakes().first)
+        XCTAssertEqual(intake.sourceURL, forumURL)
+        XCTAssertEqual(intake.decodedSeed?.firstAuthor, "Jing Bi")
+        XCTAssertEqual(
+            intake.decodedCurrentReference?.authors.map(\.displayName),
+            ["Jing Bi", "Luchuan Song", "Dingxin Zhang"]
+        )
+        if let pdfPath = intake.pdfPath {
+            PDFService.deletePDF(at: pdfPath)
+        }
+    }
+
+    func testOpenReviewForumCaptureDoesNotRewriteRejectedCandidateIdentity() async throws {
+        let database = try makeDatabase()
+        let temporary = try makeMaterializedSource(kind: .pdf, filename: "paper.pdf")
+        try Data("test-pdf-placeholder".utf8).write(to: temporary.source.fileURL)
+        let token = UUID()
+        let browserPath = "/Users/test/Downloads/Rubien/rubien-preview-\(token.uuidString.lowercased()).pdf"
+        let forumURL = "https://openreview.net/forum?id=ieUs1hK3HG"
+        let title = "Does Reasoning Improve Seeing? Understanding When Vision-Language Models Benefit from Thinking"
+        let pdfFallback = Reference(
+            title: title,
+            authors: [AuthorName(given: "", family: "Does Reasoning Improve Seeing?")],
+            url: temporary.source.fileURL.absoluteString,
+            referenceType: .conferencePaper
+        )
+        let rejectedCandidate = Reference(
+            title: "An Unrelated Rejected Match",
+            authors: [AuthorName(given: "Wrong", family: "Author")],
+            year: 2021,
+            doi: "10.1000/unrelated",
+            url: "https://example.org/unrelated",
+            referenceType: .journalArticle
+        )
+        let preparedPDF = PreparedPDFImport(
+            sourceURL: temporary.source.fileURL,
+            resolution: .rejected(RejectedEnvelope(
+                seed: MetadataResolutionSeed(fileName: "paper.pdf", title: title),
+                fallbackReference: pdfFallback,
+                currentReference: rejectedCandidate,
+                reason: .insufficientEvidence,
+                message: "The metadata candidate did not match the imported PDF."
+            ))
+        )
+        let service = BrowserClipImportService(
+            database: database,
+            metadataResolver: { _, _, _, _ in
+                XCTFail("The authenticated browser PDF must not fetch the protected forum page")
+                return MetadataResolutionPipeline.IdentifierResolutionOutcome(result: preparedPDF.resolution)
+            },
+            filePreparer: { input, path in
+                XCTAssertEqual(input, forumURL)
+                XCTAssertEqual(path, browserPath)
+                return .pdf(source: temporary.source, prepared: preparedPDF)
+            }
+        )
+
+        let prepared = try await service.prepareClip(request(page: BrowserClipPage(
+            url: forumURL,
+            citation: BrowserCitationMetadata(
+                title: title,
+                authors: ["Jing Bi", "Luchuan Song"],
+                publicationDate: "2026/05/01",
+                conferenceTitle: "ICML"
+            ),
+            browserDownloadedFilePath: browserPath,
+            browserDownloadToken: token.uuidString.lowercased()
+        )))
+
+        XCTAssertEqual(prepared.preview.title, rejectedCandidate.title)
+        XCTAssertEqual(prepared.preview.authors, ["Wrong Author"])
+        XCTAssertTrue(prepared.preview.willQueueForReview)
+
+        try FileManager.default.createDirectory(
+            at: AppDatabase.pdfStorageURL,
+            withIntermediateDirectories: true
+        )
+        let response = try await service.confirm(prepared)
+        XCTAssertEqual(response.result, .queued)
+        let intake = try XCTUnwrap(try database.fetchPendingMetadataIntakes().first)
+        XCTAssertEqual(intake.decodedSeed?.firstAuthor, "Jing Bi")
+        XCTAssertEqual(intake.decodedFallbackReference?.title, title)
+        XCTAssertEqual(
+            intake.decodedFallbackReference?.authors.map(\.displayName),
+            ["Jing Bi", "Luchuan Song"]
+        )
+        XCTAssertEqual(intake.decodedFallbackReference?.url, forumURL)
+        XCTAssertEqual(intake.decodedCurrentReference?.title, rejectedCandidate.title)
+        XCTAssertEqual(intake.decodedCurrentReference?.doi, "10.1000/unrelated")
+        XCTAssertEqual(intake.decodedCurrentReference?.url, "https://example.org/unrelated")
+        if let pdfPath = intake.pdfPath {
+            PDFService.deletePDF(at: pdfPath)
+        }
+    }
+
     private func assertPDFPreviewQueuesOnlyAfterConfirmation(
         url: String,
         browserToken: UUID? = nil
