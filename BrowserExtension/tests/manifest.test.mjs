@@ -46,6 +46,10 @@ test('manifest maps the macOS shortcut to Command', () => {
   );
 });
 
+test('manifest limits persistent site access to OpenReview metadata capture', () => {
+  assert.deepEqual(manifest.host_permissions, ['https://openreview.net/*']);
+});
+
 test('manifest key derives the Chrome Web Store extension ID', () => {
   assert.equal(
     extensionIDForKey(manifest.key),

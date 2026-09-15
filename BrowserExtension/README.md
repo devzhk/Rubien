@@ -50,9 +50,11 @@ routes the current tab the same way as the app:
 - direct `.pdf` URLs download through Chrome and enter Rubien's PDF
   metadata/import pipeline;
 - OpenReview forum and PDF tabs use that same browser download and PDF import
-  flow (see [supported URL patterns](../Docs/Supported-Paper-URLs.md)); forum tabs
-  capture rendered citation metadata, then download the PDF with the same paper
-  ID through the signed-in browser;
+  flow (see [supported URL patterns](../Docs/Supported-Paper-URLs.md)); the
+  extension reads the forum's official citation metadata, then downloads the
+  PDF with the same paper ID through the signed-in browser. A selected PDF tab
+  opens and closes the matching forum in the background for metadata. Rubien
+  saves one PDF-backed paper and does not retain the forum as a web clip;
 - direct `.md` or `.markdown` URLs download through Chrome and enter the
   Markdown importer;
 - other HTTP(S) pages become web references using the authenticated content
@@ -83,11 +85,13 @@ sheet.
 ## Security and packaging
 
 The extension requests `activeTab`, `scripting`, `downloads`, and
-`nativeMessaging`. It has no persistent host permissions and sends no cookies
-or credentials to Rubien. For a verified paper, Chrome's downloads API fetches
-only the trusted PDF URL selected by Rubien's known-publisher resolver; direct
-PDF and Markdown imports fetch only the active tab URL the user selected.
-OpenReview forum imports use the corresponding PDF endpoint with the same paper ID.
+`nativeMessaging`, plus site access limited to `https://openreview.net/*` so a
+selected OpenReview PDF can read its matching forum metadata in a temporary
+background tab. It sends no cookies or credentials to Rubien. For a verified
+paper, Chrome's downloads API fetches only the trusted PDF URL selected by
+Rubien's known-publisher resolver; direct PDF and Markdown imports fetch only
+the active tab URL the user selected. OpenReview forum imports use the
+corresponding PDF endpoint with the same paper ID.
 Chrome includes the site cookies it already owns. The helper validates the
 token-bound temporary path and file type, copies it into Rubien, and the
 extension removes the temporary download and its history entry. Page content

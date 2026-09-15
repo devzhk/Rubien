@@ -11,6 +11,9 @@
     "nativeMessaging",
     "scripting"
   ],
+  "host_permissions": [
+    "https://openreview.net/*"
+  ],
   "background": {
     "service_worker": "service-worker.js"
   },

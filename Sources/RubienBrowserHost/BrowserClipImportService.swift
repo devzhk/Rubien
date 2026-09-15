@@ -244,19 +244,16 @@ struct BrowserClipImportService {
                 sourceURL: pageURL
             ) {
                 if Self.isOpenReviewPaperURL(pageURL) {
-                    // Chrome already fetched the authenticated PDF. Its
-                    // metadata remains useful, but enrich unresolved results
-                    // with citation data rendered in the signed-in forum.
+                    // Chrome already fetched the authenticated PDF and read
+                    // the root forum note's structured citation. A complete
+                    // citation is the paper metadata shown for confirmation;
+                    // incomplete capture retains the safe review fallback.
                     let preparedFile = try await filePreparer(pageURL.absoluteString, path)
-                    let capturedFallback = capturedOpenReviewFallback(
+                    payload = prepareOpenReviewPDF(
+                        in: preparedFile,
                         from: page,
                         pageURL: pageURL,
                         canonicalURL: canonicalURL
-                    )
-                    payload = preservingBrowserSource(
-                        in: preparedFile,
-                        sourceURL: pageURL,
-                        capturedFallback: capturedFallback
                     )
                     break
                 }
@@ -428,6 +425,114 @@ struct BrowserClipImportService {
         return false
     }
 
+    private func prepareOpenReviewPDF(
+        in payload: PreparedBrowserImport.Payload,
+        from page: BrowserClipPage,
+        pageURL: URL,
+        canonicalURL: URL?
+    ) -> PreparedBrowserImport.Payload {
+#if os(macOS)
+        guard case .pdf(let source, var prepared) = payload else { return payload }
+        let capturedFallback = capturedOpenReviewFallback(
+            from: page,
+            pageURL: pageURL,
+            canonicalURL: canonicalURL
+        )
+        guard let citation = page.citation,
+              citation.title?.rubien_nilIfBlank != nil,
+              !citation.authors.flatMap(AuthorName.parseList).isEmpty,
+              var reference = capturedFallback,
+              let paperID = Self.openReviewPaperID(from: pageURL) else {
+            return preservingBrowserSource(
+                in: payload,
+                sourceURL: pageURL,
+                capturedFallback: capturedFallback
+            )
+        }
+
+        reference.url = pageURL.absoluteString
+        reference.webContent = nil
+        reference.favicon = nil
+        let evidence = openReviewEvidence(
+            for: reference,
+            paperID: paperID,
+            sourceURL: pageURL
+        )
+        reference = MetadataVerifier.manuallyVerified(
+            reference,
+            evidence: evidence,
+            reviewedBy: "browser-clipper"
+        )
+        prepared.resolution = .verified(VerifiedEnvelope(
+            reference: reference,
+            evidence: evidence
+        ))
+        return .pdf(source: source, prepared: prepared)
+#else
+        return payload
+#endif
+    }
+
+    private func openReviewEvidence(
+        for reference: Reference,
+        paperID: String,
+        sourceURL: URL
+    ) -> EvidenceBundle {
+        var fields = [
+            FieldEvidence(
+                field: "title",
+                value: reference.title,
+                origin: .structuredDetail,
+                selectorOrPath: "citation_title"
+            ),
+            FieldEvidence(
+                field: "authors",
+                value: reference.authors.displayString,
+                origin: .structuredDetail,
+                selectorOrPath: "citation_author"
+            )
+        ]
+        if let year = reference.year {
+            fields.append(FieldEvidence(
+                field: "year",
+                value: String(year),
+                origin: .structuredDetail,
+                selectorOrPath: "citation_online_date"
+            ))
+        }
+        if let journal = reference.journal?.rubien_nilIfBlank {
+            fields.append(FieldEvidence(
+                field: "journal",
+                value: journal,
+                origin: .structuredDetail,
+                selectorOrPath: "citation_conference_title"
+            ))
+        }
+        if let doi = reference.doi?.rubien_nilIfBlank {
+            fields.append(FieldEvidence(
+                field: "doi",
+                value: doi,
+                origin: .structuredDetail,
+                selectorOrPath: "citation_doi"
+            ))
+        }
+
+        return EvidenceBundle(
+            source: .publisherCitationMeta,
+            recordKey: "openreview:\(paperID)",
+            sourceURL: sourceURL.absoluteString,
+            fetchMode: .detail,
+            fieldEvidence: fields,
+            verificationHints: VerificationHints(
+                hasStructuredTitle: true,
+                hasStructuredAuthors: true,
+                hasStructuredJournal: reference.journal?.rubien_nilIfBlank != nil,
+                hasStableRecordKey: true,
+                usedStructuredDetail: true
+            )
+        )
+    }
+
     /// PDF metadata is extracted from a private staging file. Keep the selected
     /// browser URL in the durable metadata instead of that short-lived path.
     private func preservingBrowserSource(
@@ -498,9 +603,8 @@ struct BrowserClipImportService {
 #endif
     }
 
-    /// OpenReview emits `citation_*` tags for the root forum note. They are
-    /// user-visible page metadata, so they may improve a pending review but
-    /// must never turn a downloaded PDF into a verified reference on their own.
+    /// OpenReview emits `citation_*` tags from the root forum note. Incomplete
+    /// capture remains useful as a fallback when the import must enter review.
     private func capturedOpenReviewFallback(
         from page: BrowserClipPage,
         pageURL: URL,
@@ -1098,13 +1202,19 @@ struct BrowserClipImportService {
 
     // Keep aligned with the extension's extraction and download staging.
     private static func isOpenReviewPaperURL(_ url: URL) -> Bool {
+        openReviewPaperID(from: url) != nil
+    }
+
+    private static func openReviewPaperID(from url: URL) -> String? {
         guard url.host?.lowercased() == "openreview.net",
               url.path == "/pdf" || url.path == "/forum",
               let id = URLComponents(url: url, resolvingAgainstBaseURL: false)?
-                .queryItems?.first(where: { $0.name == "id" })?.value else {
-            return false
+                .queryItems?.first(where: { $0.name == "id" })?.value?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !id.isEmpty else {
+            return nil
         }
-        return !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return id
     }
 
     private static func browserFileKind(for url: URL) -> ImportSourceKind? {

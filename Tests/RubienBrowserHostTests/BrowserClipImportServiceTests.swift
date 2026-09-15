@@ -874,27 +874,38 @@ final class BrowserClipImportServiceTests: XCTestCase {
         )
     }
 
-    func testOpenReviewBrowserPDFSkipsPublisherResolverAndPreservesPDFForReview() async throws {
+    func testOpenReviewBrowserPDFWithoutCitationPreservesPDFForReview() async throws {
         try await assertPDFPreviewQueuesOnlyAfterConfirmation(
             url: "https://openreview.net/pdf?id=vgZDcUetWS",
             browserToken: UUID()
         )
     }
 
-    func testOpenReviewForumSkipsPublisherResolverAndPreservesLinkedPDFForReview() async throws {
+    func testOpenReviewForumWithoutCitationPreservesLinkedPDFForReview() async throws {
         try await assertPDFPreviewQueuesOnlyAfterConfirmation(
             url: "https://openreview.net/forum?id=ieUs1hK3HG",
             browserToken: UUID()
         )
     }
 
-    func testOpenReviewForumCaptureCorrectsMalformedPDFAuthorsInPendingReview() async throws {
+    func testOpenReviewForumCitationImportsOneVerifiedPDFOnlyPaper() async throws {
+        try await assertOpenReviewCitationImportsVerifiedPDF(
+            url: "https://openreview.net/forum?id=ieUs1hK3HG"
+        )
+    }
+
+    func testOpenReviewPDFCitationImportsOneVerifiedPDFOnlyPaper() async throws {
+        try await assertOpenReviewCitationImportsVerifiedPDF(
+            url: "https://openreview.net/pdf?id=ieUs1hK3HG"
+        )
+    }
+
+    private func assertOpenReviewCitationImportsVerifiedPDF(url: String) async throws {
         let database = try makeDatabase()
         let temporary = try makeMaterializedSource(kind: .pdf, filename: "paper.pdf")
         try Data("test-pdf-placeholder".utf8).write(to: temporary.source.fileURL)
         let token = UUID()
         let browserPath = "/Users/test/Downloads/Rubien/rubien-preview-\(token.uuidString.lowercased()).pdf"
-        let forumURL = "https://openreview.net/forum?id=ieUs1hK3HG"
         let title = "Does Reasoning Improve Seeing? Understanding When Vision-Language Models Benefit from Thinking"
         let malformedReference = Reference(
             title: title,
@@ -923,48 +934,71 @@ final class BrowserClipImportServiceTests: XCTestCase {
                 return MetadataResolutionPipeline.IdentifierResolutionOutcome(result: preparedPDF.resolution)
             },
             filePreparer: { input, path in
-                XCTAssertEqual(input, forumURL)
+                XCTAssertEqual(input, url)
                 XCTAssertEqual(path, browserPath)
                 return .pdf(source: temporary.source, prepared: preparedPDF)
             }
         )
 
         let prepared = try await service.prepareClip(request(page: BrowserClipPage(
-            url: forumURL,
+            url: url,
+            title: title,
+            siteName: "OpenReview",
             citation: BrowserCitationMetadata(
                 title: title,
                 authors: ["Jing Bi", "Luchuan Song", "Dingxin Zhang"],
                 publicationDate: "2026/05/01",
-                conferenceTitle: "ICML"
+                conferenceTitle: "Forty-third International Conference on Machine Learning",
+                abstract: "Vision-language models now support both direct answers and reasoning."
             ),
             browserDownloadedFilePath: browserPath,
             browserDownloadToken: token.uuidString.lowercased()
         )))
 
+        XCTAssertEqual(prepared.preview.kind, .pdf)
         XCTAssertEqual(prepared.preview.title, title)
         XCTAssertEqual(prepared.preview.authors, ["Jing Bi", "Luchuan Song", "Dingxin Zhang"])
-        XCTAssertEqual(prepared.preview.sourceURL, forumURL)
-        XCTAssertTrue(prepared.preview.willQueueForReview)
+        XCTAssertEqual(prepared.preview.year, 2026)
+        XCTAssertEqual(prepared.preview.sourceURL, url)
+        XCTAssertFalse(prepared.preview.willQueueForReview)
+        XCTAssertFalse(prepared.preview.hasCapturedContent)
+        XCTAssertFalse(prepared.preview.willDownloadPDF)
+        XCTAssertEqual(try database.referenceCount(), 0)
+        XCTAssertEqual(try database.fetchPendingMetadataIntakes().count, 0)
 
         try FileManager.default.createDirectory(
             at: AppDatabase.pdfStorageURL,
             withIntermediateDirectories: true
         )
         let response = try await service.confirm(prepared)
-        XCTAssertEqual(response.result, .queued)
-        let intake = try XCTUnwrap(try database.fetchPendingMetadataIntakes().first)
-        XCTAssertEqual(intake.sourceURL, forumURL)
-        XCTAssertEqual(intake.decodedSeed?.firstAuthor, "Jing Bi")
+        XCTAssertEqual(response.result, .created)
+        XCTAssertEqual(response.kind, .pdf)
+        XCTAssertEqual(response.pdfAttached, true)
+        XCTAssertEqual(try database.referenceCount(), 1)
+        XCTAssertEqual(try database.fetchPendingMetadataIntakes().count, 0)
+        let reference = try XCTUnwrap(try fetch(response.referenceID, from: database))
+        XCTAssertEqual(reference.title, title)
         XCTAssertEqual(
-            intake.decodedCurrentReference?.authors.map(\.displayName),
+            reference.authors.map(\.displayName),
             ["Jing Bi", "Luchuan Song", "Dingxin Zhang"]
         )
-        if let pdfPath = intake.pdfPath {
+        XCTAssertEqual(reference.year, 2026)
+        XCTAssertEqual(reference.journal, "Forty-third International Conference on Machine Learning")
+        XCTAssertEqual(reference.eventTitle, "Forty-third International Conference on Machine Learning")
+        XCTAssertEqual(reference.url, url)
+        XCTAssertEqual(reference.referenceType, .conferencePaper)
+        XCTAssertEqual(reference.verificationStatus, .verifiedManual)
+        XCTAssertEqual(reference.metadataSource, .publisherCitationMeta)
+        XCTAssertEqual(reference.recordKey, "openreview:ieUs1hK3HG")
+        XCTAssertEqual(reference.reviewedBy, "browser-clipper")
+        XCTAssertNil(reference.webContent)
+        XCTAssertNil(reference.favicon)
+        if let pdfPath = try database.pdfFilename(for: try XCTUnwrap(reference.id)) {
             PDFService.deletePDF(at: pdfPath)
         }
     }
 
-    func testOpenReviewForumCaptureDoesNotRewriteRejectedCandidateIdentity() async throws {
+    func testIncompleteOpenReviewCitationDoesNotRewriteRejectedCandidateIdentity() async throws {
         let database = try makeDatabase()
         let temporary = try makeMaterializedSource(kind: .pdf, filename: "paper.pdf")
         try Data("test-pdf-placeholder".utf8).write(to: temporary.source.fileURL)
@@ -1013,7 +1047,7 @@ final class BrowserClipImportServiceTests: XCTestCase {
             url: forumURL,
             citation: BrowserCitationMetadata(
                 title: title,
-                authors: ["Jing Bi", "Luchuan Song"],
+                authors: [],
                 publicationDate: "2026/05/01",
                 conferenceTitle: "ICML"
             ),
@@ -1032,11 +1066,11 @@ final class BrowserClipImportServiceTests: XCTestCase {
         let response = try await service.confirm(prepared)
         XCTAssertEqual(response.result, .queued)
         let intake = try XCTUnwrap(try database.fetchPendingMetadataIntakes().first)
-        XCTAssertEqual(intake.decodedSeed?.firstAuthor, "Jing Bi")
+        XCTAssertNil(intake.decodedSeed?.firstAuthor)
         XCTAssertEqual(intake.decodedFallbackReference?.title, title)
         XCTAssertEqual(
             intake.decodedFallbackReference?.authors.map(\.displayName),
-            ["Jing Bi", "Luchuan Song"]
+            ["Does Reasoning Improve Seeing?"]
         )
         XCTAssertEqual(intake.decodedFallbackReference?.url, forumURL)
         XCTAssertEqual(intake.decodedCurrentReference?.title, rejectedCandidate.title)

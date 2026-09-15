@@ -1,33 +1,41 @@
 # OpenReview browser PDF import
 
 The signed-in browser can display OpenReview `/pdf?id=…` URLs while native
-metadata requests receive a verification challenge. Import the browser download
-through the existing PDF pipeline without depending on a forum-page fetch.
+metadata requests receive a verification challenge. Import one paper with its
+authenticated PDF and official forum citation metadata, without saving a web
+clip or depending on a native forum-page fetch.
 
 1. Recognize OpenReview PDF and forum tabs in Chrome download staging. Forum
-   URLs map to the PDF endpoint using the same paper ID. Capture the forum's
-   rendered `citation_*` metadata before staging the PDF, because an
-   authenticated browser can read it even when Rubien's direct request is
-   challenged.
+   URLs map to the PDF endpoint using the same paper ID. Read only the forum's
+   rendered `citation_*` metadata because an authenticated browser can access
+   it even when Rubien's direct request is challenged. For a selected PDF tab,
+   open the corresponding forum in a background tab long enough to collect the
+   same structured metadata, then close it.
 2. Accept their token-bound PDF downloads in the native host and route them to
    PDF preparation. Retain file validation, preview/confirmation, and cleanup.
-3. Cover authenticated staging, routing without publisher resolution, invalid
-   downloads, and preservation of a PDF when metadata needs review.
-4. Update browser import documentation; build and run focused tests.
+3. Treat a complete OpenReview citation (title plus authors) as the metadata the
+   user confirms in the extension preview. Persist it as manually verified,
+   attach the PDF, and discard any forum article HTML. Incomplete capture keeps
+   the existing safe PDF-review fallback.
+4. Cover authenticated staging from both URL forms, background-tab cleanup,
+   routing without publisher resolution, invalid downloads, direct save, PDF
+   attachment, and the absence of captured web content.
+5. Update browser import documentation; build and run focused tests.
 
 Scope: browser imports only. No changes to CLI contracts, shared URL routing,
 schema, dependencies, releases, or installed host registration.
 
-The initial forum/PDF fix passed `swift build --disable-automatic-resolution`,
-all 41 `RubienBrowserHostTests`, and all 16 extension Node tests. Its candidate
-smoke test exposed that the forum capture was skipped, leaving a downloaded PDF
-with malformed embedded author metadata. Capture and merge the authenticated
-forum metadata into unresolved PDF review records, then repeat validation and
-the candidate smoke test.
+The initial forum/PDF fix passed its focused checks. Candidate smoke tests then
+showed two product issues: direct PDF tabs lacked the forum metadata and queued
+review, while forum tabs also saved a web article. The revised implementation
+uses the forum only as a structured metadata source and produces one PDF-backed
+paper from either URL form.
 
-Independent review found that queued PDF imports could lose the original
-OpenReview URL. The correction preserves it in the metadata seed and missing
-or local reference URLs, with durable confirmation assertions for both forum
-and PDF inputs. The reviewer confirmed the correction with no further actionable
-findings; the build and all 57 focused tests passed again. The optional
-`/simplify` sweep was not requested.
+The prior independent review found that queued PDF imports could lose the
+selected OpenReview URL; the final verified reference preserves it. The revised
+implementation passed `swift build --disable-automatic-resolution`, all 44
+`RubienBrowserHostTests`, and all 23 extension Node tests. Independent review
+found one late-populated metadata edge case; the waiter now observes `content`
+attribute updates and its regression test passes. The reviewer confirmed the
+fix with no remaining actionable findings. The optional `/simplify` sweep was
+not requested.
