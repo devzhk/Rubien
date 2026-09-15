@@ -726,5 +726,21 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.7.9</title>
+            <description sparkle:format="plain-text"><![CDATA[• Import OpenReview papers from forum or PDF links using your signed-in browser session.
+• Use OpenReview's official citation metadata for titles, authors, dates, and venues, avoiding unnecessary metadata review when a complete citation is available.
+• Save the paper with its PDF without creating a web clip of the forum page.]]></description>
+            <pubDate>Tue, 15 Sep 2026 16:33:16 +0000</pubDate>
+            <sparkle:version>49</sparkle:version>
+            <sparkle:shortVersionString>0.7.9</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien/releases/download/v0.7.9/Rubien-0.7.9.dmg"
+                sparkle:edSignature="hwWXjsShQeGpLvIsY8LSdqPYHF69d4vYPoJ9/Ye9egu7l0TpTffBdgnYZgqiNy0Ont1TkJ7q2heRK/ePg/u/DA=="
+                length="18525225"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
