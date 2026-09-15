@@ -67,7 +67,9 @@ final class LibrarySearchStateTests: XCTestCase {
         var new = Reference(title: "New")
         new.id = 2
         loader.request(new) { _ in [2: LibrarySearchExcerpt(source: "Note", text: "New result")] }
-        try await Task.sleep(for: .milliseconds(100))
+        for _ in 0..<100 where loader.excerpts[2] == nil {
+            try await Task.sleep(for: .milliseconds(20))
+        }
         XCTAssertNil(loader.excerpts[1])
         XCTAssertEqual(loader.excerpts[2]?.text, "New result")
     }
