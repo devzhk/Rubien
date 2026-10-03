@@ -18,7 +18,7 @@ Rubien is a native macOS agentic research library and reference manager (SwiftUI
 
 ```bash
 swift build                                                # build all targets
-swift run Rubien                                           # run the app from SPM (Mac dev loop)
+./scripts/preview-app.sh                                   # isolated Mac UI preview with verified SDK metadata
 swift run rubien-cli <subcmd>                              # run CLI from SPM
 swift test                                                 # all tests; needs full Xcode for XCTest
 swift test --filter CitationFormatterTests                 # single class
@@ -28,9 +28,22 @@ swift test --filter RubienCoreTests.CitationFormatterTests/testAPA   # single me
 ./scripts/build-app.sh release   # Release bundle + DMG
 ```
 
-For worktree UI checks, run `swift run Rubien` from that worktree or open the exact built `.app` path. Avoid `open -a Rubien` / activation by app name: these may open `/Applications/Rubien.app`. Use `scripts/dev-launch.sh` when App Group / CloudKit entitlements are needed.
+For worktree UI checks, use `scripts/preview-app.sh` from that worktree or open its exact verified `.app` path. Avoid `open -a Rubien` / activation by app name: these may open `/Applications/Rubien.app`. Use `scripts/dev-launch.sh` when App Group / CloudKit entitlements are needed.
+
+The preview isolates its bundle identity and library, but shares the account's provider installations and credentials. It includes `rubien-cli` for Assistant integration, but omits sync entitlements and the browser host. Use it for UI and Assistant checks; validate sync/browser integration with the appropriate signed development bundle, and follow the release runbook for delivery checks.
 
 Tests need full Xcode (`xcode-select -p`). If a toolchain switch causes SPM errors about missing target source directories, clear `.build` / `.swiftpm` and run `swift package resolve`; preserve any release dSYMs first.
+
+### UI preview SDK invariant
+
+**Do not refresh a preview by copying a plain `.build/debug/Rubien` executable into its bundle or use plain `swift run Rubien` for visual validation.** Rebuild through `scripts/preview-app.sh` so its linker settings and verification run together.
+
+On the observed Xcode 27 toolchain, Swift's `--sysroot` linker invocation can record the deployment target **14.4** as the build SDK when SDK context is absent. AppKit then selects older compatibility behavior, which caused shifted toolbar buttons and sidebar click targets. Passing the selected SDK through Clang's `-isysroot` corrected the metadata and layout. This regression returned when a manual executable copy bypassed the fix in `scripts/build-app.sh`.
+
+- Require `LC_BUILD_VERSION.sdk` to match the selected build SDK and `minos` to remain **14.4**. Keep these values distinct; do not raise the deployment target to fix layout or hardcode the SDK to 27.0.
+- The preview script checks the executable before and after packaging. For another build route, run `scripts/verify-macos-sdk.py <actual-bundle-executable> "$(xcrun --sdk macosx --show-sdk-version)"` before UI validation. A successful build or signature check does not establish correct SDK metadata.
+- If these symptoms recur, inspect the running executable's path and SDK metadata before changing SwiftUI padding, offsets, or toolbar placement.
+- After replacing a preview, click the visible centers of Home and All References and toggle Activity/Details. Verify navigation and right-edge placement; accessibility activation alone can miss displaced mouse targets.
 
 ## Architecture
 
