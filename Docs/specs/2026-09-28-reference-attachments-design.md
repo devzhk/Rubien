@@ -6,9 +6,12 @@
 > enabling attachment sync; they no longer gate local reader/UI development.
 
 
-**Date:** 2026-09-28  
-**Revised:** 2026-09-29 after two independent design reviews.  
-**Status:** Proposed; implementation and CloudKit deployment have not started.  
+**Date:** 2026-09-28
+
+**Revised:** 2026-09-29 after two independent design reviews.
+
+**Status:** Implemented; release validation and CloudKit deployment remain pending. Attachment sync is disabled by default.
+
 **Scope:** RubienCore, RubienSync, macOS Details and readers, CLI, and both MCP servers.
 
 ## 1. Outcome and decisions
