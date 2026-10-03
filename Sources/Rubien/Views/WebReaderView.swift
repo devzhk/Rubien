@@ -2992,7 +2992,20 @@ private struct WebReaderContentView: NSViewRepresentable {
                   let json = String(data: data, encoding: .utf8) else { return }
             lastAttachmentTitle = title
             // Patch text only: loading HTML again restores the opening scroll position.
-            evaluate("(() => { document.title = \(json)[0]; const heading = document.querySelector('.article-header h1'); if (heading) heading.textContent = \(json)[0]; })();")
+            evaluate("""
+                (() => {
+                    document.title = \(json)[0];
+                    const heading = document.querySelector('.article-header h1');
+                    if (!heading) return;
+                    const header = heading.closest('.article-header');
+                    const bottomBefore = header.getBoundingClientRect().bottom;
+                    heading.textContent = \(json)[0];
+                    // Keep the visible passage fixed when an offscreen title wraps.
+                    if (bottomBefore <= 0) {
+                        window.scrollBy(0, header.getBoundingClientRect().bottom - bottomBefore);
+                    }
+                })();
+                """)
         }
 
         private var lastPushedAnnotationsJSON: String?

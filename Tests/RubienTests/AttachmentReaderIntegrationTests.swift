@@ -258,7 +258,7 @@ final class AttachmentReaderIntegrationTests: XCTestCase {
         let scrollBefore = try await webView.evaluateJavaScript("window.scrollY") as? Double
         XCTAssertGreaterThan(try XCTUnwrap(scrollBefore), 0)
         let anchorBefore = try await webView.evaluateJavaScript("window.rubienRenameAnchor = [...document.querySelectorAll('p')].find(p => p.getBoundingClientRect().top >= 0); window.rubienRenameAnchor.getBoundingClientRect().top") as? Double
-        for name in ["Renamed supplement", "Renamed again"] {
+        for name in [String(repeating: "Long renamed supplement ", count: 6) + "notes", "Renamed again"] {
             try store.rename(syncId: first.syncId, to: name)
             try await waitUntil { NSApp.windows.contains { $0.title == "\(name) — Primary paper" && $0.tab.title == "\(name) — Primary paper" } }
             var heading: String?
@@ -269,7 +269,7 @@ final class AttachmentReaderIntegrationTests: XCTestCase {
             }
             XCTAssertEqual(heading, name)
             // A longer title can wrap and change document height. Check the
-            // visible passage, not absolute scrollY: WebKit anchors that passage.
+            // visible passage, not absolute scrollY: renaming must preserve it.
             let anchorAfter = try await webView.evaluateJavaScript("window.rubienRenameAnchor.getBoundingClientRect().top") as? Double
             XCTAssertEqual(try XCTUnwrap(anchorAfter), try XCTUnwrap(anchorBefore), accuracy: 1)
         }
