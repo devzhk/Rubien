@@ -5,9 +5,9 @@ import RubienCore
 struct AnnotationSidebarView: View {
     @ObservedObject var viewModel: PDFReaderViewModel
     @State private var filterType: AnnotationType?
-    @State private var editingAnnotation: PDFAnnotationRecord?
+    @State private var editingAnnotation: ReaderPDFAnnotation?
     @State private var editNoteText = ""
-    @State private var filteredAnnotations: [PDFAnnotationRecord] = []
+    @State private var filteredAnnotations: [ReaderPDFAnnotation] = []
 
     private var sidebarBackground: Color {
         Color(nsColor: NSColor(name: nil) { trait in
@@ -148,7 +148,7 @@ struct AnnotationSidebarView: View {
 
     // MARK: - Edit Note Sheet
 
-    private func editNoteSheet(annotation: PDFAnnotationRecord) -> some View {
+    private func editNoteSheet(annotation: ReaderPDFAnnotation) -> some View {
         VStack(spacing: 16) {
             HStack {
                 Text("Edit note", bundle: .module)
@@ -206,7 +206,7 @@ struct AnnotationSidebarView: View {
 // MARK: - Annotation Card
 
 struct AnnotationCard: View {
-    let annotation: PDFAnnotationRecord
+    let annotation: ReaderPDFAnnotation
     let isSelected: Bool
     let onTap: () -> Void
     let onEdit: () -> Void

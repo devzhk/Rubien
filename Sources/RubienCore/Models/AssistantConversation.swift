@@ -40,6 +40,7 @@ public enum AssistantConversationOrigin: RawStringCodable, Hashable, Sendable {
 public enum AssistantConversationContextKind: RawStringCodable, Hashable, Sendable {
     case library
     case reference
+    case attachment
     case unclassified
     case unknown(String)
 
@@ -47,6 +48,7 @@ public enum AssistantConversationContextKind: RawStringCodable, Hashable, Sendab
         switch rawValue {
         case "library": self = .library
         case "reference": self = .reference
+        case "attachment": self = .attachment
         case "unclassified": self = .unclassified
         default: self = .unknown(rawValue)
         }
@@ -56,6 +58,7 @@ public enum AssistantConversationContextKind: RawStringCodable, Hashable, Sendab
         switch self {
         case .library: "library"
         case .reference: "reference"
+        case .attachment: "attachment"
         case .unclassified: "unclassified"
         case let .unknown(value): value
         }
@@ -201,6 +204,7 @@ public struct AssistantConversation: Identifiable, Codable, Hashable, Sendable {
     public var workspaceIdentityHash: String?
     public var contextKind: AssistantConversationContextKind
     public var referenceId: Int64?
+    public var attachmentSyncId: String?
     public var scheduledJobRunId: String?
     public var continuedFromConversationId: String?
     public var continuationTransferredAt: Date?
@@ -218,6 +222,7 @@ public struct AssistantConversation: Identifiable, Codable, Hashable, Sendable {
         workspaceIdentityHash: String?,
         contextKind: AssistantConversationContextKind,
         referenceId: Int64? = nil,
+        attachmentSyncId: String? = nil,
         scheduledJobRunId: String? = nil,
         continuedFromConversationId: String? = nil,
         continuationTransferredAt: Date? = nil,
@@ -234,6 +239,7 @@ public struct AssistantConversation: Identifiable, Codable, Hashable, Sendable {
         self.workspaceIdentityHash = workspaceIdentityHash
         self.contextKind = contextKind
         self.referenceId = referenceId
+        self.attachmentSyncId = attachmentSyncId
         self.scheduledJobRunId = scheduledJobRunId
         self.continuedFromConversationId = continuedFromConversationId
         self.continuationTransferredAt = continuationTransferredAt
@@ -246,7 +252,7 @@ public struct AssistantConversation: Identifiable, Codable, Hashable, Sendable {
     }
 
     public enum Columns: String, ColumnExpression {
-        case id, provider, origin, workspaceIdentityHash, contextKind, referenceId
+        case id, provider, origin, workspaceIdentityHash, contextKind, referenceId, attachmentSyncId
         case scheduledJobRunId, continuedFromConversationId
         case continuationTransferredAt, latestProviderSessionId
         case latestSessionTurnOrdinal, latestSessionEventOrdinal
@@ -269,6 +275,7 @@ extension AssistantConversation: FetchableRecord, MutablePersistableRecord {
             contextKind = decodedContext
         }
         referenceId = storedReferenceId
+        attachmentSyncId = row[Columns.attachmentSyncId]
         scheduledJobRunId = row[Columns.scheduledJobRunId]
         continuedFromConversationId = row[Columns.continuedFromConversationId]
         continuationTransferredAt = row[Columns.continuationTransferredAt]
@@ -287,6 +294,7 @@ extension AssistantConversation: FetchableRecord, MutablePersistableRecord {
         container[Columns.workspaceIdentityHash] = workspaceIdentityHash
         container[Columns.contextKind] = contextKind.rawValue
         container[Columns.referenceId] = referenceId
+        container[Columns.attachmentSyncId] = attachmentSyncId
         container[Columns.scheduledJobRunId] = scheduledJobRunId
         container[Columns.continuedFromConversationId] = continuedFromConversationId
         container[Columns.continuationTransferredAt] = continuationTransferredAt
@@ -758,6 +766,7 @@ public struct AssistantConversationQuery: Hashable, Sendable {
     public var provider: AssistantProvider?
     public var contextKind: AssistantConversationContextKind?
     public var referenceId: Int64?
+    public var attachmentSyncId: String?
     public var search: String?
     public var includeArchived: Bool
     public var limit: Int
@@ -767,6 +776,7 @@ public struct AssistantConversationQuery: Hashable, Sendable {
         provider: AssistantProvider? = nil,
         contextKind: AssistantConversationContextKind? = nil,
         referenceId: Int64? = nil,
+        attachmentSyncId: String? = nil,
         search: String? = nil,
         includeArchived: Bool = false,
         limit: Int = 50
@@ -775,6 +785,7 @@ public struct AssistantConversationQuery: Hashable, Sendable {
         self.provider = provider
         self.contextKind = contextKind
         self.referenceId = referenceId
+        self.attachmentSyncId = attachmentSyncId
         self.search = search
         self.includeArchived = includeArchived
         self.limit = limit

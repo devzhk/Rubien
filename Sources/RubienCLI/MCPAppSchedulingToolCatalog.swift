@@ -94,7 +94,7 @@ enum MCPAppSchedulingToolCatalog {
                 )
             }
 
-            let job = try AppDatabase.shared.createScheduledJob(.init(
+            let job = try AppDatabase.openShared().createScheduledJob(.init(
                 name: name,
                 prompt: prompt,
                 recurrence: .init(

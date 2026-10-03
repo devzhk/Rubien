@@ -51,6 +51,8 @@ extension SyncEntityType {
         }
 
         switch self {
+        case .referenceAttachment, .attachmentAsset, .attachmentAnnotation:
+            return .ready
         case .referenceTag:
             guard let row = ReferenceTag(record: record) else { return .invalid }
             guard let reference = try Self.resolvedParentIdentity(
@@ -447,6 +449,11 @@ extension SyncEntityType {
         systemFields: Data?
     ) throws -> CKRecord? {
         switch self {
+        case .referenceAttachment, .attachmentAnnotation:
+            return try AttachmentRecordWriter().build(attachmentKind!, id: entityId, db: db)
+        case .attachmentAsset:
+            // Asset verification and a lifetime lease are prepared outside SQLite.
+            return nil
         case .reference:
             guard let row = try Reference
                 .filter(Column("syncId") == entityId)
@@ -697,6 +704,11 @@ extension SyncEntityType {
         }
 
         switch self {
+        case .referenceAttachment, .attachmentAsset, .attachmentAnnotation:
+            _ = try AttachmentRecordReceiver().receive(record, db: db)
+            // Receiver owns acknowledgement, including removal merges and duplicates.
+            // The generic caller must never perform a second markPulled.
+            return false
         case .reference:
             var row = Reference(record: record)
             row.syncId = entityId
@@ -1587,6 +1599,10 @@ extension SyncEntityType {
         )
 
         switch self {
+        case .referenceAttachment, .attachmentAsset, .attachmentAnnotation:
+            // Attachment deletion events and acknowledged child deletes have their
+            // own retained-marker/recovery policy in the attachment coordinator.
+            break
         case .reference:
             filenamesToUnlinkAfterCommit.formUnion(
                 try Self.consumeLegacyReferenceQuarantine(
@@ -3035,6 +3051,14 @@ extension SyncEntityType {
             sql: "SELECT * FROM syncOrphan ORDER BY receivedAt, recordName"
         )
         for orphan in wireOrphans {
+            // A completed traversal is not positive deletion evidence for an
+            // attachment. Keep its record and journal-owned bytes even after
+            // these types join live dispatch. Marker/evidence reconciliation
+            // owns their eventual cleanup; generic orphan deletion must not.
+            let recordType: String = orphan["recordType"]
+            if AttachmentRecordKind.allCases.contains(where: { $0.recordType == recordType }) {
+                continue
+            }
             let data: Data = orphan["recordData"]
             guard let record = try SyncRecordIdentity.unarchive(data),
                   let type = SyncEntityType.forRecordType(record.recordType),
@@ -3239,6 +3263,7 @@ extension SyncEntityType {
                         record.recordID.recordName
                       ), parsed.0 == type
                 else { continue }
+                if type.attachmentKind != nil { continue }
                 let entityId = parsed.1
                 guard try type.remoteDependencyStatus(
                     for: record,

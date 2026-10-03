@@ -24,6 +24,9 @@ public enum SyncEntityType: String, CaseIterable, Sendable {
     case assistantActivity  = "assistantActivity"
     case activityEpoch      = "activityEpoch"
     case referencePDF       = "referencePDF"
+    case referenceAttachment, attachmentAsset, attachmentAnnotation
+
+    var attachmentKind: AttachmentRecordKind? { AttachmentRecordKind(rawValue: rawValue) }
 
     /// The CKRecord type name this entity pushes as. Mirrors
     /// `SyncConstants.RecordType.*`.
@@ -43,6 +46,9 @@ public enum SyncEntityType: String, CaseIterable, Sendable {
         case .assistantActivity:  return SyncConstants.RecordType.assistantActivity
         case .activityEpoch:      return SyncConstants.RecordType.activityEpoch
         case .referencePDF:       return SyncConstants.RecordType.referencePDF
+        case .referenceAttachment: return "CDReferenceAttachment"
+        case .attachmentAsset: return "CDAttachmentAsset"
+        case .attachmentAnnotation: return "CDAttachmentAnnotation"
         }
     }
 
@@ -70,6 +76,8 @@ public enum SyncEntityType: String, CaseIterable, Sendable {
         case .referencePDF:                                       return 2  // FK → reference (1:1 sibling)
         // Tier 3: FK to tier-2 / tier-1 (evidence FKs both intake + reference, nullable)
         case .metadataEvidence:                                   return 3
+        case .referenceAttachment: return 2
+        case .attachmentAsset, .attachmentAnnotation: return 3
         }
     }
 
@@ -114,7 +122,7 @@ public enum SyncEntityType: String, CaseIterable, Sendable {
             else { return true }
             return SyncIdentifier.isCanonicalDecimal(String(parts[2]))
 
-        case .assistantActivity, .activityEpoch:
+        case .assistantActivity, .activityEpoch, .referenceAttachment, .attachmentAsset, .attachmentAnnotation:
             return false
         }
     }

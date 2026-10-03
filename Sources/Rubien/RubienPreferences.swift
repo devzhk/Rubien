@@ -56,6 +56,10 @@ enum RubienPreferences {
     /// historical "follow the OS" behavior.
     static let themePreferenceKey = "Rubien.themePreference"
 
+    /// Shared by both readers via @AppStorage so already-open windows update live.
+    /// This is a per-device display preference, not library data.
+    static let readingComfortEnabledKey = "Rubien.readingComfortEnabled"
+
     static var colorScheme: ColorSchemePreference {
         get {
             guard let raw = UserDefaults.standard.string(forKey: themePreferenceKey),

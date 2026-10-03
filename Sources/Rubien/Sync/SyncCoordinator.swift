@@ -128,7 +128,8 @@ public final class SyncCoordinator: ObservableObject {
                 // (RubienSync can't import Rubien without a target cycle).
                 SyncedLibrary(
                     appDatabase: db,
-                    pdfAssetSyncEnabledProvider: { RubienPreferences.pdfAssetSyncEnabled }
+                    pdfAssetSyncEnabledProvider: { RubienPreferences.pdfAssetSyncEnabled },
+                    attachmentSyncEnabledProvider: { ProcessInfo.processInfo.environment["RUBIEN_ENABLE_ATTACHMENT_SYNC"] == "1" }
                 )
             }
         }
@@ -408,6 +409,9 @@ public final class SyncCoordinator: ObservableObject {
         try? syncLock?.unlock()
         syncLock = nil
         syncResourceGeneration = nil
+        try? await appDatabase.dbWriter.write { db in
+            try db.execute(sql: "DELETE FROM syncSession WHERE key='attachmentSyncEnabled'")
+        }
         status = .disabled
     }
 
@@ -609,6 +613,9 @@ public final class SyncCoordinator: ObservableObject {
     private func subscribeActivationNotifications() {
         guard activationObservers.isEmpty else { return }
         let nc = NotificationCenter.default
+        activationObservers.append(nc.addObserver(forName: .init("RubienAttachmentSyncRetry"), object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in await self?.fetchRemoteChangesNow() }
+        })
         activationObservers.append(
             nc.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in await self?.handleDidBecomeActive() }

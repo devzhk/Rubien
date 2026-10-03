@@ -18,6 +18,19 @@ rubien-cli <subcommand> [options]
 
 The signed app and its embedded helper share the App Group path; SPM dev builds use a separate path so experiments don't touch the real library. The first run between those modes performs a one-shot migration — see CLAUDE.md "Data layer" for the mechanics. Override anywhere with `RUBIEN_LIBRARY_ROOT=/path/to/dir`.
 
+Library startup errors return a nonzero exit code and a JSON `error` on stderr.
+The app offers Retry or Quit. A failed move preserves the original library and
+prevents an empty replacement from opening. Close processes using that library
+before retrying.
+
+After a successful move, `.rubien-promoted-to` fences the old root against stale
+writes. The error names the destination. Point `RUBIEN_LIBRARY_ROOT` at that
+verified destination to use the moved library, or at a fresh directory for an
+isolated development library. Keep the marker in place; removing it can create
+two independent libraries. `--help` and `version` remain available when the
+library cannot open.
+
+
 ## Installing on `$PATH`
 
 **Mac (signed app installed):** symlink the bundled helper. Updates pick up the new binary automatically.
@@ -65,7 +78,8 @@ Linux needs system deps first — see [Linux CLI](../README.md#linux-cli). For d
 | `pdf page-image` | Render a PDF page as a base64-encoded JPEG/PNG |
 | `pdf status` | Show PDF cache + upload-queue state for a reference (JSON only) |
 | `pdf download` | Fetch the open-access PDF for a reference and attach it (skip-if-attached; `--force` to replace) |
-| `mcp` | Run a Model Context Protocol server over stdio, exposing the full 28-tool library catalog by default or its 15 read-only tools with `--read-only` (the in-app Assistant channel; a Node-free replacement for `rubien-mcp-server`). Mac **and** Linux. |
+| `attachment` | List, add, verify, read, export, rename, and remove local PDF/Markdown supplements. Mac and Linux. |
+| `mcp` | Run a Model Context Protocol server over stdio, exposing the full 35-tool library catalog by default or its 18 read-only tools with `--read-only` (the in-app Assistant channel; a Node-free replacement for `rubien-mcp-server`). Mac **and** Linux. |
 | `sync status` | Inspect iCloud sync state (JSON only). **Mac-only** — Linux builds omit this subcommand entirely. |
 | `sync acknowledge-writer-upgrade` | Release v12-readable held changes after every writable Mac is upgraded or offline. **Mac-only** and requires exact confirmation text. |
 
@@ -1131,9 +1145,12 @@ rubien-cli assistant-conversations clear --before 2026-07-01T00:00:00Z --confirm
 rubien-cli assistant-conversations clear --confirm
 ```
 
-`list` accepts `--provider claude|codex`, `--reference-id`, `--search`, and a
+`list` accepts `--provider claude|codex`, `--reference-id`, `--attachment-id`, `--search`, and a
 positive `--limit` (default 50). It returns conversation metadata, a bounded
-preview, and turn count. Search uses local FTS over visible user/assistant text
+preview, and turn count. `--attachment-id` takes an attachment UUID and cannot be
+combined with `--reference-id`. Attachment-reader conversations have
+`contextKind: "attachment"` and an `attachmentSyncId`; primary-reader conversations
+keep `contextKind: "reference"` and `referenceId`. Search uses local FTS over visible user/assistant text
 and paper titles; internal reasoning, raw tool traffic, and attachment metadata
 are not indexed.
 
@@ -1183,7 +1200,7 @@ printf '%s\n' \
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `--read-only` | Flag | off | Register only the 15 read-only tools. Without the flag, register all 28 tools (15 reads + 13 writes). |
+| `--read-only` | Flag | off | Register only the 18 read-only tools. Without the flag, register all 35 tools (18 reads + 17 writes). |
 
 **Protocol.** Speaks JSON-RPC 2.0 over stdio (newline-delimited messages, one
 per line): `initialize` (echoes the client's `protocolVersion`, advertises the
@@ -1192,9 +1209,9 @@ Notifications (`notifications/initialized`, etc.) get no response. Unknown
 methods return error `-32601`; unknown tools return `-32602`. Diagnostics go to
 stderr; stdout carries only protocol messages.
 
-**Tools.** The native catalog mirrors the npm server's 28-tool catalog. Read tools carry `readOnlyHint: true`; writes carry
+**Tools.** The native catalog mirrors the npm server's 35-tool catalog. Read tools carry `readOnlyHint: true`; writes carry
 `readOnlyHint: false`; destructive mutations also carry
-`destructiveHint: true`. `--read-only` filters this catalog to the 15 reads.
+`destructiveHint: true`. `--read-only` filters this catalog to the 18 reads.
 
 | Surface | Tools |
 |---|---|
@@ -1395,3 +1412,74 @@ Valid values for `--type`:
 ```
 Journal Article, Conference Paper, Book, Thesis, Web Page, Markdown, Other
 ```
+
+
+## Reference attachments (local only)
+
+Attachments belong to one reference and have stable UUIDs independent of the main
+PDF or web content. UI, CLI, and MCP use the same Core store and byte limits:
+**250 MiB for PDF** (262144000 bytes), **50 MiB for UTF-8 Markdown** (52428800 bytes).
+Files are copied into managed storage. Duplicate kind/hash pairs on the same
+reference are skipped; original bytes and filenames are retained after renaming.
+
+```sh
+rubien-cli attachment list 42
+rubien-cli attachment add 42 -- /path/supplement.pdf /path/notes.md
+rubien-cli attachment status <attachment-uuid>
+rubien-cli attachment retry <attachment-uuid>
+rubien-cli attachment read <attachment-uuid> --pages 2-4 --max-chars 50000
+rubien-cli attachment read <attachment-uuid> --start 0 --max-chars 50000
+rubien-cli attachment export <attachment-uuid> --output /path/copy.pdf
+rubien-cli attachment rename <attachment-uuid> --name "Supplementary methods"
+rubien-cli attachment remove <attachment-uuid>
+```
+
+`list` returns an array of status objects; `status`, `retry`, `rename`, and `remove` return
+one status object. Each contains:
+
+- `attachment`: `syncId`, optional local `id`/`referenceId`, global `referenceSyncId`,
+  `kind`, `originalFilename`, `displayName`, `byteCount`, `contentHash`,
+  `dateCreated`, `dateModified`, and optional `deletedAt`.
+- `localAvailability`: `available`, `unavailable`, `removed`, or `error`. `list`
+  checks file existence, regular-file type, and size without hashing every file.
+  Explicit `status`, reading, and export verify content hashes (or reuse a matching
+  in-process file signature). `error` carries a diagnostic when a check fails.
+- `syncStatus`: `notEnabled`, `catchingUp`, `pendingDownload`, `pendingUpload`,
+  `synced`, `removed`, or `error`, based on the active sync session. Attachment
+  sync remains opt-in for Development verification (`RUBIEN_ENABLE_ATTACHMENT_SYNC=1`).
+- `pendingUpload`: retained upload intent, **not** a successful cloud upload.
+
+`add` returns one result per file: `{file, outcome, status?, error?}`, where outcome
+is `added`, `duplicate`, or `error`. Batch completion exits successfully even when
+individual files fail; inspect every result. Other command failures return nonzero
+and a JSON error on stderr. An empty batch is a usage error.
+
+`read` returns the attachment UUID and source plus the existing reading shapes:
+PDF has `pageCount`, `selection`, `pages`, `truncated`, and `hasTextLayer`; Markdown
+has `content`, `contentLength`, `start`, `returnedChars`, and `truncated`. PDF uses
+one-based page ranges and truncates at page boundaries, always including one page
+when available. Markdown uses zero-based character offsets and excludes a UTF-8
+BOM from readable text. `--max-chars` defaults to 50000 and accepts 1–500000.
+`--start` is Markdown-only; `--pages` is PDF-only. Missing or modified files fail
+without substituting the parent document. Reads never download files.
+
+`export` writes original bytes and returns `{attachmentSyncId, output}`. It refuses
+existing files and library-owned paths. `remove` retains removal markers and bytes
+for later sync reconciliation; it removes the attachment from active lists and
+closes its reader. It never deletes the parent reference.
+
+Native and npm MCP expose matching `rubien_attachment_list`, `rubien_attachment_add`,
+`rubien_attachment_status`, `rubien_attachment_retry`, `rubien_attachment_read`, `rubien_attachment_export`,
+`rubien_attachment_rename`, and `rubien_attachment_remove` tools. List/add use
+`referenceId`; other tools use the attachment UUID in `id`. Add accepts `files`;
+read accepts `pages`, `start`, `maxChars`; rename accepts `name`; export accepts
+`output`. Add, retry, export, rename, and remove require the existing write approval path;
+remove is marked destructive. The read-only server exposes only list/status/read.
+These tools require a CLI build containing the attachment commands.
+
+`attachment retry` resets backoff and retries recovery lookups for that attachment
+in the active account scope. It does not enable sync or recreate a missing,
+previously acknowledged annotation. The running app processes the durable jobs
+on its next sync cycle; CLI reads never initiate network downloads. Removal
+keeps metadata markers. Managed bytes are deleted only after iCloud acknowledges
+the parent marker and readers/uploads release their file leases.

@@ -7,6 +7,29 @@ import RubienSync
 @preconcurrency import UserNotifications
 
 @main
+@MainActor
+enum RubienLauncher {
+    static func main() {
+        while true {
+            do {
+                try AppDatabase.openShared()
+                break
+            } catch {
+                let app = NSApplication.shared
+                app.setActivationPolicy(.regular)
+                app.activate(ignoringOtherApps: true)
+                let alert = NSAlert()
+                alert.messageText = "Rubien could not open your library"
+                alert.informativeText = error.localizedDescription
+                alert.addButton(withTitle: "Retry")
+                alert.addButton(withTitle: "Quit")
+                guard alert.runModal() == .alertFirstButtonReturn else { return }
+            }
+        }
+        RubienApp.main()
+    }
+}
+
 struct RubienApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var syncCoordinator = SyncCoordinator(appDatabase: AppDatabase.shared)

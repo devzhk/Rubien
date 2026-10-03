@@ -136,7 +136,7 @@ claude mcp add rubien -- node $(pwd)/dist/index.js        # Claude Code
 
 ## Tool catalog
 
-28 tools — CRUD operations always carry the target suffix (`create_reference`, `update_property`); a bare verb appears only when the operation is unique and unambiguous (`cite`, `export`):
+36 tools — CRUD operations always carry the target suffix (`create_reference`, `update_property`); a bare verb appears only when the operation is unique and unambiguous (`cite`, `export`):
 
 | Surface | Tools |
 |---|---|
@@ -145,6 +145,7 @@ claude mcp add rubien -- node $(pwd)/dist/index.js        # Claude Code
 | Export | `rubien_export` |
 | Reading | `rubien_read_text`, `rubien_read_annotations`, `rubien_grep_text` |
 | Activity | `rubien_reading_activity` |
+| Attachments | `rubien_attachment_list`, `rubien_attachment_add`, `rubien_attachment_status`, `rubien_attachment_retry`, `rubien_attachment_read`, `rubien_attachment_export`, `rubien_attachment_rename`, `rubien_attachment_remove` |
 | PDFs | `rubien_get_pdf_info`, `rubien_render_pdf_page`, `rubien_download_pdf` |
 | Properties (columns + options, incl. Tags) | `rubien_list_properties`, `rubien_create_property`, `rubien_update_property`, `rubien_delete_property`, `rubien_create_option`, `rubien_update_option`, `rubien_delete_option` |
 | Saved views | `rubien_list_views`, `rubien_create_view`, `rubien_update_view`, `rubien_delete_view` |
@@ -207,3 +208,23 @@ Poke at tool schemas by hand with MCP Inspector:
 ```bash
 npx @modelcontextprotocol/inspector node dist/index.js
 ```
+
+
+### Supplementary attachments
+
+The attachment tools manage local PDF and UTF-8 Markdown files belonging to a
+reference. List/add use `referenceId`; status/retry/read/export/rename/remove use an
+attachment UUID in `id`. Add takes a `files` array and reports `added`, `duplicate`,
+or `error` for each input. Import limits are 250 MiB for PDFs and 50 MiB for Markdown.
+
+Read uses PDF `pages` or Markdown `start`, plus `maxChars` (default 50000, maximum
+500000). It reads the supplement itself, without substituting the parent paper.
+Export writes original bytes to a new `output` path; rename changes only the display
+`name`. Add/retry/export/rename/remove are write tools; remove is marked destructive.
+
+Status includes verified local availability and the active session's transfer state.
+`pendingUpload` is retained intent, not a successful upload. Retry resets transfer
+backoff and repeats recovery lookups without recreating previously synced annotations.
+Attachment sync is opt-in for Development verification; the default status remains
+`notEnabled`. These tools require a CLI build
+containing the attachment commands; see [CLI reference](../Docs/CLI-Reference.md#reference-attachments-local-only).

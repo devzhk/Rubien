@@ -16,6 +16,39 @@ const isoDateString = z
   .string()
   .describe("ISO-8601 timestamp with millisecond precision, e.g. 2026-04-24T12:00:00.000Z");
 
+export const ReferenceAttachmentDTO = z.object({
+  id: z.number().int().optional(),
+  syncId: z.string().uuid(),
+  referenceId: z.number().int().optional(),
+  referenceSyncId: z.string(),
+  kind: z.string(),
+  originalFilename: z.string(),
+  displayName: z.string(),
+  byteCount: z.number().int().nonnegative(),
+  contentHash: z.string().length(64),
+  dateCreated: isoDateString,
+  dateModified: isoDateString,
+  deletedAt: isoDateString.optional(),
+});
+export type ReferenceAttachmentDTO = z.infer<typeof ReferenceAttachmentDTO>;
+
+export const ReferenceAttachmentStatus = z.object({
+  attachment: ReferenceAttachmentDTO,
+  localAvailability: z.enum(["available", "unavailable", "removed", "error"]),
+  pendingUpload: z.boolean(),
+  syncStatus: z.enum(["notEnabled", "catchingUp", "pendingDownload", "pendingUpload", "synced", "removed", "error"]),
+  error: z.string().optional(),
+});
+export type ReferenceAttachmentStatus = z.infer<typeof ReferenceAttachmentStatus>;
+
+export const AttachmentAddResult = z.object({
+  file: z.string(),
+  outcome: z.enum(["added", "duplicate", "error"]),
+  status: ReferenceAttachmentStatus.optional(),
+  error: z.string().optional(),
+});
+export type AttachmentAddResult = z.infer<typeof AttachmentAddResult>;
+
 export const CustomPropertyValueDTO = z.object({
   propertyId: z.number().int(),
   name: z.string(),

@@ -5,7 +5,7 @@ import RubienCore
 struct WebAnnotationSidebarView: View {
     @ObservedObject var viewModel: WebReaderViewModel
     @State private var filterType: AnnotationType?
-    @State private var editingAnnotation: WebAnnotationRecord?
+    @State private var editingAnnotation: ReaderWebAnnotation?
     @State private var editNoteText = ""
 
     /// `ScrollViewReader.scrollTo` 目标 id（与正文的 `rubien-article-summary` 对应侧栏卡片）。
@@ -28,7 +28,7 @@ struct WebAnnotationSidebarView: View {
         }
     }
 
-    private var filteredAnnotations: [WebAnnotationRecord] {
+    private var filteredAnnotations: [ReaderWebAnnotation] {
         if let filterType {
             return viewModel.annotations.filter { $0.type == filterType }
         }
@@ -146,7 +146,7 @@ struct WebAnnotationSidebarView: View {
         .padding(.vertical, 14)
     }
 
-    private func editNoteSheet(annotation: WebAnnotationRecord) -> some View {
+    private func editNoteSheet(annotation: ReaderWebAnnotation) -> some View {
         VStack(spacing: 16) {
             HStack {
                 Text("Edit note", bundle: .module)
@@ -242,7 +242,7 @@ private struct WebSummarySidebarCard: View {
 }
 
 private struct WebAnnotationCard: View {
-    let annotation: WebAnnotationRecord
+    let annotation: ReaderWebAnnotation
     let isSelected: Bool
     let onTap: () -> Void
     let onEdit: () -> Void

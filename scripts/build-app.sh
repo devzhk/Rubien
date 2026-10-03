@@ -63,12 +63,14 @@ DSYM_ARCHIVE_PATH=""
 # or vary the architecture with the build host. Pin the release settings here
 # so shipped binaries are coverage-free and keep the intentional Apple
 # Silicon-only contract regardless of a developer machine's scheme.
-XCODEBUILD_SETTINGS=()
-# macOS still ships Bash 3.2, where `set -u` treats an empty array expansion as
-# unset. The guarded `${array[@]+...}` form at each xcodebuild call keeps debug
-# builds argument-free while preserving all release settings as separate args.
+# Swift's linker driver can pass --sysroot without recording the SDK version,
+# making AppKit use older compatibility behavior. Pass Clang's -isysroot too;
+# Xcode expands SDKROOT to the selected SDK without changing the minimum OS.
+XCODEBUILD_SETTINGS=(
+    'OTHER_LDFLAGS=$(inherited) -Xclang-linker -isysroot -Xclang-linker "$(SDKROOT)"'
+)
 if [ "$MODE" = "release" ]; then
-    XCODEBUILD_SETTINGS=(
+    XCODEBUILD_SETTINGS+=(
         ARCHS=arm64
         ONLY_ACTIVE_ARCH=NO
         CLANG_ENABLE_CODE_COVERAGE=NO
@@ -549,8 +551,8 @@ sign_bundle() {
 
     # CloudKit environment is selected by the SIGNED entitlement, not the
     # provisioning profile, for Developer-ID (non-App-Store) macOS builds.
-    # Rubien.entitlements omits the key (so dev-launch.sh stays on Development),
-    # so the release DMG must inject Production here or the installed app
+    # Rubien.entitlements explicitly selects Development for dev-launch.sh,
+    # so the release DMG must override it with Production or the installed app
     # silently syncs against the empty Development environment. Gate on
     # MODE=release too: FLAVOR defaults to dmg even for debug builds.
     local sign_entitlements="$CODESIGN_ENTITLEMENTS"
@@ -560,7 +562,7 @@ sign_bundle() {
         prod_ent_dir="$(mktemp -d -t rubien-release-ent)"
         sign_entitlements="$prod_ent_dir/Rubien.release.entitlements"
         cp "$CODESIGN_ENTITLEMENTS" "$sign_entitlements"
-        # Add-or-set: idempotent if the base file ever gains the key.
+        # Add-or-set also supports caller-supplied entitlement files without the key.
         /usr/libexec/PlistBuddy -c \
             "Add :com.apple.developer.icloud-container-environment string Production" \
             "$sign_entitlements" 2>/dev/null \

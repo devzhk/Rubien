@@ -232,6 +232,11 @@ final class ChatSessionController: ObservableObject {
     private let providerFactory: ((AgentProviderKind) -> any AgentProvider)?
     private let transcript: any ChatTranscriptSink
     private let gate: AssistantTurnGate
+    typealias ReaderDocumentContextProvider = (AssistantConversationContext, URL) async throws -> String?
+    private let readerDocumentContextProvider: ReaderDocumentContextProvider?
+    private let readerDocumentContinuation: ((String) -> String)?
+    private var lastReaderContext: String?
+    private var lastReaderContextSessionID: String?
     private let surfaceDefaultContext: AssistantConversationContext
     private var activeConversationContext: AssistantConversationContext
     private let workspaceURL: URL
@@ -395,6 +400,8 @@ final class ChatSessionController: ObservableObject {
         transcript: any ChatTranscriptSink,
         reference: ChatReference? = nil,
         conversationContext: AssistantConversationContext? = nil,
+        readerDocumentContextProvider: ReaderDocumentContextProvider? = nil,
+        readerDocumentContinuation: ((String) -> String)? = nil,
         workspaceURL: URL,
         gate: AssistantTurnGate = .shared,
         webAccess: Bool = true,
@@ -421,6 +428,8 @@ final class ChatSessionController: ObservableObject {
         let initialContext = conversationContext
             ?? reference.map(AssistantConversationContext.reference)
             ?? .library
+        self.readerDocumentContextProvider = readerDocumentContextProvider
+        self.readerDocumentContinuation = readerDocumentContinuation
         self.surfaceDefaultContext = initialContext
         self.activeConversationContext = initialContext
         self.workspaceURL = workspaceURL
@@ -732,20 +741,8 @@ final class ChatSessionController: ObservableObject {
             visibleText: visible,
             attachments: attachments,
             mentionedReferences: mentions)
-        let request = AgentTurnRequest(
-            workspaceURL: workspaceURL,
-            conversationID: rubienConversationID,
-            resumeSessionID: resumeID,
-            prompt: providerPrompt,
-            attachments: attachments,
-            seed: AssistantContext.seed(
-                for: activeConversationContext,
-                promptOverride: promptOverride),
-            webAccess: webAccess,
-            loadUserTools: loadUserTools,
-            codexSandbox: codexSandbox,
-            modelOverride: modelOverride,
-            effortOverride: effortOverride)
+        let requestContext = activeConversationContext
+        let requestWorkspace = workspaceURL
         // Pin THIS turn to the provider live at send-time. `switchProvider` can swap
         // `self.provider` after the task is scheduled but before it reaches `send`; the
         // captured `turnProvider` keeps the turn (and its gate key) on one backend, so a
@@ -803,6 +800,47 @@ final class ChatSessionController: ObservableObject {
                 }
             }
 
+            let documentContext: String?
+            do {
+                if requestContext.attachmentID != nil && self.readerDocumentContextProvider == nil {
+                    throw CocoaError(.fileReadNoSuchFile)
+                }
+                documentContext = try await self.readerDocumentContextProvider?(requestContext, requestWorkspace)
+            } catch {
+                await self.gate.release(provider: kind, sessionID: resumeID)
+                if gen == self.generation {
+                    self.renderNotice("Rubien could not read this attachment: \(error.localizedDescription)")
+                    self.finalize(gen: gen, terminalPhase: .failed)
+                }
+                return
+            }
+            guard gen == self.generation, !Task.isCancelled else {
+                await self.gate.release(provider: kind, sessionID: resumeID)
+                return
+            }
+            let promptContext: String?
+            if let documentContext, resumeID != nil,
+               resumeID == self.lastReaderContextSessionID,
+               documentContext == self.lastReaderContext {
+                promptContext = self.readerDocumentContinuation?(documentContext) ?? documentContext
+            } else {
+                promptContext = documentContext
+            }
+            let request = AgentTurnRequest(
+                workspaceURL: requestWorkspace,
+                conversationID: rubienConversationID,
+                resumeSessionID: resumeID,
+                prompt: [promptContext, providerPrompt].compactMap { $0 }.joined(separator: "\n\n"),
+                attachments: attachments,
+                seed: AssistantContext.seed(
+                    for: requestContext,
+                    promptOverride: promptOverride),
+                webAccess: webAccess,
+                loadUserTools: loadUserTools,
+                codexSandbox: codexSandbox,
+                modelOverride: modelOverride,
+                effortOverride: effortOverride)
+
             let durableTurnID = UUID()
             let durableWorkID = UUID()
             let durableUserEntryID = UUID()
@@ -827,6 +865,7 @@ final class ChatSessionController: ObservableObject {
                     ),
                     contextKind: storedContext.kind,
                     referenceId: storedContext.referenceID,
+                    attachmentSyncId: storedContext.attachmentID,
                     createdAt: date
                 )
                 let proposedTurn = AssistantTurn(
@@ -1006,6 +1045,11 @@ final class ChatSessionController: ObservableObject {
                 if self.activeConversationRecorder === recorder {
                     self.activeConversationRecorder = nil
                 }
+            }
+            if gen == self.generation {
+                let succeeded = terminalOutcome == .succeeded && !Task.isCancelled
+                self.lastReaderContext = succeeded ? documentContext : nil
+                self.lastReaderContextSessionID = succeeded ? self.liveSessionID : nil
             }
             // Release BEFORE the task completes, so awaiting `turnTask` guarantees the
             // slot is free (a fire-and-forget release could race the next acquire).
@@ -1263,6 +1307,8 @@ final class ChatSessionController: ObservableObject {
     }
 
     private func resetConversationState(attachments policy: PendingAttachmentReset) {
+        lastReaderContext = nil
+        lastReaderContextSessionID = nil
         let capturedAttachments = pendingAttachments
         let supersededActiveWork = isResponding || isResuming
         attachmentTask?.cancel()
@@ -1504,6 +1550,7 @@ final class ChatSessionController: ObservableObject {
                 referenceId: scopedToReference
                     ? activeConversationContext.referenceID
                     : nil,
+                attachmentSyncId: scopedToReference ? activeConversationContext.attachmentID : nil,
                 limit: limit
             )
             let result = await Task.detached(priority: .userInitiated) {
@@ -1519,6 +1566,7 @@ final class ChatSessionController: ObservableObject {
             }.value
             return result
         }
+        if scopedToReference && activeConversationContext.attachmentID != nil { return .completed([]) }
         let deadline = Date().addingTimeInterval(AgentHistoryPolicy.loadTimeout)
         guard surfaceDefaultContext == .library, let attributionStore else {
             return await provider.recentSessionsResult(
@@ -1560,6 +1608,7 @@ final class ChatSessionController: ObservableObject {
                 referenceId: scopedToReference
                     ? activeConversationContext.referenceID
                     : nil,
+                attachmentSyncId: scopedToReference ? activeConversationContext.attachmentID : nil,
                 search: query,
                 limit: limit
             )
@@ -1577,6 +1626,7 @@ final class ChatSessionController: ObservableObject {
                 }
             }.value
         }
+        if scopedToReference && activeConversationContext.attachmentID != nil { return .completed([]) }
         let deadline = Date().addingTimeInterval(AgentHistoryPolicy.loadTimeout)
         guard surfaceDefaultContext == .library, let attributionStore else {
             return await provider.searchSessionsResult(
@@ -1612,6 +1662,9 @@ final class ChatSessionController: ObservableObject {
         limit: Int = 25,
         scopedToReference: Bool = false
     ) async -> AgentSessionQueryResult {
+        // Provider history does not carry attachment UUIDs. Only local History
+        // can answer an attachment-scoped query without mixing documents.
+        if scopedToReference && activeConversationContext.attachmentID != nil { return .completed([]) }
         guard await prepareProviderAccessIfNeeded() else {
             return AgentSessionQueryResult(sessions: [], didTimeOut: true)
         }
@@ -1628,6 +1681,9 @@ final class ChatSessionController: ObservableObject {
         limit: Int = 25,
         scopedToReference: Bool = false
     ) async -> AgentSessionQueryResult {
+        // Provider history does not carry attachment UUIDs. Only local History
+        // can answer an attachment-scoped query without mixing documents.
+        if scopedToReference && activeConversationContext.attachmentID != nil { return .completed([]) }
         guard await prepareProviderAccessIfNeeded() else {
             return AgentSessionQueryResult(sessions: [], didTimeOut: true)
         }
@@ -1726,7 +1782,8 @@ final class ChatSessionController: ObservableObject {
         guard !rows.isEmpty else { return .unavailable }
 
         let conversationID = UUID().uuidString.lowercased()
-        let context = Self.storedContext(activeConversationContext)
+        let context = Self.storedContext(activeConversationContext.attachmentID == nil
+            ? activeConversationContext : .unclassifiedResume)
         let conversation = AssistantConversation(
             id: conversationID,
             provider: storedProvider,
@@ -1734,6 +1791,7 @@ final class ChatSessionController: ObservableObject {
             workspaceIdentityHash: AssistantSessionIdentity.workspaceHash(expectedWorkspace),
             contextKind: context.kind,
             referenceId: context.referenceID,
+            attachmentSyncId: context.attachmentID,
             latestProviderSessionId: summary.id,
             latestSessionTurnOrdinal: 1,
             latestSessionEventOrdinal: 0,
@@ -2750,14 +2808,16 @@ final class ChatSessionController: ObservableObject {
 
     private static func storedContext(
         _ context: AssistantConversationContext
-    ) -> (kind: AssistantConversationContextKind, referenceID: Int64?) {
+    ) -> (kind: AssistantConversationContextKind, referenceID: Int64?, attachmentID: String?) {
         switch context {
         case .library:
-            (.library, nil)
+            (.library, nil, nil)
         case .reference(let reference):
-            (.reference, reference.id)
+            (.reference, reference.id, nil)
+        case .attachment(let document):
+            (.attachment, nil, document.syncId)
         case .unclassifiedResume:
-            (.unclassified, nil)
+            (.unclassified, nil, nil)
         }
     }
 
@@ -2774,6 +2834,12 @@ final class ChatSessionController: ObservableObject {
                     title: "Reference \(id)",
                     authors: ""
                 ))
+            } else {
+                .unclassifiedResume
+            }
+        case .attachment:
+            if let id = conversation.attachmentSyncId {
+                .attachment(ChatReaderAttachment(syncId: id, title: "Attachment"))
             } else {
                 .unclassifiedResume
             }

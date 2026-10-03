@@ -84,6 +84,7 @@ public struct BatchIntentResolution: Equatable, Sendable {
 
 private struct DurableIntentSnapshot {
     let writerGate: Bool
+    let attachmentSavesAllowed: Set<PendingSyncIdentity.Key>
     let live: Set<PendingSyncIdentity.Key>
     let dirty: Set<PendingSyncIdentity.Key>
     let activeDeletes: Set<PendingSyncIdentity.Key>
@@ -191,8 +192,16 @@ public extension SyncStateStore {
                 predicate: "confirmedByServer = 0 AND isPushEligible = 1"
             )
         }
+        var attachmentSavesAllowed: Set<PendingSyncIdentity.Key> = []
+        for key in requestedKeys where key.type.attachmentKind != nil {
+            let blocked = try Bool.fetchOne(db, sql: """
+                SELECT EXISTS(SELECT 1 FROM attachmentRecovery WHERE scopeID=(SELECT value FROM syncSession WHERE key='attachmentSyncScope') AND entityType=? AND entityId=?)
+                """, arguments: [key.type.rawValue,key.entityId]) ?? true
+            if !blocked { attachmentSavesAllowed.insert(key) }
+        }
         return DurableIntentSnapshot(
             writerGate: try writerUpgradeRequired(db),
+            attachmentSavesAllowed: attachmentSavesAllowed,
             live: live,
             dirty: dirty,
             activeDeletes: activeDeletes
@@ -277,6 +286,8 @@ public extension SyncStateStore {
                 desiredOperation = nil
             }
 
+            if desiredOperation == .save, key.type.attachmentKind != nil,
+               !snapshot.attachmentSavesAllowed.contains(key) { continue }
             guard let desiredOperation else {
                 if reportDiscardedRequestsAsAnomaly,
                    !requestedOperations.isEmpty

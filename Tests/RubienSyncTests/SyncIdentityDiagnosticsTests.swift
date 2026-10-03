@@ -87,7 +87,7 @@ final class SyncIdentityDiagnosticsTests: XCTestCase {
         XCTAssertNotNil(acknowledged.writerUpgradeAcknowledgedAt)
         XCTAssertEqual(
             acknowledged.writerUpgradeAcknowledgedSchemaVersion,
-            "v14"
+            AppDatabase.currentSchemaVersion
         )
     }
 

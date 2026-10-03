@@ -7,6 +7,191 @@ import RubienCore
 @MainActor
 final class ChatSessionControllerTests: XCTestCase {
 
+    func testAttachmentConversationReopensWithOwnHistoryAndSelection() async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let id = UUID().uuidString.lowercased()
+        let siblingID = UUID().uuidString.lowercased()
+        var parent = Reference(title: "Parent paper")
+        try database.saveReference(&parent)
+        _ = try database.createAssistantConversation(.init(provider: .claude,
+            workspaceIdentityHash: AssistantSessionIdentity.workspaceHash(root),
+            contextKind: .reference, referenceId: parent.id))
+        _ = try database.createAssistantConversation(.init(provider: .claude,
+            workspaceIdentityHash: AssistantSessionIdentity.workspaceHash(root),
+            contextKind: .attachment, attachmentSyncId: siblingID))
+        let provider = MockAgentProvider(kind: .claude)
+        func controller() -> ChatSessionController {
+            ChatSessionController(provider: provider, transcript: SpyTranscriptSink(),
+                conversationContext: .attachment(.init(syncId: id, title: "Supplement")),
+                readerDocumentContextProvider: { context, _ in
+                    XCTAssertEqual(context.attachmentID, id)
+                    return "Verified attachment body for \(id)"
+                }, workspaceURL: root, gate: AssistantTurnGate(),
+                initialAvailability: .installed(version: "test", path: "/fake/claude"),
+                conversationDatabase: database)
+        }
+        let first = controller()
+        first.stageSelection("selected passage")
+        await runTurn(first, provider: provider, send: "Explain", events: [
+            .sessionStarted(sessionID: "attachment-provider-session"), .turnCompleted(usage: nil)])
+        let request = try XCTUnwrap(provider.lastRequest)
+        XCTAssertTrue(request.prompt.contains("selected passage"))
+        XCTAssertTrue(request.prompt.contains("Verified attachment body"))
+        XCTAssertTrue(request.seed?.contains(id) == true)
+        let history = await first.listRecentSessions(scopedToReference: true)
+        XCTAssertEqual(history.count, 1)
+        let saved = try XCTUnwrap(database.fetchAssistantConversation(id: history[0].id))
+        XCTAssertEqual(saved.contextKind, .attachment)
+        XCTAssertEqual(saved.attachmentSyncId, id)
+        XCTAssertNil(saved.referenceId)
+        first.teardown()
+        let reopened = controller()
+        reopened.resume(history[0])
+        await waitUntil { !reopened.isResuming }
+        await runTurn(reopened, provider: provider, send: "Continue", events: [.turnCompleted(usage: nil)])
+        XCTAssertEqual(provider.lastRequest?.resumeSessionID, "attachment-provider-session")
+        XCTAssertTrue(provider.lastRequest?.prompt.contains(id) == true)
+        reopened.newConversation()
+        await runTurn(reopened, provider: provider, send: "New", events: [.turnCompleted(usage: nil)])
+        XCTAssertNil(provider.lastRequest?.resumeSessionID)
+        XCTAssertTrue(provider.lastRequest?.seed?.contains(id) == true)
+        let updated = await reopened.listRecentSessions(scopedToReference: true)
+        XCTAssertEqual(updated.count, 2)
+        reopened.teardown()
+    }
+
+    func testAttachmentContinuationResetsOnChangesFailureAndNewConversation() async throws {
+        let provider = MockAgentProvider(kind: .claude)
+        var context = "Full attachment context version one"
+        let controller = ChatSessionController(provider: provider, transcript: SpyTranscriptSink(),
+            conversationContext: .attachment(.init(syncId: UUID().uuidString, title: "Supplement")),
+            readerDocumentContextProvider: { _, _ in context },
+            readerDocumentContinuation: { _ in "Compact attachment pointers" },
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"), gate: AssistantTurnGate(),
+            initialAvailability: .installed(version: "test", path: "/fake/claude"))
+        defer { controller.teardown() }
+        await runTurn(controller, provider: provider, send: "First", events: [
+            .sessionStarted(sessionID: "s1"), .turnCompleted(usage: nil)])
+        XCTAssertTrue(provider.lastRequest!.prompt.contains(context))
+        await runTurn(controller, provider: provider, send: "Second", events: [.turnCompleted(usage: nil)])
+        XCTAssertTrue(provider.lastRequest!.prompt.contains("Compact attachment pointers"))
+        context = "Full attachment context version two"
+        await runTurn(controller, provider: provider, send: "Changed notes", events: [.turnCompleted(usage: nil)])
+        XCTAssertTrue(provider.lastRequest!.prompt.contains(context))
+        await runTurn(controller, provider: provider, send: "Failed", events: [])
+        await runTurn(controller, provider: provider, send: "Retry", events: [.turnCompleted(usage: nil)])
+        XCTAssertTrue(provider.lastRequest!.prompt.contains(context))
+        controller.newConversation()
+        await runTurn(controller, provider: provider, send: "New", events: [.turnCompleted(usage: nil)])
+        XCTAssertTrue(provider.lastRequest!.prompt.contains(context))
+    }
+
+    func testUnavailableAttachmentNeverDispatchesAndPreservesSelection() async {
+        let provider = MockAgentProvider(kind: .codex)
+        let controller = ChatSessionController(provider: provider, transcript: SpyTranscriptSink(),
+            conversationContext: .attachment(.init(syncId: UUID().uuidString, title: "Missing")),
+            readerDocumentContextProvider: { _, _ in throw ReferenceAttachmentError.removed },
+            workspaceURL: URL(fileURLWithPath: "/tmp/ws"), gate: AssistantTurnGate(),
+            initialAvailability: .installed(version: "test", path: "/fake/codex"))
+        controller.stageSelection("keep this")
+        controller.send("Explain")
+        await controller.turnTask?.value
+        XCTAssertTrue(provider.requests.isEmpty)
+        XCTAssertNotNil(controller.stagedSelection)
+        XCTAssertFalse(controller.isResponding)
+        controller.teardown()
+    }
+
+    func testReaderTeardownCancelsAttachmentPreparationAndAllowsResume() async throws {
+        try await checkAttachmentPreparationCancellation(closeReader: true)
+    }
+
+    func testNewConversationCancelsAttachmentPreparationAndAllowsResume() async throws {
+        try await checkAttachmentPreparationCancellation(closeReader: false)
+    }
+
+    private func checkAttachmentPreparationCancellation(closeReader: Bool) async throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var parent = Reference(title: "Parent paper")
+        try database.saveReference(&parent)
+        let store = ReferenceAttachmentStore(database: database, libraryRoot: root, validatePDF: { _ in })
+        let source = root.appendingPathComponent("notes.md")
+        try Data("Attachment text".utf8).write(to: source)
+        let item = try store.importFile(at: source, referenceId: parent.id!).attachment
+        let context = AssistantConversationContext.attachment(.init(syncId: item.syncId, title: item.displayName))
+        let gate = AssistantTurnGate()
+        let provider = MockAgentProvider(kind: .claude)
+        let sink = SpyTranscriptSink()
+        let started = expectation(description: "Attachment extraction started")
+        let cancelled = expectation(description: "Attachment extraction received cancellation")
+        var suspendExtraction = false
+        let controller = ChatSessionController(provider: provider, transcript: sink,
+            conversationContext: context,
+            readerDocumentContextProvider: { context, workspace in
+                if !suspendExtraction {
+                    return try await AttachmentChatContext.prepare(context: context, workspace: workspace, store: store)
+                }
+                return try await AttachmentChatContext.prepare(context: context, workspace: workspace, store: store,
+                    textExtractor: { _, _ in
+                        started.fulfill()
+                        // Model expensive synchronous PDF work, bounded even if cancellation breaks.
+                        let deadline = Date().addingTimeInterval(5)
+                        while !Task.isCancelled && Date() < deadline {
+                            Thread.sleep(forTimeInterval: 0.001)
+                        }
+                        if Task.isCancelled { cancelled.fulfill() }
+                        try Task.checkCancellation()
+                        return "Late attachment text"
+                    }, textCache: AttachmentTextCache())
+            }, workspaceURL: root, gate: gate,
+            initialAvailability: .installed(version: "test", path: "/fake/claude"),
+            conversationDatabase: database)
+        defer { controller.teardown() }
+        await runTurn(controller, provider: provider, send: "First question", events: [
+            .sessionStarted(sessionID: "attachment-cancellation-session"), .turnCompleted(usage: nil)])
+        let history = await controller.listRecentSessions(scopedToReference: true)
+        let saved = try XCTUnwrap(history.first)
+        suspendExtraction = true
+        controller.send("Interrupted question")
+        let interruptedTurn = controller.turnTask
+        await fulfillment(of: [started], timeout: 2)
+        let busy = await gate.isBusy(provider: .claude, sessionID: "attachment-cancellation-session")
+        XCTAssertTrue(busy)
+        if closeReader {
+            controller.teardown()
+        } else {
+            controller.newConversation()
+        }
+        await fulfillment(of: [cancelled], timeout: 2)
+        await interruptedTurn?.value
+        let stillBusy = await gate.isBusy(provider: .claude, sessionID: "attachment-cancellation-session")
+        XCTAssertFalse(stillBusy)
+        XCTAssertEqual(provider.requests.count, 1, "Cancelled preparation must not dispatch a turn")
+        XCTAssertFalse(sink.notices.contains { $0.contains("could not read this attachment") })
+        if !closeReader { XCTAssertFalse(controller.isResponding) }
+
+        let resumedProvider = MockAgentProvider(kind: .claude)
+        let reopened = ChatSessionController(provider: resumedProvider, transcript: SpyTranscriptSink(),
+            conversationContext: context,
+            readerDocumentContextProvider: { context, workspace in
+                try await AttachmentChatContext.prepare(context: context, workspace: workspace, store: store)
+            }, workspaceURL: root, gate: gate,
+            initialAvailability: .installed(version: "test", path: "/fake/claude"),
+            conversationDatabase: database)
+        defer { reopened.teardown() }
+        reopened.resume(saved)
+        await waitUntil { !reopened.isResuming }
+        await runTurn(reopened, provider: resumedProvider, send: "Continue", events: [.turnCompleted(usage: nil)])
+        XCTAssertFalse(reopened.busyElsewhere)
+        XCTAssertEqual(resumedProvider.lastRequest?.resumeSessionID, "attachment-cancellation-session")
+        XCTAssertTrue(resumedProvider.lastRequest?.prompt.contains("Attachment text") == true)
+    }
+
     // MARK: Fixtures
 
     private func makeController(
@@ -1974,7 +2159,7 @@ final class ChatSessionControllerTests: XCTestCase {
             switch context {
             case .library, .unclassifiedResume:
                 prompt = "LIBRARY PROMPT"
-            case .reference:
+            case .reference, .attachment:
                 prompt = "READER PROMPT for {{reference}}"
             }
             return AssistantConversationDefaults(

@@ -4,6 +4,7 @@ import GRDB
 import CloudKit
 import RubienCore
 import os.log
+import Security
 
 private let log = Logger(subsystem: "Rubien", category: "SyncedLibrary")
 
@@ -43,6 +44,14 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     /// the resolver's read and write without holding the SQLite writer during
     /// the potentially-expensive hash computation.
     private let pdfContentHasher: @Sendable (URL) throws -> String
+    private let attachmentSyncEnabledProvider: @Sendable () -> Bool
+    private let attachmentFiles: ReferenceAttachmentStore
+    private var attachmentCoordinator: AttachmentSyncCoordinator?
+    private var attachmentsReady = false
+    private var isAttachmentInventoryRunning = false
+    private let attachmentEnvironmentProvider: @Sendable () throws -> String
+    private var attachmentDeleteAttempts: [String: AttachmentSyncState.DeleteAttempt] = [:]
+    private var attachmentUploadLeases: [String: AttachmentFileLease] = [:]
 
     /// Internal shape for deletions threaded into `applyFetchedRecordsInternal`.
     /// `CKSyncEngine.Event.FetchedRecordZoneChanges.Deletion` is not publicly
@@ -124,7 +133,9 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         // pass `{ RubienPreferences.pdfAssetSyncEnabled }`; the
         // `PDFUploadDrainerTests` pass `{ true }` / `{ false }` explicitly
         // to exercise the on/off branches.
-        pdfAssetSyncEnabledProvider: @escaping @Sendable () -> Bool = { false }
+        pdfAssetSyncEnabledProvider: @escaping @Sendable () -> Bool = { false },
+        attachmentSyncEnabledProvider: @escaping @Sendable () -> Bool = { false },
+        attachmentEnvironmentProvider: (@Sendable () throws -> String)? = nil
     ) {
         var continuation: AsyncStream<SyncStatus>.Continuation!
         self.statusStream = AsyncStream { cont in continuation = cont }
@@ -161,6 +172,10 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         self.containerProvider = containerProvider
         self.pdfContentHasher = pdfContentHasher
         self.pdfAssetSyncEnabledProvider = pdfAssetSyncEnabledProvider
+        self.attachmentSyncEnabledProvider = attachmentSyncEnabledProvider
+        self.attachmentEnvironmentProvider = attachmentEnvironmentProvider ?? { try Self.attachmentCloudEnvironment() }
+        self.attachmentFiles = ReferenceAttachmentStore(database: appDatabase,
+            libraryRoot: stateFileURL.deletingLastPathComponent(), validatePDF: { _ in })
     }
 
     static func requiresFullHistoryReplay(
@@ -250,6 +265,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         do {
             try await appDatabase.dbWriter.write { db in
                 try db.execute(sql: """
+                    DELETE FROM syncSession WHERE key IN ('attachmentSyncScope','attachmentSyncEnabled','attachmentSyncError','attachmentInventoryRequired');
                     UPDATE syncState
                     SET systemFields = NULL, isDirty = 1, pushInFlight = 0
                     """)
@@ -285,7 +301,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             // Never report success while another reentrant start still owns
             // the database-only preparation sequence. Callers fail closed
             // and may retry after that original attempt finishes.
-            guard !isPreEngineStartupSequenceActive else { return false }
+            guard !isPreEngineStartupSequenceActive && !isAttachmentInventoryRunning else { return false }
             isPreEngineStartupSequenceActive = true
         }
         defer {
@@ -309,6 +325,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         _ = await drainPDFUploadQueueIntoSyncState()
         guard await repairDurableIntentForStartup() else { return false }
         await compactStaleTombstones()
+        guard await prepareAttachmentSync() else { return false }
         if protectsFirstEngineConstruction {
             isPreEngineStartupSequenceActive = false
         }
@@ -379,7 +396,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     public func drainPDFUploadQueue() async {
         guard isEngineStartupPrepared,
               isDurableIntentReadyForEngine,
-              !isPreEngineStartupSequenceActive
+              !isPreEngineStartupSequenceActive && !isAttachmentInventoryRunning
         else {
             return
         }
@@ -816,7 +833,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     /// an entry-time check alone is insufficient under actor reentrancy.
     @discardableResult
     func deferEngineMutationIfDelegateCallbackActive() -> Bool {
-        guard activeDelegateEventCount > 0 else { return false }
+        guard activeDelegateEventCount > 0 || isAttachmentInventoryRunning else { return false }
         deferPendingReconciliationForActiveCallback()
         return true
     }
@@ -954,7 +971,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     ) async {
         guard isEngineStartupPrepared,
               isDurableIntentReadyForEngine,
-              !isPreEngineStartupSequenceActive
+              !isPreEngineStartupSequenceActive && !isAttachmentInventoryRunning
         else {
             return
         }
@@ -963,7 +980,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             let desired = try await appDatabase.dbWriter.read { db in
                 try self.stateStore.desiredPendingIntents(db).intents
             }
-            let pending = desired.map(pendingChange(for:))
+            let pending = desired.filter(attachmentIntentAllowed).map(pendingChange(for:))
 
             if !pending.isEmpty {
                 if let expectedScheduledGeneration,
@@ -988,7 +1005,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     public func reconcilePendingChanges() async {
         guard isEngineStartupPrepared,
               isDurableIntentReadyForEngine,
-              !isPreEngineStartupSequenceActive
+              !isPreEngineStartupSequenceActive && !isAttachmentInventoryRunning
         else {
             return
         }
@@ -1008,7 +1025,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             )
             let plan = SyncPendingIntentPlanner.plan(
                 current: knownCurrent,
-                desired: desiredResolution.intents,
+                desired: desiredResolution.intents.filter(attachmentIntentAllowed),
                 refreshing: pendingIntentRefreshes
             )
             if !plan.removals.isEmpty {
@@ -1063,11 +1080,13 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         // no-op so neither pending-state mutation nor fetch re-entry occurs
         // before the callback returns.
         guard activeDelegateEventCount == 0,
-              !isPreEngineStartupSequenceActive
+              !isPreEngineStartupSequenceActive && !isAttachmentInventoryRunning
         else { return true }
         guard !isExplicitFetchRunning else { return true }
         isExplicitFetchRunning = true
         defer { isExplicitFetchRunning = false }
+
+        guard await prepareAttachmentSync() else { return false }
 
         // The failed engine has already advanced in memory. Recreate it from
         // the last durable sidecar only from a normal external fetch trigger
@@ -1103,12 +1122,14 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         // actual fetch boundary, where there is no later suspension before
         // entering CKSyncEngine.
         guard activeDelegateEventCount == 0,
-              !isPreEngineStartupSequenceActive
+              !isPreEngineStartupSequenceActive && !isAttachmentInventoryRunning
         else { return true }
         let fetchGeneration = engineStartupGeneration
         let fetchEngine = engine
         do {
             try await fetchEngine.fetchChanges()
+            await runAttachmentMaintenance()
+            await reconcilePendingChanges()
             return fetchGeneration == engineStartupGeneration
                 && !statePersistenceGate.requiresEngineRecovery
         } catch {
@@ -1127,7 +1148,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             "CKSyncEngine must not be constructed before durable-intent repair"
         )
         precondition(
-            !isPreEngineStartupSequenceActive,
+            !isPreEngineStartupSequenceActive && !isAttachmentInventoryRunning,
             "CKSyncEngine must not be constructed before startup DB work finishes"
         )
         if let engine = _engine { return engine }
@@ -1422,7 +1443,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         _ context: CKSyncEngine.SendChangesContext,
         syncEngine: CKSyncEngine
     ) async -> CKSyncEngine.RecordZoneChangeBatch? {
-        guard syncEngine === _engine else { return nil }
+        guard syncEngine === _engine, !isAttachmentInventoryRunning else { return nil }
         // This delegate entry point suspends on SQLite below. Count it just
         // like handleEvent so actor reentrancy cannot admit observer ingestion
         // or an explicit fetch that mutates CKSyncEngine mid-send.
@@ -1452,10 +1473,26 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             reconciliationAwaitingSendBoundary = true
         }
         let pending = Self.originalPendingChanges(
-            selected: resolution.intents,
+            selected: resolution.intents.filter(attachmentIntentAllowed),
             scopedPending: scopedPending
         )
         guard !pending.isEmpty else { return nil }
+        do {
+            let attempts = try await appDatabase.dbWriter.read { db -> [String: AttachmentSyncState.DeleteAttempt] in
+                var result: [String: AttachmentSyncState.DeleteAttempt] = [:]
+                for case .deleteRecord(let id) in pending {
+                    if let (type,entityId) = SyncEntityType.parseRecordName(id.recordName),
+                       let attempt = try AttachmentSyncState.deleteAttempt(type, id: entityId, db: db) {
+                        result[id.recordName] = attempt
+                    }
+                }
+                return result
+            }
+            attachmentDeleteAttempts.merge(attempts) { _, latest in latest }
+        } catch {
+            log.error("failed to retain attachment delete attempts: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
 
         return await CKSyncEngine.RecordZoneChangeBatch(
             pendingChanges: pending
@@ -1471,7 +1508,13 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             // and clear pushInFlight, making the eventual save-ack leave
             // `isDirty=1` for re-push.
             do {
-                return try await appDatabase.dbWriter.write { db in
+                if let (type,_) = SyncEntityType.parseRecordName(recordID.recordName), type.attachmentKind != nil,
+                   !(await self.attachmentSendReady()) { return nil }
+                let asset: AttachmentAssetRecord?
+                if let (type,id) = SyncEntityType.parseRecordName(recordID.recordName), type == .attachmentAsset {
+                    asset = await self.prepareAttachmentUpload(id)
+                } else { asset = nil }
+                let built = try await appDatabase.dbWriter.write { db -> CKRecord? in
                     guard let (entityType, entityId) = SyncEntityType.parseRecordName(recordID.recordName) else {
                         return nil
                     }
@@ -1484,6 +1527,9 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                         db: db,
                         entityId: entityId
                     ) else { return nil }
+                    if let kind = entityType.attachmentKind {
+                        return try AttachmentRecordWriter().build(kind, id: entityId, db: db, asset: asset)
+                    }
                     let systemFields = try stateStore.loadSystemFields(
                         db,
                         entityType: entityType,
@@ -1504,7 +1550,10 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                     ) else { return nil }
                     return record
                 }
+                if built == nil, let asset { await self.releaseAttachmentUpload(asset.attachmentSyncId) }
+                return built
             } catch {
+                if let (type,id) = SyncEntityType.parseRecordName(recordID.recordName), type == .attachmentAsset { await self.releaseAttachmentUpload(id) }
                 log.error("buildPushRecord failed for \(recordID.recordName, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 return nil
             }
@@ -1621,6 +1670,10 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     @discardableResult
     func resetForAccountChange() async -> Bool {
         accountResetPending = true
+        attachmentCoordinator = nil
+        attachmentsReady = false
+        attachmentUploadLeases.removeAll()
+        attachmentDeleteAttempts.removeAll()
         invalidateEngineStartup(retireEngine: true)
         fullHistoryReconciliationAwaitingDurableState = false
         isFetchInFlight = false
@@ -1757,9 +1810,13 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         modifications: [CKRecord],
         deletions: [FetchedDeletionInput]
     ) async -> Bool {
+        let attachmentModifications = modifications.filter { SyncEntityType.forRecordType($0.recordType)?.attachmentKind != nil }
+        let attachmentDeletions = deletions.filter { SyncEntityType.forRecordType($0.recordType)?.attachmentKind != nil }
+        let primaryModifications = modifications.filter { SyncEntityType.forRecordType($0.recordType)?.attachmentKind == nil }
+        let primaryDeletions = deletions.filter { SyncEntityType.forRecordType($0.recordType)?.attachmentKind == nil }
         // FK-dependency-ordered modifications. PDFs are FK-children of
         // Reference and have rank Int.max in practice — they sort last.
-        let sortedMods = modifications.sorted { lhs, rhs in
+        let sortedMods = primaryModifications.sorted { lhs, rhs in
             let lhsRank = SyncEntityType
                 .forRecordType(lhs.recordType)?.fkDependencyRank ?? Int.max
             let rhsRank = SyncEntityType
@@ -1848,7 +1905,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                     committed.merge(modificationOutcome)
                 }
 
-                if !deletions.isEmpty {
+                if !primaryDeletions.isEmpty {
                     var deletionOutcome = BatchOutcome.empty
                     do {
                         let existingViolations = try Self.foreignKeyViolations(db)
@@ -1856,7 +1913,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                             try db.execute(sql: "PRAGMA defer_foreign_keys = ON")
                             deletionOutcome = try Self.applyRemoteRows(
                                 sortedMods: [],
-                                deletions: deletions,
+                                deletions: primaryDeletions,
                                 preparedPDFs: [:],
                                 stateStore: stateStore,
                                 violationPolicy: .tolerateExisting(existingViolations),
@@ -1913,7 +1970,25 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         // A copy failure is transient (for example, CKAsset materialization or
         // filesystem availability). Other records may commit idempotently, but
         // the fetch cursor must remain non-durable so the PDF is retried.
-        return execution.succeeded && !pdfStagingFailed
+        guard execution.succeeded && !pdfStagingFailed else { return false }
+        if attachmentSyncEnabledProvider() {
+            do {
+                let evidence = primaryDeletions.filter { $0.recordType == SyncConstants.RecordType.reference }
+                let deletions = (evidence + attachmentDeletions).map {
+                    AttachmentInventoryPage.Deletion(recordName: $0.recordID.recordName, recordType: $0.recordType)
+                }
+                if attachmentsReady, let coordinator = attachmentCoordinator {
+                    try coordinator.receive(records: attachmentModifications, deletions: deletions)
+                } else {
+                    try AttachmentQuarantine.buffer(records: attachmentModifications, deletions: deletions,
+                        scope: attachmentCoordinator?.scope.id, files: attachmentFiles, database: appDatabase)
+                }
+            } catch {
+                log.error("attachment receive failed: \(error.localizedDescription, privacy: .public)")
+                return false
+            }
+        }
+        return true
     }
 
     /// Apply one fetched-changes batch's modifications + deletions inside the
@@ -2189,6 +2264,9 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         _ event: CKSyncEngine.Event.SentRecordZoneChanges,
         syncEngine: CKSyncEngine
     ) async {
+        for record in event.savedRecords + event.failedRecordSaves.map(\.record) {
+            if let id = AttachmentRecordKind.attachmentAsset.identity(in: record) { attachmentUploadLeases[id] = nil }
+        }
         let sendErrors = event.failedRecordSaves.map { $0.error }
             + event.failedRecordDeletes.map { $0.value }
         if !sendErrors.isEmpty {
@@ -2252,12 +2330,11 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             }
             do {
                 try await appDatabase.dbWriter.write { [stateStore] db in
-                    try stateStore.markPushed(
-                        db,
-                        entityType: type,
-                        entityId: entityId,
-                        record: saved
-                    )
+                    if let kind = type.attachmentKind {
+                        try AttachmentRecordWriter().acknowledge(saved, kind: kind, db: db)
+                    } else {
+                        try stateStore.markPushed(db, entityType: type, entityId: entityId, record: saved)
+                    }
                     if type == .activityEpoch,
                        let epoch = ActivityEpoch(record: saved),
                        epoch.kind.rawValue == entityId
@@ -2291,6 +2368,11 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             return parsed
         }
         if !confirmedDeletes.isEmpty {
+            let attempts = attachmentDeleteAttempts
+            defer {
+                for id in event.deletedRecordIDs { attachmentDeleteAttempts[id.recordName] = nil }
+                deferredPendingReconciliation = true
+            }
             do {
                 let filenames = try await appDatabase.dbWriter.write {
                     [stateStore] db in
@@ -2301,7 +2383,8 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                             stateStore: stateStore,
                             entityType: type,
                             entityId: entityId,
-                            retainConfirmedTombstone: true
+                            retainConfirmedTombstone: true,
+                            attachmentAttempt: attempts[type.qualifiedRecordName(entityId: entityId)]
                         )
                     }
                     return filenames
@@ -2390,6 +2473,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         // Failed deletes — typically .unknownItem (already gone server-
         // side). Purge the tombstone so we don't keep retrying.
         for failure in event.failedRecordDeletes {
+            defer { attachmentDeleteAttempts[failure.key.recordName] = nil }
             if failure.value.code == .unknownItem {
                 if let unrecoveredError = await recoverUnknownItemDeleteFailure(
                     recordID: failure.key,
@@ -2423,6 +2507,23 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         error cloudError: CKError
     ) async -> CKError? {
         defer { deferredPendingReconciliation = true }
+        if let kind = type.attachmentKind {
+            guard let coordinator = attachmentCoordinator else { return cloudError }
+            do {
+                try await appDatabase.dbWriter.write { db in
+                    try coordinator.requireScope(db)
+                    if kind == .referenceAttachment {
+                        // Metadata markers can be recreated; child recreation requires fresh parent evidence.
+                        try self.stateStore.clearSystemFields(db, entityType: type, entityId: entityId)
+                    } else {
+                        let parent = kind == .attachmentAsset ? entityId : try String.fetchOne(db, sql: "SELECT attachmentSyncId FROM attachmentAnnotation WHERE syncId=?", arguments: [entityId])
+                        if let parent { try coordinator.queueRecovery(kind, id: entityId, parent: parent, db: db) }
+                    }
+                }
+                pendingIntentRefreshes.insert(.init(type: type, entityId: entityId, operation: .save))
+                return nil
+            } catch { return cloudError }
+        }
         do {
             try await appDatabase.dbWriter.write { [stateStore] db in
                 try stateStore.clearSystemFields(
@@ -2468,6 +2569,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             return cloudError
         }
         do {
+            let attachmentAttempt = attachmentDeleteAttempts[recordID.recordName]
             let filenames = try await appDatabase.dbWriter.write {
                 [stateStore] db in
                 try Self.finalizeDeleteOutcome(
@@ -2475,7 +2577,8 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                     stateStore: stateStore,
                     entityType: type,
                     entityId: entityId,
-                    retainConfirmedTombstone: false
+                    retainConfirmedTombstone: false,
+                    attachmentAttempt: attachmentAttempt
                 )
             }
             Self.unlinkStoredPDFFilenames(filenames)
@@ -2497,8 +2600,15 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         stateStore: SyncStateStore,
         entityType: SyncEntityType,
         entityId: String,
-        retainConfirmedTombstone: Bool
+        retainConfirmedTombstone: Bool,
+        attachmentAttempt: AttachmentSyncState.DeleteAttempt? = nil
     ) throws -> [String] {
+        if entityType == .attachmentAsset || entityType == .attachmentAnnotation {
+            // A new child observation while deletion was in flight owns a newer
+            // cleanup request. The old acknowledgement must leave it pending.
+            guard let attachmentAttempt,
+                  try AttachmentSyncState.deleteAttempt(entityType, id: entityId, db: db) == attachmentAttempt else { return [] }
+        }
         guard try stateStore.hasActiveDeleteIntent(
             db,
             entityType: entityType,
@@ -2527,6 +2637,7 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         }
 
         try stateStore.setApplyingRemote(db)
+        try AttachmentSyncState.physicalDeleteConfirmed(entityType, id: entityId, db: db)
         let filenames = try entityType.applyRemoteDelete(
             entityId: entityId,
             db: db
@@ -2556,7 +2667,8 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
     func finalizeDeleteOutcomeForTest(
         entityType: SyncEntityType,
         entityId: String,
-        retainConfirmedTombstone: Bool
+        retainConfirmedTombstone: Bool,
+        attachmentAttempt: AttachmentSyncState.DeleteAttempt? = nil
     ) async throws {
         let filenames = try await appDatabase.dbWriter.write { [stateStore] db in
             try Self.finalizeDeleteOutcome(
@@ -2564,7 +2676,8 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
                 stateStore: stateStore,
                 entityType: entityType,
                 entityId: entityId,
-                retainConfirmedTombstone: retainConfirmedTombstone
+                retainConfirmedTombstone: retainConfirmedTombstone,
+                attachmentAttempt: try attachmentAttempt ?? AttachmentSyncState.deleteAttempt(entityType, id: entityId, db: db)
             )
         }
         Self.unlinkStoredPDFFilenames(filenames)
@@ -2603,6 +2716,12 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
         entityId: String,
         serverRecord: CKRecord
     ) async -> Bool {
+
+        if type.attachmentKind != nil {
+            guard let coordinator = attachmentCoordinator else { return false }
+            do { try coordinator.receive(records: [serverRecord], deletions: []); return true }
+            catch { return false }
+        }
 
         // referencePDF: pre-stage bytes outside the transaction so the writer
         // queue isn't held by a large copyItem during conflict resolution.
@@ -2781,5 +2900,146 @@ public actor SyncedLibrary: CKSyncEngineDelegate {
             zoneID: SyncConstants.libraryZoneID
         )
     }
+    // MARK: - Attachment upgrade and external transfer work
+
+    private func prepareAttachmentSync() async -> Bool {
+        guard attachmentSyncEnabledProvider() else {
+            attachmentsReady = false
+            // A disabled engine may consume attachment changes. The next enabled
+            // launch must inventory again using its own cursor, never the live one.
+            do {
+                try await appDatabase.dbWriter.write { db in
+                    try db.execute(sql: "DELETE FROM syncSession WHERE key IN ('attachmentSyncEnabled','attachmentSyncError')")
+                    try db.execute(sql: "UPDATE attachmentSyncScope SET inventoryComplete=0,inventoryToken=NULL WHERE scopeID=(SELECT value FROM syncSession WHERE key='attachmentSyncScope')")
+                }
+                return true
+            } catch { return false }
+        }
+        if attachmentsReady { return true }
+        guard !isAttachmentInventoryRunning else { return false }
+        guard activeDelegateEventCount == 0, !isFetchInFlight, !isSendInFlight else { return true }
+        let generation = engineStartupGeneration
+        isAttachmentInventoryRunning = true
+        defer { isAttachmentInventoryRunning = false }
+        do {
+            if attachmentCoordinator == nil {
+                let environment = try Self.validatedAttachmentCloudEnvironment(attachmentEnvironmentProvider())
+                let user = try await container.userRecordID()
+                guard generation == engineStartupGeneration else { return false }
+                let scope = AttachmentSyncScope(account: user.recordName, environment: environment)
+                attachmentCoordinator = AttachmentSyncCoordinator(database: appDatabase,
+                    files: attachmentFiles, scope: scope,
+                    transport: LiveAttachmentCloudTransport(database: container.privateCloudDatabase))
+            }
+            guard let coordinator = attachmentCoordinator else { return true }
+            if let running = _engine {
+                // Only external work retires an idle engine. Let cancellation
+                // callbacks persist their state, then reuse the same durable cursor.
+                await running.cancelOperations()
+                guard generation == engineStartupGeneration, _engine === running,
+                      activeDelegateEventCount == 0 else { return false }
+                _engine = nil
+                attachmentUploadLeases.removeAll()
+                attachmentDeleteAttempts.removeAll()
+            }
+            try await appDatabase.dbWriter.write { db in
+                if try String.fetchOne(db, sql: "SELECT value FROM syncSession WHERE key='attachmentInventoryRequired'") != nil {
+                    try db.execute(sql: "UPDATE attachmentSyncScope SET inventoryComplete=0,inventoryToken=NULL WHERE scopeID=?", arguments: [coordinator.scope.id])
+                    try db.execute(sql: "DELETE FROM syncSession WHERE key='attachmentInventoryRequired'")
+                }
+            }
+            publishStatus(.syncing)
+            try await coordinator.inventory()
+            guard generation == engineStartupGeneration else { return false }
+            try await appDatabase.dbWriter.write { try $0.execute(sql: "DELETE FROM syncSession WHERE key='attachmentSyncError'") }
+            attachmentsReady = true
+            return true
+        } catch {
+            guard generation == engineStartupGeneration else { return false }
+            log.error("attachment inventory deferred; primary sync can continue: \(error.localizedDescription, privacy: .public)")
+            do {
+                let needsInventory = attachmentCoordinator == nil
+                try await appDatabase.dbWriter.write { db in
+                    try db.execute(sql: "INSERT INTO syncSession(key,value) VALUES('attachmentSyncError',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", arguments: [error.localizedDescription])
+                    if needsInventory {
+                        try db.execute(sql: "INSERT INTO syncSession(key,value) VALUES('attachmentInventoryRequired','1') ON CONFLICT(key) DO NOTHING")
+                    }
+                }
+                return true
+            } catch { return false } // Do not advance a cursor if retention state cannot be persisted.
+        }
+    }
+
+    static func validatedAttachmentCloudEnvironment(_ value: String?) throws -> String {
+        guard let value, ["Development", "Production"].contains(value) else {
+            throw AttachmentEnvironmentError.missingOrInvalid
+        }
+        return value
+    }
+
+    private enum AttachmentEnvironmentError: LocalizedError {
+        case missingOrInvalid
+        var errorDescription: String? { "Attachment sync needs a valid CloudKit environment entitlement. Paper sync can continue." }
+    }
+
+    private static func attachmentCloudEnvironment() throws -> String {
+        guard let task = SecTaskCreateFromSelf(nil) else { throw AttachmentEnvironmentError.missingOrInvalid }
+        return try validatedAttachmentCloudEnvironment(
+            SecTaskCopyValueForEntitlement(task, "com.apple.developer.icloud-container-environment" as CFString, nil) as? String)
+    }
+
+    func prepareAttachmentSyncForTest() async -> Bool { await prepareAttachmentSync() }
+    var attachmentsReadyForTest: Bool { attachmentsReady }
+
+    private func runAttachmentMaintenance() async {
+        guard attachmentsReady, let coordinator = attachmentCoordinator else { return }
+        do {
+            try coordinator.replay()
+            try await coordinator.recoverPending()
+            try await coordinator.downloadPending()
+            try coordinator.cleanup()
+        } catch {
+            log.error("attachment maintenance deferred: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func attachmentIntentAllowed(_ intent: PendingSyncIdentity) -> Bool {
+        intent.type.attachmentKind == nil || (attachmentsReady && attachmentSyncEnabledProvider())
+    }
+
+    private func attachmentSendReady() -> Bool { attachmentsReady && attachmentSyncEnabledProvider() }
+    private func releaseAttachmentUpload(_ id: String) { attachmentUploadLeases[id] = nil }
+
+    private func prepareAttachmentUpload(_ id: String) async -> AttachmentAssetRecord? {
+        guard attachmentsReady else { return nil }
+        let generation = engineStartupGeneration
+        do {
+            let files = attachmentFiles
+            let prepared = try await Task.detached {
+                let lease = try files.acquireFileLease()
+                let item = try files.attachment(syncId: id)
+                let url = try files.verifiedFileURL(syncId: id)
+                return (lease, AttachmentAssetRecord(attachmentSyncId: id, contentHash: item.contentHash,
+                                                      byteCount: item.byteCount, assetURL: url))
+            }.value
+            guard generation == engineStartupGeneration, attachmentsReady else { return nil }
+            attachmentUploadLeases[id] = prepared.0
+            return prepared.1
+        } catch {
+            if generation == engineStartupGeneration, let scope = attachmentCoordinator?.scope.id {
+                try? await appDatabase.dbWriter.write { db in
+                    guard try AttachmentSyncState.activeScope(db) == scope else { return }
+                    try db.execute(sql: "INSERT INTO attachmentTransferError(scopeID,attachmentSyncId,error) VALUES(?,?,?) ON CONFLICT(scopeID,attachmentSyncId) DO UPDATE SET error=excluded.error", arguments: [scope,id,error.localizedDescription])
+                }
+            }
+            return nil
+        }
+    }
+
+    func configureAttachmentSyncForTest(_ coordinator: AttachmentSyncCoordinator, ready: Bool = true) {
+        attachmentCoordinator = coordinator
+        attachmentsReady = ready
+    }
+
 }
 #endif

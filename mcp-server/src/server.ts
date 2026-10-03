@@ -9,10 +9,11 @@ import { registerSyncTools } from "./tools/sync.js";
 import { registerPdfTools } from "./tools/pdf.js";
 import { registerReadTools } from "./tools/read.js";
 import { registerActivityTools } from "./tools/activity.js";
+import { registerAttachmentTools } from "./tools/attachments.js";
 
 export const SERVER_INFO = {
   name: "rubien-mcp-server",
-  version: "0.3.5",
+  version: "0.3.6",
 } as const;
 
 export function buildServer(): McpServer {
@@ -32,6 +33,7 @@ export function buildServer(): McpServer {
   registerPdfTools(server);
   registerReadTools(server);
   registerActivityTools(server);
+  registerAttachmentTools(server);
   registerSyncTools(server);
 
   return server;

@@ -109,7 +109,8 @@ struct PDFSearchMatch: Identifiable {
 
 @MainActor
 final class PDFReaderViewModel: ObservableObject {
-    @Published var annotations: [PDFAnnotationRecord] = []
+    @Published private(set) var documentTitle: String
+    @Published var annotations: [ReaderPDFAnnotation] = []
     @Published var currentColorHex: String = "#FFDE59"
     @Published var selectedAnnotationId: Int64?
     @Published var showNoteEditor = false
@@ -125,9 +126,9 @@ final class PDFReaderViewModel: ObservableObject {
     @Published var scaleFactor: CGFloat = 1.0
     @Published var isDocumentLoading: Bool = false
     /// When set, shows a note-edit popover for an existing annotation (e.g. after clicking a highlight).
-    @Published var editingAnnotationInPlace: PDFAnnotationRecord?
+    @Published var editingAnnotationInPlace: ReaderPDFAnnotation?
     /// When set, shows an annotation action toolbar near the clicked highlight.
-    @Published var clickedAnnotationRecord: PDFAnnotationRecord?
+    @Published var clickedAnnotationRecord: ReaderPDFAnnotation?
     @Published var annotationToolbarLayout: SelectionToolbarLayout?
 
     // MARK: Search state
@@ -141,6 +142,8 @@ final class PDFReaderViewModel: ObservableObject {
 
     let reference: Reference
     let pdfURL: URL
+    let attachmentDocument: AttachmentReaderDocument?
+    @Published var persistenceError: String?
     private let db: AppDatabase
     private var cancellables = Set<AnyCancellable>()
     private var stagedSelection: PDFSelection?
@@ -149,17 +152,32 @@ final class PDFReaderViewModel: ObservableObject {
 
     weak var pdfView: PDFView?
 
-    var jumpToAnnotation: ((PDFAnnotationRecord) -> Void)?
+    var jumpToAnnotation: ((ReaderPDFAnnotation) -> Void)?
     var clearSelectionInView: (() -> Void)?
     var onPageChanged: ((Int, Int) -> Void)?
     /// Wired by PDFReaderView body; flips the left sidebar to the Search tab and focuses its field.
     var openSearchUI: (() -> Void)?
 
-    init(reference: Reference, pdfURL: URL, db: AppDatabase = .shared) {
+    init(reference: Reference, pdfURL: URL, db: AppDatabase = .shared, attachment: AttachmentReaderDocument? = nil) {
         self.reference = reference
+        self.documentTitle = attachment?.attachment.displayName ?? reference.title
         self.pdfURL = pdfURL
         self.db = db
+        self.attachmentDocument = attachment
 
+        if let attachment {
+            attachment.$attachment.map(\.displayName).removeDuplicates()
+                .assign(to: &$documentTitle)
+            attachment.annotationPublisher
+                .receive(on: DispatchQueue.main)
+                .sink(receiveCompletion: { [weak self] result in
+                    if case .failure(let error) = result { self?.persistenceError = error.localizedDescription }
+                }, receiveValue: { [weak self] records in
+                    self?.annotations = records.compactMap { AttachmentReaderDocument.pdfAnnotation($0) }
+                }).store(in: &cancellables)
+            attachment.$errorMessage.assign(to: &$persistenceError)
+            return
+        }
         guard let refId = reference.id else { return }
 
         db.observeAnnotations(referenceId: refId)
@@ -171,7 +189,7 @@ final class PDFReaderViewModel: ObservableObject {
                     }
                 },
                 receiveValue: { [weak self] annotations in
-                    self?.annotations = annotations
+                    self?.annotations = annotations.map(ReaderPDFAnnotation.init)
                 }
             )
             .store(in: &cancellables)
@@ -188,6 +206,11 @@ final class PDFReaderViewModel: ObservableObject {
         pageIndex: Int,
         rects: [CGRect]
     ) {
+        if let attachmentDocument {
+            attachmentDocument.add(type: type, anchor: .pdf(pageIndex: pageIndex, rects: rects.map(PDFAnnotationRect.init)),
+                                   text: selectedText, note: noteText, color: currentColorHex)
+            return
+        }
         guard let refId = reference.id else { return }
         var record = PDFAnnotationRecord(
             referenceId: refId,
@@ -207,6 +230,13 @@ final class PDFReaderViewModel: ObservableObject {
         noteText: String? = nil,
         pageRects: [Int: [CGRect]]
     ) {
+        if attachmentDocument != nil {
+            for page in pageRects.keys.sorted() {
+                guard let rects = pageRects[page], !rects.isEmpty else { continue }
+                addAnnotation(type: type, selectedText: selectedText, noteText: noteText, pageIndex: page, rects: rects)
+            }
+            return
+        }
         guard let refId = reference.id else { return }
         var records: [PDFAnnotationRecord] = []
         for pageIndex in pageRects.keys.sorted() {
@@ -226,19 +256,36 @@ final class PDFReaderViewModel: ObservableObject {
         try? db.saveAnnotations(&records)
     }
 
-    func deleteAnnotation(_ annotation: PDFAnnotationRecord) {
-        guard let id = annotation.id else { return }
+    func deleteAnnotation(_ annotation: ReaderPDFAnnotation) {
+        if let attachmentDocument {
+            guard annotation.documentID == .attachment(attachmentDocument.attachment.syncId) else { return }
+            attachmentDocument.perform { try $0.removeAnnotation(syncId: annotation.syncId) }
+            return
+        }
+        guard annotation.documentID == .reference(reference.id ?? -1), let id = annotation.id else { return }
         try? db.deleteAnnotation(id: id)
     }
 
-    func updateAnnotationNote(_ annotation: PDFAnnotationRecord, noteText: String) {
-        var updated = annotation
+    func updateAnnotationNote(_ annotation: ReaderPDFAnnotation, noteText: String) {
+        if let attachmentDocument {
+            guard annotation.documentID == .attachment(attachmentDocument.attachment.syncId) else { return }
+            attachmentDocument.perform { try $0.updateAnnotationNote(syncId: annotation.syncId, note: noteText.isEmpty ? nil : noteText) }
+            return
+        }
+        guard annotation.documentID == .reference(reference.id ?? -1),
+              var updated = annotation.primaryRecord else { return }
         updated.noteText = noteText.isEmpty ? nil : noteText
         try? db.saveAnnotation(&updated)
     }
 
-    func updateAnnotationColor(_ annotation: PDFAnnotationRecord, color: String) {
-        var updated = annotation
+    func updateAnnotationColor(_ annotation: ReaderPDFAnnotation, color: String) {
+        if let attachmentDocument {
+            guard annotation.documentID == .attachment(attachmentDocument.attachment.syncId) else { return }
+            attachmentDocument.perform { try $0.updateAnnotationColor(syncId: annotation.syncId, color: color) }
+            return
+        }
+        guard annotation.documentID == .reference(reference.id ?? -1),
+              var updated = annotation.primaryRecord else { return }
         updated.color = color
         try? db.saveAnnotation(&updated)
     }
@@ -357,12 +404,12 @@ final class PDFReaderViewModel: ObservableObject {
         return matches
     }
 
-    func navigateTo(_ annotation: PDFAnnotationRecord) {
+    func navigateTo(_ annotation: ReaderPDFAnnotation) {
         selectedAnnotationId = annotation.id
         jumpToAnnotation?(annotation)
     }
 
-    var annotationsByPage: [Int: [PDFAnnotationRecord]] {
+    var annotationsByPage: [Int: [ReaderPDFAnnotation]] {
         Dictionary(grouping: annotations, by: \.pageIndex)
     }
 
@@ -428,6 +475,7 @@ final class PDFReaderViewModel: ObservableObject {
 // MARK: - Main Reader
 
 struct PDFReaderView: View {
+    @AppStorage(RubienPreferences.readingComfortEnabledKey) private var readingComfortEnabled = false
     @StateObject private var viewModel: PDFReaderViewModel
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
@@ -450,22 +498,16 @@ struct PDFReaderView: View {
     @State private var showChatSidebar: Bool
     @State private var chatPanelWidth: CGFloat = AssistantSidebarMetrics.minimumWidth
 
-    @StateObject private var chatRenderer: ChatTranscriptController
-    @StateObject private var chatSession: ChatSessionController
+    @StateObject private var assistant: ReaderAssistantState
 
-    init(reference: Reference, pdfURL: URL, onClose: (() -> Void)? = nil) {
+    init(reference: Reference, pdfURL: URL, db: AppDatabase = .shared, attachment: AttachmentReaderDocument? = nil, onClose: (() -> Void)? = nil) {
         self.onClose = onClose
         self._showOutlineSidebar = State(initialValue: RubienPreferences.pdfReaderSidebarVisible)
         self._outlineSidebarWidth = State(initialValue: PDFReaderMetrics.restoredSidebarWidth(
             RubienPreferences.pdfReaderSidebarWidth))
         self._showChatSidebar = State(initialValue: RubienPreferences.assistantSidebarVisible)
-        self._viewModel = StateObject(wrappedValue: PDFReaderViewModel(reference: reference, pdfURL: pdfURL))
-        // Live session from the user's Assistant settings via the shared production
-        // factory (Phase 2c-5) — same path as the web reader.
-        let renderer = ChatTranscriptController()
-        self._chatRenderer = StateObject(wrappedValue: renderer)
-        self._chatSession = StateObject(wrappedValue: ReaderChatSession.make(
-            reference: reference, transcript: renderer))
+        self._viewModel = StateObject(wrappedValue: PDFReaderViewModel(reference: reference, pdfURL: pdfURL, db: db, attachment: attachment))
+        self._assistant = StateObject(wrappedValue: ReaderAssistantState(reference: reference, database: db, attachment: attachment))
     }
 
     /// Convenience initializer that resolves the PDF URL via the cache.
@@ -475,7 +517,7 @@ struct PDFReaderView: View {
         guard let id = reference.id,
               let filename = try? db.pdfFilename(for: id) else { return nil }
         let url = AppDatabase.pdfStorageURL.appendingPathComponent(filename)
-        self.init(reference: reference, pdfURL: url, onClose: onClose)
+        self.init(reference: reference, pdfURL: url, db: db, onClose: onClose)
     }
 
     var body: some View {
@@ -520,6 +562,7 @@ struct PDFReaderView: View {
             HStack(spacing: 0) {
                 ZStack {
                     AnnotatablePDFView(viewModel: viewModel)
+                        .readingComfort(enabled: readingComfortEnabled)
                         .padding(6)
                         .overlay {
                             selectionActionBarOverlay
@@ -574,7 +617,7 @@ struct PDFReaderView: View {
         // details-panel idiom). It owns the trailing edge — all document aids
         // (outline/search/notes/info) live in the LEFT sidebar's tabs.
         .overlay(alignment: .trailing) {
-            if showChatSidebar {
+            if showChatSidebar, let chatSession = assistant.session, let chatRenderer = assistant.renderer {
                 FloatingChatPanel(session: chatSession, renderer: chatRenderer, width: $chatPanelWidth) {
                     setChatSidebarVisible(false)
                 }
@@ -585,7 +628,10 @@ struct PDFReaderView: View {
         .animation(.easeInOut(duration: 0.22), value: chatPanelWidth)
         // Window closing (the root view disappears): kill any in-flight agent
         // turn's process group (§4.4 step 9).
-        .onDisappear { chatSession.teardown() }
+        .onDisappear { assistant.session?.teardown() }
+        .alert("Could not save attachment changes", isPresented: Binding(get: { viewModel.persistenceError != nil }, set: { if !$0 { viewModel.persistenceError = nil } })) {
+            Button("OK") { viewModel.persistenceError = nil }
+        } message: { Text(viewModel.persistenceError ?? "") }
         .animation(
             .spring(response: 0.3, dampingFraction: 0.82),
             value: showOutlineSidebar
@@ -594,7 +640,7 @@ struct PDFReaderView: View {
             .spring(response: 0.3, dampingFraction: 0.82),
             value: viewModel.hasStagedSelection && viewModel.selectionToolbarLayout?.visible == true
         )
-        .navigationTitle(viewModel.reference.title)
+        .modifier(ReaderNavigationTitle(title: viewModel.documentTitle, isAttachment: viewModel.attachmentDocument != nil))
         .legacyToolbarBackground(pdfContainerBackground, for: .windowToolbar)
         .toolbar {
             ToolbarItemGroup(placement: .automatic) {
@@ -621,17 +667,21 @@ struct PDFReaderView: View {
                 .help(String(localized: "Fit width", bundle: .module))
 
                 pageIndicator
+
+                ReadingComfortToggle(isEnabled: $readingComfortEnabled)
             }
 
             ToolbarItemGroup(placement: .primaryAction) {
                 // No annotations button — the left sidebar's Notes tab is the
                 // (sole, sufficient) way in; the right edge belongs to the assistant.
-                Button {
-                    setChatSidebarVisible(!showChatSidebar)
-                } label: {
-                    Label(String(localized: "Assistant", bundle: .module), systemImage: "bubble.left.and.text.bubble.right")
+                if assistant.session != nil {
+                    Button {
+                        setChatSidebarVisible(!showChatSidebar)
+                    } label: {
+                        Label(String(localized: "Assistant", bundle: .module), systemImage: "bubble.left.and.text.bubble.right")
+                    }
+                    .help(String(localized: "Chat about this document", bundle: .module))
                 }
-                .help(String(localized: "Chat about this document", bundle: .module))
             }
         }
         .onAppear {
@@ -662,6 +712,7 @@ struct PDFReaderView: View {
     /// Selection→Ask passes `persist: false` so a one-off Ask reveals the panel for THIS
     /// window without overwriting a user who deliberately hid the assistant.
     private func setChatSidebarVisible(_ visible: Bool, persist: Bool = true) {
+        guard assistant.session != nil else { return }
         showChatSidebar = visible
         if persist { RubienPreferences.assistantSidebarVisible = visible }
     }
@@ -692,11 +743,11 @@ struct PDFReaderView: View {
                         viewModel.clearStagedSelection()
                         noteMarkdownForSelection = ""
                     },
-                    onAsk: {
+                    onAsk: assistant.session == nil ? nil : {
                         let text = viewModel.stagedSelectionText
                         guard !text.isEmpty else { return }
                         // 0-based PDFKit page index → the 1-based "(p. N)" label (§5.4).
-                        chatSession.stageSelection(
+                        assistant.session?.stageSelection(
                             text,
                             pageNumber: (viewModel.stagedSelectionPDFAnchor?.pageIndex).map { $0 + 1 })
                         viewModel.clearStagedSelection()
@@ -1127,7 +1178,7 @@ struct AnnotatablePDFView: NSViewRepresentable {
         pdfView.document = nil
     }
 
-    private func syncAnnotations(pdfView: PDFView, records: [PDFAnnotationRecord], coordinator: Coordinator) {
+    private func syncAnnotations(pdfView: PDFView, records: [ReaderPDFAnnotation], coordinator: Coordinator) {
         guard let document = pdfView.document else { return }
 
         let existingKeys = Set(coordinator.trackedAnnotations.keys)
@@ -1169,7 +1220,7 @@ struct AnnotatablePDFView: NSViewRepresentable {
         }
     }
 
-    private func createPDFAnnotation(from record: PDFAnnotationRecord) -> PDFAnnotation {
+    private func createPDFAnnotation(from record: ReaderPDFAnnotation) -> PDFAnnotation {
         let bounds = record.unionBounds
         let color = AnnotationColor.nsColor(for: record.color)
         let rects = record.rects
@@ -1340,6 +1391,8 @@ struct AnnotatablePDFView: NSViewRepresentable {
         private func finishLoadingDocument(_ document: PDFDocument?, for url: URL) {
             guard loadedPDFURL == url, let pdfView else { return }
             pdfView.document = document
+            if case .pdf(let page) = viewModel.attachmentDocument?.position,
+               let destination = document?.page(at: page) { pdfView.go(to: destination) }
             viewModel.isDocumentLoading = false
             let canvasBackgroundColor = NSColor(name: nil) { trait in
                 trait.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
@@ -1588,7 +1641,7 @@ struct AnnotatablePDFView: NSViewRepresentable {
 
         /// Compute position for the annotation action toolbar based on annotation bounds.
         @MainActor
-        func computeAnnotationToolbarLayout(for annotation: PDFAnnotationRecord) {
+        func computeAnnotationToolbarLayout(for annotation: ReaderPDFAnnotation) {
             let margin: CGFloat = 8
 
             guard let pdfView,
@@ -1664,6 +1717,7 @@ struct AnnotatablePDFView: NSViewRepresentable {
                 viewModel.totalPages = total
                 viewModel.scaleFactor = pdfView?.scaleFactor ?? viewModel.scaleFactor
                 viewModel.onPageChanged?(current, total)
+                viewModel.attachmentDocument?.savePosition(.pdf(pageIndex: current))
             }
         }
 

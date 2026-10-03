@@ -81,7 +81,7 @@ public enum SyncLocalEntityCatalog {
             "reference", "tag", "referenceTag", "pdfAnnotation",
             "webAnnotation", "metadataIntake", "metadataEvidence",
             "propertyDefinition", "propertyValue", "databaseView",
-            "readingActivity",
+            "readingActivity", "referenceAttachment", "attachmentAnnotation",
         ]
         var result = syncIdTables.map {
             Source(
@@ -104,6 +104,16 @@ public enum SyncLocalEntityCatalog {
             entityType: "referencePDF",
             fromClause: "pdfCache pc JOIN reference r ON r.id = pc.referenceId",
             identityExpression: "r.syncId"
+        ))
+        result.append(Source(
+            entityType: "attachmentAsset",
+            fromClause: """
+                (SELECT syncId FROM referenceAttachment a WHERE deletedAt IS NULL AND
+                    (EXISTS(SELECT 1 FROM attachmentCache c WHERE c.attachmentSyncId=a.syncId)
+                     OR EXISTS(SELECT 1 FROM attachmentUploadQueue q WHERE q.attachmentSyncId=a.syncId)
+                     OR EXISTS(SELECT 1 FROM syncState s WHERE s.entityType='attachmentAsset' AND s.entityId=a.syncId)))
+                """,
+            identityExpression: "syncId"
         ))
         return result
     }()

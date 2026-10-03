@@ -55,6 +55,17 @@ enum ReaderChatSession {
             database: database)
     }
 
+    @MainActor
+    static func makeAttachment(
+        document: AttachmentReaderDocument,
+        transcript: ChatTranscriptController
+    ) -> ChatSessionController {
+        make(context: .attachment(ChatReaderAttachment(
+            syncId: document.attachment.syncId, title: document.attachment.displayName)),
+            transcript: transcript, database: document.store.database,
+            libraryRoot: document.store.libraryRoot)
+    }
+
     /// Main-window Home uses the same provider/content-channel composition as
     /// reader assistants, differing only in its library-wide seed and history scope.
     @MainActor
@@ -69,11 +80,12 @@ enum ReaderChatSession {
     private static func make(
         context: AssistantConversationContext,
         transcript: ChatTranscriptController,
-        database: AppDatabase
+        database: AppDatabase,
+        libraryRoot: URL = AppDatabase.libraryRootURL
     ) -> ChatSessionController {
         // The MCP library channel is shared by both backends, so whichever runtime is
         // active reads and, with approval, updates the live Rubien library.
-        let contentChannel = MCPContentChannel.resolveBundled()
+        let contentChannel = MCPContentChannel.resolveBundled(libraryRoot: libraryRoot)
 
         // Builds a fresh provider for a backend kind — used at construction and by
         // the composer's provider picker (`switchProvider`). Each provider takes its
@@ -101,7 +113,7 @@ enum ReaderChatSession {
             switch promptContext {
             case .library, .unclassifiedResume:
                 promptOverride = RubienPreferences.assistantLibraryPromptOverride
-            case .reference:
+            case .reference, .attachment:
                 promptOverride = RubienPreferences.assistantReaderPromptOverride
             }
             switch kind {
@@ -131,6 +143,12 @@ enum ReaderChatSession {
             provider: providerFactory(initialKind),
             transcript: transcript,
             conversationContext: context,
+            readerDocumentContextProvider: { context, workspace in
+                try await AttachmentChatContext.prepare(context: context, workspace: workspace,
+                    store: ReferenceAttachmentStore(database: database, libraryRoot: libraryRoot,
+                                                    validatePDF: { _ in }))
+            },
+            readerDocumentContinuation: AttachmentChatContext.continuation,
             workspaceURL: AssistantContext.ensureWorkspace(RubienPreferences.assistantWorkspaceURL),
             webAccess: initial.webAccess,
             loadUserTools: initial.loadUserTools,

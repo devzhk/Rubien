@@ -10,6 +10,33 @@ import Darwin
 
 @main
 struct RubienCLI: AsyncParsableCommand {
+    static func main() async {
+        do {
+            var command = try parseAsRoot()
+            // Help/version and the public MCP proxy can run without a library.
+            // The proxy delegates library access to child commands.
+            var needsSharedLibrary = !(command is Version) && !(command is SelfUpdate) && !(command is MCPCommand)
+                && type(of: command).configuration.commandName != "help"
+            #if os(macOS)
+            // These commands inspect the existing schema before any migration.
+            if command is StatusCommand || command is AcknowledgeWriterUpgradeCommand { needsSharedLibrary = false }
+            #endif
+            if needsSharedLibrary {
+                do { try AppDatabase.openShared() }
+                catch {
+                    printJSONError(error.localizedDescription)
+                    exit(withError: ExitCode.failure)
+                }
+            }
+            if var asyncCommand = command as? any AsyncParsableCommand {
+                try await asyncCommand.run()
+            } else {
+                try command.run()
+            }
+            exit()
+        } catch { exit(withError: error) }
+    }
+
     static let configuration = CommandConfiguration(
         commandName: "rubien-cli",
         abstract: "rubien-cli — manage your Rubien reference library from the command line",
@@ -36,6 +63,7 @@ struct RubienCLI: AsyncParsableCommand {
             Export.self,
             Views.self,
             Pdf.self,
+            AttachmentCommand.self,
             Stats.self,
             StatsClear.self,
             Jobs.self,
@@ -1523,12 +1551,18 @@ struct AssistantConversationsList: ParsableCommand {
     @Option(help: "Provider: claude or codex") var provider: String?
     @Option(name: .customLong("reference-id"), help: "Limit results to one reference")
     var referenceId: Int64?
+    @Option(name: .customLong("attachment-id"), help: "Limit results to one attachment UUID")
+    var attachmentId: String?
     @Option(help: "Search locally indexed visible transcript text") var search: String?
     @Option(help: "Maximum rows") var limit = 50
 
     func run() throws {
         guard limit > 0 else {
             printJSONError("--limit must be greater than zero")
+            throw ExitCode.failure
+        }
+        if let attachmentId, UUID(uuidString: attachmentId) == nil || referenceId != nil {
+            printJSONError("Use a valid --attachment-id UUID, without --reference-id")
             throw ExitCode.failure
         }
         let parsedProvider: AssistantProvider?
@@ -1546,6 +1580,7 @@ struct AssistantConversationsList: ParsableCommand {
             query: .init(
                 provider: parsedProvider,
                 referenceId: referenceId,
+                attachmentSyncId: attachmentId?.lowercased(),
                 search: search,
                 limit: limit
             )

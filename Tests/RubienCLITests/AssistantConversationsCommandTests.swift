@@ -25,6 +25,27 @@ final class AssistantConversationsCommandTests: XCTestCase {
         super.tearDown()
     }
 
+    func testAttachmentHistoryFilterAndJSONIdentity() throws {
+        try skipIfBinaryMissing()
+        XCTAssertEqual(try runCLI(["assistant-conversations", "list"]).exitCode, 0)
+        let database = try AppDatabase(DatabaseQueue(path: testLibraryRoot.appendingPathComponent("library.sqlite").path))
+        let id = UUID().uuidString.lowercased()
+        let saved = try database.createAssistantConversation(.init(provider: .codex,
+            workspaceIdentityHash: "workspace", contextKind: .attachment, attachmentSyncId: id))
+        _ = try database.createAssistantConversation(.init(provider: .codex,
+            workspaceIdentityHash: "workspace", contextKind: .library))
+        let result = try runCLI(["assistant-conversations", "list", "--attachment-id", id])
+        XCTAssertEqual(result.exitCode, 0, result.stderr)
+        let rows = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [[String: Any]])
+        XCTAssertEqual(rows.count, 1)
+        let conversation = try XCTUnwrap(rows.first?["conversation"] as? [String: Any])
+        XCTAssertEqual(conversation["attachmentSyncId"] as? String, id)
+        XCTAssertEqual(conversation["contextKind"] as? String, "attachment")
+        let detail = try object(runCLI(["assistant-conversations", "get", saved.id]).stdout)
+        XCTAssertEqual((detail["conversation"] as? [String: Any])?["attachmentSyncId"] as? String, id)
+        XCTAssertNotEqual(try runCLI(["assistant-conversations", "list", "--attachment-id", id, "--reference-id", "1"]).exitCode, 0)
+    }
+
     func testListGetDeleteAndClearContracts() throws {
         try skipIfBinaryMissing()
         XCTAssertEqual(try runCLI(["assistant-conversations", "list"]).exitCode, 0)

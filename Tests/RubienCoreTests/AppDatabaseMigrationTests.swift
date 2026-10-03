@@ -54,6 +54,139 @@ final class AppDatabaseMigrationTests: XCTestCase {
 
     // MARK: Tests
 
+    #if os(macOS)
+    func testStartupFailureCanRetryWithoutOpeningEmptyDestination() throws {
+        let source = sandboxRoot.appendingPathComponent("source")
+        let destination = sandboxRoot.appendingPathComponent("destination")
+        try fm.createDirectory(at: source, withIntermediateDirectories: true)
+        var database: AppDatabase? = try AppDatabase(DatabaseQueue(path: source.appendingPathComponent("library.sqlite").path))
+        var reference = Reference(title: "Keep this paper")
+        try database!.saveReference(&reference)
+        XCTAssertThrowsError(try AppDatabase.openLibrary(at: destination, migrateLegacy: true, legacyRoots: [source])) {
+            XCTAssertTrue($0 is LibraryStartupError)
+            XCTAssertTrue($0.localizedDescription.contains("another process"))
+        }
+        XCTAssertFalse(fm.fileExists(atPath: destination.appendingPathComponent("library.sqlite").path))
+        database = nil
+        let reopened = try AppDatabase.openLibrary(at: destination, migrateLegacy: true, legacyRoots: [source])
+        XCTAssertEqual(try reopened.fetchAllReferences().first?.title, "Keep this paper")
+        XCTAssertThrowsError(try LibraryRootLease(root: destination, exclusive: true))
+        XCTAssertThrowsError(try AppDatabase.openLibrary(at: source, migrateLegacy: false)) {
+            XCTAssertTrue($0.localizedDescription.contains(destination.path))
+        }
+        XCTAssertFalse(fm.fileExists(atPath: source.appendingPathComponent("library.sqlite").path))
+    }
+    #endif
+
+    func testOpenLibraryPreventsPromotionUntilClosed() throws {
+        let source = sandboxRoot.appendingPathComponent("source")
+        let destination = sandboxRoot.appendingPathComponent("destination")
+        try fm.createDirectory(at: source, withIntermediateDirectories: true)
+        var database: AppDatabase? = try AppDatabase(DatabaseQueue(path: source.appendingPathComponent("library.sqlite").path))
+        var reference = Reference(title: "Active writer")
+        try database!.saveReference(&reference)
+        XCTAssertFalse(AppDatabase.migrateLegacyLibraryIfNeeded(destination: destination, legacyRoots: [source]))
+        XCTAssertFalse(fm.fileExists(atPath: destination.appendingPathComponent("library.sqlite").path))
+        reference.title = "Last write before close"
+        try database!.saveReference(&reference)
+        database = nil
+        XCTAssertTrue(AppDatabase.migrateLegacyLibraryIfNeeded(destination: destination, legacyRoots: [source]))
+        let moved = try AppDatabase(DatabaseQueue(path: destination.appendingPathComponent("library.sqlite").path))
+        XCTAssertEqual(try moved.fetchReferences(ids: [reference.id!]).first?.title, "Last write before close")
+        XCTAssertThrowsError(try LibraryRootLease(root: source))
+    }
+
+    func testDestinationLeasePreventsPromotionWithoutChangingEitherRoot() throws {
+        let source = sandboxRoot.appendingPathComponent("source")
+        let destination = sandboxRoot.appendingPathComponent("destination")
+        try seedLegacyLibrary(at: source)
+        try fm.createDirectory(at: destination, withIntermediateDirectories: true)
+        let lease = try LibraryRootLease(root: destination)
+        withExtendedLifetime(lease) {
+            XCTAssertFalse(AppDatabase.migrateLegacyLibraryIfNeeded(destination: destination, legacyRoots: [source]))
+        }
+        XCTAssertTrue(fm.fileExists(atPath: source.appendingPathComponent("library.sqlite").path))
+        XCTAssertFalse(fm.fileExists(atPath: destination.appendingPathComponent("library.sqlite").path))
+    }
+
+    func testSQLiteWriterWithoutRootLeasePreventsPromotion() throws {
+        let source = sandboxRoot.appendingPathComponent("source")
+        let destination = sandboxRoot.appendingPathComponent("destination")
+        try seedLegacyLibrary(at: source)
+        let writer = try DatabaseQueue(path: source.appendingPathComponent("library.sqlite").path)
+        try writer.write { db in
+            try db.execute(sql: "UPDATE marker SET title='Uncommitted'")
+            XCTAssertFalse(AppDatabase.migrateLegacyLibraryIfNeeded(destination: destination, legacyRoots: [source]))
+            XCTAssertFalse(fm.fileExists(atPath: destination.appendingPathComponent("library.sqlite").path))
+        }
+        XCTAssertEqual(try readMarkerTitle(at: source.appendingPathComponent("library.sqlite")), "Uncommitted")
+    }
+
+    func testInterruptedPublicationRetriesOnlyItsRecordedDestination() throws {
+        let source = sandboxRoot.appendingPathComponent("source")
+        let destination = sandboxRoot.appendingPathComponent("destination")
+        try seedLegacyLibrary(at: source)
+        try Data(destination.path.utf8).write(to: source.appendingPathComponent(LibraryRootLease.markerName))
+        XCTAssertThrowsError(try LibraryRootLease(root: source))
+        XCTAssertFalse(AppDatabase.migrateLegacyLibraryIfNeeded(
+            destination: sandboxRoot.appendingPathComponent("other"), legacyRoots: [source]))
+        XCTAssertTrue(fm.fileExists(atPath: source.appendingPathComponent("library.sqlite").path))
+        XCTAssertTrue(AppDatabase.migrateLegacyLibraryIfNeeded(destination: destination, legacyRoots: [source]))
+        XCTAssertEqual(try readMarkerTitle(at: destination.appendingPathComponent("library.sqlite")), "Legacy Title")
+    }
+
+    func testExclusiveLeaseBlocksAttachmentImportAndRecovery() throws {
+        let root = sandboxRoot.appendingPathComponent("memory-library")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        let database = try AppDatabase(DatabaseQueue())
+        var reference = Reference(title: "Paper")
+        try database.saveReference(&reference)
+        let file = sandboxRoot.appendingPathComponent("notes.md")
+        try Data("Notes".utf8).write(to: file)
+        let store = ReferenceAttachmentStore(database: database, libraryRoot: root, validatePDF: { _ in })
+        let lease = try LibraryRootLease(root: root, exclusive: true)
+        try withExtendedLifetime(lease) {
+            XCTAssertThrowsError(try store.importFile(at: file, referenceId: reference.id!))
+        }
+        XCTAssertTrue(try store.list(referenceId: reference.id!).isEmpty)
+        XCTAssertFalse(fm.fileExists(atPath: root.appendingPathComponent("Attachments").path))
+    }
+
+    func testPromotionIncludesManagedStagedAndQuarantinedAttachments() throws {
+        let source = sandboxRoot.appendingPathComponent("source")
+        let destination = sandboxRoot.appendingPathComponent("destination")
+        try seedLegacyLibrary(at: source)
+        try fm.createDirectory(at: destination, withIntermediateDirectories: true)
+        let paths = ["Attachments/document/content.md", "Attachments/.staging/import/content.pdf",
+                     "Attachments/.quarantine/receive/content.pdf"]
+        for path in paths {
+            let url = source.appendingPathComponent(path)
+            try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data(path.utf8).write(to: url)
+        }
+        AppDatabase.migrateLegacyLibraryIfNeeded(destination: destination, legacyRoots: [source])
+        for path in paths {
+            XCTAssertEqual(try Data(contentsOf: destination.appendingPathComponent(path)), Data(path.utf8))
+            XCTAssertFalse(fm.fileExists(atPath: source.appendingPathComponent(path).path))
+        }
+        XCTAssertEqual(try readMarkerTitle(at: destination.appendingPathComponent("library.sqlite")), "Legacy Title")
+    }
+
+    func testAttachmentValidationFailureLeavesSourceLibraryIntact() throws {
+        let source = sandboxRoot.appendingPathComponent("source")
+        let destination = sandboxRoot.appendingPathComponent("destination")
+        try seedLegacyLibrary(at: source)
+        try fm.createDirectory(at: source.appendingPathComponent("Attachments"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: destination, withIntermediateDirectories: true)
+        let outside = sandboxRoot.appendingPathComponent("original.md")
+        try Data("original".utf8).write(to: outside)
+        try fm.createSymbolicLink(at: source.appendingPathComponent("Attachments/escape.md"), withDestinationURL: outside)
+        AppDatabase.migrateLegacyLibraryIfNeeded(destination: destination, legacyRoots: [source])
+        XCTAssertTrue(fm.fileExists(atPath: source.appendingPathComponent("library.sqlite").path))
+        XCTAssertFalse(fm.fileExists(atPath: destination.appendingPathComponent("library.sqlite").path))
+        XCTAssertEqual(try Data(contentsOf: outside), Data("original".utf8))
+    }
+
     func testNoOpWhenDestinationAlreadyHasLibrary() throws {
         let destination = sandboxRoot.appendingPathComponent("dest", isDirectory: true)
         try seedLegacyLibrary(at: destination, titleMarker: "Destination")

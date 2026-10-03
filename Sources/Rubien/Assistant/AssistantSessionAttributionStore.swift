@@ -144,7 +144,7 @@ actor AssistantSessionAttributionStore {
         switch context {
         case .library: return .library
         case .reference(let reference): return .reference(reference.id)
-        case .unclassifiedResume: return nil
+        case .attachment, .unclassifiedResume: return nil
         }
     }
 

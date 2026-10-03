@@ -59,6 +59,8 @@ const EXPECTED_CATALOG = [
   "rubien_get_pdf_info",
   "rubien_render_pdf_page",
   "rubien_download_pdf",
+  "rubien_attachment_list", "rubien_attachment_status", "rubien_attachment_read",
+  "rubien_attachment_retry", "rubien_attachment_add", "rubien_attachment_export", "rubien_attachment_rename", "rubien_attachment_remove",
   // read
   "rubien_read_text",
   "rubien_read_annotations",
@@ -70,12 +72,12 @@ const EXPECTED_CATALOG = [
 ].sort();
 
 describe("0.3.2 catalog", () => {
-  it("registers exactly the 28 tools — no old names", async () => {
+  it("registers exactly the 36 tools — no old names", async () => {
     const client = await connectedClient();
     const tools = await client.listTools();
     const names = tools.tools.map((t) => t.name).sort();
     expect(names).toEqual(EXPECTED_CATALOG);
-    expect(names).toHaveLength(28);
+    expect(names).toHaveLength(36);
   });
 
   it("create_reference is non-destructive; delete tools are destructive", async () => {

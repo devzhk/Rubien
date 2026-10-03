@@ -28,7 +28,7 @@ struct BrowserImportSession {
         case "preview":
             prepared?.discard()
             prepared = nil
-            let service = resolvedService()
+            let service = try resolvedService()
             let next = try await service.prepareClip(request)
             prepared = next
             return .confirmation(next.preview)
@@ -41,7 +41,7 @@ struct BrowserImportSession {
                 throw BrowserClipHostError.staleConfirmation
             }
             prepared = nil
-            let service = resolvedService()
+            let service = try resolvedService()
             return try await service.confirm(
                 current,
                 downloadedPDFPath: request.downloadedPDFPath,
@@ -68,8 +68,9 @@ struct BrowserImportSession {
         prepared = nil
     }
 
-    private mutating func resolvedService() -> BrowserClipImportService {
+    private mutating func resolvedService() throws -> BrowserClipImportService {
         if let service { return service }
+        try AppDatabase.openShared()
         let service = BrowserClipImportService()
         self.service = service
         return service

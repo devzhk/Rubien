@@ -128,23 +128,25 @@ final class SyncOrphanToleranceTests: XCTestCase {
         )
         XCTAssertTrue(parentsApplied)
 
-        let resolved = try db.dbWriter.read { db in
+        let resolved: [String: String]? = try await db.dbWriter.read { db in
             try Row.fetchOne(db, sql: """
                 SELECT rt.syncId, r.syncId AS referenceSyncId,
                        t.syncId AS tagSyncId
                 FROM referenceTag rt
                 JOIN reference r ON r.id = rt.referenceId
                 JOIN tag t ON t.id = rt.tagId
-                """)
+                """).map { row in
+                    Dictionary(uniqueKeysWithValues: row.columnNames.map { ($0, row[$0] as String) })
+                }
         }
         XCTAssertEqual(resolved?["syncId"], "ref-one/tag-two")
         XCTAssertEqual(resolved?["referenceSyncId"], "ref-one")
         XCTAssertEqual(resolved?["tagSyncId"], "tag-two")
         XCTAssertEqual(try orphanCount(), 0)
-        let violations = try db.dbWriter.read {
-            try Row.fetchAll($0, sql: "PRAGMA foreign_key_check")
+        let violationCount = try await db.dbWriter.read {
+            try Row.fetchAll($0, sql: "PRAGMA foreign_key_check").count
         }
-        XCTAssertTrue(violations.isEmpty)
+        XCTAssertEqual(violationCount, 0)
     }
 
     func testParentDeletionStillCascadesMaterializedChild() async throws {
@@ -230,10 +232,10 @@ final class SyncOrphanToleranceTests: XCTestCase {
 
         XCTAssertEqual(try pivotCount(), 0)
         XCTAssertEqual(try orphanCount(), 1)
-        let violations = try db.dbWriter.read {
-            try Row.fetchAll($0, sql: "PRAGMA foreign_key_check")
+        let violationCount = try await db.dbWriter.read {
+            try Row.fetchAll($0, sql: "PRAGMA foreign_key_check").count
         }
-        XCTAssertTrue(violations.isEmpty)
+        XCTAssertEqual(violationCount, 0)
     }
 
     func testSameEventDeletionWinsOverNewChildModification() async throws {
@@ -397,18 +399,17 @@ final class SyncOrphanToleranceTests: XCTestCase {
 
         let fullyReconciled = await library.reconcileFetchedZoneForTest()
         XCTAssertTrue(fullyReconciled)
-        let terminal: (Int, Row?) = try db.dbWriter.read { db in
-            return (
-                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM syncOrphan") ?? -1,
-                try Row.fetchOne(db, sql: """
-                    SELECT confirmedByServer, isPushEligible FROM tombstone
-                    WHERE entityType = 'referenceTag' AND entityId = ?
-                    """, arguments: [entityId])
-            )
+        let terminal: (Int, Int?, Int?) = try await db.dbWriter.read { db in
+            let row = try Row.fetchOne(db, sql: """
+                SELECT confirmedByServer, isPushEligible FROM tombstone
+                WHERE entityType = 'referenceTag' AND entityId = ?
+                """, arguments: [entityId])
+            return (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM syncOrphan") ?? -1,
+                    row?["confirmedByServer"], row?["isPushEligible"])
         }
         XCTAssertEqual(terminal.0, 0)
-        XCTAssertEqual(terminal.1?["confirmedByServer"], 0)
-        XCTAssertEqual(terminal.1?["isPushEligible"], 1)
+        XCTAssertEqual(terminal.1, 0)
+        XCTAssertEqual(terminal.2, 1)
     }
 
     func testReadingActivityMissingParentUsesWireQuarantine() async throws {
@@ -505,14 +506,16 @@ final class SyncOrphanToleranceTests: XCTestCase {
         )
         XCTAssertTrue(parentApplied)
 
-        let resolved = try db.dbWriter.read { db in
+        let resolved: [String: String]? = try await db.dbWriter.read { db in
             try Row.fetchOne(db, sql: """
                 SELECT mi.syncId, mi.linkedReferenceSyncId,
                        r.syncId AS resolvedReferenceSyncId
                 FROM metadataIntake mi
                 JOIN reference r ON r.id = mi.linkedReferenceId
                 WHERE mi.syncId = 'intake-one'
-                """)
+                """).map { row in
+                    Dictionary(uniqueKeysWithValues: row.columnNames.map { ($0, row[$0] as String) })
+                }
         }
         XCTAssertEqual(resolved?["syncId"], "intake-one")
         XCTAssertEqual(resolved?["linkedReferenceSyncId"], "reference-one")

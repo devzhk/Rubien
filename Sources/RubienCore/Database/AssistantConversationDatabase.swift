@@ -120,6 +120,11 @@ extension AppDatabase {
                         && AssistantConversation.Columns.referenceId == referenceID
                     )
                 }
+                if let attachmentID = query.attachmentSyncId {
+                    request = request.filter(
+                        AssistantConversation.Columns.contextKind == AssistantConversationContextKind.attachment.rawValue
+                        && AssistantConversation.Columns.attachmentSyncId == attachmentID)
+                }
                 request = request.order(
                     AssistantConversation.Columns.lastActivityAt.desc,
                     AssistantConversation.Columns.id.desc
@@ -930,6 +935,7 @@ extension AppDatabase {
                 workspaceIdentityHash: parent.workspaceIdentityHash,
                 contextKind: parent.contextKind,
                 referenceId: parent.referenceId,
+                attachmentSyncId: parent.attachmentSyncId,
                 continuedFromConversationId: parent.id,
                 latestProviderSessionId: providerSessionID,
                 latestSessionTurnOrdinal: latestTurnOrdinal,
@@ -1468,7 +1474,12 @@ extension AppDatabase {
               nonBlank(proposed.contextKind.rawValue) != nil else {
             throw AssistantConversationError.invalidIdentifier
         }
+        if proposed.contextKind != .attachment && proposed.attachmentSyncId != nil {
+            throw AssistantConversationError.invalidContext
+        }
         switch proposed.contextKind {
+        case .attachment where proposed.referenceId != nil || UUID(uuidString: proposed.attachmentSyncId ?? "") == nil:
+            throw AssistantConversationError.invalidContext
         case .reference where proposed.referenceId == nil:
             throw AssistantConversationError.invalidContext
         case .library where proposed.referenceId != nil:
@@ -1701,6 +1712,11 @@ extension AppDatabase {
                 AssistantConversationContextKind.reference.rawValue,
                 referenceID,
             ])
+        }
+        if let attachmentID = query.attachmentSyncId {
+            predicates.append("conversation.contextKind = ?")
+            predicates.append("conversation.attachmentSyncId = ?")
+            _ = arguments.append(contentsOf: [AssistantConversationContextKind.attachment.rawValue, attachmentID])
         }
         let rows = try Row.fetchCursor(
             db,

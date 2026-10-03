@@ -68,8 +68,8 @@ describe.skipIf(skipReason !== null)("e2e stdio JSON-RPC", () => {
         expect(toolsResult.result).toBeDefined();
         const toolNames = (toolsResult.result.tools as Array<{ name: string }>)
           .map((t) => t.name);
-        // The 0.3.2 catalog is exactly 28 tools.
-        expect(toolNames).toHaveLength(28);
+        // The 0.3.2 catalog is exactly 36 tools.
+        expect(toolNames).toHaveLength(36);
         // Spot-check a few from each category.
         expect(toolNames).toContain("rubien_search_references");
         expect(toolNames).toContain("rubien_list_references");
@@ -196,7 +196,7 @@ describe.skipIf(!existsSync(distIndex))("e2e stdio degraded mode (version gate)"
         });
         expect(
           (toolsResult.result.tools as Array<{ name: string }>).length,
-        ).toBe(28);
+        ).toBe(36);
 
         // Every call returns the update instruction as tool text.
         const degraded = await rpcRequest(child, {
@@ -207,7 +207,7 @@ describe.skipIf(!existsSync(distIndex))("e2e stdio degraded mode (version gate)"
         });
         expect(degraded.result.isError).toBe(true);
         const degradedText = (degraded.result.content as Array<{ text: string }>)[0].text;
-        expect(degradedText).toContain("needs build >= 46");
+        expect(degradedText).toContain("needs build >= 50");
         expect(degradedText).toMatch(/Update Rubien\.app/);
 
         // "Update Rubien.app" mid-session → the very next call recovers,

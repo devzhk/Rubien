@@ -359,3 +359,67 @@ DEFINE SCHEMA
         GRANT WRITE TO "_creator",
         GRANT READ TO "_world"
     );
+
+    RECORD TYPE CDReferenceAttachment (
+        "___createTime" TIMESTAMP,
+        "___createdBy" REFERENCE,
+        "___etag" STRING,
+        "___modTime" TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID" REFERENCE,
+        byteCount INT64 QUERYABLE SORTABLE,
+        contentHash STRING QUERYABLE SEARCHABLE SORTABLE,
+        dateCreated TIMESTAMP QUERYABLE SORTABLE,
+        dateModified TIMESTAMP QUERYABLE SORTABLE,
+        deletedAt TIMESTAMP QUERYABLE SORTABLE,
+        displayName STRING QUERYABLE SEARCHABLE SORTABLE,
+        kind STRING QUERYABLE SEARCHABLE SORTABLE,
+        originalFilename STRING QUERYABLE SEARCHABLE SORTABLE,
+        referenceSyncId STRING QUERYABLE SEARCHABLE SORTABLE,
+        syncId STRING QUERYABLE SEARCHABLE SORTABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE CDAttachmentAsset (
+        "___createTime" TIMESTAMP,
+        "___createdBy" REFERENCE,
+        "___etag" STRING,
+        "___modTime" TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID" REFERENCE,
+        asset ASSET,
+        attachmentSyncId STRING QUERYABLE SEARCHABLE SORTABLE,
+        byteCount INT64 QUERYABLE SORTABLE,
+        contentHash STRING QUERYABLE SEARCHABLE SORTABLE,
+        syncId STRING QUERYABLE SEARCHABLE SORTABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );
+
+    RECORD TYPE CDAttachmentAnnotation (
+        "___createTime" TIMESTAMP,
+        "___createdBy" REFERENCE,
+        "___etag" STRING,
+        "___modTime" TIMESTAMP,
+        "___modifiedBy" REFERENCE,
+        "___recordID" REFERENCE,
+        anchorJSON STRING QUERYABLE SEARCHABLE SORTABLE,
+        anchorKind STRING QUERYABLE SEARCHABLE SORTABLE,
+        anchorVersion INT64 QUERYABLE SORTABLE,
+        attachmentSyncId STRING QUERYABLE SEARCHABLE SORTABLE,
+        color STRING QUERYABLE SEARCHABLE SORTABLE,
+        contentHash STRING QUERYABLE SEARCHABLE SORTABLE,
+        dateCreated TIMESTAMP QUERYABLE SORTABLE,
+        dateModified TIMESTAMP QUERYABLE SORTABLE,
+        deletedAt TIMESTAMP QUERYABLE SORTABLE,
+        noteText STRING QUERYABLE SEARCHABLE SORTABLE,
+        selectedText STRING QUERYABLE SEARCHABLE SORTABLE,
+        syncId STRING QUERYABLE SEARCHABLE SORTABLE,
+        type STRING QUERYABLE SEARCHABLE SORTABLE,
+        GRANT WRITE TO "_creator",
+        GRANT CREATE TO "_icloud",
+        GRANT READ TO "_world"
+    );

@@ -75,7 +75,7 @@ enum MCPAppPresentationToolCatalog {
             throw MCPToolError.invalidArguments("`items` must contain between 1 and \(maximumItemCount) items")
         }
 
-        let database = AppDatabase.shared
+        let database = try AppDatabase.openShared()
         var result: [[String: Any]] = []
         var seenLibrary = Set<Int64>()
         var seenWeb = Set<String>()

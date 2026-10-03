@@ -517,7 +517,7 @@ private struct ReaderWindowMinWidthEnforcer: NSViewRepresentable {
 
 @MainActor
 final class WebReaderViewModel: ObservableObject {
-    @Published var annotations: [WebAnnotationRecord] = []
+    @Published var annotations: [ReaderWebAnnotation] = []
     @Published var currentColorHex: String = "#FFDE59"
     @Published var selectedAnnotationId: Int64?
     @Published var showNoteEditor = false
@@ -525,9 +525,9 @@ final class WebReaderViewModel: ObservableObject {
     @Published var pendingSelection: WebSelectionSnapshot?
     @Published var selectionToolbarLayout: SelectionToolbarLayout?
     /// When set, shows a note-edit sheet for an existing annotation.
-    @Published var editingAnnotationInPlace: WebAnnotationRecord?
+    @Published var editingAnnotationInPlace: ReaderWebAnnotation?
     /// When set, shows an annotation action toolbar near the clicked highlight.
-    @Published var clickedAnnotationRecord: WebAnnotationRecord?
+    @Published var clickedAnnotationRecord: ReaderWebAnnotation?
     @Published var annotationToolbarLayout: SelectionToolbarLayout?
     @Published var renderedHTML = ""
     @Published var isRendering = false
@@ -542,22 +542,49 @@ final class WebReaderViewModel: ObservableObject {
     @Published var sidebarSummaryScrollToken: UInt64 = 0
     /// 侧栏摘要卡片是否处于「正文摘要已点击」高亮。
     @Published var highlightSidebarSummary: Bool = false
+    @Published private(set) var documentTitle: String
+    var documentContent: Reference.DecodedWebContent? {
+        if let attachmentDocument {
+            return .init(body: attachmentDocument.markdown ?? "", format: .markdown)
+        }
+        return reference.decodedWebContent
+    }
+    var documentSourceURL: String? {
+        attachmentDocument == nil ? reference.resolvedWebReaderURLString() : nil
+    }
     var reference: Reference
+    let attachmentDocument: AttachmentReaderDocument?
+    @Published var persistenceError: String?
     private let db: AppDatabase
     private var cancellables = Set<AnyCancellable>()
     /// 在线阅读整段流程（加载原文 + 注入脚本 + 抽取 + 组 HTML）防挂起超时。
     private var extractionSafetyTask: Task<Void, Never>?
     private var currentArticleBodyHTML: String?
-    var jumpToAnnotationInView: ((WebAnnotationRecord) -> Void)?
+    private var contentRenderGeneration = 0
+    var jumpToAnnotationInView: ((ReaderWebAnnotation) -> Void)?
     var jumpToSummaryInWeb: (() -> Void)?
     /// 停止正在进行的原文加载 / Readability 流程（切回「剪藏正文」时调用）。
     var resetExtractionNavigation: (() -> Void)?
     var clearSelectionInView: (() -> Void)?
-    var refreshAnnotationsInView: (([WebAnnotationRecord]) -> Void)?
+    var refreshAnnotationsInView: (([ReaderWebAnnotation]) -> Void)?
+    var findInDocument: ((String, Bool) -> Void)?
+    @Published var searchResultMissing = false
 
-    init(reference: Reference, db: AppDatabase = .shared) {
+    init(reference: Reference, db: AppDatabase = .shared, attachment: AttachmentReaderDocument? = nil) {
         self.reference = reference
+        self.documentTitle = attachment?.attachment.displayName ?? reference.title
         self.db = db
+        self.attachmentDocument = attachment
+        if let attachment {
+            attachment.$attachment.map(\.displayName).removeDuplicates()
+                .sink { [weak self] title in
+                    self?.documentTitle = title
+                }.store(in: &cancellables)
+            attachment.$errorMessage.assign(to: &$persistenceError)
+            observeAnnotations()
+            renderContent()
+            return
+        }
         observeAnnotations()
         // Re-fetch the webContent column from disk so a stale snapshot from a
         // list view (captured before a prior persistLiveBodyToReference write
@@ -587,6 +614,7 @@ final class WebReaderViewModel: ObservableObject {
     /// inject Defuddle, and `applyReadableExtractionResult` will swap
     /// in the new content + persist it to `reference.webContent`.
     func refreshClipContent() {
+        guard attachmentDocument == nil else { return }
         guard displayMode == .clip else { return }
         guard !isExtracting else { return }
         let urlStr = reference.resolvedWebReaderURLString() ?? ""
@@ -602,7 +630,7 @@ final class WebReaderViewModel: ObservableObject {
     }
 
     var allowsDisplayModeSwitching: Bool {
-        reference.referenceType == .webpage
+        attachmentDocument == nil && reference.referenceType == .webpage
     }
 
     var hasSelection: Bool {
@@ -610,10 +638,15 @@ final class WebReaderViewModel: ObservableObject {
     }
 
     var canExportMarkdown: Bool {
-        reference.id != nil && reference.webContent?.isEmpty == false
+        documentContent?.body.isEmpty == false
     }
 
     func prepareMarkdownExport() async throws -> Data {
+        if let attachmentDocument {
+            let store = attachmentDocument.store
+            let id = attachmentDocument.attachment.syncId
+            return try await Task.detached { try Data(contentsOf: store.verifiedFileURL(syncId: id)) }.value
+        }
         let reference = reference
         let database = db
         return try await Task.detached(priority: .userInitiated) {
@@ -695,19 +728,36 @@ final class WebReaderViewModel: ObservableObject {
         showNoteEditor = false
     }
 
-    func deleteAnnotation(_ annotation: WebAnnotationRecord) {
-        guard let id = annotation.id else { return }
+    func deleteAnnotation(_ annotation: ReaderWebAnnotation) {
+        if let attachmentDocument {
+            guard annotation.documentID == .attachment(attachmentDocument.attachment.syncId) else { return }
+            attachmentDocument.perform { try $0.removeAnnotation(syncId: annotation.syncId) }
+            return
+        }
+        guard annotation.documentID == .reference(reference.id ?? -1), let id = annotation.id else { return }
         try? db.deleteWebAnnotation(id: id)
     }
 
-    func updateAnnotationNote(_ annotation: WebAnnotationRecord, noteText: String) {
-        var updated = annotation
+    func updateAnnotationNote(_ annotation: ReaderWebAnnotation, noteText: String) {
+        if let attachmentDocument {
+            guard annotation.documentID == .attachment(attachmentDocument.attachment.syncId) else { return }
+            attachmentDocument.perform { try $0.updateAnnotationNote(syncId: annotation.syncId, note: noteText.isEmpty ? nil : noteText) }
+            return
+        }
+        guard annotation.documentID == .reference(reference.id ?? -1),
+              var updated = annotation.primaryRecord else { return }
         updated.noteText = noteText.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
         try? db.saveWebAnnotation(&updated)
     }
 
-    func updateAnnotationColor(_ annotation: WebAnnotationRecord, color: String) {
-        var updated = annotation
+    func updateAnnotationColor(_ annotation: ReaderWebAnnotation, color: String) {
+        if let attachmentDocument {
+            guard annotation.documentID == .attachment(attachmentDocument.attachment.syncId) else { return }
+            attachmentDocument.perform { try $0.updateAnnotationColor(syncId: annotation.syncId, color: color) }
+            return
+        }
+        guard annotation.documentID == .reference(reference.id ?? -1),
+              var updated = annotation.primaryRecord else { return }
         updated.color = color
         try? db.saveWebAnnotation(&updated)
     }
@@ -717,7 +767,7 @@ final class WebReaderViewModel: ObservableObject {
         annotationToolbarLayout = nil
     }
 
-    func navigateTo(_ annotation: WebAnnotationRecord) {
+    func navigateTo(_ annotation: ReaderWebAnnotation) {
         selectedAnnotationId = annotation.id
         highlightSidebarSummary = false
         jumpToAnnotationInView?(annotation)
@@ -737,11 +787,13 @@ final class WebReaderViewModel: ObservableObject {
     }
 
     var hasSidebarSummary: Bool {
+        guard attachmentDocument == nil else { return false }
         let a = reference.abstract?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return !a.isEmpty
     }
 
     func setDisplayMode(_ mode: WebReaderDisplayMode) {
+        guard attachmentDocument == nil else { return }
         guard mode != displayMode else { return }
         extractionUserMessage = nil
         displayMode = mode
@@ -854,6 +906,7 @@ final class WebReaderViewModel: ObservableObject {
     /// so the next reader open displays the clipped copy immediately rather than
     /// kicking off another network fetch + Defuddle/Readability pass.
     private func persistLiveBodyToReference(_ articleBodyHTML: String) {
+        guard attachmentDocument == nil else { return }
         guard let referenceID = reference.id,
               let encoded = Reference.encodeWebContent(articleBodyHTML, format: .html) else {
             onlineReadableLog.notice("Skipped persisting live-extracted body refId=\(self.reference.id ?? -1, privacy: .public) (encode failed or no id)")
@@ -925,6 +978,18 @@ final class WebReaderViewModel: ObservableObject {
     }
 
     private func observeAnnotations() {
+        if let attachmentDocument {
+            attachmentDocument.annotationPublisher.receive(on: DispatchQueue.main)
+                .sink(receiveCompletion: { [weak self] result in
+                    if case .failure(let error) = result { self?.persistenceError = error.localizedDescription }
+                }, receiveValue: { [weak self] records in
+                    guard let self else { return }
+                    let annotations = records.compactMap { AttachmentReaderDocument.webAnnotation($0) }
+                    self.annotations = annotations
+                    self.refreshAnnotationsInView?(self.annotations)
+                }).store(in: &cancellables)
+            return
+        }
         guard let refId = reference.id else { return }
 
         db.observeWebAnnotations(referenceId: refId)
@@ -937,14 +1002,19 @@ final class WebReaderViewModel: ObservableObject {
                 },
                 receiveValue: { [weak self] annotations in
                     guard let self else { return }
-                    self.annotations = annotations
-                    self.refreshAnnotationsInView?(annotations)
+                    self.annotations = annotations.map(ReaderWebAnnotation.init)
+                    self.refreshAnnotationsInView?(self.annotations)
                 }
             )
             .store(in: &cancellables)
     }
 
     func addAnnotation(type: AnnotationType, selection: WebSelectionSnapshot, noteText: String?) {
+        if let attachmentDocument {
+            attachmentDocument.add(type: type, anchor: .markdown(text: selection.text, prefix: selection.prefixText.nilIfBlank, suffix: selection.suffixText.nilIfBlank),
+                                   text: selection.text, note: noteText, color: currentColorHex)
+            return
+        }
         guard let refId = reference.id else { return }
         var annotation = WebAnnotationRecord(
             referenceId: refId,
@@ -959,8 +1029,10 @@ final class WebReaderViewModel: ObservableObject {
     }
 
     private func renderContent() {
-        guard let storedContent = reference.decodedWebContent else {
-            renderedHTML = Self.emptyDocument(title: reference.title)
+        contentRenderGeneration += 1
+        let generation = contentRenderGeneration
+        guard let storedContent = documentContent else {
+            renderedHTML = Self.emptyDocument(title: documentTitle)
             return
         }
 
@@ -968,15 +1040,17 @@ final class WebReaderViewModel: ObservableObject {
         let reference = self.reference
         let fontSize = self.fontSize
         let contentWidth = self.contentWidth
+        let isAttachment = attachmentDocument != nil
+        let title = documentTitle
 
-        Task.detached(priority: .userInitiated) {
+        Task.detached(priority: .userInitiated) { [weak self] in
             let includeClipperTypography = storedContent.format == .html
             let bodyHTML: String
             switch storedContent.format {
             case .markdown:
                 bodyHTML = Self.renderedMarkdownHTML(
                     from: storedContent.body,
-                    baseURL: reference.resolvedWebReaderURLString().flatMap(URL.init(string:))
+                    baseURL: isAttachment ? nil : reference.resolvedWebReaderURLString().flatMap(URL.init(string:))
                 )
             case .html:
                 bodyHTML = ReaderExtractionManager.removingInjectedBrandCoverIfNeeded(from: storedContent.body)
@@ -987,12 +1061,15 @@ final class WebReaderViewModel: ObservableObject {
                 articleBodyHTML: bodyHTML,
                 fontSize: fontSize,
                 contentWidth: contentWidth,
-                eyebrowText: "Clipped",
+                eyebrowText: isAttachment ? "Attachment" : "Clipped",
+                headerTitle: title,
                 includeClipperTypography: includeClipperTypography,
-                omitReferenceAbstract: false,
+                omitReferenceAbstract: isAttachment,
+                omitReferenceMetadata: isAttachment,
                 omitArticleHeader: false
             )
             await MainActor.run {
+                guard let self, generation == self.contentRenderGeneration else { return }
                 self.currentArticleBodyHTML = bodyHTML
                 self.renderedHTML = html
                 self.isRendering = false
@@ -1080,6 +1157,7 @@ final class WebReaderViewModel: ObservableObject {
         authorOverride: String? = nil,
         includeClipperTypography: Bool = false,
         omitReferenceAbstract: Bool = false,
+        omitReferenceMetadata: Bool = false,
         omitArticleHeader: Bool = false
     ) -> String {
         let rawHeaderTitle = (headerTitle ?? reference.title).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1087,7 +1165,7 @@ final class WebReaderViewModel: ObservableObject {
         let title = htmlEscape(displayTitle)
 
         let rawAuthor = authorOverride?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let author = htmlEscape(rawAuthor.isEmpty ? reference.authors.displayString : rawAuthor)
+        let author = htmlEscape(omitReferenceMetadata ? "" : (rawAuthor.isEmpty ? reference.authors.displayString : rawAuthor))
 
         let rawSummary: String
         if omitReferenceAbstract {
@@ -1097,8 +1175,8 @@ final class WebReaderViewModel: ObservableObject {
         }
         let summary = htmlEscape(rawSummary)
 
-        let siteRaw = (reference.siteName ?? reference.journal ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let urlRaw = (reference.resolvedWebReaderURLString() ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let siteRaw = omitReferenceMetadata ? "" : (reference.siteName ?? reference.journal ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let urlRaw = omitReferenceMetadata ? "" : (reference.resolvedWebReaderURLString() ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let site = htmlEscape(siteRaw)
         let url = htmlEscape(urlRaw)
         let showURLInMeta = !urlRaw.isEmpty && !metaSiteAndURLAreRedundant(site: siteRaw, url: urlRaw)
@@ -2034,6 +2112,7 @@ final class WebReaderViewModel: ObservableObject {
 }
 
 struct WebReaderView: View {
+    @AppStorage(RubienPreferences.readingComfortEnabledKey) private var readingComfortEnabled = false
     @StateObject private var viewModel: WebReaderViewModel
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var colorScheme
@@ -2050,36 +2129,26 @@ struct WebReaderView: View {
     @State private var noteMarkdownForSelection: String = ""
     @State private var isExportingMarkdown = false
     @State private var markdownExportError: String?
+    @State private var showAttachmentSearch = false
+    @State private var attachmentSearchText = ""
+    @FocusState private var attachmentSearchFocused: Bool
     private let onClose: (() -> Void)?
 
     // Assistant chat (Phase 2c, floating card since Phase 3a): one renderer +
     // session controller per reader window; conversation state is in-memory
     // only; transcript content itself is durable in Rubien's local library.
-    @StateObject private var chatRenderer: ChatTranscriptController
-    @StateObject private var chatSession: ChatSessionController
+    @StateObject private var assistant: ReaderAssistantState
 
-    init(reference: Reference, onClose: (() -> Void)? = nil) {
+    init(reference: Reference, db: AppDatabase = .shared, attachment: AttachmentReaderDocument? = nil, onClose: (() -> Void)? = nil) {
         self.onClose = onClose
         RubienPreferences.migrateReaderSidebarPreferencesIfNeeded()
         self._showAnnotationSidebar = State(initialValue: RubienPreferences.webReaderSidebarVisible)
         self._annotationSidebarWidth = State(initialValue: WebReaderMetrics.restoredAnnotationSidebarWidth(
             RubienPreferences.webReaderSidebarWidth))
         self._showChatSidebar = State(initialValue: RubienPreferences.assistantSidebarVisible)
-        self._viewModel = StateObject(wrappedValue: WebReaderViewModel(reference: reference))
+        self._viewModel = StateObject(wrappedValue: WebReaderViewModel(reference: reference, db: db, attachment: attachment))
 
-        // The first production provider construction: the agent is wrapped with
-        // Rubien's approval-gated MCP library channel, so it reads THIS document
-        // and can propose library updates through Rubien's own tools. Reader
-        // windows always hold a persisted reference; `?? 0` is unreachable in
-        // practice.
-        // Build the live session from the user's Assistant settings via the shared
-        // production factory (Phase 2c-5) — the PDF reader (Phase 3) reuses the same
-        // path, so the wiring lives in one place. Each seeded value stays editable
-        // per-conversation in the sidebar.
-        let renderer = ChatTranscriptController()
-        self._chatRenderer = StateObject(wrappedValue: renderer)
-        self._chatSession = StateObject(wrappedValue: ReaderChatSession.make(
-            reference: reference, transcript: renderer))
+        self._assistant = StateObject(wrappedValue: ReaderAssistantState(reference: reference, database: db, attachment: attachment))
     }
 
     var body: some View {
@@ -2129,6 +2198,7 @@ struct WebReaderView: View {
             ZStack(alignment: .top) {
                 VStack(spacing: 0) {
                     WebReaderContentView(viewModel: viewModel)
+                        .readingComfort(enabled: readingComfortEnabled)
                         .overlay {
                             webSelectionToolbarOverlay
                         }
@@ -2156,7 +2226,7 @@ struct WebReaderView: View {
             // (Phase 3a, details-panel idiom) — anchored to this pane, not the
             // window, so it never covers the annotation sidebar.
             .overlay(alignment: .trailing) {
-                if showChatSidebar {
+                if showChatSidebar, let chatSession = assistant.session, let chatRenderer = assistant.renderer {
                     FloatingChatPanel(session: chatSession, renderer: chatRenderer, width: $chatPanelWidth) {
                         setChatSidebarVisible(false)
                     }
@@ -2173,7 +2243,10 @@ struct WebReaderView: View {
         .background(ReaderWindowMinWidthEnforcer(minWidth: currentMinimumWindowWidth))
         // Window closing (the root view disappears): kill any in-flight agent
         // turn's process group (§4.4 step 9).
-        .onDisappear { chatSession.teardown() }
+        .onDisappear { assistant.session?.teardown() }
+        .alert("Could not save attachment changes", isPresented: Binding(get: { viewModel.persistenceError != nil }, set: { if !$0 { viewModel.persistenceError = nil } })) {
+            Button("OK") { viewModel.persistenceError = nil }
+        } message: { Text(viewModel.persistenceError ?? "") }
         .animation(
             .spring(response: 0.3, dampingFraction: 0.82),
             value: viewModel.hasSelection && viewModel.selectionToolbarLayout?.visible == true
@@ -2187,6 +2260,30 @@ struct WebReaderView: View {
         }
         .toolbar {
             ToolbarItemGroup(placement: .automatic) {
+                if viewModel.attachmentDocument != nil {
+                    Button {
+                        showAttachmentSearch = true
+                        attachmentSearchFocused = true
+                    } label: { Label("Find", systemImage: "magnifyingglass") }
+                    .keyboardShortcut("f", modifiers: .command)
+                    if showAttachmentSearch {
+                        TextField("Find in attachment", text: $attachmentSearchText)
+                            .frame(width: 150).focused($attachmentSearchFocused)
+                            .onSubmit { viewModel.findInDocument?(attachmentSearchText, false) }
+                            .onChange(of: attachmentSearchText) { _, text in viewModel.findInDocument?(text, false) }
+                        Button { viewModel.findInDocument?(attachmentSearchText, true) } label: {
+                            Image(systemName: "chevron.up")
+                        }.help("Previous match")
+                        Button { viewModel.findInDocument?(attachmentSearchText, false) } label: {
+                            Image(systemName: "chevron.down")
+                        }.help("Next match")
+                        if viewModel.searchResultMissing { Text("No matches").font(.caption).foregroundStyle(.secondary) }
+                        Button {
+                            showAttachmentSearch = false
+                            viewModel.findInDocument?("", false)
+                        } label: { Image(systemName: "xmark") }.help("Close find")
+                    }
+                }
                 if viewModel.allowsDisplayModeSwitching {
                     Picker(String(localized: "Reading mode", bundle: .module), selection: Binding(
                         get: { viewModel.displayMode },
@@ -2211,7 +2308,7 @@ struct WebReaderView: View {
                             Label(String(localized: "Refresh", bundle: .module), systemImage: "arrow.clockwise")
                         }
                     }
-                    .disabled(viewModel.isExtracting || viewModel.reference.resolvedWebReaderURLString() == nil)
+                    .disabled(viewModel.isExtracting || viewModel.documentSourceURL == nil)
                     .help(String(localized: "Re-extract from the source URL", bundle: .module))
                 }
 
@@ -2229,6 +2326,8 @@ struct WebReaderView: View {
                 }
                 .disabled(isExportingMarkdown || !viewModel.canExportMarkdown)
                 .help(String(localized: "Export the clipped article as Markdown", bundle: .module))
+
+                ReadingComfortToggle(isEnabled: $readingComfortEnabled)
             }
 
             ToolbarItemGroup(placement: .primaryAction) {
@@ -2239,12 +2338,14 @@ struct WebReaderView: View {
                 }
                 .help(String(localized: "Toggle notes sidebar", bundle: .module))
 
-                Button {
-                    setChatSidebarVisible(!showChatSidebar)
-                } label: {
-                    Label(String(localized: "Assistant", bundle: .module), systemImage: "bubble.left.and.text.bubble.right")
+                if assistant.session != nil {
+                    Button {
+                        setChatSidebarVisible(!showChatSidebar)
+                    } label: {
+                        Label(String(localized: "Assistant", bundle: .module), systemImage: "bubble.left.and.text.bubble.right")
+                    }
+                    .help(String(localized: "Chat about this document", bundle: .module))
                 }
-                .help(String(localized: "Chat about this document", bundle: .module))
             }
         }
         .onAppear {
@@ -2258,7 +2359,7 @@ struct WebReaderView: View {
         .onChange(of: showAnnotationSidebar) { _, visible in
             RubienPreferences.webReaderSidebarVisible = visible
         }
-        .navigationTitle(viewModel.reference.title)
+        .modifier(ReaderNavigationTitle(title: viewModel.documentTitle, isAttachment: viewModel.attachmentDocument != nil))
         .alert(String(localized: "Refresh", bundle: .module), isPresented: Binding(
             get: { viewModel.extractionUserMessage != nil },
             set: { if !$0 { viewModel.extractionUserMessage = nil } }
@@ -2287,9 +2388,8 @@ struct WebReaderView: View {
                 let panel = NSSavePanel()
                 panel.title = String(localized: "Export Markdown", bundle: .module)
                 panel.prompt = String(localized: "Export", bundle: .module)
-                panel.nameFieldStringValue = WebReaderMarkdownExportWorker.suggestedFilename(
-                    for: viewModel.reference.title
-                )
+                panel.nameFieldStringValue = viewModel.attachmentDocument?.attachment.originalFilename
+                    ?? WebReaderMarkdownExportWorker.suggestedFilename(for: viewModel.reference.title)
                 panel.canCreateDirectories = true
                 panel.isExtensionHidden = false
                 panel.allowedContentTypes = [
@@ -2299,10 +2399,20 @@ struct WebReaderView: View {
                 guard panel.runModal() == .OK, let destination = panel.url else {
                     return
                 }
-                let data = try await viewModel.prepareMarkdownExport()
-                try await Task.detached(priority: .userInitiated) {
-                    try data.write(to: destination, options: .atomic)
-                }.value
+                if let attachment = viewModel.attachmentDocument {
+                    let store = attachment.store
+                    let id = attachment.attachment.syncId
+                    try await Task.detached(priority: .userInitiated) {
+                        let scoped = destination.startAccessingSecurityScopedResource()
+                        defer { if scoped { destination.stopAccessingSecurityScopedResource() } }
+                        try store.export(syncId: id, to: destination, replaceExisting: true)
+                    }.value
+                } else {
+                    let data = try await viewModel.prepareMarkdownExport()
+                    try await Task.detached(priority: .userInitiated) {
+                        try data.write(to: destination, options: .atomic)
+                    }.value
+                }
             } catch {
                 markdownExportError = error.localizedDescription
             }
@@ -2313,6 +2423,7 @@ struct WebReaderView: View {
     /// Selection→Ask passes `persist: false` so a one-off Ask reveals the panel for THIS
     /// window without overwriting a user who deliberately hid the assistant.
     private func setChatSidebarVisible(_ visible: Bool, persist: Bool = true) {
+        guard assistant.session != nil else { return }
         showChatSidebar = visible
         if persist { RubienPreferences.assistantSidebarVisible = visible }
     }
@@ -2350,12 +2461,12 @@ struct WebReaderView: View {
                         viewModel.clearSelection()
                         noteMarkdownForSelection = ""
                     },
-                    onAsk: {
+                    onAsk: assistant.session == nil ? nil : {
                         // `pendingSelection.text` is stored pre-trimmed & non-empty
                         // (the popover only exists for a live selection); compose-time
                         // trimming re-normalizes it, so no trim is needed here.
                         guard let text = viewModel.pendingSelection?.text, !text.isEmpty else { return }
-                        chatSession.stageSelection(text)
+                        assistant.session?.stageSelection(text)
                         viewModel.clearSelection()
                         noteMarkdownForSelection = ""
                         setChatSidebarVisible(true, persist: false)
@@ -2427,6 +2538,19 @@ private struct WebReaderContentView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> WKWebView {
         let controller = WKUserContentController()
+        if viewModel.attachmentDocument != nil {
+            controller.add(context.coordinator, name: "attachmentPosition")
+            controller.addUserScript(WKUserScript(source: """
+                let positionTimer;
+                window.addEventListener('scroll', () => {
+                    clearTimeout(positionTimer);
+                    positionTimer = setTimeout(() => {
+                        const extent = document.documentElement.scrollHeight - innerHeight;
+                        window.webkit.messageHandlers.attachmentPosition.postMessage(extent > 0 ? scrollY / extent : 0);
+                    }, 200);
+                });
+                """, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        }
         controller.add(context.coordinator, name: "selectionChanged")
         controller.add(context.coordinator, name: "selectionCleared")
         controller.add(context.coordinator, name: "annotationActivated")
@@ -2440,6 +2564,7 @@ private struct WebReaderContentView: NSViewRepresentable {
         configuration.mediaTypesRequiringUserActionForPlayback = []
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.identifier = NSUserInterfaceItemIdentifier("RubienWebReaderContent")
         webView.navigationDelegate = context.coordinator
         webView.customUserAgent = ReaderExtractionManager.safariLikeUserAgent
         webView.setValue(false, forKey: "drawsBackground")
@@ -2458,6 +2583,7 @@ private struct WebReaderContentView: NSViewRepresentable {
     func updateNSView(_ nsView: WKWebView, context: Context) {
         context.coordinator.parent = self
         context.coordinator.bind(to: viewModel)
+        context.coordinator.updateAttachmentTitle()
 
         // Case 1: Refresh-triggered URL load while in Clip mode. didFinish
         // injects Defuddle; result delivered via postMessage updates webContent.
@@ -2465,7 +2591,7 @@ private struct WebReaderContentView: NSViewRepresentable {
         // Case 4 swaps in the clipped HTML.
         if viewModel.shouldLoadOriginalURLForExtraction,
            viewModel.displayMode == .clip,
-           let urlString = viewModel.reference.resolvedWebReaderURLString(),
+           let urlString = viewModel.documentSourceURL,
            let pageURL = URL(string: urlString) {
             viewModel.acknowledgeOriginalURLLoadStarted()
             context.coordinator.extractionManager.resetForNewNavigation()
@@ -2483,7 +2609,7 @@ private struct WebReaderContentView: NSViewRepresentable {
         // awaiting flag first — a prior refresh's flag would otherwise cause
         // didFinish to inject Defuddle into the Original page load.
         if viewModel.displayMode == .original,
-           let urlString = viewModel.reference.resolvedWebReaderURLString(),
+           let urlString = viewModel.documentSourceURL,
            let pageURL = URL(string: urlString) {
             context.coordinator.awaitingReadableExtraction = false
             // Skip if we've already initiated the Original load for this exact
@@ -2552,7 +2678,7 @@ private struct WebReaderContentView: NSViewRepresentable {
     }
 
     private var referenceBaseURL: String {
-        if let url = viewModel.reference.resolvedWebReaderURLString(), !url.isEmpty {
+        if let url = viewModel.documentSourceURL, !url.isEmpty {
             return url
         }
         return "http://127.0.0.1:23858/"
@@ -2645,9 +2771,19 @@ private struct WebReaderContentView: NSViewRepresentable {
             viewModel.refreshAnnotationsInView = { [weak self] annotations in
                 self?.pushAnnotations(annotations: annotations)
             }
+            viewModel.findInDocument = { [weak self, weak viewModel] text, backwards in
+                let configuration = WKFindConfiguration()
+                configuration.backwards = backwards
+                configuration.wraps = true
+                self?.webView?.find(text, configuration: configuration) { result in
+                    viewModel?.searchResultMissing = !text.isEmpty && !result.matchFound
+                }
+            }
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            lastAttachmentTitle = nil
+            updateAttachmentTitle()
             // Second step of the two-step Original load: the about:blank reset
             // (matched by its navigation token, so an unrelated didFinish can't
             // be mistaken for it) has finished — now navigate to the real page.
@@ -2667,6 +2803,9 @@ private struct WebReaderContentView: NSViewRepresentable {
                 return
             }
             pushAnnotations()
+            if case .markdown(let fraction) = parent.viewModel.attachmentDocument?.position {
+                evaluate("requestAnimationFrame(() => window.scrollTo(0, Math.max(0, document.documentElement.scrollHeight - innerHeight) * \(fraction)));")
+            }
             WebReaderContentView.applyElegantScrollers(to: webView)
         }
 
@@ -2741,6 +2880,10 @@ private struct WebReaderContentView: NSViewRepresentable {
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             switch message.name {
+            case "attachmentPosition":
+                if let fraction = message.body as? Double, fraction.isFinite {
+                    parent.viewModel.attachmentDocument?.savePosition(.markdown(fraction: min(1, max(0, fraction))))
+                }
             case "selectionChanged":
                 guard let body = message.body as? [String: Any] else { return }
                 let rect = Self.parseViewportRect(from: body["rect"])
@@ -2839,13 +2982,26 @@ private struct WebReaderContentView: NSViewRepresentable {
             pushAnnotations(annotations: parent.viewModel.annotations)
         }
 
+        private var lastAttachmentTitle: String?
+
+        func updateAttachmentTitle() {
+            guard parent.viewModel.attachmentDocument != nil else { return }
+            let title = parent.viewModel.documentTitle
+            guard lastAttachmentTitle != title,
+                  let data = try? JSONSerialization.data(withJSONObject: [title]),
+                  let json = String(data: data, encoding: .utf8) else { return }
+            lastAttachmentTitle = title
+            // Patch text only: loading HTML again restores the opening scroll position.
+            evaluate("(() => { document.title = \(json)[0]; const heading = document.querySelector('.article-header h1'); if (heading) heading.textContent = \(json)[0]; })();")
+        }
+
         private var lastPushedAnnotationsJSON: String?
 
         func invalidateAnnotationsPushCache() {
             lastPushedAnnotationsJSON = nil
         }
 
-        func pushAnnotations(annotations: [WebAnnotationRecord]) {
+        func pushAnnotations(annotations: [ReaderWebAnnotation]) {
             // Guard at source: didFinish, updateNSView, AND the annotation
             // observer callback can all reach here. Original mode shows a raw
             // page with no window.RubienReader — the JS would no-op anyway,

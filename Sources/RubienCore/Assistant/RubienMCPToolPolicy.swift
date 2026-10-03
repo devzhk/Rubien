@@ -60,6 +60,9 @@ public enum RubienMCPToolPolicy {
         "rubien_grep_text",
         "rubien_get_sync_status",
         "rubien_reading_activity",
+        "rubien_attachment_list",
+        "rubien_attachment_status",
+        "rubien_attachment_read",
     ]
 
     public static let writeToolNames: Set<String> = [
@@ -76,6 +79,11 @@ public enum RubienMCPToolPolicy {
         "rubien_update_view",
         "rubien_delete_view",
         "rubien_download_pdf",
+        "rubien_attachment_retry",
+        "rubien_attachment_add",
+        "rubien_attachment_export",
+        "rubien_attachment_rename",
+        "rubien_attachment_remove",
     ]
 
     public static let allToolNames = readToolNames.union(writeToolNames)

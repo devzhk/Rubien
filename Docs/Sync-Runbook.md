@@ -7,14 +7,13 @@ Post-enrollment steps to take Rubien's sync from `.unavailable` to actually sync
 > The environment is selected by the **signed** `com.apple.developer.icloud-container-environment`
 > entitlement — **not** the provisioning profile (the profile's value alone is NOT honored at
 > runtime for Developer-ID / non-App-Store macOS builds). The base
-> `Sources/Rubien/Rubien.entitlements` deliberately **omits** the key so dev builds stay on
-> Development; `scripts/build-app.sh` **injects `…=Production` into release (DMG) builds only**
+> `Sources/Rubien/Rubien.entitlements` explicitly sets **Development**; `scripts/build-app.sh` **injects `…=Production` into release (DMG) builds only**
 > at sign time. Omitting the injection makes a Developer-ID build silently use **Development**
 > (the bug that shipped in v0.1.2 — data landed in Development while Production stayed empty).
 >
 > | Build | How signed | CloudKit env |
 > |---|---|---|
-> | `scripts/dev-launch.sh`, Xcode debug | base entitlements (keyless) + Development profile | **Development** |
+> | `scripts/dev-launch.sh`, Xcode debug | base entitlements (`Development`) + Development profile | **Development** |
 > | `scripts/build-app.sh release` DMG | base **+ injected `…=Production`** (in the signature) | **Production** |
 >
 > Verify a built app's environment:
@@ -284,6 +283,43 @@ Do not use CloudKit Dashboard's **Delete Zone** action as routine recovery. It p
 removes the cloud copy, and an already-baselined local library is not automatically marked for
 full re-upload.
 
+### Attachment sync development status
+
+The checked-in schema declares `CDReferenceAttachment`, `CDAttachmentAsset`, and
+`CDAttachmentAnnotation`. All three participate in engine dispatch, durable intent,
+recovery, and removal cleanup. The app enables attachment traffic only when started
+with `RUBIEN_ENABLE_ATTACHMENT_SYNC=1`; the default remains disabled pending signed
+Development verification on two Macs. Use an isolated `RUBIEN_LIBRARY_ROOT`.
+
+Startup attempts a separate scalar inventory before constructing CKSyncEngine.
+If inventory or environment discovery fails, primary sync still starts. Attachment
+sends stay paused; incoming attachment records, assets, and deletion evidence are
+retained durably. External foreground/idle work retries after quiescing the engine,
+then recreates it from the same durable cursor. Buffered record IDs are refreshed
+from CloudKit before replay so independent cursors cannot overwrite newer versions.
+An absent or invalid environment entitlement reports an attachment error; it never
+selects a default scope. Records received before scope discovery remain unscoped
+until a fresh inventory establishes current cloud state.
+
+The inventory cursor, download queue, server observations, quarantine ownership,
+and reference deletion evidence are scoped by account/container/environment/zone/feature version.
+Inventory never resets the primary engine cursor or applies primary records. Its
+`desiredKeys` apply to every record type, so small primary annotation text may be
+returned; primary PDF assets and `webContent` are excluded. Downloads request only
+exact attachment asset IDs and retry independently of primary sync.
+
+Removal markers remain durable. Child cloud deletions and local byte cleanup require
+acknowledgement of the parent marker; reader/upload leases postpone local unlinking.
+Physical-delete receipts survive ordinary tombstone compaction. A new child delivery
+reopens deletion work. Cleanup drains a durable queue; quarantine replay wakes on
+relevant parent changes or explicit Retry instead of rescanning retained history.
+Previously observed annotations missing remotely are preserved with a recoverable
+error. Retry repeats the lookup without authorizing recreation.
+
+See [the attachment sync plan](plans/2026-09-30-attachment-sync.md) for verification.
+The schema file has not been deployed by this work. Development schema provisioning,
+signed two-Mac checks, Production deployment, and release approval remain separate.
+
 ### 8. Schema migrations (v1 → v2 → vN)
 
 `rubien-cli sync status` reports the live schema version under `schemaVersion`. The constant lives at `AppDatabase.currentSchemaVersion` and must be bumped in lock-step with each new `migrator.registerMigration(...)` block.
@@ -300,6 +336,10 @@ full re-upload.
 - **v12** (derived web Markdown cache, 2026-08) — added local-only `webContentMarkdownCache`, keyed to Reference with cascade deletion. Cached Markdown is derived from canonical HTML and invalidated by source hash/converter version. No CloudKit schema change.
 - **v13** (global sync identities, 2026-08) — separates stable CloudKit `syncId` values from local integer row IDs, adds shadow global FKs and validation triggers, portable saved-view wire JSON, exact tombstone eligibility, wire-record orphan quarantine, mandatory full-history replay, and the selective v12-writer interlock. Existing proven numeric CloudKit identities remain permanent legacy names; unconfirmed local rows receive UUIDs. This is forward-only and requires the backup/all-writers rollout in §6.1 plus the additive Production schema fields in §2.5.
 - **v14** (durable sync intent, 2026-09) — makes save and delete intent mutually exclusive in every dirty-tracking trigger, upgrades stranded activity tombstones, repairs safe stale PDF state keys, and normalizes contradictory queue rows. Runtime startup repair separately clears abandoned in-flight markers and conservatively removes only clean orphan state with no server evidence. The CloudKit wire schema and global identity version remain unchanged.
+- **v15** (attachment foundation, in development) — adds supplementary-file metadata, separate annotation removal markers, local cache/upload ownership, an import recovery journal, and document-local reader state. Existing primary PDFs and web content are not converted. The app exposes local-only attachments marked “On this Mac”; attachment CLI/MCP parity is implemented; CloudKit dispatch is gated by the Development opt-in described above. The whole `Attachments` directory joins legacy-root promotion, with copied attachment bytes verified before database publication. Do not launch this intermediate build against a production library; use an isolated `RUBIEN_LIBRARY_ROOT`. Older binaries cannot open the migrated local schema.
+- **v16** (attachment chat, in development) — adds document-specific attachment identity to local Assistant conversations.
+- **v17** (attachment sync state, in development) — adds scoped inventory, download/recovery/cleanup jobs, server observations, quarantine ownership, and deletion evidence. Existing primary rows and pending sync intent are preserved.
+- **v18** (attachment recovery, in development) — adds permanent physical-delete receipts, queued removal work, indexed quarantine dependencies, and buffered deletion events. Backfills existing confirmed deletes and pending removals without changing model rows or dirty intent.
 
 **Forward-only.** Migrations are one-way. A v1 binary opening a v2 DB errors with `no such column: pdfPath` (the failure mode that hit the dev when the worktree migrated the live library before the matching binary shipped). Always upgrade the binary first, then let it migrate the DB on launch.
 

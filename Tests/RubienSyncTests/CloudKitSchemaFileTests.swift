@@ -24,6 +24,53 @@ final class CloudKitSchemaFileTests: XCTestCase {
         }
     }
 
+    func testDormantAttachmentSchemaMatchesMappingsAndSQLite() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let schema = try String(contentsOf: root.appendingPathComponent("CloudKit/RubienSchema.ckdb"), encoding: .utf8)
+        let database = try AppDatabase(DatabaseQueue())
+        let entries: [(AttachmentRecordKind, [String], Set<String>)] = [
+            (.referenceAttachment, ReferenceAttachment.allFieldNames, ["id", "referenceId"]),
+            (.attachmentAnnotation, ReferenceAttachmentAnnotation.allFieldNames, ["id", "attachmentId"]),
+        ]
+        for (kind, fields, local) in entries {
+            let columns = try database.dbWriter.read { db in
+                try Dictionary(uniqueKeysWithValues: Row.fetchAll(db, sql: "SELECT name, type FROM pragma_table_info(?)", arguments: [kind.rawValue])
+                    .map { ($0["name"] as String, $0["type"] as String) })
+            }
+            XCTAssertEqual(Set(columns.keys).subtracting(local), Set(fields))
+            let signatures = try Dictionary(uniqueKeysWithValues: fields.map { ($0, try cloudKitSignature(forSQLiteType: XCTUnwrap(columns[$0]))) })
+            XCTAssertEqual(try customFields(in: schema, recordType: kind.recordType), signatures)
+        }
+        let assetFields = try customFields(in: schema, recordType: "CDAttachmentAsset")
+        XCTAssertEqual(Set(assetFields.keys), Set(AttachmentAssetRecord.allFieldNames))
+        XCTAssertEqual(assetFields["asset"], "ASSET")
+        XCTAssertEqual(assetFields["byteCount"], "INT64 QUERYABLE SORTABLE")
+        for key in ["syncId", "attachmentSyncId", "contentHash"] {
+            XCTAssertEqual(assetFields[key], "STRING QUERYABLE SEARCHABLE SORTABLE")
+        }
+    }
+
+    func testInventoryProjectionCannotRequestLargePrimaryFields() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let schema = try String(contentsOf: root.appendingPathComponent("CloudKit/RubienSchema.ckdb"), encoding: .utf8)
+        let projection = Set(AttachmentInventoryProjection.desiredKeys)
+        // String content must be classified explicitly; binary types are discovered
+        // from every existing primary schema declaration to catch future additions.
+        var excluded: Set<String> = ["asset", "webContent", "notes", "favicon"]
+        var primaryFields = Set<String>()
+        for kind in SyncEntityType.allCases {
+            let fields = try customFields(in: schema, recordType: kind.recordType)
+            primaryFields.formUnion(fields.keys)
+            excluded.formUnion(fields.filter { $0.value.hasPrefix("ASSET") || $0.value.hasPrefix("BYTES") }.keys)
+        }
+        XCTAssertTrue(projection.isDisjoint(with: excluded))
+        XCTAssertFalse(projection.isEmpty)
+        for overlap in ["selectedText", "noteText", "color", "type", "contentHash", "kind"] {
+            XCTAssertTrue(primaryFields.contains(overlap))
+            XCTAssertTrue(projection.contains(overlap), "Known scalar/text overlap is expected across the zone")
+        }
+    }
+
     private func customFields(
         in schema: String,
         recordType: String
@@ -55,6 +102,12 @@ final class CloudKitSchemaFileTests: XCTestCase {
         for entity: SyncEntityType,
         database: AppDatabase
     ) throws -> [String: String] {
+        if entity == .attachmentAsset {
+            return ["asset": "ASSET", "byteCount": "INT64 QUERYABLE SORTABLE",
+                    "syncId": "STRING QUERYABLE SEARCHABLE SORTABLE",
+                    "attachmentSyncId": "STRING QUERYABLE SEARCHABLE SORTABLE",
+                    "contentHash": "STRING QUERYABLE SEARCHABLE SORTABLE"]
+        }
         if entity == .referencePDF {
             return [
                 ReferencePDFRecord.RecordField.asset: "ASSET",
@@ -156,6 +209,9 @@ final class CloudKitSchemaFileTests: XCTestCase {
 
     private func recordFieldNames(for entity: SyncEntityType) -> [String] {
         switch entity {
+        case .referenceAttachment: return ReferenceAttachment.allFieldNames
+        case .attachmentAsset: return AttachmentAssetRecord.allFieldNames
+        case .attachmentAnnotation: return ReferenceAttachmentAnnotation.allFieldNames
         case .reference:
             return Reference.allFieldNames.map {
                 switch $0 {

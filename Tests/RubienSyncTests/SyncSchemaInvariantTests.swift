@@ -27,7 +27,10 @@ final class SyncSchemaInvariantTests: XCTestCase {
     /// matching CKRecord fields. This set MUST stay empty in mainline; a
     /// non-empty allow-list is acceptable only with a comment explaining why
     /// the column is auto-stamped or otherwise self-healing on apply.
-    static let allowedExtraColumns: [String: Set<String>] = [:]
+    // Local foreign keys are resolved afresh from the wire's global UUIDs on apply.
+    static let allowedExtraColumns: [String: Set<String>] = [
+        "referenceAttachment": ["referenceId"], "attachmentAnnotation": ["attachmentId"]
+    ]
 
     /// Columns we never expect in CKRecord (they're SQL plumbing or computed).
     /// `id` is the local rowID — identity is in `CKRecord.recordName`.
@@ -103,6 +106,9 @@ final class SyncSchemaInvariantTests: XCTestCase {
     /// switch — the compiler enforces the latter (exhaustive switch).
     private func allFieldNames(for entity: SyncEntityType) -> [String] {
         switch entity {
+        case .referenceAttachment: return ReferenceAttachment.allFieldNames
+        case .attachmentAsset: return AttachmentAssetRecord.allFieldNames
+        case .attachmentAnnotation: return ReferenceAttachmentAnnotation.allFieldNames
         case .reference:          return Reference.allFieldNames
         case .tag:                return Tag.allFieldNames
         case .referenceTag:       return ReferenceTag.allFieldNames

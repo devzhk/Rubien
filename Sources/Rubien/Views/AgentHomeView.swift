@@ -100,7 +100,6 @@ struct AgentHomeView: View {
                     activityPanel(maximumHeight: max(300, geometry.size.height - 112))
                     .frame(width: min(activityWidth, max(300, geometry.size.width - 24)))
                     .padding(8)
-                    .shadow(color: .black.opacity(0.14), radius: 18, y: 8)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
                     .zIndex(2)
                 }
@@ -114,7 +113,7 @@ struct AgentHomeView: View {
                 onCompactLayoutChange(value)
             }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.chatSurface)
     }
 
     private var chatSurface: some View {
@@ -166,13 +165,6 @@ struct AgentHomeView: View {
         }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.chatSurface)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(
-                        Color(nsColor: .separatorColor).opacity(0.35),
-                        lineWidth: 0.5)
-            }
     }
 
     private var presentedScheduledRun: ScheduledJobRun? {
@@ -243,7 +235,16 @@ private struct ReadingActivityPanel: View {
             }
             .frame(maxHeight: maximumHeight)
         }
-        .neutralGlassCard(cornerRadius: 14)
+        .background {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.chatSurface)
+                .shadow(color: .black.opacity(0.04), radius: 2, y: 1)
+                .shadow(color: .black.opacity(0.10), radius: 16, y: 6)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(Color(nsColor: .separatorColor).opacity(0.35), lineWidth: 0.5)
+                }
+        }
         .task(id: activeReloadID) {
             guard isActive, needsReload || loadedReloadID != reloadID else { return }
             await reload()

@@ -49,6 +49,7 @@ final class MCPServerTests: XCTestCase {
         "rubien_get_pdf_info", "rubien_render_pdf_page",
         "rubien_read_text", "rubien_read_annotations", "rubien_grep_text",
         "rubien_get_sync_status", "rubien_reading_activity",
+        "rubien_attachment_list", "rubien_attachment_status", "rubien_attachment_read",
     ]
 
     private let expectedWriteToolNames: Set<String> = [
@@ -57,6 +58,7 @@ final class MCPServerTests: XCTestCase {
         "rubien_create_option", "rubien_update_option", "rubien_delete_option",
         "rubien_create_view", "rubien_update_view", "rubien_delete_view",
         "rubien_download_pdf",
+        "rubien_attachment_retry", "rubien_attachment_add", "rubien_attachment_export", "rubien_attachment_rename", "rubien_attachment_remove",
     ]
 
     // MARK: - Process helpers
@@ -229,6 +231,17 @@ final class MCPServerTests: XCTestCase {
             let format = try XCTUnwrap(properties["format"] as? [String: Any])
             XCTAssertEqual(format["enum"] as? [String], ["markdown", "html"])
         }
+    }
+
+    func testPresentationLibraryFailureKeepsMCPServerConnected() throws {
+        try Data("/temporary/moved-library".utf8).write(to: testLibraryRoot.appendingPathComponent(".rubien-promoted-to"))
+        let responses = try runMCP([
+            toolCall(id: 1, name: "rubien_present_document_cards", arguments: ["items": [["referenceId": 1]]]),
+            req(id: 2, method: "ping"),
+        ], appPresentation: true)
+        let result = try XCTUnwrap(response(responses, id: 1)?["result"] as? [String: Any])
+        XCTAssertEqual(result["isError"] as? Bool, true)
+        XCTAssertNotNil(response(responses, id: 2)?["result"])
     }
 
     func testAppPresentationModeAddsOnlyPrivateDocumentCardTool() throws {
@@ -546,7 +559,7 @@ final class MCPServerTests: XCTestCase {
             (tool["name"] as? String).map { ($0, tool) }
         })
         XCTAssertEqual(Set(byName.keys), expectedReadToolNames.union(expectedWriteToolNames))
-        XCTAssertEqual(byName.count, 28)
+        XCTAssertEqual(byName.count, 36)
 
         for name in expectedReadToolNames {
             XCTAssertEqual((byName[name]?["annotations"] as? [String: Any])?["readOnlyHint"] as? Bool, true, name)

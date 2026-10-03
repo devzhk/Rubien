@@ -3,6 +3,33 @@ import GRDB
 @testable import RubienCore
 
 final class AssistantConversationDatabaseTests: XCTestCase {
+    func testAttachmentHistoryListAndSearchStaySeparate() throws {
+        let database = try AppDatabase(DatabaseQueue())
+        let first = UUID().uuidString.lowercased()
+        let second = UUID().uuidString.lowercased()
+        var parent = Reference(title: "Parent")
+        try database.saveReference(&parent)
+        for (kind, reference, attachment) in [(AssistantConversationContextKind.reference, parent.id, nil),
+                                            (.attachment, nil, first), (.attachment, nil, second)] {
+            let conversation = try database.createAssistantConversation(.init(provider: .codex,
+                workspaceIdentityHash: "workspace", contextKind: kind,
+                referenceId: reference, attachmentSyncId: attachment))
+            let turn = AssistantTurn(conversationId: conversation.id, ordinal: 1)
+            try database.beginAssistantTurn(turn, userEntry: .init(turnId: turn.id,
+                sequence: 0, kind: .user, body: "distinctive question"))
+        }
+        for search in [nil, "distinctive"] as [String?] {
+            let rows = try database.fetchAssistantConversationSummaries(query: .init(attachmentSyncId: first, search: search))
+            XCTAssertEqual(rows.count, 1)
+            XCTAssertEqual(rows.first?.conversation.attachmentSyncId, first)
+            let primary = try database.fetchAssistantConversationSummaries(query: .init(referenceId: parent.id, search: search))
+            XCTAssertEqual(primary.count, 1)
+            XCTAssertNil(primary.first?.conversation.attachmentSyncId)
+        }
+        XCTAssertThrowsError(try database.createAssistantConversation(.init(provider: .codex,
+            workspaceIdentityHash: "workspace", contextKind: .attachment)))
+    }
+
     func testInteractiveTurnRequiresExplicitCreationForMissingConversation() throws {
         let database = try AppDatabase(DatabaseQueue())
         let conversation = AssistantConversation(

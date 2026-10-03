@@ -1,7 +1,7 @@
 import { probeCliVersion, type CliProbe } from "./cli.js";
 
-/** Minimum CLI build supporting the optional notes/highlights search scopes. */
-export const MIN_CLI_BUILD = 46;
+/** Minimum CLI build supporting attachment tools. */
+export const MIN_CLI_BUILD = 50;
 
 export interface CliVersion {
   version: string;

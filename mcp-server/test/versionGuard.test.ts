@@ -24,7 +24,7 @@ describe("evaluateCliProbe", () => {
     );
     expectFailure(r);
     expect(r.message).toContain("build 40");
-    expect(r.message).toContain(">= 46");
+    expect(r.message).toContain(">= 50");
     expect(r.message).toMatch(/Update Rubien\.app|download a newer rubien-cli/i);
     expect(r.message).toContain("github.com/devzhk/Rubien/releases");
     expect(r.message).not.toContain("Rubien-releases");

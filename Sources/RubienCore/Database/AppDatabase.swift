@@ -52,16 +52,24 @@ public struct ReferenceMentionCandidate: Sendable, Equatable {
 public final class AppDatabase: Sendable {
     /// Bumped whenever a new migration is registered. Surfaced in
     /// `rubien-cli sync status` JSON for diagnostics.
-    public static let currentSchemaVersion = "v14"
+    public static let currentSchemaVersion = "v18"
 
     public let dbWriter: any DatabaseWriter
+    private let storageLease: LibraryRootLease?
     private let includesV13Migration: Bool
     private let includesV14Migration: Bool
+    private let includesV15Migration: Bool
 
-    public init(_ dbWriter: any DatabaseWriter) throws {
+    public convenience init(_ dbWriter: any DatabaseWriter) throws {
+        try self.init(dbWriter, storageLease: LibraryRootLease.forDatabase(at: dbWriter.path))
+    }
+
+    private init(_ dbWriter: any DatabaseWriter, storageLease: LibraryRootLease?) throws {
+        self.storageLease = storageLease
         self.dbWriter = dbWriter
         self.includesV13Migration = true
         self.includesV14Migration = true
+        self.includesV15Migration = true
         let migrator = self.migrator
         let hasNewerSchema = try dbWriter.read(migrator.hasBeenSuperseded)
         guard !hasNewerSchema else {
@@ -721,6 +729,26 @@ public final class AppDatabase: Sendable {
                 // that v13 deliberately preserved for later replay repair.
                 migrator.registerMigration("v14", foreignKeyChecks: .immediate) { db in
                     try Self.applyV14Body(db)
+                }
+                if includesV15Migration {
+                    migrator.registerMigration("v15", foreignKeyChecks: .immediate) { db in
+                        try Self.applyV15AttachmentSchema(db)
+                    }
+                    migrator.registerMigration("v16", foreignKeyChecks: .immediate) { db in
+                        // Local conversation history retains document identity after removal.
+                        try db.alter(table: "assistantConversation") { t in
+                            t.add(column: "attachmentSyncId", .text)
+                        }
+                        try db.create(index: "assistantConversation_attachment_history",
+                                      on: "assistantConversation",
+                                      columns: ["attachmentSyncId", "lastActivityAt"])
+                    }
+                    migrator.registerMigration("v17", foreignKeyChecks: .immediate) { db in
+                        try Self.applyV17AttachmentSyncSchema(db)
+                    }
+                    migrator.registerMigration("v18", foreignKeyChecks: .immediate) { db in
+                        try Self.applyV18AttachmentSyncRecoverySchema(db)
+                    }
                 }
             }
         }
@@ -2672,14 +2700,20 @@ public final class AppDatabase: Sendable {
         )
     }
 
+    public static func makeV14DatabaseForTesting(on queue: DatabaseQueue) throws {
+        _ = try AppDatabase(queue, includesV13Migration: true, includesV14Migration: true)
+    }
+
     private init(
         _ dbWriter: any DatabaseWriter,
         includesV13Migration: Bool,
         includesV14Migration: Bool
     ) throws {
+        self.storageLease = try LibraryRootLease.forDatabase(at: dbWriter.path)
         self.dbWriter = dbWriter
         self.includesV13Migration = includesV13Migration
         self.includesV14Migration = includesV14Migration
+        self.includesV15Migration = false
         let migrator = self.migrator
         try Self.recoverPendingV11BlockedBySyncOrphans(on: dbWriter)
         try migrator.migrate(dbWriter)
@@ -2820,7 +2854,28 @@ extension AppDatabase {
         }
     }
 
-    public static let shared = makeShared()
+    private final class SharedDatabase: @unchecked Sendable {
+        let lock = NSLock()
+        var database: AppDatabase?
+    }
+    private static let sharedStorage = SharedDatabase()
+
+    /// Entry points call this before constructing services that use `shared`.
+    /// Failed opens are retryable and never substitute an empty library.
+    @discardableResult
+    public static func openShared() throws -> AppDatabase {
+        sharedStorage.lock.lock()
+        defer { sharedStorage.lock.unlock() }
+        if let database = sharedStorage.database { return database }
+        let database = try openLibrary(at: baseRoot, migrateLegacy: explicitStorageRoot == nil)
+        sharedStorage.database = database
+        return database
+    }
+
+    public static var shared: AppDatabase {
+        do { return try openShared() }
+        catch { preconditionFailure("Call openShared() and handle startup errors before using the library: \(error.localizedDescription)") }
+    }
 
     /// Shared App Group identifier. Both `Rubien.app` (sandboxed) and the
     /// bundled `rubien-cli` helper claim this entitlement so they read/write
@@ -2925,14 +2980,13 @@ extension AppDatabase {
         }
     }
 
-    private static func makeShared() -> AppDatabase {
-        let dirURL = baseRoot
+    static func openLibrary(at dirURL: URL, migrateLegacy: Bool, legacyRoots: [URL]? = nil) throws -> AppDatabase {
         // Skip legacy migration when the caller pointed us at an explicit dir;
         // they want isolation, not "and then we copied your old library in too."
         // Linux has no legacy install, so the scan is pure noise — gate it off.
         #if os(macOS)
-        if explicitStorageRoot == nil {
-            migrateLegacyLibraryIfNeeded(destination: dirURL)
+        if migrateLegacy {
+            try migrateLegacyLibrary(destination: dirURL, legacyRoots: legacyRoots)
         }
         #endif
 
@@ -2959,27 +3013,18 @@ extension AppDatabase {
                 }
             }
             #endif
+            let lease = try LibraryRootLease(root: dirURL)
             let dbPool = try DatabasePool(path: dbURL.path, configuration: config)
-
-            return try AppDatabase(dbPool)
+            return try AppDatabase(dbPool, storageLease: lease)
         } catch {
             // Never replace a user's persistent library with an implicit
             // in-memory database. Besides making the UI look deceptively
             // healthy, sync would persist an advanced CKSyncEngine sidecar
             // beside the unopened on-disk database and permanently skip the
             // downloaded records on the next launch.
-            #if canImport(os)
-            appDatabaseLog.fault(
-                "Primary database setup failed at \(dirURL.path, privacy: .public): \(error.localizedDescription, privacy: .public)"
-            )
-            #else
-            appDatabaseLog.error(
-                "Primary database setup failed at \(dirURL.path): \(error.localizedDescription)"
-            )
-            #endif
-            preconditionFailure(
-                "Rubien cannot safely continue without its persistent library: \(error)"
-            )
+            // The entry point owns diagnostics: extra stderr logging would
+            // corrupt the CLI/native-messaging error envelope on Linux.
+            throw LibraryStartupError(root: dirURL, reason: error.localizedDescription)
         }
     }
 
@@ -2994,6 +3039,7 @@ extension AppDatabase {
         syncEngineStateFilename,
         "PDFs",
         "MetadataArtifacts",
+        "Attachments",
         libraryFilename,
     ]
 
@@ -3027,66 +3073,75 @@ extension AppDatabase {
     ///
     /// Copy-then-delete rather than move: an interrupted migration always
     /// leaves the authoritative library at the source, so the next launch can
-    /// retry without data loss. The PID-scoped `.migrating-<pid>` scratch dir
+    /// retry without data loss. The attempt-scoped `.migrating-<uuid>` scratch dir
     /// is the only artifact of a partial run; `defer`-cleanup removes it.
     ///
     /// Exposed `internal` (via the injectable `legacyRoots` parameter) for
     /// tests; production call sites pass `nil` to use `defaultLegacyRoots()`.
-    static func migrateLegacyLibraryIfNeeded(destination: URL, legacyRoots: [URL]? = nil) {
+    @discardableResult
+    static func migrateLegacyLibraryIfNeeded(destination: URL, legacyRoots: [URL]? = nil) -> Bool {
+        do {
+            try migrateLegacyLibrary(destination: destination, legacyRoots: legacyRoots)
+            return true
+        } catch { return false }
+    }
+
+    private static func migrateLegacyLibrary(destination: URL, legacyRoots: [URL]?) throws {
         let fm = FileManager.default
         let dstLibrary = destination.appendingPathComponent(libraryFilename)
         if fm.fileExists(atPath: dstLibrary.path) { return }
 
-        let roots = legacyRoots ?? defaultLegacyRoots()
-
-        for root in roots {
+        for root in legacyRoots ?? defaultLegacyRoots() {
             let srcLibrary = root.appendingPathComponent(libraryFilename)
-            // Don't migrate from yourself.
-            if root.standardizedFileURL == destination.standardizedFileURL { continue }
+            if root.resolvingSymlinksInPath().standardizedFileURL.path == destination.resolvingSymlinksInPath().standardizedFileURL.path { continue }
             guard fm.fileExists(atPath: srcLibrary.path) else { continue }
-
-            // PID-scoped staging so concurrent processes (e.g. app + CLI
-            // launched in the same second) don't stomp each other's work.
-            let staging = destination.appendingPathComponent(
-                ".migrating-\(ProcessInfo.processInfo.processIdentifier)",
-                isDirectory: true
-            )
+            let staging = destination.appendingPathComponent(".migrating-\(UUID().uuidString)", isDirectory: true)
             defer { try? fm.removeItem(at: staging) }
             do {
-                try fm.createDirectory(at: staging, withIntermediateDirectories: true)
-
-                try checkpointSourceWAL(at: srcLibrary)
-                try copyMigrationEntries(from: root, into: staging)
-
-                // promoteStaging returns false if another process beat us to
-                // it (destination library.sqlite already exists). In that
-                // case we just bail quietly — the other process's migration
-                // is authoritative.
-                guard try promoteStaging(staging, to: destination) else {
-                    appDatabaseLog.info("Migration race: another process completed the migration first")
+                try fm.createDirectory(at: destination, withIntermediateDirectories: true)
+                let destinationLease = try LibraryRootLease(root: destination, exclusive: true)
+                let sourceLease = try LibraryRootLease(root: root, exclusive: true)
+                try withExtendedLifetime((destinationLease, sourceLease)) {
+                    if fm.fileExists(atPath: dstLibrary.path) { return }
+                    let marker = root.appendingPathComponent(LibraryRootLease.markerName)
+                    if fm.fileExists(atPath: marker.path) {
+                        // Resume an interrupted publication only to its recorded destination.
+                        guard try String(contentsOf: marker, encoding: .utf8) == destination.path else {
+                            throw LibraryRootLeaseError.promoted(destination: try String(contentsOf: marker, encoding: .utf8))
+                        }
+                    }
+                    try fm.createDirectory(at: staging, withIntermediateDirectories: true)
+                    // Also exclude SQLite users that do not participate in root leases.
+                    // EXCLUSIVE locking mode retains the file locks after COMMIT.
+                    let source = try DatabaseQueue(path: srcLibrary.path)
+                    try source.writeWithoutTransaction { db in
+                        try db.execute(sql: "PRAGMA locking_mode=EXCLUSIVE")
+                        try db.execute(sql: "BEGIN EXCLUSIVE; COMMIT")
+                        let checkpoint = try Row.fetchOne(db, sql: "PRAGMA wal_checkpoint(TRUNCATE)")
+                        guard (checkpoint?[0] as Int? ?? 1) == 0 else { throw LibraryRootLeaseError.busy }
+                        try copyMigrationEntries(from: root, into: staging)
+                        try AttachmentMigrationValidation.validateCopy(from: root, to: staging)
+                        try verifyIntegrity(at: staging.appendingPathComponent(libraryFilename))
+                        // Fence stale source opens before publishing SQLite. On a crash,
+                        // this same destination can retry without reopening a second library.
+                        try Data(destination.path.utf8).write(to: marker, options: .atomic)
+                        defer {
+                            if !fm.fileExists(atPath: dstLibrary.path) { try? fm.removeItem(at: marker) }
+                        }
+                        guard try promoteStaging(staging, to: destination) else { return }
+                        deleteSourceEntries(from: root)
+                    }
+                    try source.close()
+                    appDatabaseLog.info("Migrated Rubien library from \(root.path) to \(destination.path)")
                     return
                 }
-
-                verifyIntegrity(at: dstLibrary)
-                deleteSourceEntries(from: root)
-
-                appDatabaseLog.info("Migrated Rubien library from \(root.path) to \(destination.path)")
                 return
             } catch {
-                appDatabaseLog.error("Migration from \(root.path) failed: \(error.localizedDescription) — source left untouched, will retry next launch")
-                // Try the next legacy root.
+                // Do not substitute another legacy library or open an empty destination.
+                throw LibraryStartupError(root: root, reason: error.localizedDescription)
             }
         }
-    }
-
-    private static func checkpointSourceWAL(at sqliteURL: URL) throws {
-        // Open briefly, checkpoint, close. Folds any outstanding WAL content
-        // back into library.sqlite so the copy below is authoritative even
-        // if the old app crashed mid-write.
-        let pool = try DatabasePool(path: sqliteURL.path)
-        try pool.writeWithoutTransaction { db in
-            try db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE)")
-        }
+        return
     }
 
     private static func copyMigrationEntries(from source: URL, into staging: URL) throws {
@@ -3145,18 +3200,16 @@ extension AppDatabase {
         return true
     }
 
-    private static func verifyIntegrity(at sqliteURL: URL) {
-        do {
-            let pool = try DatabasePool(path: sqliteURL.path)
-            try pool.read { db in
-                let result = try String.fetchOne(db, sql: "PRAGMA integrity_check") ?? ""
-                if result != "ok" {
-                    appDatabaseLog.error("Integrity check on migrated library reported: \(result)")
-                }
+    private static func verifyIntegrity(at sqliteURL: URL) throws {
+        var config = Configuration()
+        config.readonly = true
+        let queue = try DatabaseQueue(path: sqliteURL.path, configuration: config)
+        try queue.read { db in
+            guard try String.fetchOne(db, sql: "PRAGMA integrity_check") == "ok" else {
+                throw LibraryRootLeaseError.invalidDatabase
             }
-        } catch {
-            appDatabaseLog.error("Integrity check on migrated library failed to run: \(error.localizedDescription)")
         }
+        try queue.close()
     }
 
     private static func deleteSourceEntries(from root: URL) {

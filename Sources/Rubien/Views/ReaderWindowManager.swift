@@ -1,10 +1,70 @@
 #if os(macOS)
 import AppKit
+import PDFKit
 import os.log
 import SwiftUI
+import WebKit
 import RubienCore
+import Combine
+import GRDB
 
 private let readerWindowLog = Logger(subsystem: "Rubien", category: "reader-window")
+
+/// Reader windows own the print shortcut so it works even when a PDF page,
+/// webpage, note editor, or Assistant field has keyboard focus.
+private final class ReaderWindow: NSWindow {
+    enum DocumentKind {
+        case pdf
+        case web
+    }
+
+    var documentKind: DocumentKind = .pdf
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown, !event.isARepeat, Self.isPrintShortcut(event) {
+            printDocument()
+            return
+        }
+        super.sendEvent(event)
+    }
+
+    private static func isPrintShortcut(_ event: NSEvent) -> Bool {
+        guard event.charactersIgnoringModifiers?.lowercased() == "p" else { return false }
+        let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
+        return modifiers == .control || modifiers == .command
+    }
+
+    private func printDocument() {
+        guard let contentView else { return }
+        switch documentKind {
+        case .pdf:
+            guard let pdfView = findView(in: contentView, ofType: PDFView.self),
+                  pdfView.document != nil else { return }
+            pdfView.print(with: NSPrintInfo.shared, autoRotate: true)
+        case .web:
+            guard let webView = findView(
+                in: contentView,
+                ofType: WKWebView.self,
+                identifier: "RubienWebReaderContent"
+            ) else { return }
+            let operation = webView.printOperation(with: NSPrintInfo.shared)
+            operation.showsPrintPanel = true
+            operation.run()
+        }
+    }
+
+    private func findView<T: NSView>(in view: NSView, ofType type: T.Type, identifier: String? = nil) -> T? {
+        if let match = view as? T, identifier == nil || view.identifier?.rawValue == identifier {
+            return match
+        }
+        for subview in view.subviews {
+            if let match = findView(in: subview, ofType: type, identifier: identifier) {
+                return match
+            }
+        }
+        return nil
+    }
+}
 
 enum ReaderWindowMetrics {
     static let defaultPreferredWidth: CGFloat = 1200
@@ -31,7 +91,7 @@ enum ReaderWindowMetrics {
 /// stays in place and multiple documents can be read side-by-side.
 ///
 /// Design goals:
-/// - One window per reference (re-activates if already open).
+/// - One window per primary reference or attachment (re-activates if already open).
 /// - Each window hosts the full `PDFReaderView` or `WebReaderView` with all
 ///   existing annotation/toolbar functionality intact.
 /// - Zero coupling to `ContentView` reader-mode state — the main window never
@@ -43,10 +103,11 @@ final class ReaderWindowManager {
 
     // MARK: - Storage
 
-    /// Open reader windows keyed by reference ID.
-    private var windows: [Int64: NSWindow] = [:]
-    /// Close-notification observers, keyed by reference ID.
-    private var closeObservers: [Int64: NSObjectProtocol] = [:]
+    /// Primary references and supplementary documents have separate identities.
+    private var windows: [ReaderDocumentIdentity: NSWindow] = [:]
+    /// Close and metadata observers share the window's document identity.
+    private var attachmentObservers: [ReaderDocumentIdentity: AnyCancellable] = [:]
+    private var closeObservers: [ReaderDocumentIdentity: NSObjectProtocol] = [:]
     /// Shared tabbing identifier so all reader windows group into the same tab bar.
     private let readerTabbingIdentifier = "com.rubien.reader-window"
 
@@ -64,7 +125,7 @@ final class ReaderWindowManager {
         // Already open → bring to front (select its tab if tabbed).
         // Check visibility, miniaturized, or part of a tab group to avoid
         // reusing a stale window that is mid-close (async cleanup race).
-        if let existing = windows[refId],
+        if let existing = windows[.reference(refId)],
            existing.isVisible || existing.isMiniaturized || existing.tabGroup != nil {
             if existing.isMiniaturized { existing.deminiaturize(nil) }
             existing.makeKeyAndOrderFront(nil)
@@ -77,9 +138,9 @@ final class ReaderWindowManager {
         let title = windowTitle(for: reference, suffix: "PDF")
         let minSize = NSSize(width: 800, height: 600)
         let contentSize = preferredWindowSize(minSize: minSize)
-        let window = makeWindow(title: title, minSize: minSize, contentSize: contentSize)
+        let window = makeWindow(title: title, minSize: minSize, contentSize: contentSize, documentKind: .pdf)
 
-        let readerView = PDFReaderView(reference: reference, pdfURL: pdfURL) { [weak self] in
+        let readerView = PDFReaderView(reference: reference, pdfURL: pdfURL, db: db) { [weak self] in
             self?.closeWindow(forReferenceId: refId)
         }
         .frame(minWidth: 800, minHeight: 600)
@@ -90,7 +151,7 @@ final class ReaderWindowManager {
         // the remembered/default size. Re-assert it, then center (pre-show; no flash).
         window.setContentSize(contentSize)
         window.center()
-        registerWindow(window, title: title, forReferenceId: refId)
+        registerWindow(window, title: title, forDocument: .reference(refId))
         ReadingActivityWindowMonitor.shared.register(window: window, referenceId: refId, database: db)
     }
 
@@ -99,7 +160,7 @@ final class ReaderWindowManager {
         guard let refId = reference.id, reference.canOpenWebReader else { return }
 
         // Already open → bring to front (select its tab if tabbed).
-        if let existing = windows[refId],
+        if let existing = windows[.reference(refId)],
            existing.isVisible || existing.isMiniaturized || existing.tabGroup != nil {
             if existing.isMiniaturized { existing.deminiaturize(nil) }
             existing.makeKeyAndOrderFront(nil)
@@ -119,9 +180,9 @@ final class ReaderWindowManager {
             height: WebReaderMetrics.minimumWindowHeight
         )
         let contentSize = preferredWindowSize(minSize: minSize)
-        let window = makeWindow(title: title, minSize: minSize, contentSize: contentSize)
+        let window = makeWindow(title: title, minSize: minSize, contentSize: contentSize, documentKind: .web)
 
-        let readerView = WebReaderView(reference: reference) { [weak self] in
+        let readerView = WebReaderView(reference: reference, db: db) { [weak self] in
             self?.closeWindow(forReferenceId: refId)
         }
 
@@ -131,21 +192,74 @@ final class ReaderWindowManager {
         // the remembered/default size. Re-assert it, then center (pre-show; no flash).
         window.setContentSize(contentSize)
         window.center()
-        registerWindow(window, title: title, forReferenceId: refId)
+        registerWindow(window, title: title, forDocument: .reference(refId))
         ReadingActivityWindowMonitor.shared.register(window: window, referenceId: refId, database: db)
+    }
+
+    /// The caller prepares verified bytes away from the main actor before opening.
+    func openAttachment(_ document: AttachmentReaderDocument, parent: Reference) throws {
+        let item = document.attachment
+        guard item.referenceId == parent.id, item.referenceSyncId == parent.syncId,
+              item.deletedAt == nil else { throw ReferenceAttachmentError.removed }
+        let identity = ReaderDocumentIdentity.attachment(item.syncId)
+        if let existing = windows[identity], existing.isVisible || existing.isMiniaturized || existing.tabGroup != nil {
+            if existing.isMiniaturized { existing.deminiaturize(nil) }
+            existing.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let isPDF = item.supportedKind == .pdf
+        let minimum = isPDF ? NSSize(width: 800, height: 600) : NSSize(
+            width: WebReaderMetrics.initialWindowMinWidth(
+                chatVisible: RubienPreferences.assistantSidebarVisible),
+            height: WebReaderMetrics.minimumWindowHeight)
+        let size = preferredWindowSize(minSize: minimum)
+        let title = "\(item.displayName) — \(parent.title)"
+        let window = makeWindow(title: title, minSize: minimum, contentSize: size, documentKind: isPDF ? .pdf : .web)
+        let close: () -> Void = { [weak self] in self?.windows[identity]?.close() }
+        if isPDF {
+            window.contentViewController = makeRubienHostingController(rootView:
+                PDFReaderView(reference: parent, pdfURL: document.fileURL, db: document.store.database,
+                              attachment: document, onClose: close), sizingOptions: [])
+        } else {
+            window.contentViewController = makeRubienHostingController(rootView:
+                WebReaderView(reference: parent, db: document.store.database, attachment: document, onClose: close), sizingOptions: [])
+        }
+        window.setContentSize(size)
+        window.center()
+        registerWindow(window, title: title, forDocument: identity)
+        if let parentId = parent.id {
+            recordReaderOpen(referenceId: parentId, db: document.store.database)
+            ReadingActivityWindowMonitor.shared.register(window: window, referenceId: parentId, database: document.store.database)
+        }
+        // The document owns the sole database observation. This subscription owns
+        // native window/tab titles and closes readers when their attachment disappears.
+        attachmentObservers[identity] = document.$attachment.combineLatest(document.$isRemoved)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak window] current, isRemoved in
+                guard !isRemoved, current.deletedAt == nil else { window?.close(); return }
+                let title = "\(current.displayName) — \(parent.title)"
+                window?.title = title
+                window?.tab.title = title
+            }
+    }
+
+    func isAttachmentOpen(syncId: String) -> Bool {
+        guard let window = windows[.attachment(syncId)] else { return false }
+        return window.isVisible || window.isMiniaturized || window.tabGroup != nil
     }
 
     /// Returns true if a reader window is currently open for the given reference.
     func isOpen(referenceId: Int64) -> Bool {
-        windows[referenceId]?.isVisible == true
+        windows[.reference(referenceId)]?.isVisible == true
     }
 
     /// Close all reader windows (e.g. on app termination).
     func closeAll() {
-        for (refId, window) in windows {
+        for (refId, window) in Array(windows) {
             ReadingActivityWindowMonitor.shared.unregister(window: window)
             window.close()
-            removeObserver(forReferenceId: refId)
+            removeObserver(forDocument: refId)
         }
         windows.removeAll()
     }
@@ -173,13 +287,19 @@ final class ReaderWindowManager {
         }
     }
 
-    private func makeWindow(title: String, minSize: NSSize, contentSize: NSSize) -> NSWindow {
-        let window = NSWindow(
+    private func makeWindow(
+        title: String,
+        minSize: NSSize,
+        contentSize: NSSize,
+        documentKind: ReaderWindow.DocumentKind
+    ) -> ReaderWindow {
+        let window = ReaderWindow(
             contentRect: NSRect(origin: .zero, size: contentSize),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
+        window.documentKind = documentKind
         // Intentionally leave `window.appearance` nil: these reader windows
         // live outside the SwiftUI scene graph, so they inherit the app-wide
         // theme from `NSApplication.appearance` (set by
@@ -210,7 +330,7 @@ final class ReaderWindowManager {
         return window
     }
 
-    private func registerWindow(_ window: NSWindow, title: String, forReferenceId refId: Int64) {
+    private func registerWindow(_ window: NSWindow, title: String, forDocument refId: ReaderDocumentIdentity) {
         // Store reference
         windows[refId] = window
 
@@ -247,18 +367,19 @@ final class ReaderWindowManager {
                 }
                 guard let self else { return }
                 self.windows.removeValue(forKey: refId)
-                self.removeObserver(forReferenceId: refId)
+                self.removeObserver(forDocument: refId)
             }
         }
         closeObservers[refId] = observer
     }
 
     private func closeWindow(forReferenceId refId: Int64) {
-        windows[refId]?.close()
+        windows[.reference(refId)]?.close()
         // Observer callback handles cleanup
     }
 
-    private func removeObserver(forReferenceId refId: Int64) {
+    private func removeObserver(forDocument refId: ReaderDocumentIdentity) {
+        attachmentObservers.removeValue(forKey: refId)?.cancel()
         if let observer = closeObservers.removeValue(forKey: refId) {
             NotificationCenter.default.removeObserver(observer)
         }

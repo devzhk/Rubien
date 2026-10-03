@@ -31,6 +31,7 @@ enum MCPToolCatalog {
         let tools = documentReadTools
             + MCPAdditionalToolCatalog.readTools
             + MCPAdditionalToolCatalog.writeTools
+            + MCPAttachmentToolCatalog.tools
         precondition(
             Set(tools.map(\.name)) == RubienMCPToolPolicy.allToolNames,
             "Native MCP catalog must exactly match RubienMCPToolPolicy"

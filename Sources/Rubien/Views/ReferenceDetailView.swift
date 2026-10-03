@@ -385,6 +385,10 @@ struct ReferenceDetailView: View {
                 propertiesCard
                 if canOpenWebReader { webReaderCard }
                 if cachedHasPDFInCache { pdfCard }
+                if reference.id != nil {
+                    ReferenceAttachmentsView(reference: reference, database: db)
+                        .id(reference.syncId)
+                }
                 abstractSection
                 notesSection
                 footerSection
