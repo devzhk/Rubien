@@ -5,9 +5,13 @@ import GRDB
 @testable import RubienSync
 
 final class SyncRepairParityTests: XCTestCase {
-    private func makeFixture() throws -> DatabaseQueue {
+    private func makeFixture(currentSchema: Bool = false) throws -> DatabaseQueue {
         let queue = try DatabaseQueue()
-        try AppDatabase.makeV13DatabaseForTesting(on: queue)
+        if currentSchema {
+            _ = try AppDatabase(queue)
+        } else {
+            try AppDatabase.makeV13DatabaseForTesting(on: queue)
+        }
         try queue.write { db in
             try db.execute(sql: """
                 INSERT INTO tag(syncId, name, color, dateModified)
@@ -116,7 +120,9 @@ final class SyncRepairParityTests: XCTestCase {
 
     func testFrozenV14AndRuntimeRepairAgreeOnSharedRules() throws {
         let migrated = try makeFixture()
-        let repaired = try makeFixture()
+        // Runtime repair runs after migrations and needs the current entity tables.
+        // Seed the same legacy intent only after creating that schema.
+        let repaired = try makeFixture(currentSchema: true)
 
         _ = try AppDatabase(migrated)
         try repaired.write { db in
