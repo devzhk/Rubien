@@ -50,6 +50,20 @@ final class CodexModelCatalogTests: XCTestCase {
         XCTAssertEqual(try modelListRequests(), 1, "second call must hit the memo, not respawn")
     }
 
+    func testExternalExecutableReplacementInvalidatesCatalog() async throws {
+        let store = freshCatalog()
+        let workspace = try XCTUnwrap(currentWorkspace)
+        let launcher = workspace.appendingPathComponent("codex")
+        try FileManager.default.copyItem(atPath: fakeServerPath, toPath: launcher.path)
+        let first = await store.catalog(executableOverride: launcher.path)
+        XCTAssertTrue(first.fetchedOK)
+        // A broken replacement must not return the previously cached list.
+        try "#!/bin/sh\nexit 1\n".write(to: launcher, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: launcher.path)
+        let second = await store.catalog(executableOverride: launcher.path)
+        XCTAssertFalse(second.fetchedOK)
+    }
+
     func testForceReloadRefetches() async throws {
         let store = freshCatalog()
         _ = await store.catalog(executableOverride: fakeServerPath)
@@ -77,6 +91,39 @@ final class CodexModelCatalogTests: XCTestCase {
         let store = freshCatalog(config: ["modelListError": true])
         let catalog = await store.catalog(executableOverride: fakeServerPath)
         XCTAssertEqual(catalog, .unavailable)
+    }
+
+    func testFailedFetchBacksOffButExpiresAndExplicitReloadBypassesIt() async throws {
+        let clock = ProviderSetupTestClock()
+        let store = freshCatalog(config: ["modelListError": true], now: { clock.now() })
+        _ = await store.catalog(executableOverride: fakeServerPath)
+        _ = await store.catalog(executableOverride: fakeServerPath)
+        XCTAssertEqual(try modelListRequests(), 1)
+        clock.advance(31)
+        _ = await store.catalog(executableOverride: fakeServerPath)
+        XCTAssertEqual(try modelListRequests(), 2)
+        try writeConfig([:])
+        let cachedFailure = await store.catalog(executableOverride: fakeServerPath)
+        XCTAssertFalse(cachedFailure.fetchedOK)
+        XCTAssertEqual(try modelListRequests(), 2)
+        let recovered = await store.catalog(executableOverride: fakeServerPath, forceReload: true)
+        XCTAssertTrue(recovered.fetchedOK)
+        XCTAssertEqual(try modelListRequests(), 3)
+    }
+
+    func testExecutableReplacementBypassesFailureBackoff() async throws {
+        let store = freshCatalog(config: ["modelListError": true])
+        let launcher = try XCTUnwrap(currentWorkspace).appendingPathComponent("codex")
+        try FileManager.default.copyItem(atPath: fakeServerPath, toPath: launcher.path)
+        let failed = await store.catalog(executableOverride: launcher.path)
+        XCTAssertFalse(failed.fetchedOK)
+        try writeConfig([:])
+        let script = try String(contentsOfFile: fakeServerPath, encoding: .utf8)
+        try (script + "\n# replacement\n").write(to: launcher, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: launcher.path)
+        let recovered = await store.catalog(executableOverride: launcher.path)
+        XCTAssertTrue(recovered.fetchedOK)
+        XCTAssertEqual(try modelListRequests(), 2)
     }
 
     /// The spec §4.1 stale-completion guarantee: a fetch that was in flight when a
@@ -123,7 +170,7 @@ final class CodexModelCatalogTests: XCTestCase {
 
     /// A fresh actor with its own temp working directory (the fake writes its
     /// observed/config JSON to cwd; sharing a cwd across tests would collide).
-    private func freshCatalog(config: [String: Any] = [:]) -> CodexModelCatalog {
+    private func freshCatalog(config: [String: Any] = [:], now: @escaping @Sendable () -> Date = { Date() }) -> CodexModelCatalog {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("catalog-test-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -136,7 +183,7 @@ final class CodexModelCatalogTests: XCTestCase {
         // The production picker keeps a ten-second bound. The Python fixture can
         // cold-start much more slowly after the full process-heavy provider suite,
         // so give the harness headroom without weakening the production timeout.
-        return CodexModelCatalog(workingDirectory: dir, fetchTimeout: 30)
+        return CodexModelCatalog(workingDirectory: dir, fetchTimeout: 30, now: now)
     }
 
     private var currentWorkspace: URL?

@@ -35,6 +35,7 @@ struct RubienApp: App {
     @StateObject private var syncCoordinator = SyncCoordinator(appDatabase: AppDatabase.shared)
     @StateObject private var pdfDownloadCoordinator = PDFDownloadCoordinator()
     @StateObject private var scheduledJobCoordinator = ScheduledJobCoordinator()
+    @StateObject private var providerUpdateScheduler = ProviderUpdateScheduler()
     #if canImport(Sparkle)
     @State private var updateController = UpdateController()
     #endif
@@ -64,6 +65,8 @@ struct RubienApp: App {
                     }
                 }
                 .syncStatusBannerFromCoordinator()
+                .overlay(alignment: .top) { ProviderUpdateNotices() }
+                .task { providerUpdateScheduler.start() }
                 .task {
                     await syncCoordinator.startIfEnabled()
                 }
@@ -148,6 +151,7 @@ struct RubienApp: App {
 
 class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     private var activationCancellables = Set<AnyCancellable>()
+    @MainActor private lazy var providerTermination = ProviderUpdateTermination()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Apply the saved appearance before activation so the first window
@@ -182,6 +186,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             .publisher(for: NSApplication.didBecomeActiveNotification)
             .sink { _ in LibraryChangeBroadcaster.shared.triggerLocalRefresh() }
             .store(in: &activationCancellables)
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        providerTermination.request(actions: [.codex, .claude]) {
+            sender.reply(toApplicationShouldTerminate: true)
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

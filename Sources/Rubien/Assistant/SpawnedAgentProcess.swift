@@ -31,13 +31,15 @@ final class SpawnedAgentProcess: @unchecked Sendable {
     private let stateLock = NSLock()
     private var hasReaped = false
     private var reapedStatus: Int32?
+    private var usageLease: ProviderSetupLock?
     private static let groupCleanupTimeout: TimeInterval = 2
 
-    private init(pid: pid_t, stdin: FileHandle, stdout: FileHandle, stderr: FileHandle) {
+    private init(pid: pid_t, stdin: FileHandle, stdout: FileHandle, stderr: FileHandle, usageLease: ProviderSetupLock? = nil) {
         self.pid = pid
         self.stdinHandle = stdin
         self.stdoutHandle = stdout
         self.stderrHandle = stderr
+        self.usageLease = usageLease
     }
 
     /// The minimal ALLOWLISTED child environment shared by every provider (§4.1) —
@@ -265,6 +267,7 @@ final class SpawnedAgentProcess: @unchecked Sendable {
                 }
                 self.hasReaped = true
                 self.reapedStatus = status
+                self.usageLease = nil
                 self.stateLock.unlock()
                 continuation.resume(returning: status)
             }
@@ -340,10 +343,12 @@ final class SpawnedAgentProcess: @unchecked Sendable {
             if members.allSatisfy({ $0 == pid }) { return true }
             signalGroup(SIGKILL)
             guard ProcessInfo.processInfo.systemUptime < deadline else { return false }
-            do {
-                try await Task.sleep(for: .milliseconds(25))
-            } catch {
-                return false
+            // Cancellation often initiated this cleanup. It must not skip the
+            // bounded wait for killed children and leave the leader unreaped.
+            await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + .milliseconds(25)) {
+                    continuation.resume()
+                }
             }
         } while true
     }
@@ -412,9 +417,14 @@ final class SpawnedAgentProcess: @unchecked Sendable {
         executablePath: String,
         arguments: [String],
         environment: [String: String],
-        workingDirectory: String
+        workingDirectory: String,
+        startsNewSession: Bool = false,
+        inheritedLock: Int32? = nil,
+        maintenanceOwner: ProviderUsageOwner? = nil
     ) throws -> SpawnedAgentProcess {
         _ = sigpipeIgnored
+        let usage = try ProviderUsageCoordinator.acquireUsage(path: executablePath, owner: maintenanceOwner)
+        defer { withExtendedLifetime(usage) {} }
 
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
@@ -449,11 +459,24 @@ final class SpawnedAgentProcess: @unchecked Sendable {
         posix_spawn_file_actions_addclose(&fileActions, parentStdoutRead)
         posix_spawn_file_actions_addclose(&fileActions, parentStderrRead)
 
+        // Keep only the explicit action lock across exec, including parent death.
+        if let inheritedLock {
+            let result = posix_spawn_file_actions_addinherit_np(&fileActions, inheritedLock)
+            guard result == 0 else { throw AgentProviderError.spawnFailed(code: result) }
+        }
+
+        for descriptor in [usage?.descriptor, maintenanceOwner?.usage.descriptor, maintenanceOwner?.intent.descriptor].compactMap({ $0 }) {
+            let result = posix_spawn_file_actions_addinherit_np(&fileActions, descriptor)
+            guard result == 0 else { throw AgentProviderError.spawnFailed(code: result) }
+        }
+
         var attributes: posix_spawnattr_t?
         posix_spawnattr_init(&attributes)
         defer { posix_spawnattr_destroy(&attributes) }
-        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP))
-        posix_spawnattr_setpgroup(&attributes, 0)   // new group, pgid == child pid
+        // Installers must not inherit a controlling terminal (closing stdin alone
+        // still leaves /dev/tty available). A new session also owns a new group.
+        posix_spawnattr_setflags(&attributes, Int16(startsNewSession ? POSIX_SPAWN_SETSID : POSIX_SPAWN_SETPGROUP))
+        if !startsNewSession { posix_spawnattr_setpgroup(&attributes, 0) }
 
         let argv = [executablePath] + arguments
         let envp = environment.map { "\($0.key)=\($0.value)" }
@@ -479,7 +502,7 @@ final class SpawnedAgentProcess: @unchecked Sendable {
             pid: pid,
             stdin: stdinPipe.fileHandleForWriting,
             stdout: stdoutPipe.fileHandleForReading,
-            stderr: stderrPipe.fileHandleForReading)
+            stderr: stderrPipe.fileHandleForReading, usageLease: usage)
     }
 }
 
@@ -718,51 +741,32 @@ enum AgentBinaryProbe {
 
     /// Last-resort discovery: ask the user's login shell where `binaryName` lives
     /// (login shells run startup scripts, so this is bounded + sanitized).
-    static func shellResolve(binaryName: String) -> String? {
-        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        guard let output = run(
+    static func shellResolve(
+        binaryName: String,
+        shell: String = ProviderSetupEnvironment.loginShell(),
+        environment: [String: String] = SpawnedAgentProcess.minimalEnvironment(binaryDirectory: "")
+    ) -> String? {
+        let lookup = ProviderShellLookup()
+        guard let result = runCommand(
             executablePath: shell,
-            arguments: ["-l", "-c", "command -v \(binaryName)"],
-            environment: SpawnedAgentProcess.minimalEnvironment(binaryDirectory: ""),
-            timeout: 5)
-        else { return nil }
-        let path = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !path.isEmpty, FileManager.default.isExecutableFile(atPath: path) else { return nil }
+            arguments: ["-l", "-c", lookup.command(binaryName: binaryName)],
+            environment: environment,
+            timeout: 5, captureStderr: false),
+              !result.timedOut, result.exitCode == 0,
+              let path = lookup.parse(result.stdout).path,
+              FileManager.default.isExecutableFile(atPath: path) else { return nil }
         return path
     }
 
-    /// Run a short probe with a HARD timeout that holds even if a login-shell
-    /// grandchild keeps stdout open (A4): stdout is read on a background queue; on
-    /// timeout we `terminate()` + close the read handle to unblock the read and
-    /// return. stderr is discarded to `/dev/null` so it can never fill and stall
-    /// the child.
-    static func run(
-        executablePath: String, arguments: [String],
-        environment: [String: String], timeout: TimeInterval,
-        workingDirectory: String? = nil
-    ) -> String? {
-        guard let result = runCommand(
-            executablePath: executablePath,
-            arguments: arguments,
-            environment: environment,
-            timeout: timeout,
-            captureStderr: false,
-            workingDirectory: workingDirectory),
-              result.exitCode == 0,
-              !result.timedOut
-        else { return nil }
-        return result.stdout
-    }
-
-    /// Run a short probe and return stdout/stderr even for nonzero exits. Auth
-    /// status probes use nonzero as a meaningful "signed out" signal, unlike
-    /// `--version` where only exit 0 is usable.
+    /// Blocking shell discovery only; callers run this off the cooperative pool.
+    /// Provider executables must use runSpawnedCommand for usage admission.
     static func runCommand(
         executablePath: String, arguments: [String],
         environment: [String: String], timeout: TimeInterval,
         captureStderr: Bool = true,
         workingDirectory: String? = nil
     ) -> CommandResult? {
+        guard ProviderUsageCoordinator.packageRoot(executablePath) == nil else { return nil }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.arguments = arguments
@@ -774,7 +778,7 @@ enum AgentBinaryProbe {
         process.standardOutput = outPipe
         // Only pipe stderr when the caller needs it (auth probes read it). Otherwise send
         // it to /dev/null: a login-shell grandchild that inherits ONLY stderr would else
-        // hold that pipe open and force the timeout, making run() discard a perfectly good
+        // hold that pipe open and force the timeout, making discovery discard a perfectly good
         // stdout path — the bug that broke version discovery on some setups (A4/#3).
         let errPipe: Pipe? = captureStderr ? Pipe() : nil
         process.standardError = errPipe ?? FileHandle.nullDevice
@@ -889,7 +893,7 @@ enum AgentAuthProbe {
 
 /// A tiny lock-guarded value box so a background reader and the caller can hand off
 /// data across threads without a data race.
-private final class LockedBox<Value>: @unchecked Sendable {
+final class LockedBox<Value>: @unchecked Sendable {
     private let lock = NSLock()
     private var value: Value
     init(_ value: Value) { self.value = value }

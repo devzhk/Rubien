@@ -42,11 +42,12 @@ final class ClaudeCodeProvider: AgentProvider {
     init(
         executableOverride: String? = nil,
         contentChannel: MCPContentChannel? = nil,
-        leaseCoordinator: ClaudeSessionLeaseCoordinator = .shared
+        leaseCoordinator: ClaudeSessionLeaseCoordinator = .shared,
+        maintenanceStore: ProviderSetupStore = .standard
     ) {
         self.executableOverride = executableOverride
         self.contentChannel = contentChannel
-        self.engine = ClaudeTurnEngine(leaseCoordinator: leaseCoordinator)
+        self.engine = ClaudeTurnEngine(leaseCoordinator: leaseCoordinator, maintenanceStore: maintenanceStore)
     }
 
     func isAvailable() async -> AgentAvailability {
@@ -215,7 +216,9 @@ actor ClaudeTurnEngine {
     private var isShuttingDown = false
     private var latestStartSequence: UInt64 = 0
     private var cachedResolution: (path: String, version: String)?
+    private var cachedFingerprint: ProviderBinaryFingerprint?
     private let leaseCoordinator: ClaudeSessionLeaseCoordinator
+    private let maintenanceStore: ProviderSetupStore
     private let logger = RubienLogger(subsystem: "com.rubien.assistant", category: "ClaudeProvider")
 
     private static let settleSoftKillDelay: Double = 3.0
@@ -226,8 +229,9 @@ actor ClaudeTurnEngine {
     private static let terminalResultSoftKillDelay: Double = 10.0
     private static let terminalResultHardKillDelay: Double = 15.0
 
-    init(leaseCoordinator: ClaudeSessionLeaseCoordinator) {
+    init(leaseCoordinator: ClaudeSessionLeaseCoordinator, maintenanceStore: ProviderSetupStore = .standard) {
         self.leaseCoordinator = leaseCoordinator
+        self.maintenanceStore = maintenanceStore
     }
 
     private final class PendingStart {
@@ -408,6 +412,10 @@ actor ClaudeTurnEngine {
 
         let process: SpawnedAgentProcess
         do {
+            guard !isShuttingDown, pending?.token == start.token else {
+                await leaseCoordinator.release(lease, latestSessionID: resumeSessionID)
+                return
+            }
             process = try SpawnedAgentProcess.spawn(
                 executablePath: executable,
                 arguments: arguments,
@@ -767,6 +775,7 @@ actor ClaudeTurnEngine {
     // MARK: Availability
 
     func isAvailable(override: String?) async -> AgentAvailability {
+        if let maintenance = maintenanceStore.maintenanceAvailability(provider: .claude) { return maintenance }
         // Resolve the binary + --version once and cache THAT (expensive: candidate walk,
         // possibly a login-shell `command -v`, plus the version subprocess). Auth is
         // re-probed on EVERY call so a mid-session sign-out / token expiry is reflected —
@@ -774,6 +783,9 @@ actor ClaudeTurnEngine {
         let path: String
         let version: String
         let environment: [String: String]
+        if let cached = cachedResolution, ProviderBinaryFingerprint.read(cached.path) != cachedFingerprint {
+            cachedResolution = nil
+        }
         if let cached = cachedResolution {
             path = cached.path
             version = cached.version
@@ -786,11 +798,16 @@ actor ClaudeTurnEngine {
             }
             environment = ClaudeCLIInvocation.environment(
                 binaryDirectory: (resolved as NSString).deletingLastPathComponent)
+            let fingerprint = ProviderBinaryFingerprint.read(resolved)
             guard let probedVersion = await AgentBinaryProbe.probeVersion(
                 executablePath: resolved, environment: environment)
             else {
                 return .notFound(reason: "Found claude at \(resolved) but it did not respond to --version.")
             }
+            guard ProviderBinaryFingerprint.read(resolved) == fingerprint else {
+                return .notFound(reason: "Claude Code changed during the check. Recheck to use its new version.")
+            }
+            cachedFingerprint = fingerprint
             cachedResolution = (path: resolved, version: probedVersion)
             path = resolved
             version = probedVersion
@@ -806,15 +823,9 @@ actor ClaudeTurnEngine {
 
     /// Well-known claude install dirs; resolution control flow is shared (§5.5).
     static func resolveExecutable(override: String?) -> String? {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
         return AgentBinaryProbe.resolveExecutable(
             override: override,
-            candidates: [
-                "\(home)/.local/bin/claude",
-                "/opt/homebrew/bin/claude",
-                "/usr/local/bin/claude",
-                "\(home)/.npm-global/bin/claude",
-            ],
+            candidates: AgentProviderKind.claude.setupCandidates(home: FileManager.default.homeDirectoryForCurrentUser),
             binaryName: "claude")
     }
 }

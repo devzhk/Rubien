@@ -29,6 +29,9 @@ actor CodexModelCatalog {
     private static let logger = RubienLogger(subsystem: "com.rubien.assistant", category: "CodexModelCatalog")
 
     private var cache: [String: CodexCatalog] = [:]
+    private var fingerprints: [String: ProviderBinaryFingerprint] = [:]
+    private var failureRetryAfter: [String: Date] = [:]
+    private let now: @Sendable () -> Date
     private struct InflightFetch {
         let token: UUID
         let generation: Int
@@ -47,11 +50,13 @@ actor CodexModelCatalog {
     init(
         workingDirectory: URL = FileManager.default.temporaryDirectory,
         fetchTimeout: Double = 10,
-        usesSharedRuntime: Bool = false
+        usesSharedRuntime: Bool = false,
+        now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.workingDirectory = workingDirectory
         self.fetchTimeout = fetchTimeout
         self.usesSharedRuntime = usesSharedRuntime
+        self.now = now
     }
 
     /// The catalog for the codex the override resolves to. Memoized; `forceReload`
@@ -63,8 +68,12 @@ actor CodexModelCatalog {
             Self.logger.error("codex model/list probe failed: could not resolve a codex binary")
             return .unavailable
         }
-        if forceReload {
+        let fingerprint = ProviderBinaryFingerprint.read(path)
+        let binaryChanged = fingerprints[path] != fingerprint
+        fingerprints[path] = fingerprint
+        if forceReload || binaryChanged {
             cache[path] = nil
+            failureRetryAfter[path] = nil
             generation[path, default: 0] += 1
             let previous = inflight[path]
             previous?.task.cancel()
@@ -91,7 +100,9 @@ actor CodexModelCatalog {
             inflight[path] = replacement
             return await finish(replacement, for: path)
         }
-        if let cached = cache[path] { return cached }
+        if let cached = cache[path], cached.fetchedOK || (failureRetryAfter[path].map { now() < $0 } ?? false) {
+            return cached
+        }
         if let running = inflight[path] {
             return await finish(running, for: path)
         }
@@ -124,7 +135,15 @@ actor CodexModelCatalog {
             }
             return cache[path] ?? .unavailable
         }
+        guard fingerprints[path] == ProviderBinaryFingerprint.read(path) else {
+            cache[path] = nil
+            inflight[path] = nil
+            return .unavailable
+        }
+        // Back off failures, including a busy shared runtime, without making a
+        // transient failure permanent. Force reload and binary changes bypass it.
         cache[path] = result
+        failureRetryAfter[path] = result.fetchedOK ? nil : now().addingTimeInterval(30)
         inflight[path] = nil
         return result
     }
@@ -150,7 +169,7 @@ actor CodexModelCatalog {
         // names under feature isolation, then pin every configured server off before
         // starting this metadata-only app-server.
         guard let disabledMCPServerNames =
-            CodexInvocation.metadataDisabledMCPServerNames(
+            await CodexInvocation.metadataDisabledMCPServerNames(
             executablePath: executablePath,
             environment: environment,
             workingDirectory: workingDirectory.path
@@ -197,7 +216,13 @@ actor CodexModelCatalog {
         watchdog.cancel()
         process.closeStdin()
         process.signalGroup(SIGKILL)
-        _ = await process.wait(timeout: 2)
+        // The fetch is cancelled on reload; cleanup must not inherit that
+        // cancellation and abandon the leader before waitpid can reap it.
+        let reaped = await Task.detached { await process.wait(timeout: 2) }.value
+        guard reaped != nil else {
+            logger.error("codex model/list probe cleanup could not be confirmed")
+            return .unavailable
+        }
 
         guard let models else {
             logger.error("codex model/list probe failed: no model list received (EOF, timeout, or decode failure)")

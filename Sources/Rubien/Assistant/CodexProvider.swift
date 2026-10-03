@@ -86,7 +86,11 @@ final class CodexProvider: AgentProvider {
         shareAppServer: Bool = false,
         sharedConnectionRegistry: CodexSharedConnectionRegistry? = nil,
         runtimeMetrics: CodexRuntimeMetricsStore? = nil,
-        availabilityPreemptionHook: (@Sendable () async -> Void)? = nil
+        availabilityPreemptionHook: (@Sendable () async -> Void)? = nil,
+        maintenanceStore: ProviderSetupStore = .standard,
+        resolveForAvailability: @escaping @Sendable (String?) async -> String? = { override in
+            await Task.detached { CodexProvider.resolveExecutable(override: override) }.value
+        }
     ) {
         self.executableOverride = executableOverride
         // Production composition roots opt into the app-wide shared runtime.
@@ -104,7 +108,8 @@ final class CodexProvider: AgentProvider {
                 turnSilenceTimeout: turnSilenceTimeout,
                 livenessProbeTimeout: livenessProbeTimeout,
                 runtimeMetrics: effectiveRuntimeMetrics,
-                availabilityPreemptionHook: availabilityPreemptionHook)
+                availabilityPreemptionHook: availabilityPreemptionHook,
+                maintenanceStore: maintenanceStore, resolveForAvailability: resolveForAvailability)
         }
         if shareAppServer || sharedConnectionRegistry != nil {
             let registry = sharedConnectionRegistry ?? .shared
@@ -126,7 +131,11 @@ final class CodexProvider: AgentProvider {
     }
 
     func isAvailable() async -> AgentAvailability {
-        await connection.isAvailable()
+        await connection.isAvailable(requestedOverride: executableOverride)
+    }
+
+    func runSetupLogin(_ execute: @escaping @Sendable () async throws -> ProviderCommandResult) async throws -> ProviderCommandResult {
+        try await connection.runSetupLogin(execute)
     }
 
     func send(turn: AgentTurnRequest) -> AsyncThrowingStream<AgentEvent, Error> {
@@ -314,15 +323,9 @@ final class CodexProvider: AgentProvider {
     /// `CodexModelCatalog`'s catalog probe, so a picker asking "what can Codex
     /// run?" resolves the SAME binary a turn will actually spawn (§5.5).
     static func resolveExecutable(override: String?) -> String? {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
         return AgentBinaryProbe.resolveExecutable(
             override: override,
-            candidates: [
-                "\(home)/.npm-global/bin/codex",
-                "/opt/homebrew/bin/codex",
-                "/usr/local/bin/codex",
-                "\(home)/.local/bin/codex",
-            ],
+            candidates: AgentProviderKind.codex.setupCandidates(home: FileManager.default.homeDirectoryForCurrentUser),
             binaryName: "codex")
     }
 }
@@ -436,6 +439,16 @@ final class CodexSharedConnectionRegistry: @unchecked Sendable {
         for connection in connections {
             await connection.shutdown()
         }
+    }
+
+    func retireIdleForProviderUpdate(path: String? = nil, automatic: Bool = false) async {
+        let connection = currentConnection()
+        await connection?.retireIdleForProviderUpdate(path: path, automatic: automatic)
+    }
+    private func currentConnection() -> CodexRuntimeBroker? {
+        lock.lock()
+        defer { lock.unlock() }
+        return entry?.connection
     }
 
     private func removeAllConnections() -> [CodexRuntimeBroker] {
@@ -605,15 +618,15 @@ enum CodexInvocation {
         executablePath: String,
         environment: [String: String],
         workingDirectory: String
-    ) -> [String]? {
-        guard let catalog = AgentBinaryProbe.run(
+    ) async -> [String]? {
+        guard let catalog = await AgentBinaryProbe.runSpawnedCommand(
             executablePath: executablePath,
             arguments: metadataMCPListArguments,
             environment: environment,
             timeout: 5,
             workingDirectory: workingDirectory
-        ) else { return nil }
-        return configuredEnabledMCPServerNames(from: catalog)
+        ), catalog.exitCode == 0, !catalog.timedOut else { return nil }
+        return configuredEnabledMCPServerNames(from: catalog.stdout)
     }
 
     /// The shared minimal ALLOWLISTED environment. `HOME` (in the shared allowlist)
@@ -652,6 +665,8 @@ private actor CodexRuntimeBroker {
     private let livenessProbeTimeout: Double
     nonisolated private let runtimeMetrics: CodexRuntimeMetricsStore?
     private let availabilityPreemptionHook: (@Sendable () async -> Void)?
+    private let maintenanceStore: ProviderSetupStore
+    private let resolveForAvailability: @Sendable (String?) async -> String?
     private let logger = RubienLogger(subsystem: "com.rubien.assistant", category: "CodexProvider")
 
     init(
@@ -663,7 +678,9 @@ private actor CodexRuntimeBroker {
         turnSilenceTimeout: Double,
         livenessProbeTimeout: Double,
         runtimeMetrics: CodexRuntimeMetricsStore?,
-        availabilityPreemptionHook: (@Sendable () async -> Void)?
+        availabilityPreemptionHook: (@Sendable () async -> Void)?,
+        maintenanceStore: ProviderSetupStore,
+        resolveForAvailability: @escaping @Sendable (String?) async -> String?
     ) {
         self.executableOverride = executableOverride
         self.contentChannel = contentChannel
@@ -674,6 +691,8 @@ private actor CodexRuntimeBroker {
         self.livenessProbeTimeout = max(0.001, livenessProbeTimeout)
         self.runtimeMetrics = runtimeMetrics
         self.availabilityPreemptionHook = availabilityPreemptionHook
+        self.maintenanceStore = maintenanceStore
+        self.resolveForAvailability = resolveForAvailability
     }
 
     // Tunables (single point — mirrors ClaudeTurnEngine's named timers).
@@ -792,6 +811,8 @@ private actor CodexRuntimeBroker {
         let process: SpawnedAgentProcess
         let generation: Int
         let spawnConfiguration: CodexRuntimeProfile
+        let executablePath: String
+        let executableFingerprint: ProviderBinaryFingerprint?
         let stderr = StderrRingBuffer()
         var nextRequestID = 1
         var pending: [Int: PendingRequest] = [:]
@@ -825,11 +846,13 @@ private actor CodexRuntimeBroker {
 
         init(
             process: SpawnedAgentProcess, generation: Int,
-            spawnConfiguration: CodexRuntimeProfile
+            spawnConfiguration: CodexRuntimeProfile, executablePath: String
         ) {
             self.process = process
             self.generation = generation
             self.spawnConfiguration = spawnConfiguration
+            self.executablePath = executablePath
+            self.executableFingerprint = ProviderBinaryFingerprint.read(executablePath)
         }
     }
 
@@ -842,6 +865,7 @@ private actor CodexRuntimeBroker {
         let task: Task<Bool, Never>
     }
 
+    private var setupLoginInProgress = false
     private var server: Server?
     private var serverGeneration = 0
     private var initializeRecovery: InitializeRecovery?
@@ -944,9 +968,12 @@ private actor CodexRuntimeBroker {
     /// cached — re-probed on every isAvailable() so a mid-session sign-out is reflected
     /// instead of Recheck being a no-op (#11); a not-found stays uncached (B6).
     private var cachedResolution: (path: String, version: String?)?
+    private var cachedResolutionFingerprint: ProviderBinaryFingerprint?
+    private var availabilityResolution: (token: UUID, task: Task<String?, Never>)?
     private struct AvailabilityProbe {
         let token: UUID
         let path: String
+        let fingerprint: ProviderBinaryFingerprint?
         let metadataWorkID: UUID
         let task: Task<AgentAvailability, Never>
     }
@@ -966,6 +993,11 @@ private actor CodexRuntimeBroker {
         identityObserver: AgentIdentityObserver?,
         metricsTicket: CodexRuntimeMetricsTurnTicket?
     ) async {
+        if setupLoginInProgress {
+            continuation.finish(throwing: ProviderSetupError.command("Codex sign-in is running. Finish or cancel sign-in before starting a conversation."))
+            await identityObserver?.close()
+            return
+        }
         if retiredTokens.contains(token) {
             continuation.finish()
             await identityObserver?.close()
@@ -2133,6 +2165,16 @@ private actor CodexRuntimeBroker {
         ))
     }
 
+    func retireIdleForProviderUpdate(path: String?, automatic: Bool) async {
+        guard let srv = server, path == nil || srv.executablePath == path,
+              automatic || ProviderUsageCoordinator.pending(path: srv.executablePath),
+              srv.handshaked, srv.pending.isEmpty,
+              !activeTurnsByToken.values.contains(where: { !$0.finished && $0.runtimeGeneration != nil }),
+              scheduledPayloads.isEmpty, availabilityProbe == nil else { return }
+        killServer(srv)
+        _ = await joinInitializeRecoveryIfNeeded()
+    }
+
     /// Window close: kill the server's whole tree. The turn stream (if any) is
     /// finished FIRST so the reader's EOF path sees a deliberate shutdown.
     func shutdown() async {
@@ -2249,8 +2291,33 @@ private actor CodexRuntimeBroker {
         }
         guard !shutdownRequested else { throw RequestFailure.serverExited }
 
+        guard !setupLoginInProgress else {
+            throw ProviderSetupError.command("Codex sign-in is running. Finish or cancel sign-in before starting a conversation.")
+        }
+        var resolvedPath = server?.executablePath
+            ?? ProviderUsageCoordinator.pendingPath(provider: .codex, override: executableOverride)
+        if resolvedPath == nil { resolvedPath = await resolvedExecutablePath() }
+        guard !shutdownRequested else { throw RequestFailure.serverExited }
+        if let updatePath = resolvedPath, ProviderUsageCoordinator.pending(path: updatePath) {
+            ProviderUsageCoordinator.markDemand(path: updatePath)
+            // Preserve this suspended caller and active generations while the
+            // update watcher retires the server once its actual work has ended.
+            while ProviderUsageCoordinator.pending(path: updatePath) {
+                if let srv = server, srv.handshaked, srv.pending.isEmpty,
+                   !activeTurnsByToken.values.contains(where: { !$0.finished && $0.runtimeGeneration != nil }) {
+                    killServer(srv)
+                    _ = await joinInitializeRecoveryIfNeeded()
+                }
+                try Task.checkCancellation()
+                try await Task.sleep(for: .milliseconds(200))
+            }
+            resolvedPath = await resolvedExecutablePath()
+        }
         if let srv = server {
-            if reuseAnySpawnConfiguration || srv.spawnConfiguration == configuration {
+            let binaryChanged = ProviderBinaryFingerprint.read(srv.executablePath) != srv.executableFingerprint
+            let servingTurns = activeTurnsByToken.values.contains { !$0.finished && $0.runtimeGeneration == srv.generation }
+            let shouldRefreshBinary = binaryChanged && !servingTurns && srv.handshaked && srv.pending.isEmpty
+            if !shouldRefreshBinary && (reuseAnySpawnConfiguration || srv.spawnConfiguration == configuration) {
                 do {
                     try await joinHandshake(
                         srv, timeoutOverride: requestTimeoutOverride
@@ -2280,7 +2347,11 @@ private actor CodexRuntimeBroker {
                         metricsTicket: metricsTicket)
                 }
             }
-            logger.info("spawn configuration changed — respawning codex app-server")
+            if shouldRefreshBinary {
+                cachedResolution = nil
+                resolvedPath = nil
+            }
+            logger.info("runtime configuration or executable changed — respawning codex app-server")
             runtimeMetrics?.recordProfileRespawn(
                 configuration.delta(from: srv.spawnConfiguration),
                 ticket: metricsTicket
@@ -2304,7 +2375,8 @@ private actor CodexRuntimeBroker {
             }
         }
 
-        guard let executable = CodexProvider.resolveExecutable(override: executableOverride) else {
+        if resolvedPath == nil { resolvedPath = await resolvedExecutablePath() }
+        guard let executable = resolvedPath, FileManager.default.isExecutableFile(atPath: executable) else {
             throw AgentProviderError.executableNotFound(executableOverride ?? "codex")
         }
         let environment = CodexInvocation.environment(
@@ -2312,6 +2384,7 @@ private actor CodexRuntimeBroker {
         let processWorkingDirectory = workspaceURL.standardizedFileURL.path
         if cachedResolution == nil {
             cachedResolution = (path: executable, version: nil)
+            cachedResolutionFingerprint = ProviderBinaryFingerprint.read(executable)
         }
         guard !shutdownRequested else { throw RequestFailure.serverExited }
         if server != nil || initializeRecovery != nil {
@@ -2337,7 +2410,7 @@ private actor CodexRuntimeBroker {
             workingDirectory: processWorkingDirectory)
         let srv = Server(
             process: process, generation: serverGeneration,
-            spawnConfiguration: configuration)
+            spawnConfiguration: configuration, executablePath: executable)
         server = srv
         shuttingDown = false
         startReaders(srv)
@@ -2868,6 +2941,7 @@ private actor CodexRuntimeBroker {
     }
 
     private func beginMetadataWork(kind: CodexMetadataKind) async -> MetadataLease? {
+        guard !setupLoginInProgress else { return nil }
         // Availability uses standalone `codex --version` / auth processes. Reap
         // that group before metadata is allowed to spawn/reuse app-server so the
         // broker never owns two Codex roots at once.
@@ -3288,9 +3362,36 @@ private actor CodexRuntimeBroker {
         }
     }
 
+    func runSetupLogin(_ execute: @escaping @Sendable () async throws -> ProviderCommandResult) async throws -> ProviderCommandResult {
+        guard !setupLoginInProgress, !workScheduler.hasTurnWork else {
+            throw ProviderSetupError.command("Finish active Codex conversations before signing in.")
+        }
+        setupLoginInProgress = true
+        defer { setupLoginInProgress = false; cachedResolution = nil }
+        await preemptAvailabilityProbeIfNeeded()
+        if let idle = server { killServer(idle) }
+        guard await joinInitializeRecoveryIfNeeded(), !shutdownRequested else {
+            throw ProviderSetupError.command("Codex could not finish its previous process. Restart Rubien, then try signing in.")
+        }
+        try Task.checkCancellation()
+        return try await execute()
+    }
+
     // MARK: Availability
 
-    func isAvailable() async -> AgentAvailability {
+    func isAvailable(requestedOverride: String?) async -> AgentAvailability {
+        guard requestedOverride == executableOverride else {
+            return .notFound(reason: "The selected Codex path changed. Restart Rubien to use it; existing conversations keep their current executable.")
+        }
+        if let pending = ProviderUsageCoordinator.pendingPath(provider: .codex, override: requestedOverride ?? cachedResolution?.path) {
+            return .installed(version: cachedResolution?.version, path: pending)
+        }
+        if let maintenance = maintenanceStore.maintenanceAvailability(provider: .codex) { return maintenance }
+        if setupLoginInProgress {
+            return AgentAvailability(isInstalled: true, isAuthenticated: false, version: cachedResolution?.version,
+                resolvedPath: cachedResolution?.path ?? executableOverride,
+                unavailableReason: "Codex sign-in is running.", setupInProgress: true)
+        }
         // Recheck is observational while turn work is active/reserved/queued. A
         // standalone `login status` process must never overlap the broker's root.
         if workScheduler.hasTurnWork {
@@ -3300,9 +3401,7 @@ private actor CodexRuntimeBroker {
                     path: cachedResolution.path
                 )
             }
-            guard let path = CodexProvider.resolveExecutable(
-                override: executableOverride
-            ) else {
+            guard let path = await resolvedExecutablePath() else {
                 return Self.codexNotFound()
             }
             cachedResolution = (path: path, version: nil)
@@ -3312,8 +3411,7 @@ private actor CodexRuntimeBroker {
         if let probe = availabilityProbe {
             return await finishAvailabilityProbe(probe)
         }
-        guard let path = cachedResolution?.path
-            ?? CodexProvider.resolveExecutable(override: executableOverride) else {
+        guard let path = await resolvedExecutablePath() else {
             return Self.codexNotFound()
         }
         guard let lease = await beginMetadataWork(kind: .availability) else {
@@ -3345,6 +3443,7 @@ private actor CodexRuntimeBroker {
         let environment = CodexInvocation.environment(
             binaryDirectory: (path as NSString).deletingLastPathComponent)
         let token = UUID()
+        let fingerprint = ProviderBinaryFingerprint.read(path)
         let task = Task.detached { () -> AgentAvailability in
             guard let version = await AgentBinaryProbe.probeVersion(
                 executablePath: path,
@@ -3376,11 +3475,28 @@ private actor CodexRuntimeBroker {
         let probe = AvailabilityProbe(
             token: token,
             path: path,
+            fingerprint: fingerprint,
             metadataWorkID: lease.workID,
             task: task
         )
         availabilityProbe = probe
         return await finishAvailabilityProbe(probe)
+    }
+
+    private func resolvedExecutablePath() async -> String? {
+        if let cached = cachedResolution, let fingerprint = ProviderBinaryFingerprint.read(cached.path),
+           fingerprint == cachedResolutionFingerprint { return cached.path }
+        cachedResolution = nil
+        cachedResolutionFingerprint = nil
+        if let running = availabilityResolution { return await running.task.value }
+        let token = UUID()
+        let resolver = resolveForAvailability
+        let override = executableOverride
+        let task = Task { await resolver(override) }
+        availabilityResolution = (token, task)
+        let path = await task.value
+        if availabilityResolution?.token == token { availabilityResolution = nil }
+        return path
     }
 
     private func finishAvailabilityProbe(
@@ -3390,8 +3506,12 @@ private actor CodexRuntimeBroker {
         guard availabilityProbe?.token == probe.token else { return result }
         availabilityProbe = nil
         workScheduler.finishMetadata(workID: probe.metadataWorkID)
+        guard ProviderBinaryFingerprint.read(probe.path) == probe.fingerprint else {
+            return .notFound(reason: "Codex changed during the check. Recheck to use its new version.")
+        }
         if result.isInstalled {
             cachedResolution = (path: probe.path, version: result.version)
+            cachedResolutionFingerprint = probe.fingerprint
         }
         return result
     }

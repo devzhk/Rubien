@@ -33,6 +33,25 @@ final class CodexProviderTests: XCTestCase {
 
     // MARK: Availability
 
+    func testColdTurnSharesExecutableResolutionWithRuntimeReuse() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["assistantText": "resolved once"], into: workspace)
+        let path = fakeServerPath
+        let resolutions = LockedBox(0)
+        let provider = CodexProvider(executableOverride: path,
+            resolveForAvailability: { _ in
+                resolutions.set(resolutions.get() + 1)
+                try? await Task.sleep(for: .milliseconds(20))
+                return path
+            })
+        defer { provider.shutdown() }
+        for _ in 0..<2 {
+            let events = try await collectAllEvents(provider.send(turn: turn(workspace: workspace)), timeout: 6)
+            XCTAssertTrue(events.contains(.assistantMessageCompleted(text: "resolved once")))
+        }
+        XCTAssertEqual(resolutions.get(), 1)
+    }
+
     func testIsAvailableReportsInstalledVersion() async {
         let provider = CodexProvider(executableOverride: fakeServerPath)
         let availability = await provider.isAvailable()
@@ -611,6 +630,87 @@ final class CodexProviderTests: XCTestCase {
     }
 
     // MARK: Long-lived server + thread reuse (the point of app-server)
+
+    func testChangedSelectedPathDoesNotReportPreviousExecutableAsReady() async throws {
+        let registry = CodexSharedConnectionRegistry()
+        let original = CodexProvider(executableOverride: fakeServerPath, sharedConnectionRegistry: registry)
+        let initial = await original.isAvailable()
+        XCTAssertTrue(initial.isInstalled)
+        let replacement = CodexProvider(executableOverride: "/missing/selected-codex", sharedConnectionRegistry: registry)
+        let changed = await replacement.isAvailable()
+        XCTAssertFalse(changed.isReady)
+        XCTAssertTrue(changed.unavailableReason?.contains("Restart Rubien") == true)
+        await registry.shutdownAll()
+    }
+
+    func testSetupLoginCancellationReleasesRuntimeAndAvailabilityReturnsPromptly() async throws {
+        let workspace = try makeWorkspace()
+        let provider = CodexProvider(executableOverride: fakeServerPath)
+        defer { provider.shutdown() }
+        let login = Task {
+            try await provider.runSetupLogin {
+                try await Task.sleep(for: .seconds(30))
+                return ProviderCommandResult(exitCode: 0, timedOut: false, output: "", truncated: false)
+            }
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        let before = Date()
+        let availability = await provider.isAvailable()
+        XCTAssertLessThan(Date().timeIntervalSince(before), 1)
+        XCTAssertTrue(availability.unavailableReason?.contains("sign-in is running") == true)
+        login.cancel()
+        do { _ = try await login.value; XCTFail("Expected cancellation") } catch is CancellationError {} catch { throw error }
+        let catalog = await provider.modelCatalog(workspaceURL: workspace)
+        XCTAssertTrue(catalog.fetchedOK)
+    }
+
+    func testIdleServerRefreshesAfterExternalExecutableReplacement() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["assistantText": "ready"], into: workspace)
+        let launcher = workspace.appendingPathComponent("codex")
+        try FileManager.default.copyItem(atPath: fakeServerPath, toPath: launcher.path)
+        let provider = CodexProvider(executableOverride: launcher.path)
+        defer { provider.shutdown() }
+        _ = try await collectAllEvents(provider.send(turn: turn(workspace: workspace)))
+        let firstPID = try XCTUnwrap(try readObserved(in: workspace)["pid"] as? Int)
+        // Atomic replacement models a vendor update at the same discovered path.
+        let source = try String(contentsOfFile: fakeServerPath, encoding: .utf8) + "\n# updated\n"
+        try source.write(to: launcher, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: launcher.path)
+        _ = try await collectAllEvents(provider.send(turn: turn(workspace: workspace, resume: "TH-1")))
+        let secondPID = try XCTUnwrap(try readObserved(in: workspace)["pid"] as? Int)
+        XCTAssertNotEqual(firstPID, secondPID)
+        try await assertEventuallyDead(Int32(firstPID), timeout: 5)
+    }
+
+    func testExternalExecutableReplacementDoesNotInterruptActiveTurn() async throws {
+        let workspace = try makeWorkspace()
+        try writeConfig(["hang": true], into: workspace)
+        let launcher = workspace.appendingPathComponent("codex")
+        try FileManager.default.copyItem(atPath: fakeServerPath, toPath: launcher.path)
+        let registry = CodexSharedConnectionRegistry()
+        let first = CodexProvider(executableOverride: launcher.path, sharedConnectionRegistry: registry)
+        let second = CodexProvider(executableOverride: launcher.path, sharedConnectionRegistry: registry)
+        let running = Task { try await collectAllEvents(first.send(turn: turn(workspace: workspace))) }
+        try await waitForObserved(in: workspace, timeout: 10) { ($0["turnStarts"] as? Int ?? 0) == 1 }
+        let firstPID = try XCTUnwrap(try readObserved(in: workspace)["pid"] as? Int)
+        do {
+            _ = try await first.runSetupLogin {
+                XCTFail("Login must not overlap active work")
+                return ProviderCommandResult(exitCode: 0, timedOut: false, output: "", truncated: false)
+            }
+            XCTFail("Active conversation should refuse login")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("active Codex")) }
+        let source = try String(contentsOfFile: fakeServerPath, encoding: .utf8) + "\n# updated\n"
+        try source.write(to: launcher, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: launcher.path)
+        try writeConfig(["assistantText": "second complete"], into: workspace)
+        _ = try await collectAllEvents(second.send(turn: turn(workspace: workspace)))
+        XCTAssertEqual(try readObserved(in: workspace)["pid"] as? Int, firstPID)
+        first.cancel()
+        _ = try? await running.value
+        await registry.shutdownAll()
+    }
 
     func testServerAndThreadReusedAcrossTurns() async throws {
         let workspace = try makeWorkspace()

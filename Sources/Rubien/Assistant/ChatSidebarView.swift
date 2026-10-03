@@ -129,6 +129,7 @@ struct ChatSurfaceView: View {
     var isActive = true
     let configuration: ChatSurfaceConfiguration
 
+    @State private var showingProviderSetup = false
     @State private var showingHistory = false
     @State private var showingScheduledJobs = false
     @State private var scheduledJobToEdit: ScheduledJob?
@@ -179,6 +180,9 @@ struct ChatSurfaceView: View {
         }
         .frame(minWidth: AssistantSidebarMetrics.minimumWidth)
         .task { await session.recheckAvailability() }
+        .sheet(isPresented: $showingProviderSetup, onDismiss: {
+            Task { await session.recheckAvailability() }
+        }) { AssistantSetupView() }
         .onAppear {
             session.refreshCodexCatalog()
             renderer.setTheme(colorScheme == .dark ? .dark : .light)
@@ -708,6 +712,10 @@ struct ChatSurfaceView: View {
         // normal quick-start suggestions rather than a "checking" gate. Only a KNOWN
         // not-ready state surfaces the setup card below.
         guard let availability = session.availability, !availability.isReady else { return nil }
+        if availability.setupInProgress {
+            return AssistantSetupCopy(title: "Assistant setup is running.",
+                detail: availability.unavailableReason ?? "Open assistant setup to view progress.")
+        }
         switch (session.providerKind, availability.isInstalled, availability.isAuthenticated) {
         case (.claude, false, _):
             return AssistantSetupCopy(
@@ -716,7 +724,7 @@ struct ChatSurfaceView: View {
         case (.claude, true, false):
             return AssistantSetupCopy(
                 title: "Claude Code is installed but not signed in.",
-                detail: "Run claude auth login in Terminal, then recheck.")
+                detail: "Sign in from assistant setup, or run claude auth login in Terminal and recheck.")
         case (.codex, false, _):
             return AssistantSetupCopy(
                 title: "Codex CLI wasn’t found.",
@@ -724,7 +732,7 @@ struct ChatSurfaceView: View {
         case (.codex, true, false):
             return AssistantSetupCopy(
                 title: "Codex is installed but not signed in.",
-                detail: "Run codex login in Terminal, then recheck.")
+                detail: "Sign in from assistant setup, or run codex login in Terminal and recheck.")
         default:
             return AssistantSetupCopy(
                 title: "\(session.providerKind.displayName) is unavailable.",
@@ -746,6 +754,8 @@ struct ChatSurfaceView: View {
                 .font(.system(size: 11.5))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            Button("Set up assistant…") { showingProviderSetup = true }
+                .buttonStyle(SettingsActionButtonStyle())
             Button {
                 Task { await session.recheckAvailability() }
             } label: {
