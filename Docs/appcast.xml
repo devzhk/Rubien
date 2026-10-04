@@ -742,5 +742,27 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.8.0</title>
+            <description sparkle:format="plain-text"><![CDATA[- Install and sign in to Codex or Claude Code from Rubien, with clearer setup status.
+- Check for provider updates and update supported installations from the chat notice or Settings.
+- Opt in to automatic Codex npm updates that wait for idle time and defer quietly while other sessions use the installation.
+- Add multiple PDF and Markdown attachments to references, including drag-and-drop import.
+- Read attachments with annotations and the Assistant sidebar; reveal, open, and remove files from reference details.
+- Print papers and Markdown documents from their readers with Command-P or Control-P.
+- Improve sidebar hit targets, toolbar placement, and the Home reading activity panel.
+- Add attachment commands and tools to the CLI and MCP server; improve library startup and recovery errors.
+- Attachment iCloud sync is experimental and remains disabled by default.]]></description>
+            <pubDate>Sun, 04 Oct 2026 00:18:10 +0000</pubDate>
+            <sparkle:version>51</sparkle:version>
+            <sparkle:shortVersionString>0.8.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien/releases/download/v0.8.0/Rubien-0.8.0.dmg"
+                sparkle:edSignature="endvQHcSwBqpo9xPZ5uM3lR5vO88B0w9C1VnhUqvqtVEN5ufUhjFqjF0eU213yc9QqBNzGw6qsTYr7b6TkL1Bg=="
+                length="19072215"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
