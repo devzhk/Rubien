@@ -29,8 +29,9 @@ jobs:
     # Keep a backstop for genuine runaways. A single `swift test` process spanning
     # the framework-heavy app tests and subprocess-heavy CLI tests intermittently
     # deadlocks on the macOS runner. The isolated test steps below avoid that
-    # cross-suite lifetime race while retaining the 10-minute cost guard.
-    timeout-minutes: 10
+    # cross-suite lifetime race. Cold builds plus all three suites can exceed
+    # 10 minutes; retain a bounded 15-minute backstop without skipping tests.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Build
