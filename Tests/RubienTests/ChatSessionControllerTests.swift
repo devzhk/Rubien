@@ -3350,6 +3350,42 @@ final class ChatSessionControllerTests: XCTestCase {
         return (controller, codex)
     }
 
+    func testInitialAvailabilityLoadsCodexModelsAfterAuthCompletes() async {
+        let models = ["first", "second"].map {
+            CodexModelInfo(id: $0, displayName: $0, description: nil,
+                           efforts: [], defaultEffort: nil, isDefault: false, hidden: false)
+        }
+        let (controller, codex) = makeCodexController(
+            catalog: CodexCatalog(models: models, fetchedOK: true))
+        controller.modelOverride = "saved-model"
+        codex.holdAvailability()
+        codex.holdCatalog()
+        let check = Task { await controller.recheckAvailability() }
+        await codex.waitUntilAvailabilityProbing()
+        XCTAssertEqual(codex.catalogCallCount, 0, "Discovery must wait for auth, which can retire app-server")
+        XCTAssertTrue(controller.isLoadingCodexModels)
+
+        codex.releaseAvailability()
+        await check.value
+        await waitUntil { codex.catalogCallCount == 1 }
+        XCTAssertEqual(codex.catalogCallCount, 1, "First mount must discover models without switching providers")
+        XCTAssertTrue(controller.isLoadingCodexModels)
+        codex.releaseCatalog()
+        await waitUntil { !controller.isLoadingCodexModels }
+
+        XCTAssertEqual(controller.codexModels.map(\.id), ["first", "second"])
+        XCTAssertEqual(controller.modelOverride, "saved-model", "First discovery must preserve the user's selection")
+        XCTAssertEqual(codex.catalogCallCount, 1)
+    }
+
+    func testUnavailableCodexDoesNotStartModelDiscovery() async {
+        let provider = MockAgentProvider(kind: .codex, availability: .notFound(reason: "Missing"))
+        let controller = makeController(provider: provider, sink: SpyTranscriptSink())
+        await controller.recheckAvailability()
+        XCTAssertEqual(provider.catalogCallCount, 0)
+        XCTAssertFalse(controller.isLoadingCodexModels)
+    }
+
     func testRefreshCodexCatalogPopulatesVisibleModels() async {
         let terra = CodexModelInfo(
             id: "gpt-5.6-terra", displayName: "GPT-5.6-Terra", description: nil,
@@ -3700,8 +3736,8 @@ final class ChatSessionControllerTests: XCTestCase {
         controller.refreshCodexCatalog()
         await codex.waitUntilCatalogProbing()
 
-        // Switch to Claude: catalogFetchToken bumps, and refreshCodexCatalog's
-        // Claude-side call synchronously clears codexModels (Claude has no catalog).
+        // Switch to Claude: synchronously invalidate and clear the old catalog
+        // before the new backend's availability check starts.
         controller.switchProvider(to: .claude)
         XCTAssertEqual(controller.providerKind, .claude)
 

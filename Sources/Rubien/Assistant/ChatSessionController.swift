@@ -192,6 +192,7 @@ final class ChatSessionController: ObservableObject {
     /// resolves — the picker then shows only a pin, if any, until discovery lands
     /// (spec §4.7). Claude conversations keep this empty (static lists).
     @Published private(set) var codexModels: [CodexModelInfo] = []
+    @Published private(set) var isLoadingCodexModels = false
     /// The conversation's model, applied per turn (`--model`). Claude aliases:
     /// `fable` / `opus` / `sonnet` / `haiku`. The sidebar always shows a concrete
     /// model (no "CLI default" state); `nil` remains valid programmatically and
@@ -1485,7 +1486,9 @@ final class ChatSessionController: ObservableObject {
             applyConversationDefaults(defaults)
         }
         seedCodexModelIfUnset()
-        refreshCodexCatalog()
+        catalogFetchToken += 1
+        codexModels = []
+        isLoadingCodexModels = kind == .codex
         Task { await recheckAvailability() }
     }
 
@@ -1509,6 +1512,7 @@ final class ChatSessionController: ObservableObject {
         availabilityProbeToken += 1
         catalogFetchToken += 1
         codexModels = []
+        isLoadingCodexModels = false
         if let defaults = defaultsProvider?(kind, context) {
             applyConversationDefaults(defaults)
         }
@@ -2638,17 +2642,28 @@ final class ChatSessionController: ObservableObject {
     func recheckAvailability() async {
         availabilityProbeToken += 1
         let token = availabilityProbeToken
+        catalogFetchToken += 1
+        isLoadingCodexModels = providerKind == .codex
         guard await prepareProviderAccessIfNeeded() else {
             guard token == availabilityProbeToken else { return }
             availability = .notFound(
                 reason: executionOwnership?.unavailableReason
                     ?? "Assistant execution is owned by another Rubien process."
             )
+            isLoadingCodexModels = false
             return
         }
         let result = await provider.isAvailable()
         guard token == availabilityProbeToken else { return }
         availability = result
+        // Availability may retire the idle app-server to probe authentication.
+        // Starting model/list alongside it can cancel discovery and leave only
+        // the saved model in the picker for the rest of this window's lifetime.
+        if result.isReady {
+            refreshCodexCatalog()
+        } else {
+            isLoadingCodexModels = false
+        }
     }
 
     /// The model whose effort list governs the picker (spec §4.6): the pinned
@@ -2666,19 +2681,24 @@ final class ChatSessionController: ObservableObject {
         let token = catalogFetchToken
         guard providerKind == .codex else {
             codexModels = []
+            isLoadingCodexModels = false
             return
         }
+        isLoadingCodexModels = true
         let catalogProvider = provider
         Task { [weak self] in
-            guard let self,
-                  await self.prepareProviderAccessIfNeeded(),
-                  token == self.catalogFetchToken else {
-                self?.codexModels = []
+            guard let self else { return }
+            let hasAccess = await self.prepareProviderAccessIfNeeded()
+            guard token == self.catalogFetchToken else { return }
+            guard hasAccess else {
+                self.codexModels = []
+                self.isLoadingCodexModels = false
                 return
             }
             let catalog = await catalogProvider.availableModels()
             guard token == self.catalogFetchToken else { return }
             self.codexModels = catalog?.visibleModels ?? []
+            self.isLoadingCodexModels = false
             self.seedCodexModelIfUnset()  // seed an unset conversation onto a concrete model
             self.ensureEffortSupported()  // a pinned/seeded model's efforts are now known
         }

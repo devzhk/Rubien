@@ -184,7 +184,6 @@ struct ChatSurfaceView: View {
             Task { await session.recheckAvailability() }
         }) { AssistantSetupView() }
         .onAppear {
-            session.refreshCodexCatalog()
             renderer.setTheme(colorScheme == .dark ? .dark : .light)
             // Re-mounting the pane created a fresh (empty) WebView — restore the
             // conversation from the controller's in-memory render log.
@@ -1407,6 +1406,9 @@ struct ChatSurfaceView: View {
 
     private var modelPicker: some View {
         Menu {
+            if session.providerKind == .codex, session.codexModels.isEmpty {
+                Text(session.isLoadingCodexModels ? "Loading models…" : "Model list unavailable")
+            }
             Picker("Model", selection: Binding(
                 get: { session.modelOverride },
                 set: { session.selectModel($0) })) {
