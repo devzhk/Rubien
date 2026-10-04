@@ -793,5 +793,20 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.8.3</title>
+            <description sparkle:format="plain-text"><![CDATA[• Add an Attachment sync (experimental) control in Settings → iCloud Sync for supplementary PDFs, Markdown files, and their annotations.
+• Save the choice on each Mac and show when a restart is needed. Enable it on both Macs, then restart Rubien to begin testing sync.]]></description>
+            <pubDate>Sun, 04 Oct 2026 05:43:06 +0000</pubDate>
+            <sparkle:version>54</sparkle:version>
+            <sparkle:shortVersionString>0.8.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien/releases/download/v0.8.3/Rubien-0.8.3.dmg"
+                sparkle:edSignature="7dWurZklUIeWV+AlA6lvGZh4p/R85dKE6vN3oQHR6zrzbvb82aVIfEE1djHnXmEoHoi9xTa148i2g2MtsPw/Bg=="
+                length="19077776"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
