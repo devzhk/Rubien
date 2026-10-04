@@ -33,7 +33,6 @@ struct ProviderUpdateRecord: Codable, Sendable {
     }
     func allowsNotice(now: Date) -> Bool {
         guard automaticChecks, lastError == nil, let snapshot, snapshot.hasNewerRelease,
-              snapshot.source.allowsReleaseNotice,
               now.timeIntervalSince(snapshot.checkedAt) >= 0,
               now.timeIntervalSince(snapshot.checkedAt) <= 25 * 3600 else { return false }
         return deferredVersion != snapshot.availableVersion || (deferredUntil.map { $0 <= now } ?? true)

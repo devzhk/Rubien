@@ -166,13 +166,41 @@ final class ProviderUpdateTests: XCTestCase {
     }
 
     @MainActor
-    func testNativePolicyUnknownAndNewerInstalledVersionNeverNotify() async throws {
+    func testNativeReleaseNoticesUseCachedResultsAndRespectLaterAndOptOut() async throws {
+        for provider: AgentProviderKind in [.codex, .claude] {
+            let counter = ReleaseTestCounter()
+            let installed = provider == .claude ? "2.1.288" : "0.159.0"
+            let available = provider == .claude ? "2.1.289" : "0.160.0"
+            await counter.setVersion(available)
+            let first = try model(counter: counter, hint: .native, installed: installed, provider: provider)
+            await first.check()
+            XCTAssertEqual(first.notice?.availableVersion, available)
+            XCTAssertEqual(first.notice?.source, provider == .claude ? .claudeNative : .codexNative)
+
+            let reopened = try model(counter: counter, hint: .native, installed: installed,
+                                     createExecutable: false, provider: provider)
+            await reopened.check()
+            XCTAssertEqual(reopened.notice?.availableVersion, available)
+            let calls = await counter.count
+            XCTAssertEqual(calls, 1, "A cached native update must appear before the next daily check")
+            reopened.later()
+
+            let deferred = try model(counter: counter, hint: .native, installed: installed,
+                                    createExecutable: false, provider: provider)
+            await deferred.check(manual: true)
+            XCTAssertNil(deferred.notice)
+            deferred.setAutomaticChecks(false)
+            await counter.setVersion(provider == .claude ? "2.1.290" : "0.161.0")
+            await deferred.check(manual: true)
+            XCTAssertTrue(deferred.record.snapshot?.hasNewerRelease == true)
+            XCTAssertNil(deferred.notice)
+        }
+    }
+
+    @MainActor
+    func testNewerInstalledVersionNeverNotifies() async throws {
         let counter = ReleaseTestCounter()
-        let native = try model(counter: counter, hint: .native)
-        await native.check()
-        XCTAssertTrue(native.record.snapshot?.hasNewerRelease == true)
-        XCTAssertNil(native.notice)
-        let newer = try model(counter: counter, installed: "0.170.0", createExecutable: false)
+        let newer = try model(counter: counter, installed: "0.170.0")
         await newer.check(manual: true)
         XCTAssertFalse(newer.record.snapshot?.hasNewerRelease == true)
         XCTAssertNil(newer.notice)
@@ -301,11 +329,11 @@ final class ProviderUpdateTests: XCTestCase {
     @MainActor
     private func model(counter: ReleaseTestCounter, clock: ProviderSetupTestClock = .init(),
                        hint: ProviderInstallation.MethodHint = .npm, installed: String = "0.153.4",
-                       createExecutable: Bool = true) throws -> ProviderUpdateModel {
-        let path = directory.appendingPathComponent("codex")
+                       createExecutable: Bool = true, provider: AgentProviderKind = .codex) throws -> ProviderUpdateModel {
+        let path = directory.appendingPathComponent(provider.rawValue)
         if createExecutable { try Data("fixture".utf8).write(to: path) }
         let found = ProviderInstallation(state: .found, path: path.path, hint: hint, detail: nil)
-        return ProviderUpdateModel(provider: .codex, store: ProviderUpdateStore(root: directory.appendingPathComponent("state")),
+        return ProviderUpdateModel(provider: provider, store: ProviderUpdateStore(root: directory.appendingPathComponent("state")),
             override: { nil }, now: { clock.now() }, jitter: { 0 }, discover: { _, _ in found },
             version: { _, _ in installed }, fetch: { _ in try await counter.fetch() })
     }

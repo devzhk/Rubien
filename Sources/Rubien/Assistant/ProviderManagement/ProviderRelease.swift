@@ -75,13 +75,6 @@ enum ProviderReleaseSource: String, Codable, Sendable {
         case .codexHomebrew, .claudeHomebrew: return "Homebrew cask release"
         }
     }
-    var allowsReleaseNotice: Bool {
-        switch self {
-        case .codexNPM, .claudeNPM, .codexHomebrew, .claudeHomebrew: return true
-        // Native updater/channel policy is not established by a layout hint.
-        case .codexNative, .claudeNative: return false
-        }
-    }
     var updateCommand: String? {
         switch self {
         case .codexNPM: return "npm install -g @openai/codex@latest"

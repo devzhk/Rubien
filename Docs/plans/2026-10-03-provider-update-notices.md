@@ -13,7 +13,7 @@ The user clarified on 2026-10-03 that installation/sign-in alone does not satisf
 - Share automatic-check preferences, last results, retry deadlines, and seven-day Later suppression across Rubien builds, keyed by provider and selected installation.
 - Start background checks after 30 seconds, check daily with jitter, and catch up once on activation. Manual checks bypass normal age but respect Retry-After.
 - Add Settings controls and a compact in-app notice with Update instructions and Later. Preserve a previous result on network failure and label its age.
-- Public latest-release comparisons are advisory. Native channel/updater policy remains unverified and suppresses proactive native notices. Pre-release, custom, missing, and broken installations must not produce a false up-to-date claim.
+- Public latest-release comparisons are advisory. Native Claude Code and Codex installations also show advisory notices for fresh newer releases, as requested after testing 0.8.0. Channel/updater uncertainty limits update actions, not notice visibility. Pre-release, custom, missing, and broken installations must not produce a false up-to-date claim.
 - One-click native updates still require updater retention tests; package mutations and automatic installation still require Phase 3 ownership/usage checks. This step executes no update command.
 
 ## Verification

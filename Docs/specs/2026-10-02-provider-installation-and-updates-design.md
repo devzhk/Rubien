@@ -149,11 +149,11 @@ For native installations, show **Updates managed by Codex** or **Updates managed
 
 After the package-manager adapters pass Phase 3 gates, eligible Homebrew/npm installations gain **Update** and **Automatically install updates through Rubien**, off by default. Enabling automatic installation enables automatic checking. Disabling automatic checking cancels pending automatic work and disables that consent. The policy is shared across Rubien builds on this Mac for the same installation (§7).
 
-Settings always displays the last successfully established available version and its freshness, regardless of updater policy. Native installations get a proactive update notice **only when their vendor updater is established as disabled** and an eligible newer version is known. Enabled, supported-but-unknown, stale, or unavailable updater status produces no proactive native notice. A manually requested check still shows its result inline in Settings. Unknown is never treated as disabled; check policy again before showing a delayed notice.
+Settings always displays the last successfully established available version and its freshness. Following the user’s 2026-10-03 correction after testing 0.8.0, native Claude Code and Codex installations also show the advisory release notice when a fresh comparison finds a newer public release. Vendor self-update status does not suppress that notice. Automatic-check opt-out, stale/error results, Later, and per-session deduplication still apply. Showing a notice does not establish update eligibility; the action planner separately validates ownership, channel/policy, and retention before offering Update now.
 
 An eligible notice names the provider and offers Update (or Update instructions) and Later. Later suppresses that installation/version notice for seven days; a newer eligible version may produce a new notice only if the notice policy still permits it. Deduplicate per installation/version per app session and persist suppression. Following the user's 2026-10-03 clarification, Phase 2 also shows **New public release** advisory notices for likely npm/Homebrew installations. These compare installed and published versions and lead to general official instructions; they do not establish registry, prefix, pins, updater policy, or mutation eligibility. Phase 3 is still required for targeted package updates and automatic-install consent.
 
-The first Phase 2 step may show native **latest published** metadata inline before channel/policy verification, clearly labeled as a public release comparison. It must not call that version an eligible native update or show a proactive native notice while updater/channel policy is unknown. Keep release-check status separate from installed/authenticated readiness.
+Native latest-release metadata and notices are public release comparisons, even before channel/policy verification. They do not establish an eligible native update. Keep release-check status separate from installed/authenticated readiness.
 
 Manual updates show their actual command in expandable details. Phase 2 native Update starts after action-lock/eligibility checks, even during a chat, with no “Update when idle” state. Only Phase 3 package updates wait for usage to end; the click authorizes that queued operation. Turning off future automatic installation does not cancel a manually queued package update or interrupt a running mutation. Turning off Rubien's checks has no effect on vendor-owned updates.
 
@@ -486,7 +486,7 @@ The Phase 1 runner passes its action lock to installer and login children. The c
 
 First validate public metadata contracts and deliver version comparison, daily checks, Settings results, and npm/Homebrew advisory notices with general update instructions. This addresses the user's requirement that a new package release should not go unnoticed. Checks do not depend on authentication or start a provider chat.
 
-Then validate native ownership, channel/policy, and retention contracts before enabling native manual Update, native notices for established disabled updaters, action serialization, and recovery. Updates do not drain local chats or integrate maintenance into CodexWorkScheduler. Full package ownership checks remain in Phase 3. No second native background installer or shared usage lease is required.
+Then validate native ownership, channel/policy, and retention contracts before enabling native manual Update, action serialization, and recovery. Advisory native notices use the release comparison and do not require mutation eligibility. Updates do not drain local chats or integrate maintenance into CodexWorkScheduler. Full package ownership checks remain in Phase 3. No second native background installer or shared usage lease is required.
 
 ### Phase 3 — optional package-manager updates and automation
 
@@ -543,7 +543,7 @@ Tests are scoped by delivery phase; later-phase cases are not prerequisites for 
 | 1+ | VoiceOver, keyboard, appearance | Readable states, accessible commands, visible feedback |
 | 2 | Native update during long-running local and remote chats | Update proceeds; old executable/resources remain usable; no chat drain; subsequent work uses fresh runtime |
 | 2 | Scheduled work due during native update | Normal scheduling continues; no maintenance-related pause |
-| 2 | Self-updating native installation | Settings shows eligible version; no proactive notice unless updater is established disabled |
+| 2 | Self-updating native installation | Settings and the advisory notice show a fresh newer public release; Update now still requires a validated action plan |
 | 2 | Existing Homebrew/npm installation | Likely label and general official guidance, no verified-prefix claim |
 | 3 | Existing Homebrew/npm installation | Verified targeted command and update after usage drains |
 | 3 | Two libraries/processes using same package installation | Active usage blocks mutation; queued work resumes after maintenance |

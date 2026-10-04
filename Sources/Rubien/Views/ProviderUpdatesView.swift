@@ -26,7 +26,7 @@ struct ProviderUpdatesView: View {
                 Text(result.source.label).font(.caption).foregroundStyle(.secondary)
                 Text("Last checked: \(result.checkedAt.formatted(date: .abbreviated, time: .shortened))")
                     .font(.caption).foregroundStyle(.secondary)
-                if !result.source.allowsReleaseNotice {
+                if result.source == .codexNative || result.source == .claudeNative {
                     Text("The provider manages native updates. The latest release may differ from your selected channel or version policy.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
