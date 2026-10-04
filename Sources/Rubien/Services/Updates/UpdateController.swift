@@ -1,5 +1,6 @@
 #if canImport(Sparkle)
 import Foundation
+import Combine
 import Observation
 import Sparkle
 
@@ -25,7 +26,12 @@ final class UpdateController {
 
     var automaticallyChecks: Bool {
         get { updater.automaticallyChecksForUpdates }
-        set { updater.automaticallyChecksForUpdates = newValue }
+        set {
+            updater.automaticallyChecksForUpdates = newValue
+            if !newValue, launchCheckState == .pending {
+                launchCheckState = .finished
+            }
+        }
     }
 
     var automaticallyDownloads: Bool {
@@ -35,11 +41,10 @@ final class UpdateController {
 
     private let updater: any UpdaterProtocol
 
-    // Ensures the launch-time background check fires at most once per process
-    // (a second window appearing would otherwise re-trigger it). Sparkle warns
-    // that forced background checks belong at launch only, not arbitrary later
-    // points — see `kickLaunchBackgroundCheck()`.
-    private var didKickLaunchBackgroundCheck = false
+    private enum LaunchCheckState { case notRequested, pending, finished }
+    private var launchCheckState = LaunchCheckState.notRequested
+    private let initialCheckDate: Date?
+    @ObservationIgnored private var stateObservation: AnyCancellable?
 
     // Strongly retained — SPUStandardUpdaterController stores delegates as
     // weak references, so the delegate must outlive init by being owned here.
@@ -69,13 +74,25 @@ final class UpdateController {
         self.standardController = standardController
         self.canCheckForUpdates = updater.canCheckForUpdates
         self.lastCheckDate = updater.lastUpdateCheckDate
+        self.initialCheckDate = updater.lastUpdateCheckDate
 
         // Wire the callback ONCE here, regardless of which init path was
         // taken. Captures self weakly to avoid a retain cycle.
         userDriverDelegate.onUpdateReady = { [weak self] version in
+            self?.launchCheckState = .finished
             self?.updateReadyToInstall = true
             self?.pendingVersion = version
         }
+
+        // Sparkle changes readiness during its scheduling callbacks. Defer to
+        // the next main-queue turn so we read settled state and never reenter it.
+        stateObservation = updater.stateChanges
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in
+                MainActor.assumeIsolated {
+                    self?.updaterStateChanged()
+                }
+            }
     }
 
     /// Test convenience: builds a fresh delegate alongside the injected
@@ -112,6 +129,7 @@ final class UpdateController {
     }
 
     func checkNow() {
+        launchCheckState = .finished
         updater.checkForUpdates()
     }
 
@@ -133,9 +151,29 @@ final class UpdateController {
     /// Sparkle's guidance for launch-time checks) and made idempotent so
     /// re-opening a window doesn't re-kick mid-session.
     func kickLaunchBackgroundCheck() {
-        guard !didKickLaunchBackgroundCheck else { return }
-        didKickLaunchBackgroundCheck = true
-        guard automaticallyChecks else { return }
+        guard launchCheckState == .notRequested else { return }
+        launchCheckState = .pending
+        attemptLaunchBackgroundCheck()
+    }
+
+    private func updaterStateChanged() {
+        canCheckForUpdates = updater.canCheckForUpdates
+        lastCheckDate = updater.lastUpdateCheckDate
+        attemptLaunchBackgroundCheck()
+    }
+
+    private func attemptLaunchBackgroundCheck() {
+        guard launchCheckState == .pending else { return }
+        guard automaticallyChecks, updater.lastUpdateCheckDate == initialCheckDate else {
+            // A real check started since initialization, or the user opted out.
+            // Sparkle's startup scheduling probe does not change the check date.
+            launchCheckState = .finished
+            return
+        }
+        // canCheckForUpdates can be true while an update is already being
+        // offered. Background checks require both readiness and an idle session.
+        guard updater.canCheckForUpdates, !updater.sessionInProgress else { return }
+        launchCheckState = .finished
         updater.checkForUpdatesInBackground()
     }
 
@@ -148,7 +186,7 @@ final class UpdateController {
         // "Install and Relaunch" button drive the same SPUUpdater pipeline.
         // When Sparkle exposes installPendingUpdate() (or we adopt a custom
         // user driver), call that here instead.
-        updater.checkForUpdates()
+        checkNow()
     }
 
     // MARK: - Testing hooks

@@ -1,5 +1,6 @@
 #if canImport(Sparkle)
 import Foundation
+import Combine
 import Sparkle
 
 /// Narrow abstraction over `SPUUpdater` used by `UpdateController` so unit
@@ -12,14 +13,22 @@ protocol UpdaterProtocol: AnyObject {
     var automaticallyChecksForUpdates: Bool { get set }
     var automaticallyDownloadsUpdates: Bool { get set }
     var canCheckForUpdates: Bool { get }
+    var sessionInProgress: Bool { get }
     var lastUpdateCheckDate: Date? { get }
+    var stateChanges: AnyPublisher<Void, Never> { get }
 
     func checkForUpdates()
     func checkForUpdatesInBackground()
 }
 
 extension SPUUpdater: UpdaterProtocol {
-    // SPUUpdater already exposes every member of UpdaterProtocol with the
-    // same names. Empty extension to declare conformance.
+    var stateChanges: AnyPublisher<Void, Never> {
+        Publishers.MergeMany([
+            publisher(for: \.canCheckForUpdates, options: [.new]).map { _ in () }.eraseToAnyPublisher(),
+            publisher(for: \.sessionInProgress, options: [.new]).map { _ in () }.eraseToAnyPublisher(),
+            publisher(for: \.lastUpdateCheckDate, options: [.new]).map { _ in () }.eraseToAnyPublisher(),
+            publisher(for: \.automaticallyChecksForUpdates, options: [.new]).map { _ in () }.eraseToAnyPublisher(),
+        ]).eraseToAnyPublisher()
+    }
 }
 #endif

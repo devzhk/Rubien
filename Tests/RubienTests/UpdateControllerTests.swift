@@ -1,5 +1,6 @@
 #if canImport(Sparkle)
 import XCTest
+import Combine
 @testable import Rubien
 
 @MainActor
@@ -66,6 +67,129 @@ final class UpdateControllerTests: XCTestCase {
         XCTAssertEqual(fake.checkForUpdatesInBackgroundCallCount, 1)
     }
 
+    func testLaunchCheckWaitsForStartupSchedulingToFinish() async {
+        let fake = FakeUpdater()
+        fake.automaticallyChecksForUpdates = true
+        fake.canCheckForUpdates = false
+        fake.sessionInProgress = true
+        let controller = UpdateController(updater: fake)
+
+        controller.kickLaunchBackgroundCheck()
+        controller.kickLaunchBackgroundCheck()
+        XCTAssertEqual(fake.checkForUpdatesInBackgroundCallCount, 0)
+
+        // Sparkle may set readiness before it clears its scheduling session.
+        fake.canCheckForUpdates = true
+        await flushUpdaterChanges()
+        XCTAssertTrue(controller.canCheckForUpdates)
+        XCTAssertEqual(fake.checkForUpdatesInBackgroundCallCount, 0)
+
+        fake.sessionInProgress = false
+        XCTAssertEqual(fake.checkForUpdatesInBackgroundCallCount, 0, "Do not reenter Sparkle's callback")
+        await flushUpdaterChanges()
+        XCTAssertEqual(fake.checkForUpdatesInBackgroundCallCount, 1)
+
+        fake.sessionInProgress = true
+        fake.sessionInProgress = false
+        controller.kickLaunchBackgroundCheck()
+        await flushUpdaterChanges()
+        XCTAssertEqual(fake.checkForUpdatesInBackgroundCallCount, 1)
+        XCTAssertEqual(fake.checkForUpdatesCallCount, 0)
+    }
+
+    func testScheduledCheckSatisfiesPendingLaunchRequest() async {
+        let fake = FakeUpdater()
+        fake.automaticallyChecksForUpdates = true
+        fake.sessionInProgress = true
+        let controller = UpdateController(updater: fake)
+        controller.kickLaunchBackgroundCheck()
+
+        let checkedAt = Date(timeIntervalSince1970: 100)
+        fake.lastUpdateCheckDate = checkedAt
+        fake.sessionInProgress = false
+        await flushUpdaterChanges()
+
+        XCTAssertEqual(controller.lastCheckDate, checkedAt)
+        XCTAssertEqual(fake.checkForUpdatesInBackgroundCallCount, 0)
+    }
+
+    func testScheduledCheckBeforeWindowAppearsSatisfiesLaunchRequest() {
+        let fake = FakeUpdater()
+        fake.automaticallyChecksForUpdates = true
+        let controller = UpdateController(updater: fake)
+        fake.lastUpdateCheckDate = Date(timeIntervalSince1970: 100)
+
+        controller.kickLaunchBackgroundCheck()
+
+        XCTAssertEqual(fake.checkForUpdatesInBackgroundCallCount, 0)
+    }
+
+    func testOptOutWhileWaitingCancelsLaunchCheck() async {
+        let fake = FakeUpdater()
+        fake.automaticallyChecksForUpdates = true
+        fake.sessionInProgress = true
+        let controller = UpdateController(updater: fake)
+        controller.kickLaunchBackgroundCheck()
+
+        controller.automaticallyChecks = false
+        fake.sessionInProgress = false
+        controller.automaticallyChecks = true
+        await flushUpdaterChanges()
+
+        XCTAssertEqual(fake.checkForUpdatesInBackgroundCallCount, 0)
+    }
+
+    func testManualCheckReplacesPendingLaunchCheck() async {
+        let fake = FakeUpdater()
+        fake.automaticallyChecksForUpdates = true
+        fake.sessionInProgress = true
+        let controller = UpdateController(updater: fake)
+        controller.kickLaunchBackgroundCheck()
+
+        controller.checkNow()
+        fake.sessionInProgress = false
+        await flushUpdaterChanges()
+
+        XCTAssertEqual(fake.checkForUpdatesCallCount, 1)
+        XCTAssertEqual(fake.checkForUpdatesInBackgroundCallCount, 0)
+    }
+
+    func testReadinessAndLastCheckDateStayCurrent() async {
+        let fake = FakeUpdater()
+        let controller = UpdateController(updater: fake)
+        fake.canCheckForUpdates = false
+        fake.lastUpdateCheckDate = Date(timeIntervalSince1970: 100)
+        await flushUpdaterChanges()
+
+        XCTAssertFalse(controller.canCheckForUpdates)
+        XCTAssertEqual(controller.lastCheckDate, fake.lastUpdateCheckDate)
+        fake.canCheckForUpdates = true
+        await flushUpdaterChanges()
+        XCTAssertTrue(controller.canCheckForUpdates)
+        XCTAssertEqual(fake.checkForUpdatesInBackgroundCallCount, 0)
+    }
+
+    func testPendingLaunchObservationDoesNotRetainController() async {
+        let fake = FakeUpdater()
+        fake.automaticallyChecksForUpdates = true
+        fake.sessionInProgress = true
+        var controller: UpdateController? = UpdateController(updater: fake)
+        weak var weakController = controller
+        controller?.kickLaunchBackgroundCheck()
+        controller = nil
+        fake.sessionInProgress = false
+        await flushUpdaterChanges()
+
+        XCTAssertNil(weakController)
+        XCTAssertEqual(fake.checkForUpdatesInBackgroundCallCount, 0)
+    }
+
+    private func flushUpdaterChanges() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+    }
+
     func testAutomaticallyChecksRoundTrip() {
         let fake = FakeUpdater()
         fake.automaticallyChecksForUpdates = true
@@ -112,10 +236,13 @@ final class UpdateControllerTests: XCTestCase {
 
 @MainActor
 final class FakeUpdater: UpdaterProtocol {
-    var automaticallyChecksForUpdates: Bool = false
+    private let changes = PassthroughSubject<Void, Never>()
+    var stateChanges: AnyPublisher<Void, Never> { changes.eraseToAnyPublisher() }
+    var automaticallyChecksForUpdates: Bool = false { didSet { changes.send() } }
     var automaticallyDownloadsUpdates: Bool = false
-    var canCheckForUpdates: Bool = true
-    var lastUpdateCheckDate: Date? = nil
+    var canCheckForUpdates: Bool = true { didSet { changes.send() } }
+    var sessionInProgress: Bool = false { didSet { changes.send() } }
+    var lastUpdateCheckDate: Date? = nil { didSet { changes.send() } }
 
     var checkForUpdatesCallCount = 0
     var checkForUpdatesInBackgroundCallCount = 0
