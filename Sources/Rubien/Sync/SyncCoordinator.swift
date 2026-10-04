@@ -23,6 +23,7 @@ public final class SyncCoordinator: ObservableObject {
 
     public enum DefaultsKey {
         public static let enabled             = "rubien.sync.enabled"
+        public static let attachmentsEnabled  = "rubien.sync.attachmentsEnabled"
         public static let didConfirmFirstRun  = "rubien.sync.didConfirmFirstRun"
     }
 
@@ -30,6 +31,15 @@ public final class SyncCoordinator: ObservableObject {
 
     @Published public private(set) var status: SyncStatus = .disabled
     @Published public private(set) var userEnabled: Bool
+    @Published public private(set) var attachmentsEnabled: Bool
+
+    /// Immutable for the lifetime of this app session: never switch transfer
+    /// policy while CloudKit inventory or asset operations are in flight.
+    let attachmentsEnabledForSession: Bool
+
+    public var attachmentSyncNeedsRestart: Bool {
+        attachmentsEnabled != attachmentsEnabledForSession
+    }
     @Published public private(set) var identityDiagnostics: SyncIdentityDiagnostics?
 
     /// Transient, non-persistent. True between toggle flip and
@@ -108,6 +118,7 @@ public final class SyncCoordinator: ObservableObject {
     public init(
         appDatabase: AppDatabase,
         defaults: UserDefaults = .standard,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
         probes: Probes = .live,
         makeLibrary: (@Sendable (AppDatabase) async -> SyncedLibrary)? = nil,
         startLibrary: (@Sendable (SyncedLibrary) async -> Bool)? = nil,
@@ -120,6 +131,11 @@ public final class SyncCoordinator: ObservableObject {
         self.defaults = defaults
         self.probes = probes
         self.lockURL = lockURL
+        let attachmentsEnabled = defaults.object(forKey: DefaultsKey.attachmentsEnabled) != nil
+            ? defaults.bool(forKey: DefaultsKey.attachmentsEnabled)
+            : environment["RUBIEN_ENABLE_ATTACHMENT_SYNC"] == "1"
+        self.attachmentsEnabled = attachmentsEnabled
+        self.attachmentsEnabledForSession = attachmentsEnabled
         if let makeLibrary {
             self.makeLibrary = makeLibrary
         } else {
@@ -129,7 +145,7 @@ public final class SyncCoordinator: ObservableObject {
                 SyncedLibrary(
                     appDatabase: db,
                     pdfAssetSyncEnabledProvider: { RubienPreferences.pdfAssetSyncEnabled },
-                    attachmentSyncEnabledProvider: { ProcessInfo.processInfo.environment["RUBIEN_ENABLE_ATTACHMENT_SYNC"] == "1" }
+                    attachmentSyncEnabledProvider: { attachmentsEnabled }
                 )
             }
         }
@@ -163,6 +179,18 @@ public final class SyncCoordinator: ObservableObject {
             get: { self.pendingConfirm || self.userEnabled },
             set: { self.handleToggle($0) }
         )
+    }
+
+    public var attachmentToggleBinding: Binding<Bool> {
+        Binding(
+            get: { self.attachmentsEnabled },
+            set: { self.setAttachmentsEnabled($0) }
+        )
+    }
+
+    public func setAttachmentsEnabled(_ enabled: Bool) {
+        defaults.set(enabled, forKey: DefaultsKey.attachmentsEnabled)
+        attachmentsEnabled = enabled
     }
 
     // MARK: - Lifecycle transitions

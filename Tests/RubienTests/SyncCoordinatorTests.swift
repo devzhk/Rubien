@@ -74,6 +74,38 @@ final class SyncCoordinatorTests: XCTestCase {
         super.tearDown()
     }
 
+    func testAttachmentSyncDefaultsOffAndPersistsAcrossSessions() {
+        let coordinator = SyncCoordinator(appDatabase: db, defaults: defaults, environment: [:])
+        XCTAssertFalse(coordinator.attachmentsEnabled)
+        XCTAssertFalse(coordinator.attachmentSyncNeedsRestart)
+
+        coordinator.attachmentToggleBinding.wrappedValue = true
+        XCTAssertTrue(coordinator.attachmentsEnabled)
+        XCTAssertTrue(coordinator.attachmentSyncNeedsRestart)
+        XCTAssertFalse(coordinator.attachmentsEnabledForSession)
+        XCTAssertFalse(coordinator.userEnabled, "Attachment opt-in must not enable library sync")
+
+        let relaunched = SyncCoordinator(appDatabase: db, defaults: defaults, environment: [:])
+        XCTAssertTrue(relaunched.attachmentsEnabledForSession)
+        XCTAssertFalse(relaunched.attachmentSyncNeedsRestart)
+        relaunched.setAttachmentsEnabled(false)
+        XCTAssertTrue(relaunched.attachmentSyncNeedsRestart)
+        XCTAssertTrue(relaunched.attachmentsEnabledForSession)
+        relaunched.setAttachmentsEnabled(true)
+        XCTAssertFalse(relaunched.attachmentSyncNeedsRestart)
+    }
+
+    func testAttachmentSyncExplicitChoiceOverridesLegacyEnvironmentFlag() {
+        let environment = ["RUBIEN_ENABLE_ATTACHMENT_SYNC": "1"]
+        let coordinator = SyncCoordinator(appDatabase: db, defaults: defaults, environment: environment)
+        XCTAssertTrue(coordinator.attachmentsEnabledForSession)
+        coordinator.setAttachmentsEnabled(false)
+        let relaunched = SyncCoordinator(appDatabase: db, defaults: defaults, environment: environment)
+        XCTAssertFalse(relaunched.attachmentsEnabled)
+        XCTAssertFalse(relaunched.attachmentsEnabledForSession)
+        XCTAssertFalse(relaunched.attachmentSyncNeedsRestart)
+    }
+
     func testInitialStateRespectsUserDefaults() {
         let coordinator = SyncCoordinator(
             appDatabase: db,

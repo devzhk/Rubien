@@ -287,9 +287,19 @@ full re-upload.
 
 The checked-in schema declares `CDReferenceAttachment`, `CDAttachmentAsset`, and
 `CDAttachmentAnnotation`. All three participate in engine dispatch, durable intent,
-recovery, and removal cleanup. The app enables attachment traffic only when started
-with `RUBIEN_ENABLE_ATTACHMENT_SYNC=1`; the default remains disabled pending signed
-Development verification on two Macs. Use an isolated `RUBIEN_LIBRARY_ROOT`.
+recovery, and removal cleanup. Starting in 0.8.3, enable
+**Settings → iCloud Sync → Attachment sync (experimental)** on both Macs, alongside
+**Sync library via iCloud**, then quit and reopen Rubien on both. The saved choice
+is per Mac and defaults to off. Settings shows when a restart is required; reverting
+the toggle to the running session's choice clears that reminder. Disabling it
+preserves existing files. Test adding a small supplementary PDF or Markdown file,
+opening it on the other Mac, then syncing an annotation and a rename.
+
+Released 0.8.0–0.8.2 have only the developer flag
+`RUBIEN_ENABLE_ATTACHMENT_SYNC=1`. It remains a fallback when no explicit Settings
+choice exists; an explicit off choice overrides it. Two-Mac verification is still
+pending. Use the same signed CloudKit environment on both Macs; for Development
+testing use an isolated `RUBIEN_LIBRARY_ROOT`.
 
 Startup attempts a separate scalar inventory before constructing CKSyncEngine.
 If inventory or environment discovery fails, primary sync still starts. Attachment

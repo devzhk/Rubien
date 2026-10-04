@@ -306,6 +306,31 @@ struct RubienSettingsView: View {
                 await refreshCacheStatsLoop()
             }
 
+            Section {
+                Toggle(
+                    String(localized: "Attachment sync (experimental)", bundle: .module),
+                    isOn: coordinator.attachmentToggleBinding
+                )
+                if coordinator.attachmentSyncNeedsRestart {
+                    Label(
+                        String(localized: "Restart Rubien to apply this change.", bundle: .module),
+                        systemImage: "arrow.clockwise"
+                    )
+                    .foregroundStyle(.secondary)
+                }
+                if !coordinator.userEnabled {
+                    Text(String(localized: "Enable library sync above to sync attachments.", bundle: .module))
+                        .foregroundStyle(.secondary)
+                }
+            } footer: {
+                Text(String(
+                    localized: "Sync supplementary PDFs, Markdown files, and their annotations through iCloud. Enable this on both Macs using the same iCloud account. Changes take effect after restarting Rubien. Turning it off keeps existing files.",
+                    bundle: .module
+                ))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
             if case .unavailable = coordinator.status {
                 Section {
                     Button(String(localized: "Try again", bundle: .module)) {
