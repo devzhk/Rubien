@@ -808,5 +808,20 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.8.4</title>
+            <description sparkle:format="plain-text"><![CDATA[• Fixed the Codex model picker showing only the saved model on first opening.
+• Added a loading indicator while Codex models are being discovered.]]></description>
+            <pubDate>Sun, 04 Oct 2026 16:33:56 +0000</pubDate>
+            <sparkle:version>55</sparkle:version>
+            <sparkle:shortVersionString>0.8.4</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien/releases/download/v0.8.4/Rubien-0.8.4.dmg"
+                sparkle:edSignature="hsXkTV7KxuwQMV/nuEebBBR1YcDXkjnkLm16NHHw9zPi5D/Jpi5rmKxarz/4oHfZR+y1WF/EaFPQIy0nkouaAA=="
+                length="19077435"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
