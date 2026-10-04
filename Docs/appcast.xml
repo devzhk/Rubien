@@ -778,5 +778,20 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.8.2</title>
+            <description sparkle:format="plain-text"><![CDATA[• Fix an app update check that could be missed when Rubien starts while its updater is busy.
+• Keep Software Update readiness and the last-checked time current in Settings.]]></description>
+            <pubDate>Sun, 04 Oct 2026 05:15:56 +0000</pubDate>
+            <sparkle:version>53</sparkle:version>
+            <sparkle:shortVersionString>0.8.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien/releases/download/v0.8.2/Rubien-0.8.2.dmg"
+                sparkle:edSignature="U1Estp6q5ghiaqg+QlNOSPepGyraLWwfQZCVaw8naKM0G8bPvlJ9zw4pbTm2yRbb6ECJtf2El7EcVbxkqpH+Cw=="
+                length="19074959"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
