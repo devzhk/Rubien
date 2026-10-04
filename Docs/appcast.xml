@@ -764,5 +764,19 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.8.1</title>
+            <description sparkle:format="plain-text"><![CDATA[• Fix missing update notices for native Claude Code and Codex installations when a newer release is available.]]></description>
+            <pubDate>Sun, 04 Oct 2026 03:41:21 +0000</pubDate>
+            <sparkle:version>52</sparkle:version>
+            <sparkle:shortVersionString>0.8.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien/releases/download/v0.8.1/Rubien-0.8.1.dmg"
+                sparkle:edSignature="Ipgw97A1cHoxyLOIY+7FUiw1QW5ZvEATYa6LZ+7Q4mArS96dECfHJ1FQMoRTVWUsviqrj3jvDlwOmdBVvtHKDQ=="
+                length="19071540"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
