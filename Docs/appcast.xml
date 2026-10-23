@@ -823,5 +823,21 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.8.5</title>
+            <description sparkle:format="plain-text"><![CDATA[• Mention library papers with @ directly after text, without inserting a space.
+• Open PDF annotation notes in a consistent, clean editor.
+• Spot notes with sharp, clickable badges that stay aligned while scrolling and zooming, with clear hover feedback.]]></description>
+            <pubDate>Fri, 23 Oct 2026 07:03:26 +0000</pubDate>
+            <sparkle:version>56</sparkle:version>
+            <sparkle:shortVersionString>0.8.5</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien/releases/download/v0.8.5/Rubien-0.8.5.dmg"
+                sparkle:edSignature="evuLMbBHtg5YdiTdmFPnppyCSjtDCjMoK/MZCYkBCz1FJg8G0m8y0VToNrX7wBexVRohvNRpF5ok56kOzt/hAQ=="
+                length="19082131"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
