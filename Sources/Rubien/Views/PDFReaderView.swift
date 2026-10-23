@@ -911,12 +911,104 @@ struct PDFReaderView: View {
 
 // MARK: - PDFKit Bridge
 
+/// Native overlay: SF Symbols render at the window's backing scale, independently
+/// of PDFKit's cached page tiles and the document's zoom factor.
+final class PDFNoteIndicatorButton: NSButton {
+    var onOpen: () -> Void
+    var annotationColor: NSColor = .systemYellow {
+        didSet { updateAppearance() }
+    }
+    private var isHovered = false
+    private var hoverTrackingArea: NSTrackingArea?
+
+    init(onOpen: @escaping () -> Void) {
+        self.onOpen = onOpen
+        super.init(frame: .zero)
+        title = ""
+        image = NSImage(systemSymbolName: "text.bubble", accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 16, weight: .medium))
+        imagePosition = .imageOnly
+        imageScaling = .scaleProportionallyDown
+        contentTintColor = NSColor(calibratedWhite: 0.2, alpha: 1)
+        isBordered = false
+        wantsLayer = true
+        layer?.cornerRadius = 5
+        toolTip = String(localized: "Open note", bundle: .module)
+        setAccessibilityLabel(toolTip)
+        target = self
+        action = #selector(openNote)
+        updateAppearance()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTrackingArea { removeTrackingArea(hoverTrackingArea) }
+        let tracking = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseMoved, .mouseEnteredAndExited, .cursorUpdate, .activeInKeyWindow, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(tracking)
+        hoverTrackingArea = tracking
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        NSCursor.pointingHand.set()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.invalidateCursorRects(for: self)
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        window?.invalidateCursorRects(for: self)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        NSCursor.pointingHand.set()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        NSCursor.pointingHand.set()
+        isHovered = true
+        updateAppearance()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        isHovered = false
+        updateAppearance()
+    }
+
+    private func updateAppearance() {
+        layer?.backgroundColor = annotationColor.withAlphaComponent(isHovered ? 0.5 : 0.3).cgColor
+        layer?.borderColor = NSColor.black.withAlphaComponent(0.12).cgColor
+        layer?.borderWidth = isHovered ? 1 : 0
+        contentTintColor = NSColor(calibratedWhite: isHovered ? 0.08 : 0.2, alpha: 1)
+    }
+
+    @objc private func openNote() { onOpen() }
+}
+
 final class CommitAwarePDFView: PDFView {
     var onSelectionCommitted: ((PDFSelection) -> Void)?
     var onSelectionCleared: (() -> Void)?
     var onAnnotationClicked: ((PDFAnnotation) -> Void)?
     var onShowSearchUI: (() -> Void)?
     var onLinkHoverChanged: ((PDFAnnotation?, CGRect) -> Void)?
+    var onLayoutChanged: (() -> Void)?
 
     /// Arrow key codes (left, right, down, up) for keyboard text-selection extension.
     private static let arrowKeyCodes: ClosedRange<Int> = 0x7B...0x7E
@@ -927,6 +1019,11 @@ final class CommitAwarePDFView: PDFView {
 
     override var acceptsFirstResponder: Bool { true }
 
+    override func layout() {
+        super.layout()
+        onLayoutChanged?()
+    }
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
 
@@ -936,7 +1033,7 @@ final class CommitAwarePDFView: PDFView {
 
         let trackingArea = NSTrackingArea(
             rect: .zero,
-            options: [.mouseMoved, .mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect],
+            options: [.mouseMoved, .mouseEnteredAndExited, .cursorUpdate, .activeInKeyWindow, .inVisibleRect],
             owner: self,
             userInfo: nil
         )
@@ -985,6 +1082,14 @@ final class CommitAwarePDFView: PDFView {
     override func mouseMoved(with event: NSEvent) {
         super.mouseMoved(with: event)
 
+        // PDFKit sets its page cursor during mouse movement, after cursorUpdate
+        // can have run on our overlay. Restore the button cursor last here too.
+        if noteIndicator(at: event) != nil {
+            resetHoveredLinkPreview()
+            NSCursor.pointingHand.set()
+            return
+        }
+
         guard !userIsSelecting else {
             resetHoveredLinkPreview()
             return
@@ -1007,6 +1112,21 @@ final class CommitAwarePDFView: PDFView {
     override func mouseExited(with event: NSEvent) {
         resetHoveredLinkPreview()
         super.mouseExited(with: event)
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        if noteIndicator(at: event) != nil {
+            NSCursor.pointingHand.set()
+        } else {
+            super.cursorUpdate(with: event)
+        }
+    }
+
+    private func noteIndicator(at event: NSEvent) -> PDFNoteIndicatorButton? {
+        let point = convert(event.locationInWindow, from: nil)
+        return subviews.first {
+            $0 is PDFNoteIndicatorButton && !$0.isHidden && $0.frame.contains(point)
+        } as? PDFNoteIndicatorButton
     }
 
     override func keyUp(with event: NSEvent) {
@@ -1094,6 +1214,9 @@ struct AnnotatablePDFView: NSViewRepresentable {
         }
 
         context.coordinator.pdfView = pdfView
+        pdfView.onLayoutChanged = { [weak coordinator = context.coordinator] in
+            coordinator?.updateNoteIndicators()
+        }
         viewModel.pdfView = pdfView
         context.coordinator.loadDocument(from: viewModel.pdfURL, into: pdfView)
         pdfView.onSelectionCommitted = { [weak coordinator = context.coordinator] selection in
@@ -1169,12 +1292,14 @@ struct AnnotatablePDFView: NSViewRepresentable {
             context.coordinator.lastAnnotationsHash = currentHash
             syncAnnotations(pdfView: pdfView, records: viewModel.annotations, coordinator: context.coordinator)
         }
+        context.coordinator.updateNoteIndicators()
     }
 
     static func dismantleNSView(_ pdfView: PDFView, coordinator: Coordinator) {
         coordinator.teardownObservers()
         coordinator.cancelDocumentLoad()
         coordinator.closeLinkPreview()
+        (pdfView as? CommitAwarePDFView)?.onLayoutChanged = nil
         pdfView.document = nil
     }
 
@@ -1209,7 +1334,7 @@ struct AnnotatablePDFView: NSViewRepresentable {
 
             if record.pageIndex < document.pageCount,
                let page = document.page(at: record.pageIndex) {
-                let annotation = createPDFAnnotation(from: record)
+                let annotation = Self.createPDFAnnotation(from: record)
                 page.addAnnotation(annotation)
                 coordinator.trackedAnnotations[recordId] = TrackedAnnotation(
                     annotation: annotation,
@@ -1220,7 +1345,7 @@ struct AnnotatablePDFView: NSViewRepresentable {
         }
     }
 
-    private func createPDFAnnotation(from record: ReaderPDFAnnotation) -> PDFAnnotation {
+    static func createPDFAnnotation(from record: ReaderPDFAnnotation) -> PDFAnnotation {
         let bounds = record.unionBounds
         let color = AnnotationColor.nsColor(for: record.color)
         let rects = record.rects
@@ -1242,14 +1367,36 @@ struct AnnotatablePDFView: NSViewRepresentable {
             annotation.quadrilateralPoints = buildQuadrilateralPoints(from: rects, relativeTo: bounds)
         }
 
-        if let noteText = record.noteText, !noteText.isEmpty {
-            annotation.contents = noteText
-        }
+        // Notes live in the library and are edited by ExistingAnnotationPopover.
+        // Supplying PDFKit contents also creates its native colored note popup,
+        // which competes with Rubien's editor and does not persist edits here.
 
         return annotation
     }
 
-    private func buildQuadrilateralPoints(from rects: [CGRect], relativeTo union: CGRect) -> [NSValue] {
+    static func noteIndicatorAnchor(for record: ReaderPDFAnnotation) -> CGRect? {
+        guard let note = record.noteText,
+              !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return record.rects.max(by: {
+            $0.maxY == $1.maxY ? $0.maxX < $1.maxX : $0.maxY < $1.maxY
+        })
+    }
+
+    /// Inputs and the resulting 24-point hit target are in view coordinates.
+    static func noteIndicatorFrame(anchor: CGRect, pageBounds: CGRect) -> CGRect? {
+        let size: CGFloat = 24
+        let inset: CGFloat = 2
+        guard pageBounds.width >= size + 2 * inset,
+              pageBounds.height >= size + 2 * inset else { return nil }
+        return CGRect(
+            x: min(max(anchor.maxX + 3, pageBounds.minX + inset), pageBounds.maxX - size - inset).rounded(),
+            y: min(max(anchor.maxY + 2, pageBounds.minY + inset), pageBounds.maxY - size - inset).rounded(),
+            width: size,
+            height: size
+        )
+    }
+
+    private static func buildQuadrilateralPoints(from rects: [CGRect], relativeTo union: CGRect) -> [NSValue] {
         rects.flatMap { rect -> [NSValue] in
             let relativeRect = rect.offsetBy(dx: -union.minX, dy: -union.minY)
             let topLeft = CGPoint(x: relativeRect.minX, y: relativeRect.maxY)
@@ -1291,6 +1438,7 @@ struct AnnotatablePDFView: NSViewRepresentable {
         weak var pdfView: PDFView?
         var trackedAnnotations: [Int64: TrackedAnnotation] = [:]
         var lastAnnotationsHash: Int = 0
+        private var noteIndicators: [Int64: PDFNoteIndicatorButton] = [:]
 
         private var scrollObserver: NSObjectProtocol?
         private var scaleObserver: NSObjectProtocol?
@@ -1301,6 +1449,7 @@ struct AnnotatablePDFView: NSViewRepresentable {
         private var loadedPDFURL: URL?
         private var documentLoadTask: Task<Void, Never>?
         private var toolbarDebounceTask: Task<Void, Never>?
+        private var noteIndicatorLayoutTask: Task<Void, Never>?
         private var linkPreviewTask: Task<Void, Never>?
         private let linkPreviewPopover = PDFLinkPreviewPopoverController()
         private var lastToolbarCenter: CGPoint = .zero
@@ -1308,6 +1457,50 @@ struct AnnotatablePDFView: NSViewRepresentable {
 
         init(viewModel: PDFReaderViewModel) {
             self.viewModel = viewModel
+        }
+
+        @MainActor
+        func updateNoteIndicators() {
+            guard let pdfView, let document = pdfView.document else {
+                clearNoteIndicators()
+                return
+            }
+            var visibleIDs = Set<Int64>()
+            for record in viewModel.annotations {
+                guard let id = record.id,
+                      record.pageIndex >= 0, record.pageIndex < document.pageCount,
+                      let anchor = AnnotatablePDFView.noteIndicatorAnchor(for: record),
+                      let page = document.page(at: record.pageIndex) else { continue }
+                let anchorInView = pdfView.convert(anchor, from: page)
+                guard anchorInView.intersects(pdfView.bounds),
+                      let frame = AnnotatablePDFView.noteIndicatorFrame(
+                          anchor: anchorInView,
+                          pageBounds: pdfView.convert(page.bounds(for: .cropBox), from: page)
+                      ), pdfView.bounds.contains(frame) else { continue }
+                visibleIDs.insert(id)
+                let button: PDFNoteIndicatorButton
+                if let existing = noteIndicators[id] {
+                    button = existing
+                } else {
+                    button = PDFNoteIndicatorButton { [weak self] in
+                        self?.handleAnnotationClicked(id: id)
+                    }
+                    noteIndicators[id] = button
+                    pdfView.addSubview(button)
+                }
+                if button.frame != frame { button.frame = frame }
+                button.annotationColor = AnnotationColor.nsColor(for: record.color)
+            }
+            for id in Set(noteIndicators.keys).subtracting(visibleIDs) {
+                noteIndicators.removeValue(forKey: id)?.removeFromSuperview()
+            }
+        }
+
+        private func clearNoteIndicators() {
+            noteIndicatorLayoutTask?.cancel()
+            noteIndicatorLayoutTask = nil
+            for button in noteIndicators.values { button.removeFromSuperview() }
+            noteIndicators.removeAll()
         }
 
         deinit {
@@ -1355,6 +1548,7 @@ struct AnnotatablePDFView: NSViewRepresentable {
                     queue: .main
                 ) { [weak self, weak pdfView] _ in
                     self?.closeLinkPreview(resetHoverState: true)
+                    self?.requestToolbarLayoutUpdate()
                     guard let self, let pdfView,
                           let document = pdfView.document,
                           let firstPage = document.page(at: 0) else { return }
@@ -1376,6 +1570,7 @@ struct AnnotatablePDFView: NSViewRepresentable {
 
             cancelDocumentLoad()
             closeLinkPreview(resetHoverState: true)
+            clearNoteIndicators()
             loadedPDFURL = url
             self.pdfView = pdfView
             viewModel.isDocumentLoading = true
@@ -1421,6 +1616,7 @@ struct AnnotatablePDFView: NSViewRepresentable {
 
         func teardownObservers() {
             closeLinkPreview(resetHoverState: true)
+            clearNoteIndicators()
             removeScrollObserver()
             removeScaleObserver()
             removePageChangedObserver()
@@ -1451,6 +1647,16 @@ struct AnnotatablePDFView: NSViewRepresentable {
         }
 
         private func requestToolbarLayoutUpdate() {
+            // Keep a fixed deadline for badges: resetting it on every event can
+            // starve their updates when scrolling faster than 60 Hz.
+            if noteIndicatorLayoutTask == nil {
+                noteIndicatorLayoutTask = Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: 16_000_000)
+                    guard !Task.isCancelled, let self else { return }
+                    noteIndicatorLayoutTask = nil
+                    updateNoteIndicators()
+                }
+            }
             toolbarDebounceTask?.cancel()
             toolbarDebounceTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: 16_000_000) // ~1 frame (16ms)
@@ -1546,18 +1752,20 @@ struct AnnotatablePDFView: NSViewRepresentable {
         }
 
         func handleAnnotationClicked(_ annotation: PDFAnnotation) {
+            guard let id = trackedAnnotations.first(where: { $0.value.annotation === annotation })?.key else { return }
+            handleAnnotationClicked(id: id)
+        }
+
+        private func handleAnnotationClicked(id: Int64) {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 closeLinkPreview(resetHoverState: true)
                 // Clear any active text selection toolbar
                 viewModel.clearStagedSelection(clearViewSelection: true)
-                for (id, tracked) in trackedAnnotations where tracked.annotation === annotation {
-                    viewModel.selectedAnnotationId = id
-                    if let record = viewModel.annotations.first(where: { $0.id == id }) {
-                        viewModel.clickedAnnotationRecord = record
-                        computeAnnotationToolbarLayout(for: record)
-                    }
-                    return
+                viewModel.selectedAnnotationId = id
+                if let record = viewModel.annotations.first(where: { $0.id == id }) {
+                    viewModel.clickedAnnotationRecord = record
+                    computeAnnotationToolbarLayout(for: record)
                 }
             }
         }

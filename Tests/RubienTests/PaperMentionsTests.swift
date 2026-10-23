@@ -37,11 +37,40 @@ final class PaperMentionsTests: XCTestCase {
         XCTAssertEqual(String(text[result.range]), "@attention is all")
     }
 
-    func testRecognizesLineStartAndPunctuationButNotEmailAddress() {
+    func testRecognizesLineStartAndPunctuation() {
         XCTAssertEqual(query("@graph")?.text, "graph")
         XCTAssertEqual(query("Compare (@graph")?.text, "graph")
-        XCTAssertNil(query("name@example.com"))
-        XCTAssertNil(query("prefix_@graph"))
+    }
+
+    func testRecognizesQueryImmediatelyAfterText() throws {
+        for prefix in ["abcd", "参考", "123", "prefix_", "prefix.", "prefix+", "prefix-", "🧑‍🔬"] {
+            XCTAssertEqual(query(prefix + "@")?.text, "", prefix)
+            let text = prefix + "@paper"
+            let result = try XCTUnwrap(query(text), prefix)
+            XCTAssertEqual(result.text, "paper", prefix)
+            XCTAssertEqual(String(text[result.range]), "@paper", prefix)
+        }
+    }
+
+    func testEmailAddressCanOpenSuggestions() {
+        XCTAssertEqual(query("name@example.com")?.text, "example.com")
+    }
+
+    func testCompletionAfterAdjacentTextPreservesPrefixAndMentionIdentity() throws {
+        let text = "参考@att with the baseline"
+        let caret = text.index(text.startIndex, offsetBy: "参考@att".count)
+        let active = try XCTUnwrap(PaperMentions.activeQuery(in: text, caret: caret))
+        let completed = PaperMentions.completing(active, with: attention, in: text)
+        let selected = PaperMentionSelection(reference: attention, range: completed.mentionRange)
+
+        XCTAssertEqual(completed.text, "参考@Attention Is All You Need  with the baseline")
+        XCTAssertEqual(completed.mentionRange, 2..<28)
+        XCTAssertEqual(completed.caretOffset, 29)
+        XCTAssertEqual(
+            PaperMentions.selectionsStillPresent(in: completed.text, from: [selected]),
+            [selected]
+        )
+        XCTAssertNil(query(completed.text, completed: [selected]))
     }
 
     func testOnlyUsesMentionOnCurrentLineAndRejectsOversizedQuery() {

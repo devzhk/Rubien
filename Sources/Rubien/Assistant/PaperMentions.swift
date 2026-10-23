@@ -27,9 +27,10 @@ enum PaperMentions {
     static let maximumQueryLength = 120
     static let maximumMentionsPerTurn = 20
 
-    /// Returns the mention ending at `caret`, if any. A mention begins at an `@`
-    /// at the start of a line or after a non-word character and may contain spaces,
-    /// which lets a user search a multi-word paper title naturally.
+    /// Returns the mention ending at `caret`, if any. An `@` can follow any
+    /// character, including adjacent prose in languages that do not use spaces.
+    /// Queries may contain spaces for multi-word paper titles. Email addresses
+    /// can also open suggestions; only an explicit selection creates a mention.
     static func activeQuery(
         in text: String,
         caret: String.Index,
@@ -39,11 +40,6 @@ enum PaperMentions {
         let prefix = text[..<caret]
         let lineStart = prefix.lastIndex(of: "\n").map { text.index(after: $0) } ?? text.startIndex
         guard let at = prefix.lastIndex(of: "@"), at >= lineStart else { return nil }
-
-        if at > text.startIndex {
-            let previous = text[text.index(before: at)]
-            guard !isWordCharacter(previous) else { return nil }
-        }
 
         let queryStart = text.index(after: at)
         let raw = String(text[queryStart..<caret])
@@ -167,11 +163,6 @@ enum PaperMentions {
         let upper = text.index(text.startIndex, offsetBy: selection.range.upperBound)
         guard String(text[lower..<upper]) == token(for: selection.reference) else { return false }
         return upper == text.endIndex || !isTokenContinuation(text[upper])
-    }
-
-    private static func isWordCharacter(_ character: Character) -> Bool {
-        character.isLetter || character.isNumber || character == "_" || character == "."
-            || character == "+" || character == "-"
     }
 
     private static func isTokenContinuation(_ character: Character) -> Bool {
