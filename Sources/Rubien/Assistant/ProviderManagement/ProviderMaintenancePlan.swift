@@ -32,9 +32,10 @@ struct ProviderMaintenancePlan: Sendable, Equatable {
 
 enum ProviderMaintenancePlanner {
     typealias Run = @Sendable (ProviderMaintenanceRequest) async throws -> ProviderCommandResult
-    // Compatibility gate: this bootstrap preserved every old release resource in
-    // the live retention test. Revalidate that contract when the script changes.
-    static let reviewedCodexScriptHash = "150e3cf675682efeaac115aa3747add3f27887896d04ce6d0b56478d8b428bf6"
+    // Compatibility gate: selected, previous, and in-use releases survive this
+    // bootstrap's cleanup. Revalidate with scripts/validate-codex-installer.py
+    // whenever its bytes change; a surviving executable alone is insufficient.
+    static let reviewedCodexScriptHash = "95d14ccaba915e52a3f0cc590638ca5ac510086ff6a23dc9ac9f77e957403a93"
 
     static func make(provider: AgentProviderKind, installation: ProviderInstallation,
                      snapshot: ProviderReleaseSnapshot, home: URL = FileManager.default.homeDirectoryForCurrentUser,

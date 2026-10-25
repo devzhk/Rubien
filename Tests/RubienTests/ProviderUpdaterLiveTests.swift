@@ -6,6 +6,49 @@ import Darwin
 /// Explicit network/installer opt-in. All package mutations are confined to a
 /// fresh directory below build/ProviderUpdateValidation; shared tools are read only.
 final class ProviderUpdaterLiveTests: XCTestCase {
+    /// The retention harness prepares this isolated home and keeps old servers
+    /// alive while the real action downloads, updates, and verifies the CLI.
+    @MainActor
+    func testNativeCodexProductionUpdate() async throws {
+        guard let value = ProcessInfo.processInfo.environment["RUBIEN_CODEX_UPDATE_LIVE_HOME"] else {
+            throw XCTSkip("Run scripts/validate-codex-installer.py for native retention validation")
+        }
+        let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let base = repository.appendingPathComponent("build/ProviderUpdateValidation").resolvingSymlinksInPath()
+        let home = URL(fileURLWithPath: value).resolvingSymlinksInPath()
+        guard home.path.hasPrefix(base.path + "/live-codex-"), home.lastPathComponent == "home",
+              FileManager.default.fileExists(atPath: home.appendingPathComponent(".retention-fixture").path) else {
+            throw ProviderMutationError.unsupported("Native live test requires a disposable retention fixture")
+        }
+        let launcher = home.appendingPathComponent(".local/bin/codex")
+        let installation = ProviderInstallation(state: .found, path: launcher.path, hint: .native, detail: nil)
+        let snapshot = ProviderReleaseSnapshot(installedVersion: "0.163.0", availableVersion: "0.164.0",
+            source: .codexNative, fingerprint: try XCTUnwrap(ProviderBinaryFingerprint.read(launcher.path)), checkedAt: Date())
+        let model = ProviderUpdateActionModel(provider: .codex, root: home.appendingPathComponent("actions"),
+            home: home, override: { launcher.path }, discover: { _, _, _ in installation }, refreshed: {}, run: { request in
+                guard request.environment["HOME"] == home.path else { throw ProviderMutationError.changed }
+                return try await ProviderMaintenanceRunner.run(request)
+            })
+        await model.prepare(installation: installation, snapshot: snapshot)
+        XCTAssertTrue(model.canUpdate, model.explanation ?? "no plan")
+        guard model.canUpdate else { return }
+        model.update()
+        let deadline = Date().addingTimeInterval(240)
+        while model.isRunning, Date() < deadline { try await Task.sleep(for: .milliseconds(100)) }
+        guard !model.isRunning else {
+            model.beginTermination()
+            await model.finishForTermination()
+            XCTFail("Native update exceeded the live-test deadline")
+            return
+        }
+        try model.output.write(to: home.appendingPathComponent("production-update.log"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(model.stage, "Updated to 0.164.0. New conversations will use this version.")
+        let nativeRoot = home.appendingPathComponent(".codex/packages/standalone")
+        XCTAssertEqual(try String(contentsOf: nativeRoot.appendingPathComponent("auto-update-version"), encoding: .utf8),
+                       nativeRoot.appendingPathComponent("current").resolvingSymlinksInPath().lastPathComponent)
+    }
+
     @MainActor
     func testNPMProductionUpdateWaitsForOldServerAndVerifiesNewVersion() async throws {
         guard let value = ProcessInfo.processInfo.environment["RUBIEN_UPDATER_LIVE_ROOT"] else {

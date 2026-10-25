@@ -17,7 +17,7 @@ final class ProviderInstallerLiveTests: XCTestCase {
             throw XCTSkip("Live tests require isolated artifacts and a baseline snapshot")
         }
         let hashes: [AgentProviderKind: String] = [
-            .codex: "150e3cf675682efeaac115aa3747add3f27887896d04ce6d0b56478d8b428bf6",
+            .codex: ProviderMaintenancePlanner.reviewedCodexScriptHash,
             .claude: "3a68d3406cf674e17bed1733a4dcf37805e2e47d87417700007d7e1aa766a944",
         ]
         let runRoot = root.appendingPathComponent("model-run-\(UUID().uuidString)")

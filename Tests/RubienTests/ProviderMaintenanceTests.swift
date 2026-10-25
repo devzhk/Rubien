@@ -255,6 +255,41 @@ final class ProviderMaintenanceTests: XCTestCase {
     }
 
     @MainActor
+    func testNativeCodexRejectsUnreviewedInstallerBeforeMutation() async throws {
+        let release = ".codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin"
+        let binary = try write(release + "/bin/codex", "#!/bin/sh\necho codex-cli 0.163.0\n")
+        let nativeRoot = root.appendingPathComponent(".codex/packages/standalone")
+        try FileManager.default.createSymbolicLink(at: nativeRoot.appendingPathComponent("current"),
+            withDestinationURL: binary.deletingLastPathComponent().deletingLastPathComponent())
+        let marker = try write(".codex/packages/standalone/auto-update-version", "0.163.0-aarch64-apple-darwin")
+        try FileManager.default.createDirectory(at: root.appendingPathComponent(".local/bin"), withIntermediateDirectories: true)
+        let launcher = root.appendingPathComponent(".local/bin/codex")
+        try FileManager.default.createSymbolicLink(at: launcher, withDestinationURL: nativeRoot.appendingPathComponent("current/bin/codex"))
+        let installation = ProviderInstallation(state: .found, path: launcher.path, hint: .native, detail: nil)
+        let fingerprint = try XCTUnwrap(ProviderBinaryFingerprint.read(launcher.path))
+        let mutations = LockedBox(0)
+        let model = ProviderUpdateActionModel(provider: .codex, root: root.appendingPathComponent("actions"),
+            home: root, override: { launcher.path }, refreshed: {}, run: { request in
+                if request.executable == "/usr/bin/curl" {
+                    let installer = ProviderInstallerPlan(provider: .codex, directory: request.directory)
+                    try "#!/bin/sh\necho unreviewed updater\n".write(to: installer.script, atomically: true, encoding: .utf8)
+                    try "HTTP/2 200\r\n".write(to: installer.headers, atomically: true, encoding: .utf8)
+                } else { mutations.set(mutations.get() + 1) }
+                return .init(exitCode: 0, timedOut: false, output: "", truncated: false)
+            })
+        let snapshot = ProviderReleaseSnapshot(installedVersion: "0.163.0", availableVersion: "0.164.0",
+            source: .codexNative, fingerprint: fingerprint, checkedAt: Date())
+        await model.prepare(installation: installation, snapshot: snapshot)
+        XCTAssertTrue(model.canUpdate)
+        model.update()
+        try await waitUntilIdle(model)
+        XCTAssertTrue(model.stage?.contains("official updater changed") == true, model.stage ?? "no status")
+        XCTAssertEqual(mutations.get(), 0, "Unknown installer bytes must never reach a shell or verification")
+        XCTAssertEqual(ProviderBinaryFingerprint.read(launcher.path), fingerprint)
+        XCTAssertEqual(try String(contentsOf: marker, encoding: .utf8), "0.163.0-aarch64-apple-darwin")
+    }
+
+    @MainActor
     func testChangedSelectionRejectsPreparedManualAndAutomaticUpdates() async throws {
         let f = try fixture()
         var selected: String? = f.launcher.path

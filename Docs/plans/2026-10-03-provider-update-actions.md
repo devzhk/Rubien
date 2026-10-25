@@ -91,3 +91,15 @@ The automatic scheduler now checks the process inventory after the quiet period 
 The early scan uses parent IDs to exclude descendants of this Rubien process, whose usage leases are coordinated during the actual action. The final scan still includes every matching holder after those leases drain, catching sessions opened between checks. Other processes remain conservative blockers during preflight. Concurrent ticks share the in-flight scan; consent, selection, plan, idle state, and pending intent are rechecked after it returns.
 
 Validation: all 31 ProviderMaintenanceTests passed. Five new tests cover silent backoff and eventual retry, failed inventory, concurrent checks with consent changed by another model, ancestry filtering, and a session appearing after preflight. The silent-deferral test verifies unchanged policy bytes/directory contents, no usage directory, no progress state, and exactly one process scan per retry. Log: `/private/tmp/rubien-provider-silent-preflight-final.log`. No live provider mutation ran; changes remain uncommitted.
+
+## Codex installer revalidation, 2026-10-24
+
+The 0.8.6 preparation advances the reviewed bootstrap to SHA-256
+`95d14ccaba915e52a3f0cc590638ca5ac510086ff6a23dc9ac9f77e957403a93`.
+Unlike the earlier script, it prunes unused old releases while retaining selected,
+previous, and in-use releases. Run `python3 scripts/validate-codex-installer.py`
+after building the tests to repeat the native compatibility check in a disposable
+home. It uses the real production update action, keeps two server generations
+alive, hashes all old resources, launches old bundled helpers after cutover, and
+checks no-op cleanup after sessions exit. The existing unknown-script gate remains.
+See [0.8.6 evidence](2026-10-24-release-0.8.6.md).
