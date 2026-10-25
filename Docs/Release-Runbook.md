@@ -76,7 +76,7 @@ the legacy 0.6.3 release or any of its four assets.
 
 Host prerequisites: `gh` authenticated, the Developer ID identity available, the EdDSA private key in Keychain, the `RubienNotary` notarytool profile in the login Keychain (from One-time setup §4 — it persists across releases; you do **not** re-run `store-credentials` each time), and a current CloudKit management token saved for `cktool` (One-time setup §7). Steps 1–4 establish the release prerequisites: release-preparation changes committed and pushed to `origin/main`, the CI gate satisfied, a clean synchronized `main`, and both live CloudKit environments validated against the checked-in schema.
 
-The order is strict: **prepare and commit → push and satisfy the CI gate → validate CloudKit Development and Production → smoke-test release-candidate browser assets → obtain explicit approval and sign/publish with host access → verify published Mac and Linux artifacts → submit the matching extension to the Chrome Web Store → publish any coupled npm package**. Normally the green run must match `HEAD` exactly. The only exception is a descendant containing Markdown-only documentation changes after an already-green release-preparation SHA; the commands below prove that no release input changed. Do not start signing while release-preparation commits exist only locally.
+The order is strict: **prepare and commit → push and satisfy the CI gate → validate CloudKit Development and Production → smoke-test release-candidate browser assets when browser integration changed → obtain explicit approval and sign/publish with host access → verify published Mac and Linux artifacts → submit any needed extension update to the Chrome Web Store → publish any coupled npm package**. Apply the browser-check skip rule below for app-only releases. Normally the green run must match `HEAD` exactly. The only exception is a descendant containing Markdown-only documentation changes after an already-green release-preparation SHA; the commands below prove that no release input changed. Do not start signing while release-preparation commits exist only locally.
 
 > **An agent may run the signed release pipeline only after the user explicitly approves the release command.** Before requesting approval, show the exact version/build and release notes, confirm the release-preparation SHA passed the CI gate, and confirm the CloudKit validation passed. The approval authorizes the consequential effects of `release.sh`: signed build and notarization, an appcast commit and push, a source tag, a public GitHub release, and Linux-release workflow dispatch. For 0.6.3 it also authorizes the full compatibility-mirror release in `devzhk/Rubien-releases`. Run it with elevated/unsandboxed host access so it can read the Developer ID and Sparkle EdDSA keys, use the `RubienNotary` and CloudKit management tokens in the login Keychain, write `build/`, access the network, and update Git/GitHub. A failed credential check inside the ordinary sandbox does **not** prove a credential is missing; repeat the read-only preflight with approved host access. Once explicit approval is recorded, no separate interactive-host handoff is required.
 
@@ -124,8 +124,9 @@ git status --short --branch
 # attribute, or permission has not reached Development or Production.
 ./scripts/validate-cloudkit-schema.sh
 
-# 5. Build an unsigned release candidate and complete the browser-extension
-# pre-publication smoke gate below. This has no signing or publication effects.
+# 5. Build an unsigned release candidate. Complete the browser-extension smoke
+# gate below only when browser integration changed; otherwise skip that check.
+# This build has no signing or publication effects.
 CODESIGN_ENABLED=0 ./scripts/build-app.sh release dmg
 
 # 6. Set the Developer ID identity in your shell
@@ -160,7 +161,8 @@ gh release view "v$(tr -d '[:space:]' < VERSION)" \
 # those same four asset names; also compare the two releases' title and notes.
 # Copy the dSYM zip path printed by build-app.sh to durable private storage.
 
-# 11. After the matching Mac release is public, upload
+# 11. If an extension update is needed and explicitly approved, after the
+# matching Mac release is public, upload
 # build/Rubien-Browser-Extension-X.Y.Z-Chrome-Web-Store.zip to the existing
 # Chrome Web Store listing, complete its privacy/listing declarations, and
 # submit it for review. Choose deferred publishing when available so approval
@@ -247,12 +249,23 @@ Upload only after the matching Mac release is public. First reviews can take
 substantially longer than ordinary release publication, so keep the GitHub ZIP
 as the supported manual-install fallback.
 
-**This is a human-run smoke gate.** When an agent is driving the release, it
-must ask the user to perform the app/extension checks below and wait for the
-user to explicitly confirm that they passed. The agent must not try to satisfy
-this gate through Browser/Chrome control or other UI automation. It may build
-and statically verify the candidate artifacts, then provide their exact paths
-and this checklist to the user.
+**Skip the Chrome extension smoke check for app-only releases with no browser
+integration changes.** Compare the release diff with the previous published
+release: check the extension code/assets/dependencies, native messaging host,
+shared browser protocol and import behavior, host registration, and extension
+packaging. Automatic manifest version stamping alone does not count as a
+browser integration change. When these are unchanged, record that the check
+was skipped and proceed without asking the user to test Chrome or approve a
+waiver. Such releases also do not need a Chrome Web Store submission; the
+existing compatible extension can remain published. Continue building and
+statically verifying the matching ZIPs and publishing the GitHub ZIP as usual.
+
+**When browser integration changed, this is a human-run smoke gate.** An agent
+must ask the user to perform the app/extension checks below and wait for explicit
+confirmation that they passed. The agent must not try to satisfy this gate
+through Browser/Chrome control or other UI automation. It may build and
+statically verify the candidate artifacts, then provide their exact paths and
+this checklist to the user.
 
 Before requesting approval to run the signed release, use the release-candidate
 app and ZIP produced by step 5, not a development build or files loaded directly

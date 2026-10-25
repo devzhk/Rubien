@@ -1,8 +1,8 @@
 #!/bin/bash
 # One-command signed-and-relaunch loop for the Rubien.app with
-# CloudKit entitlements. For sync testing — everyday dev work that doesn't
-# need sync can still use `swift run Rubien`, which is faster but has no
-# entitlement (sync stays .unavailable).
+# CloudKit entitlements. For everyday UI checks without sync, use
+# scripts/preview-app.sh; it verifies the linked SDK and uses a separate library.
+# See AGENTS.md's UI preview SDK invariant before launching another build route.
 #
 # What this does:
 #   1. Kill any running Rubien.app
