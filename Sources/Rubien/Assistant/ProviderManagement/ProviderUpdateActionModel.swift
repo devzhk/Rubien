@@ -231,6 +231,7 @@ final class ProviderUpdateActionModel: ObservableObject {
     }
     private func perform(_ plan: ProviderMaintenancePlan, selection selected: String?, automatic: Bool) async {
         var mutationStarted = false
+        var downloadedScript: ProviderDownloadedScript?
         let intentStartedAt = Date()
         var ownsAction = false
         var heldAction: ProviderSetupLock?
@@ -312,9 +313,7 @@ final class ProviderUpdateActionModel: ObservableObject {
                     environment: environment, directory: folder, timeout: 90, inheritedLock: action.descriptor))
                 guard download.exitCode == 0, !download.timedOut else { throw ProviderSetupError.download }
                 let script = try installer.inspectDownload()
-                guard script.hash == ProviderMaintenancePlanner.reviewedCodexScriptHash else {
-                    throw ProviderMutationError.unsupported("The official updater changed. This Rubien version needs a compatibility check; use the official update instructions meanwhile.")
-                }
+                downloadedScript = script
                 guard plan.unchanged(), try installer.inspectDownload() == script else { throw ProviderMutationError.changed }
                 executable = provider.installerShell
                 arguments = [installer.script.path]
@@ -330,7 +329,7 @@ final class ProviderUpdateActionModel: ObservableObject {
             try Task.checkCancellation()
             canCancel = false
             stage = "Updating \(provider.setupName)…"
-            try journal(plan, stage: stage!, finished: false)
+            try journal(plan, stage: stage!, finished: false, script: downloadedScript)
             mutationStarted = true
             needsRefresh = true
             let result = try await run(.init(executable: executable, arguments: arguments,
@@ -362,7 +361,7 @@ final class ProviderUpdateActionModel: ObservableObject {
             } else {
                 stage = "Updated to \(raw). New conversations will use this version."
             }
-            try journal(plan, stage: stage!, finished: true)
+            try journal(plan, stage: stage!, finished: true, script: downloadedScript)
             policy = try changePolicy(plan.identity) {
                 $0.failures = 0
                 $0.retryAt = nil
@@ -374,11 +373,11 @@ final class ProviderUpdateActionModel: ObservableObject {
             if mutationStarted { self.plan = nil }
             stage = !ownsAction ? "Stopped watching. The other Rubien window continues its update."
                 : mutationStarted ? "Update interrupted. Recheck the installation." : "Update cancelled."
-            if ownsAction { try? journal(plan, stage: stage!, finished: true) }
+            if ownsAction { try? journal(plan, stage: stage!, finished: true, script: downloadedScript) }
         } catch {
             if mutationStarted { self.plan = nil }
             stage = error.localizedDescription
-            if ownsAction { try? journal(plan, stage: stage!, finished: true) }
+            if ownsAction { try? journal(plan, stage: stage!, finished: true, script: downloadedScript) }
             if automatic, ownsAction {
                 policy = (try? changePolicy(plan.identity) {
                     switch error {
@@ -472,13 +471,14 @@ final class ProviderUpdateActionModel: ObservableObject {
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
         return policy
     }
-    private func journal(_ plan: ProviderMaintenancePlan, stage: String, finished: Bool) throws {
+    private func journal(_ plan: ProviderMaintenancePlan, stage: String, finished: Bool,
+                         script: ProviderDownloadedScript? = nil) throws {
         let file = try operationDirectory(plan.identity).appendingPathComponent("operation.json")
         let data = try JSONSerialization.data(withJSONObject: ["provider": provider.rawValue, "path": plan.launcher,
             "previousVersion": plan.previousVersion, "targetVersion": plan.targetVersion,
             "stage": stage, "finished": finished, "updatedAt": Date().timeIntervalSince1970, "output": output,
-            "scriptSHA256": plan.method == .codexNative ? ProviderMaintenancePlanner.reviewedCodexScriptHash : "",
-            "scriptSource": plan.method == .codexNative ? provider.installerURL.absoluteString : ""])
+            "scriptSHA256": script?.hash ?? "",
+            "scriptSource": script?.sourceURL.absoluteString ?? ""])
         try data.write(to: file, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
     }

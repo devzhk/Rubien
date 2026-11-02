@@ -23,7 +23,7 @@ final class ProviderUpdaterLiveTests: XCTestCase {
         }
         let launcher = home.appendingPathComponent(".local/bin/codex")
         let installation = ProviderInstallation(state: .found, path: launcher.path, hint: .native, detail: nil)
-        let snapshot = ProviderReleaseSnapshot(installedVersion: "0.163.0", availableVersion: "0.164.0",
+        let snapshot = ProviderReleaseSnapshot(installedVersion: "0.164.0", availableVersion: "0.166.0",
             source: .codexNative, fingerprint: try XCTUnwrap(ProviderBinaryFingerprint.read(launcher.path)), checkedAt: Date())
         let model = ProviderUpdateActionModel(provider: .codex, root: home.appendingPathComponent("actions"),
             home: home, override: { launcher.path }, discover: { _, _, _ in installation }, refreshed: {}, run: { request in
@@ -43,7 +43,14 @@ final class ProviderUpdaterLiveTests: XCTestCase {
             return
         }
         try model.output.write(to: home.appendingPathComponent("production-update.log"), atomically: true, encoding: .utf8)
-        XCTAssertEqual(model.stage, "Updated to 0.164.0. New conversations will use this version.")
+        let verification = try await ProviderMaintenanceRunner.run(executable: launcher.path, arguments: ["--version"],
+            environment: ["HOME": home.path, "PATH": "/usr/bin:/bin"], directory: home, timeout: 15)
+        XCTAssertEqual(verification.exitCode, 0)
+        let rawVersion = try XCTUnwrap(ProviderSetupModel.version(from: verification.output))
+        let installed = try XCTUnwrap(ProviderReleaseVersion(rawVersion))
+        XCTAssertFalse(installed.isPrerelease)
+        XCTAssertGreaterThanOrEqual(installed, try XCTUnwrap(ProviderReleaseVersion(snapshot.availableVersion)))
+        XCTAssertEqual(model.stage, "Updated to \(rawVersion). New conversations will use this version.")
         let nativeRoot = home.appendingPathComponent(".codex/packages/standalone")
         XCTAssertEqual(try String(contentsOf: nativeRoot.appendingPathComponent("auto-update-version"), encoding: .utf8),
                        nativeRoot.appendingPathComponent("current").resolvingSymlinksInPath().lastPathComponent)

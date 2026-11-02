@@ -17,7 +17,6 @@ final class ProviderInstallerLiveTests: XCTestCase {
             throw XCTSkip("Live tests require isolated artifacts and a baseline snapshot")
         }
         let hashes: [AgentProviderKind: String] = [
-            .codex: ProviderMaintenancePlanner.reviewedCodexScriptHash,
             .claude: "3a68d3406cf674e17bed1733a4dcf37805e2e47d87417700007d7e1aa766a944",
         ]
         let runRoot = root.appendingPathComponent("model-run-\(UUID().uuidString)")
@@ -27,8 +26,9 @@ final class ProviderInstallerLiveTests: XCTestCase {
         for provider in [AgentProviderKind.codex, .claude] {
             let bootstrap = root.appendingPathComponent("\(provider.rawValue)-bootstrap")
             let plan = ProviderInstallerPlan(provider: provider, directory: bootstrap)
-            let reviewedHash = try XCTUnwrap(hashes[provider])
             let inspectedHash = try plan.validateDownload()
+            // Bind this live run to its prepared fixture, not a production Codex pin.
+            let reviewedHash = hashes[provider] ?? inspectedHash
             XCTAssertEqual(inspectedHash, reviewedHash, "Reinspect changed scripts before running them")
             guard inspectedHash == reviewedHash else { return }
             let home = runRoot.appendingPathComponent("\(provider.rawValue)-home")

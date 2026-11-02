@@ -254,8 +254,7 @@ final class ProviderMaintenanceTests: XCTestCase {
         } catch { XCTAssertTrue(error.localizedDescription.contains("policy")) }
     }
 
-    @MainActor
-    func testNativeCodexRejectsUnreviewedInstallerBeforeMutation() async throws {
+    private func nativeCodexFixture() throws -> (installation: ProviderInstallation, snapshot: ProviderReleaseSnapshot, launcher: URL, nativeRoot: URL, marker: URL) {
         let release = ".codex/packages/standalone/releases/0.163.0-aarch64-apple-darwin"
         let binary = try write(release + "/bin/codex", "#!/bin/sh\necho codex-cli 0.163.0\n")
         let nativeRoot = root.appendingPathComponent(".codex/packages/standalone")
@@ -267,26 +266,77 @@ final class ProviderMaintenanceTests: XCTestCase {
         try FileManager.default.createSymbolicLink(at: launcher, withDestinationURL: nativeRoot.appendingPathComponent("current/bin/codex"))
         let installation = ProviderInstallation(state: .found, path: launcher.path, hint: .native, detail: nil)
         let fingerprint = try XCTUnwrap(ProviderBinaryFingerprint.read(launcher.path))
+        let snapshot = ProviderReleaseSnapshot(installedVersion: "0.163.0", availableVersion: "0.164.0",
+            source: .codexNative, fingerprint: fingerprint, checkedAt: Date())
+        return (installation, snapshot, launcher, nativeRoot, marker)
+    }
+
+    @MainActor
+    func testNativeCodexRunsCurrentOfficialInstallerWithoutHashPin() async throws {
+        let f = try nativeCodexFixture()
+        let newRelease = try write(".codex/packages/standalone/releases/0.164.0-aarch64-apple-darwin/bin/codex",
+                                   "#!/bin/sh\necho codex-cli 0.164.0\n").deletingLastPathComponent().deletingLastPathComponent()
+        let script = """
+        #!/bin/sh
+        set -eu
+        root="$HOME/.codex/packages/standalone"
+        ln -sfn "$root/releases/0.164.0-aarch64-apple-darwin" "$root/current"
+        printf '%s' '0.164.0-aarch64-apple-darwin' > "$root/auto-update-version"
+        """
+        let digest = LockedBox("")
         let mutations = LockedBox(0)
-        let model = ProviderUpdateActionModel(provider: .codex, root: root.appendingPathComponent("actions"),
-            home: root, override: { launcher.path }, refreshed: {}, run: { request in
+        let actionRoot = root.appendingPathComponent("actions")
+        let model = ProviderUpdateActionModel(provider: .codex, root: actionRoot,
+            home: root, override: { f.launcher.path }, discover: { _, _, _ in f.installation }, refreshed: {}, run: { request in
                 if request.executable == "/usr/bin/curl" {
                     let installer = ProviderInstallerPlan(provider: .codex, directory: request.directory)
-                    try "#!/bin/sh\necho unreviewed updater\n".write(to: installer.script, atomically: true, encoding: .utf8)
+                    XCTAssertEqual(request.arguments, installer.downloadArguments)
+                    try script.write(to: installer.script, atomically: true, encoding: .utf8)
+                    try "HTTP/2 200\r\n".write(to: installer.headers, atomically: true, encoding: .utf8)
+                    digest.set(try installer.validateDownload())
+                    return .init(exitCode: 0, timedOut: false, output: "", truncated: false)
+                }
+                if request.executable == "/bin/sh" {
+                    mutations.set(mutations.get() + 1)
+                    XCTAssertEqual(request.arguments.count, 1, "Use the current official script without pinning a release")
+                }
+                return try await ProviderMaintenanceRunner.run(request)
+            })
+        await model.prepare(installation: f.installation, snapshot: f.snapshot)
+        XCTAssertTrue(model.canUpdate, model.explanation ?? "no plan")
+        model.update()
+        try await waitUntilIdle(model)
+        XCTAssertEqual(model.stage, "Updated to 0.164.0. New conversations will use this version.")
+        XCTAssertEqual(mutations.get(), 1)
+        XCTAssertEqual(f.launcher.resolvingSymlinksInPath(), newRelease.appendingPathComponent("bin/codex"))
+        XCTAssertEqual(try String(contentsOf: f.marker, encoding: .utf8), newRelease.lastPathComponent)
+        let key = ProviderUpdateStore.key(provider: .codex, path: f.nativeRoot.path)
+        let journal = try JSONSerialization.jsonObject(with: Data(contentsOf: actionRoot.appendingPathComponent(key + "/operation.json"))) as? [String: Any]
+        XCTAssertEqual(journal?["scriptSHA256"] as? String, digest.get(), "Record the downloaded script's actual digest")
+        XCTAssertEqual(journal?["scriptSource"] as? String, AgentProviderKind.codex.installerURL.absoluteString)
+    }
+
+    @MainActor
+    func testNativeCodexRejectsInvalidDownloadBeforeMutation() async throws {
+        let f = try nativeCodexFixture()
+        let mutations = LockedBox(0)
+        let model = ProviderUpdateActionModel(provider: .codex, root: root.appendingPathComponent("actions"),
+            home: root, override: { f.launcher.path }, discover: { _, _, _ in f.installation }, refreshed: {}, run: { request in
+                if request.executable == "/usr/bin/curl" {
+                    let installer = ProviderInstallerPlan(provider: .codex, directory: request.directory)
+                    try "<!doctype html><title>Unavailable</title>".write(to: installer.script, atomically: true, encoding: .utf8)
                     try "HTTP/2 200\r\n".write(to: installer.headers, atomically: true, encoding: .utf8)
                 } else { mutations.set(mutations.get() + 1) }
                 return .init(exitCode: 0, timedOut: false, output: "", truncated: false)
             })
-        let snapshot = ProviderReleaseSnapshot(installedVersion: "0.163.0", availableVersion: "0.164.0",
-            source: .codexNative, fingerprint: fingerprint, checkedAt: Date())
-        await model.prepare(installation: installation, snapshot: snapshot)
+        await model.prepare(installation: f.installation, snapshot: f.snapshot)
         XCTAssertTrue(model.canUpdate)
         model.update()
         try await waitUntilIdle(model)
-        XCTAssertTrue(model.stage?.contains("official updater changed") == true, model.stage ?? "no status")
-        XCTAssertEqual(mutations.get(), 0, "Unknown installer bytes must never reach a shell or verification")
-        XCTAssertEqual(ProviderBinaryFingerprint.read(launcher.path), fingerprint)
-        XCTAssertEqual(try String(contentsOf: marker, encoding: .utf8), "0.163.0-aarch64-apple-darwin")
+        XCTAssertTrue(model.stage?.contains("downloaded completely") == true, model.stage ?? "no status")
+        XCTAssertEqual(mutations.get(), 0, "Invalid downloads must never reach a shell or verification")
+        XCTAssertEqual(ProviderBinaryFingerprint.read(f.launcher.path), f.snapshot.fingerprint)
+        XCTAssertEqual(try String(contentsOf: f.marker, encoding: .utf8), "0.163.0-aarch64-apple-darwin")
     }
 
     @MainActor
