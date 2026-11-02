@@ -853,5 +853,19 @@ Breaking — CLI & MCP
                 type="application/octet-stream"
             />
         </item>
+        <item>
+            <title>Rubien 0.8.7</title>
+            <description sparkle:format="plain-text"><![CDATA[• Fix Codex updates getting blocked when the official updater changes.]]></description>
+            <pubDate>Mon, 02 Nov 2026 04:22:57 +0000</pubDate>
+            <sparkle:version>58</sparkle:version>
+            <sparkle:shortVersionString>0.8.7</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.4</sparkle:minimumSystemVersion>
+            <enclosure
+                url="https://github.com/devzhk/Rubien/releases/download/v0.8.7/Rubien-0.8.7.dmg"
+                sparkle:edSignature="0Xqo/zUNg1Ai30n/+jV7no7hunw5j/sWgnW2TQsNxhryAIELnonB+5UtYC+lNv9WA+3pDlncVClQRooKeBkYDg=="
+                length="19082222"
+                type="application/octet-stream"
+            />
+        </item>
     </channel>
 </rss>
