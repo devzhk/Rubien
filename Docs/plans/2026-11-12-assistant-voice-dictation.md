@@ -12,9 +12,9 @@ see "Changes from revision 1" at the end.
 
 ## Status (2026-11-13)
 
-Implemented on the local branch `assistant-voice-dictation` (13 commits on top
-of `main`, not pushed, not released). The status subsections under each phase
-below have the detail; this is the summary.
+Implemented on the branch `assistant-voice-dictation` and fast-forwarded into
+local `main` on 2026-11-13. Not pushed and not released. The status
+subsections under each phase below have the detail; this is the summary.
 
 Works, verified by driving the real UI in the preview app with recorded audio
 (`DictationSelfTest`, see "Orchestrator review and end-to-end check of
