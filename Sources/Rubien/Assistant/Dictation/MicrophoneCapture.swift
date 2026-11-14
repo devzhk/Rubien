@@ -10,6 +10,8 @@ final class MicrophoneCapture: DictationAudioSource {
     /// stalls longer loses the oldest audio rather than growing memory.
     private static let bufferLimit = 96
     private static let tapBufferSize: AVAudioFrameCount = 4096
+    /// A device that keeps reconfiguring must not restart capture forever.
+    private static let restartLimit = 3
 
     let needsMicrophone = true
 
@@ -18,6 +20,7 @@ final class MicrophoneCapture: DictationAudioSource {
     private var configurationObserver: NSObjectProtocol?
     private var continuation: Continuation?
     private var isStopped = false
+    private var restarts = 0
 
     func start() throws -> AsyncThrowingStream<AVAudioPCMBuffer, Error> {
         let (stream, continuation) = AsyncThrowingStream.makeStream(
@@ -30,22 +33,10 @@ final class MicrophoneCapture: DictationAudioSource {
         self.engine = engine
         self.continuation = continuation
         do {
-            // Using an input node whose hardware format is empty raises an
-            // exception rather than an error.
-            let input = engine.inputNode
-            let hardwareFormat = input.inputFormat(forBus: 0)
-            guard hardwareFormat.sampleRate > 0, hardwareFormat.channelCount > 0 else {
-                throw DictationFailure.noMicrophone
-            }
-            input.installTap(
-                onBus: 0, bufferSize: Self.tapBufferSize, format: nil,
-                block: Self.tapBlock(yieldingTo: continuation))
-            isTapInstalled = true
+            try startCapturing(engine, into: continuation)
             configurationObserver = NotificationCenter.default.addObserver(
                 forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil,
-                using: Self.configurationChangeHandler(endingWith: continuation))
-            engine.prepare()
-            try engine.start()
+                using: Self.configurationChangeHandler(for: self))
         } catch {
             stop()
             throw (error as? DictationFailure) ?? .noMicrophone
@@ -69,22 +60,60 @@ final class MicrophoneCapture: DictationAudioSource {
         continuation = nil
     }
 
-    // Both closures run on audio-system queues, so they are built outside the
-    // main actor and touch nothing but the continuation.
+    private func startCapturing(_ engine: AVAudioEngine, into continuation: Continuation) throws {
+        let input = engine.inputNode
+        if isTapInstalled {
+            input.removeTap(onBus: 0)
+            isTapInstalled = false
+        }
+        // Using an input node whose hardware format is empty raises an
+        // exception rather than an error.
+        let hardwareFormat = input.inputFormat(forBus: 0)
+        guard hardwareFormat.sampleRate > 0, hardwareFormat.channelCount > 0 else {
+            throw DictationFailure.noMicrophone
+        }
+        input.installTap(
+            onBus: 0, bufferSize: Self.tapBufferSize, format: nil,
+            block: Self.tapBlock(yieldingTo: continuation))
+        isTapInstalled = true
+        engine.prepare()
+        try engine.start()
+    }
 
+    /// The engine stops itself when the input device or its format changes,
+    /// which includes a Bluetooth headset switching to its call profile as
+    /// recording begins. Capture resumes on the new configuration; the tap is
+    /// reinstalled because its format belongs to the old one.
+    private func resumeAfterConfigurationChange() {
+        guard !isStopped, let engine, let continuation else { return }
+        restarts += 1
+        do {
+            guard restarts <= Self.restartLimit else { throw DictationFailure.noMicrophone }
+            try startCapturing(engine, into: continuation)
+        } catch {
+            // `stop()` cleans up later, on the consumer's path.
+            continuation.finish(throwing: DictationFailure.noMicrophone)
+        }
+    }
+
+    // Both closures run on audio-system queues, so they are built outside the
+    // main actor.
+
+    /// Tearing the engine down inside this handler can deadlock, so it only
+    /// hands off to the main actor.
+    nonisolated private static func configurationChangeHandler(
+        for capture: MicrophoneCapture
+    ) -> @Sendable (Notification) -> Void {
+        { [weak capture] _ in
+            Task { @MainActor in capture?.resumeAfterConfigurationChange() }
+        }
+    }
+
+    /// Touches nothing but the continuation.
     nonisolated private static func tapBlock(yieldingTo continuation: Continuation) -> AVAudioNodeTapBlock {
         { buffer, _ in
             if let copy = buffer.deepCopy() { continuation.yield(copy) }
         }
-    }
-
-    /// The engine has stopped itself because the input device changed. Tearing
-    /// it down inside this handler can deadlock, so the handler only ends the
-    /// stream; `stop()` cleans up later on the caller's path.
-    nonisolated private static func configurationChangeHandler(
-        endingWith continuation: Continuation
-    ) -> @Sendable (Notification) -> Void {
-        { _ in continuation.finish(throwing: DictationFailure.noMicrophone) }
     }
 }
 #endif

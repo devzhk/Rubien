@@ -86,6 +86,47 @@ final class AnalyzerDictationEngineLiveTests: XCTestCase {
         engine.finish()
     }
 
+    /// The whole chain short of the UI: the controller picks and drives the real
+    /// engine, and the transcript lands in a composer editor through the bridge.
+    func testControllerDictatesTheFixtureIntoAComposerEditor() async throws {
+        guard #available(macOS 26.0, *) else { throw XCTSkip("Needs macOS 26") }
+        let textView = ComposerTextView.makeTextView()
+        textView.string = "Note:"
+        textView.setSelectedRange(NSRange(location: 5, length: 0))
+        let bridge = ComposerDictationBridge()
+        textView.dictationBridge = bridge
+
+        let source = ObservedAudioSource(FileDictationAudioSource(url: dictationSpeechFixture, paced: true))
+        let controller = DictationController(
+            makeEngine: { locale in
+                try await DictationEngines.makeEngine(for: locale, audioSource: source)
+            },
+            // A file source needs no permission, so this is never consulted.
+            authorizer: SystemDictationAuthorizer())
+        let owner = DictationController.Owner()
+
+        controller.start(owner: owner, bridge: bridge, locale: Locale(identifier: "en_US"))
+        try await within(.seconds(20)) { await source.waitUntilEnded() }
+        XCTAssertEqual(controller.state(for: owner), .listening)
+        let whileListening = textView.string
+        XCTAssertGreaterThan(whileListening.count, "Note:".count, "text streams in before Stop")
+
+        controller.finish(owner: owner)
+        _ = try await within(.seconds(10)) { () throws -> Bool in
+            while controller.state != .idle { try await Task.sleep(for: .milliseconds(20)) }
+            return true
+        }
+        XCTAssertNil(controller.failure)
+        XCTAssertFalse(bridge.isActive)
+
+        let text = textView.string
+        print("Live controller result: \(text)")
+        XCTAssertTrue(text.hasPrefix("Note: "), "dictation is separated from the text before it")
+        for word in ["compare", "attention", "mechanism", "recurrent", "networks"] {
+            XCTAssertTrue(text.lowercased().contains(word), "missing \"\(word)\" in \"\(text)\"")
+        }
+    }
+
     // MARK: Helpers
 
     @available(macOS 26.0, *)

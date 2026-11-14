@@ -462,6 +462,40 @@ en_US model was already installed), release of a reserved locale, device
 change during capture, and the test files against the 26.5 SDK. The live tests
 reserve en_US for the test runner's identity.
 
+Orchestrator review of Phase 4 (2026-11-13). The implementation was written by
+an Opus implementer subagent, then read in full and re-run by the owning
+session:
+
+- Re-ran the unit tests (70 pass) and the live tests (4 pass). The engine
+  files type-check with no diagnostics against the macOS 26.5 SDK directly
+  (`swiftc -typecheck -sdk …/MacOSX26.5.sdk` on the seven engine files).
+- Added a live test of the whole chain short of the UI: the controller picks
+  and drives the real engine, and the fixture lands in a composer editor as
+  "Note: Compare the attention mechanism with recurrent networks."
+- Changed `MicrophoneCapture` to resume after a configuration change instead
+  of ending the session: it reinstalls the tap on the new format and restarts
+  the engine, at most three times, then fails with `noMicrophone`. A Bluetooth
+  headset switching to its call profile as recording begins raises this
+  notification, so ending on it would have made dictation unusable there. The
+  hand-off leaves the notification handler before touching the engine. This
+  path could not be exercised here and is still unverified.
+
+Follow-up fixes to the Phase 3 controller, from one last Codex pass (raw
+output in `/tmp/rubien-voice-dictation-phase3-review-2026-11-13.md`; reviews
+after this point are done by the owning session or an Opus reviewer):
+
+- The progress callback captured its session strongly, forming a cycle with
+  an engine that keeps the callback. It is weak now and the session drops its
+  engine when it ends; a test asserts the engine is released.
+- A session ended from an editor callback while the editor was being claimed
+  now gives the claim back instead of leaving it open.
+- Timers check for cancellation after their sleep completes.
+- Only a changed transcript postpones the silence timeout.
+- The silence test now proves the timer is replaced by new words and left
+  alone by repeated ones. Added cases: the engine completing by itself, a
+  same-surface restart while preparing, and an engine that keeps sending after
+  being cancelled.
+
 ### Phase 5 — Button and surface integration (first end-to-end build)
 
 - `ComposerDictationButton`, the control-row line, freeze hooks in
