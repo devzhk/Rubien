@@ -214,6 +214,9 @@ final class ComposerDictationBridge {
     /// Ends the session because another change is about to be applied.
     func interrupt() {
         guard session != nil else { return }
+        #if DEBUG
+        DictationSelfTest.interruptionTrace?(Thread.callStackSymbols)
+        #endif
         end()
         onInterruption?()
     }
@@ -300,8 +303,9 @@ final class ComposerDictationBridge {
         textView.textStorage?.replaceCharacters(
             in: range,
             with: NSAttributedString(string: replacement, attributes: textView.typingAttributes))
-        textView.setSelectedRange(selection)
+        // Text first, then selection: the order typing publishes them in.
         textView.didChangeText()
+        textView.setSelectedRange(selection)
     }
 
     private static func character(in text: NSString, endingAt location: Int) -> Character? {

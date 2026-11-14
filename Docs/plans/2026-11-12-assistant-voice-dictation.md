@@ -610,6 +610,43 @@ One unrelated test, `CodexProviderTests/testHistoryTimeoutResetsTheServerAndRetr
 failed once in a full app-suite run and passed three times alone. It is
 timing-sensitive and predates this work.
 
+Second end-to-end round (2026-11-13), after extending the self-test to drive
+two windows, a forced failure, and a second language. It found two bugs that
+no unit test had:
+
+- **Dictation in Agent Home stopped after the first words.** SwiftUI re-rendered
+  the editor once with the draft from before the edit it had just published,
+  then again with the new one. The editor took the stale value for an outside
+  replacement, reverted the text, and ended the session. It shows in Agent
+  Home because that draft is owned several views up, in the main window's root
+  view; the reader sidebar's draft sits next to the editor. Reading the draft
+  back to tell an echo from a real outside write did not work either: it
+  returned the same stale value. `ComposerTextView.Coordinator` now remembers
+  the texts it replaced with its own edits until a render confirms the
+  current one. A render showing one of those is ignored unless nothing
+  confirms the editor's text within half a second, in which case it is applied
+  as an outside write after all. This also protects ordinary typing.
+- **The failure popover opened empty.** Its content was built at presentation
+  time from state that had not been recorded yet. It now reads the live
+  failure.
+
+The self-test's results after the fixes, in the preview app:
+
+- English recording: 22 checks pass, including a hand-off from the harness
+  window to Agent Home, where the whole sentence is dictated and the button
+  draws the listening state.
+- Forced failure (an unsupported language in the preference): the popover is
+  on screen with "Language not available" and its explanation.
+- Chinese (`zh-CN` preference, a recording made with the Tingting voice): 22
+  checks pass with "请比较注意力机制和循环神经网络。". The first run downloaded the
+  speech model, showed the progress ring, and continued to listening. A
+  recording made with the Flo voice was transcribed with wrong opening words,
+  which is recognition quality on that synthetic voice, not the pipeline.
+
+Still not verified: the real microphone, the Settings picker on screen, the
+reader windows themselves (the harness uses the same surface), and a device
+change during capture.
+
 ### Phase 6 — Language setting, docs, release gate
 
 - (Done in Phase 5.) `RubienPreferences.assistantDictationLocaleIdentifier`

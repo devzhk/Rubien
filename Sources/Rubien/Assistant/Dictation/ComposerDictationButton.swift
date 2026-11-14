@@ -45,14 +45,18 @@ struct ComposerDictationButton: View {
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { frame in
             DictationSelfTest.buttonFrames[ObjectIdentifier(bridge)] = frame
         }
+        .onChange(of: state, initial: true) { _, state in
+            DictationSelfTest.renderedStates[ObjectIdentifier(bridge)] = state
+        }
         #endif
         .popover(isPresented: failurePresented, arrowEdge: .top) {
-            if let shownFailure { failurePopover(shownFailure) }
+            // The live failure while it is set: the popover's content is built
+            // when it is presented, before `shownFailure` has been recorded.
+            // `shownFailure` keeps the text while the popover animates away.
+            if let reason = ownFailure ?? shownFailure { failurePopover(reason) }
         }
-        // Kept after the failure is cleared, so the popover does not empty out
-        // while it animates away.
-        .onChange(of: controller.failure, initial: true) { _, failure in
-            if let failure, failure.owner == owner { shownFailure = failure.reason }
+        .onChange(of: ownFailure, initial: true) { _, reason in
+            if let reason { shownFailure = reason }
         }
     }
 
@@ -124,9 +128,13 @@ struct ComposerDictationButton: View {
 
     // MARK: Failure
 
+    private var ownFailure: DictationFailure? {
+        controller.failure?.owner == owner ? controller.failure?.reason : nil
+    }
+
     private var failurePresented: Binding<Bool> {
         Binding(
-            get: { controller.failure?.owner == owner },
+            get: { ownFailure != nil },
             set: { if !$0 { controller.clearFailure(owner: owner) } })
     }
 

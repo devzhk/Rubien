@@ -142,6 +142,11 @@ final class ComposerDictationBridgeTests: XCTestCase {
             textView.insertText(text, replacementRange: textView.selectedRange())
         }
 
+        /// Runs work the editor scheduled on the main queue.
+        func drainMainQueue(for seconds: TimeInterval) {
+            RunLoop.current.run(until: Date().addingTimeInterval(seconds))
+        }
+
         /// Lets the undo manager close the group it opened for the current
         /// event, the way returning to the run loop does between real events.
         func endEvent(file: StaticString = #filePath, line: UInt = #line) {
@@ -308,17 +313,95 @@ final class ComposerDictationBridgeTests: XCTestCase {
     }
 
     func testExternalDraftReplacementEndsTheSession() {
-        let editor = Editor()
+        let editor = Editor("abc")
         XCTAssertTrue(editor.bridge.begin())
         editor.bridge.update(transcript: "hello")
 
         editor.coordinator.syncExternalText("", into: editor.textView)
-        XCTAssertEqual(editor.textAtInterruption, ["hello"])
+        XCTAssertEqual(editor.textAtInterruption, ["abc hello"])
         XCTAssertEqual(editor.string, "")
         XCTAssertFalse(editor.undoManager.canUndo)
 
         editor.bridge.update(transcript: "hello world")
         XCTAssertEqual(editor.string, "")
+    }
+
+    // MARK: Stale renders
+
+    /// SwiftUI can re-render the editor once with the draft from before an edit
+    /// the editor just published (seen in Agent Home, whose draft is owned
+    /// several views up). That must not revert the edit or end dictation.
+    func testAStaleRenderOfThePreviousDraftIsNotAnOutsideWrite() {
+        let editor = Editor()
+        XCTAssertTrue(editor.bridge.begin())
+        editor.bridge.update(transcript: "hello")
+
+        editor.coordinator.staleRenderGrace = 0.05
+        editor.coordinator.syncExternalText("", into: editor.textView)
+        XCTAssertEqual(editor.string, "hello")
+        XCTAssertTrue(editor.bridge.isActive)
+
+        // The render with the new draft arrives; the echo was just an echo.
+        editor.coordinator.syncExternalText("hello", into: editor.textView)
+        editor.drainMainQueue(for: 0.15)
+        XCTAssertEqual(editor.string, "hello")
+        XCTAssertTrue(editor.bridge.isActive)
+        XCTAssertTrue(editor.textAtInterruption.isEmpty)
+
+        // After that confirmation the same text arriving again is an outside
+        // write and is applied at once.
+        editor.coordinator.syncExternalText("", into: editor.textView)
+        XCTAssertEqual(editor.string, "")
+        XCTAssertEqual(editor.textAtInterruption, ["hello"])
+    }
+
+    /// Dictation keeps publishing while earlier echoes are still unresolved.
+    func testEchoesOfSeveralEditsInARowAllResolve() {
+        let editor = Editor()
+        editor.coordinator.staleRenderGrace = 0.05
+        XCTAssertTrue(editor.bridge.begin())
+        editor.bridge.update(transcript: "one")
+        editor.coordinator.syncExternalText("", into: editor.textView)
+        editor.bridge.update(transcript: "one two")
+        editor.coordinator.syncExternalText("one", into: editor.textView)
+        editor.bridge.update(transcript: "one two three")
+        editor.coordinator.syncExternalText("one two", into: editor.textView)
+        editor.coordinator.syncExternalText("one two three", into: editor.textView)
+
+        editor.drainMainQueue(for: 0.15)
+        XCTAssertEqual(editor.string, "one two three")
+        XCTAssertTrue(editor.bridge.isActive)
+        XCTAssertTrue(editor.textAtInterruption.isEmpty)
+    }
+
+    /// An outside write can equal the previous draft (the draft is cleared
+    /// right after the first character). With no render confirming the
+    /// editor's text, it is applied once the grace period has passed.
+    func testAnOutsideWriteMatchingThePreviousDraftIsAppliedAfterTheGracePeriod() {
+        let editor = Editor()
+        editor.coordinator.staleRenderGrace = 0.05
+        editor.type("a")
+        editor.draft.text = ""
+        editor.coordinator.syncExternalText("", into: editor.textView)
+        XCTAssertEqual(editor.string, "a")
+
+        editor.drainMainQueue(for: 0.15)
+        XCTAssertEqual(editor.string, "")
+        XCTAssertFalse(editor.undoManager.canUndo)
+    }
+
+    func testStaleRendersDoNotDisturbTyping() {
+        let editor = Editor("x")
+        editor.type("y")
+        editor.type("z")
+        editor.coordinator.staleRenderGrace = 0.05
+        editor.coordinator.syncExternalText("xy", into: editor.textView)
+        editor.coordinator.syncExternalText("x", into: editor.textView)
+        editor.coordinator.syncExternalText("xyz", into: editor.textView)
+        editor.drainMainQueue(for: 0.15)
+        XCTAssertEqual(editor.string, "xyz")
+        XCTAssertEqual(editor.draft.text, "xyz")
+        XCTAssertTrue(editor.undoManager.canUndo)
     }
 
     func testRemovingTheBridgeFromTheEditorEndsTheSession() {

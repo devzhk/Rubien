@@ -458,6 +458,15 @@ struct ComposerTextView: NSViewRepresentable {
         var lastSyncedText: String
         /// Character offsets matching the primary AppKit selection.
         var lastSyncedSelection: Range<Int>?
+        /// Drafts this editor replaced with its own edits and has not yet seen
+        /// SwiftUI render back. See `syncExternalText`.
+        private var unconfirmedPreviousTexts: [String] = []
+        /// A draft that matched one of those and may yet be an outside write.
+        private var unresolvedDraft: String?
+        private var unresolvedDraftCheck = 0
+        /// How long a draft equal to one of this editor's previous texts may go
+        /// unconfirmed before it is taken for an outside write after all.
+        var staleRenderGrace: TimeInterval = 0.5
         /// Editor-private undo stack — the window's shared undo manager would let
         /// ⌘Z in the composer unwind other views' registrations (and vice versa).
         let undoManager = UndoManager()
@@ -476,7 +485,34 @@ struct ComposerTextView: NSViewRepresentable {
             // the whole text storage to a fresh String on every render (and this
             // runs per streaming tick); the cache stays COW-identical to the
             // binding when nothing changed, so the common case is O(1).
-            guard text != lastSyncedText else { return }
+            guard text != lastSyncedText else {
+                unconfirmedPreviousTexts.removeAll()
+                unresolvedDraft = nil
+                return
+            }
+            // SwiftUI can re-render the editor with the draft from before an
+            // edit it just published, then again with the new one. It happens
+            // in Agent Home, whose draft is owned several views up. That echo is
+            // not an outside write: acting on it would revert the edit and end
+            // dictation. An outside write can equal the same text, though, and
+            // the draft cannot be read back reliably at this point, so the echo
+            // is only acted on if no render confirms the editor's text in time.
+            if unconfirmedPreviousTexts.contains(text) {
+                unresolvedDraft = text
+                unresolvedDraftCheck += 1
+                let check = unresolvedDraftCheck
+                DispatchQueue.main.asyncAfter(deadline: .now() + staleRenderGrace) { [weak self, weak textView] in
+                    guard let self, let textView, self.unresolvedDraftCheck == check,
+                          let draft = self.unresolvedDraft
+                    else { return }
+                    if draft != self.lastSyncedText { self.replaceText(with: draft, in: textView) }
+                }
+                return
+            }
+            replaceText(with: text, in: textView)
+        }
+
+        private func replaceText(with text: String, in textView: ComposerNSTextView) {
             // Assigning `string` bypasses the text view's change validation.
             textView.dictationBridge?.interrupt()
             // Replace wholesale and drop undo history — undoing across a
@@ -484,12 +520,19 @@ struct ComposerTextView: NSViewRepresentable {
             textView.string = text
             lastSyncedText = text
             lastSyncedSelection = nil
+            unconfirmedPreviousTexts.removeAll()
+            unresolvedDraft = nil
             undoManager.removeAllActions()
         }
 
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
             let latest = textView.string
+            if latest != lastSyncedText {
+                // A few entries are plenty: each is confirmed by the next render.
+                unconfirmedPreviousTexts.append(lastSyncedText)
+                if unconfirmedPreviousTexts.count > 8 { unconfirmedPreviousTexts.removeFirst() }
+            }
             lastSyncedText = latest
             parent.text = latest
             syncSelection(from: textView)
