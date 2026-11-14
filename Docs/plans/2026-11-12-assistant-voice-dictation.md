@@ -12,10 +12,9 @@ see "Changes from revision 1" at the end.
 
 ## Status (2026-11-14)
 
-Implemented on the branch `assistant-voice-dictation` and fast-forwarded into
-local `main` on 2026-11-13, the Command-D shortcut included. Not pushed and
-not released. The status subsections under each phase below have the detail;
-this is the summary.
+Released in Rubien 0.8.8 (build 59) on 2026-11-14, with the Command-D
+shortcut, the language menu, and the editor-owns-its-text composer. The status
+subsections under each phase below have the detail; this is the summary.
 
 Fast-forwarded into local `main` again on 2026-11-14 at the developer's
 request: the language menu beside the microphone, the grouped voice tile with
@@ -47,9 +46,11 @@ Not verified, in order of importance:
 1. **Device changes during capture** (plugging in or switching a headset,
    Bluetooth profile switches). The recovery code follows the AVFAudio headers
    and is guarded against exceptions, but has never run.
-2. **A Developer ID signed, Hardened Runtime build.** The release runbook now
-   has a microphone gate for this; the provisioning profile's acceptance of
-   the `audio-input` entitlement is only settled there.
+2. ~~A Developer ID signed, Hardened Runtime build.~~ Settled on 2026-11-14 by
+   the release runbook's microphone gate: a Developer ID signed release build
+   launched, prompted, and transcribed speech from the real microphone. The
+   gate must sign a release build; a signed debug build does not launch (see
+   the runbook).
 3. The Settings picker on screen, real reader windows (the harness uses the
    same surface), and agent microphone inheritance in Rubien's own bundle
    (confirmed with a stand-in app in Phase 1).

@@ -494,6 +494,7 @@ Avoid losing both anchors simultaneously by storing them in independent failure 
 | Developer ID cert expires | None (signature is timestamped) | Renew via Xcode → Settings → Accounts for next release |
 | Developer ID cert revoked by Apple | Existing installs keep running; new installs blocked by Gatekeeper | Appeal to Apple; ship a release with a new cert (single-anchor rotation via the dual-trust path above) |
 | Notarization ticket revoked for one release | That release fails Gatekeeper on fresh installs | Pull from appcast; ship a re-notarized fix-forward |
+| `notarytool` returns 403, "A required agreement is missing or has expired" | `release.sh` stops before the appcast commit, tag, and GitHub release, so nothing is published and it is safe to rerun | The Account Holder accepts the Apple Developer Program License Agreement at developer.apple.com/account (click Agree, not just review). Probe with `xcrun notarytool history --keychain-profile RubienNotary` until it lists submissions (a few minutes), then rerun `release.sh`. The Paid Applications Agreement is unrelated |
 | EdDSA private key lost (not leaked) | Existing installs keep updating from cached state; you cannot publish new updates | Rotate via dual-trust (see EdDSA section); back the new key up immediately |
 
 ## File locations
