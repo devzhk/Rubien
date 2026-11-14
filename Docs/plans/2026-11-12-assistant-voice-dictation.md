@@ -508,6 +508,58 @@ after this point are done by the owning session or an Opus reviewer):
   window while listening, unplugging the microphone, Siri and Dictation
   turned off.
 
+#### Phase 5 status (2026-11-13)
+
+Implemented by an Opus implementer subagent. The language setting and its
+Settings text, listed under Phase 6 below, were moved into this phase; the
+README, release notes, and runbook items stay in Phase 6.
+
+- `SharedDictation.swift`: `DictationController.shared`, with the system
+  authorizer and the microphone engine factory. Debug builds only: when
+  `RUBIEN_DICTATION_AUDIO_FILE` names a file, the shared controller plays it
+  through `FileDictationAudioSource(paced: true)` instead, so the real composer
+  can be dictated into with no microphone and no permission prompt. Also
+  `DictationLanguage` (the start locale and the Settings picker rows).
+- `ComposerDictationButton.swift`: the button, absent below macOS 26. Idle
+  starts; any other state calls `finish`. Glyphs: `mic`; a small spinner, or a
+  determinate ring while a model downloads; accent `mic.fill` with a pulse
+  (skipped under Reduce Motion) and a faint accent fill while listening; the
+  same, dimmed and still, while finishing. 27 × 27 points with the "+" menu's
+  corners and hover fill. Accessibility identifier
+  `composer-dictation-button`. A failure popover above the button, with an
+  "Open System Settings" button for the two permission failures. The failure
+  text is `DictationFailure.title`, `message`, and `settingsURL`.
+- `ChatSurfaceView`: one owner and one bridge per surface; the button sits
+  before the send controls; starting requests editor focus. Freezes at the top
+  of `sendDraft`, in `onDisappear`, and when `isActive` turns false.
+  `applicationShouldTerminate` freezes first. Mention suggestions are
+  dismissed and not opened while this surface's dictation is not idle.
+- Send-time mentions. The surface now records the exact draft its mentions
+  were last reconciled against (`mentionsReconciledDraft`, set by `onChange`,
+  mention completion, and `resetDraft`). `sendDraft`, after freezing, and
+  `completeMention` first apply any edit `onChange` has not handled yet
+  (`PaperMentions.updating`). `onChange` reconciles from that recorded draft
+  rather than its own `old` value, so an edit already applied is not applied
+  again; the `reconciledDraft` guard still skips a completion's own change and
+  is now cleared by the first `onChange` after it.
+- A caret exactly at the end of a selected mention starts dictation with
+  `separatingFromPrecedingText` (`PaperMentions.caretEndsMention`).
+- `RubienPreferences.assistantDictationLocaleIdentifier` (BCP-47, nil for the
+  system language), read at every start. `DictationEngines.supportedLocales()`
+  unions both transcribers' locales on macOS 26. Settings → Assistant →
+  Dictation has the picker and the on-device and agent-microphone disclosure.
+
+Not changed: `ChatSidebarHarness` needed nothing, since it renders
+`ChatSidebarView` and so gets the button and the debug audio-file override.
+
+Verified by the implementer: build with no new warnings, unit tests for the
+failure text, the language helpers, and the mention helpers, the dictation and
+composer suites, the app suite, the opt-in live tests, and the macOS 26.5 SDK
+type-check of the engine files. Not verified: anything in the running app (the
+button, its states and popover, live text, freeze on send or window close,
+mention suppression, the Settings picker), and every manual check listed
+above.
+
 ### Phase 6 — Language setting, docs, release gate
 
 - `RubienPreferences.assistantDictationLocale` with a `@State` mirror in

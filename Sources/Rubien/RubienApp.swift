@@ -189,7 +189,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        providerTermination.request(actions: [.codex, .claude]) {
+        // Close the microphone and keep the dictated text before providers and
+        // readers shut down.
+        DictationController.shared.freezeAll()
+        return providerTermination.request(actions: [.codex, .claude]) {
             sender.reply(toApplicationShouldTerminate: true)
         }
     }

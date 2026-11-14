@@ -260,6 +260,24 @@ enum RubienPreferences {
         set { UserDefaults.standard.set(newValue, forKey: assistantLoadUserToolsKey) }
     }
 
+    /// The language composer dictation listens for, as a BCP-47 identifier.
+    /// Empty/unset ⇒ the system language.
+    static let assistantDictationLocaleIdentifierKey = "Rubien.assistant.dictationLocale"
+
+    static var assistantDictationLocaleIdentifier: String? {
+        get {
+            let identifier = UserDefaults.standard.string(forKey: assistantDictationLocaleIdentifierKey)
+            return (identifier?.isEmpty == false) ? identifier : nil
+        }
+        set {
+            if let newValue, !newValue.isEmpty {
+                UserDefaults.standard.set(newValue, forKey: assistantDictationLocaleIdentifierKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: assistantDictationLocaleIdentifierKey)
+            }
+        }
+    }
+
     /// Default visibility for the assistant panel in newly opened reader windows.
     /// Unset ⇒ visible, so the assistant is discoverable until the user explicitly
     /// hides it. Existing open readers keep their local state; this seeds new ones.

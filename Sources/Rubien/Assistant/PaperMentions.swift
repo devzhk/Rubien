@@ -129,6 +129,35 @@ enum PaperMentions {
         }
     }
 
+    /// Brings selections that were last reconciled against `reconciledText` up to
+    /// date with `text`. The composer reconciles in a deferred `onChange`, so an
+    /// edit and a send handled in the same run-loop turn would otherwise send
+    /// ranges that are one edit behind, and the send-time check would drop them.
+    static func updating(
+        _ selections: [PaperMentionSelection],
+        reconciledAgainst reconciledText: String,
+        to text: String
+    ) -> [PaperMentionSelection] {
+        reconciledText == text
+            ? selections
+            : reconciling(selections, from: reconciledText, to: text)
+    }
+
+    /// Whether `selection` is a caret sitting exactly at the end of a selected
+    /// mention that is still present in `text`. Dictation there must start with
+    /// a space: a letter appended to the title drops the mention, and Han
+    /// characters are letters that normally take no space.
+    static func caretEndsMention(
+        _ selection: Range<Int>?,
+        in text: String,
+        mentions: [PaperMentionSelection]
+    ) -> Bool {
+        guard let selection, selection.isEmpty else { return false }
+        return mentions.contains {
+            $0.range.upperBound == selection.lowerBound && tokenMatches($0, in: text)
+        }
+    }
+
     /// Final send-time defense: exact ranges must still contain their selected
     /// tokens. IDs are deduplicated and capped to the manifest's shared limit.
     static func selectionsStillPresent(

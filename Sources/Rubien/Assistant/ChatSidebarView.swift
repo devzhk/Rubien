@@ -153,6 +153,13 @@ struct ChatSurfaceView: View {
     /// Exact draft already reconciled by a programmatic completion. Its next
     /// `onChange` must not apply the same edit a second time.
     @State private var reconciledDraft: String?
+    /// The exact draft `selectedMentions` were last reconciled against. `onChange`
+    /// runs a render later than the edit, so send and mention completion bring
+    /// the mentions up to date from here first (see `bringMentionsUpToDate`).
+    @State private var mentionsReconciledDraft: String?
+    @ObservedObject private var dictation = DictationController.shared
+    @State private var dictationOwner = DictationController.Owner()
+    @State private var dictationBridge = ComposerDictationBridge()
     /// Draft and selection are separate SwiftUI bindings and can publish in
     /// either order. Coalesce them before converting offsets to String.Index.
     @State private var mentionRefreshTask: Task<Void, Never>?
@@ -184,6 +191,7 @@ struct ChatSurfaceView: View {
             Task { await session.recheckAvailability() }
         }) { AssistantSetupView() }
         .onAppear {
+            mentionsReconciledDraft = draft
             renderer.setTheme(colorScheme == .dark ? .dark : .light)
             // Re-mounting the pane created a fresh (empty) WebView — restore the
             // conversation from the controller's in-memory render log.
@@ -218,18 +226,25 @@ struct ChatSurfaceView: View {
         // (even re-Asking the same passage), which focuses the composer (§5.4).
         .onChange(of: session.composerFocusRequest) { _, _ in focusComposerSoon() }
         .onChange(of: draft) { old, new in
-            if reconciledDraft == new {
-                reconciledDraft = nil
-            } else {
-                selectedMentions = PaperMentions.reconciling(
+            if reconciledDraft != new {
+                selectedMentions = PaperMentions.updating(
                     selectedMentions,
-                    from: old,
+                    reconciledAgainst: mentionsReconciledDraft ?? old,
                     to: new
                 )
             }
+            reconciledDraft = nil
+            mentionsReconciledDraft = new
             scheduleMentionRefresh()
         }
         .onChange(of: draftSelection) { _, _ in scheduleMentionRefresh() }
+        // Dictated text is not a typed `@` query.
+        .onChange(of: isDictating) { _, dictating in
+            if dictating { dismissMentionPopover() }
+        }
+        .onChange(of: isActive) { _, active in
+            if !active { dictation.freeze(owner: dictationOwner) }
+        }
         .onChange(of: session.queuedMessages) { _, messages in
             guard let editingQueuedMessageID,
                   !messages.contains(where: { $0.id == editingQueuedMessageID })
@@ -248,6 +263,7 @@ struct ChatSurfaceView: View {
             _ = interruptAndSendQueuedIfPossible()
         }
         .onDisappear {
+            dictation.freeze(owner: dictationOwner)
             cancelQueuedMessageEdit()
             mentionSearchTask?.cancel()
             mentionRefreshTask?.cancel()
@@ -1065,6 +1081,16 @@ struct ChatSurfaceView: View {
                 Spacer()
                 providerPicker
                 modelPicker
+                ComposerDictationButton(
+                    controller: dictation,
+                    owner: dictationOwner,
+                    bridge: dictationBridge,
+                    separatingFromPrecedingText: {
+                        bringMentionsUpToDate()
+                        return PaperMentions.caretEndsMention(
+                            draftSelection, in: draft, mentions: selectedMentions)
+                    },
+                    onStart: { editorFocusRequests += 1 })
                 composerButton
             }
         }
@@ -1552,7 +1578,8 @@ struct ChatSurfaceView: View {
                 onNavigationKey: handleComposerNavigationKey,
                 onAttachFiles: { session.stageAttachments($0) },
                 onAttachImageData: { session.stagePastedImage($0, suggestedName: $1) },
-                onDragTargeted: { isDropTargeted = $0 }
+                onDragTargeted: { isDropTargeted = $0 },
+                dictationBridge: dictationBridge
             )
                 .popover(
                     isPresented: mentionPopoverPresented,
@@ -1667,6 +1694,9 @@ struct ChatSurfaceView: View {
     }
 
     private func sendDraft() {
+        // Send exactly the visible text, with mentions that match it.
+        dictation.freeze(owner: dictationOwner)
+        bringMentionsUpToDate()
         guard session.canSend(draft: draft) else {
             editorFocusRequests += 1
             return
@@ -1796,7 +1826,8 @@ struct ChatSurfaceView: View {
     }
 
     private func refreshActiveMention() {
-        guard let selection = draftSelection,
+        guard !isDictating,
+              let selection = draftSelection,
               selection.isEmpty,
               selection.lowerBound >= 0,
               let caret = draft.index(
@@ -1847,6 +1878,7 @@ struct ChatSurfaceView: View {
 
     private func completeMention(_ reference: ChatReference) {
         guard let query = activeMentionQuery else { return }
+        bringMentionsUpToDate()
         let completed = PaperMentions.completing(query, with: reference, in: draft)
         var mentions = PaperMentions.reconciling(
             selectedMentions,
@@ -1867,6 +1899,7 @@ struct ChatSurfaceView: View {
         mentionSearchInProgress = false
         draftSelection = nil
         reconciledDraft = completed.text
+        mentionsReconciledDraft = completed.text
         draft = completed.text
         draftSelection = completed.caretOffset..<completed.caretOffset
         editorFocusRequests += 1
@@ -1917,7 +1950,21 @@ struct ChatSurfaceView: View {
         draft = ""
         selectedMentions = []
         reconciledDraft = nil
+        mentionsReconciledDraft = ""
         dismissMentionPopover()
+    }
+
+    /// Applies an edit `onChange(of: draft)` has not handled yet, so the mentions
+    /// match the current draft. `onChange` then finds nothing left to apply.
+    private func bringMentionsUpToDate() {
+        guard let reconciled = mentionsReconciledDraft, reconciled != draft else { return }
+        selectedMentions = PaperMentions.updating(
+            selectedMentions, reconciledAgainst: reconciled, to: draft)
+        mentionsReconciledDraft = draft
+    }
+
+    private var isDictating: Bool {
+        dictation.state(for: dictationOwner) != .idle
     }
 
     /// Move keyboard focus into the composer shortly after a selection is staged

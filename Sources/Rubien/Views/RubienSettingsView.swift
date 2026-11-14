@@ -39,6 +39,9 @@ struct RubienSettingsView: View {
     @State private var defaultWebAccess = true
     @State private var defaultAutoApprove = false
     @State private var defaultLoadUserTools = false
+    /// "" ⇒ the system language.
+    @State private var dictationLocaleIdentifier = ""
+    @State private var dictationSupportedLocales: [Locale] = []
     @State private var codexRuntimeMetrics =
         CodexRuntimeMetricsStore.shared.snapshot()
     @State private var codexRuntimeMetricsStatusMessage: String?
@@ -456,6 +459,9 @@ struct RubienSettingsView: View {
             assistantConnectionSection
             assistantDefaultsSection
             assistantPermissionsSection
+            if DictationEngines.isSupported {
+                assistantDictationSection
+            }
             Section {
                 Button {
                     showAssistantAdvanced.toggle()
@@ -491,7 +497,10 @@ struct RubienSettingsView: View {
             readerPrompt = RubienPreferences.assistantReaderPromptOverride
                 ?? AssistantContext.defaultPrompt(for: .reader)
             seedModelEffortMirrors(for: defaultProvider)
-
+            dictationLocaleIdentifier = RubienPreferences.assistantDictationLocaleIdentifier ?? ""
+            if DictationEngines.isSupported {
+                dictationSupportedLocales = await DictationEngines.supportedLocales()
+            }
         }
         // Persist each mirror to the (non-observable) prefs when the user changes it.
         // Switching the default backend re-seeds the model/effort mirrors from that
@@ -522,6 +531,9 @@ struct RubienSettingsView: View {
         .onChange(of: defaultAutoApprove) { _, value in RubienPreferences.assistantAutoApprove = value }
         .onChange(of: defaultLoadUserTools) { _, value in
             RubienPreferences.assistantLoadUserTools = value
+        }
+        .onChange(of: dictationLocaleIdentifier) { _, value in
+            RubienPreferences.assistantDictationLocaleIdentifier = value.isEmpty ? nil : value
         }
         .onChange(of: libraryPrompt) { _, _ in
             schedulePromptSave()
@@ -864,6 +876,31 @@ struct RubienSettingsView: View {
             Text(String(localized: "Permissions", bundle: .module))
         } footer: {
             Text(String(localized: "Applies to new conversations. Your agent rules apply, so Rubien may not ask first when connected tools are enabled.", bundle: .module))
+        }
+    }
+
+    private var assistantDictationSection: some View {
+        Section {
+            Picker(selection: $dictationLocaleIdentifier) {
+                Text(String(localized: "System language", bundle: .module)).tag("")
+                // Lists the chosen language even before the supported list loads,
+                // or after it stops being supported, so the picker always shows it.
+                ForEach(DictationLanguage.options(
+                    supported: dictationSupportedLocales,
+                    storedIdentifier: dictationLocaleIdentifier
+                )) { option in
+                    Text(option.name).tag(option.id)
+                }
+            } label: {
+                Text(String(localized: "Dictation language", bundle: .module))
+            }
+        } header: {
+            Text(String(localized: "Dictation", bundle: .module))
+        } footer: {
+            Text(String(
+                localized: "Speech is transcribed on this Mac. Once Rubien has microphone access, commands run by Claude Code can use the microphone too. The default Ask approval mode asks before each command; Auto mode does not.",
+                bundle: .module
+            ))
         }
     }
 
