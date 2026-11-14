@@ -178,7 +178,53 @@ struct ChatSurfaceView: View {
     @State private var queuedMessageEditDraft = ""
     @Environment(\.colorScheme) private var colorScheme
 
+    // The surface's modifiers are split across `layout`, `sessionObservingLayout`
+    // and `body`. As one chain they were more than the Swift compiler on CI
+    // (macos-26) could type-check as a single expression; each property is
+    // checked by itself. Keep new modifiers out of the longest of the three.
     var body: some View {
+        sessionObservingLayout
+            .onChange(of: draft) { old, new in
+                draftChanged(from: old, to: new)
+            }
+            .onChange(of: draftSelection) { _, _ in
+                scheduleMentionRefresh()
+            }
+            .onChange(of: isDictating) { _, dictating in
+                // Dictated text is not a typed `@` query.
+                guard dictating else { return }
+                dismissMentionPopover()
+            }
+            .onChange(of: isActive) { _, active in
+                guard !active else { return }
+                dictation.freeze(owner: dictationOwner)
+            }
+            .onChange(of: session.queuedMessages) { _, messages in
+                guard let editingQueuedMessageID,
+                      !messages.contains(where: { $0.id == editingQueuedMessageID })
+                else { return }
+                cancelQueuedMessageEdit()
+            }
+            .onExitCommand {
+                if editingQueuedMessageID != nil {
+                    cancelQueuedMessageEdit()
+                    return
+                }
+                // The composer consumes Escape first when its mention popover is open.
+                // Otherwise make interrupt-and-send work from the transcript and other
+                // controls too, not only while the text editor owns focus.
+                guard activeMentionQuery == nil else { return }
+                _ = interruptAndSendQueuedIfPossible()
+            }
+            .onDisappear {
+                dictation.freeze(owner: dictationOwner)
+                cancelQueuedMessageEdit()
+                mentionSearchTask?.cancel()
+                mentionRefreshTask?.cancel()
+            }
+    }
+
+    private var layout: some View {
         VStack(spacing: 0) {
             header
             if !configuration.isHome {
@@ -191,6 +237,10 @@ struct ChatSurfaceView: View {
         .sheet(isPresented: $showingProviderSetup, onDismiss: {
             Task { await session.recheckAvailability() }
         }) { AssistantSetupView() }
+    }
+
+    private var sessionObservingLayout: some View {
+        layout
         .onAppear {
             mentionsReconciledDraft = draft
             renderer.setTheme(colorScheme == .dark ? .dark : .light)
@@ -227,49 +277,19 @@ struct ChatSurfaceView: View {
         // Selection→Ask while the pane is already open — each Ask bumps the token
         // (even re-Asking the same passage), which focuses the composer (§5.4).
         .onChange(of: session.composerFocusRequest) { _, _ in focusComposerSoon() }
-        .onChange(of: draft) { old, new in
-            if reconciledDraft != new {
-                selectedMentions = PaperMentions.updating(
-                    selectedMentions,
-                    reconciledAgainst: mentionsReconciledDraft ?? old,
-                    to: new
-                )
-            }
-            reconciledDraft = nil
-            mentionsReconciledDraft = new
-            scheduleMentionRefresh()
+    }
+
+    private func draftChanged(from old: String, to new: String) {
+        if reconciledDraft != new {
+            selectedMentions = PaperMentions.updating(
+                selectedMentions,
+                reconciledAgainst: mentionsReconciledDraft ?? old,
+                to: new
+            )
         }
-        .onChange(of: draftSelection) { _, _ in scheduleMentionRefresh() }
-        // Dictated text is not a typed `@` query.
-        .onChange(of: isDictating) { _, dictating in
-            if dictating { dismissMentionPopover() }
-        }
-        .onChange(of: isActive) { _, active in
-            if !active { dictation.freeze(owner: dictationOwner) }
-        }
-        .onChange(of: session.queuedMessages) { _, messages in
-            guard let editingQueuedMessageID,
-                  !messages.contains(where: { $0.id == editingQueuedMessageID })
-            else { return }
-            cancelQueuedMessageEdit()
-        }
-        .onExitCommand {
-            if editingQueuedMessageID != nil {
-                cancelQueuedMessageEdit()
-                return
-            }
-            // The composer consumes Escape first when its mention popover is open.
-            // Otherwise make interrupt-and-send work from the transcript and other
-            // controls too, not only while the text editor owns focus.
-            guard activeMentionQuery == nil else { return }
-            _ = interruptAndSendQueuedIfPossible()
-        }
-        .onDisappear {
-            dictation.freeze(owner: dictationOwner)
-            cancelQueuedMessageEdit()
-            mentionSearchTask?.cancel()
-            mentionRefreshTask?.cancel()
-        }
+        reconciledDraft = nil
+        mentionsReconciledDraft = new
+        scheduleMentionRefresh()
     }
 
     // MARK: Header (popover-toolbar idiom)
