@@ -286,6 +286,69 @@ path if this is revisited. Phase 7 documents the behavior for users.
   insertion survives, one after it shifts, and send immediately after an
   update carries matching text and mentions.
 
+#### Phase 2 status (2026-11-13)
+
+Implemented in `Sources/Rubien/Assistant/Dictation/ComposerDictationBridge.swift`
+(the bridge plus the pure `DictationInsertion` rules), with hooks in
+`ComposerTextView.swift`. Nothing calls the bridge yet; `ComposerTextView`
+takes it as an optional parameter that defaults to nil.
+
+Decisions made while building it:
+
+- **A caret the user moves is left alone.** Moving the caret does not end
+  dictation; only a text change does. The caret follows the dictated text
+  while it sits at its end, and otherwise stays on the same character.
+- **Spacing.** A space is added on either side only where words would run
+  together. None is added beside whitespace, closing or opening punctuation,
+  or Han, kana, and full-width characters.
+- **Undo is owned by the bridge.** One action is registered with the first
+  edit and reads the session's final range when it runs; undo and redo then
+  register each other. The text view's automatic registration is switched off
+  while a dictation edit is validated, because its inverse of a programmatic
+  replacement raised a range exception on redo (caught by the tests). A
+  session that ends with no net change withdraws its undo action.
+- **The hook lives on the text view.** `ComposerNSTextView` overrides the
+  multiple-range `shouldChangeText` and `setMarkedText`, and links itself to
+  the bridge through a property observer. No delegate method was added.
+- **External draft writes** moved into `Coordinator.syncExternalText`, which
+  ends a session before replacing the text. Behavior is otherwise unchanged.
+- **Interruptions carry no reason.** Every interruption is handled the same
+  way, so `onInterruption` takes no argument.
+
+Reviewed before commit. Codex (raw output in
+`/tmp/rubien-voice-dictation-phase2-review-2026-11-13.md`) found two majors
+and three minors, all fixed except one:
+
+- Own-edit suppression now covers only the validation call, so an edit made
+  while a dictation edit is being announced still interrupts and keeps its own
+  undo step.
+- Dictation at the end of a completed `@paper` mention could run Han
+  characters into the title and silently drop the mention. `begin` takes
+  `separatingFromPrecedingText`, which forces a space in any script.
+- Moving a bridge to another editor now unlinks the first.
+- A no-change session no longer leaves an empty undo step.
+- Not fixed: text dictated between straight double quotes gains inner spaces.
+  Telling an opening quote from a closing one needs more context than the
+  neighbor characters, and the result is cosmetic.
+
+The simplify sweep's cleanups were applied: a shared validate/apply pair for
+dictation edits and undo swaps, the storage's own string instead of a full
+copy per partial result, and tests that build the editor through
+`ComposerTextView.makeTextView()`.
+
+Carried into Phase 5:
+
+- Pass `separatingFromPrecedingText: true` when the caret sits at the end of
+  a selected mention.
+- The surface reconciles mentions in a deferred `.onChange(of: draft)`. Send
+  must not snapshot mentions that have not yet been reconciled against the
+  latest dictated text; reconcile first, or the send-time check silently drops
+  the mention.
+- Check by hand, because tests cannot cover them: automatic spelling
+  correction and text substitution (they arrive as text changes and would end
+  a session), a real input method's composition sequence, paste, drag and
+  drop of text, Services, and Writing Tools.
+
 ### Phase 3 — Controller and contracts, no audio
 
 - `DictationEngine`, `DictationUpdate`, `AudioSource`, authorizer protocol,

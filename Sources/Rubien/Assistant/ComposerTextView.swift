@@ -122,6 +122,15 @@ final class ComposerNSTextView: NSTextView {
     var onAttachFiles: ([URL]) -> Void = { _ in }
     var onAttachImageData: (Data, String) -> Void = { _, _ in }
     var onDragTargeted: (Bool) -> Void = { _ in }
+    /// Live dictation into this editor, if the surface offers it. The bridge
+    /// keeps a matching back-reference, so the two are linked and unlinked here.
+    weak var dictationBridge: ComposerDictationBridge? {
+        didSet {
+            guard oldValue !== dictationBridge else { return }
+            oldValue?.detach(from: self)
+            dictationBridge?.attach(to: self)
+        }
+    }
 
     /// True while the current drag session is ours to handle (files/images) rather
     /// than the text system's (text drags). Super only ever sees the phases of
@@ -216,6 +225,27 @@ final class ComposerNSTextView: NSTextView {
         case 53: return .escape
         default: return nil
         }
+    }
+
+    // MARK: Dictation
+
+    /// Every text change that carries replacement text is validated here first:
+    /// typing, paste, undo, text substitutions, and the dictation bridge's own
+    /// edits. A nil array is an attributes-only change, which leaves dictated
+    /// text where it is.
+    override func shouldChangeText(
+        inRanges affectedRanges: [NSValue],
+        replacementStrings: [String]?
+    ) -> Bool {
+        if replacementStrings != nil { dictationBridge?.editorWillChangeText() }
+        return super.shouldChangeText(inRanges: affectedRanges, replacementStrings: replacementStrings)
+    }
+
+    /// Marked text is an edit in progress; dictation must stop before it starts
+    /// rather than rewrite text around a half-composed character.
+    override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        dictationBridge?.editorWillChangeText()
+        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
     }
 
     // MARK: Paste
@@ -326,6 +356,7 @@ struct ComposerTextView: NSViewRepresentable {
     var onAttachFiles: ([URL]) -> Void
     var onAttachImageData: (Data, String) -> Void
     var onDragTargeted: (Bool) -> Void
+    var dictationBridge: ComposerDictationBridge? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -338,6 +369,23 @@ struct ComposerTextView: NSViewRepresentable {
         scrollView.focusRingType = .none
         scrollView.applyRubienElegantScrollers()
 
+        let textView = Self.makeTextView()
+        textView.delegate = context.coordinator
+        textView.string = text
+        textView.onCommandReturn = onCommandReturn
+        textView.onNavigationKey = onNavigationKey
+        textView.onAttachFiles = onAttachFiles
+        textView.onAttachImageData = onAttachImageData
+        textView.onDragTargeted = onDragTargeted
+        textView.dictationBridge = dictationBridge
+
+        scrollView.documentView = textView
+        return scrollView
+    }
+
+    /// The editor's text-system configuration, apart from the SwiftUI wiring, so
+    /// tests can drive the same text view the composer uses.
+    static func makeTextView() -> ComposerNSTextView {
         let textView = ComposerNSTextView()
         textView.autoresizingMask = [.width]
         textView.isVerticallyResizable = true
@@ -356,16 +404,11 @@ struct ComposerTextView: NSViewRepresentable {
         textView.focusRingType = .none
         textView.font = .systemFont(ofSize: Self.messageFontSize)
         textView.textColor = .textColor
-        textView.delegate = context.coordinator
-        textView.string = text
-        textView.onCommandReturn = onCommandReturn
-        textView.onNavigationKey = onNavigationKey
-        textView.onAttachFiles = onAttachFiles
-        textView.onAttachImageData = onAttachImageData
-        textView.onDragTargeted = onDragTargeted
+        return textView
+    }
 
-        scrollView.documentView = textView
-        return scrollView
+    static func dismantleNSView(_ scrollView: NSScrollView, coordinator: Coordinator) {
+        (scrollView.documentView as? ComposerNSTextView)?.dictationBridge = nil
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
@@ -376,20 +419,8 @@ struct ComposerTextView: NSViewRepresentable {
         textView.onAttachFiles = onAttachFiles
         textView.onAttachImageData = onAttachImageData
         textView.onDragTargeted = onDragTargeted
-
-        // Compare against the coordinator's cache, not `textView.string` — the
-        // latter bridges the whole text storage to a fresh String on every render
-        // (and this runs per streaming tick); the cache stays COW-identical to the
-        // binding when nothing changed, so the common case is O(1).
-        if text != context.coordinator.lastSyncedText {
-            // External write (send cleared the draft, conversation switched):
-            // replace wholesale and drop undo history — undoing across a
-            // programmatic replacement restores text the user never typed here.
-            textView.string = text
-            context.coordinator.lastSyncedText = text
-            context.coordinator.lastSyncedSelection = nil
-            context.coordinator.undoManager.removeAllActions()
-        }
+        textView.dictationBridge = dictationBridge
+        context.coordinator.syncExternalText(text, into: textView)
 
         if selection != context.coordinator.lastSyncedSelection,
            let selection,
@@ -436,6 +467,24 @@ struct ComposerTextView: NSViewRepresentable {
             honoredFocusRequestCount = parent.focusRequestCount
             lastSyncedText = parent.text
             lastSyncedSelection = parent.selection
+        }
+
+        /// Adopts a draft written from outside the editor (send cleared it, the
+        /// conversation switched, a mention was completed).
+        func syncExternalText(_ text: String, into textView: ComposerNSTextView) {
+            // Compare against the cache, not `textView.string` — the latter bridges
+            // the whole text storage to a fresh String on every render (and this
+            // runs per streaming tick); the cache stays COW-identical to the
+            // binding when nothing changed, so the common case is O(1).
+            guard text != lastSyncedText else { return }
+            // Assigning `string` bypasses the text view's change validation.
+            textView.dictationBridge?.interrupt()
+            // Replace wholesale and drop undo history — undoing across a
+            // programmatic replacement restores text the user never typed here.
+            textView.string = text
+            lastSyncedText = text
+            lastSyncedSelection = nil
+            undoManager.removeAllActions()
         }
 
         func textDidChange(_ notification: Notification) {
