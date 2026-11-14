@@ -296,9 +296,13 @@ the signed/notarized checks in `release.sh`.
 
 Required for the first release that contains Assistant dictation, and for any release that changes `Sources/Rubien/Rubien.entitlements`, the signing steps, or `scripts/lib/privacy-usage.sh`. Do it before approving the release command in step 6, because `release.sh` publishes in the same run that signs.
 
-1. Sign a debug build with the Developer ID identity: `CODESIGN_IDENTITY="Developer ID Application: <Your Name> (9TXK4V3SS8)" ./scripts/build-app.sh debug`.
-2. Launch that exact `build/Rubien.app`, open the Assistant, click the microphone in the composer, allow the macOS prompt, and dictate one sentence.
+1. Quit any running Rubien, then sign a **release** build with the Developer ID identity: `CODESIGN_IDENTITY="Developer ID Application: <Your Name> (9TXK4V3SS8)" ./scripts/build-app.sh release`. This signs locally and publishes nothing.
+2. Launch that exact `build/Rubien.app`, open the Assistant, click the microphone in the composer, allow the macOS prompt, and dictate one sentence. Quit it afterwards.
 3. Stop the release if the app does not launch, no prompt appears, or no text arrives.
+
+Use `release`, not `debug`. Only a release build pins the CloudKit Production environment, and the Developer ID profile grants no other. A Developer ID–signed debug build keeps Development, so macOS refuses to launch it (`open` reports POSIX error 163; the system log shows `Unsatisfied entitlements: com.apple.developer.icloud-container-environment`). That failure says nothing about dictation.
+
+The gate build is the real app: it opens the live library and syncs against Production CloudKit, like the installed copy. Step 5's unsigned candidate overwrites `build/Rubien.app`, so rebuild the candidate after the gate if it ran first.
 
 `build-app.sh` already fails when a usage string is missing or the signed bundle lacks the `audio-input` entitlement as a Boolean true. This gate covers what a script cannot: that Hardened Runtime lets the signed app hear audio, and that the Developer ID provisioning profile accepts the entitlement. Unsigned candidates, the preview app, and `dev-launch.sh` builds do not use Hardened Runtime, so they pass even when the entitlement is wrong.
 
